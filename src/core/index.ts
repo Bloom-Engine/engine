@@ -45,6 +45,15 @@ declare function bloom_get_touch_x(index: number): number;
 declare function bloom_get_touch_y(index: number): number;
 declare function bloom_get_touch_count(): number;
 
+// Input injection FFI
+declare function bloom_inject_key_down(key: number): void;
+declare function bloom_inject_key_up(key: number): void;
+declare function bloom_inject_gamepad_axis(axis: number, value: number): void;
+declare function bloom_inject_gamepad_button_down(button: number): void;
+declare function bloom_inject_gamepad_button_up(button: number): void;
+declare function bloom_get_platform(): number;
+declare function bloom_is_any_input_pressed(): number;
+
 // Utility FFI
 declare function bloom_toggle_fullscreen(): void;
 declare function bloom_set_window_title(title: number): void;
@@ -276,6 +285,29 @@ export function fileExists(path: string): boolean {
 
 export function readFile(path: string): string {
   return bloom_read_file(path as any) as any;
+}
+
+// Input injection
+
+export function injectKeyDown(key: number): void { bloom_inject_key_down(key); }
+export function injectKeyUp(key: number): void { bloom_inject_key_up(key); }
+export function injectGamepadAxis(axis: number, value: number): void { bloom_inject_gamepad_axis(axis, value); }
+export function injectGamepadButtonDown(button: number): void { bloom_inject_gamepad_button_down(button); }
+export function injectGamepadButtonUp(button: number): void { bloom_inject_gamepad_button_up(button); }
+
+// Platform detection
+
+export const Platform = { UNKNOWN: 0, MACOS: 1, IOS: 2, WINDOWS: 3, LINUX: 4, ANDROID: 5 } as const;
+
+export function getPlatform(): number { return bloom_get_platform(); }
+
+export function isMobile(): boolean {
+  const p = bloom_get_platform();
+  return p === 2 || p === 5;
+}
+
+export function isAnyInputPressed(): boolean {
+  return bloom_is_any_input_pressed() !== 0;
 }
 
 // Pure TS camera helpers

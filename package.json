@@ -12,7 +12,8 @@
     "./audio": "./src/audio/index.ts",
     "./math": "./src/math/index.ts",
     "./textures": "./src/textures/index.ts",
-    "./models": "./src/models/index.ts"
+    "./models": "./src/models/index.ts",
+    "./mobile": "./src/mobile/index.ts"
   },
   "license": "MIT",
   "perry": {
@@ -106,6 +107,13 @@
         { "name": "bloom_set_directional_light",   "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],        "returns": "void" },
         { "name": "bloom_get_model_mesh_count",    "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_get_model_material_count","params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_inject_key_down",         "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_inject_key_up",           "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_inject_gamepad_axis",     "params": ["f64", "f64"],                                            "returns": "void" },
+        { "name": "bloom_inject_gamepad_button_down","params": ["f64"],                                                 "returns": "void" },
+        { "name": "bloom_inject_gamepad_button_up","params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_get_platform",            "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_is_any_input_pressed",    "params": [],                                                        "returns": "f64"  },
 
         { "name": "bloom_load_music",               "params": ["i64"],                                                   "returns": "f64"  },
         { "name": "bloom_play_music",               "params": ["f64"],                                                   "returns": "void" },
@@ -134,7 +142,15 @@
         { "name": "bloom_get_touch_x",              "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_get_touch_y",              "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_get_touch_count",          "params": [],                                                        "returns": "f64"  },
-        { "name": "bloom_get_time",                 "params": [],                                                        "returns": "f64"  }
+        { "name": "bloom_get_time",                 "params": [],                                                        "returns": "f64"  },
+
+        { "name": "bloom_inject_key_down",            "params": ["f64"],        "returns": "void" },
+        { "name": "bloom_inject_key_up",              "params": ["f64"],        "returns": "void" },
+        { "name": "bloom_inject_gamepad_axis",        "params": ["f64", "f64"], "returns": "void" },
+        { "name": "bloom_inject_gamepad_button_down", "params": ["f64"],        "returns": "void" },
+        { "name": "bloom_inject_gamepad_button_up",   "params": ["f64"],        "returns": "void" },
+        { "name": "bloom_get_platform",               "params": [],             "returns": "f64"  },
+        { "name": "bloom_is_any_input_pressed",       "params": [],             "returns": "f64"  }
       ],
       "targets": {
         "macos": {

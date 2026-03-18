@@ -26,8 +26,8 @@ export function closeAudio(): void {
 }
 
 // Spec-compliant aliases
-export const initAudioDevice = initAudio;
-export const closeAudioDevice = closeAudio;
+export function initAudioDevice(): void { bloom_init_audio(); }
+export function closeAudioDevice(): void { bloom_close_audio(); }
 
 export function loadSound(path: string): Sound {
   const handle = bloom_load_sound(path as any);
@@ -70,7 +70,7 @@ export function updateMusicStream(music: Music): void {
 }
 
 // Spec-compliant alias
-export const updateMusic = updateMusicStream;
+export function updateMusic(music: Music): void { bloom_update_music_stream(music.handle); }
 
 export function setMusicVolume(music: Music, volume: number): void {
   bloom_set_music_volume(music.handle, volume);

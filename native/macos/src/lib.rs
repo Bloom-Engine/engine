@@ -376,7 +376,12 @@ pub extern "C" fn bloom_begin_drawing() {
                         }
                     }
                     NSEventType::MouseMoved | NSEventType::LeftMouseDragged | NSEventType::RightMouseDragged => {
-                        if let Some(window) = unsafe { &WINDOW } {
+                        if engine().input.cursor_disabled {
+                            // In disabled-cursor mode, use raw deltas from NSEvent
+                            let dx: f64 = unsafe { msg_send![&*event, deltaX] };
+                            let dy: f64 = unsafe { msg_send![&*event, deltaY] };
+                            engine().input.accumulate_mouse_delta(dx, dy);
+                        } else if let Some(window) = unsafe { &WINDOW } {
                             let loc = unsafe { event.locationInWindow() };
                             let frame = window.contentView().map(|v| v.frame()).unwrap_or(NSRect::ZERO);
                             engine().input.set_mouse_position(loc.x, frame.size.height - loc.y);
@@ -1188,12 +1193,14 @@ pub extern "C" fn bloom_set_window_icon(path_ptr: *const u8) {
     unsafe {
         let ns_path = NSString::from_str(path);
         let image_cls = objc2::runtime::AnyClass::get(c"NSImage").unwrap();
-        let image: objc2::rc::Retained<objc2::runtime::AnyObject> =
+        let image: *mut objc2::runtime::AnyObject =
             msg_send![image_cls, alloc];
-        let image: objc2::rc::Retained<objc2::runtime::AnyObject> =
+        if image.is_null() { return; }
+        let image: *mut objc2::runtime::AnyObject =
             msg_send![image, initWithContentsOfFile: &*ns_path];
+        if image.is_null() { return; }
         let app = NSApplication::sharedApplication(MainThreadMarker::new_unchecked());
-        let _: () = msg_send![&*app, setApplicationIconImage: &*image];
+        let _: () = msg_send![&*app, setApplicationIconImage: image];
     }
 }
 
@@ -1257,6 +1264,37 @@ pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
         }
         Err(_) => std::ptr::null(),
     }
+}
+
+// ============================================================
+// Input injection + platform detection
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_inject_key_down(key: f64) {
+    engine().input.set_key_down(key as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_key_up(key: f64) {
+    engine().input.set_key_up(key as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_gamepad_axis(axis: f64, value: f64) {
+    engine().input.set_gamepad_axis(axis as usize, value as f32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_gamepad_button_down(button: f64) {
+    engine().input.set_gamepad_button_down(button as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
+    engine().input.set_gamepad_button_up(button as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_platform() -> f64 { 1.0 }
+#[no_mangle]
+pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
+    if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
 }
 
 // ============================================================

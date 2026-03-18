@@ -5,15 +5,12 @@ import {
   disableCursor, getMouseDeltaX, getMouseDeltaY,
 } from "bloom/core";
 import { Color, Key, Camera3D, MouseButton } from "bloom/core";
-import { drawCube, drawCubeWires, drawPlane, drawGrid } from "bloom/models";
+import { drawCube, drawCubeWires } from "bloom/models";
 import { drawText } from "bloom/text";
 import { drawRect } from "bloom/shapes";
 import {
-  clamp, vec3, vec3Add, vec3Scale, vec3Normalize, randomInt, randomFloat,
-  mat4Perspective, mat4LookAt, mat4Multiply,
-  extractFrustumPlanes, isBoxInFrustum,
+  clamp, randomInt,
 } from "bloom/math";
-import { Vec3, BoundingBox } from "bloom/core";
 
 // Constants
 const SCREEN_WIDTH = 960;
@@ -31,17 +28,17 @@ const BLOCK_LEAVES = 5;
 const BLOCK_SAND = 6;
 const BLOCK_WATER = 7;
 
-// Block colors
-function blockColor(type: number): Color {
-  if (type === BLOCK_GRASS) return { r: 60, g: 170, b: 60, a: 255 };
-  if (type === BLOCK_DIRT) return { r: 130, g: 90, b: 50, a: 255 };
-  if (type === BLOCK_STONE) return { r: 128, g: 128, b: 128, a: 255 };
-  if (type === BLOCK_WOOD) return { r: 120, g: 80, b: 40, a: 255 };
-  if (type === BLOCK_LEAVES) return { r: 30, g: 130, b: 30, a: 200 };
-  if (type === BLOCK_SAND) return { r: 220, g: 200, b: 120, a: 255 };
-  if (type === BLOCK_WATER) return { r: 40, g: 80, b: 200, a: 150 };
-  return { r: 255, g: 0, b: 255, a: 255 };
-}
+// Pre-allocated block color table (avoid allocations in hot render loop)
+const BLOCK_COLORS: Color[] = [
+  { r: 255, g: 0, b: 255, a: 255 },   // 0: AIR (unused)
+  { r: 60, g: 170, b: 60, a: 255 },    // 1: GRASS
+  { r: 130, g: 90, b: 50, a: 255 },    // 2: DIRT
+  { r: 128, g: 128, b: 128, a: 255 },  // 3: STONE
+  { r: 120, g: 80, b: 40, a: 255 },    // 4: WOOD
+  { r: 30, g: 130, b: 30, a: 200 },    // 5: LEAVES
+  { r: 220, g: 200, b: 120, a: 255 },  // 6: SAND
+  { r: 40, g: 80, b: 200, a: 150 },    // 7: WATER
+];
 
 // World voxel storage
 const worldSizeX = WORLD_CHUNKS_X * CHUNK_SIZE;
@@ -137,7 +134,7 @@ let highlightX = -1;
 let highlightY = -1;
 let highlightZ = -1;
 
-function getCamForward(): Vec3 {
+function getCamForward(): { x: number; y: number; z: number } {
   return {
     x: Math.cos(camPitch) * Math.sin(camYaw),
     y: Math.sin(camPitch),
@@ -145,7 +142,7 @@ function getCamForward(): Vec3 {
   };
 }
 
-function getCamRight(): Vec3 {
+function getCamRight(): { x: number; y: number; z: number } {
   return { x: Math.cos(camYaw), y: 0, z: -Math.sin(camYaw) };
 }
 
@@ -191,14 +188,10 @@ const camera: Camera3D = {
   projection: "perspective",
 };
 
-while (!windowShouldClose()) {
-  const dt = getDeltaTime();
-
-  // Mouse look
+function handleInput(dt: number): void {
   camYaw = camYaw + getMouseDeltaX() * MOUSE_SENS;
   camPitch = clamp(camPitch - getMouseDeltaY() * MOUSE_SENS, -1.4, 1.4);
 
-  // Movement
   const forward = getCamForward();
   const right = getCamRight();
   let moveX = 0;
@@ -219,7 +212,6 @@ while (!windowShouldClose()) {
   camY = camY + moveY * MOVE_SPEED * dt;
   camZ = camZ + moveZ * MOVE_SPEED * dt;
 
-  // Block selection (1-7 keys)
   if (isKeyPressed(Key.ONE)) selectedBlock = BLOCK_GRASS;
   if (isKeyPressed(Key.TWO)) selectedBlock = BLOCK_DIRT;
   if (isKeyPressed(Key.THREE)) selectedBlock = BLOCK_STONE;
@@ -228,18 +220,14 @@ while (!windowShouldClose()) {
   if (isKeyPressed(Key.SIX)) selectedBlock = BLOCK_SAND;
   if (isKeyPressed(Key.SEVEN)) selectedBlock = BLOCK_WATER;
 
-  // Raycast
   raycastBlock();
 
-  // Break block (left click)
   if (isMouseButtonPressed(MouseButton.LEFT) && highlightX >= 0) {
     setBlock(highlightX, highlightY, highlightZ, BLOCK_AIR);
   }
 
-  // Place block (right click) — place adjacent to highlighted face
   if (isMouseButtonPressed(MouseButton.RIGHT) && highlightX >= 0) {
     const dir = getCamForward();
-    // Step back from highlight to find placement position
     let rx = camX;
     let ry = camY;
     let rz = camZ;
@@ -256,38 +244,21 @@ while (!windowShouldClose()) {
         }
         break;
       }
-      prevBx = bx;
-      prevBy = by;
-      prevBz = bz;
-      rx = rx + dir.x * 0.2;
-      ry = ry + dir.y * 0.2;
-      rz = rz + dir.z * 0.2;
+      prevBx = bx; prevBy = by; prevBz = bz;
+      rx = rx + dir.x * 0.2; ry = ry + dir.y * 0.2; rz = rz + dir.z * 0.2;
     }
   }
 
-  // Update camera
-  camera.position.x = camX;
-  camera.position.y = camY;
-  camera.position.z = camZ;
+  camera.position.x = camX; camera.position.y = camY; camera.position.z = camZ;
   camera.target.x = camX + forward.x;
   camera.target.y = camY + forward.y;
   camera.target.z = camZ + forward.z;
+}
 
-  // Build frustum for culling
-  const aspect = SCREEN_WIDTH / SCREEN_HEIGHT;
-  const proj = mat4Perspective(camera.fovy * Math.PI / 180, aspect, 0.1, 200);
-  const view = mat4LookAt(camera.position, camera.target, camera.up);
-  const mvp = mat4Multiply(proj, view);
-  const frustum = extractFrustumPlanes(mvp);
+const renderPos = { x: 0, y: 0, z: 0 };
 
-  // Drawing
-  beginDrawing();
-  clearBackground({ r: 130, g: 200, b: 255, a: 255 });
-
-  beginMode3D(camera);
-
-  // Render visible blocks with frustum culling
-  const renderDist = 40;
+function renderBlocks(): void {
+  const renderDist = 32;
   const minX = Math.max(0, Math.floor(camX - renderDist));
   const maxX = Math.min(worldSizeX - 1, Math.floor(camX + renderDist));
   const minZ = Math.max(0, Math.floor(camZ - renderDist));
@@ -298,56 +269,51 @@ while (!windowShouldClose()) {
       for (let x = minX; x <= maxX; x++) {
         const block = getBlock(x, y, z);
         if (block === BLOCK_AIR) continue;
-
-        // Skip fully occluded blocks (all 6 neighbors are solid)
         if (
           getBlock(x-1, y, z) !== BLOCK_AIR && getBlock(x+1, y, z) !== BLOCK_AIR &&
           getBlock(x, y-1, z) !== BLOCK_AIR && getBlock(x, y+1, z) !== BLOCK_AIR &&
           getBlock(x, y, z-1) !== BLOCK_AIR && getBlock(x, y, z+1) !== BLOCK_AIR
         ) continue;
-
-        // Frustum cull
-        const box_: BoundingBox = {
-          min: { x: x, y: y, z: z },
-          max: { x: x + 1, y: y + 1, z: z + 1 },
-        };
-        if (!isBoxInFrustum(box_, frustum)) continue;
-
-        const color = blockColor(block);
-        drawCube({ x: x + 0.5, y: y + 0.5, z: z + 0.5 }, 1, 1, 1, color);
+        renderPos.x = x + 0.5; renderPos.y = y + 0.5; renderPos.z = z + 0.5;
+        drawCube(renderPos, 1, 1, 1, BLOCK_COLORS[block]);
       }
     }
   }
+}
 
-  // Highlight selected block
-  if (highlightX >= 0) {
-    drawCubeWires(
-      { x: highlightX + 0.5, y: highlightY + 0.5, z: highlightZ + 0.5 },
-      1.02, 1.02, 1.02,
-      Color.White,
-    );
-  }
-
-  endMode3D();
-
-  // HUD
-  // Crosshair
+function drawHUD(): void {
   const cx = SCREEN_WIDTH / 2;
   const cy = SCREEN_HEIGHT / 2;
   drawRect(cx - 10, cy - 1, 20, 2, Color.White);
   drawRect(cx - 1, cy - 10, 2, 20, Color.White);
 
-  // Block selector
   const blockNames = ["", "Grass", "Dirt", "Stone", "Wood", "Leaves", "Sand", "Water"];
   drawRect(5, SCREEN_HEIGHT - 35, 200, 30, { r: 0, g: 0, b: 0, a: 150 });
   drawText("Block: " + blockNames[selectedBlock] + " [1-7]", 10, SCREEN_HEIGHT - 30, 18, Color.White);
-
-  // Position
   drawText(
     "Pos: " + Math.floor(camX).toString() + ", " + Math.floor(camY).toString() + ", " + Math.floor(camZ).toString(),
     10, 10, 16, Color.White,
   );
+}
 
+while (!windowShouldClose()) {
+  handleInput(getDeltaTime());
+
+  beginDrawing();
+  clearBackground({ r: 130, g: 200, b: 255, a: 255 });
+
+  beginMode3D(camera);
+  renderBlocks();
+
+  if (highlightX >= 0) {
+    drawCubeWires(
+      { x: highlightX + 0.5, y: highlightY + 0.5, z: highlightZ + 0.5 },
+      1.02, 1.02, 1.02, Color.White,
+    );
+  }
+  endMode3D();
+
+  drawHUD();
   endDrawing();
 }
 

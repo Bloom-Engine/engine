@@ -15,6 +15,8 @@ export {
   writeFile, fileExists, readFile,
   getScreenToWorld2D, getWorldToScreen2D,
   Color, ColorConstants, Colors, Key, MouseButton,
+  injectKeyDown, injectKeyUp, isAnyInputPressed, getPlatform, isMobile, Platform,
+  injectGamepadAxis, injectGamepadButtonDown, injectGamepadButtonUp,
 } from './core/index';
 
 export type {
@@ -82,3 +84,11 @@ export {
   extractFrustumPlanes, isBoxInFrustum,
   rayIntersectsTriangle, getRayCollisionBox, getRayCollisionMesh,
 } from './math/index';
+
+export {
+  createVirtualJoystick, updateVirtualJoystick, drawVirtualJoystick,
+  createVirtualButton, updateVirtualButton, drawVirtualButton,
+  getMovementInput, resetTouchClaims,
+} from './mobile/index';
+
+export type { VirtualJoystick, VirtualButton } from './mobile/index';

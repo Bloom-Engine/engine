@@ -24,6 +24,8 @@ pub struct InputState {
     pub mouse_delta_y: f64,
     prev_mouse_x: f64,
     prev_mouse_y: f64,
+    raw_delta_x: f64,
+    raw_delta_y: f64,
     pub cursor_disabled: bool,
     mouse_pressed: [bool; MAX_MOUSE_BUTTONS],
     mouse_down: [bool; MAX_MOUSE_BUTTONS],
@@ -58,6 +60,8 @@ impl InputState {
             mouse_delta_y: 0.0,
             prev_mouse_x: 0.0,
             prev_mouse_y: 0.0,
+            raw_delta_x: 0.0,
+            raw_delta_y: 0.0,
             cursor_disabled: false,
             mouse_pressed: [false; MAX_MOUSE_BUTTONS],
             mouse_down: [false; MAX_MOUSE_BUTTONS],
@@ -76,8 +80,15 @@ impl InputState {
     }
 
     pub fn begin_frame(&mut self) {
-        self.mouse_delta_x = self.mouse_x - self.prev_mouse_x;
-        self.mouse_delta_y = self.mouse_y - self.prev_mouse_y;
+        if self.cursor_disabled {
+            self.mouse_delta_x = self.raw_delta_x;
+            self.mouse_delta_y = self.raw_delta_y;
+            self.raw_delta_x = 0.0;
+            self.raw_delta_y = 0.0;
+        } else {
+            self.mouse_delta_x = self.mouse_x - self.prev_mouse_x;
+            self.mouse_delta_y = self.mouse_y - self.prev_mouse_y;
+        }
         for i in 0..MAX_KEYS {
             self.keys_pressed[i] = self.keys_down[i] && !self.prev_keys_down[i];
             self.keys_released[i] = !self.keys_down[i] && self.prev_keys_down[i];
@@ -110,6 +121,7 @@ impl InputState {
 
     // Mouse
     pub fn set_mouse_position(&mut self, x: f64, y: f64) { self.mouse_x = x; self.mouse_y = y; }
+    pub fn accumulate_mouse_delta(&mut self, dx: f64, dy: f64) { self.raw_delta_x += dx; self.raw_delta_y += dy; }
     pub fn set_mouse_button_down(&mut self, button: usize) { if button < MAX_MOUSE_BUTTONS { self.mouse_down[button] = true; } }
     pub fn set_mouse_button_up(&mut self, button: usize) { if button < MAX_MOUSE_BUTTONS { self.mouse_down[button] = false; } }
 
@@ -157,4 +169,12 @@ impl InputState {
         if index < MAX_TOUCH_POINTS { self.touch_points[index].y } else { 0.0 }
     }
     pub fn get_touch_count(&self) -> usize { self.touch_count }
+
+    // Any input
+    pub fn is_any_input_pressed(&self) -> bool {
+        self.keys_pressed.iter().any(|&k| k)
+            || self.mouse_pressed.iter().any(|&m| m)
+            || self.gamepad_buttons_pressed.iter().any(|&g| g)
+            || self.touch_count > 0
+    }
 }

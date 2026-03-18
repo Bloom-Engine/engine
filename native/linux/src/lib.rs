@@ -879,6 +879,34 @@ pub extern "C" fn bloom_get_touch_count() -> f64 { engine().input.get_touch_coun
 #[no_mangle]
 pub extern "C" fn bloom_get_time() -> f64 { engine().get_time() }
 
+// Input injection + platform detection
+#[no_mangle]
+pub extern "C" fn bloom_inject_key_down(key: f64) {
+    engine().input.set_key_down(key as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_key_up(key: f64) {
+    engine().input.set_key_up(key as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_gamepad_axis(axis: f64, value: f64) {
+    engine().input.set_gamepad_axis(axis as usize, value as f32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_gamepad_button_down(button: f64) {
+    engine().input.set_gamepad_button_down(button as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
+    engine().input.set_gamepad_button_up(button as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_platform() -> f64 { 4.0 }
+#[no_mangle]
+pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
+    if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
+}
+
 fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
     use std::task::{Context, Poll, Wake, Waker};
     use std::pin::Pin;

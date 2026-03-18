@@ -1,4 +1,7 @@
-import { Vec2, Vec3, Vec4, Quat, Ray, BoundingBox, Mat4, FrustumPlanes, RayHit, Model } from '../core/types';
+import { Vec2 as Vec2Type, Vec3 as Vec3Type, Vec4 as Vec4Type, Quat, Ray, BoundingBox, Mat4, FrustumPlanes, RayHit, Model } from '../core/types';
+type Vec2 = Vec2Type;
+type Vec3 = Vec3Type;
+type Vec4 = Vec4Type;
 
 // Vec2 operations
 
@@ -455,9 +458,9 @@ export function getRayCollisionBox(ray: Ray, box_: BoundingBox): RayHit {
 }
 
 // PascalCase vector constructors (spec-compliant aliases)
-export const Vec2 = vec2;
-export const Vec3 = vec3;
-export const Vec4 = vec4;
+export function Vec2(x: number, y: number): Vec2Type { return { x, y }; }
+export function Vec3(x: number, y: number, z: number): Vec3Type { return { x, y, z }; }
+export function Vec4(x: number, y: number, z: number, w: number): Vec4Type { return { x, y, z, w }; }
 
 // Mesh-level raycasting — tests ray against all triangles in a model's stored mesh data
 // Note: requires model meshCount > 0. For models loaded from file, this iterates

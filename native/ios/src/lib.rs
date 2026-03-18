@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut UI_WINDOW: Option<Retained<AnyObject>> = None;
 static mut UI_VIEW: Option<Retained<AnyObject>> = None;
+static mut TOUCH_MAP: [*const c_void; 10] = [std::ptr::null(); 10];
 
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
@@ -85,37 +86,87 @@ unsafe extern "C" fn bloom_layer_class(_cls: *const c_void, _sel: Sel) -> *const
 }
 
 unsafe extern "C" fn bloom_touches_began(_this: *mut c_void, _sel: Sel, touches: *const AnyObject, _event: *const AnyObject) {
-    handle_touch(touches, true);
+    handle_touches(touches, TouchPhase::Began);
 }
 
 unsafe extern "C" fn bloom_touches_moved(_this: *mut c_void, _sel: Sel, touches: *const AnyObject, _event: *const AnyObject) {
-    handle_touch(touches, true);
+    handle_touches(touches, TouchPhase::Moved);
 }
 
 unsafe extern "C" fn bloom_touches_ended(_this: *mut c_void, _sel: Sel, touches: *const AnyObject, _event: *const AnyObject) {
-    handle_touch(touches, false);
+    handle_touches(touches, TouchPhase::Ended);
 }
 
 unsafe extern "C" fn bloom_touches_cancelled(_this: *mut c_void, _sel: Sel, touches: *const AnyObject, _event: *const AnyObject) {
-    handle_touch(touches, false);
+    handle_touches(touches, TouchPhase::Ended);
 }
 
-unsafe fn handle_touch(touches: *const AnyObject, down: bool) {
+enum TouchPhase { Began, Moved, Ended }
+
+unsafe fn handle_touches(touches: *const AnyObject, phase: TouchPhase) {
     if touches.is_null() { return; }
-    let touch: Retained<AnyObject> = msg_send![&*touches, anyObject];
 
     let view_ptr: *const AnyObject = match UI_VIEW.as_ref() {
         Some(v) => Retained::as_ptr(v),
         None => std::ptr::null(),
     };
-    let loc: CGPoint = msg_send![&*touch, locationInView: view_ptr];
 
-    if let Some(eng) = ENGINE.get_mut() {
-        eng.input.set_mouse_position(loc.x, loc.y);
-        if down {
-            eng.input.set_mouse_button_down(0);
-        } else {
-            eng.input.set_mouse_button_up(0);
+    let enumerator: Retained<AnyObject> = msg_send![&*touches, objectEnumerator];
+    loop {
+        let touch: *const AnyObject = msg_send![&*enumerator, nextObject];
+        if touch.is_null() { break; }
+
+        let touch_id = touch as *const c_void;
+        let loc: CGPoint = msg_send![&*touch, locationInView: view_ptr];
+
+        let index = match phase {
+            TouchPhase::Began => {
+                // Find a free slot and assign this touch pointer
+                let mut slot = None;
+                for i in 0..10 {
+                    if TOUCH_MAP[i].is_null() {
+                        TOUCH_MAP[i] = touch_id;
+                        slot = Some(i);
+                        break;
+                    }
+                }
+                match slot {
+                    Some(i) => i,
+                    None => continue, // All slots full, skip
+                }
+            }
+            TouchPhase::Moved => {
+                // Find existing slot for this touch pointer
+                match TOUCH_MAP.iter().position(|&p| p == touch_id) {
+                    Some(i) => i,
+                    None => continue,
+                }
+            }
+            TouchPhase::Ended => {
+                // Find and clear slot
+                match TOUCH_MAP.iter().position(|&p| p == touch_id) {
+                    Some(i) => {
+                        TOUCH_MAP[i] = std::ptr::null();
+                        i
+                    }
+                    None => continue,
+                }
+            }
+        };
+
+        if let Some(eng) = ENGINE.get_mut() {
+            let active = !matches!(phase, TouchPhase::Ended);
+            eng.input.set_touch(index, loc.x, loc.y, active);
+
+            // First touch (index 0) also drives mouse for backward compatibility
+            if index == 0 {
+                eng.input.set_mouse_position(loc.x, loc.y);
+                if active {
+                    eng.input.set_mouse_button_down(0);
+                } else {
+                    eng.input.set_mouse_button_up(0);
+                }
+            }
         }
     }
 }
@@ -1122,4 +1173,35 @@ pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
 #[no_mangle]
 pub extern "C" fn bloom_get_time() -> f64 {
     engine().get_time()
+}
+
+// ============================================================
+// Input injection + platform detection
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_inject_key_down(key: f64) {
+    engine().input.set_key_down(key as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_key_up(key: f64) {
+    engine().input.set_key_up(key as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_gamepad_axis(axis: f64, value: f64) {
+    engine().input.set_gamepad_axis(axis as usize, value as f32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_gamepad_button_down(button: f64) {
+    engine().input.set_gamepad_button_down(button as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
+    engine().input.set_gamepad_button_up(button as usize);
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_platform() -> f64 { 2.0 }
+#[no_mangle]
+pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
+    if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
 }
