@@ -3,10 +3,10 @@ import {
   clearBackground, setTargetFPS, getDeltaTime, isKeyDown,
   getScreenWidth, getScreenHeight, closeWindow,
 } from "bloom/core";
-import { Colors, Key } from "bloom/core";
+import { Color, Key } from "bloom/core";
 import { drawRect, drawCircle, checkCollisionRecs } from "bloom/shapes";
 import { drawText, measureText } from "bloom/text";
-import { initAudio, loadSound, playSound, closeAudio } from "bloom/audio";
+import { initAudioDevice, loadSound, playSound, closeAudioDevice } from "bloom/audio";
 import { clamp } from "bloom/math";
 import { Rect } from "bloom/core";
 
@@ -41,7 +41,7 @@ function resetBall(direction: number): void {
 // Initialize
 initWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Pong");
 setTargetFPS(60);
-initAudio();
+initAudioDevice();
 
 // Main game loop
 while (!windowShouldClose()) {
@@ -130,7 +130,7 @@ while (!windowShouldClose()) {
 
   // Drawing
   beginDrawing();
-  clearBackground(Colors.BLACK);
+  clearBackground(Color.Black);
 
   // Center line
   const segments = 20;
@@ -141,31 +141,31 @@ while (!windowShouldClose()) {
       i * segHeight * 2,
       2,
       segHeight,
-      Colors.DARKGRAY,
+      Color.DarkGray,
     );
   }
 
   // Paddles
-  drawRect(PADDLE_MARGIN, leftPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Colors.WHITE);
-  drawRect(SCREEN_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH, rightPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Colors.WHITE);
+  drawRect(PADDLE_MARGIN, leftPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Color.White);
+  drawRect(SCREEN_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH, rightPaddleY, PADDLE_WIDTH, PADDLE_HEIGHT, Color.White);
 
   // Ball
-  drawCircle(ballX, ballY, BALL_RADIUS, Colors.WHITE);
+  drawCircle(ballX, ballY, BALL_RADIUS, Color.White);
 
   // Scores
   const leftScoreText = leftScore.toString();
   const rightScoreText = rightScore.toString();
-  drawText(leftScoreText, SCREEN_WIDTH / 4 - measureText(leftScoreText, 40) / 2, 20, 40, Colors.WHITE);
-  drawText(rightScoreText, 3 * SCREEN_WIDTH / 4 - measureText(rightScoreText, 40) / 2, 20, 40, Colors.WHITE);
+  drawText(leftScoreText, SCREEN_WIDTH / 4 - measureText(leftScoreText, 40) / 2, 20, 40, Color.White);
+  drawText(rightScoreText, 3 * SCREEN_WIDTH / 4 - measureText(rightScoreText, 40) / 2, 20, 40, Color.White);
 
   // Pause text
   if (paused) {
     const pauseText = "PAUSED";
-    drawText(pauseText, SCREEN_WIDTH / 2 - measureText(pauseText, 30) / 2, SCREEN_HEIGHT / 2 - 15, 30, Colors.LIGHTGRAY);
+    drawText(pauseText, SCREEN_WIDTH / 2 - measureText(pauseText, 30) / 2, SCREEN_HEIGHT / 2 - 15, 30, Color.LightGray);
   }
 
   endDrawing();
 }
 
-closeAudio();
+closeAudioDevice();
 closeWindow();

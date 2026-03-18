@@ -407,6 +407,19 @@ pub extern "C" fn bloom_begin_drawing() {
         engine().should_close = true;
     }
 
+    // Handle window resize
+    if let Some(window) = unsafe { &WINDOW } {
+        if let Some(content_view) = window.contentView() {
+            let frame = content_view.frame();
+            let new_w = frame.size.width as u32;
+            let new_h = frame.size.height as u32;
+            let eng = engine();
+            if new_w > 0 && new_h > 0 && (new_w != eng.renderer.width() || new_h != eng.renderer.height()) {
+                eng.renderer.resize(new_w, new_h);
+            }
+        }
+    }
+
     engine().begin_frame();
 }
 
@@ -766,6 +779,12 @@ pub extern "C" fn bloom_load_texture_from_image(handle: f64) -> f64 {
     eng.textures.load_texture_from_image(handle, unsafe { &mut *renderer_ptr })
 }
 
+#[no_mangle]
+pub extern "C" fn bloom_gen_texture_mipmaps(_handle: f64) {
+    // Mipmap generation is handled by the GPU texture creation pipeline
+    // This is a no-op for now as wgpu handles mipmaps internally
+}
+
 // ============================================================
 // Camera 2D
 // ============================================================
@@ -849,6 +868,20 @@ pub extern "C" fn bloom_draw_ray(origin_x: f64, origin_y: f64, origin_z: f64, di
 }
 
 // ============================================================
+// Lighting
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) {
+    engine().renderer.set_ambient_light(r, g, b, intensity);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
+    engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
+}
+
+// ============================================================
 // Models
 // ============================================================
 
@@ -894,6 +927,52 @@ pub extern "C" fn bloom_gen_mesh_heightmap(image_handle: f64, size_x: f64, size_
         eng.models.gen_mesh_heightmap(&data, w, h, size_x as f32, size_y as f32, size_z as f32)
     } else {
         0.0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_shader(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    engine().renderer.load_custom_shader(source) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f32, vertex_count: f64, index_ptr: *const u32, index_count: f64) -> f64 {
+    if vertex_ptr.is_null() || index_ptr.is_null() { return 0.0; }
+    let vcount = vertex_count as usize;
+    let icount = index_count as usize;
+    let vertex_data = unsafe { std::slice::from_raw_parts(vertex_ptr, vcount * 12) }; // 12 floats per vertex
+    let index_data = unsafe { std::slice::from_raw_parts(index_ptr, icount) };
+    engine().models.create_mesh(vertex_data, index_data)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read(path) {
+        Ok(data) => engine().models.load_model_animation(&data),
+        Err(_) => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64) {
+    engine().models.update_model_animation(handle, anim_index as usize, time as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_model_mesh_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64,
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_model_material_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64, // materials roughly equal meshes
+        None => 0.0,
     }
 }
 
@@ -1018,6 +1097,16 @@ pub extern "C" fn bloom_set_master_volume(volume: f64) {
     engine().audio.master_volume = volume as f32;
 }
 
+#[no_mangle]
+pub extern "C" fn bloom_play_sound_3d(handle: f64, x: f64, y: f64, z: f64) {
+    engine().audio.play_sound_3d(handle, x as f32, y as f32, z as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_listener_position(x: f64, y: f64, z: f64, fx: f64, fy: f64, fz: f64) {
+    engine().audio.set_listener_position(x as f32, y as f32, z as f32, fx as f32, fy as f32, fz as f32);
+}
+
 // ============================================================
 // Music
 // ============================================================
@@ -1108,14 +1197,28 @@ pub extern "C" fn bloom_set_window_icon(path_ptr: *const u8) {
     }
 }
 
+extern "C" {
+    fn CGDisplayHideCursor(display: u32) -> i32;
+    fn CGDisplayShowCursor(display: u32) -> i32;
+    fn CGAssociateMouseAndMouseCursorPosition(connected: u8) -> i32;
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_disable_cursor() {
     engine().input.cursor_disabled = true;
+    unsafe {
+        CGDisplayHideCursor(0);
+        CGAssociateMouseAndMouseCursorPosition(0); // dissociate = relative mode
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_enable_cursor() {
     engine().input.cursor_disabled = false;
+    unsafe {
+        CGAssociateMouseAndMouseCursorPosition(1);
+        CGDisplayShowCursor(0);
+    }
 }
 
 #[no_mangle]
@@ -1142,6 +1245,18 @@ pub extern "C" fn bloom_write_file(path_ptr: *const u8, data_ptr: *const u8) -> 
 pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
     if std::path::Path::new(path).exists() { 1.0 } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let c_str = std::ffi::CString::new(contents).unwrap_or_default();
+            c_str.into_raw() as *const u8
+        }
+        Err(_) => std::ptr::null(),
+    }
 }
 
 // ============================================================

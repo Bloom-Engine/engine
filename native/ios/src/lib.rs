@@ -532,6 +532,11 @@ pub extern "C" fn bloom_get_texture_height(handle: f64) -> f64 {
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_gen_texture_mipmaps(_handle: f64) {
+    // No-op: wgpu handles mipmaps internally
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_load_image(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
     match std::fs::read(path) {
@@ -696,18 +701,229 @@ pub extern "C" fn bloom_gen_mesh_heightmap(image_handle: f64, size_x: f64, size_
     }
 }
 
-// ============================================================
-// Audio
-// ============================================================
-
 #[no_mangle]
-pub extern "C" fn bloom_init_audio() {
-    // Audio initialization stub for iOS.
-    // CoreAudio with kAudioUnitSubType_RemoteIO would be used for full playback.
+pub extern "C" fn bloom_load_shader(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    engine().renderer.load_custom_shader(source) as f64
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_close_audio() {}
+pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f32, vertex_count: f64, index_ptr: *const u32, index_count: f64) -> f64 {
+    if vertex_ptr.is_null() || index_ptr.is_null() { return 0.0; }
+    let vcount = vertex_count as usize;
+    let icount = index_count as usize;
+    let vertex_data = unsafe { std::slice::from_raw_parts(vertex_ptr, vcount * 12) }; // 12 floats per vertex
+    let index_data = unsafe { std::slice::from_raw_parts(index_ptr, icount) };
+    engine().models.create_mesh(vertex_data, index_data)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read(path) {
+        Ok(data) => engine().models.load_model_animation(&data),
+        Err(_) => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64) {
+    engine().models.update_model_animation(handle, anim_index as usize, time as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_model_mesh_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64,
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_model_material_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64,
+        None => 0.0,
+    }
+}
+
+// ============================================================
+// CoreAudio (iOS) — RemoteIO Audio Unit
+// ============================================================
+
+type AudioUnit = *mut c_void;
+type OSStatus = i32;
+type AudioUnitPropertyID = u32;
+type AudioUnitScope = u32;
+type AudioUnitElement = u32;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AudioComponentDescription {
+    component_type: u32,
+    component_sub_type: u32,
+    component_manufacturer: u32,
+    component_flags: u32,
+    component_flags_mask: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AudioStreamBasicDescription {
+    sample_rate: f64,
+    format_id: u32,
+    format_flags: u32,
+    bytes_per_packet: u32,
+    frames_per_packet: u32,
+    bytes_per_frame: u32,
+    channels_per_frame: u32,
+    bits_per_channel: u32,
+    reserved: u32,
+}
+
+#[repr(C)]
+struct AudioBufferList {
+    number_buffers: u32,
+    buffers: [AudioBufferData; 1],
+}
+
+#[repr(C)]
+struct AudioBufferData {
+    number_channels: u32,
+    data_byte_size: u32,
+    data: *mut c_void,
+}
+
+type AURenderCallback = unsafe extern "C" fn(
+    in_ref_con: *mut c_void,
+    io_action_flags: *mut u32,
+    in_time_stamp: *const c_void,
+    in_bus_number: u32,
+    in_number_frames: u32,
+    io_data: *mut AudioBufferList,
+) -> OSStatus;
+
+#[repr(C)]
+struct AURenderCallbackStruct {
+    input_proc: AURenderCallback,
+    input_proc_ref_con: *mut c_void,
+}
+
+type AudioComponent = *mut c_void;
+
+#[link(name = "AudioToolbox", kind = "framework")]
+extern "C" {
+    fn AudioComponentFindNext(component: AudioComponent, desc: *const AudioComponentDescription) -> AudioComponent;
+    fn AudioComponentInstanceNew(component: AudioComponent, out: *mut AudioUnit) -> OSStatus;
+    fn AudioUnitSetProperty(
+        unit: AudioUnit,
+        property_id: AudioUnitPropertyID,
+        scope: AudioUnitScope,
+        element: AudioUnitElement,
+        data: *const c_void,
+        data_size: u32,
+    ) -> OSStatus;
+    fn AudioUnitInitialize(unit: AudioUnit) -> OSStatus;
+    fn AudioOutputUnitStart(unit: AudioUnit) -> OSStatus;
+    fn AudioOutputUnitStop(unit: AudioUnit) -> OSStatus;
+    fn AudioComponentInstanceDispose(unit: AudioUnit) -> OSStatus;
+}
+
+const K_AUDIO_UNIT_TYPE_OUTPUT: u32 = u32::from_be_bytes(*b"auou");
+const K_AUDIO_UNIT_SUB_TYPE_REMOTE_IO: u32 = u32::from_be_bytes(*b"rioc");
+const K_AUDIO_UNIT_MANUFACTURER_APPLE: u32 = u32::from_be_bytes(*b"appl");
+
+const K_AUDIO_UNIT_PROPERTY_STREAM_FORMAT: AudioUnitPropertyID = 8;
+const K_AUDIO_UNIT_PROPERTY_SET_RENDER_CALLBACK: AudioUnitPropertyID = 23;
+const K_AUDIO_UNIT_SCOPE_INPUT: AudioUnitScope = 1;
+
+const K_AUDIO_FORMAT_LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
+const K_AUDIO_FORMAT_FLAG_IS_FLOAT: u32 = 1;
+const K_AUDIO_FORMAT_FLAG_IS_PACKED: u32 = 8;
+
+struct AudioUnitInstance { unit: AudioUnit }
+unsafe impl Send for AudioUnitInstance {}
+unsafe impl Sync for AudioUnitInstance {}
+
+static mut AUDIO_UNIT: Option<AudioUnitInstance> = None;
+
+unsafe extern "C" fn audio_render_callback(
+    _in_ref_con: *mut c_void,
+    _io_action_flags: *mut u32,
+    _in_time_stamp: *const c_void,
+    _in_bus_number: u32,
+    in_number_frames: u32,
+    io_data: *mut AudioBufferList,
+) -> OSStatus {
+    let buffer_list = &mut *io_data;
+    let buffer = &mut buffer_list.buffers[0];
+    let num_samples = in_number_frames as usize * 2; // stereo
+    let output = std::slice::from_raw_parts_mut(buffer.data as *mut f32, num_samples);
+    ENGINE.get_mut().map(|eng| { eng.audio.mix_output(output); });
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_init_audio() {
+    unsafe {
+        let desc = AudioComponentDescription {
+            component_type: K_AUDIO_UNIT_TYPE_OUTPUT,
+            component_sub_type: K_AUDIO_UNIT_SUB_TYPE_REMOTE_IO,
+            component_manufacturer: K_AUDIO_UNIT_MANUFACTURER_APPLE,
+            component_flags: 0,
+            component_flags_mask: 0,
+        };
+
+        let component = AudioComponentFindNext(std::ptr::null_mut(), &desc);
+        if component.is_null() { return; }
+
+        let mut unit: AudioUnit = std::ptr::null_mut();
+        if AudioComponentInstanceNew(component, &mut unit) != 0 { return; }
+
+        let stream_desc = AudioStreamBasicDescription {
+            sample_rate: 44100.0,
+            format_id: K_AUDIO_FORMAT_LINEAR_PCM,
+            format_flags: K_AUDIO_FORMAT_FLAG_IS_FLOAT | K_AUDIO_FORMAT_FLAG_IS_PACKED,
+            bytes_per_packet: 8,
+            frames_per_packet: 1,
+            bytes_per_frame: 8,
+            channels_per_frame: 2,
+            bits_per_channel: 32,
+            reserved: 0,
+        };
+
+        AudioUnitSetProperty(
+            unit, K_AUDIO_UNIT_PROPERTY_STREAM_FORMAT, K_AUDIO_UNIT_SCOPE_INPUT, 0,
+            &stream_desc as *const _ as *const c_void,
+            std::mem::size_of::<AudioStreamBasicDescription>() as u32,
+        );
+
+        let callback_struct = AURenderCallbackStruct {
+            input_proc: audio_render_callback,
+            input_proc_ref_con: std::ptr::null_mut(),
+        };
+
+        AudioUnitSetProperty(
+            unit, K_AUDIO_UNIT_PROPERTY_SET_RENDER_CALLBACK, K_AUDIO_UNIT_SCOPE_INPUT, 0,
+            &callback_struct as *const _ as *const c_void,
+            std::mem::size_of::<AURenderCallbackStruct>() as u32,
+        );
+
+        AudioUnitInitialize(unit);
+        AudioOutputUnitStart(unit);
+        AUDIO_UNIT = Some(AudioUnitInstance { unit });
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_close_audio() {
+    unsafe {
+        if let Some(au) = AUDIO_UNIT.take() {
+            AudioOutputUnitStop(au.unit);
+            AudioComponentInstanceDispose(au.unit);
+        }
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn bloom_load_sound(path_ptr: *const u8) -> f64 {
@@ -736,6 +952,16 @@ pub extern "C" fn bloom_stop_sound(handle: f64) { engine().audio.stop_sound(hand
 pub extern "C" fn bloom_set_sound_volume(handle: f64, volume: f64) { engine().audio.set_sound_volume(handle, volume as f32); }
 #[no_mangle]
 pub extern "C" fn bloom_set_master_volume(volume: f64) { engine().audio.master_volume = volume as f32; }
+
+#[no_mangle]
+pub extern "C" fn bloom_play_sound_3d(handle: f64, x: f64, y: f64, z: f64) {
+    engine().audio.play_sound_3d(handle, x as f32, y as f32, z as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_listener_position(x: f64, y: f64, z: f64, fx: f64, fy: f64, fz: f64) {
+    engine().audio.set_listener_position(x as f32, y as f32, z as f32, fx as f32, fy as f32, fz as f32);
+}
 
 // ============================================================
 // Music
@@ -879,6 +1105,18 @@ pub extern "C" fn bloom_write_file(path_ptr: *const u8, data_ptr: *const u8) -> 
 pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
     if std::path::Path::new(path).exists() { 1.0 } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let c_str = std::ffi::CString::new(contents).unwrap_or_default();
+            c_str.into_raw() as *const u8
+        }
+        Err(_) => std::ptr::null(),
+    }
 }
 
 #[no_mangle]

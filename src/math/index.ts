@@ -1,4 +1,4 @@
-import { Vec2, Vec3, Vec4, Quat, Ray, BoundingBox, Mat4, FrustumPlanes, RayHit } from '../core/types';
+import { Vec2, Vec3, Vec4, Quat, Ray, BoundingBox, Mat4, FrustumPlanes, RayHit, Model } from '../core/types';
 
 // Vec2 operations
 
@@ -452,4 +452,48 @@ export function getRayCollisionBox(ray: Ray, box_: BoundingBox): RayHit {
     z: ray.position.z + ray.direction.z * tmin,
   };
   return { hit: true, distance: tmin, point, normal: normals[0] };
+}
+
+// PascalCase vector constructors (spec-compliant aliases)
+export const Vec2 = vec2;
+export const Vec3 = vec3;
+export const Vec4 = vec4;
+
+// Mesh-level raycasting — tests ray against all triangles in a model's stored mesh data
+// Note: requires model meshCount > 0. For models loaded from file, this iterates
+// through the mesh vertex/index data stored on the native side.
+
+// Mesh vertex data registry for TS-side raycasting
+const _meshData = new Map<number, { vertices: number[]; indices: number[] }>();
+
+export function _registerMeshData(handle: number, vertices: number[], indices: number[]): void {
+  _meshData.set(handle, { vertices, indices });
+}
+
+export function getRayCollisionMesh(ray: Ray, model: Model): RayHit {
+  const noHit: RayHit = { hit: false, distance: 0, point: { x: 0, y: 0, z: 0 }, normal: { x: 0, y: 0, z: 0 } };
+  const data = _meshData.get(model.handle);
+  if (!data) return noHit;
+
+  let closest = noHit;
+  const verts = data.vertices;
+  const idxs = data.indices;
+
+  // Each vertex is 12 floats: x,y,z, nx,ny,nz, r,g,b,a, u,v
+  for (let i = 0; i < idxs.length; i += 3) {
+    const i0 = idxs[i] * 12;
+    const i1 = idxs[i + 1] * 12;
+    const i2 = idxs[i + 2] * 12;
+
+    const v0: Vec3 = { x: verts[i0], y: verts[i0 + 1], z: verts[i0 + 2] };
+    const v1: Vec3 = { x: verts[i1], y: verts[i1 + 1], z: verts[i1 + 2] };
+    const v2: Vec3 = { x: verts[i2], y: verts[i2 + 1], z: verts[i2 + 2] };
+
+    const hit = rayIntersectsTriangle(ray, v0, v1, v2);
+    if (hit.hit && (!closest.hit || hit.distance < closest.distance)) {
+      closest = hit;
+    }
+  }
+
+  return closest;
 }

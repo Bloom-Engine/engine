@@ -3,12 +3,12 @@ import {
   clearBackground, setTargetFPS, getDeltaTime, isKeyDown, isKeyPressed,
   getScreenWidth, getScreenHeight, closeWindow,
 } from "bloom/core";
-import { Colors, Key } from "bloom/core";
+import { Color, Key } from "bloom/core";
 import { drawRect, drawCircle, drawTriangle, checkCollisionRecs, checkCollisionCircleRec } from "bloom/shapes";
 import { drawText, measureText } from "bloom/text";
-import { initAudio, closeAudio } from "bloom/audio";
+import { initAudioDevice, closeAudioDevice } from "bloom/audio";
 import { clamp, randomFloat, randomInt } from "bloom/math";
-import { Rect, Color } from "bloom/core";
+import { Rect } from "bloom/core";
 
 // Constants
 const SCREEN_WIDTH = 800;
@@ -86,7 +86,7 @@ for (let i = 0; i < MAX_ENEMIES; i++) {
 
 const particles: Particle[] = [];
 for (let i = 0; i < MAX_PARTICLES; i++) {
-  particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 0, color: Colors.WHITE, active: false });
+  particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 0, color: Color.White, active: false });
 }
 
 // Scrolling star background
@@ -178,7 +178,7 @@ function resetGame(): void {
 // Initialize
 initWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Space Blaster");
 setTargetFPS(60);
-initAudio();
+initAudioDevice();
 
 // Main game loop
 while (!windowShouldClose()) {
@@ -381,8 +381,8 @@ while (!windowShouldClose()) {
   }
 
   // HUD
-  drawText("SCORE: " + score.toString(), 10, 10, 20, Colors.WHITE);
-  drawText("WAVE: " + wave.toString(), SCREEN_WIDTH / 2 - 40, 10, 20, Colors.WHITE);
+  drawText("SCORE: " + score.toString(), 10, 10, 20, Color.White);
+  drawText("WAVE: " + wave.toString(), SCREEN_WIDTH / 2 - 40, 10, 20, Color.White);
 
   // Lives
   for (let i = 0; i < lives; i++) {
@@ -397,20 +397,20 @@ while (!windowShouldClose()) {
   // Wave announcement
   if (waveTimer < 0) {
     const waveText = "WAVE " + wave.toString();
-    drawText(waveText, SCREEN_WIDTH / 2 - measureText(waveText, 40) / 2, SCREEN_HEIGHT / 2 - 20, 40, Colors.YELLOW);
+    drawText(waveText, SCREEN_WIDTH / 2 - measureText(waveText, 40) / 2, SCREEN_HEIGHT / 2 - 20, 40, Color.Yellow);
   }
 
   // Game over screen
   if (gameOver) {
-    drawText("GAME OVER", SCREEN_WIDTH / 2 - measureText("GAME OVER", 60) / 2, SCREEN_HEIGHT / 2 - 60, 60, Colors.RED);
+    drawText("GAME OVER", SCREEN_WIDTH / 2 - measureText("GAME OVER", 60) / 2, SCREEN_HEIGHT / 2 - 60, 60, Color.Red);
     const finalScore = "Score: " + score.toString();
-    drawText(finalScore, SCREEN_WIDTH / 2 - measureText(finalScore, 30) / 2, SCREEN_HEIGHT / 2 + 10, 30, Colors.WHITE);
+    drawText(finalScore, SCREEN_WIDTH / 2 - measureText(finalScore, 30) / 2, SCREEN_HEIGHT / 2 + 10, 30, Color.White);
     const restartText = "Press ENTER to restart";
-    drawText(restartText, SCREEN_WIDTH / 2 - measureText(restartText, 20) / 2, SCREEN_HEIGHT / 2 + 60, 20, Colors.LIGHTGRAY);
+    drawText(restartText, SCREEN_WIDTH / 2 - measureText(restartText, 20) / 2, SCREEN_HEIGHT / 2 + 60, 20, Color.LightGray);
   }
 
   endDrawing();
 }
 
-closeAudio();
+closeAudioDevice();
 closeWindow();

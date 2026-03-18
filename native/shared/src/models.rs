@@ -12,13 +12,48 @@ pub struct ModelData {
     pub bbox_max: [f32; 3],
 }
 
+pub struct JointData {
+    pub inverse_bind: [[f32; 4]; 4],
+    pub children: Vec<usize>,
+    pub name: String,
+}
+
+pub struct AnimationChannel {
+    pub joint_index: usize,
+    pub timestamps: Vec<f32>,
+    pub translations: Vec<[f32; 3]>,
+    pub rotations: Vec<[f32; 4]>,
+    pub scales: Vec<[f32; 3]>,
+}
+
+pub struct AnimationData {
+    pub channels: Vec<AnimationChannel>,
+    pub duration: f32,
+    pub name: String,
+}
+
+pub struct SkeletonData {
+    pub joints: Vec<JointData>,
+    pub root_joints: Vec<usize>,
+}
+
+pub struct ModelAnimation {
+    pub skeleton: Option<SkeletonData>,
+    pub animations: Vec<AnimationData>,
+    pub joint_matrices: Vec<[[f32; 4]; 4]>,
+}
+
 pub struct ModelManager {
     pub models: HandleRegistry<ModelData>,
+    pub animations: HandleRegistry<ModelAnimation>,
 }
 
 impl ModelManager {
     pub fn new() -> Self {
-        Self { models: HandleRegistry::new() }
+        Self {
+            models: HandleRegistry::new(),
+            animations: HandleRegistry::new(),
+        }
     }
 
     pub fn load_model(&mut self, file_data: &[u8]) -> f64 {
@@ -166,6 +201,445 @@ impl ModelManager {
         };
         self.models.alloc(model)
     }
+
+    /// Create a mesh from raw float data passed from TS.
+    /// vertex_data layout: [x,y,z, nx,ny,nz, r,g,b,a, u,v] per vertex (12 floats each)
+    pub fn create_mesh(&mut self, vertex_data: &[f32], index_data: &[u32]) -> f64 {
+        let floats_per_vert = 12;
+        let vert_count = vertex_data.len() / floats_per_vert;
+        if vert_count == 0 { return 0.0; }
+
+        let mut vertices = Vec::with_capacity(vert_count);
+        let mut bbox_min = [f32::MAX; 3];
+        let mut bbox_max = [f32::MIN; 3];
+
+        for i in 0..vert_count {
+            let o = i * floats_per_vert;
+            let pos = [vertex_data[o], vertex_data[o+1], vertex_data[o+2]];
+            for k in 0..3 {
+                if pos[k] < bbox_min[k] { bbox_min[k] = pos[k]; }
+                if pos[k] > bbox_max[k] { bbox_max[k] = pos[k]; }
+            }
+            vertices.push(Vertex3D {
+                position: pos,
+                normal: [vertex_data[o+3], vertex_data[o+4], vertex_data[o+5]],
+                color: [vertex_data[o+6], vertex_data[o+7], vertex_data[o+8], vertex_data[o+9]],
+                uv: [vertex_data[o+10], vertex_data[o+11]],
+            });
+        }
+
+        let indices = index_data.to_vec();
+        let model = ModelData {
+            meshes: vec![MeshData { vertices, indices }],
+            bbox_min,
+            bbox_max,
+        };
+        self.models.alloc(model)
+    }
+
+    pub fn load_model_animation(&mut self, file_data: &[u8]) -> f64 {
+        match load_gltf_animation(file_data) {
+            Some(anim) => self.animations.alloc(anim),
+            None => 0.0,
+        }
+    }
+
+    pub fn update_model_animation(&mut self, handle: f64, anim_index: usize, time: f32) {
+        if let Some(model_anim) = self.animations.get_mut(handle) {
+            let skeleton = match &model_anim.skeleton {
+                Some(s) => s,
+                None => return,
+            };
+            if anim_index >= model_anim.animations.len() { return; }
+
+            let joint_count = skeleton.joints.len();
+            if model_anim.joint_matrices.len() != joint_count {
+                model_anim.joint_matrices = vec![mat4_identity(); joint_count];
+            }
+
+            // Evaluate local transforms for each joint from animation channels
+            let mut local_translations = vec![[0.0f32; 3]; joint_count];
+            let mut local_rotations = vec![[0.0f32, 0.0, 0.0, 1.0]; joint_count]; // identity quat
+            let mut local_scales = vec![[1.0f32; 3]; joint_count];
+
+            let anim = &model_anim.animations[anim_index];
+            let t = if anim.duration > 0.0 { time % anim.duration } else { 0.0 };
+
+            for channel in &anim.channels {
+                let ji = channel.joint_index;
+                if ji >= joint_count { continue; }
+
+                if !channel.translations.is_empty() && !channel.timestamps.is_empty() {
+                    local_translations[ji] = sample_vec3(&channel.timestamps, &channel.translations, t);
+                }
+                if !channel.rotations.is_empty() && !channel.timestamps.is_empty() {
+                    local_rotations[ji] = sample_quat(&channel.timestamps, &channel.rotations, t);
+                }
+                if !channel.scales.is_empty() && !channel.timestamps.is_empty() {
+                    local_scales[ji] = sample_vec3(&channel.timestamps, &channel.scales, t);
+                }
+            }
+
+            // Build world transforms by walking the hierarchy from roots
+            let mut world_transforms = vec![mat4_identity(); joint_count];
+
+            let root_joints = skeleton.root_joints.clone();
+            for &root in &root_joints {
+                compute_joint_transforms(
+                    skeleton, root, &mat4_identity(),
+                    &local_translations, &local_rotations, &local_scales,
+                    &mut world_transforms,
+                );
+            }
+
+            // Multiply by inverse bind matrices to get final joint matrices
+            for i in 0..joint_count {
+                model_anim.joint_matrices[i] = mat4_mul(&world_transforms[i], &skeleton.joints[i].inverse_bind);
+            }
+        }
+    }
+}
+
+// ============================================================
+// Matrix / quaternion helpers for skeletal animation
+// ============================================================
+
+fn mat4_identity() -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0f32; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            out[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + a[i][3] * b[3][j];
+        }
+    }
+    out
+}
+
+fn mat4_from_trs(t: &[f32; 3], r: &[f32; 4], s: &[f32; 3]) -> [[f32; 4]; 4] {
+    let (x, y, z, w) = (r[0], r[1], r[2], r[3]);
+    let x2 = x + x; let y2 = y + y; let z2 = z + z;
+    let xx = x * x2; let xy = x * y2; let xz = x * z2;
+    let yy = y * y2; let yz = y * z2; let zz = z * z2;
+    let wx = w * x2; let wy = w * y2; let wz = w * z2;
+
+    [
+        [(1.0 - (yy + zz)) * s[0], (xy + wz) * s[0],         (xz - wy) * s[0],         0.0],
+        [(xy - wz) * s[1],         (1.0 - (xx + zz)) * s[1], (yz + wx) * s[1],         0.0],
+        [(xz + wy) * s[2],         (yz - wx) * s[2],         (1.0 - (xx + yy)) * s[2], 0.0],
+        [t[0],                      t[1],                      t[2],                      1.0],
+    ]
+}
+
+fn quat_slerp(a: &[f32; 4], b: &[f32; 4], t: f32) -> [f32; 4] {
+    let mut dot = a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3];
+    let mut b2 = *b;
+    if dot < 0.0 {
+        dot = -dot;
+        b2 = [-b[0], -b[1], -b[2], -b[3]];
+    }
+    if dot > 0.9995 {
+        let mut out = [
+            a[0] + t * (b2[0] - a[0]),
+            a[1] + t * (b2[1] - a[1]),
+            a[2] + t * (b2[2] - a[2]),
+            a[3] + t * (b2[3] - a[3]),
+        ];
+        let len = (out[0]*out[0] + out[1]*out[1] + out[2]*out[2] + out[3]*out[3]).sqrt();
+        if len > 0.0 { for v in &mut out { *v /= len; } }
+        return out;
+    }
+    let theta = dot.acos();
+    let sin_theta = theta.sin();
+    let wa = ((1.0 - t) * theta).sin() / sin_theta;
+    let wb = (t * theta).sin() / sin_theta;
+    [
+        wa * a[0] + wb * b2[0],
+        wa * a[1] + wb * b2[1],
+        wa * a[2] + wb * b2[2],
+        wa * a[3] + wb * b2[3],
+    ]
+}
+
+fn lerp_vec3(a: &[f32; 3], b: &[f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + t * (b[0] - a[0]),
+        a[1] + t * (b[1] - a[1]),
+        a[2] + t * (b[2] - a[2]),
+    ]
+}
+
+fn find_keyframe_pair(timestamps: &[f32], time: f32) -> (usize, usize, f32) {
+    if timestamps.len() <= 1 {
+        return (0, 0, 0.0);
+    }
+    if time <= timestamps[0] {
+        return (0, 0, 0.0);
+    }
+    if time >= timestamps[timestamps.len() - 1] {
+        let last = timestamps.len() - 1;
+        return (last, last, 0.0);
+    }
+    for i in 0..timestamps.len() - 1 {
+        if time >= timestamps[i] && time < timestamps[i + 1] {
+            let dt = timestamps[i + 1] - timestamps[i];
+            let t = if dt > 0.0 { (time - timestamps[i]) / dt } else { 0.0 };
+            return (i, i + 1, t);
+        }
+    }
+    let last = timestamps.len() - 1;
+    (last, last, 0.0)
+}
+
+fn sample_vec3(timestamps: &[f32], values: &[[f32; 3]], time: f32) -> [f32; 3] {
+    if values.is_empty() { return [0.0; 3]; }
+    if values.len() == 1 { return values[0]; }
+    let (i0, i1, t) = find_keyframe_pair(timestamps, time);
+    if i0 >= values.len() { return values[values.len() - 1]; }
+    if i1 >= values.len() { return values[values.len() - 1]; }
+    lerp_vec3(&values[i0], &values[i1], t)
+}
+
+fn sample_quat(timestamps: &[f32], values: &[[f32; 4]], time: f32) -> [f32; 4] {
+    if values.is_empty() { return [0.0, 0.0, 0.0, 1.0]; }
+    if values.len() == 1 { return values[0]; }
+    let (i0, i1, t) = find_keyframe_pair(timestamps, time);
+    if i0 >= values.len() { return values[values.len() - 1]; }
+    if i1 >= values.len() { return values[values.len() - 1]; }
+    quat_slerp(&values[i0], &values[i1], t)
+}
+
+fn compute_joint_transforms(
+    skeleton: &SkeletonData,
+    joint_idx: usize,
+    parent_transform: &[[f32; 4]; 4],
+    translations: &[[f32; 3]],
+    rotations: &[[f32; 4]],
+    scales: &[[f32; 3]],
+    world_transforms: &mut [[[f32; 4]; 4]],
+) {
+    if joint_idx >= skeleton.joints.len() { return; }
+    let local = mat4_from_trs(&translations[joint_idx], &rotations[joint_idx], &scales[joint_idx]);
+    let world = mat4_mul(parent_transform, &local);
+    world_transforms[joint_idx] = world;
+    let children = skeleton.joints[joint_idx].children.clone();
+    for &child in &children {
+        compute_joint_transforms(skeleton, child, &world, translations, rotations, scales, world_transforms);
+    }
+}
+
+// ============================================================
+// glTF animation loader
+// ============================================================
+
+fn read_accessor_f32(gltf: &gltf::Gltf, buffer_data: &[Vec<u8>], accessor: &gltf::Accessor) -> Vec<f32> {
+    let view = match accessor.view() {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let buf_idx = view.buffer().index();
+    if buf_idx >= buffer_data.len() { return Vec::new(); }
+    let buf = &buffer_data[buf_idx];
+    let offset = view.offset() + accessor.offset();
+    let count = accessor.count();
+    let stride = view.stride().unwrap_or(accessor.size());
+    let component_count = match accessor.dimensions() {
+        gltf::accessor::Dimensions::Scalar => 1,
+        gltf::accessor::Dimensions::Vec2 => 2,
+        gltf::accessor::Dimensions::Vec3 => 3,
+        gltf::accessor::Dimensions::Vec4 => 4,
+        gltf::accessor::Dimensions::Mat4 => 16,
+        _ => 1,
+    };
+
+    let mut result = Vec::with_capacity(count * component_count);
+    for i in 0..count {
+        let base = offset + i * stride;
+        for c in 0..component_count {
+            let byte_offset = base + c * 4;
+            if byte_offset + 4 <= buf.len() {
+                let val = f32::from_le_bytes([buf[byte_offset], buf[byte_offset+1], buf[byte_offset+2], buf[byte_offset+3]]);
+                result.push(val);
+            } else {
+                result.push(0.0);
+            }
+        }
+    }
+    result
+}
+
+fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
+    let gltf = gltf::Gltf::from_slice(data).ok()?;
+
+    // Get buffer data
+    let mut buffer_data: Vec<Vec<u8>> = Vec::new();
+    for buffer in gltf.buffers() {
+        match buffer.source() {
+            gltf::buffer::Source::Bin => {
+                if let Some(blob) = gltf.blob.as_ref() {
+                    buffer_data.push(blob.clone());
+                }
+            }
+            gltf::buffer::Source::Uri(uri) => {
+                if let Some(encoded) = uri.strip_prefix("data:application/octet-stream;base64,") {
+                    let mut decoded = Vec::new();
+                    let _ = base64_decode(encoded, &mut decoded);
+                    buffer_data.push(decoded);
+                } else {
+                    buffer_data.push(Vec::new());
+                }
+            }
+        }
+    }
+
+    // Parse skeleton from the first skin
+    let skeleton = if let Some(skin) = gltf.skins().next() {
+        let joints_nodes: Vec<_> = skin.joints().collect();
+        let joint_count = joints_nodes.len();
+
+        // Build a mapping from node index to joint index
+        let mut node_to_joint = std::collections::HashMap::new();
+        for (ji, node) in joints_nodes.iter().enumerate() {
+            node_to_joint.insert(node.index(), ji);
+        }
+
+        // Read inverse bind matrices
+        let ibm_data = if let Some(accessor) = skin.inverse_bind_matrices() {
+            read_accessor_f32(&gltf, &buffer_data, &accessor)
+        } else {
+            let mut default_ibm = Vec::with_capacity(joint_count * 16);
+            for _ in 0..joint_count {
+                default_ibm.extend_from_slice(&[
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ]);
+            }
+            default_ibm
+        };
+
+        let mut joints = Vec::with_capacity(joint_count);
+        let mut root_joints = Vec::new();
+
+        for (ji, node) in joints_nodes.iter().enumerate() {
+            let mut ibm = [[0.0f32; 4]; 4];
+            let base = ji * 16;
+            if base + 16 <= ibm_data.len() {
+                for row in 0..4 {
+                    for col in 0..4 {
+                        ibm[row][col] = ibm_data[base + row * 4 + col];
+                    }
+                }
+            } else {
+                ibm = mat4_identity();
+            }
+
+            let children: Vec<usize> = node.children()
+                .filter_map(|child| node_to_joint.get(&child.index()).copied())
+                .collect();
+
+            let name = node.name().unwrap_or("").to_string();
+
+            joints.push(JointData { inverse_bind: ibm, children, name });
+        }
+
+        // Find root joints (joints that are not children of any other joint)
+        let mut is_child = vec![false; joint_count];
+        for joint in &joints {
+            for &child in &joint.children {
+                if child < joint_count { is_child[child] = true; }
+            }
+        }
+        for i in 0..joint_count {
+            if !is_child[i] { root_joints.push(i); }
+        }
+
+        Some(SkeletonData { joints, root_joints })
+    } else {
+        None
+    };
+
+    // Parse animations
+    let mut animations = Vec::new();
+    for anim in gltf.animations() {
+        let mut channels = Vec::new();
+        let mut duration: f32 = 0.0;
+
+        // Build node-to-joint mapping for channel resolution
+        let node_to_joint: std::collections::HashMap<usize, usize> = if let Some(skin) = gltf.skins().next() {
+            skin.joints().enumerate().map(|(ji, node)| (node.index(), ji)).collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        // Group channels by target node
+        let mut node_channels: std::collections::HashMap<usize, (Vec<f32>, Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<[f32; 3]>)> = std::collections::HashMap::new();
+
+        for channel in anim.channels() {
+            let target_node = channel.target().node().index();
+            let joint_index = match node_to_joint.get(&target_node) {
+                Some(&ji) => ji,
+                None => continue,
+            };
+
+            let sampler = channel.sampler();
+            let input_accessor = sampler.input();
+            let output_accessor = sampler.output();
+
+            let timestamps = read_accessor_f32(&gltf, &buffer_data, &input_accessor);
+            let values = read_accessor_f32(&gltf, &buffer_data, &output_accessor);
+
+            if let Some(&last) = timestamps.last() {
+                if last > duration { duration = last; }
+            }
+
+            let entry = node_channels.entry(joint_index).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+
+            match channel.target().property() {
+                gltf::animation::Property::Translation => {
+                    entry.0 = timestamps;
+                    entry.1 = values.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
+                }
+                gltf::animation::Property::Rotation => {
+                    if entry.0.is_empty() { entry.0 = timestamps; }
+                    entry.2 = values.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+                }
+                gltf::animation::Property::Scale => {
+                    if entry.0.is_empty() { entry.0 = timestamps; }
+                    entry.3 = values.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
+                }
+                _ => {}
+            }
+        }
+
+        for (joint_index, (timestamps, translations, rotations, scales)) in node_channels {
+            channels.push(AnimationChannel {
+                joint_index,
+                timestamps,
+                translations,
+                rotations,
+                scales,
+            });
+        }
+
+        let name = anim.name().unwrap_or("").to_string();
+        animations.push(AnimationData { channels, duration, name });
+    }
+
+    let joint_count = skeleton.as_ref().map(|s| s.joints.len()).unwrap_or(0);
+    Some(ModelAnimation {
+        skeleton,
+        animations,
+        joint_matrices: vec![mat4_identity(); joint_count],
+    })
 }
 
 fn load_gltf(data: &[u8]) -> Option<ModelData> {

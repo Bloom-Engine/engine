@@ -42,11 +42,11 @@ export interface Camera3D {
   target: Vec3;
   up: Vec3;
   fovy: number;
-  projection: number;
+  projection: "perspective" | "orthographic";
 }
 
 export interface Texture {
-  handle: number;
+  id: number;
   width: number;
   height: number;
 }
@@ -83,6 +83,9 @@ export interface BoundingBox {
 
 export interface Model {
   handle: number;
+  meshCount: number;
+  materialCount: number;
+  transform: Mat4;
 }
 
 export interface RayHit {

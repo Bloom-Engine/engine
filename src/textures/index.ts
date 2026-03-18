@@ -14,24 +14,25 @@ declare function bloom_image_crop(handle: number, x: number, y: number, w: numbe
 declare function bloom_image_flip_h(handle: number): void;
 declare function bloom_image_flip_v(handle: number): void;
 declare function bloom_load_texture_from_image(handle: number): number;
+declare function bloom_gen_texture_mipmaps(handle: number): void;
 
 export function loadTexture(path: string): Texture {
-  const handle = bloom_load_texture(path as any);
-  const width = bloom_get_texture_width(handle);
-  const height = bloom_get_texture_height(handle);
-  return { handle, width, height };
+  const id = bloom_load_texture(path as any);
+  const width = bloom_get_texture_width(id);
+  const height = bloom_get_texture_height(id);
+  return { id, width, height };
 }
 
 export function unloadTexture(texture: Texture): void {
-  bloom_unload_texture(texture.handle);
+  bloom_unload_texture(texture.id);
 }
 
 export function drawTexture(texture: Texture, x: number, y: number, tint: Color): void {
-  bloom_draw_texture(texture.handle, x, y, tint.r, tint.g, tint.b, tint.a);
+  bloom_draw_texture(texture.id, x, y, tint.r, tint.g, tint.b, tint.a);
 }
 
 export function drawTextureRec(texture: Texture, source: Rect, position: { x: number; y: number }, tint: Color): void {
-  bloom_draw_texture_rec(texture.handle, source.x, source.y, source.width, source.height, position.x, position.y, tint.r, tint.g, tint.b, tint.a);
+  bloom_draw_texture_rec(texture.id, source.x, source.y, source.width, source.height, position.x, position.y, tint.r, tint.g, tint.b, tint.a);
 }
 
 export function drawTexturePro(
@@ -39,7 +40,7 @@ export function drawTexturePro(
   origin: { x: number; y: number }, rotation: number, tint: Color,
 ): void {
   bloom_draw_texture_pro(
-    texture.handle,
+    texture.id,
     source.x, source.y, source.width, source.height,
     dest.x, dest.y, dest.width, dest.height,
     origin.x, origin.y, rotation,
@@ -76,8 +77,12 @@ export function imageFlipV(imageHandle: number): void {
 }
 
 export function loadTextureFromImage(imageHandle: number): Texture {
-  const handle = bloom_load_texture_from_image(imageHandle);
-  const width = bloom_get_texture_width(handle);
-  const height = bloom_get_texture_height(handle);
-  return { handle, width, height };
+  const id = bloom_load_texture_from_image(imageHandle);
+  const width = bloom_get_texture_width(id);
+  const height = bloom_get_texture_height(id);
+  return { id, width, height };
+}
+
+export function genTextureMipmaps(texture: Texture): void {
+  bloom_gen_texture_mipmaps(texture.id);
 }

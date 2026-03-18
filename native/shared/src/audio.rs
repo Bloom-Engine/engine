@@ -13,6 +13,11 @@ struct PlayingSound {
     position: usize,
     volume: f32,
     playing: bool,
+    // Spatial audio
+    spatial: bool,
+    source_x: f32,
+    source_y: f32,
+    source_z: f32,
 }
 
 /// Music data (fully decoded for simplicity).
@@ -33,6 +38,13 @@ pub struct AudioMixer {
     pub master_volume: f32,
     sound_volumes: Vec<(f64, f32)>,
     pub music: HandleRegistry<MusicData>,
+    // Spatial audio listener
+    pub listener_x: f32,
+    pub listener_y: f32,
+    pub listener_z: f32,
+    pub listener_forward_x: f32,
+    pub listener_forward_y: f32,
+    pub listener_forward_z: f32,
 }
 
 impl AudioMixer {
@@ -43,6 +55,12 @@ impl AudioMixer {
             master_volume: 1.0,
             sound_volumes: Vec::new(),
             music: HandleRegistry::new(),
+            listener_x: 0.0,
+            listener_y: 0.0,
+            listener_z: 0.0,
+            listener_forward_x: 0.0,
+            listener_forward_y: 0.0,
+            listener_forward_z: -1.0,
         }
     }
 
@@ -56,7 +74,32 @@ impl AudioMixer {
             position: 0,
             volume: self.get_sound_volume(handle),
             playing: true,
+            spatial: false,
+            source_x: 0.0, source_y: 0.0, source_z: 0.0,
         });
+    }
+
+    pub fn play_sound_3d(&mut self, handle: f64, x: f32, y: f32, z: f32) {
+        self.playing.push(PlayingSound {
+            data_handle: handle,
+            position: 0,
+            volume: self.get_sound_volume(handle),
+            playing: true,
+            spatial: true,
+            source_x: x, source_y: y, source_z: z,
+        });
+    }
+
+    pub fn set_listener_position(&mut self, x: f32, y: f32, z: f32, fx: f32, fy: f32, fz: f32) {
+        self.listener_x = x;
+        self.listener_y = y;
+        self.listener_z = z;
+        let len = (fx*fx + fy*fy + fz*fz).sqrt();
+        if len > 0.0 {
+            self.listener_forward_x = fx / len;
+            self.listener_forward_y = fy / len;
+            self.listener_forward_z = fz / len;
+        }
     }
 
     pub fn stop_sound(&mut self, handle: f64) {
@@ -131,6 +174,18 @@ impl AudioMixer {
             *sample = 0.0;
         }
 
+        // Spatial audio: compute listener-relative parameters once
+        let lx = self.listener_x;
+        let ly = self.listener_y;
+        let lz = self.listener_z;
+        let lfx = self.listener_forward_x;
+        let lfy = self.listener_forward_y;
+        let lfz = self.listener_forward_z;
+        // Listener right vector (cross product of forward and up=[0,1,0])
+        let lrx = lfz;
+        let lrz = -lfx;
+        let lr_len = (lrx * lrx + lrz * lrz).sqrt().max(0.001);
+
         // Mix sound effects
         self.playing.retain_mut(|p| {
             if !p.playing { return false; }
@@ -138,19 +193,44 @@ impl AudioMixer {
                 Some(s) => s,
                 None => return false,
             };
-            let vol = p.volume * self.master_volume;
+
+            // Compute spatial gain and pan
+            let (gain_l, gain_r) = if p.spatial {
+                let dx = p.source_x - lx;
+                let dy = p.source_y - ly;
+                let dz = p.source_z - lz;
+                let dist = (dx*dx + dy*dy + dz*dz).sqrt().max(0.1);
+                // Distance attenuation: 1/distance, clamped
+                let attenuation = (1.0 / dist).min(1.0);
+                // Pan: dot product of source direction with listener right
+                let pan = ((dx * lrx + dz * lrz) / (dist * lr_len)).clamp(-1.0, 1.0);
+                let left = attenuation * (1.0 - pan) * 0.5;
+                let right = attenuation * (1.0 + pan) * 0.5;
+                (left, right)
+            } else {
+                (1.0, 1.0)
+            };
+
+            let base_vol = p.volume * self.master_volume;
+            let vol_l = base_vol * gain_l;
+            let vol_r = base_vol * gain_r;
             let mut i = 0;
             while i < output.len() && p.position < sound.samples.len() {
                 if sound.channels == 1 {
-                    let sample = sound.samples[p.position] * vol;
-                    output[i] += sample;
-                    if i + 1 < output.len() { output[i + 1] += sample; }
+                    let sample = sound.samples[p.position];
+                    output[i] += sample * vol_l;
+                    if i + 1 < output.len() { output[i + 1] += sample * vol_r; }
                     p.position += 1;
                     i += 2;
                 } else {
-                    output[i] += sound.samples[p.position] * vol;
+                    // For stereo sources, apply gain to each channel
+                    output[i] += sound.samples[p.position] * vol_l;
                     p.position += 1;
-                    i += 1;
+                    if i + 1 < output.len() && p.position < sound.samples.len() {
+                        output[i + 1] += sound.samples[p.position] * vol_r;
+                        p.position += 1;
+                    }
+                    i += 2;
                 }
             }
             p.position < sound.samples.len()

@@ -7,21 +7,24 @@ export {
   getMouseX, getMouseY, isMouseButtonPressed, isMouseButtonDown, isMouseButtonReleased,
   getMousePosition, getTouchPosition,
   beginMode2D, endMode2D, beginMode3D, endMode3D,
-  isGamepadAvailable, getGamepadAxis, isGamepadButtonPressed,
+  isGamepadAvailable, getGamepadAxis, getGamepadAxisValue, isGamepadButtonPressed,
   isGamepadButtonDown, isGamepadButtonReleased, getGamepadAxisCount,
-  getTouchX, getTouchY, getTouchCount,
+  getTouchX, getTouchY, getTouchCount, getTouchPointCount,
   toggleFullscreen, setWindowTitle, setWindowIcon,
   disableCursor, enableCursor, getMouseDeltaX, getMouseDeltaY,
-  writeFile, fileExists,
+  writeFile, fileExists, readFile,
   getScreenToWorld2D, getWorldToScreen2D,
-  Colors, Key, MouseButton,
+  Color, ColorConstants, Colors, Key, MouseButton,
 } from './core/index';
 
 export type {
-  Color, Vec2, Vec3, Vec4, Rect, Camera2D, Camera3D,
+  Rect, Camera2D, Camera3D,
   Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4,
   RayHit, FrustumPlanes,
 } from './core/index';
+
+// Vec2, Vec3, Vec4 as types come from core, as values (constructors) from math
+export type { Vec2, Vec3, Vec4, Color } from './core/index';
 
 export {
   drawLine, drawRect, drawRectRec, drawRectLines,
@@ -35,23 +38,30 @@ export {
 } from './text/index';
 
 export {
-  initAudio, closeAudio, loadSound, playSound, stopSound,
+  initAudio, closeAudio, initAudioDevice, closeAudioDevice,
+  loadSound, playSound, stopSound,
   setSoundVolume, setMasterVolume,
-  loadMusic, playMusic, stopMusic, updateMusicStream,
+  loadMusic, playMusic, stopMusic, updateMusicStream, updateMusic,
   setMusicVolume, isMusicPlaying,
+  playSound3D, setListenerPosition,
 } from './audio/index';
 
 export {
   loadTexture, unloadTexture, drawTexture, drawTexturePro, drawTextureRec,
   getTextureWidth, getTextureHeight, loadImage,
   imageResize, imageCrop, imageFlipH, imageFlipV, loadTextureFromImage,
+  genTextureMipmaps,
 } from './textures/index';
 
 export {
   loadModel, drawModel, unloadModel,
   drawCube, drawCubeWires, drawSphere, drawSphereWires,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
+  loadShader, loadModelAnimation, updateModelAnimation, createMesh,
+  setAmbientLight, setDirectionalLight,
 } from './models/index';
+
+export type { DrawCubeOpts } from './models/index';
 
 export {
   vec2, vec2Add, vec2Sub, vec2Scale, vec2Length, vec2LengthSq,
@@ -59,6 +69,7 @@ export {
   vec3, vec3Add, vec3Sub, vec3Scale, vec3Length, vec3LengthSq,
   vec3Normalize, vec3Dot, vec3Cross, vec3Distance, vec3Lerp,
   vec4, vec4Add, vec4Scale, vec4Length, vec4Normalize,
+  Vec2, Vec3, Vec4,
   lerp, clamp, remap, randomFloat, randomInt,
   easeInQuad, easeOutQuad, easeInOutQuad, easeInCubic, easeOutCubic,
   easeInOutCubic, easeInElastic, easeOutElastic, easeBounce,
@@ -69,5 +80,5 @@ export {
   quatNormalize, quatMultiply,
   rayIntersectsBox, rayIntersectsSphere, checkCollisionBoxes, checkCollisionSpheres,
   extractFrustumPlanes, isBoxInFrustum,
-  rayIntersectsTriangle, getRayCollisionBox,
+  rayIntersectsTriangle, getRayCollisionBox, getRayCollisionMesh,
 } from './math/index';

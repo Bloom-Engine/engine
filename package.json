@@ -61,6 +61,8 @@
         { "name": "bloom_stop_sound",               "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_sound_volume",         "params": ["f64", "f64"],                                            "returns": "void" },
         { "name": "bloom_set_master_volume",        "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_play_sound_3d",            "params": ["f64", "f64", "f64", "f64"],                              "returns": "void" },
+        { "name": "bloom_set_listener_position",    "params": ["f64", "f64", "f64", "f64", "f64", "f64"],               "returns": "void" },
 
         { "name": "bloom_load_texture",             "params": ["i64"],                                                   "returns": "f64"  },
         { "name": "bloom_unload_texture",           "params": ["f64"],                                                   "returns": "void" },
@@ -75,6 +77,7 @@
         { "name": "bloom_image_flip_h",             "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_image_flip_v",             "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_load_texture_from_image",  "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_gen_texture_mipmaps",      "params": ["f64"],                                                   "returns": "void" },
 
         { "name": "bloom_begin_mode_2d",            "params": ["f64", "f64", "f64", "f64", "f64", "f64"],               "returns": "void" },
         { "name": "bloom_end_mode_2d",              "params": [],                                                        "returns": "void" },
@@ -95,6 +98,14 @@
         { "name": "bloom_unload_model",             "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_gen_mesh_cube",            "params": ["f64", "f64", "f64"],                                     "returns": "f64"  },
         { "name": "bloom_gen_mesh_heightmap",       "params": ["f64", "f64", "f64", "f64"],                              "returns": "f64"  },
+        { "name": "bloom_load_shader",              "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_load_model_animation",   "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_update_model_animation",  "params": ["f64", "f64", "f64"],                                    "returns": "void" },
+        { "name": "bloom_create_mesh",             "params": ["i64", "f64", "i64", "f64"],                             "returns": "f64"  },
+        { "name": "bloom_set_ambient_light",       "params": ["f64", "f64", "f64", "f64"],                              "returns": "void" },
+        { "name": "bloom_set_directional_light",   "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],        "returns": "void" },
+        { "name": "bloom_get_model_mesh_count",    "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_get_model_material_count","params": ["f64"],                                                   "returns": "f64"  },
 
         { "name": "bloom_load_music",               "params": ["i64"],                                                   "returns": "f64"  },
         { "name": "bloom_play_music",               "params": ["f64"],                                                   "returns": "void" },
@@ -119,6 +130,7 @@
         { "name": "bloom_get_mouse_delta_y",        "params": [],                                                        "returns": "f64"  },
         { "name": "bloom_write_file",               "params": ["i64", "i64"],                                            "returns": "f64"  },
         { "name": "bloom_file_exists",              "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_read_file",                "params": ["i64"],                                                   "returns": "i64"  },
         { "name": "bloom_get_touch_x",              "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_get_touch_y",              "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_get_touch_count",          "params": [],                                                        "returns": "f64"  },
@@ -142,12 +154,12 @@
         "windows": {
           "crate": "native/windows/",
           "lib": "bloom_windows.lib",
-          "libs": ["user32", "gdi32", "ole32", "shell32", "d3d12", "dxgi", "dxguid"]
+          "libs": ["user32", "gdi32", "ole32", "shell32", "d3d12", "dxgi", "dxguid", "xinput"]
         },
         "linux": {
           "crate": "native/linux/",
           "lib": "libbloom_linux.a",
-          "pkgConfig": ["x11", "xi"]
+          "pkgConfig": ["x11", "xi", "alsa"]
         },
         "android": {
           "crate": "native/android/",

@@ -116,6 +116,18 @@ mod win32 {
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+            0x0005 /* WM_SIZE */ => {
+                let new_w = (lparam.0 & 0xFFFF) as u32;
+                let new_h = ((lparam.0 >> 16) & 0xFFFF) as u32;
+                if new_w > 0 && new_h > 0 {
+                    if let Some(eng) = ENGINE.get_mut() {
+                        if new_w != eng.renderer.width() || new_h != eng.renderer.height() {
+                            eng.renderer.resize(new_w, new_h);
+                        }
+                    }
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
@@ -234,10 +246,66 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
     if engine().should_close { 1.0 } else { 0.0 }
 }
 
+#[cfg(windows)]
+fn poll_xinput_gamepad() {
+    use windows::Win32::UI::Input::XboxController::*;
+    let eng = engine();
+    let mut state = XINPUT_STATE::default();
+    let result = unsafe { XInputGetState(0, &mut state) };
+    if result == 0 {
+        // ERROR_SUCCESS
+        eng.input.gamepad_available = true;
+        let gp = &state.Gamepad;
+
+        // Axes: left stick X/Y, right stick X/Y, triggers
+        let normalize = |v: i16| -> f32 {
+            if v > 0 { v as f32 / 32767.0 } else { v as f32 / 32768.0 }
+        };
+        eng.input.set_gamepad_axis(0, normalize(gp.sThumbLX));
+        eng.input.set_gamepad_axis(1, -normalize(gp.sThumbLY)); // invert Y
+        eng.input.set_gamepad_axis(2, normalize(gp.sThumbRX));
+        eng.input.set_gamepad_axis(3, -normalize(gp.sThumbRY));
+        eng.input.set_gamepad_axis(4, gp.bLeftTrigger as f32 / 255.0);
+        eng.input.set_gamepad_axis(5, gp.bRightTrigger as f32 / 255.0);
+        eng.input.gamepad_axis_count = 6;
+
+        // Buttons
+        let buttons = gp.wButtons;
+        let mappings: &[(u16, usize)] = &[
+            (0x1000, 0),  // A
+            (0x2000, 1),  // B
+            (0x4000, 2),  // X
+            (0x8000, 3),  // Y
+            (0x0100, 4),  // Left bumper
+            (0x0200, 5),  // Right bumper
+            (0x0020, 6),  // Back/Select
+            (0x0010, 7),  // Start
+            (0x0040, 8),  // Left stick press
+            (0x0080, 9),  // Right stick press
+            (0x0001, 10), // DPad Up
+            (0x0002, 11), // DPad Down
+            (0x0004, 12), // DPad Left
+            (0x0008, 13), // DPad Right
+        ];
+        for &(mask, idx) in mappings {
+            if buttons.0 & mask != 0 {
+                eng.input.set_gamepad_button_down(idx);
+            } else {
+                eng.input.set_gamepad_button_up(idx);
+            }
+        }
+    } else {
+        eng.input.gamepad_available = false;
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
     #[cfg(windows)]
-    win32::poll_events();
+    {
+        win32::poll_events();
+        poll_xinput_gamepad();
+    }
     engine().begin_frame();
 }
 
@@ -379,11 +447,152 @@ pub extern "C" fn bloom_measure_text_ex(font_handle: f64, text_ptr: *const u8, s
     engine().text.measure_text_ex(font_handle as usize, text, size as u32, spacing as f32)
 }
 
-#[no_mangle]
-pub extern "C" fn bloom_init_audio() {}
+static AUDIO_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[no_mangle]
-pub extern "C" fn bloom_close_audio() {}
+pub extern "C" fn bloom_init_audio() {
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::Ordering;
+        AUDIO_RUNNING.store(true, Ordering::SeqCst);
+
+        std::thread::spawn(|| {
+            unsafe { wasapi_audio_thread(); }
+        });
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_close_audio() {
+    AUDIO_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+}
+
+#[cfg(windows)]
+unsafe fn wasapi_audio_thread() {
+    use windows::Win32::Media::Audio::*;
+    use windows::Win32::System::Com::*;
+    use windows::core::*;
+    use std::sync::atomic::Ordering;
+
+    // Initialize COM on this thread
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+    // Create device enumerator and get default output device
+    let enumerator: IMMDeviceEnumerator = match CoCreateInstance(
+        &MMDeviceEnumerator,
+        None,
+        CLSCTX_ALL,
+    ) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let device = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    let audio_client: IAudioClient = match device.Activate(CLSCTX_ALL, None) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Get mix format
+    let mix_format_ptr = match audio_client.GetMixFormat() {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let mix_format = &*mix_format_ptr;
+    let sample_rate = mix_format.nSamplesPerSec;
+    let channels = mix_format.nChannels as usize;
+
+    // Initialize in shared mode with 20ms buffer
+    let buffer_duration = 200_000; // 20ms in 100-nanosecond units
+    if audio_client.Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        0,
+        buffer_duration,
+        0,
+        mix_format_ptr,
+        None,
+    ).is_err() {
+        return;
+    }
+
+    let buffer_size = match audio_client.GetBufferSize() {
+        Ok(s) => s as usize,
+        Err(_) => return,
+    };
+
+    let render_client: IAudioRenderClient = match audio_client.GetService() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let _ = audio_client.Start();
+
+    // Temporary buffer for mixing (always stereo f32 from our mixer)
+    let mut mix_buf = vec![0.0f32; buffer_size * 2];
+
+    while AUDIO_RUNNING.load(Ordering::SeqCst) {
+        let padding = audio_client.GetCurrentPadding().unwrap_or(0) as usize;
+        let available = buffer_size - padding;
+        if available == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            continue;
+        }
+
+        let buffer_ptr = match render_client.GetBuffer(available as u32) {
+            Ok(p) => p,
+            Err(_) => { std::thread::sleep(std::time::Duration::from_millis(2)); continue; }
+        };
+
+        // Mix audio
+        let mix_samples = available * 2; // stereo
+        for i in 0..mix_samples { mix_buf[i] = 0.0; }
+        ENGINE.get_mut().map(|eng| {
+            eng.audio.mix_output(&mut mix_buf[..mix_samples]);
+        });
+
+        // Write to WASAPI buffer (format is typically f32 or i16, assume float since we requested shared mode)
+        let bits = mix_format.wBitsPerSample;
+        let out_channels = channels;
+        if bits == 32 {
+            let out = std::slice::from_raw_parts_mut(buffer_ptr as *mut f32, available * out_channels);
+            for i in 0..available {
+                let l = mix_buf[i * 2];
+                let r = if i * 2 + 1 < mix_samples { mix_buf[i * 2 + 1] } else { l };
+                if out_channels >= 2 {
+                    out[i * out_channels] = l;
+                    out[i * out_channels + 1] = r;
+                    for c in 2..out_channels { out[i * out_channels + c] = 0.0; }
+                } else {
+                    out[i] = (l + r) * 0.5;
+                }
+            }
+        } else if bits == 16 {
+            let out = std::slice::from_raw_parts_mut(buffer_ptr as *mut i16, available * out_channels);
+            for i in 0..available {
+                let l = mix_buf[i * 2];
+                let r = if i * 2 + 1 < mix_samples { mix_buf[i * 2 + 1] } else { l };
+                if out_channels >= 2 {
+                    out[i * out_channels] = (l * 32767.0) as i16;
+                    out[i * out_channels + 1] = (r * 32767.0) as i16;
+                    for c in 2..out_channels { out[i * out_channels + c] = 0; }
+                } else {
+                    out[i] = ((l + r) * 0.5 * 32767.0) as i16;
+                }
+            }
+        }
+
+        let _ = render_client.ReleaseBuffer(available as u32, 0);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    let _ = audio_client.Stop();
+    CoUninitialize();
+}
 
 #[no_mangle]
 pub extern "C" fn bloom_load_sound(path_ptr: *const u8) -> f64 {
@@ -413,6 +622,16 @@ pub extern "C" fn bloom_set_sound_volume(handle: f64, volume: f64) {
 #[no_mangle]
 pub extern "C" fn bloom_set_master_volume(volume: f64) {
     engine().audio.master_volume = volume as f32;
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_play_sound_3d(handle: f64, x: f64, y: f64, z: f64) {
+    engine().audio.play_sound_3d(handle, x as f32, y as f32, z as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_listener_position(x: f64, y: f64, z: f64, fx: f64, fy: f64, fz: f64) {
+    engine().audio.set_listener_position(x as f32, y as f32, z as f32, fx as f32, fy as f32, fz as f32);
 }
 
 // --- Texture FFI ---
@@ -472,6 +691,11 @@ pub extern "C" fn bloom_get_texture_width(handle: f64) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_get_texture_height(handle: f64) -> f64 {
     engine().textures.get(handle).map(|t| t.height as f64).unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_gen_texture_mipmaps(_handle: f64) {
+    // No-op: wgpu handles mipmaps internally
 }
 
 #[no_mangle]
@@ -579,6 +803,22 @@ pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f
 pub extern "C" fn bloom_unload_model(handle: f64) { engine().models.unload_model(handle); }
 
 #[no_mangle]
+pub extern "C" fn bloom_get_model_mesh_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64,
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_model_material_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64,
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_gen_mesh_cube(w: f64, h: f64, d: f64) -> f64 {
     engine().models.gen_mesh_cube(w as f32, h as f32, d as f32)
 }
@@ -594,6 +834,36 @@ pub extern "C" fn bloom_gen_mesh_heightmap(image_handle: f64, size_x: f64, size_
     } else {
         0.0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_shader(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    engine().renderer.load_custom_shader(source) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f32, vertex_count: f64, index_ptr: *const u32, index_count: f64) -> f64 {
+    if vertex_ptr.is_null() || index_ptr.is_null() { return 0.0; }
+    let vcount = vertex_count as usize;
+    let icount = index_count as usize;
+    let vertex_data = unsafe { std::slice::from_raw_parts(vertex_ptr, vcount * 12) }; // 12 floats per vertex
+    let index_data = unsafe { std::slice::from_raw_parts(index_ptr, icount) };
+    engine().models.create_mesh(vertex_data, index_data)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read(path) {
+        Ok(data) => engine().models.load_model_animation(&data),
+        Err(_) => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64) {
+    engine().models.update_model_animation(handle, anim_index as usize, time as f32);
 }
 
 // --- Music FFI ---
@@ -680,6 +950,18 @@ pub extern "C" fn bloom_write_file(path_ptr: *const u8, data_ptr: *const u8) -> 
 pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
     if std::path::Path::new(path).exists() { 1.0 } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let c_str = std::ffi::CString::new(contents).unwrap_or_default();
+            c_str.into_raw() as *const u8
+        }
+        Err(_) => std::ptr::null(),
+    }
 }
 
 #[no_mangle]

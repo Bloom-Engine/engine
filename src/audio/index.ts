@@ -14,6 +14,8 @@ declare function bloom_stop_music(handle: number): void;
 declare function bloom_update_music_stream(handle: number): void;
 declare function bloom_set_music_volume(handle: number, volume: number): void;
 declare function bloom_is_music_playing(handle: number): number;
+declare function bloom_play_sound_3d(handle: number, x: number, y: number, z: number): void;
+declare function bloom_set_listener_position(x: number, y: number, z: number, fx: number, fy: number, fz: number): void;
 
 export function initAudio(): void {
   bloom_init_audio();
@@ -22,6 +24,10 @@ export function initAudio(): void {
 export function closeAudio(): void {
   bloom_close_audio();
 }
+
+// Spec-compliant aliases
+export const initAudioDevice = initAudio;
+export const closeAudioDevice = closeAudio;
 
 export function loadSound(path: string): Sound {
   const handle = bloom_load_sound(path as any);
@@ -63,10 +69,23 @@ export function updateMusicStream(music: Music): void {
   bloom_update_music_stream(music.handle);
 }
 
+// Spec-compliant alias
+export const updateMusic = updateMusicStream;
+
 export function setMusicVolume(music: Music, volume: number): void {
   bloom_set_music_volume(music.handle, volume);
 }
 
 export function isMusicPlaying(music: Music): boolean {
   return bloom_is_music_playing(music.handle) !== 0;
+}
+
+// Spatial audio
+
+export function playSound3D(sound: Sound, x: number, y: number, z: number): void {
+  bloom_play_sound_3d(sound.handle, x, y, z);
+}
+
+export function setListenerPosition(x: number, y: number, z: number, forwardX: number, forwardY: number, forwardZ: number): void {
+  bloom_set_listener_position(x, y, z, forwardX, forwardY, forwardZ);
 }

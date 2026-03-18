@@ -32,6 +32,24 @@ struct Uniforms3D {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightingUniforms {
+    ambient: [f32; 4],      // rgb + intensity
+    light_dir: [f32; 4],    // xyz + intensity
+    light_color: [f32; 4],  // rgb + _pad
+}
+
+impl LightingUniforms {
+    fn defaults() -> Self {
+        Self {
+            ambient: [1.0, 1.0, 1.0, 0.3],
+            light_dir: [0.5, 1.0, 0.3, 0.7],
+            light_color: [1.0, 1.0, 1.0, 0.0],
+        }
+    }
+}
+
+#[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex2D {
     pub position: [f32; 2],
@@ -145,6 +163,12 @@ struct Uniforms3D {
     mvp: mat4x4<f32>,
 };
 
+struct Lighting {
+    ambient: vec4<f32>,
+    light_dir: vec4<f32>,
+    light_color: vec4<f32>,
+};
+
 struct VertexInput3D {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -160,6 +184,7 @@ struct VertexOutput3D {
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms3D;
+@group(1) @binding(0) var<uniform> lighting: Lighting;
 
 @vertex
 fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
@@ -173,11 +198,13 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
 
 @fragment
 fn fs_main_3d(in: VertexOutput3D) -> @location(0) vec4<f32> {
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
     let n = normalize(in.normal);
+    let light_dir = normalize(lighting.light_dir.xyz);
     let diffuse = max(dot(n, light_dir), 0.0);
-    let lighting = 0.3 + diffuse * 0.7;
-    return vec4<f32>(in.color.rgb * lighting, in.color.a);
+    let ambient = lighting.ambient.rgb * lighting.ambient.a;
+    let direct = lighting.light_color.rgb * lighting.light_dir.w * diffuse;
+    let lit = ambient + direct;
+    return vec4<f32>(in.color.rgb * lit, in.color.a);
 }
 ";
 
@@ -215,6 +242,7 @@ pub struct Renderer {
     // Pipelines
     pipeline_2d: wgpu::RenderPipeline,
     pipeline_3d: wgpu::RenderPipeline,
+    custom_pipelines: Vec<wgpu::RenderPipeline>,
 
     // 2D uniforms (multiple slots for mode switching)
     uniform_buffers: Vec<wgpu::Buffer>,
@@ -225,6 +253,11 @@ pub struct Renderer {
     // 3D uniforms
     uniform_buffer_3d: wgpu::Buffer,
     uniform_bind_group_3d: wgpu::BindGroup,
+
+    // Lighting uniforms
+    lighting_uniforms: LightingUniforms,
+    lighting_buffer: wgpu::Buffer,
+    lighting_bind_group: wgpu::BindGroup,
 
     // Texture management
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -361,6 +394,35 @@ impl Renderer {
             }],
         });
 
+        // --- Lighting uniform buffer ---
+        let lighting_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lighting_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let lighting_uniforms = LightingUniforms::defaults();
+        let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lighting_buffer"),
+            contents: bytemuck::bytes_of(&lighting_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let lighting_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lighting_bg"),
+            layout: &lighting_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: lighting_buffer.as_entire_binding(),
+            }],
+        });
+
         // --- Sampler ---
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("bloom_sampler"),
@@ -456,7 +518,7 @@ impl Renderer {
         // --- 3D Pipeline ---
         let pipeline_layout_3d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline_layout_3d"),
-            bind_group_layouts: &[&uniform_3d_layout],
+            bind_group_layouts: &[&uniform_3d_layout, &lighting_layout],
             push_constant_ranges: &[],
         });
 
@@ -513,6 +575,9 @@ impl Renderer {
             uniform_slot_count: 0,
             uniform_buffer_3d,
             uniform_bind_group_3d,
+            lighting_uniforms,
+            lighting_buffer,
+            lighting_bind_group,
             texture_bind_group_layout,
             texture_bind_groups,
             textures,
@@ -527,6 +592,7 @@ impl Renderer {
             indices_3d: Vec::with_capacity(8192),
             render_mode: RenderMode::ScreenSpace,
             clear_color: wgpu::Color::BLACK,
+            custom_pipelines: Vec::new(),
         }
     }
 
@@ -569,6 +635,10 @@ impl Renderer {
             view_proj: IDENTITY_MAT4,
         };
         self.queue.write_buffer(&self.uniform_buffers[0], 0, bytemuck::bytes_of(&uniforms));
+
+        // Reset lighting to defaults
+        self.lighting_uniforms = LightingUniforms::defaults();
+        self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));
     }
 
     pub fn end_frame(&mut self) {
@@ -644,6 +714,7 @@ impl Renderer {
             if let (Some(vb), Some(ib)) = (&vb_3d, &ib_3d) {
                 pass.set_pipeline(&self.pipeline_3d);
                 pass.set_bind_group(0, &self.uniform_bind_group_3d, &[]);
+                pass.set_bind_group(1, &self.lighting_bind_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.indices_3d.len() as u32, 0, 0..1);
@@ -1051,6 +1122,21 @@ impl Renderer {
     }
 
     // ============================================================
+    // Lighting
+    // ============================================================
+
+    pub fn set_ambient_light(&mut self, r: f64, g: f64, b: f64, intensity: f64) {
+        self.lighting_uniforms.ambient = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, intensity as f32];
+        self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));
+    }
+
+    pub fn set_directional_light(&mut self, dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
+        self.lighting_uniforms.light_dir = [dx as f32, dy as f32, dz as f32, intensity as f32];
+        self.lighting_uniforms.light_color = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, 0.0];
+        self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));
+    }
+
+    // ============================================================
     // 3D drawing
     // ============================================================
 
@@ -1297,6 +1383,73 @@ impl Renderer {
 
     pub fn height(&self) -> u32 {
         self.surface_config.height
+    }
+
+    pub fn load_custom_shader(&mut self, wgsl_source: &str) -> usize {
+        let shader_module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("custom_shader"),
+            source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
+        });
+
+        // Create layout matching the default 3D pipeline
+        let bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("custom_shader_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("custom_pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("custom_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_module,
+                entry_point: Some("vs_main_3d"),
+                buffers: &[Vertex3D::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: Some("fs_main_3d"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.surface_config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        self.custom_pipelines.push(pipeline);
+        self.custom_pipelines.len() // 1-based index
     }
 }
 

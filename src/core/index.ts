@@ -1,7 +1,8 @@
 import { Color, Camera2D, Camera3D } from './types';
 
-export { Color, Vec2, Vec3, Vec4, Rect, Camera2D, Camera3D, Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4, RayHit, FrustumPlanes } from './types';
-export { Colors } from './colors';
+export type { Color, Vec2, Vec3, Vec4, Rect, Camera2D, Camera3D, Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4, RayHit, FrustumPlanes } from './types';
+export { ColorConstants, Colors } from './colors';
+export { ColorConstants as Color } from './colors';
 export { Key, MouseButton } from './keys';
 
 // FFI declarations
@@ -55,6 +56,7 @@ declare function bloom_get_mouse_delta_x(): number;
 declare function bloom_get_mouse_delta_y(): number;
 declare function bloom_write_file(path: number, data: number): number;
 declare function bloom_file_exists(path: number): number;
+declare function bloom_read_file(path: number): number;
 
 // Window management
 
@@ -171,11 +173,12 @@ export function endMode2D(): void {
 // Camera 3D
 
 export function beginMode3D(camera: Camera3D): void {
+  const proj = camera.projection === "orthographic" ? 1 : 0;
   bloom_begin_mode_3d(
     camera.position.x, camera.position.y, camera.position.z,
     camera.target.x, camera.target.y, camera.target.z,
     camera.up.x, camera.up.y, camera.up.z,
-    camera.fovy, camera.projection,
+    camera.fovy, proj,
   );
 }
 
@@ -183,10 +186,14 @@ export function endMode3D(): void {
   bloom_end_mode_3d();
 }
 
-// Gamepad
+// Gamepad — spec-compliant signatures with gamepad ID
 
-export function isGamepadAvailable(): boolean {
+export function isGamepadAvailable(id?: number): boolean {
   return bloom_is_gamepad_available() !== 0;
+}
+
+export function getGamepadAxisValue(id: number, axis: number): number {
+  return bloom_get_gamepad_axis(axis);
 }
 
 export function getGamepadAxis(axis: number): number {
@@ -220,6 +227,10 @@ export function getTouchY(index: number): number {
 }
 
 export function getTouchCount(): number {
+  return bloom_get_touch_count();
+}
+
+export function getTouchPointCount(): number {
   return bloom_get_touch_count();
 }
 
@@ -261,6 +272,10 @@ export function writeFile(path: string, data: string): boolean {
 
 export function fileExists(path: string): boolean {
   return bloom_file_exists(path as any) !== 0;
+}
+
+export function readFile(path: string): string {
+  return bloom_read_file(path as any) as any;
 }
 
 // Pure TS camera helpers

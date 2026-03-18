@@ -4,8 +4,10 @@ use bloom_shared::string_header::str_from_header;
 use bloom_shared::audio::{parse_wav, parse_ogg, parse_mp3};
 
 use std::sync::OnceLock;
+use std::os::unix::io::RawFd;
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
+static mut GAMEPAD_FD: RawFd = -1;
 
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
@@ -147,6 +149,17 @@ mod x11_impl {
                             _ => {}
                         }
                     }
+                    x11::xlib::ConfigureNotify => {
+                        let configure = event.configure;
+                        let new_w = configure.width as u32;
+                        let new_h = configure.height as u32;
+                        if new_w > 0 && new_h > 0 {
+                            let eng = engine();
+                            if new_w != eng.renderer.width() || new_h != eng.renderer.height() {
+                                eng.renderer.resize(new_w, new_h);
+                            }
+                        }
+                    }
                     x11::xlib::DestroyNotify => {
                         engine().should_close = true;
                     }
@@ -225,10 +238,65 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
     if engine().should_close { 1.0 } else { 0.0 }
 }
 
+#[cfg(target_os = "linux")]
+fn poll_linux_gamepad() {
+    unsafe {
+        // Try to open gamepad if not already
+        if GAMEPAD_FD < 0 {
+            let path = b"/dev/input/js0\0";
+            // Open non-blocking
+            GAMEPAD_FD = libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY | libc::O_NONBLOCK);
+            if GAMEPAD_FD >= 0 {
+                engine().input.gamepad_available = true;
+                engine().input.gamepad_axis_count = 6;
+            }
+        }
+        if GAMEPAD_FD < 0 { return; }
+
+        // Linux joystick event structure
+        #[repr(C)]
+        struct JsEvent {
+            time: u32,
+            value: i16,
+            event_type: u8,
+            number: u8,
+        }
+
+        loop {
+            let mut event = std::mem::zeroed::<JsEvent>();
+            let n = libc::read(
+                GAMEPAD_FD,
+                &mut event as *mut _ as *mut libc::c_void,
+                std::mem::size_of::<JsEvent>(),
+            );
+            if n != std::mem::size_of::<JsEvent>() as isize { break; }
+
+            let type_masked = event.event_type & 0x7f; // strip JS_EVENT_INIT
+            if type_masked == 1 {
+                // Button
+                let idx = event.number as usize;
+                if event.value != 0 {
+                    engine().input.set_gamepad_button_down(idx);
+                } else {
+                    engine().input.set_gamepad_button_up(idx);
+                }
+            } else if type_masked == 2 {
+                // Axis
+                let idx = event.number as usize;
+                let value = event.value as f32 / 32767.0;
+                engine().input.set_gamepad_axis(idx, value);
+            }
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
     #[cfg(target_os = "linux")]
-    x11_impl::poll_events();
+    {
+        x11_impl::poll_events();
+        poll_linux_gamepad();
+    }
     engine().begin_frame();
 }
 
@@ -367,10 +435,77 @@ pub extern "C" fn bloom_measure_text_ex(font_handle: f64, text_ptr: *const u8, s
     engine().text.measure_text_ex(font_handle as usize, text, size as u32, spacing as f32)
 }
 
+static AUDIO_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[no_mangle]
-pub extern "C" fn bloom_init_audio() {}
+pub extern "C" fn bloom_init_audio() {
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::atomic::Ordering;
+        AUDIO_RUNNING.store(true, Ordering::SeqCst);
+        std::thread::spawn(|| {
+            alsa_audio_thread();
+        });
+    }
+}
+
 #[no_mangle]
-pub extern "C" fn bloom_close_audio() {}
+pub extern "C" fn bloom_close_audio() {
+    AUDIO_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+}
+
+#[cfg(target_os = "linux")]
+fn alsa_audio_thread() {
+    use alsa::pcm::*;
+    use alsa::{Direction, ValueOr};
+    use std::sync::atomic::Ordering;
+
+    let pcm = match PCM::new("default", Direction::Playback, false) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let sample_rate = 44100u32;
+    let channels = 2u32;
+    let period_size = 1024;
+
+    {
+        let hwp = HwParams::any(&pcm).unwrap();
+        let _ = hwp.set_channels(channels);
+        let _ = hwp.set_rate(sample_rate, ValueOr::Nearest);
+        let _ = hwp.set_format(Format::float());
+        let _ = hwp.set_access(Access::RWInterleaved);
+        let _ = hwp.set_period_size(period_size, ValueOr::Nearest);
+        let _ = hwp.set_buffer_size(period_size * 4);
+        let _ = pcm.hw_params(&hwp);
+    }
+
+    let _ = pcm.prepare();
+
+    let frames = period_size as usize;
+    let mut mix_buf = vec![0.0f32; frames * channels as usize];
+
+    while AUDIO_RUNNING.load(Ordering::SeqCst) {
+        for s in mix_buf.iter_mut() { *s = 0.0; }
+
+        unsafe {
+            ENGINE.get_mut().map(|eng| {
+                eng.audio.mix_output(&mut mix_buf);
+            });
+        }
+
+        let io = pcm.io_f32().unwrap();
+        match io.writei(&mix_buf) {
+            Ok(_) => {}
+            Err(e) => {
+                let _ = pcm.try_recover(e, true);
+            }
+        }
+    }
+
+    let _ = pcm.drain();
+}
 
 #[no_mangle]
 pub extern "C" fn bloom_load_sound(path_ptr: *const u8) -> f64 {
@@ -394,6 +529,16 @@ pub extern "C" fn bloom_stop_sound(handle: f64) { engine().audio.stop_sound(hand
 pub extern "C" fn bloom_set_sound_volume(handle: f64, volume: f64) { engine().audio.set_sound_volume(handle, volume as f32); }
 #[no_mangle]
 pub extern "C" fn bloom_set_master_volume(volume: f64) { engine().audio.master_volume = volume as f32; }
+
+#[no_mangle]
+pub extern "C" fn bloom_play_sound_3d(handle: f64, x: f64, y: f64, z: f64) {
+    engine().audio.play_sound_3d(handle, x as f32, y as f32, z as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_listener_position(x: f64, y: f64, z: f64, fx: f64, fy: f64, fz: f64) {
+    engine().audio.set_listener_position(x as f32, y as f32, z as f32, fx as f32, fy as f32, fz as f32);
+}
 
 // --- Texture FFI ---
 
@@ -452,6 +597,11 @@ pub extern "C" fn bloom_get_texture_width(handle: f64) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_get_texture_height(handle: f64) -> f64 {
     engine().textures.get(handle).map(|t| t.height as f64).unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_gen_texture_mipmaps(_handle: f64) {
+    // No-op: wgpu handles mipmaps internally
 }
 
 #[no_mangle]
@@ -559,6 +709,22 @@ pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f
 pub extern "C" fn bloom_unload_model(handle: f64) { engine().models.unload_model(handle); }
 
 #[no_mangle]
+pub extern "C" fn bloom_get_model_mesh_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64,
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_model_material_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64,
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_gen_mesh_cube(w: f64, h: f64, d: f64) -> f64 {
     engine().models.gen_mesh_cube(w as f32, h as f32, d as f32)
 }
@@ -574,6 +740,36 @@ pub extern "C" fn bloom_gen_mesh_heightmap(image_handle: f64, size_x: f64, size_
     } else {
         0.0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_shader(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    engine().renderer.load_custom_shader(source) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f32, vertex_count: f64, index_ptr: *const u32, index_count: f64) -> f64 {
+    if vertex_ptr.is_null() || index_ptr.is_null() { return 0.0; }
+    let vcount = vertex_count as usize;
+    let icount = index_count as usize;
+    let vertex_data = unsafe { std::slice::from_raw_parts(vertex_ptr, vcount * 12) }; // 12 floats per vertex
+    let index_data = unsafe { std::slice::from_raw_parts(index_ptr, icount) };
+    engine().models.create_mesh(vertex_data, index_data)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read(path) {
+        Ok(data) => engine().models.load_model_animation(&data),
+        Err(_) => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64) {
+    engine().models.update_model_animation(handle, anim_index as usize, time as f32);
 }
 
 // --- Music FFI ---
@@ -660,6 +856,18 @@ pub extern "C" fn bloom_write_file(path_ptr: *const u8, data_ptr: *const u8) -> 
 pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
     if std::path::Path::new(path).exists() { 1.0 } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let c_str = std::ffi::CString::new(contents).unwrap_or_default();
+            c_str.into_raw() as *const u8
+        }
+        Err(_) => std::ptr::null(),
+    }
 }
 
 #[no_mangle]
