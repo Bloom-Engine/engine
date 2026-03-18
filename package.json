@@ -1,0 +1,159 @@
+{
+  "name": "bloom",
+  "version": "0.2.0",
+  "description": "Bloom Engine: native TypeScript game engine compiled by Perry",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./core": "./src/core/index.ts",
+    "./shapes": "./src/shapes/index.ts",
+    "./text": "./src/text/index.ts",
+    "./audio": "./src/audio/index.ts",
+    "./math": "./src/math/index.ts",
+    "./textures": "./src/textures/index.ts",
+    "./models": "./src/models/index.ts"
+  },
+  "license": "MIT",
+  "perry": {
+    "nativeLibrary": {
+      "module": "bloom",
+      "functions": [
+        { "name": "bloom_init_window",              "params": ["f64", "f64", "i64"],                                     "returns": "void" },
+        { "name": "bloom_close_window",             "params": [],                                                        "returns": "void" },
+        { "name": "bloom_window_should_close",      "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_begin_drawing",            "params": [],                                                        "returns": "void" },
+        { "name": "bloom_end_drawing",              "params": [],                                                        "returns": "void" },
+        { "name": "bloom_clear_background",         "params": ["f64", "f64", "f64", "f64"],                              "returns": "void" },
+        { "name": "bloom_set_target_fps",           "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_get_delta_time",           "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_get_fps",                  "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_get_screen_width",         "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_get_screen_height",        "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_is_key_pressed",           "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_is_key_down",              "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_is_key_released",          "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_get_mouse_x",              "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_get_mouse_y",              "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_is_mouse_button_pressed",  "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_is_mouse_button_down",     "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_is_mouse_button_released", "params": ["f64"],                                                   "returns": "f64"  },
+
+        { "name": "bloom_draw_line",                "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],  "returns": "void" },
+        { "name": "bloom_draw_rect",                "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],         "returns": "void" },
+        { "name": "bloom_draw_rect_lines",          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_draw_circle",              "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],                "returns": "void" },
+        { "name": "bloom_draw_circle_lines",        "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],                "returns": "void" },
+        { "name": "bloom_draw_triangle",            "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],  "returns": "void" },
+        { "name": "bloom_draw_poly",                "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],  "returns": "void" },
+
+        { "name": "bloom_draw_text",                "params": ["i64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],  "returns": "void" },
+        { "name": "bloom_measure_text",             "params": ["i64", "f64"],                                            "returns": "f64"  },
+        { "name": "bloom_load_font",                "params": ["i64", "f64"],                                            "returns": "f64"  },
+        { "name": "bloom_unload_font",              "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_draw_text_ex",             "params": ["f64", "i64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_measure_text_ex",          "params": ["f64", "i64", "f64", "f64"],                              "returns": "f64"  },
+
+        { "name": "bloom_init_audio",               "params": [],                                                        "returns": "void" },
+        { "name": "bloom_close_audio",              "params": [],                                                        "returns": "void" },
+        { "name": "bloom_load_sound",               "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_play_sound",               "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_stop_sound",               "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_sound_volume",         "params": ["f64", "f64"],                                            "returns": "void" },
+        { "name": "bloom_set_master_volume",        "params": ["f64"],                                                   "returns": "void" },
+
+        { "name": "bloom_load_texture",             "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_unload_texture",           "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_draw_texture",             "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],         "returns": "void" },
+        { "name": "bloom_draw_texture_rec",         "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_draw_texture_pro",         "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_get_texture_width",        "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_get_texture_height",       "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_load_image",               "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_image_resize",             "params": ["f64", "f64", "f64"],                                     "returns": "void" },
+        { "name": "bloom_image_crop",               "params": ["f64", "f64", "f64", "f64", "f64"],                       "returns": "void" },
+        { "name": "bloom_image_flip_h",             "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_image_flip_v",             "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_load_texture_from_image",  "params": ["f64"],                                                   "returns": "f64"  },
+
+        { "name": "bloom_begin_mode_2d",            "params": ["f64", "f64", "f64", "f64", "f64", "f64"],               "returns": "void" },
+        { "name": "bloom_end_mode_2d",              "params": [],                                                        "returns": "void" },
+        { "name": "bloom_begin_mode_3d",            "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_end_mode_3d",              "params": [],                                                        "returns": "void" },
+
+        { "name": "bloom_draw_cube",                "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_draw_cube_wires",          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_draw_sphere",              "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_draw_sphere_wires",        "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_draw_cylinder",            "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_draw_plane",               "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_draw_grid",                "params": ["f64", "f64"],                                            "returns": "void" },
+        { "name": "bloom_draw_ray",                 "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+
+        { "name": "bloom_load_model",               "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_draw_model",               "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+        { "name": "bloom_unload_model",             "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_gen_mesh_cube",            "params": ["f64", "f64", "f64"],                                     "returns": "f64"  },
+        { "name": "bloom_gen_mesh_heightmap",       "params": ["f64", "f64", "f64", "f64"],                              "returns": "f64"  },
+
+        { "name": "bloom_load_music",               "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_play_music",               "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_stop_music",               "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_update_music_stream",      "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_music_volume",         "params": ["f64", "f64"],                                            "returns": "void" },
+        { "name": "bloom_is_music_playing",         "params": ["f64"],                                                   "returns": "f64"  },
+
+        { "name": "bloom_is_gamepad_available",     "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_get_gamepad_axis",         "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_is_gamepad_button_pressed", "params": ["f64"],                                                  "returns": "f64"  },
+        { "name": "bloom_is_gamepad_button_down",   "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_is_gamepad_button_released","params": ["f64"],                                                  "returns": "f64"  },
+        { "name": "bloom_get_gamepad_axis_count",   "params": [],                                                        "returns": "f64"  },
+
+        { "name": "bloom_toggle_fullscreen",        "params": [],                                                        "returns": "void" },
+        { "name": "bloom_set_window_title",         "params": ["i64"],                                                   "returns": "void" },
+        { "name": "bloom_set_window_icon",          "params": ["i64"],                                                   "returns": "void" },
+        { "name": "bloom_disable_cursor",           "params": [],                                                        "returns": "void" },
+        { "name": "bloom_enable_cursor",            "params": [],                                                        "returns": "void" },
+        { "name": "bloom_get_mouse_delta_x",        "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_get_mouse_delta_y",        "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_write_file",               "params": ["i64", "i64"],                                            "returns": "f64"  },
+        { "name": "bloom_file_exists",              "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_get_touch_x",              "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_get_touch_y",              "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_get_touch_count",          "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_get_time",                 "params": [],                                                        "returns": "f64"  }
+      ],
+      "targets": {
+        "macos": {
+          "crate": "native/macos/",
+          "lib": "libbloom_macos.a",
+          "frameworks": ["Metal", "QuartzCore", "AppKit", "CoreGraphics", "CoreText",
+                          "CoreFoundation", "CoreAudio", "AudioToolbox", "AVFoundation",
+                          "GameController"]
+        },
+        "ios": {
+          "crate": "native/ios/",
+          "lib": "libbloom_ios.a",
+          "frameworks": ["Metal", "QuartzCore", "UIKit", "CoreGraphics", "CoreText",
+                          "CoreFoundation", "CoreAudio", "AudioToolbox", "AVFoundation",
+                          "GameController"]
+        },
+        "windows": {
+          "crate": "native/windows/",
+          "lib": "bloom_windows.lib",
+          "libs": ["user32", "gdi32", "ole32", "shell32", "d3d12", "dxgi", "dxguid"]
+        },
+        "linux": {
+          "crate": "native/linux/",
+          "lib": "libbloom_linux.a",
+          "pkgConfig": ["x11", "xi"]
+        },
+        "android": {
+          "crate": "native/android/",
+          "lib": "libbloom_android.so"
+        }
+      }
+    }
+  }
+}

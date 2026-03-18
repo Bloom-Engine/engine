@@ -1,0 +1,16 @@
+[package]
+name = "bloom-linux"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bloom_linux"
+crate-type = ["staticlib"]
+
+[dependencies]
+bloom-shared = { path = "../shared" }
+raw-window-handle = "0.6"
+wgpu = "24"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11 = "2"

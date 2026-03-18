@@ -1,0 +1,15 @@
+[package]
+name = "bloom-ios"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bloom_ios"
+crate-type = ["staticlib"]
+
+[dependencies]
+bloom-shared = { path = "../shared" }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread", "NSObject"] }
+raw-window-handle = "0.6"
+wgpu = "24"

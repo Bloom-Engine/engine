@@ -1,0 +1,17 @@
+[package]
+name = "bloom-macos"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bloom_macos"
+crate-type = ["staticlib"]
+
+[dependencies]
+bloom-shared = { path = "../shared" }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread"] }
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSEvent", "NSApplication", "NSScreen", "NSGraphicsContext", "NSRunningApplication", "NSResponder"] }
+objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
+raw-window-handle = "0.6"
+wgpu = "24"

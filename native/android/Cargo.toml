@@ -1,0 +1,15 @@
+[package]
+name = "bloom-android"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bloom_android"
+crate-type = ["cdylib"]
+
+[dependencies]
+bloom-shared = { path = "../shared" }
+raw-window-handle = "0.6"
+wgpu = "24"
+libc = "0.2"
+ndk = "0.9"
