@@ -105,6 +105,11 @@ struct DrawCall2D {
     index_start: u32,
 }
 
+struct DrawCall3D {
+    texture_idx: u32,
+    index_start: u32,
+}
+
 #[derive(PartialEq, Clone, Copy)]
 pub enum RenderMode {
     ScreenSpace,
@@ -185,6 +190,8 @@ struct VertexOutput3D {
 
 @group(0) @binding(0) var<uniform> u: Uniforms3D;
 @group(1) @binding(0) var<uniform> lighting: Lighting;
+@group(2) @binding(0) var tex3d: texture_2d<f32>;
+@group(2) @binding(1) var tex3d_sampler: sampler;
 
 @vertex
 fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
@@ -204,7 +211,8 @@ fn fs_main_3d(in: VertexOutput3D) -> @location(0) vec4<f32> {
     let ambient = lighting.ambient.rgb * lighting.ambient.a;
     let direct = lighting.light_color.rgb * lighting.light_dir.w * diffuse;
     let lit = ambient + direct;
-    return vec4<f32>(in.color.rgb * lit, in.color.a);
+    let tex_color = textureSample(tex3d, tex3d_sampler, in.uv);
+    return vec4<f32>(tex_color.rgb * in.color.rgb * lit, tex_color.a * in.color.a);
 }
 ";
 
@@ -278,6 +286,8 @@ pub struct Renderer {
     // Per-frame 3D batch
     pub vertices_3d: Vec<Vertex3D>,
     pub indices_3d: Vec<u32>,
+    draw_calls_3d: Vec<DrawCall3D>,
+    current_texture_3d: u32,
 
     // State
     pub render_mode: RenderMode,
@@ -518,7 +528,7 @@ impl Renderer {
         // --- 3D Pipeline ---
         let pipeline_layout_3d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline_layout_3d"),
-            bind_group_layouts: &[&uniform_3d_layout, &lighting_layout],
+            bind_group_layouts: &[&uniform_3d_layout, &lighting_layout, &texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -590,6 +600,8 @@ impl Renderer {
             draw_calls_2d: Vec::new(),
             vertices_3d: Vec::with_capacity(4096),
             indices_3d: Vec::with_capacity(8192),
+            draw_calls_3d: Vec::new(),
+            current_texture_3d: 0,
             render_mode: RenderMode::ScreenSpace,
             clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
@@ -622,6 +634,8 @@ impl Renderer {
         self.draw_calls_2d.clear();
         self.vertices_3d.clear();
         self.indices_3d.clear();
+        self.draw_calls_3d.clear();
+        self.current_texture_3d = 0;
         self.current_uniform_idx = 0;
         self.uniform_slot_count = 0;
         self.render_mode = RenderMode::ScreenSpace;
@@ -644,7 +658,8 @@ impl Renderer {
     pub fn end_frame(&mut self) {
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(_) => {
+            Err(e) => {
+                eprintln!("[bloom] get_current_texture failed: {:?}, config: {}x{}", e, self.surface_config.width, self.surface_config.height);
                 self.surface.configure(&self.device, &self.surface_config);
                 return;
             }
@@ -710,14 +725,38 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            // Draw 3D geometry first (with depth testing)
+            // Draw 3D geometry first (with depth testing), batched by texture
             if let (Some(vb), Some(ib)) = (&vb_3d, &ib_3d) {
                 pass.set_pipeline(&self.pipeline_3d);
                 pass.set_bind_group(0, &self.uniform_bind_group_3d, &[]);
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.indices_3d.len() as u32, 0, 0..1);
+
+                if self.draw_calls_3d.is_empty() {
+                    // No draw calls tracked — draw all with white texture (backward compat)
+                    pass.set_bind_group(2, &self.texture_bind_groups[0], &[]);
+                    pass.draw_indexed(0..self.indices_3d.len() as u32, 0, 0..1);
+                } else {
+                    let num_calls = self.draw_calls_3d.len();
+                    for i in 0..num_calls {
+                        let call = &self.draw_calls_3d[i];
+                        let next_start = if i + 1 < num_calls {
+                            self.draw_calls_3d[i + 1].index_start
+                        } else {
+                            self.indices_3d.len() as u32
+                        };
+                        let count = next_start - call.index_start;
+                        if count == 0 { continue; }
+                        let tex_idx = call.texture_idx as usize;
+                        if tex_idx < self.texture_bind_groups.len() {
+                            pass.set_bind_group(2, &self.texture_bind_groups[tex_idx], &[]);
+                        } else {
+                            pass.set_bind_group(2, &self.texture_bind_groups[0], &[]);
+                        }
+                        pass.draw_indexed(call.index_start..next_start, 0, 0..1);
+                    }
+                }
             }
 
             // Draw 2D geometry (no depth testing, always passes)
@@ -1122,6 +1161,25 @@ impl Renderer {
     }
 
     // ============================================================
+    // 3D texture tracking
+    // ============================================================
+
+    fn ensure_draw_state_3d(&mut self, texture_idx: u32) {
+        let needs_new = self.draw_calls_3d.is_empty()
+            || self.draw_calls_3d.last().unwrap().texture_idx != texture_idx;
+        if needs_new {
+            self.draw_calls_3d.push(DrawCall3D {
+                texture_idx,
+                index_start: self.indices_3d.len() as u32,
+            });
+        }
+    }
+
+    pub fn set_texture_3d(&mut self, texture_idx: u32) {
+        self.current_texture_3d = texture_idx;
+    }
+
+    // ============================================================
     // Lighting
     // ============================================================
 
@@ -1170,6 +1228,7 @@ impl Renderer {
     }
 
     pub fn draw_cube(&mut self, x: f64, y: f64, z: f64, w: f64, h: f64, d: f64, r: f64, g: f64, b: f64, a: f64) {
+        self.ensure_draw_state_3d(self.current_texture_3d);
         let color = Self::color_to_f32(r, g, b, a);
         let (x, y, z) = (x as f32, y as f32, z as f32);
         let (hw, hh, hd) = (w as f32 * 0.5, h as f32 * 0.5, d as f32 * 0.5);
@@ -1213,6 +1272,7 @@ impl Renderer {
     }
 
     pub fn draw_sphere(&mut self, cx: f64, cy: f64, cz: f64, radius: f64, r: f64, g: f64, b: f64, a: f64) {
+        self.ensure_draw_state_3d(self.current_texture_3d);
         let color = Self::color_to_f32(r, g, b, a);
         let (cx, cy, cz, radius) = (cx as f32, cy as f32, cz as f32, radius as f32);
         let rings = 16u32;
@@ -1277,6 +1337,7 @@ impl Renderer {
     }
 
     pub fn draw_cylinder(&mut self, x: f64, y: f64, z: f64, radius_top: f64, radius_bottom: f64, height: f64, r: f64, g: f64, b: f64, a: f64) {
+        self.ensure_draw_state_3d(self.current_texture_3d);
         let color = Self::color_to_f32(r, g, b, a);
         let (x, y, z) = (x as f32, y as f32, z as f32);
         let (rt, rb, h) = (radius_top as f32, radius_bottom as f32, height as f32);
@@ -1313,6 +1374,7 @@ impl Renderer {
     }
 
     pub fn draw_plane(&mut self, cx: f64, cy: f64, cz: f64, w: f64, d: f64, r: f64, g: f64, b: f64, a: f64) {
+        self.ensure_draw_state_3d(self.current_texture_3d);
         let color = Self::color_to_f32(r, g, b, a);
         let (cx, cy, cz) = (cx as f32, cy as f32, cz as f32);
         let (hw, hd) = (w as f32 * 0.5, d as f32 * 0.5);
@@ -1346,10 +1408,11 @@ impl Renderer {
     }
 
     pub fn draw_model_mesh(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32) {
-        self.draw_model_mesh_tinted(vertices, indices, position, scale, [1.0, 1.0, 1.0, 1.0]);
+        self.draw_model_mesh_tinted(vertices, indices, position, scale, [1.0, 1.0, 1.0, 1.0], 0);
     }
 
-    pub fn draw_model_mesh_tinted(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4]) {
+    pub fn draw_model_mesh_tinted(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32) {
+        self.ensure_draw_state_3d(texture_idx);
         let base = self.vertices_3d.len() as u32;
         for v in vertices {
             self.vertices_3d.push(Vertex3D {

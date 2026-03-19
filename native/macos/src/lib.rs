@@ -894,7 +894,11 @@ pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64,
 pub extern "C" fn bloom_load_model(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
     match std::fs::read(path) {
-        Ok(data) => engine().models.load_model(&data),
+        Ok(data) => {
+            let eng = engine();
+            let renderer_ptr = &mut eng.renderer as *mut Renderer;
+            eng.models.load_model_with_textures(&data, unsafe { &mut *renderer_ptr })
+        }
         Err(_) => 0.0,
     }
 }
@@ -907,7 +911,8 @@ pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f
         let scale = scale as f32;
         let tint = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32];
         for mesh in &model.meshes {
-            eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, position, scale, tint);
+            let tex_idx = mesh.texture_idx.unwrap_or(0);
+            eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, position, scale, tint, tex_idx);
         }
     }
 }
@@ -1212,7 +1217,9 @@ extern "C" {
 
 #[no_mangle]
 pub extern "C" fn bloom_disable_cursor() {
-    engine().input.cursor_disabled = true;
+    let input = &mut engine().input;
+    input.cursor_disabled = true;
+    input.clear_mouse_delta();
     unsafe {
         CGDisplayHideCursor(0);
         CGAssociateMouseAndMouseCursorPosition(0); // dissociate = relative mode
