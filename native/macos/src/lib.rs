@@ -978,7 +978,7 @@ pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
 pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64) {
     // Scale parameter: if model is rendered at 0.01 scale, pass 0.01
     // to scale joint matrix translations to match vertex positions
-    let scale = 0.001f32; // TODO: make configurable
+    let scale = 0.0002f32; // TODO: make configurable
     let eng = engine();
     eng.models.update_model_animation(handle, anim_index as usize, time as f32);
     if let Some(anim) = eng.models.get_animation(handle) {
