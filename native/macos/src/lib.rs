@@ -967,7 +967,14 @@ pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
 
 #[no_mangle]
 pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64) {
-    engine().models.update_model_animation(handle, anim_index as usize, time as f32);
+    let eng = engine();
+    eng.models.update_model_animation(handle, anim_index as usize, time as f32);
+    // Write computed joint matrices to renderer for GPU skinning
+    if let Some(anim) = eng.models.get_animation(handle) {
+        if !anim.joint_matrices.is_empty() {
+            eng.renderer.set_joint_matrices(&anim.joint_matrices);
+        }
+    }
 }
 
 #[no_mangle]

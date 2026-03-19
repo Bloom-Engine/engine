@@ -75,6 +75,10 @@ impl ModelManager {
         self.models.get(handle)
     }
 
+    pub fn get_animation(&self, handle: f64) -> Option<&ModelAnimation> {
+        self.animations.get(handle)
+    }
+
     pub fn unload_model(&mut self, handle: f64) {
         self.models.free(handle);
     }
@@ -124,6 +128,8 @@ impl ModelManager {
             normal: *norm,
             color: white,
             uv: *uv,
+            joints: [0.0; 4],
+            weights: [0.0; 4],
         }).collect();
 
         let mut indices = Vec::with_capacity(36);
@@ -170,6 +176,8 @@ impl ModelManager {
                     normal: [0.0, 1.0, 0.0],
                     color: white,
                     uv: [u, v],
+                    joints: [0.0; 4],
+                    weights: [0.0; 4],
                 });
             }
         }
@@ -233,6 +241,8 @@ impl ModelManager {
                 normal: [vertex_data[o+3], vertex_data[o+4], vertex_data[o+5]],
                 color: [vertex_data[o+6], vertex_data[o+7], vertex_data[o+8], vertex_data[o+9]],
                 uv: [vertex_data[o+10], vertex_data[o+11]],
+                joints: [0.0; 4],
+                weights: [0.0; 4],
             });
         }
 
@@ -747,11 +757,29 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
                 } else {
                     [base_color[0], base_color[1], base_color[2], base_color[3]]
                 };
+                // Skin data (joints + weights)
+                let joint_vals: Option<Vec<[u16; 4]>> = reader.read_joints(0)
+                    .map(|iter| iter.into_u16().collect());
+                let weight_vals: Option<Vec<[f32; 4]>> = reader.read_weights(0)
+                    .map(|iter| iter.into_f32().collect());
+
+                let jv = if let Some(ref j) = joint_vals {
+                    [j[i][0] as f32, j[i][1] as f32, j[i][2] as f32, j[i][3] as f32]
+                } else {
+                    [0.0; 4]
+                };
+                let wv = if let Some(ref w) = weight_vals {
+                    w[i]
+                } else {
+                    [0.0; 4]
+                };
                 vertices.push(Vertex3D {
                     position: p,
                     normal: normals[i],
                     color,
                     uv: tex_coords[i],
+                    joints: jv,
+                    weights: wv,
                 });
             }
             let indices: Vec<u32> = match reader.read_indices() {
@@ -824,11 +852,23 @@ fn load_gltf(data: &[u8]) -> Option<ModelData> {
                     if p[k] < bbox_min[k] { bbox_min[k] = p[k]; }
                     if p[k] > bbox_max[k] { bbox_max[k] = p[k]; }
                 }
+                // Read skin data if available
+                let joint_vals: Option<Vec<[u16; 4]>> = reader.read_joints(0)
+                    .map(|iter| iter.into_u16().collect());
+                let weight_vals: Option<Vec<[f32; 4]>> = reader.read_weights(0)
+                    .map(|iter| iter.into_f32().collect());
+                let jv = if let Some(ref j) = joint_vals {
+                    [j[i][0] as f32, j[i][1] as f32, j[i][2] as f32, j[i][3] as f32]
+                } else { [0.0; 4] };
+                let wv = if let Some(ref w) = weight_vals { w[i] } else { [0.0; 4] };
+
                 vertices.push(Vertex3D {
                     position: p,
                     normal: normals[i],
                     color,
                     uv: tex_coords[i],
+                    joints: jv,
+                    weights: wv,
                 });
             }
 

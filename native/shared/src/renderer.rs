@@ -78,6 +78,8 @@ pub struct Vertex3D {
     pub normal: [f32; 3],
     pub color: [f32; 4],
     pub uv: [f32; 2],
+    pub joints: [f32; 4],   // bone indices (as floats for simplicity)
+    pub weights: [f32; 4],  // bone weights (sum to 1.0, or all 0.0 for unskinned)
 }
 
 impl Vertex3D {
@@ -86,10 +88,12 @@ impl Vertex3D {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
-                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
-                wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x4 },
-                wgpu::VertexAttribute { offset: 40, shader_location: 3, format: wgpu::VertexFormat::Float32x2 },
+                wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },   // position
+                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },  // normal
+                wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x4 },  // color
+                wgpu::VertexAttribute { offset: 40, shader_location: 3, format: wgpu::VertexFormat::Float32x2 },  // uv
+                wgpu::VertexAttribute { offset: 48, shader_location: 4, format: wgpu::VertexFormat::Float32x4 },  // joints
+                wgpu::VertexAttribute { offset: 64, shader_location: 5, format: wgpu::VertexFormat::Float32x4 },  // weights
             ],
         }
     }
@@ -174,11 +178,17 @@ struct Lighting {
     light_color: vec4<f32>,
 };
 
+struct JointMatrices {
+    matrices: array<mat4x4<f32>, 64>,
+};
+
 struct VertexInput3D {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) uv: vec2<f32>,
+    @location(4) joints: vec4<f32>,
+    @location(5) weights: vec4<f32>,
 };
 
 struct VertexOutput3D {
@@ -192,12 +202,31 @@ struct VertexOutput3D {
 @group(1) @binding(0) var<uniform> lighting: Lighting;
 @group(2) @binding(0) var tex3d: texture_2d<f32>;
 @group(2) @binding(1) var tex3d_sampler: sampler;
+@group(3) @binding(0) var<uniform> joints: JointMatrices;
 
 @vertex
 fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
     var out: VertexOutput3D;
-    out.clip_position = u.mvp * vec4<f32>(in.position, 1.0);
-    out.normal = in.normal;
+    let total_weight = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
+    var pos = vec4<f32>(in.position, 1.0);
+    var norm = vec4<f32>(in.normal, 0.0);
+    if (total_weight > 0.01) {
+        // GPU skinning: blend position/normal by bone matrices
+        let j0 = u32(in.joints.x); let j1 = u32(in.joints.y);
+        let j2 = u32(in.joints.z); let j3 = u32(in.joints.w);
+        let skinned_pos = joints.matrices[j0] * pos * in.weights.x
+                        + joints.matrices[j1] * pos * in.weights.y
+                        + joints.matrices[j2] * pos * in.weights.z
+                        + joints.matrices[j3] * pos * in.weights.w;
+        let skinned_norm = joints.matrices[j0] * norm * in.weights.x
+                         + joints.matrices[j1] * norm * in.weights.y
+                         + joints.matrices[j2] * norm * in.weights.z
+                         + joints.matrices[j3] * norm * in.weights.w;
+        pos = skinned_pos;
+        norm = skinned_norm;
+    }
+    out.clip_position = u.mvp * pos;
+    out.normal = norm.xyz;
     out.color = in.color;
     out.uv = in.uv;
     return out;
@@ -266,6 +295,10 @@ pub struct Renderer {
     lighting_uniforms: LightingUniforms,
     lighting_buffer: wgpu::Buffer,
     lighting_bind_group: wgpu::BindGroup,
+
+    // Joint matrices for GPU skinning (64 joints × 4x4 matrix)
+    joint_buffer: wgpu::Buffer,
+    joint_bind_group: wgpu::BindGroup,
 
     // Texture management
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -525,10 +558,54 @@ impl Renderer {
             cache: None,
         });
 
+        // --- Joint matrix buffer for GPU skinning ---
+        let joint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("joint_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        // 64 joints × 64 bytes per mat4 = 4096 bytes
+        let joint_data = vec![0u8; 4096];
+        let joint_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("joint_buffer"),
+            contents: &joint_data,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let joint_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("joint_bg"),
+            layout: &joint_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: joint_buffer.as_entire_binding(),
+            }],
+        });
+        // Initialize with identity matrices
+        {
+            let mut identity_data = vec![0u8; 4096];
+            for i in 0..64 {
+                let offset = i * 64;
+                // Identity matrix in column-major: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
+                let one = 1.0f32.to_le_bytes();
+                identity_data[offset..offset+4].copy_from_slice(&one);       // [0][0]
+                identity_data[offset+20..offset+24].copy_from_slice(&one);   // [1][1]
+                identity_data[offset+40..offset+44].copy_from_slice(&one);   // [2][2]
+                identity_data[offset+60..offset+64].copy_from_slice(&one);   // [3][3]
+            }
+            queue.write_buffer(&joint_buffer, 0, &identity_data);
+        }
+
         // --- 3D Pipeline ---
         let pipeline_layout_3d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline_layout_3d"),
-            bind_group_layouts: &[&uniform_3d_layout, &lighting_layout, &texture_bind_group_layout],
+            bind_group_layouts: &[&uniform_3d_layout, &lighting_layout, &texture_bind_group_layout, &joint_layout],
             push_constant_ranges: &[],
         });
 
@@ -588,6 +665,8 @@ impl Renderer {
             lighting_uniforms,
             lighting_buffer,
             lighting_bind_group,
+            joint_buffer,
+            joint_bind_group,
             texture_bind_group_layout,
             texture_bind_groups,
             textures,
@@ -658,8 +737,7 @@ impl Renderer {
     pub fn end_frame(&mut self) {
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(e) => {
-                eprintln!("[bloom] get_current_texture failed: {:?}, config: {}x{}", e, self.surface_config.width, self.surface_config.height);
+            Err(_) => {
                 self.surface.configure(&self.device, &self.surface_config);
                 return;
             }
@@ -730,6 +808,7 @@ impl Renderer {
                 pass.set_pipeline(&self.pipeline_3d);
                 pass.set_bind_group(0, &self.uniform_bind_group_3d, &[]);
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);
+                pass.set_bind_group(3, &self.joint_bind_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 
@@ -1161,6 +1240,26 @@ impl Renderer {
     }
 
     // ============================================================
+    // Joint matrices (GPU skinning)
+    // ============================================================
+
+    pub fn set_joint_matrices(&mut self, matrices: &[[[f32; 4]; 4]]) {
+        let count = matrices.len().min(64);
+        let mut data = vec![0u8; 4096];
+        for i in 0..count {
+            let offset = i * 64;
+            for col in 0..4 {
+                for row in 0..4 {
+                    let bytes = matrices[i][col][row].to_le_bytes();
+                    let idx = offset + col * 16 + row * 4;
+                    data[idx..idx+4].copy_from_slice(&bytes);
+                }
+            }
+        }
+        self.queue.write_buffer(&self.joint_buffer, 0, &data);
+    }
+
+    // ============================================================
     // 3D texture tracking
     // ============================================================
 
@@ -1220,10 +1319,10 @@ impl Renderer {
         let normal = [px/ht, py/ht, pz/ht];
 
         let base = self.vertices_3d.len() as u32;
-        self.vertices_3d.push(Vertex3D { position: [start[0]+px, start[1]+py, start[2]+pz], normal, color, uv: [0.0, 0.0] });
-        self.vertices_3d.push(Vertex3D { position: [start[0]-px, start[1]-py, start[2]-pz], normal, color, uv: [0.0, 0.0] });
-        self.vertices_3d.push(Vertex3D { position: [end[0]-px, end[1]-py, end[2]-pz], normal, color, uv: [0.0, 0.0] });
-        self.vertices_3d.push(Vertex3D { position: [end[0]+px, end[1]+py, end[2]+pz], normal, color, uv: [0.0, 0.0] });
+        self.vertices_3d.push(Vertex3D { position: [start[0]+px, start[1]+py, start[2]+pz], normal, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+        self.vertices_3d.push(Vertex3D { position: [start[0]-px, start[1]-py, start[2]-pz], normal, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+        self.vertices_3d.push(Vertex3D { position: [end[0]-px, end[1]-py, end[2]-pz], normal, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+        self.vertices_3d.push(Vertex3D { position: [end[0]+px, end[1]+py, end[2]+pz], normal, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
         self.indices_3d.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
     }
 
@@ -1245,7 +1344,7 @@ impl Renderer {
         for (normal, verts) in &faces {
             let base = self.vertices_3d.len() as u32;
             for v in verts {
-                self.vertices_3d.push(Vertex3D { position: *v, normal: *normal, color, uv: [0.0, 0.0] });
+                self.vertices_3d.push(Vertex3D { position: *v, normal: *normal, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
             }
             self.indices_3d.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
         }
@@ -1298,10 +1397,10 @@ impl Renderer {
                 let (p01, n01) = p(theta1, phi2);
 
                 let base = self.vertices_3d.len() as u32;
-                self.vertices_3d.push(Vertex3D { position: p00, normal: n00, color, uv: [0.0, 0.0] });
-                self.vertices_3d.push(Vertex3D { position: p10, normal: n10, color, uv: [0.0, 0.0] });
-                self.vertices_3d.push(Vertex3D { position: p11, normal: n11, color, uv: [0.0, 0.0] });
-                self.vertices_3d.push(Vertex3D { position: p01, normal: n01, color, uv: [0.0, 0.0] });
+                self.vertices_3d.push(Vertex3D { position: p00, normal: n00, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+                self.vertices_3d.push(Vertex3D { position: p10, normal: n10, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+                self.vertices_3d.push(Vertex3D { position: p11, normal: n11, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+                self.vertices_3d.push(Vertex3D { position: p01, normal: n01, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
                 self.indices_3d.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
             }
         }
@@ -1351,24 +1450,24 @@ impl Renderer {
 
             // Side face
             let base = self.vertices_3d.len() as u32;
-            self.vertices_3d.push(Vertex3D { position: [x + rb*c1, y, z + rb*s1], normal: [c1, 0.0, s1], color, uv: [0.0, 0.0] });
-            self.vertices_3d.push(Vertex3D { position: [x + rb*c2, y, z + rb*s2], normal: [c2, 0.0, s2], color, uv: [0.0, 0.0] });
-            self.vertices_3d.push(Vertex3D { position: [x + rt*c2, y+h, z + rt*s2], normal: [c2, 0.0, s2], color, uv: [0.0, 0.0] });
-            self.vertices_3d.push(Vertex3D { position: [x + rt*c1, y+h, z + rt*s1], normal: [c1, 0.0, s1], color, uv: [0.0, 0.0] });
+            self.vertices_3d.push(Vertex3D { position: [x + rb*c1, y, z + rb*s1], normal: [c1, 0.0, s1], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+            self.vertices_3d.push(Vertex3D { position: [x + rb*c2, y, z + rb*s2], normal: [c2, 0.0, s2], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+            self.vertices_3d.push(Vertex3D { position: [x + rt*c2, y+h, z + rt*s2], normal: [c2, 0.0, s2], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+            self.vertices_3d.push(Vertex3D { position: [x + rt*c1, y+h, z + rt*s1], normal: [c1, 0.0, s1], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
             self.indices_3d.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
 
             // Top cap
             let base = self.vertices_3d.len() as u32;
-            self.vertices_3d.push(Vertex3D { position: [x, y+h, z], normal: [0.0, 1.0, 0.0], color, uv: [0.0, 0.0] });
-            self.vertices_3d.push(Vertex3D { position: [x+rt*c1, y+h, z+rt*s1], normal: [0.0, 1.0, 0.0], color, uv: [0.0, 0.0] });
-            self.vertices_3d.push(Vertex3D { position: [x+rt*c2, y+h, z+rt*s2], normal: [0.0, 1.0, 0.0], color, uv: [0.0, 0.0] });
+            self.vertices_3d.push(Vertex3D { position: [x, y+h, z], normal: [0.0, 1.0, 0.0], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+            self.vertices_3d.push(Vertex3D { position: [x+rt*c1, y+h, z+rt*s1], normal: [0.0, 1.0, 0.0], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+            self.vertices_3d.push(Vertex3D { position: [x+rt*c2, y+h, z+rt*s2], normal: [0.0, 1.0, 0.0], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
             self.indices_3d.extend_from_slice(&[base, base+1, base+2]);
 
             // Bottom cap
             let base = self.vertices_3d.len() as u32;
-            self.vertices_3d.push(Vertex3D { position: [x, y, z], normal: [0.0, -1.0, 0.0], color, uv: [0.0, 0.0] });
-            self.vertices_3d.push(Vertex3D { position: [x+rb*c2, y, z+rb*s2], normal: [0.0, -1.0, 0.0], color, uv: [0.0, 0.0] });
-            self.vertices_3d.push(Vertex3D { position: [x+rb*c1, y, z+rb*s1], normal: [0.0, -1.0, 0.0], color, uv: [0.0, 0.0] });
+            self.vertices_3d.push(Vertex3D { position: [x, y, z], normal: [0.0, -1.0, 0.0], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+            self.vertices_3d.push(Vertex3D { position: [x+rb*c2, y, z+rb*s2], normal: [0.0, -1.0, 0.0], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+            self.vertices_3d.push(Vertex3D { position: [x+rb*c1, y, z+rb*s1], normal: [0.0, -1.0, 0.0], color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
             self.indices_3d.extend_from_slice(&[base, base+1, base+2]);
         }
     }
@@ -1381,10 +1480,10 @@ impl Renderer {
         let normal = [0.0f32, 1.0, 0.0];
 
         let base = self.vertices_3d.len() as u32;
-        self.vertices_3d.push(Vertex3D { position: [cx-hw, cy, cz-hd], normal, color, uv: [0.0, 0.0] });
-        self.vertices_3d.push(Vertex3D { position: [cx+hw, cy, cz-hd], normal, color, uv: [1.0, 0.0] });
-        self.vertices_3d.push(Vertex3D { position: [cx+hw, cy, cz+hd], normal, color, uv: [1.0, 1.0] });
-        self.vertices_3d.push(Vertex3D { position: [cx-hw, cy, cz+hd], normal, color, uv: [0.0, 1.0] });
+        self.vertices_3d.push(Vertex3D { position: [cx-hw, cy, cz-hd], normal, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+        self.vertices_3d.push(Vertex3D { position: [cx+hw, cy, cz-hd], normal, color, uv: [1.0, 0.0], joints: [0.0; 4], weights: [0.0; 4] });
+        self.vertices_3d.push(Vertex3D { position: [cx+hw, cy, cz+hd], normal, color, uv: [1.0, 1.0], joints: [0.0; 4], weights: [0.0; 4] });
+        self.vertices_3d.push(Vertex3D { position: [cx-hw, cy, cz+hd], normal, color, uv: [0.0, 1.0], joints: [0.0; 4], weights: [0.0; 4] });
         self.indices_3d.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
     }
 
@@ -1429,6 +1528,8 @@ impl Renderer {
                     v.color[3] * tint[3],
                 ],
                 uv: v.uv,
+                joints: v.joints,
+                weights: v.weights,
             });
         }
         for &idx in indices {
