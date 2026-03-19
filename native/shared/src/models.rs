@@ -581,8 +581,16 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             if !is_child[i] { root_joints.push(i); }
         }
 
+        eprintln!("[anim] Skeleton: {} joints, {} roots", joints.len(), root_joints.len());
+        for (i, j) in joints.iter().enumerate() {
+            if i < 5 || i == joints.len() - 1 {
+                eprintln!("[anim]   joint {}: '{}' children={:?}", i, j.name, j.children);
+            }
+        }
+
         Some(SkeletonData { joints, root_joints })
     } else {
+        eprintln!("[anim] No skin found in glTF!");
         None
     };
 
@@ -602,11 +610,24 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
         // Group channels by target node
         let mut node_channels: std::collections::HashMap<usize, (Vec<f32>, Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<[f32; 3]>)> = std::collections::HashMap::new();
 
+        let mut skipped_channels = 0usize;
+        let mut mapped_channels = 0usize;
+        eprintln!("[anim] Animation '{}' has {} channels, node_to_joint map has {} entries",
+            anim.name().unwrap_or("?"), anim.channels().count(), node_to_joint.len());
+        // Debug: print first few channel target nodes
+        for (ci, ch) in anim.channels().enumerate() {
+            if ci < 5 {
+                let tn = ch.target().node();
+                eprintln!("[anim]   channel {} targets node {} '{}'  mapped={}",
+                    ci, tn.index(), tn.name().unwrap_or("?"),
+                    node_to_joint.contains_key(&tn.index()));
+            }
+        }
         for channel in anim.channels() {
             let target_node = channel.target().node().index();
             let joint_index = match node_to_joint.get(&target_node) {
-                Some(&ji) => ji,
-                None => continue,
+                Some(&ji) => { mapped_channels += 1; ji },
+                None => { skipped_channels += 1; continue; },
             };
 
             let sampler = channel.sampler();
@@ -650,6 +671,8 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
         }
 
         let name = anim.name().unwrap_or("").to_string();
+        eprintln!("[anim] Animation '{}': {} channels mapped, {} skipped, duration={:.2}s",
+            name, mapped_channels, skipped_channels, duration);
         animations.push(AnimationData { channels, duration, name });
     }
 

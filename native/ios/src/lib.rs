@@ -18,6 +18,7 @@ static mut UI_WINDOW: Option<Retained<AnyObject>> = None;
 static mut UI_VIEW: Option<Retained<AnyObject>> = None;
 static mut TOUCH_MAP: [*const c_void; 10] = [std::ptr::null(); 10];
 static mut BUNDLE_PATH: Option<String> = None;
+static mut SCREEN_SCALE: f64 = 1.0;
 
 
 /// Resolve a relative asset path to the app bundle path.
@@ -168,10 +169,13 @@ unsafe fn handle_touches(touches: *const AnyObject, phase: TouchPhase) {
 
         if let Some(eng) = ENGINE.get_mut() {
             let active = !matches!(phase, TouchPhase::Ended);
-            eng.input.set_touch(index, loc.x, loc.y, active);
+            // Scale touch from points to pixels to match getScreenWidth/Height
+            let sx = loc.x * SCREEN_SCALE;
+            let sy = loc.y * SCREEN_SCALE;
+            eng.input.set_touch(index, sx, sy, active);
 
             if index == 0 {
-                eng.input.set_mouse_position(loc.x, loc.y);
+                eng.input.set_mouse_position(sx, sy);
                 if active {
                     eng.input.set_mouse_button_down(0);
                 } else {
@@ -355,6 +359,9 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
 
     let pixel_width = (bounds.size.width * scale) as u32;
     let pixel_height = (bounds.size.height * scale) as u32;
+
+    // Store scale for touch coordinate conversion (points → pixels)
+    SCREEN_SCALE = scale;
 
     // Create UIWindow — attached to scene if available, otherwise plain
     let window_cls = AnyClass::get(c"UIWindow").unwrap();
