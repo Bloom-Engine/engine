@@ -179,7 +179,7 @@ struct Lighting {
 };
 
 struct JointMatrices {
-    matrices: array<mat4x4<f32>, 64>,
+    matrices: array<mat4x4<f32>, 128>,
 };
 
 struct VertexInput3D {
@@ -576,7 +576,7 @@ impl Renderer {
             }],
         });
         // 64 joints × 64 bytes per mat4 = 4096 bytes
-        let joint_data = vec![0u8; 4096];
+        let joint_data = vec![0u8; 8192];
         let joint_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("joint_buffer"),
             contents: &joint_data,
@@ -592,8 +592,8 @@ impl Renderer {
         });
         // Initialize with identity matrices
         {
-            let mut identity_data = vec![0u8; 4096];
-            for i in 0..64 {
+            let mut identity_data = vec![0u8; 8192];
+            for i in 0..128 {
                 let offset = i * 64;
                 // Identity matrix in column-major: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
                 let one = 1.0f32.to_le_bytes();
@@ -1259,7 +1259,7 @@ impl Renderer {
 
     /// Set a single joint matrix for testing (joint_index 0-63, angle in radians around X axis)
     pub fn set_joint_test(&mut self, joint_index: usize, angle: f32) {
-        if joint_index >= 64 { return; }
+        if joint_index >= 128 { return; }
         let c = angle.cos();
         let s = angle.sin();
         // Rotation around X axis, column-major in the buffer
@@ -1288,8 +1288,8 @@ impl Renderer {
 
     fn flush_joint_matrices(&mut self) {
         if let Some(ref matrices) = self.pending_joint_matrices {
-            let count = matrices.len().min(64);
-            let mut data = vec![0u8; 4096];
+            let count = matrices.len().min(128);
+            let mut data = vec![0u8; 8192];
             for i in 0..count {
                 let offset = i * 64;
                 // Row-major [row][col] → column-major for WGSL
