@@ -976,12 +976,14 @@ pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
 
 #[no_mangle]
 pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64) {
+    // Scale parameter: if model is rendered at 0.01 scale, pass 0.01
+    // to scale joint matrix translations to match vertex positions
+    let scale = 0.001f32; // TODO: make configurable
     let eng = engine();
     eng.models.update_model_animation(handle, anim_index as usize, time as f32);
-    // Write computed joint matrices to renderer for GPU skinning
     if let Some(anim) = eng.models.get_animation(handle) {
         if !anim.joint_matrices.is_empty() {
-            eng.renderer.set_joint_matrices(&anim.joint_matrices);
+            eng.renderer.set_joint_matrices_scaled(&anim.joint_matrices, scale);
         }
     }
 }

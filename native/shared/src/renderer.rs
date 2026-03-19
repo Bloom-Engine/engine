@@ -211,7 +211,7 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
     var pos = vec4<f32>(in.position, 1.0);
     var norm = vec4<f32>(in.normal, 0.0);
     if (total_weight > 0.01) {
-        // GPU skinning: blend position/normal by bone matrices
+        // GPU skinning: joint matrices already include model scale
         let j0 = u32(in.joints.x); let j1 = u32(in.joints.y);
         let j2 = u32(in.joints.z); let j3 = u32(in.joints.w);
         let skinned_pos = joints.matrices[j0] * pos * in.weights.x
@@ -328,6 +328,7 @@ pub struct Renderer {
     debug_frame: u64,
     // Pending joint matrices (written to GPU in end_frame)
     pub pending_joint_matrices: Option<Vec<[[f32; 4]; 4]>>,
+    pub model_skin_scale: f32,
 }
 
 impl Renderer {
@@ -687,6 +688,7 @@ impl Renderer {
             render_mode: RenderMode::ScreenSpace,
             debug_frame: 0,
             pending_joint_matrices: None,
+            model_skin_scale: 1.0,
             clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
         }
@@ -1282,25 +1284,51 @@ impl Renderer {
     }
 
     pub fn set_joint_matrices(&mut self, matrices: &[[[f32; 4]; 4]]) {
-        // Store for writing in end_frame (GPU needs data right before render pass)
         self.pending_joint_matrices = Some(matrices.to_vec());
+    }
+
+    pub fn set_model_skin_scale(&mut self, scale: f32) {
+        self.model_skin_scale = scale;
+    }
+
+    pub fn set_joint_matrices_scaled(&mut self, matrices: &[[[f32; 4]; 4]], scale: f32) {
+        // Bake model scale into joint matrices: finalJoint = scaleMatrix * jointMatrix
+        // This transforms from bind space → world space at the correct scale
+        let mut scaled = Vec::with_capacity(matrices.len());
+        for m in matrices {
+            // Column-major [col][row]: left-multiply by uniform scale
+            // scaleMatrix * M: scales output x,y,z → scale rows 0-2 of each column
+            let mut sm = *m;
+            for col in 0..4 {
+                sm[col][0] *= scale; // x component
+                sm[col][1] *= scale; // y component
+                sm[col][2] *= scale; // z component
+                // sm[col][3] unchanged (w component)
+            }
+            scaled.push(sm);
+        }
+        self.pending_joint_matrices = Some(scaled);
     }
 
     fn flush_joint_matrices(&mut self) {
         if let Some(ref matrices) = self.pending_joint_matrices {
-            let count = matrices.len().min(128);
+            let count = matrices.len().min(127); // max 127, slot 127 = scale
             let mut data = vec![0u8; 8192];
             for i in 0..count {
                 let offset = i * 64;
-                // Row-major [row][col] → column-major for WGSL
+                // Matrices are column-major [col][row] — write directly
                 for col in 0..4 {
                     for row in 0..4 {
-                        let bytes = matrices[i][row][col].to_le_bytes();
+                        let bytes = matrices[i][col][row].to_le_bytes();
                         let idx = offset + col * 16 + row * 4;
                         data[idx..idx+4].copy_from_slice(&bytes);
                     }
                 }
             }
+            // Write model scale to slot 127 [0][0] (column-major: first 4 bytes of slot)
+            let scale_offset = 127 * 64;
+            let scale_bytes = self.model_skin_scale.to_le_bytes();
+            data[scale_offset..scale_offset+4].copy_from_slice(&scale_bytes);
             self.queue.write_buffer(&self.joint_buffer, 0, &data);
         }
         self.pending_joint_matrices = None;
@@ -1564,9 +1592,8 @@ impl Renderer {
             // Check if vertex is skinned (has non-zero weights)
             let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
             let pos = if is_skinned {
-                // Skinned: pass bind-space position (shader applies joint matrices + model transform via MVP)
-                // Scale is baked into the model, position offset is handled by adjusting joint matrices
-                [v.position[0] * scale, v.position[1] * scale, v.position[2] * scale]
+                // Skinned: pass original bind-space positions (joint matrices include scale)
+                [v.position[0], v.position[1], v.position[2]]
             } else {
                 // Unskinned: apply CPU-side position + scale
                 [v.position[0] * scale + position[0],
