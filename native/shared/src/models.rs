@@ -594,14 +594,14 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
                 ibm = mat4_identity();
             }
 
-            // Normalize Blender FBX 100x scale from IBMs
-            // Detect by checking if diagonal has scale > 10
-            let diag_scale = ibm[0][0].abs();
-            if diag_scale > 10.0 {
+            // IBM keeps original values (including Blender's 100x FBX scale)
+            // Both vertex positions and joint matrices are scaled by drawModel scale
+            if false { // REMOVED: IBM normalization
+                let diag_scale = ibm[0][0].abs();
                 let inv = 1.0 / diag_scale;
                 for a in 0..4 {
                     for b in 0..4 {
-                        if !(a == 3 && b == 3) { // don't touch homogeneous w
+                        if !(a == 3 && b == 3) {
                             ibm[a][b] *= inv;
                         }
                     }

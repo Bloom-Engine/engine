@@ -1579,8 +1579,8 @@ impl Renderer {
             // Check if vertex is skinned (has non-zero weights)
             let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
             let pos = if is_skinned {
-                // Skinned: pass original bind-space positions (joint matrices include scale)
-                [v.position[0], v.position[1], v.position[2]]
+                // Skinned: scale positions (joint matrices also scaled — double scale gives correct result)
+                [v.position[0] * scale, v.position[1] * scale, v.position[2] * scale]
             } else {
                 // Unskinned: apply CPU-side position + scale
                 [v.position[0] * scale + position[0],

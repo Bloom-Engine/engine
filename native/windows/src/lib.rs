@@ -794,8 +794,10 @@ pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f
     let eng = engine();
     if let Some(model) = eng.models.get(handle) {
         let tint = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32];
+        let position = [x as f32, y as f32, z as f32];
         for mesh in &model.meshes {
-            eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, [x as f32, y as f32, z as f32], scale as f32, tint);
+            let tex_idx = mesh.texture_idx.unwrap_or(0);
+            eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, position, scale as f32, tint, tex_idx);
         }
     }
 }
@@ -906,6 +908,25 @@ pub extern "C" fn bloom_is_gamepad_button_down(btn: f64) -> f64 { if engine().in
 pub extern "C" fn bloom_is_gamepad_button_released(btn: f64) -> f64 { if engine().input.is_gamepad_button_released(btn as usize) { 1.0 } else { 0.0 } }
 #[no_mangle]
 pub extern "C" fn bloom_get_gamepad_axis_count() -> f64 { engine().input.get_gamepad_axis_count() as f64 }
+
+// --- Skeletal Animation Debug ---
+
+#[no_mangle]
+pub extern "C" fn bloom_set_joint_test(_joint: f64, _angle: f64) {
+    // No-op for now — skeletal animation testing
+}
+
+// --- Lighting ---
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) {
+    engine().renderer.set_ambient_light(r, g, b, intensity);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
+    engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
+}
 
 // --- Utility FFI ---
 
