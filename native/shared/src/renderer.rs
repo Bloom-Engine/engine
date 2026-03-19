@@ -326,6 +326,8 @@ pub struct Renderer {
     pub render_mode: RenderMode,
     clear_color: wgpu::Color,
     debug_frame: u64,
+    // Pending joint matrices (written to GPU in end_frame)
+    pub pending_joint_matrices: Option<Vec<[[f32; 4]; 4]>>,
 }
 
 impl Renderer {
@@ -684,6 +686,7 @@ impl Renderer {
             current_texture_3d: 0,
             render_mode: RenderMode::ScreenSpace,
             debug_frame: 0,
+            pending_joint_matrices: None,
             clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
         }
@@ -743,10 +746,8 @@ impl Renderer {
     }
 
     pub fn end_frame(&mut self) {
-        // DEBUG: animate joints RIGHT BEFORE rendering
-        self.debug_frame += 1;
-        let angle = (self.debug_frame as f32) * 0.04;
-        self.set_joint_test(0, angle.sin() * 0.6);
+        // Flush pending joint matrices to GPU right before rendering
+        self.flush_joint_matrices();
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
@@ -1281,21 +1282,28 @@ impl Renderer {
     }
 
     pub fn set_joint_matrices(&mut self, matrices: &[[[f32; 4]; 4]]) {
-        let count = matrices.len().min(64);
-        let mut data = vec![0u8; 4096];
-        for i in 0..count {
-            let offset = i * 64;
-            // Our matrices are row-major [row][col], WGSL expects column-major
-            // Column-major layout: data[col*16+row*4] = matrix[row][col]
-            for col in 0..4 {
-                for row in 0..4 {
-                    let bytes = matrices[i][row][col].to_le_bytes();
-                    let idx = offset + col * 16 + row * 4;
-                    data[idx..idx+4].copy_from_slice(&bytes);
+        // Store for writing in end_frame (GPU needs data right before render pass)
+        self.pending_joint_matrices = Some(matrices.to_vec());
+    }
+
+    fn flush_joint_matrices(&mut self) {
+        if let Some(ref matrices) = self.pending_joint_matrices {
+            let count = matrices.len().min(64);
+            let mut data = vec![0u8; 4096];
+            for i in 0..count {
+                let offset = i * 64;
+                // Row-major [row][col] → column-major for WGSL
+                for col in 0..4 {
+                    for row in 0..4 {
+                        let bytes = matrices[i][row][col].to_le_bytes();
+                        let idx = offset + col * 16 + row * 4;
+                        data[idx..idx+4].copy_from_slice(&bytes);
+                    }
                 }
             }
+            self.queue.write_buffer(&self.joint_buffer, 0, &data);
         }
-        self.queue.write_buffer(&self.joint_buffer, 0, &data);
+        self.pending_joint_matrices = None;
     }
 
     // ============================================================

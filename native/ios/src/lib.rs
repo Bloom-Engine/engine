@@ -348,9 +348,6 @@ pub unsafe extern "C" fn perry_register_native_classes() {
 /// This runs on the main thread — safe for all UIKit operations.
 #[no_mangle]
 pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
-    if scene.is_null() { return; }
-    let scene = scene as *const AnyObject;
-
     let screen_cls = AnyClass::get(c"UIScreen").unwrap();
     let screen: Retained<AnyObject> = msg_send![screen_cls, mainScreen];
     let bounds: CGRect = msg_send![&*screen, bounds];
@@ -359,10 +356,15 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
     let pixel_width = (bounds.size.width * scale) as u32;
     let pixel_height = (bounds.size.height * scale) as u32;
 
-    // Create UIWindow attached to the scene
+    // Create UIWindow — attached to scene if available, otherwise plain
     let window_cls = AnyClass::get(c"UIWindow").unwrap();
-    let window: Allocated<AnyObject> = msg_send![window_cls, alloc];
-    let window: Retained<AnyObject> = msg_send![window, initWithWindowScene: scene];
+    let window: Retained<AnyObject> = if !scene.is_null() {
+        let w: Allocated<AnyObject> = msg_send![window_cls, alloc];
+        msg_send![w, initWithWindowScene: scene as *const AnyObject]
+    } else {
+        let w: Allocated<AnyObject> = msg_send![window_cls, alloc];
+        msg_send![w, initWithFrame: bounds]
+    };
 
     // Create UIViewController
     let vc_cls = AnyClass::get(c"UIViewController").unwrap();
