@@ -60,7 +60,7 @@ export {
   drawCube, drawCubeWires, drawSphere, drawSphereWires,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
   loadShader, loadModelAnimation, updateModelAnimation, createMesh,
-  setAmbientLight, setDirectionalLight,
+  setAmbientLight, setDirectionalLight, setJointTest,
 } from './models/index';
 
 export type { DrawCubeOpts } from './models/index';

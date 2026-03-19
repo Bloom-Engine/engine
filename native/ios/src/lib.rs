@@ -11,7 +11,7 @@ use objc2::{msg_send, sel};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
 
 use std::ffi::c_void;
-use std::sync::{OnceLock, Condvar, Mutex};
+use std::sync::OnceLock;
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut UI_WINDOW: Option<Retained<AnyObject>> = None;
@@ -19,11 +19,6 @@ static mut UI_VIEW: Option<Retained<AnyObject>> = None;
 static mut TOUCH_MAP: [*const c_void; 10] = [std::ptr::null(); 10];
 static mut BUNDLE_PATH: Option<String> = None;
 
-// Sync primitive for init: scene delegate signals when window is ready
-static INIT_READY: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
-
-// Jump buffer for escaping UIApplicationMain after scene delegate fires
-static mut JUMP_BUF: [u8; 256] = [0u8; 256]; // oversized for jmp_buf
 
 /// Resolve a relative asset path to the app bundle path.
 fn resolve_path(path: &str) -> String {
@@ -91,13 +86,6 @@ extern "C" {
 
     fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after: u8) -> i32;
     static kCFRunLoopDefaultMode: *const c_void;
-
-    fn UIApplicationMain(
-        argc: i32,
-        argv: *const *const u8,
-        principalClassName: *const c_void,
-        delegateClassName: *const c_void,
-    ) -> i32;
 }
 
 fn pump_run_loop(seconds: f64) {
@@ -230,8 +218,9 @@ unsafe extern "C" fn scene_will_connect(
 ) {
     if scene.is_null() { return; }
 
-    // Get screen info from the scene
-    let screen: Retained<AnyObject> = msg_send![&*scene, screen];
+    // Get screen bounds from UIScreen.mainScreen (simpler than scene.screen)
+    let screen_cls = AnyClass::get(c"UIScreen").unwrap();
+    let screen: Retained<AnyObject> = msg_send![screen_cls, mainScreen];
     let bounds: CGRect = msg_send![&*screen, bounds];
     let scale: f64 = msg_send![&*screen, scale];
 
@@ -344,9 +333,118 @@ unsafe extern "C" fn scene_will_connect(
         }
     }
 
-    // Escape UIApplicationMain by longjmp back to bloom_init_window
-    extern "C" { fn longjmp(env: *mut u8, val: i32) -> !; }
-    longjmp(JUMP_BUF.as_mut_ptr(), 1);
+    // ENGINE is now set — bloom_init_window polls for this on the game thread
+}
+
+/// Called by the perry runtime's main() before UIApplicationMain to register
+/// ObjC classes needed for the scene lifecycle.
+#[no_mangle]
+pub unsafe extern "C" fn perry_register_native_classes() {
+    register_metal_view_class();
+    register_scene_delegate();
+}
+
+/// Called by the runtime's scene delegate when the UIWindowScene connects.
+/// This runs on the main thread — safe for all UIKit operations.
+#[no_mangle]
+pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
+    if scene.is_null() { return; }
+    let scene = scene as *const AnyObject;
+
+    let screen_cls = AnyClass::get(c"UIScreen").unwrap();
+    let screen: Retained<AnyObject> = msg_send![screen_cls, mainScreen];
+    let bounds: CGRect = msg_send![&*screen, bounds];
+    let scale: f64 = msg_send![&*screen, scale];
+
+    let pixel_width = (bounds.size.width * scale) as u32;
+    let pixel_height = (bounds.size.height * scale) as u32;
+
+    // Create UIWindow attached to the scene
+    let window_cls = AnyClass::get(c"UIWindow").unwrap();
+    let window: Allocated<AnyObject> = msg_send![window_cls, alloc];
+    let window: Retained<AnyObject> = msg_send![window, initWithWindowScene: scene];
+
+    // Create UIViewController
+    let vc_cls = AnyClass::get(c"UIViewController").unwrap();
+    let vc: Allocated<AnyObject> = msg_send![vc_cls, alloc];
+    let vc: Retained<AnyObject> = msg_send![vc, init];
+
+    // Create BloomMetalView
+    let view_cls = AnyClass::get(c"BloomMetalView").unwrap();
+    let view: Allocated<AnyObject> = msg_send![view_cls, alloc];
+    let view: Retained<AnyObject> = msg_send![view, initWithFrame: bounds];
+
+    // Set background to black
+    let color_cls = AnyClass::get(c"UIColor").unwrap();
+    let black: Retained<AnyObject> = msg_send![color_cls, blackColor];
+    let _: () = msg_send![&*view, setBackgroundColor: &*black];
+
+    // Configure CAMetalLayer
+    let layer: Retained<AnyObject> = msg_send![&*view, layer];
+    let drawable_size = CGSize { width: pixel_width as f64, height: pixel_height as f64 };
+    let _: () = msg_send![&*layer, setDrawableSize: drawable_size];
+    let _: () = msg_send![&*layer, setContentsScale: scale];
+    let _: () = msg_send![&*layer, setOpaque: Bool::YES];
+
+    // Enable touches
+    let _: () = msg_send![&*view, setUserInteractionEnabled: Bool::YES];
+    let _: () = msg_send![&*view, setMultipleTouchEnabled: Bool::YES];
+
+    // Set up window hierarchy
+    let _: () = msg_send![&*vc, setView: &*view];
+    let _: () = msg_send![&*window, setRootViewController: &*vc];
+    let _: () = msg_send![&*window, makeKeyAndVisible];
+
+    // Store references
+    UI_VIEW = Some(view.clone());
+    UI_WINDOW = Some(window);
+
+    // Create wgpu surface and engine
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::METAL,
+        ..Default::default()
+    });
+
+    let view_ptr = Retained::as_ptr(&view) as *mut c_void;
+    let handle = UiKitWindowHandle::new(
+        std::ptr::NonNull::new(view_ptr).unwrap(),
+    );
+    let raw = RawWindowHandle::UiKit(handle);
+    let surface = instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+        raw_display_handle: RawDisplayHandle::UiKit(UiKitDisplayHandle::new()),
+        raw_window_handle: raw,
+    }).expect("Failed to create wgpu surface");
+
+    let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&surface),
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    })).expect("No GPU adapter found");
+
+    let (device, queue) = pollster_block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
+        None,
+    )).expect("Failed to create device");
+
+    let surface_caps = surface.get_capabilities(&adapter);
+    let format = surface_caps.formats.iter()
+        .find(|f| f.is_srgb()).copied()
+        .unwrap_or(surface_caps.formats[0]);
+
+    let surface_config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: pixel_width,
+        height: pixel_height,
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: surface_caps.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(&device, &surface_config);
+
+    let renderer = Renderer::new(device, queue, surface, surface_config);
+    let _ = ENGINE.set(EngineState::new(renderer));
 }
 
 fn register_scene_delegate() {
@@ -365,34 +463,6 @@ fn register_scene_delegate() {
         // Add UIWindowSceneDelegate protocol
         extern "C" { fn objc_getProtocol(name: *const u8) -> *const c_void; }
         let protocol = objc_getProtocol(b"UIWindowSceneDelegate\0".as_ptr());
-        if !protocol.is_null() {
-            extern "C" { fn class_addProtocol(cls: *mut AnyClass, protocol: *const c_void) -> bool; }
-            class_addProtocol(cls, protocol);
-        }
-
-        objc_registerClassPair(cls);
-    }
-}
-
-fn register_app_delegate() {
-    if AnyClass::get(c"BloomAppDelegate").is_some() { return; }
-
-    unsafe {
-        let superclass = AnyClass::get(c"UIResponder").unwrap();
-        let cls = objc_allocateClassPair(superclass as *const AnyClass, b"BloomAppDelegate\0".as_ptr(), 0);
-        if cls.is_null() { return; }
-
-        // application:didFinishLaunchingWithOptions:
-        unsafe extern "C" fn did_finish_launching(_this: *mut c_void, _sel: Sel, _app: *const AnyObject, _opts: *const AnyObject) -> Bool {
-            Bool::YES
-        }
-        let sel = Sel::register(c"application:didFinishLaunchingWithOptions:");
-        let types = b"B32@0:8@16@24\0".as_ptr();
-        class_addMethod(cls, sel, did_finish_launching as *const c_void, types);
-
-        // Add UIApplicationDelegate protocol
-        extern "C" { fn objc_getProtocol(name: *const u8) -> *const c_void; }
-        let protocol = objc_getProtocol(b"UIApplicationDelegate\0".as_ptr());
         if !protocol.is_null() {
             extern "C" { fn class_addProtocol(cls: *mut AnyClass, protocol: *const c_void) -> bool; }
             class_addProtocol(cls, protocol);
@@ -433,9 +503,17 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const u8) {
     let _title = str_from_header(title_ptr);
 
+    // Register ObjC classes for the scene delegate (window/view creation)
     register_metal_view_class();
     register_scene_delegate();
-    register_app_delegate();
+
+    // Signal the main thread that our ObjC classes are ready.
+    // UIApplicationMain (on main thread) waits for this before starting.
+    extern "C" { fn perry_ios_classes_registered(); }
+    unsafe { perry_ios_classes_registered(); }
+
+    // Debug: write marker to confirm we reached this point
+    let _ = std::fs::write("/tmp/bloom_checkpoint_1.txt", "classes registered\n");
 
     // Get app bundle path for resolving relative asset paths
     unsafe {
@@ -453,35 +531,20 @@ pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const
         }
     }
 
+    // With --features ios-game-loop, this function runs on the game thread.
+    // UIApplicationMain runs on the main thread. The runtime's scene delegate
+    // calls perry_scene_will_connect() which creates the window, view, wgpu
+    // surface, and ENGINE — all on the main thread. We just wait for it.
     unsafe {
-        // === Bootstrap UIKit ===
-        // UIApplicationMain blocks forever. We use setjmp/longjmp:
-        // 1. setjmp saves context
-        // 2. UIApplicationMain enters the run loop
-        // 3. Scene delegate creates window/engine, then longjmps back
-        // 4. Game loop continues on the main thread
-
-        // Use setjmp/longjmp to escape UIApplicationMain after scene delegate fires.
-        // UIApplicationMain blocks forever in the run loop. The scene delegate
-        // calls longjmp back here after creating the window and engine.
-        extern "C" {
-            fn setjmp(env: *mut u8) -> i32;
+        for _ in 0..1000 {
+            if ENGINE.get().is_some() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
 
-        let result = setjmp(JUMP_BUF.as_mut_ptr());
-        if result == 0 {
-            // First call — enter UIApplicationMain (blocks until longjmp)
-            let ns_cls = AnyClass::get(c"NSString").unwrap();
-            let cstr = std::ffi::CString::new("BloomAppDelegate").unwrap();
-            let delegate_name: Retained<AnyObject> = msg_send![ns_cls, stringWithUTF8String: cstr.as_ptr()];
-
-            UIApplicationMain(
-                0, std::ptr::null(), std::ptr::null(),
-                Retained::as_ptr(&delegate_name) as *const c_void,
-            );
-            // Should never reach here
-        }
-        // longjmp landed here — scene delegate has set up the engine
+    if unsafe { ENGINE.get().is_none() } {
+        panic!("[bloom-ios] Engine not initialized after 10s. \
+                Compile with: perry compile --target ios-simulator --features ios-game-loop");
     }
 }
 
@@ -497,31 +560,13 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
 
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
-    pump_run_loop(0.016);  // Full frame worth of run loop time for drawable recycling
+    // No run loop pumping needed — UIApplicationMain handles the main run loop
+    // on its own thread. The game runs on the game thread.
     engine().begin_frame();
 }
 
-static mut FRAME_CT: u64 = 0;
-
 #[no_mangle]
 pub extern "C" fn bloom_end_drawing() {
-    unsafe { FRAME_CT += 1; }
-    let fc = unsafe { FRAME_CT };
-    if fc == 1 || fc == 60 || fc == 300 {
-        unsafe {
-            extern "C" { fn NSTemporaryDirectory() -> *const AnyObject; }
-            let tmp: *const AnyObject = NSTemporaryDirectory();
-            if !tmp.is_null() {
-                let utf8: *const u8 = msg_send![&*tmp, UTF8String];
-                if !utf8.is_null() {
-                    let p = std::ffi::CStr::from_ptr(utf8 as *const i8).to_str().unwrap_or("");
-                    let _ = std::fs::OpenOptions::new().create(true).append(true)
-                        .open(format!("{}bloom_debug.txt", p))
-                        .and_then(|mut f| { use std::io::Write; write!(f, "frame {}\n", fc) });
-                }
-            }
-        }
-    }
     engine().end_frame();
 }
 
@@ -864,6 +909,15 @@ pub extern "C" fn bloom_draw_grid(slices: f64, spacing: f64) {
 #[no_mangle]
 pub extern "C" fn bloom_draw_ray(origin_x: f64, origin_y: f64, origin_z: f64, dir_x: f64, dir_y: f64, dir_z: f64, r: f64, g: f64, b: f64, a: f64) {
     engine().renderer.draw_ray(origin_x, origin_y, origin_z, dir_x, dir_y, dir_z, r, g, b, a);
+}
+
+// ============================================================
+// Joint test (skeletal animation debug)
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_set_joint_test(_joint: f64, _angle: f64) {
+    // No-op for now — skeletal animation testing
 }
 
 // ============================================================

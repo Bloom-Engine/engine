@@ -276,8 +276,6 @@ pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
     pub surface_config: wgpu::SurfaceConfiguration,
 
-    frame_debug_count: u64,
-
     // Pipelines
     pipeline_2d: wgpu::RenderPipeline,
     pipeline_3d: wgpu::RenderPipeline,
@@ -327,6 +325,7 @@ pub struct Renderer {
     // State
     pub render_mode: RenderMode,
     clear_color: wgpu::Color,
+    debug_frame: u64,
 }
 
 impl Renderer {
@@ -684,9 +683,9 @@ impl Renderer {
             draw_calls_3d: Vec::new(),
             current_texture_3d: 0,
             render_mode: RenderMode::ScreenSpace,
+            debug_frame: 0,
             clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
-            frame_debug_count: 0,
         }
     }
 
@@ -735,30 +734,27 @@ impl Renderer {
         // Reset lighting to defaults
         self.lighting_uniforms = LightingUniforms::defaults();
         self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));
+
+        // DEBUG: joint animation disabled for iOS port
+        // self.debug_frame += 1;
+        // let angle = (self.debug_frame as f32) * 0.03;
+        // self.set_joint_test(0, angle.sin() * 0.8);
+        // self.set_joint_test(5, (angle * 1.5).sin() * 0.5);
     }
 
     pub fn end_frame(&mut self) {
-        self.frame_debug_count += 1;
+        // DEBUG: animate joints RIGHT BEFORE rendering
+        self.debug_frame += 1;
+        let angle = (self.debug_frame as f32) * 0.04;
+        self.set_joint_test(0, angle.sin() * 0.6);
+
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(e) => {
-                if self.frame_debug_count <= 3 || self.frame_debug_count % 120 == 0 {
-                    let msg = format!("FAIL frame {}: {:?} ({}x{})\n",
-                        self.frame_debug_count, e, self.surface_config.width, self.surface_config.height);
-                    let _ = std::fs::OpenOptions::new().create(true).append(true)
-                        .open("/Users/amlug/bloom_ios_debug.txt")
-                        .and_then(|mut f| { use std::io::Write; f.write_all(msg.as_bytes()) });
-                }
+            Err(_) => {
                 self.surface.configure(&self.device, &self.surface_config);
                 return;
             }
         };
-        if self.frame_debug_count <= 3 {
-            let msg = format!("OK frame {} ({}x{})\n", self.frame_debug_count, self.surface_config.width, self.surface_config.height);
-            let _ = std::fs::OpenOptions::new().create(true).append(true)
-                .open("/Users/amlug/bloom_ios_debug.txt")
-                .and_then(|mut f| { use std::io::Write; f.write_all(msg.as_bytes()) });
-        }
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1260,6 +1256,30 @@ impl Renderer {
     // Joint matrices (GPU skinning)
     // ============================================================
 
+    /// Set a single joint matrix for testing (joint_index 0-63, angle in radians around X axis)
+    pub fn set_joint_test(&mut self, joint_index: usize, angle: f32) {
+        if joint_index >= 64 { return; }
+        let c = angle.cos();
+        let s = angle.sin();
+        // Rotation around X axis, column-major in the buffer
+        let mut data = [0u8; 64];
+        let mat: [[f32; 4]; 4] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0,   c,   s, 0.0],
+            [0.0,  -s,   c, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        // Write as column-major
+        for col in 0..4 {
+            for row in 0..4 {
+                let bytes = mat[row][col].to_le_bytes();
+                let idx = col * 16 + row * 4;
+                data[idx..idx+4].copy_from_slice(&bytes);
+            }
+        }
+        self.queue.write_buffer(&self.joint_buffer, (joint_index * 64) as u64, &data);
+    }
+
     pub fn set_joint_matrices(&mut self, matrices: &[[[f32; 4]; 4]]) {
         let count = matrices.len().min(64);
         let mut data = vec![0u8; 4096];
@@ -1533,12 +1553,20 @@ impl Renderer {
         self.ensure_draw_state_3d(texture_idx);
         let base = self.vertices_3d.len() as u32;
         for v in vertices {
+            // Check if vertex is skinned (has non-zero weights)
+            let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
+            let pos = if is_skinned {
+                // Skinned: pass bind-space position (shader applies joint matrices + model transform via MVP)
+                // Scale is baked into the model, position offset is handled by adjusting joint matrices
+                [v.position[0] * scale, v.position[1] * scale, v.position[2] * scale]
+            } else {
+                // Unskinned: apply CPU-side position + scale
+                [v.position[0] * scale + position[0],
+                 v.position[1] * scale + position[1],
+                 v.position[2] * scale + position[2]]
+            };
             self.vertices_3d.push(Vertex3D {
-                position: [
-                    v.position[0] * scale + position[0],
-                    v.position[1] * scale + position[1],
-                    v.position[2] * scale + position[2],
-                ],
+                position: pos,
                 normal: v.normal,
                 color: [
                     v.color[0] * tint[0],

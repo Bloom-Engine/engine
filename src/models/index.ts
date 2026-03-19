@@ -205,3 +205,8 @@ export function setAmbientLight(color: Color, intensity: number): void {
 export function setDirectionalLight(direction: Vec3, color: Color, intensity: number): void {
   bloom_set_directional_light(direction.x, direction.y, direction.z, color.r, color.g, color.b, intensity);
 }
+
+declare function bloom_set_joint_test(joint: number, angle: number): void;
+export function setJointTest(joint: number, angle: number): void {
+  bloom_set_joint_test(joint, angle);
+}

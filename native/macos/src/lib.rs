@@ -873,6 +873,15 @@ pub extern "C" fn bloom_draw_ray(origin_x: f64, origin_y: f64, origin_z: f64, di
 }
 
 // ============================================================
+// Joint test
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_set_joint_test(joint_index: f64, angle: f64) {
+    engine().renderer.set_joint_test(joint_index as usize, angle as f32);
+}
+
+// ============================================================
 // Lighting
 // ============================================================
 
