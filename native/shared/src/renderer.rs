@@ -276,6 +276,8 @@ pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
     pub surface_config: wgpu::SurfaceConfiguration,
 
+    frame_debug_count: u64,
+
     // Pipelines
     pipeline_2d: wgpu::RenderPipeline,
     pipeline_3d: wgpu::RenderPipeline,
@@ -684,6 +686,7 @@ impl Renderer {
             render_mode: RenderMode::ScreenSpace,
             clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
+            frame_debug_count: 0,
         }
     }
 
@@ -735,13 +738,27 @@ impl Renderer {
     }
 
     pub fn end_frame(&mut self) {
+        self.frame_debug_count += 1;
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(_) => {
+            Err(e) => {
+                if self.frame_debug_count <= 3 || self.frame_debug_count % 120 == 0 {
+                    let msg = format!("FAIL frame {}: {:?} ({}x{})\n",
+                        self.frame_debug_count, e, self.surface_config.width, self.surface_config.height);
+                    let _ = std::fs::OpenOptions::new().create(true).append(true)
+                        .open("/Users/amlug/bloom_ios_debug.txt")
+                        .and_then(|mut f| { use std::io::Write; f.write_all(msg.as_bytes()) });
+                }
                 self.surface.configure(&self.device, &self.surface_config);
                 return;
             }
         };
+        if self.frame_debug_count <= 3 {
+            let msg = format!("OK frame {} ({}x{})\n", self.frame_debug_count, self.surface_config.width, self.surface_config.height);
+            let _ = std::fs::OpenOptions::new().create(true).append(true)
+                .open("/Users/amlug/bloom_ios_debug.txt")
+                .and_then(|mut f| { use std::io::Write; f.write_all(msg.as_bytes()) });
+        }
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1248,9 +1265,11 @@ impl Renderer {
         let mut data = vec![0u8; 4096];
         for i in 0..count {
             let offset = i * 64;
+            // Our matrices are row-major [row][col], WGSL expects column-major
+            // Column-major layout: data[col*16+row*4] = matrix[row][col]
             for col in 0..4 {
                 for row in 0..4 {
-                    let bytes = matrices[i][col][row].to_le_bytes();
+                    let bytes = matrices[i][row][col].to_le_bytes();
                     let idx = offset + col * 16 + row * 4;
                     data[idx..idx+4].copy_from_slice(&bytes);
                 }

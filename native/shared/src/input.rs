@@ -122,6 +122,7 @@ impl InputState {
     // Mouse
     pub fn set_mouse_position(&mut self, x: f64, y: f64) { self.mouse_x = x; self.mouse_y = y; }
     pub fn accumulate_mouse_delta(&mut self, dx: f64, dy: f64) { self.raw_delta_x += dx; self.raw_delta_y += dy; }
+    pub fn clear_mouse_delta(&mut self) { self.raw_delta_x = 0.0; self.raw_delta_y = 0.0; self.mouse_delta_x = 0.0; self.mouse_delta_y = 0.0; }
     pub fn set_mouse_button_down(&mut self, button: usize) { if button < MAX_MOUSE_BUTTONS { self.mouse_down[button] = true; } }
     pub fn set_mouse_button_up(&mut self, button: usize) { if button < MAX_MOUSE_BUTTONS { self.mouse_down[button] = false; } }
 

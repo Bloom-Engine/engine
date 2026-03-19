@@ -11,12 +11,33 @@ use objc2::{msg_send, sel};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
 
 use std::ffi::c_void;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, Condvar, Mutex};
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut UI_WINDOW: Option<Retained<AnyObject>> = None;
 static mut UI_VIEW: Option<Retained<AnyObject>> = None;
 static mut TOUCH_MAP: [*const c_void; 10] = [std::ptr::null(); 10];
+static mut BUNDLE_PATH: Option<String> = None;
+
+// Sync primitive for init: scene delegate signals when window is ready
+static INIT_READY: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+// Jump buffer for escaping UIApplicationMain after scene delegate fires
+static mut JUMP_BUF: [u8; 256] = [0u8; 256]; // oversized for jmp_buf
+
+/// Resolve a relative asset path to the app bundle path.
+fn resolve_path(path: &str) -> String {
+    if path.starts_with('/') {
+        return path.to_string();
+    }
+    unsafe {
+        if let Some(ref base) = BUNDLE_PATH {
+            format!("{}/{}", base, path)
+        } else {
+            path.to_string()
+        }
+    }
+}
 
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
@@ -60,17 +81,23 @@ unsafe impl RefEncode for CGRect {
 }
 
 // ============================================================
-// ObjC runtime for class registration (avoids objc2 lifetime issues)
+// ObjC runtime
 // ============================================================
 
 extern "C" {
     fn objc_allocateClassPair(superclass: *const AnyClass, name: *const u8, extra_bytes: usize) -> *mut AnyClass;
     fn objc_registerClassPair(cls: *mut AnyClass);
     fn class_addMethod(cls: *mut AnyClass, sel: Sel, imp: *const c_void, types: *const u8) -> bool;
-    fn objc_getClass(name: *const u8) -> *const AnyClass;
 
     fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after: u8) -> i32;
     static kCFRunLoopDefaultMode: *const c_void;
+
+    fn UIApplicationMain(
+        argc: i32,
+        argv: *const *const u8,
+        principalClassName: *const c_void,
+        delegateClassName: *const c_void,
+    ) -> i32;
 }
 
 fn pump_run_loop(seconds: f64) {
@@ -121,7 +148,6 @@ unsafe fn handle_touches(touches: *const AnyObject, phase: TouchPhase) {
 
         let index = match phase {
             TouchPhase::Began => {
-                // Find a free slot and assign this touch pointer
                 let mut slot = None;
                 for i in 0..10 {
                     if TOUCH_MAP[i].is_null() {
@@ -132,18 +158,16 @@ unsafe fn handle_touches(touches: *const AnyObject, phase: TouchPhase) {
                 }
                 match slot {
                     Some(i) => i,
-                    None => continue, // All slots full, skip
+                    None => continue,
                 }
             }
             TouchPhase::Moved => {
-                // Find existing slot for this touch pointer
                 match TOUCH_MAP.iter().position(|&p| p == touch_id) {
                     Some(i) => i,
                     None => continue,
                 }
             }
             TouchPhase::Ended => {
-                // Find and clear slot
                 match TOUCH_MAP.iter().position(|&p| p == touch_id) {
                     Some(i) => {
                         TOUCH_MAP[i] = std::ptr::null();
@@ -158,7 +182,6 @@ unsafe fn handle_touches(touches: *const AnyObject, phase: TouchPhase) {
             let active = !matches!(phase, TouchPhase::Ended);
             eng.input.set_touch(index, loc.x, loc.y, active);
 
-            // First touch (index 0) also drives mouse for backward compatibility
             if index == 0 {
                 eng.input.set_mouse_position(loc.x, loc.y);
                 if active {
@@ -179,14 +202,12 @@ fn register_metal_view_class() {
         let cls = objc_allocateClassPair(superclass as *const AnyClass, b"BloomMetalView\0".as_ptr(), 0);
         if cls.is_null() { return; }
 
-        // +layerClass is a class method — must be added to the metaclass only.
         extern "C" { fn object_getClass(obj: *const c_void) -> *mut AnyClass; }
         let meta = object_getClass(cls as *const c_void);
 
         class_addMethod(meta, sel!(layerClass), bloom_layer_class as *const c_void, b"#8@0:8\0".as_ptr());
 
-        // Touch methods (instance methods)
-        let touch_types = b"v32@0:8@16@24\0".as_ptr(); // void (self, _cmd, NSSet*, UIEvent*)
+        let touch_types = b"v32@0:8@16@24\0".as_ptr();
         class_addMethod(cls, sel!(touchesBegan:withEvent:), bloom_touches_began as *const c_void, touch_types);
         class_addMethod(cls, sel!(touchesMoved:withEvent:), bloom_touches_moved as *const c_void, touch_types);
         class_addMethod(cls, sel!(touchesEnded:withEvent:), bloom_touches_ended as *const c_void, touch_types);
@@ -196,14 +217,188 @@ fn register_metal_view_class() {
     }
 }
 
-fn register_dummy_scene_delegate() {
-    if AnyClass::get(c"PerrySceneDelegate").is_some() { return; }
-    unsafe {
-        let superclass = AnyClass::get(c"NSObject").unwrap();
-        let cls = objc_allocateClassPair(superclass as *const AnyClass, b"PerrySceneDelegate\0".as_ptr(), 0);
-        if !cls.is_null() {
-            objc_registerClassPair(cls);
+// ============================================================
+// Scene delegate — creates UIWindow + Metal view + wgpu engine
+// ============================================================
+
+unsafe extern "C" fn scene_will_connect(
+    _this: *mut c_void,
+    _sel: Sel,
+    scene: *const AnyObject,
+    _session: *const AnyObject,
+    _options: *const AnyObject,
+) {
+    if scene.is_null() { return; }
+
+    // Get screen info from the scene
+    let screen: Retained<AnyObject> = msg_send![&*scene, screen];
+    let bounds: CGRect = msg_send![&*screen, bounds];
+    let scale: f64 = msg_send![&*screen, scale];
+
+    let pixel_width = (bounds.size.width * scale) as u32;
+    let pixel_height = (bounds.size.height * scale) as u32;
+
+    // Create UIWindow attached to the scene
+    let window_cls = AnyClass::get(c"UIWindow").unwrap();
+    let window: Allocated<AnyObject> = msg_send![window_cls, alloc];
+    let window: Retained<AnyObject> = msg_send![window, initWithWindowScene: scene];
+
+    // Create UIViewController
+    let vc_cls = AnyClass::get(c"UIViewController").unwrap();
+    let vc: Allocated<AnyObject> = msg_send![vc_cls, alloc];
+    let vc: Retained<AnyObject> = msg_send![vc, init];
+
+    // Create BloomMetalView
+    let view_cls = AnyClass::get(c"BloomMetalView").unwrap();
+    let view: Allocated<AnyObject> = msg_send![view_cls, alloc];
+    let view: Retained<AnyObject> = msg_send![view, initWithFrame: bounds];
+
+    // Set background to green (diagnostic — visible if Metal isn't rendering)
+    let color_cls = AnyClass::get(c"UIColor").unwrap();
+    let green: Retained<AnyObject> = msg_send![color_cls, greenColor];
+    let _: () = msg_send![&*view, setBackgroundColor: &*green];
+
+    // Configure CAMetalLayer
+    let layer: Retained<AnyObject> = msg_send![&*view, layer];
+    let drawable_size = CGSize { width: pixel_width as f64, height: pixel_height as f64 };
+    let _: () = msg_send![&*layer, setDrawableSize: drawable_size];
+    let _: () = msg_send![&*layer, setContentsScale: scale];
+    let _: () = msg_send![&*layer, setOpaque: Bool::NO];  // Non-opaque so green shows if Metal fails
+
+    // Enable touches
+    let _: () = msg_send![&*view, setUserInteractionEnabled: Bool::YES];
+    let _: () = msg_send![&*view, setMultipleTouchEnabled: Bool::YES];
+
+    // Set up window hierarchy
+    let _: () = msg_send![&*vc, setView: &*view];
+    let _: () = msg_send![&*window, setRootViewController: &*vc];
+    let _: () = msg_send![&*window, makeKeyAndVisible];
+
+    // Store references
+    UI_VIEW = Some(view.clone());
+    UI_WINDOW = Some(window);
+
+    // Create wgpu surface
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::METAL,
+        ..Default::default()
+    });
+
+    let view_ptr = Retained::as_ptr(&view) as *mut c_void;
+    let handle = UiKitWindowHandle::new(
+        std::ptr::NonNull::new(view_ptr).unwrap(),
+    );
+    let raw = RawWindowHandle::UiKit(handle);
+    let surface = instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+        raw_display_handle: RawDisplayHandle::UiKit(UiKitDisplayHandle::new()),
+        raw_window_handle: raw,
+    }).expect("Failed to create wgpu surface");
+
+    let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&surface),
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    })).expect("No GPU adapter found");
+
+    let (device, queue) = pollster_block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
+        None,
+    )).expect("Failed to create device");
+
+    let surface_caps = surface.get_capabilities(&adapter);
+    let format = surface_caps.formats.iter()
+        .find(|f| f.is_srgb()).copied()
+        .unwrap_or(surface_caps.formats[0]);
+
+    let surface_config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: pixel_width,
+        height: pixel_height,
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: surface_caps.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(&device, &surface_config);
+
+    let renderer = Renderer::new(device, queue, surface, surface_config);
+    let _ = ENGINE.set(EngineState::new(renderer));
+
+    // Write debug info to app container tmp
+    {
+        let ns_cls = AnyClass::get(c"NSTemporaryDirectory").unwrap_or(AnyClass::get(c"NSString").unwrap());
+        // Use NSFileManager to get tmp dir
+        extern "C" { fn NSTemporaryDirectory() -> *const AnyObject; }
+        let tmp_dir: *const AnyObject = NSTemporaryDirectory();
+        if !tmp_dir.is_null() {
+            let utf8: *const u8 = msg_send![&*tmp_dir, UTF8String];
+            if !utf8.is_null() {
+                let cstr_val = std::ffi::CStr::from_ptr(utf8 as *const i8);
+                if let Ok(tmp_path) = cstr_val.to_str() {
+                    let _ = std::fs::write(format!("{}bloom_debug.txt", tmp_path),
+                        format!("scene_will_connect OK\npixels={}x{} scale={}\nwindow_scene={}\n",
+                            pixel_width, pixel_height, scale, !scene.is_null()));
+                }
+            }
         }
+    }
+
+    // Escape UIApplicationMain by longjmp back to bloom_init_window
+    extern "C" { fn longjmp(env: *mut u8, val: i32) -> !; }
+    longjmp(JUMP_BUF.as_mut_ptr(), 1);
+}
+
+fn register_scene_delegate() {
+    if AnyClass::get(c"PerrySceneDelegate").is_some() { return; }
+
+    unsafe {
+        let superclass = AnyClass::get(c"UIResponder").unwrap();
+        let cls = objc_allocateClassPair(superclass as *const AnyClass, b"PerrySceneDelegate\0".as_ptr(), 0);
+        if cls.is_null() { return; }
+
+        // scene:willConnectToSession:connectionOptions:
+        let sel = Sel::register(c"scene:willConnectToSession:connectionOptions:");
+        let types = b"v48@0:8@16@24@32\0".as_ptr();
+        class_addMethod(cls, sel, scene_will_connect as *const c_void, types);
+
+        // Add UIWindowSceneDelegate protocol
+        extern "C" { fn objc_getProtocol(name: *const u8) -> *const c_void; }
+        let protocol = objc_getProtocol(b"UIWindowSceneDelegate\0".as_ptr());
+        if !protocol.is_null() {
+            extern "C" { fn class_addProtocol(cls: *mut AnyClass, protocol: *const c_void) -> bool; }
+            class_addProtocol(cls, protocol);
+        }
+
+        objc_registerClassPair(cls);
+    }
+}
+
+fn register_app_delegate() {
+    if AnyClass::get(c"BloomAppDelegate").is_some() { return; }
+
+    unsafe {
+        let superclass = AnyClass::get(c"UIResponder").unwrap();
+        let cls = objc_allocateClassPair(superclass as *const AnyClass, b"BloomAppDelegate\0".as_ptr(), 0);
+        if cls.is_null() { return; }
+
+        // application:didFinishLaunchingWithOptions:
+        unsafe extern "C" fn did_finish_launching(_this: *mut c_void, _sel: Sel, _app: *const AnyObject, _opts: *const AnyObject) -> Bool {
+            Bool::YES
+        }
+        let sel = Sel::register(c"application:didFinishLaunchingWithOptions:");
+        let types = b"B32@0:8@16@24\0".as_ptr();
+        class_addMethod(cls, sel, did_finish_launching as *const c_void, types);
+
+        // Add UIApplicationDelegate protocol
+        extern "C" { fn objc_getProtocol(name: *const u8) -> *const c_void; }
+        let protocol = objc_getProtocol(b"UIApplicationDelegate\0".as_ptr());
+        if !protocol.is_null() {
+            extern "C" { fn class_addProtocol(cls: *mut AnyClass, protocol: *const c_void) -> bool; }
+            class_addProtocol(cls, protocol);
+        }
+
+        objc_registerClassPair(cls);
     }
 }
 
@@ -223,7 +418,9 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
     loop {
         match future.as_mut().poll(&mut cx) {
             Poll::Ready(result) => return result,
-            Poll::Pending => std::thread::yield_now(),
+            Poll::Pending => {
+                pump_run_loop(0.001);
+            }
         }
     }
 }
@@ -233,111 +430,58 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 // ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8) {
+pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const u8) {
     let _title = str_from_header(title_ptr);
 
     register_metal_view_class();
-    register_dummy_scene_delegate();
+    register_scene_delegate();
+    register_app_delegate();
+
+    // Get app bundle path for resolving relative asset paths
+    unsafe {
+        let bundle_cls = AnyClass::get(c"NSBundle").unwrap();
+        let main_bundle: Retained<AnyObject> = msg_send![bundle_cls, mainBundle];
+        let resource_path: *const AnyObject = msg_send![&*main_bundle, resourcePath];
+        if !resource_path.is_null() {
+            let utf8: *const u8 = msg_send![&*resource_path, UTF8String];
+            if !utf8.is_null() {
+                let cstr = std::ffi::CStr::from_ptr(utf8 as *const i8);
+                if let Ok(s) = cstr.to_str() {
+                    BUNDLE_PATH = Some(s.to_string());
+                }
+            }
+        }
+    }
 
     unsafe {
-        // Get screen bounds
-        let screen_cls = AnyClass::get(c"UIScreen").unwrap();
-        let screen: Retained<AnyObject> = msg_send![screen_cls, mainScreen];
-        let bounds: CGRect = msg_send![&*screen, bounds];
-        let scale: f64 = msg_send![&*screen, scale];
+        // === Bootstrap UIKit ===
+        // UIApplicationMain blocks forever. We use setjmp/longjmp:
+        // 1. setjmp saves context
+        // 2. UIApplicationMain enters the run loop
+        // 3. Scene delegate creates window/engine, then longjmps back
+        // 4. Game loop continues on the main thread
 
-        let pixel_width = (bounds.size.width * scale) as u32;
-        let pixel_height = (bounds.size.height * scale) as u32;
+        // Use setjmp/longjmp to escape UIApplicationMain after scene delegate fires.
+        // UIApplicationMain blocks forever in the run loop. The scene delegate
+        // calls longjmp back here after creating the window and engine.
+        extern "C" {
+            fn setjmp(env: *mut u8) -> i32;
+        }
 
-        // Create UIWindow
-        let window_cls = AnyClass::get(c"UIWindow").unwrap();
-        let window: Allocated<AnyObject> = msg_send![window_cls, alloc];
-        let window: Retained<AnyObject> = msg_send![window, initWithFrame: bounds];
+        let result = setjmp(JUMP_BUF.as_mut_ptr());
+        if result == 0 {
+            // First call — enter UIApplicationMain (blocks until longjmp)
+            let ns_cls = AnyClass::get(c"NSString").unwrap();
+            let cstr = std::ffi::CString::new("BloomAppDelegate").unwrap();
+            let delegate_name: Retained<AnyObject> = msg_send![ns_cls, stringWithUTF8String: cstr.as_ptr()];
 
-        // Create UIViewController
-        let vc_cls = AnyClass::get(c"UIViewController").unwrap();
-        let vc: Allocated<AnyObject> = msg_send![vc_cls, alloc];
-        let vc: Retained<AnyObject> = msg_send![vc, init];
-
-        // Create BloomMetalView
-        let view_cls = AnyClass::get(c"BloomMetalView").unwrap();
-        let view: Allocated<AnyObject> = msg_send![view_cls, alloc];
-        let view: Retained<AnyObject> = msg_send![view, initWithFrame: bounds];
-
-        // Set background to black
-        let color_cls = AnyClass::get(c"UIColor").unwrap();
-        let black: Retained<AnyObject> = msg_send![color_cls, blackColor];
-        let _: () = msg_send![&*view, setBackgroundColor: &*black];
-
-        // Configure CAMetalLayer
-        let layer: Retained<AnyObject> = msg_send![&*view, layer];
-        let drawable_size = CGSize { width: pixel_width as f64, height: pixel_height as f64 };
-        let _: () = msg_send![&*layer, setDrawableSize: drawable_size];
-        let _: () = msg_send![&*layer, setContentsScale: scale];
-        let _: () = msg_send![&*layer, setOpaque: Bool::YES];
-
-        // Enable touches
-        let _: () = msg_send![&*view, setUserInteractionEnabled: Bool::YES];
-        let _: () = msg_send![&*view, setMultipleTouchEnabled: Bool::YES];
-
-        // Set up window hierarchy
-        let _: () = msg_send![&*vc, setView: &*view];
-        let _: () = msg_send![&*window, setRootViewController: &*vc];
-        let _: () = msg_send![&*window, makeKeyAndVisible];
-
-        // Let UIKit settle
-        pump_run_loop(0.1);
-
-        // Store references
-        UI_VIEW = Some(view.clone());
-        UI_WINDOW = Some(window);
-
-        // Create wgpu surface
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
-            ..Default::default()
-        });
-
-        let view_ptr = Retained::as_ptr(&view) as *mut c_void;
-        let handle = UiKitWindowHandle::new(
-            std::ptr::NonNull::new(view_ptr).unwrap(),
-        );
-        let raw = RawWindowHandle::UiKit(handle);
-        let surface = instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: RawDisplayHandle::UiKit(UiKitDisplayHandle::new()),
-            raw_window_handle: raw,
-        }).expect("Failed to create wgpu surface");
-
-        let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        })).expect("No GPU adapter found");
-
-        let (device, queue) = pollster_block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
-            None,
-        )).expect("Failed to create device");
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let format = surface_caps.formats.iter()
-            .find(|f| f.is_srgb()).copied()
-            .unwrap_or(surface_caps.formats[0]);
-
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: pixel_width,
-            height: pixel_height,
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &surface_config);
-
-        let renderer = Renderer::new(device, queue, surface, surface_config);
-        let _ = ENGINE.set(EngineState::new(renderer));
+            UIApplicationMain(
+                0, std::ptr::null(), std::ptr::null(),
+                Retained::as_ptr(&delegate_name) as *const c_void,
+            );
+            // Should never reach here
+        }
+        // longjmp landed here — scene delegate has set up the engine
     }
 }
 
@@ -353,12 +497,31 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
 
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
-    pump_run_loop(0.001);
+    pump_run_loop(0.016);  // Full frame worth of run loop time for drawable recycling
     engine().begin_frame();
 }
 
+static mut FRAME_CT: u64 = 0;
+
 #[no_mangle]
 pub extern "C" fn bloom_end_drawing() {
+    unsafe { FRAME_CT += 1; }
+    let fc = unsafe { FRAME_CT };
+    if fc == 1 || fc == 60 || fc == 300 {
+        unsafe {
+            extern "C" { fn NSTemporaryDirectory() -> *const AnyObject; }
+            let tmp: *const AnyObject = NSTemporaryDirectory();
+            if !tmp.is_null() {
+                let utf8: *const u8 = msg_send![&*tmp, UTF8String];
+                if !utf8.is_null() {
+                    let p = std::ffi::CStr::from_ptr(utf8 as *const i8).to_str().unwrap_or("");
+                    let _ = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(format!("{}bloom_debug.txt", p))
+                        .and_then(|mut f| { use std::io::Write; write!(f, "frame {}\n", fc) });
+                }
+            }
+        }
+    }
     engine().end_frame();
 }
 
@@ -487,7 +650,7 @@ pub extern "C" fn bloom_measure_text(text_ptr: *const u8, size: f64) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_load_font(path_ptr: *const u8, _size: f64) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) { Ok(data) => engine().text.load_font(&data) as f64, Err(_) => 0.0 }
+    match std::fs::read(resolve_path(path)) { Ok(data) => engine().text.load_font(&data) as f64, Err(_) => 0.0 }
 }
 
 #[no_mangle]
@@ -517,7 +680,7 @@ pub extern "C" fn bloom_measure_text_ex(font_handle: f64, text_ptr: *const u8, s
 #[no_mangle]
 pub extern "C" fn bloom_load_texture(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => {
             let eng = engine();
             let renderer_ptr = &mut eng.renderer as *mut Renderer;
@@ -583,14 +746,12 @@ pub extern "C" fn bloom_get_texture_height(handle: f64) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_gen_texture_mipmaps(_handle: f64) {
-    // No-op: wgpu handles mipmaps internally
-}
+pub extern "C" fn bloom_gen_texture_mipmaps(_handle: f64) {}
 
 #[no_mangle]
 pub extern "C" fn bloom_load_image(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => engine().textures.load_image(&data),
         Err(_) => 0.0,
     }
@@ -706,13 +867,27 @@ pub extern "C" fn bloom_draw_ray(origin_x: f64, origin_y: f64, origin_z: f64, di
 }
 
 // ============================================================
+// Lighting
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) {
+    engine().renderer.set_ambient_light(r, g, b, intensity);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
+    engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
+}
+
+// ============================================================
 // Models
 // ============================================================
 
 #[no_mangle]
 pub extern "C" fn bloom_load_model(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => engine().models.load_model(&data),
         Err(_) => 0.0,
     }
@@ -723,8 +898,10 @@ pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f
     let eng = engine();
     if let Some(model) = eng.models.get(handle) {
         let tint = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32];
+        let position = [x as f32, y as f32, z as f32];
         for mesh in &model.meshes {
-            eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, [x as f32, y as f32, z as f32], scale as f32, tint);
+            let tex_idx = mesh.texture_idx.unwrap_or(0);
+            eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, position, scale as f32, tint, tex_idx);
         }
     }
 }
@@ -763,7 +940,7 @@ pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f32, vertex_count: f64, i
     if vertex_ptr.is_null() || index_ptr.is_null() { return 0.0; }
     let vcount = vertex_count as usize;
     let icount = index_count as usize;
-    let vertex_data = unsafe { std::slice::from_raw_parts(vertex_ptr, vcount * 12) }; // 12 floats per vertex
+    let vertex_data = unsafe { std::slice::from_raw_parts(vertex_ptr, vcount * 12) };
     let index_data = unsafe { std::slice::from_raw_parts(index_ptr, icount) };
     engine().models.create_mesh(vertex_data, index_data)
 }
@@ -771,7 +948,7 @@ pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f32, vertex_count: f64, i
 #[no_mangle]
 pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => engine().models.load_model_animation(&data),
         Err(_) => 0.0,
     }
@@ -908,7 +1085,7 @@ unsafe extern "C" fn audio_render_callback(
 ) -> OSStatus {
     let buffer_list = &mut *io_data;
     let buffer = &mut buffer_list.buffers[0];
-    let num_samples = in_number_frames as usize * 2; // stereo
+    let num_samples = in_number_frames as usize * 2;
     let output = std::slice::from_raw_parts_mut(buffer.data as *mut f32, num_samples);
     ENGINE.get_mut().map(|eng| { eng.audio.mix_output(output); });
     0
@@ -979,7 +1156,7 @@ pub extern "C" fn bloom_close_audio() {
 #[no_mangle]
 pub extern "C" fn bloom_load_sound(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => {
             if let Some(s) = parse_wav(&data) {
                 engine().audio.load_sound(s)
@@ -1021,7 +1198,7 @@ pub extern "C" fn bloom_set_listener_position(x: f64, y: f64, z: f64, fx: f64, f
 #[no_mangle]
 pub extern "C" fn bloom_load_music(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => {
             if let Some(s) = parse_ogg(&data) {
                 engine().audio.load_music(s)
@@ -1108,19 +1285,13 @@ pub extern "C" fn bloom_get_touch_count() -> f64 {
 // ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_toggle_fullscreen() {
-    // No-op on iOS — apps are always fullscreen.
-}
+pub extern "C" fn bloom_toggle_fullscreen() {}
 
 #[no_mangle]
-pub extern "C" fn bloom_set_window_title(_title_ptr: *const u8) {
-    // No-op on iOS — there is no window title.
-}
+pub extern "C" fn bloom_set_window_title(_title_ptr: *const u8) {}
 
 #[no_mangle]
-pub extern "C" fn bloom_set_window_icon(_path_ptr: *const u8) {
-    // No-op on iOS — app icon is set in the bundle.
-}
+pub extern "C" fn bloom_set_window_icon(_path_ptr: *const u8) {}
 
 #[no_mangle]
 pub extern "C" fn bloom_disable_cursor() {
@@ -1155,13 +1326,14 @@ pub extern "C" fn bloom_write_file(path_ptr: *const u8, data_ptr: *const u8) -> 
 #[no_mangle]
 pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    if std::path::Path::new(path).exists() { 1.0 } else { 0.0 }
+    let resolved = resolve_path(path);
+    if std::path::Path::new(&resolved).exists() { 1.0 } else { 0.0 }
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
-    match std::fs::read_to_string(path) {
+    match std::fs::read_to_string(resolve_path(path)) {
         Ok(contents) => {
             let c_str = std::ffi::CString::new(contents).unwrap_or_default();
             c_str.into_raw() as *const u8

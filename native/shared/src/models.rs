@@ -551,9 +551,10 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             let mut ibm = [[0.0f32; 4]; 4];
             let base = ji * 16;
             if base + 16 <= ibm_data.len() {
+                // glTF stores matrices column-major; our internal format is row-major
                 for row in 0..4 {
                     for col in 0..4 {
-                        ibm[row][col] = ibm_data[base + row * 4 + col];
+                        ibm[row][col] = ibm_data[base + col * 4 + row];
                     }
                 }
             } else {
