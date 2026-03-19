@@ -283,9 +283,11 @@ impl ModelManager {
             let anim = &model_anim.animations[anim_index];
             let t = if anim.duration > 0.0 { time % anim.duration } else { 0.0 };
 
+            let mut channels_applied = 0usize;
             for channel in &anim.channels {
                 let ji = channel.joint_index;
                 if ji >= joint_count { continue; }
+                channels_applied += 1;
 
                 if !channel.translations.is_empty() && !channel.timestamps.is_empty() {
                     local_translations[ji] = sample_vec3(&channel.timestamps, &channel.translations, t);
@@ -314,6 +316,36 @@ impl ModelManager {
             for i in 0..joint_count {
                 model_anim.joint_matrices[i] = mat4_mul(&world_transforms[i], &skeleton.joints[i].inverse_bind);
             }
+
+            // Debug: print joint 0 values once
+            static mut DEBUG_PRINTED: bool = false;
+            unsafe {
+                if !DEBUG_PRINTED {
+                    DEBUG_PRINTED = true;
+                    eprintln!("[anim] channels_applied={}, t={:.3}, anim_index={}", channels_applied, t, anim_index);
+                    eprintln!("[anim] Joint0 local: t=[{:.2},{:.2},{:.2}] r=[{:.4},{:.4},{:.4},{:.4}]",
+                        local_translations[0][0], local_translations[0][1], local_translations[0][2],
+                        local_rotations[0][0], local_rotations[0][1], local_rotations[0][2], local_rotations[0][3]);
+                    let m = &model_anim.joint_matrices[0];
+                    eprintln!("[anim] Joint0 final matrix:");
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", m[0][0], m[0][1], m[0][2], m[0][3]);
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", m[1][0], m[1][1], m[1][2], m[1][3]);
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", m[2][0], m[2][1], m[2][2], m[2][3]);
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", m[3][0], m[3][1], m[3][2], m[3][3]);
+                    let w = &world_transforms[0];
+                    eprintln!("[anim] Joint0 world transform:");
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", w[0][0], w[0][1], w[0][2], w[0][3]);
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", w[1][0], w[1][1], w[1][2], w[1][3]);
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", w[2][0], w[2][1], w[2][2], w[2][3]);
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", w[3][0], w[3][1], w[3][2], w[3][3]);
+                    let ibm = &skeleton.joints[0].inverse_bind;
+                    eprintln!("[anim] Joint0 IBM:");
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", ibm[0][0], ibm[0][1], ibm[0][2], ibm[0][3]);
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", ibm[1][0], ibm[1][1], ibm[1][2], ibm[1][3]);
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", ibm[2][0], ibm[2][1], ibm[2][2], ibm[2][3]);
+                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", ibm[3][0], ibm[3][1], ibm[3][2], ibm[3][3]);
+                }
+            }
         }
     }
 }
@@ -333,9 +365,9 @@ fn mat4_identity() -> [[f32; 4]; 4] {
 
 fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut out = [[0.0f32; 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            out[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + a[i][3] * b[3][j];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col][row] = a[0][row]*b[col][0] + a[1][row]*b[col][1] + a[2][row]*b[col][2] + a[3][row]*b[col][3];
         }
     }
     out
@@ -348,11 +380,12 @@ fn mat4_from_trs(t: &[f32; 3], r: &[f32; 4], s: &[f32; 3]) -> [[f32; 4]; 4] {
     let yy = y * y2; let yz = y * z2; let zz = z * z2;
     let wx = w * x2; let wy = w * y2; let wz = w * z2;
 
+    // Column-major: m[col][row]
     [
-        [(1.0 - (yy + zz)) * s[0], (xy + wz) * s[0],         (xz - wy) * s[0],         0.0],
-        [(xy - wz) * s[1],         (1.0 - (xx + zz)) * s[1], (yz + wx) * s[1],         0.0],
-        [(xz + wy) * s[2],         (yz - wx) * s[2],         (1.0 - (xx + yy)) * s[2], 0.0],
-        [t[0],                      t[1],                      t[2],                      1.0],
+        [(1.0 - (yy + zz)) * s[0], (xy + wz) * s[0],         (xz - wy) * s[0],         0.0],  // column 0
+        [(xy - wz) * s[1],         (1.0 - (xx + zz)) * s[1], (yz + wx) * s[1],         0.0],  // column 1
+        [(xz + wy) * s[2],         (yz - wx) * s[2],         (1.0 - (xx + yy)) * s[2], 0.0],  // column 2
+        [t[0],                      t[1],                      t[2],                      1.0],  // column 3 (translation)
     ]
 }
 
@@ -551,14 +584,28 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             let mut ibm = [[0.0f32; 4]; 4];
             let base = ji * 16;
             if base + 16 <= ibm_data.len() {
-                // glTF stores column-major; our internal format is also column-major [col][row]
-                for col in 0..4 {
-                    for row in 0..4 {
-                        ibm[col][row] = ibm_data[base + col * 4 + row];
+                // glTF stores column-major; read directly (we also use column-major)
+                for a in 0..4 {
+                    for b in 0..4 {
+                        ibm[a][b] = ibm_data[base + a * 4 + b];
                     }
                 }
             } else {
                 ibm = mat4_identity();
+            }
+
+            // Normalize Blender FBX 100x scale from IBMs
+            // Detect by checking if diagonal has scale > 10
+            let diag_scale = ibm[0][0].abs();
+            if diag_scale > 10.0 {
+                let inv = 1.0 / diag_scale;
+                for a in 0..4 {
+                    for b in 0..4 {
+                        if !(a == 3 && b == 3) { // don't touch homogeneous w
+                            ibm[a][b] *= inv;
+                        }
+                    }
+                }
             }
 
             let children: Vec<usize> = node.children()

@@ -180,7 +180,8 @@
         },
         "android": {
           "crate": "native/android/",
-          "lib": "libbloom_android.so"
+          "lib": "libbloom_android.a",
+          "libs": ["android", "log", "c++_static", "c++abi", "OpenSLES"]
         }
       }
     }

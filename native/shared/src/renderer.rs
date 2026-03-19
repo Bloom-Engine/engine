@@ -1264,23 +1264,14 @@ impl Renderer {
         if joint_index >= 128 { return; }
         let c = angle.cos();
         let s = angle.sin();
-        // Rotation around X axis, column-major in the buffer
-        let mut data = [0u8; 64];
+        // Rotation around X axis, column-major m[col][row]
         let mat: [[f32; 4]; 4] = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0,   c,   s, 0.0],
-            [0.0,  -s,   c, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0],   // column 0
+            [0.0,   c,   s, 0.0],   // column 1
+            [0.0,  -s,   c, 0.0],   // column 2
+            [0.0, 0.0, 0.0, 1.0],   // column 3
         ];
-        // Write as column-major
-        for col in 0..4 {
-            for row in 0..4 {
-                let bytes = mat[row][col].to_le_bytes();
-                let idx = col * 16 + row * 4;
-                data[idx..idx+4].copy_from_slice(&bytes);
-            }
-        }
-        self.queue.write_buffer(&self.joint_buffer, (joint_index * 64) as u64, &data);
+        self.queue.write_buffer(&self.joint_buffer, (joint_index * 64) as u64, bytemuck::cast_slice(&mat));
     }
 
     pub fn set_joint_matrices(&mut self, matrices: &[[[f32; 4]; 4]]) {
@@ -1292,18 +1283,19 @@ impl Renderer {
     }
 
     pub fn set_joint_matrices_scaled(&mut self, matrices: &[[[f32; 4]; 4]], scale: f32) {
-        // Bake model scale into joint matrices: finalJoint = scaleMatrix * jointMatrix
-        // This transforms from bind space → world space at the correct scale
+        eprintln!("[scale] set_joint_matrices_scaled called with {} matrices, scale={}", matrices.len(), scale);
+        if !matrices.is_empty() {
+            let m = &matrices[0];
+            eprintln!("[scale] Input m[0]: [{:.4},{:.4},{:.4},{:.4}]", m[0][0], m[0][1], m[0][2], m[0][3]);
+        }
         let mut scaled = Vec::with_capacity(matrices.len());
         for m in matrices {
-            // Column-major [col][row]: left-multiply by uniform scale
-            // scaleMatrix * M: scales output x,y,z → scale rows 0-2 of each column
             let mut sm = *m;
             for col in 0..4 {
-                sm[col][0] *= scale; // x component
-                sm[col][1] *= scale; // y component
-                sm[col][2] *= scale; // z component
-                // sm[col][3] unchanged (w component)
+                sm[col][0] *= scale; // row 0 (x)
+                sm[col][1] *= scale; // row 1 (y)
+                sm[col][2] *= scale; // row 2 (z)
+                // sm[col][3] unchanged (w)
             }
             scaled.push(sm);
         }
@@ -1312,24 +1304,19 @@ impl Renderer {
 
     fn flush_joint_matrices(&mut self) {
         if let Some(ref matrices) = self.pending_joint_matrices {
-            let count = matrices.len().min(127); // max 127, slot 127 = scale
-            let mut data = vec![0u8; 8192];
-            for i in 0..count {
-                let offset = i * 64;
-                // Matrices are column-major [col][row] — write directly
-                for col in 0..4 {
-                    for row in 0..4 {
-                        let bytes = matrices[i][col][row].to_le_bytes();
-                        let idx = offset + col * 16 + row * 4;
-                        data[idx..idx+4].copy_from_slice(&bytes);
-                    }
-                }
+            let count = matrices.len().min(127);
+            if self.debug_frame < 3 {
+                eprintln!("[flush] Writing {} joint matrices, scale={}", count, self.model_skin_scale);
+                let m = &matrices[0];
+                eprintln!("[flush] Joint0 scaled: [{:.3},{:.3},{:.3},{:.3}] [{:.3},{:.3},{:.3},{:.3}]",
+                    m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3]);
             }
-            // Write model scale to slot 127 [0][0] (column-major: first 4 bytes of slot)
-            let scale_offset = 127 * 64;
-            let scale_bytes = self.model_skin_scale.to_le_bytes();
-            data[scale_offset..scale_offset+4].copy_from_slice(&scale_bytes);
-            self.queue.write_buffer(&self.joint_buffer, 0, &data);
+            // Column-major matrices — write directly via bytemuck (same as MVP)
+            let mut all_data = vec![[[0.0f32; 4]; 4]; 128];
+            for i in 0..count {
+                all_data[i] = matrices[i];
+            }
+            self.queue.write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(&all_data));
         }
         self.pending_joint_matrices = None;
     }

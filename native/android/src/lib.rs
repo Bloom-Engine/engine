@@ -9,9 +9,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut NATIVE_WINDOW: *mut libc::c_void = std::ptr::null_mut();
 static AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
+static mut ASSET_BASE_PATH: Option<String> = None;
 
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
+}
+
+/// Resolve relative asset paths to the app's base asset directory.
+/// On Android, relative paths like "assets/models/tree.glb" won't resolve
+/// because the working directory isn't the app's data directory.
+fn resolve_path(path: &str) -> String {
+    if path.starts_with('/') {
+        return path.to_string();
+    }
+    unsafe {
+        if let Some(ref base) = ASSET_BASE_PATH {
+            format!("{}/{}", base, path)
+        } else {
+            path.to_string()
+        }
+    }
+}
+
+/// Called by the Android Activity to set the base path for asset resolution.
+/// Should be set to the app's files directory where assets are extracted.
+#[no_mangle]
+pub extern "C" fn bloom_android_set_asset_path(path_ptr: *const u8) {
+    let path = str_from_header(path_ptr);
+    unsafe {
+        ASSET_BASE_PATH = Some(path.to_string());
+    }
 }
 
 // ============================================================
@@ -63,6 +90,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     let _title = str_from_header(title_ptr);
 
     unsafe {
+        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: starting\0".as_ptr());
         let window = NATIVE_WINDOW;
         // If no native window was set, use requested dimensions with a headless surface
         let (pixel_w, pixel_h) = if !window.is_null() {
@@ -73,6 +101,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            flags: wgpu::InstanceFlags::default(),
             ..Default::default()
         });
 
@@ -93,22 +122,52 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             ),
             raw_window_handle: raw,
         }).expect("Failed to create surface");
+        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: surface created\0".as_ptr());
 
         let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
-        })).expect("No adapter found");
+        }));
+        let adapter = match adapter {
+            Some(a) => a,
+            None => {
+                // Try again without surface compatibility requirement
+                match pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    ..Default::default()
+                })) {
+                    Some(a) => a,
+                    None => panic!("No GPU adapter found"),
+                }
+            }
+        };
+        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: adapter found\0".as_ptr());
 
         let (device, queue) = pollster_block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
+            &wgpu::DeviceDescriptor {
+                label: Some("bloom_device"),
+                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                    .using_resolution(adapter.limits()),
+                ..Default::default()
+            },
             None,
         )).expect("Failed to create device");
+        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: device created\0".as_ptr());
 
         let surface_caps = surface.get_capabilities(&adapter);
+        if surface_caps.formats.is_empty() {
+            panic!("Surface reports no supported formats (emulator Vulkan limitation)");
+        }
         let format = surface_caps.formats.iter()
             .find(|f| f.is_srgb()).copied()
             .unwrap_or(surface_caps.formats[0]);
+
+        let alpha_mode = if surface_caps.alpha_modes.is_empty() {
+            wgpu::CompositeAlphaMode::Auto
+        } else {
+            surface_caps.alpha_modes[0]
+        };
 
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -116,14 +175,16 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             width: pixel_w,
             height: pixel_h,
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface_caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &surface_config);
 
+        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: surface configured\0".as_ptr());
         let renderer = Renderer::new(device, queue, surface, surface_config);
         let _ = ENGINE.set(EngineState::new(renderer));
+        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: engine initialized\0".as_ptr());
     }
 }
 
@@ -286,7 +347,7 @@ pub extern "C" fn bloom_measure_text(text_ptr: *const u8, size: f64) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_load_font(path_ptr: *const u8, size: f64) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) { Ok(data) => engine().text.load_font(&data) as f64, Err(_) => 0.0 }
+    match std::fs::read(resolve_path(path)) { Ok(data) => engine().text.load_font(&data) as f64, Err(_) => 0.0 }
 }
 
 #[no_mangle]
@@ -330,9 +391,9 @@ fn android_audio_thread() {
     struct BloomAudioCallback;
 
     impl AudioOutputCallback for BloomAudioCallback {
-        type FrameType = (f32, f32); // stereo
+        type FrameType = (f32, Stereo);
 
-        fn on_audio_ready(&mut self, _stream: &mut dyn AudioOutputStream, frames: &mut [(f32, f32)]) -> DataCallbackResult {
+        fn on_audio_ready(&mut self, _stream: &mut dyn AudioOutputStreamSafe, frames: &mut [(f32, f32)]) -> DataCallbackResult {
             // Convert frame tuples to interleaved slice
             let len = frames.len() * 2;
             let ptr = frames.as_mut_ptr() as *mut f32;
@@ -352,8 +413,8 @@ fn android_audio_thread() {
     let mut stream = AudioStreamBuilder::default()
         .set_performance_mode(PerformanceMode::LowLatency)
         .set_sharing_mode(SharingMode::Shared)
-        .set_format(AudioFormat::F32)
-        .set_channel_count(ChannelCount::Stereo)
+        .set_format::<f32>()
+        .set_channel_count::<Stereo>()
         .set_sample_rate(44100)
         .set_callback(BloomAudioCallback)
         .open_stream();
@@ -374,7 +435,7 @@ fn android_audio_thread() {
 #[no_mangle]
 pub extern "C" fn bloom_load_sound(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => {
             if let Some(s) = parse_wav(&data) { engine().audio.load_sound(s) }
             else if let Some(s) = parse_ogg(&data) { engine().audio.load_sound(s) }
@@ -409,7 +470,7 @@ pub extern "C" fn bloom_set_listener_position(x: f64, y: f64, z: f64, fx: f64, f
 #[no_mangle]
 pub extern "C" fn bloom_load_texture(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => {
             let eng = engine();
             let renderer_ptr = &mut eng.renderer as *mut bloom_shared::renderer::Renderer;
@@ -471,7 +532,7 @@ pub extern "C" fn bloom_gen_texture_mipmaps(_handle: f64) {
 #[no_mangle]
 pub extern "C" fn bloom_load_image(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) { Ok(data) => engine().textures.load_image(&data), Err(_) => 0.0 }
+    match std::fs::read(resolve_path(path)) { Ok(data) => engine().textures.load_image(&data), Err(_) => 0.0 }
 }
 
 #[no_mangle]
@@ -557,15 +618,17 @@ pub extern "C" fn bloom_draw_ray(ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz
 #[no_mangle]
 pub extern "C" fn bloom_load_model(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) { Ok(data) => engine().models.load_model(&data), Err(_) => 0.0 }
+    match std::fs::read(resolve_path(path)) { Ok(data) => engine().models.load_model(&data), Err(_) => 0.0 }
 }
 #[no_mangle]
 pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f64, r: f64, g: f64, b: f64, a: f64) {
     let eng = engine();
     if let Some(model) = eng.models.get(handle) {
         let tint = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32];
+        let position = [x as f32, y as f32, z as f32];
         for mesh in &model.meshes {
-            eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, [x as f32, y as f32, z as f32], scale as f32, tint);
+            let tex_idx = mesh.texture_idx.unwrap_or(0);
+            eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, position, scale as f32, tint, tex_idx);
         }
     }
 }
@@ -625,7 +688,7 @@ pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f32, vertex_count: f64, i
 #[no_mangle]
 pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => engine().models.load_model_animation(&data),
         Err(_) => 0.0,
     }
@@ -641,7 +704,7 @@ pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, tim
 #[no_mangle]
 pub extern "C" fn bloom_load_music(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => {
             if let Some(s) = parse_ogg(&data) { engine().audio.load_music(s) }
             else if let Some(s) = parse_wav(&data) { engine().audio.load_music(s) }
@@ -676,6 +739,25 @@ pub extern "C" fn bloom_is_gamepad_button_down(btn: f64) -> f64 { if engine().in
 pub extern "C" fn bloom_is_gamepad_button_released(btn: f64) -> f64 { if engine().input.is_gamepad_button_released(btn as usize) { 1.0 } else { 0.0 } }
 #[no_mangle]
 pub extern "C" fn bloom_get_gamepad_axis_count() -> f64 { engine().input.get_gamepad_axis_count() as f64 }
+
+// --- Skeletal Animation Debug ---
+
+#[no_mangle]
+pub extern "C" fn bloom_set_joint_test(_joint: f64, _angle: f64) {
+    // No-op for now — skeletal animation testing
+}
+
+// --- Lighting ---
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) {
+    engine().renderer.set_ambient_light(r, g, b, intensity);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
+    engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
+}
 
 // --- Utility FFI ---
 
@@ -719,13 +801,14 @@ pub extern "C" fn bloom_write_file(path_ptr: *const u8, data_ptr: *const u8) -> 
 #[no_mangle]
 pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    if std::path::Path::new(path).exists() { 1.0 } else { 0.0 }
+    let resolved = resolve_path(path);
+    if std::path::Path::new(&resolved).exists() { 1.0 } else { 0.0 }
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
-    match std::fs::read_to_string(path) {
+    match std::fs::read_to_string(resolve_path(path)) {
         Ok(contents) => {
             let c_str = std::ffi::CString::new(contents).unwrap_or_default();
             c_str.into_raw() as *const u8
@@ -769,4 +852,112 @@ pub extern "C" fn bloom_get_platform() -> f64 { 5.0 }
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
+}
+
+// ============================================================
+// JNI Bridge for Bloom game applications
+// ============================================================
+//
+// These functions bridge the Android Java/Kotlin layer to the
+// Bloom engine. Any Bloom game on Android should use the
+// com.bloomengine.game.BloomGameBridge Kotlin class.
+
+extern "C" {
+    fn ANativeWindow_fromSurface(env: *mut libc::c_void, surface: *mut libc::c_void) -> *mut libc::c_void;
+    fn mallopt(param: i32, value: i32) -> i32;
+    fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+    fn main() -> i32;
+}
+
+/// JNI_OnLoad: called when System.loadLibrary() loads this .so.
+/// Disables MTE heap tagging (required for Perry NaN-boxing) and
+/// reads the asset base path from BLOOM_ASSET_PATH env var.
+#[no_mangle]
+pub extern "C" fn JNI_OnLoad(_vm: *mut libc::c_void, _reserved: *mut libc::c_void) -> i32 {
+    unsafe {
+        // Disable MTE heap tagging for Perry NaN-boxing compatibility.
+        // Perry uses 48-bit pointers; Android's scudo allocator may tag
+        // the top byte, corrupting NaN-boxed pointer values.
+        mallopt(-204, 0);
+
+        __android_log_print(
+            3, b"BloomEngine\0".as_ptr(),
+            b"JNI_OnLoad: MTE disabled\0".as_ptr(),
+        );
+    }
+
+    // Read asset base path from environment (set by Activity before loadLibrary)
+    if let Ok(path) = std::env::var("BLOOM_ASSET_PATH") {
+        unsafe {
+            __android_log_print(
+                3, b"BloomEngine\0".as_ptr(),
+                b"JNI_OnLoad: asset path set\0".as_ptr(),
+            );
+            ASSET_BASE_PATH = Some(path);
+        }
+    }
+
+    0x00010006 // JNI_VERSION_1_6
+}
+
+/// Pass the Android Surface to the engine so it can create a wgpu rendering surface.
+/// Called from BloomGameBridge.nativeSetSurface(surface).
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSetSurface(
+    env: *mut libc::c_void,
+    _class: *mut libc::c_void,
+    surface: *mut libc::c_void,
+) {
+    let window = ANativeWindow_fromSurface(env, surface);
+    __android_log_print(
+        3, b"BloomEngine\0".as_ptr(),
+        b"nativeSetSurface: ANativeWindow acquired\0".as_ptr(),
+    );
+    bloom_android_set_native_window(window);
+}
+
+/// Run the compiled game's main() function on the game thread.
+/// Called from BloomGameBridge.nativeMain().
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeMain(
+    _env: *mut libc::c_void,
+    _class: *mut libc::c_void,
+) {
+    __android_log_print(
+        3, b"BloomEngine\0".as_ptr(),
+        b"nativeMain: calling main()\0".as_ptr(),
+    );
+    main();
+    __android_log_print(
+        3, b"BloomEngine\0".as_ptr(),
+        b"nativeMain: main() returned\0".as_ptr(),
+    );
+}
+
+/// Forward touch events from the Android UI thread to the engine's input system.
+/// Called from BloomGameBridge.nativeOnTouch(action, x, y, pointerIndex).
+#[no_mangle]
+pub extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeOnTouch(
+    _env: *mut libc::c_void,
+    _class: *mut libc::c_void,
+    action: i32,
+    x: f64,
+    y: f64,
+    pointer_index: i32,
+) {
+    bloom_android_on_touch(action, x, y, pointer_index);
+}
+
+/// Signal the engine to close when the Activity is destroyed.
+/// Called from BloomGameBridge.nativeOnDestroy().
+#[no_mangle]
+pub extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeOnDestroy(
+    _env: *mut libc::c_void,
+    _class: *mut libc::c_void,
+) {
+    unsafe {
+        if let Some(eng) = ENGINE.get_mut() {
+            eng.should_close = true;
+        }
+    }
 }

@@ -5,7 +5,7 @@ edition = "2021"
 
 [lib]
 name = "bloom_android"
-crate-type = ["cdylib"]
+crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 bloom-shared = { path = "../shared" }
