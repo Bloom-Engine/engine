@@ -134,14 +134,15 @@ mod win32 {
 
     pub fn create_window(width: f64, height: f64, title: &str) -> HWND {
         unsafe {
-            let hinstance = GetModuleHandleW(None).unwrap();
+            let hmodule = GetModuleHandleW(None).unwrap();
+            let hinstance: HINSTANCE = hmodule.into();
             let class_name = w!("BloomWindowClass");
 
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(wndproc),
-                hInstance: hinstance.into(),
+                hInstance: hinstance,
                 lpszClassName: class_name,
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap(),
                 ..Default::default()
@@ -157,7 +158,7 @@ mod win32 {
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                 CW_USEDEFAULT, CW_USEDEFAULT,
                 width as i32, height as i32,
-                None, None, Some(hinstance.into()), None,
+                None, None, Some(&hinstance), None,
             ).unwrap();
 
             ShowWindow(hwnd, SW_SHOW);
