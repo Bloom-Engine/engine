@@ -1282,23 +1282,43 @@ impl Renderer {
         self.model_skin_scale = scale;
     }
 
-    pub fn set_joint_matrices_scaled(&mut self, matrices: &[[[f32; 4]; 4]], scale: f32) {
-        eprintln!("[scale] set_joint_matrices_scaled called with {} matrices, scale={}", matrices.len(), scale);
-        if !matrices.is_empty() {
-            let m = &matrices[0];
-            eprintln!("[scale] Input m[0]: [{:.4},{:.4},{:.4},{:.4}]", m[0][0], m[0][1], m[0][2], m[0][3]);
-        }
+    pub fn set_joint_matrices_scaled(&mut self, matrices: &[[[f32; 4]; 4]], scale: f32, position: [f32; 3]) {
         let mut scaled = Vec::with_capacity(matrices.len());
         for m in matrices {
             let mut sm = *m;
             for col in 0..4 {
-                sm[col][0] *= scale; // row 0 (x)
-                sm[col][1] *= scale; // row 1 (y)
-                sm[col][2] *= scale; // row 2 (z)
-                // sm[col][3] unchanged (w)
+                sm[col][0] *= scale;
+                sm[col][1] *= scale;
+                sm[col][2] *= scale;
             }
+            sm[3][0] += position[0];
+            sm[3][1] += position[1];
+            sm[3][2] += position[2];
             scaled.push(sm);
         }
+
+        // One-time dump: print scaled matrices for joints 0, 1, 55 and simulate skinning
+        static mut SCALE_DUMP: u32 = 0;
+        unsafe {
+            if SCALE_DUMP < 2 && scaled.len() > 55 {
+                SCALE_DUMP += 1;
+                eprintln!("[dump{}] scale={}, pos={:?}", SCALE_DUMP, scale, position);
+                for &ji in &[0usize, 1, 55] {
+                    let m = &scaled[ji];
+                    eprintln!("[dump{}] J{} scaled matrix:", SCALE_DUMP, ji);
+                    for col in 0..4 {
+                        eprintln!("  col{}: [{:.6},{:.6},{:.6},{:.6}]", col, m[col][0], m[col][1], m[col][2], m[col][3]);
+                    }
+                    // Simulate skinning for a test vertex at [0.1, 0.0, 1.0] (100x scaled, near spine)
+                    let vx = 0.1f32; let vy = 0.0; let vz = 1.0;
+                    let rx = m[0][0]*vx + m[1][0]*vy + m[2][0]*vz + m[3][0];
+                    let ry = m[0][1]*vx + m[1][1]*vy + m[2][1]*vz + m[3][1];
+                    let rz = m[0][2]*vx + m[1][2]*vy + m[2][2]*vz + m[3][2];
+                    eprintln!("  test vertex [0.1,0,1] → [{:.4},{:.4},{:.4}]", rx, ry, rz);
+                }
+            }
+        }
+
         self.pending_joint_matrices = Some(scaled);
     }
 
@@ -1575,12 +1595,69 @@ impl Renderer {
     pub fn draw_model_mesh_tinted(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32) {
         self.ensure_draw_state_3d(texture_idx);
         let base = self.vertices_3d.len() as u32;
+        // Debug: position range + sample vertices from different body parts
+        static mut SKIN_DUMP: bool = false;
+        unsafe {
+            if !SKIN_DUMP {
+                // Find position range
+                let mut min_y = f32::MAX;
+                let mut max_y = f32::MIN;
+                let mut skinned_count = 0u32;
+                let mut joint_set = std::collections::HashSet::new();
+                for v in vertices.iter() {
+                    let ws = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3];
+                    if ws > 0.01 {
+                        skinned_count += 1;
+                        if v.position[1] < min_y { min_y = v.position[1]; }
+                        if v.position[1] > max_y { max_y = v.position[1]; }
+                        joint_set.insert(v.joints[0] as u32);
+                    }
+                }
+                if skinned_count > 0 {
+                eprintln!("[MESH] {} skinned verts, y range [{:.4}, {:.4}], {} unique primary joints",
+                    skinned_count, min_y, max_y, joint_set.len());
+
+                // Sample vertices at different heights (bottom, middle, top)
+                let targets = [min_y, (min_y+max_y)*0.5, max_y];
+                for target in &targets {
+                    let mut best: Option<(usize, f32)> = None;
+                    for (vi, v) in vertices.iter().enumerate() {
+                        let ws = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3];
+                        if ws > 0.01 {
+                            let d = (v.position[1] - target).abs();
+                            if best.is_none() || d < best.unwrap().1 {
+                                best = Some((vi, d));
+                            }
+                        }
+                    }
+                    if let Some((vi, _)) = best {
+                        let v = &vertices[vi];
+                        eprintln!("[vtx {}] pos=[{:.4},{:.4},{:.4}] j=[{},{},{},{}] w=[{:.3},{:.3},{:.3},{:.3}]",
+                            vi, v.position[0], v.position[1], v.position[2],
+                            v.joints[0] as u32, v.joints[1] as u32, v.joints[2] as u32, v.joints[3] as u32,
+                            v.weights[0], v.weights[1], v.weights[2], v.weights[3]);
+                        if let Some(ref matrices) = self.pending_joint_matrices {
+                            let j0 = v.joints[0] as usize;
+                            if j0 < matrices.len() {
+                                let m = &matrices[j0];
+                                let rx = m[0][0]*v.position[0] + m[1][0]*v.position[1] + m[2][0]*v.position[2] + m[3][0];
+                                let ry = m[0][1]*v.position[0] + m[1][1]*v.position[1] + m[2][1]*v.position[2] + m[3][1];
+                                let rz = m[0][2]*v.position[0] + m[1][2]*v.position[1] + m[2][2]*v.position[2] + m[3][2];
+                                eprintln!("  → skinned pos=[{:.4},{:.4},{:.4}]", rx, ry, rz);
+                            }
+                        }
+                    }
+                }
+                SKIN_DUMP = true;
+                } // skinned_count > 0
+            }
+        }
         for v in vertices {
             // Check if vertex is skinned (has non-zero weights)
             let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
             let pos = if is_skinned {
-                // Skinned: scale positions (joint matrices also scaled — double scale gives correct result)
-                [v.position[0] * scale, v.position[1] * scale, v.position[2] * scale]
+                // Skinned: pass raw bind-pose positions — joint matrices have scale baked in
+                v.position
             } else {
                 // Unskinned: apply CPU-side position + scale
                 [v.position[0] * scale + position[0],

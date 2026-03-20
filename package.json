@@ -101,7 +101,7 @@
         { "name": "bloom_gen_mesh_heightmap",       "params": ["f64", "f64", "f64", "f64"],                              "returns": "f64"  },
         { "name": "bloom_load_shader",              "params": ["i64"],                                                   "returns": "f64"  },
         { "name": "bloom_load_model_animation",   "params": ["i64"],                                                   "returns": "f64"  },
-        { "name": "bloom_update_model_animation",  "params": ["f64", "f64", "f64"],                                    "returns": "void" },
+        { "name": "bloom_update_model_animation",  "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],       "returns": "void" },
         { "name": "bloom_create_mesh",             "params": ["i64", "f64", "i64", "f64"],                             "returns": "f64"  },
         { "name": "bloom_set_joint_test",          "params": ["f64", "f64"],                                            "returns": "void" },
         { "name": "bloom_set_ambient_light",       "params": ["f64", "f64", "f64", "f64"],                              "returns": "void" },

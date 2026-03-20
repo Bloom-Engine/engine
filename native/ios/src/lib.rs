@@ -1018,8 +1018,14 @@ pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64) {
-    engine().models.update_model_animation(handle, anim_index as usize, time as f32);
+pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64, scale: f64, px: f64, py: f64, pz: f64) {
+    let eng = engine();
+    eng.models.update_model_animation(handle, anim_index as usize, time as f32);
+    if let Some(anim) = eng.models.get_animation(handle) {
+        if !anim.joint_matrices.is_empty() {
+            eng.renderer.set_joint_matrices_scaled(&anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32]);
+        }
+    }
 }
 
 #[no_mangle]

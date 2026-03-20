@@ -188,8 +188,8 @@ export function loadModelAnimation(path: string): number {
   return bloom_load_model_animation(path as any);
 }
 
-export function updateModelAnimation(handle: number, animIndex: number, time: number): void {
-  bloom_update_model_animation(handle, animIndex, time);
+export function updateModelAnimation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number): void {
+  bloom_update_model_animation(handle, animIndex, time, scale, px, py, pz);
 }
 
 export function createMesh(vertices: number[], indices: number[]): Model {

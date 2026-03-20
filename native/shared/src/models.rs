@@ -17,6 +17,9 @@ pub struct JointData {
     pub inverse_bind: [[f32; 4]; 4],
     pub children: Vec<usize>,
     pub name: String,
+    pub rest_translation: [f32; 3],
+    pub rest_rotation: [f32; 4],
+    pub rest_scale: [f32; 3],
 }
 
 pub struct AnimationChannel {
@@ -42,6 +45,9 @@ pub struct ModelAnimation {
     pub skeleton: Option<SkeletonData>,
     pub animations: Vec<AnimationData>,
     pub joint_matrices: Vec<[[f32; 4]; 4]>,
+    /// Reference rest-pose rotations (from first animation, sampled at t=0).
+    /// Used for retargeting when multiple armatures have different rest orientations.
+    pub ref_rest_rotations: Option<Vec<[f32; 4]>>,
 }
 
 pub struct ModelManager {
@@ -275,10 +281,13 @@ impl ModelManager {
                 model_anim.joint_matrices = vec![mat4_identity(); joint_count];
             }
 
-            // Evaluate local transforms for each joint from animation channels
-            let mut local_translations = vec![[0.0f32; 3]; joint_count];
-            let mut local_rotations = vec![[0.0f32, 0.0, 0.0, 1.0]; joint_count]; // identity quat
-            let mut local_scales = vec![[1.0f32; 3]; joint_count];
+            // Initialize from rest-pose transforms (fallback for non-animated joints)
+            let mut local_translations: Vec<[f32; 3]> = skeleton.joints.iter()
+                .map(|j| j.rest_translation).collect();
+            let mut local_rotations: Vec<[f32; 4]> = skeleton.joints.iter()
+                .map(|j| j.rest_rotation).collect();
+            let mut local_scales: Vec<[f32; 3]> = skeleton.joints.iter()
+                .map(|j| j.rest_scale).collect();
 
             let anim = &model_anim.animations[anim_index];
             let t = if anim.duration > 0.0 { time % anim.duration } else { 0.0 };
@@ -300,6 +309,32 @@ impl ModelManager {
                 }
             }
 
+            // Strip root motion from root joint (keep Y bounce, zero XZ displacement)
+            if true {
+                let rest_t = skeleton.joints[0].rest_translation;
+                let anim_t = local_translations[0];
+                // Keep the animated Y delta (bounce) but use rest XZ
+                local_translations[0] = [rest_t[0], anim_t[1], rest_t[2]];
+            }
+
+            // Debug: print animation data for first 3 joints (once per animation index)
+            static mut ANIM_DUMP_0: bool = false;
+            static mut ANIM_DUMP_1: bool = false;
+            unsafe {
+                let should_print = (anim_index == 0 && !ANIM_DUMP_0) || (anim_index == 1 && !ANIM_DUMP_1);
+                if should_print {
+                    if anim_index == 0 { ANIM_DUMP_0 = true; }
+                    if anim_index == 1 { ANIM_DUMP_1 = true; }
+                    eprintln!("[anim{}] t={:.3}, Joints 0-2:", anim_index, t);
+                    for ji in 0..3.min(joint_count) {
+                        eprintln!("[anim{}] J{} '{}' t=[{:.4},{:.4},{:.4}] r=[{:.4},{:.4},{:.4},{:.4}]",
+                            anim_index, ji, skeleton.joints[ji].name,
+                            local_translations[ji][0], local_translations[ji][1], local_translations[ji][2],
+                            local_rotations[ji][0], local_rotations[ji][1], local_rotations[ji][2], local_rotations[ji][3]);
+                    }
+                }
+            }
+
             // Build world transforms by walking the hierarchy from roots
             let mut world_transforms = vec![mat4_identity(); joint_count];
 
@@ -315,6 +350,22 @@ impl ModelManager {
             // Multiply by inverse bind matrices to get final joint matrices
             for i in 0..joint_count {
                 model_anim.joint_matrices[i] = mat4_mul(&world_transforms[i], &skeleton.joints[i].inverse_bind);
+            }
+
+            // Debug: print joint matrix diagonal and translation for first 3 joints
+            static mut JM_DUMP_0: bool = false;
+            static mut JM_DUMP_1: bool = false;
+            unsafe {
+                let should = (anim_index == 0 && !JM_DUMP_0) || (anim_index == 1 && !JM_DUMP_1);
+                if should {
+                    if anim_index == 0 { JM_DUMP_0 = true; }
+                    if anim_index == 1 { JM_DUMP_1 = true; }
+                    for ji in 0..3.min(joint_count) {
+                        let m = &model_anim.joint_matrices[ji];
+                        eprintln!("[jm{}] J{} diag=[{:.2},{:.2},{:.2}] trans=[{:.2},{:.2},{:.2}]",
+                            anim_index, ji, m[0][0], m[1][1], m[2][2], m[3][0], m[3][1], m[3][2]);
+                    }
+                }
             }
 
             // Debug: print joint 0 values once
@@ -458,6 +509,16 @@ fn sample_vec3(timestamps: &[f32], values: &[[f32; 3]], time: f32) -> [f32; 3] {
     lerp_vec3(&values[i0], &values[i1], t)
 }
 
+fn quat_mul(a: &[f32; 4], b: &[f32; 4]) -> [f32; 4] {
+    // Hamilton product: a * b where q = [x, y, z, w]
+    [
+        a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
+        a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
+        a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
+        a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
+    ]
+}
+
 fn sample_quat(timestamps: &[f32], values: &[[f32; 4]], time: f32) -> [f32; 4] {
     if values.is_empty() { return [0.0, 0.0, 0.0, 1.0]; }
     if values.len() == 1 { return values[0]; }
@@ -594,27 +655,24 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
                 ibm = mat4_identity();
             }
 
-            // IBM keeps original values (including Blender's 100x FBX scale)
-            // Both vertex positions and joint matrices are scaled by drawModel scale
-            if false { // REMOVED: IBM normalization
-                let diag_scale = ibm[0][0].abs();
-                let inv = 1.0 / diag_scale;
-                for a in 0..4 {
-                    for b in 0..4 {
-                        if !(a == 3 && b == 3) {
-                            ibm[a][b] *= inv;
-                        }
-                    }
-                }
-            }
+            // Blender FBX export bakes 100x scale into IBMs (converts m→cm for bone space).
+            // This is NEEDED because Blender also pre-scales vertex positions to meters.
+            // The 100x in IBMs converts meter-space vertices to cm-space bone transforms.
+            // DO NOT normalize — the scale is intentional and required.
 
             let children: Vec<usize> = node.children()
                 .filter_map(|child| node_to_joint.get(&child.index()).copied())
                 .collect();
 
             let name = node.name().unwrap_or("").to_string();
+            let (t, r, s) = node.transform().decomposed();
 
-            joints.push(JointData { inverse_bind: ibm, children, name });
+            joints.push(JointData {
+                inverse_bind: ibm, children, name,
+                rest_translation: t,
+                rest_rotation: r,
+                rest_scale: s,
+            });
         }
 
         // Find root joints (joints that are not children of any other joint)
@@ -724,10 +782,28 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
     }
 
     let joint_count = skeleton.as_ref().map(|s| s.joints.len()).unwrap_or(0);
+    // Build reference rest rotations from the first animation at t=0
+    let ref_rest_rotations = if animations.len() > 1 {
+        if let Some(ref skel) = skeleton {
+            let joint_count_s = skel.joints.len();
+            let mut rest_rots = vec![[0.0f32, 0.0, 0.0, 1.0]; joint_count_s];
+            // Sample first animation at t=0 to get reference rest rotations
+            let anim0 = &animations[0];
+            for ch in &anim0.channels {
+                if ch.joint_index < joint_count_s && !ch.rotations.is_empty() {
+                    rest_rots[ch.joint_index] = if ch.rotations.len() > 0 { ch.rotations[0] } else { [0.0, 0.0, 0.0, 1.0] };
+                }
+            }
+            eprintln!("[retarget] Built reference rest rotations from anim 0 for {} joints", joint_count_s);
+            Some(rest_rots)
+        } else { None }
+    } else { None };
+
     Some(ModelAnimation {
         skeleton,
         animations,
         joint_matrices: vec![mat4_identity(); joint_count],
+        ref_rest_rotations,
     })
 }
 
@@ -783,6 +859,58 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
             _ => { texture_indices.push(0); }
         }
     }
+
+    // Detect armature scale for skinned meshes.
+    // Blender FBX imports set armature scale to 0.01 (cm→m conversion).
+    // Vertex positions inherit this scale but bone transforms don't,
+    // creating a unit mismatch. We apply the inverse to vertex positions.
+    let skin_vertex_scale: f32 = {
+        let mut scale = 1.0f32;
+        for node in gltf.nodes() {
+            if node.mesh().is_some() && node.skin().is_some() {
+                // Found a skinned mesh node — look for parent with scale
+                for parent in gltf.nodes() {
+                    for child in parent.children() {
+                        if child.index() == node.index() {
+                            let (_, _, s) = parent.transform().decomposed();
+                            let avg_scale = (s[0] + s[1] + s[2]) / 3.0;
+                            if avg_scale > 0.001 && (avg_scale - 1.0).abs() > 0.01 {
+                                scale = 1.0 / avg_scale;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: check IBMs for large scale (Blender FBX baked 100x)
+        if (scale - 1.0).abs() < 0.01 {
+            if let Some(skin) = gltf.skins().next() {
+                if let Some(accessor) = skin.inverse_bind_matrices() {
+                    let view = accessor.view().unwrap();
+                    let buf_idx = view.buffer().index();
+                    if buf_idx < buffer_data.len() {
+                        let offset = view.offset() + accessor.offset();
+                        let data = &buffer_data[buf_idx];
+                        if offset + 12 <= data.len() {
+                            // Read first 3 floats (first column of first IBM)
+                            let f0 = f32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
+                            let f1 = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
+                            let f2 = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
+                            let diag = (f0*f0 + f1*f1 + f2*f2).sqrt();
+                            if diag > 10.0 {
+                                scale = diag;
+                                eprintln!("[skin] IBM col0 len={:.1}, applying {:.0}x vertex scale", diag, scale);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (scale - 1.0).abs() > 0.01 {
+            eprintln!("[skin] Applying {:.0}x vertex scale to compensate armature transform", scale);
+        }
+        scale
+    };
 
     let mut meshes = Vec::new();
     let mut bbox_min = [f32::MAX; 3];
@@ -844,8 +972,15 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
                 } else {
                     [0.0; 4]
                 };
+                // Apply inverse armature scale to skinned vertex positions
+                let is_skinned = wv[0] + wv[1] + wv[2] + wv[3] > 0.01;
+                let final_pos = if is_skinned && (skin_vertex_scale - 1.0).abs() > 0.01 {
+                    [p[0] * skin_vertex_scale, p[1] * skin_vertex_scale, p[2] * skin_vertex_scale]
+                } else {
+                    p
+                };
                 vertices.push(Vertex3D {
-                    position: p,
+                    position: final_pos,
                     normal: normals[i],
                     color,
                     uv: tex_coords[i],
