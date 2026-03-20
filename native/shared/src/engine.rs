@@ -70,7 +70,9 @@ impl EngineState {
         self.renderer.end_frame();
         self.input.end_frame();
 
-        if self.target_fps > 0.0 {
+        // Vsync (PresentMode::Fifo, the wgpu default) already caps frame rate.
+        // Only apply CPU sleep-based cap when vsync is not active.
+        if self.target_fps > 0.0 && !self.renderer.vsync_active() {
             let target_frame_time = 1.0 / self.target_fps;
             let elapsed = self.last_frame_time.elapsed().as_secs_f64();
             if elapsed < target_frame_time {

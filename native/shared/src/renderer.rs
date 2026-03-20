@@ -322,6 +322,16 @@ pub struct Renderer {
     draw_calls_3d: Vec<DrawCall3D>,
     current_texture_3d: u32,
 
+    // Persistent GPU buffers (reused across frames, grown as needed)
+    persistent_vb_2d: wgpu::Buffer,
+    persistent_ib_2d: wgpu::Buffer,
+    persistent_vb_3d: wgpu::Buffer,
+    persistent_ib_3d: wgpu::Buffer,
+    persistent_vb_2d_capacity: usize, // in bytes
+    persistent_ib_2d_capacity: usize,
+    persistent_vb_3d_capacity: usize,
+    persistent_ib_3d_capacity: usize,
+
     // State
     pub render_mode: RenderMode,
     clear_color: wgpu::Color,
@@ -475,6 +485,7 @@ impl Renderer {
             label: Some("bloom_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -514,6 +525,37 @@ impl Renderer {
 
         // --- Depth texture ---
         let (depth_texture, depth_view) = create_depth_texture(&device, surface_config.width, surface_config.height);
+
+        // --- Persistent GPU buffers (reused across frames) ---
+        let vb_3d_cap = 1024 * 1024; // 1MB ~= 10,900 Vertex3D
+        let ib_3d_cap = 512 * 1024;  // 512KB
+        let vb_2d_cap = 256 * 1024;  // 256KB
+        let ib_2d_cap = 128 * 1024;  // 128KB
+
+        let persistent_vb_3d = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("persistent_vb_3d"),
+            size: vb_3d_cap as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let persistent_ib_3d = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("persistent_ib_3d"),
+            size: ib_3d_cap as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let persistent_vb_2d = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("persistent_vb_2d"),
+            size: vb_2d_cap as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let persistent_ib_2d = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("persistent_ib_2d"),
+            size: ib_2d_cap as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         // --- 2D Pipeline ---
         let pipeline_layout_2d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -681,10 +723,18 @@ impl Renderer {
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
-            vertices_3d: Vec::with_capacity(4096),
-            indices_3d: Vec::with_capacity(8192),
+            vertices_3d: Vec::with_capacity(16384),
+            indices_3d: Vec::with_capacity(32768),
             draw_calls_3d: Vec::new(),
             current_texture_3d: 0,
+            persistent_vb_2d,
+            persistent_ib_2d,
+            persistent_vb_3d,
+            persistent_ib_3d,
+            persistent_vb_2d_capacity: vb_2d_cap,
+            persistent_ib_2d_capacity: ib_2d_cap,
+            persistent_vb_3d_capacity: vb_3d_cap,
+            persistent_ib_3d_capacity: ib_3d_cap,
             render_mode: RenderMode::ScreenSpace,
             debug_frame: 0,
             pending_joint_matrices: None,
@@ -764,37 +814,25 @@ impl Renderer {
             label: Some("bloom_encoder"),
         });
 
-        // Create 2D GPU buffers
-        let vb_2d = if !self.vertices_2d.is_empty() {
-            Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("vb_2d"),
-                contents: bytemuck::cast_slice(&self.vertices_2d),
-                usage: wgpu::BufferUsages::VERTEX,
-            }))
-        } else { None };
-        let ib_2d = if !self.indices_2d.is_empty() {
-            Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("ib_2d"),
-                contents: bytemuck::cast_slice(&self.indices_2d),
-                usage: wgpu::BufferUsages::INDEX,
-            }))
-        } else { None };
+        // Upload 2D data to persistent GPU buffers
+        let has_2d = !self.vertices_2d.is_empty();
+        if has_2d {
+            let vb_size = std::mem::size_of_val(self.vertices_2d.as_slice());
+            let ib_size = std::mem::size_of_val(self.indices_2d.as_slice());
+            self.ensure_buffer_capacity_2d(vb_size, ib_size);
+            self.queue.write_buffer(&self.persistent_vb_2d, 0, bytemuck::cast_slice(&self.vertices_2d));
+            self.queue.write_buffer(&self.persistent_ib_2d, 0, bytemuck::cast_slice(&self.indices_2d));
+        }
 
-        // Create 3D GPU buffers
-        let vb_3d = if !self.vertices_3d.is_empty() {
-            Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("vb_3d"),
-                contents: bytemuck::cast_slice(&self.vertices_3d),
-                usage: wgpu::BufferUsages::VERTEX,
-            }))
-        } else { None };
-        let ib_3d = if !self.indices_3d.is_empty() {
-            Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("ib_3d"),
-                contents: bytemuck::cast_slice(&self.indices_3d),
-                usage: wgpu::BufferUsages::INDEX,
-            }))
-        } else { None };
+        // Upload 3D data to persistent GPU buffers
+        let has_3d = !self.vertices_3d.is_empty();
+        if has_3d {
+            let vb_size = std::mem::size_of_val(self.vertices_3d.as_slice());
+            let ib_size = std::mem::size_of_val(self.indices_3d.as_slice());
+            self.ensure_buffer_capacity_3d(vb_size, ib_size);
+            self.queue.write_buffer(&self.persistent_vb_3d, 0, bytemuck::cast_slice(&self.vertices_3d));
+            self.queue.write_buffer(&self.persistent_ib_3d, 0, bytemuck::cast_slice(&self.indices_3d));
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -820,13 +858,13 @@ impl Renderer {
             });
 
             // Draw 3D geometry first (with depth testing), batched by texture
-            if let (Some(vb), Some(ib)) = (&vb_3d, &ib_3d) {
+            if has_3d {
                 pass.set_pipeline(&self.pipeline_3d);
                 pass.set_bind_group(0, &self.uniform_bind_group_3d, &[]);
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);
                 pass.set_bind_group(3, &self.joint_bind_group, &[]);
-                pass.set_vertex_buffer(0, vb.slice(..));
-                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(0, self.persistent_vb_3d.slice(..));
+                pass.set_index_buffer(self.persistent_ib_3d.slice(..), wgpu::IndexFormat::Uint32);
 
                 if self.draw_calls_3d.is_empty() {
                     // No draw calls tracked — draw all with white texture (backward compat)
@@ -855,10 +893,10 @@ impl Renderer {
             }
 
             // Draw 2D geometry (no depth testing, always passes)
-            if let (Some(vb), Some(ib)) = (&vb_2d, &ib_2d) {
+            if has_2d {
                 pass.set_pipeline(&self.pipeline_2d);
-                pass.set_vertex_buffer(0, vb.slice(..));
-                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(0, self.persistent_vb_2d.slice(..));
+                pass.set_index_buffer(self.persistent_ib_2d.slice(..), wgpu::IndexFormat::Uint32);
 
                 let num_calls = self.draw_calls_2d.len();
                 for i in 0..num_calls {
@@ -889,21 +927,75 @@ impl Renderer {
     // ============================================================
 
     pub fn register_texture(&mut self, width: u32, height: u32, data: &[u8]) -> u32 {
-        let texture = self.device.create_texture_with_data(
-            &self.queue,
-            &wgpu::TextureDescriptor {
-                label: Some("registered_texture"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            data,
-        );
+        let max_dim = if width > height { width } else { height };
+        let mip_count = (max_dim as f32).log2().floor() as u32 + 1;
+
+        // Generate mip chain data (box filter downsampling)
+        let mut mip_data = Vec::with_capacity(data.len() * 2); // overallocate
+        mip_data.extend_from_slice(data); // level 0
+        let mut mip_offsets = vec![0usize]; // byte offset of each mip level
+        let mut mw = width;
+        let mut mh = height;
+        for _ in 1..mip_count {
+            let prev_offset = *mip_offsets.last().unwrap();
+            let pw = mw as usize; // previous width
+            let ph = mh as usize; // previous height
+            mw = if mw > 1 { mw / 2 } else { 1 };
+            mh = if mh > 1 { mh / 2 } else { 1 };
+            mip_offsets.push(mip_data.len());
+            for y in 0..mh as usize {
+                for x in 0..mw as usize {
+                    let sx = x * 2;
+                    let sy = y * 2;
+                    let sx1 = (sx + 1).min(pw - 1);
+                    let sy1 = (sy + 1).min(ph - 1);
+                    for c in 0..4usize {
+                        let p00 = mip_data[prev_offset + (sy * pw + sx) * 4 + c] as u32;
+                        let p10 = mip_data[prev_offset + (sy * pw + sx1) * 4 + c] as u32;
+                        let p01 = mip_data[prev_offset + (sy1 * pw + sx) * 4 + c] as u32;
+                        let p11 = mip_data[prev_offset + (sy1 * pw + sx1) * 4 + c] as u32;
+                        mip_data.push(((p00 + p10 + p01 + p11 + 2) / 4) as u8);
+                    }
+                }
+            }
+        }
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("registered_texture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: mip_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Upload each mip level
+        let mut lw = width;
+        let mut lh = height;
+        for level in 0..mip_count {
+            let offset = mip_offsets[level as usize];
+            let level_size = (lw * lh * 4) as usize;
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &mip_data[offset..offset + level_size],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * lw),
+                    rows_per_image: Some(lh),
+                },
+                wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+            );
+            lw = if lw > 1 { lw / 2 } else { 1 };
+            lh = if lh > 1 { lh / 2 } else { 1 };
+        }
+
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("texture_bg"),
@@ -1297,40 +1389,60 @@ impl Renderer {
             scaled.push(sm);
         }
 
-        // One-time dump: print scaled matrices for joints 0, 1, 55 and simulate skinning
-        static mut SCALE_DUMP: u32 = 0;
-        unsafe {
-            if SCALE_DUMP < 2 && scaled.len() > 55 {
-                SCALE_DUMP += 1;
-                eprintln!("[dump{}] scale={}, pos={:?}", SCALE_DUMP, scale, position);
-                for &ji in &[0usize, 1, 55] {
-                    let m = &scaled[ji];
-                    eprintln!("[dump{}] J{} scaled matrix:", SCALE_DUMP, ji);
-                    for col in 0..4 {
-                        eprintln!("  col{}: [{:.6},{:.6},{:.6},{:.6}]", col, m[col][0], m[col][1], m[col][2], m[col][3]);
-                    }
-                    // Simulate skinning for a test vertex at [0.1, 0.0, 1.0] (100x scaled, near spine)
-                    let vx = 0.1f32; let vy = 0.0; let vz = 1.0;
-                    let rx = m[0][0]*vx + m[1][0]*vy + m[2][0]*vz + m[3][0];
-                    let ry = m[0][1]*vx + m[1][1]*vy + m[2][1]*vz + m[3][1];
-                    let rz = m[0][2]*vx + m[1][2]*vy + m[2][2]*vz + m[3][2];
-                    eprintln!("  test vertex [0.1,0,1] → [{:.4},{:.4},{:.4}]", rx, ry, rz);
-                }
-            }
-        }
-
         self.pending_joint_matrices = Some(scaled);
+    }
+
+    /// Ensure persistent 3D buffers are large enough. Grows with doubling strategy.
+    fn ensure_buffer_capacity_3d(&mut self, vb_bytes: usize, ib_bytes: usize) {
+        if vb_bytes > self.persistent_vb_3d_capacity {
+            let new_cap = vb_bytes.next_power_of_two();
+            self.persistent_vb_3d = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("persistent_vb_3d"),
+                size: new_cap as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.persistent_vb_3d_capacity = new_cap;
+        }
+        if ib_bytes > self.persistent_ib_3d_capacity {
+            let new_cap = ib_bytes.next_power_of_two();
+            self.persistent_ib_3d = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("persistent_ib_3d"),
+                size: new_cap as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.persistent_ib_3d_capacity = new_cap;
+        }
+    }
+
+    /// Ensure persistent 2D buffers are large enough. Grows with doubling strategy.
+    fn ensure_buffer_capacity_2d(&mut self, vb_bytes: usize, ib_bytes: usize) {
+        if vb_bytes > self.persistent_vb_2d_capacity {
+            let new_cap = vb_bytes.next_power_of_two();
+            self.persistent_vb_2d = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("persistent_vb_2d"),
+                size: new_cap as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.persistent_vb_2d_capacity = new_cap;
+        }
+        if ib_bytes > self.persistent_ib_2d_capacity {
+            let new_cap = ib_bytes.next_power_of_two();
+            self.persistent_ib_2d = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("persistent_ib_2d"),
+                size: new_cap as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.persistent_ib_2d_capacity = new_cap;
+        }
     }
 
     fn flush_joint_matrices(&mut self) {
         if let Some(ref matrices) = self.pending_joint_matrices {
             let count = matrices.len().min(127);
-            if self.debug_frame < 3 {
-                eprintln!("[flush] Writing {} joint matrices, scale={}", count, self.model_skin_scale);
-                let m = &matrices[0];
-                eprintln!("[flush] Joint0 scaled: [{:.3},{:.3},{:.3},{:.3}] [{:.3},{:.3},{:.3},{:.3}]",
-                    m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3]);
-            }
             // Column-major matrices — write directly via bytemuck (same as MVP)
             let mut all_data = vec![[[0.0f32; 4]; 4]; 128];
             for i in 0..count {
@@ -1456,8 +1568,8 @@ impl Renderer {
         self.ensure_draw_state_3d(self.current_texture_3d);
         let color = Self::color_to_f32(r, g, b, a);
         let (cx, cy, cz, radius) = (cx as f32, cy as f32, cz as f32, radius as f32);
-        let rings = 16u32;
-        let slices = 16u32;
+        let rings = 8u32;
+        let slices = 8u32;
 
         for i in 0..rings {
             let theta1 = (i as f32) / (rings as f32) * std::f32::consts::PI;
@@ -1595,63 +1707,6 @@ impl Renderer {
     pub fn draw_model_mesh_tinted(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32) {
         self.ensure_draw_state_3d(texture_idx);
         let base = self.vertices_3d.len() as u32;
-        // Debug: position range + sample vertices from different body parts
-        static mut SKIN_DUMP: bool = false;
-        unsafe {
-            if !SKIN_DUMP {
-                // Find position range
-                let mut min_y = f32::MAX;
-                let mut max_y = f32::MIN;
-                let mut skinned_count = 0u32;
-                let mut joint_set = std::collections::HashSet::new();
-                for v in vertices.iter() {
-                    let ws = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3];
-                    if ws > 0.01 {
-                        skinned_count += 1;
-                        if v.position[1] < min_y { min_y = v.position[1]; }
-                        if v.position[1] > max_y { max_y = v.position[1]; }
-                        joint_set.insert(v.joints[0] as u32);
-                    }
-                }
-                if skinned_count > 0 {
-                eprintln!("[MESH] {} skinned verts, y range [{:.4}, {:.4}], {} unique primary joints",
-                    skinned_count, min_y, max_y, joint_set.len());
-
-                // Sample vertices at different heights (bottom, middle, top)
-                let targets = [min_y, (min_y+max_y)*0.5, max_y];
-                for target in &targets {
-                    let mut best: Option<(usize, f32)> = None;
-                    for (vi, v) in vertices.iter().enumerate() {
-                        let ws = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3];
-                        if ws > 0.01 {
-                            let d = (v.position[1] - target).abs();
-                            if best.is_none() || d < best.unwrap().1 {
-                                best = Some((vi, d));
-                            }
-                        }
-                    }
-                    if let Some((vi, _)) = best {
-                        let v = &vertices[vi];
-                        eprintln!("[vtx {}] pos=[{:.4},{:.4},{:.4}] j=[{},{},{},{}] w=[{:.3},{:.3},{:.3},{:.3}]",
-                            vi, v.position[0], v.position[1], v.position[2],
-                            v.joints[0] as u32, v.joints[1] as u32, v.joints[2] as u32, v.joints[3] as u32,
-                            v.weights[0], v.weights[1], v.weights[2], v.weights[3]);
-                        if let Some(ref matrices) = self.pending_joint_matrices {
-                            let j0 = v.joints[0] as usize;
-                            if j0 < matrices.len() {
-                                let m = &matrices[j0];
-                                let rx = m[0][0]*v.position[0] + m[1][0]*v.position[1] + m[2][0]*v.position[2] + m[3][0];
-                                let ry = m[0][1]*v.position[0] + m[1][1]*v.position[1] + m[2][1]*v.position[2] + m[3][1];
-                                let rz = m[0][2]*v.position[0] + m[1][2]*v.position[1] + m[2][2]*v.position[2] + m[3][2];
-                                eprintln!("  → skinned pos=[{:.4},{:.4},{:.4}]", rx, ry, rz);
-                            }
-                        }
-                    }
-                }
-                SKIN_DUMP = true;
-                } // skinned_count > 0
-            }
-        }
         for v in vertices {
             // Check if vertex is skinned (has non-zero weights)
             let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
@@ -1693,6 +1748,12 @@ impl Renderer {
 
     pub fn height(&self) -> u32 {
         self.surface_config.height
+    }
+
+    /// Returns true if vsync is active (Fifo or FifoRelaxed present mode).
+    pub fn vsync_active(&self) -> bool {
+        matches!(self.surface_config.present_mode,
+            wgpu::PresentMode::Fifo | wgpu::PresentMode::FifoRelaxed)
     }
 
     pub fn load_custom_shader(&mut self, wgsl_source: &str) -> usize {

@@ -38,7 +38,7 @@ while (!windowShouldClose()) {
 | **Textures** | `bloom/textures` | Image loading, sprite batching |
 | **Text** | `bloom/text` | TTF/OTF font loading and rendering |
 | **Audio** | `bloom/audio` | Sound effects + music streaming |
-| **Models** | `bloom/models` | 3D model loading (glTF, OBJ) |
+| **Models** | `bloom/models` | 3D model loading (glTF, OBJ), skeletal animation |
 | **Math** | `bloom/math` | Vectors, matrices, quaternions, easing |
 
 ## Platforms
@@ -90,6 +90,30 @@ interface Texture { handle: number; width: number; height: number }
 interface Sound { handle: number }
 interface Model { handle: number }
 ```
+
+## Skeletal Animation
+
+Bloom supports GPU-accelerated skeletal animation via glTF/GLB models. The pipeline uses 4-bone linear blend skinning with a 128-joint uniform buffer, running entirely on the GPU.
+
+```typescript
+import { loadModel, loadModelAnimation, updateModelAnimation, drawModel,
+         getTime, Colors } from "bloom";
+
+const character = loadModel("assets/models/character.glb");
+const anim = loadModelAnimation("assets/models/character.glb");
+
+// In your game loop:
+updateModelAnimation(anim, 0, getTime(), 1.0, 0, 0, 0);
+drawModel(character, { x: 0, y: 0, z: 0 }, 1.0, Colors.WHITE);
+```
+
+Key functions:
+- `loadModel(path)` -- loads GLB with skin data (JOINTS_0, WEIGHTS_0)
+- `loadModelAnimation(path)` -- loads skeleton + animation channels from GLB
+- `updateModelAnimation(handle, animIndex, time, scale, px, py, pz)` -- samples animation, computes joint matrices
+- `drawModel(model, position, scale, tint)` -- renders with GPU skinning
+
+For the full pipeline (Blender export, pitfalls, architecture), see [docs/skeletal-animation.md](docs/skeletal-animation.md).
 
 ## Links
 

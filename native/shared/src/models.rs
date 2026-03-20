@@ -292,11 +292,13 @@ impl ModelManager {
             let anim = &model_anim.animations[anim_index];
             let t = if anim.duration > 0.0 { time % anim.duration } else { 0.0 };
 
+            #[cfg(debug_assertions)]
             let mut channels_applied = 0usize;
             for channel in &anim.channels {
                 let ji = channel.joint_index;
                 if ji >= joint_count { continue; }
-                channels_applied += 1;
+                #[cfg(debug_assertions)]
+                { channels_applied += 1; }
 
                 if !channel.translations.is_empty() && !channel.timestamps.is_empty() {
                     local_translations[ji] = sample_vec3(&channel.timestamps, &channel.translations, t);
@@ -309,31 +311,8 @@ impl ModelManager {
                 }
             }
 
-            // Strip root motion from root joint (keep Y bounce, zero XZ displacement)
-            if true {
-                let rest_t = skeleton.joints[0].rest_translation;
-                let anim_t = local_translations[0];
-                // Keep the animated Y delta (bounce) but use rest XZ
-                local_translations[0] = [rest_t[0], anim_t[1], rest_t[2]];
-            }
-
-            // Debug: print animation data for first 3 joints (once per animation index)
-            static mut ANIM_DUMP_0: bool = false;
-            static mut ANIM_DUMP_1: bool = false;
-            unsafe {
-                let should_print = (anim_index == 0 && !ANIM_DUMP_0) || (anim_index == 1 && !ANIM_DUMP_1);
-                if should_print {
-                    if anim_index == 0 { ANIM_DUMP_0 = true; }
-                    if anim_index == 1 { ANIM_DUMP_1 = true; }
-                    eprintln!("[anim{}] t={:.3}, Joints 0-2:", anim_index, t);
-                    for ji in 0..3.min(joint_count) {
-                        eprintln!("[anim{}] J{} '{}' t=[{:.4},{:.4},{:.4}] r=[{:.4},{:.4},{:.4},{:.4}]",
-                            anim_index, ji, skeleton.joints[ji].name,
-                            local_translations[ji][0], local_translations[ji][1], local_translations[ji][2],
-                            local_rotations[ji][0], local_rotations[ji][1], local_rotations[ji][2], local_rotations[ji][3]);
-                    }
-                }
-            }
+            // Lock root translation to rest pose (strip all root motion)
+            local_translations[0] = skeleton.joints[0].rest_translation;
 
             // Build world transforms by walking the hierarchy from roots
             let mut world_transforms = vec![mat4_identity(); joint_count];
@@ -352,49 +331,20 @@ impl ModelManager {
                 model_anim.joint_matrices[i] = mat4_mul(&world_transforms[i], &skeleton.joints[i].inverse_bind);
             }
 
-            // Debug: print joint matrix diagonal and translation for first 3 joints
-            static mut JM_DUMP_0: bool = false;
-            static mut JM_DUMP_1: bool = false;
-            unsafe {
-                let should = (anim_index == 0 && !JM_DUMP_0) || (anim_index == 1 && !JM_DUMP_1);
-                if should {
-                    if anim_index == 0 { JM_DUMP_0 = true; }
-                    if anim_index == 1 { JM_DUMP_1 = true; }
-                    for ji in 0..3.min(joint_count) {
-                        let m = &model_anim.joint_matrices[ji];
-                        eprintln!("[jm{}] J{} diag=[{:.2},{:.2},{:.2}] trans=[{:.2},{:.2},{:.2}]",
-                            anim_index, ji, m[0][0], m[1][1], m[2][2], m[3][0], m[3][1], m[3][2]);
+            #[cfg(debug_assertions)]
+            {
+                static mut DEBUG_PRINTED: bool = false;
+                unsafe {
+                    if !DEBUG_PRINTED {
+                        DEBUG_PRINTED = true;
+                        eprintln!("[anim] channels_applied={}, t={:.3}, anim_index={}", channels_applied, t, anim_index);
+                        eprintln!("[anim] Joint0 local: t=[{:.2},{:.2},{:.2}] r=[{:.4},{:.4},{:.4},{:.4}]",
+                            local_translations[0][0], local_translations[0][1], local_translations[0][2],
+                            local_rotations[0][0], local_rotations[0][1], local_rotations[0][2], local_rotations[0][3]);
+                        let m = &model_anim.joint_matrices[0];
+                        eprintln!("[anim] Joint0 final diag=[{:.4},{:.4},{:.4}] trans=[{:.4},{:.4},{:.4}]",
+                            m[0][0], m[1][1], m[2][2], m[3][0], m[3][1], m[3][2]);
                     }
-                }
-            }
-
-            // Debug: print joint 0 values once
-            static mut DEBUG_PRINTED: bool = false;
-            unsafe {
-                if !DEBUG_PRINTED {
-                    DEBUG_PRINTED = true;
-                    eprintln!("[anim] channels_applied={}, t={:.3}, anim_index={}", channels_applied, t, anim_index);
-                    eprintln!("[anim] Joint0 local: t=[{:.2},{:.2},{:.2}] r=[{:.4},{:.4},{:.4},{:.4}]",
-                        local_translations[0][0], local_translations[0][1], local_translations[0][2],
-                        local_rotations[0][0], local_rotations[0][1], local_rotations[0][2], local_rotations[0][3]);
-                    let m = &model_anim.joint_matrices[0];
-                    eprintln!("[anim] Joint0 final matrix:");
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", m[0][0], m[0][1], m[0][2], m[0][3]);
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", m[1][0], m[1][1], m[1][2], m[1][3]);
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", m[2][0], m[2][1], m[2][2], m[2][3]);
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", m[3][0], m[3][1], m[3][2], m[3][3]);
-                    let w = &world_transforms[0];
-                    eprintln!("[anim] Joint0 world transform:");
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", w[0][0], w[0][1], w[0][2], w[0][3]);
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", w[1][0], w[1][1], w[1][2], w[1][3]);
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", w[2][0], w[2][1], w[2][2], w[2][3]);
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", w[3][0], w[3][1], w[3][2], w[3][3]);
-                    let ibm = &skeleton.joints[0].inverse_bind;
-                    eprintln!("[anim] Joint0 IBM:");
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", ibm[0][0], ibm[0][1], ibm[0][2], ibm[0][3]);
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", ibm[1][0], ibm[1][1], ibm[1][2], ibm[1][3]);
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", ibm[2][0], ibm[2][1], ibm[2][2], ibm[2][3]);
-                    eprintln!("  [{:.4}, {:.4}, {:.4}, {:.4}]", ibm[3][0], ibm[3][1], ibm[3][2], ibm[3][3]);
                 }
             }
         }
@@ -686,15 +636,19 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             if !is_child[i] { root_joints.push(i); }
         }
 
-        eprintln!("[anim] Skeleton: {} joints, {} roots", joints.len(), root_joints.len());
-        for (i, j) in joints.iter().enumerate() {
-            if i < 5 || i == joints.len() - 1 {
-                eprintln!("[anim]   joint {}: '{}' children={:?}", i, j.name, j.children);
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[anim] Skeleton: {} joints, {} roots", joints.len(), root_joints.len());
+            for (i, j) in joints.iter().enumerate() {
+                if i < 5 || i == joints.len() - 1 {
+                    eprintln!("[anim]   joint {}: '{}' children={:?}", i, j.name, j.children);
+                }
             }
         }
 
         Some(SkeletonData { joints, root_joints })
     } else {
+        #[cfg(debug_assertions)]
         eprintln!("[anim] No skin found in glTF!");
         None
     };
@@ -715,24 +669,36 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
         // Group channels by target node
         let mut node_channels: std::collections::HashMap<usize, (Vec<f32>, Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<[f32; 3]>)> = std::collections::HashMap::new();
 
+        #[cfg(debug_assertions)]
         let mut skipped_channels = 0usize;
+        #[cfg(debug_assertions)]
         let mut mapped_channels = 0usize;
-        eprintln!("[anim] Animation '{}' has {} channels, node_to_joint map has {} entries",
-            anim.name().unwrap_or("?"), anim.channels().count(), node_to_joint.len());
-        // Debug: print first few channel target nodes
-        for (ci, ch) in anim.channels().enumerate() {
-            if ci < 5 {
-                let tn = ch.target().node();
-                eprintln!("[anim]   channel {} targets node {} '{}'  mapped={}",
-                    ci, tn.index(), tn.name().unwrap_or("?"),
-                    node_to_joint.contains_key(&tn.index()));
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[anim] Animation '{}' has {} channels, node_to_joint map has {} entries",
+                anim.name().unwrap_or("?"), anim.channels().count(), node_to_joint.len());
+            for (ci, ch) in anim.channels().enumerate() {
+                if ci < 5 {
+                    let tn = ch.target().node();
+                    eprintln!("[anim]   channel {} targets node {} '{}'  mapped={}",
+                        ci, tn.index(), tn.name().unwrap_or("?"),
+                        node_to_joint.contains_key(&tn.index()));
+                }
             }
         }
         for channel in anim.channels() {
             let target_node = channel.target().node().index();
             let joint_index = match node_to_joint.get(&target_node) {
-                Some(&ji) => { mapped_channels += 1; ji },
-                None => { skipped_channels += 1; continue; },
+                Some(&ji) => {
+                    #[cfg(debug_assertions)]
+                    { mapped_channels += 1; }
+                    ji
+                },
+                None => {
+                    #[cfg(debug_assertions)]
+                    { skipped_channels += 1; }
+                    continue;
+                },
             };
 
             let sampler = channel.sampler();
@@ -776,8 +742,13 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
         }
 
         let name = anim.name().unwrap_or("").to_string();
-        eprintln!("[anim] Animation '{}': {} channels mapped, {} skipped, duration={:.2}s",
-            name, mapped_channels, skipped_channels, duration);
+        #[cfg(debug_assertions)]
+        {
+            let total_kf: usize = channels.iter().map(|c| c.timestamps.len()).sum();
+            let avg_kf = if !channels.is_empty() { total_kf / channels.len() } else { 0 };
+            eprintln!("[anim] Animation '{}': {} channels mapped, {} skipped, duration={:.2}s, avg {}/ch keyframes",
+                name, mapped_channels, skipped_channels, duration, avg_kf);
+        }
         animations.push(AnimationData { channels, duration, name });
     }
 
@@ -794,6 +765,7 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
                     rest_rots[ch.joint_index] = if ch.rotations.len() > 0 { ch.rotations[0] } else { [0.0, 0.0, 0.0, 1.0] };
                 }
             }
+            #[cfg(debug_assertions)]
             eprintln!("[retarget] Built reference rest rotations from anim 0 for {} joints", joint_count_s);
             Some(rest_rots)
         } else { None }
@@ -899,6 +871,7 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
                             let diag = (f0*f0 + f1*f1 + f2*f2).sqrt();
                             if diag > 10.0 {
                                 scale = diag;
+                                #[cfg(debug_assertions)]
                                 eprintln!("[skin] IBM col0 len={:.1}, applying {:.0}x vertex scale", diag, scale);
                             }
                         }
@@ -907,6 +880,7 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
             }
         }
         if (scale - 1.0).abs() > 0.01 {
+            #[cfg(debug_assertions)]
             eprintln!("[skin] Applying {:.0}x vertex scale to compensate armature transform", scale);
         }
         scale
