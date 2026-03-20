@@ -919,9 +919,14 @@ pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f
         let position = [x as f32, y as f32, z as f32];
         let scale = scale as f32;
         let tint = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32];
-        for mesh in &model.meshes {
-            let tex_idx = mesh.texture_idx.unwrap_or(0);
-            eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, position, scale, tint, tex_idx);
+        let handle_bits = handle.to_bits();
+        if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+            eng.renderer.draw_model_cached(handle_bits, position, scale, tint);
+        } else {
+            for mesh in &model.meshes {
+                let tex_idx = mesh.texture_idx.unwrap_or(0);
+                eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, position, scale, tint, tex_idx);
+            }
         }
     }
 }

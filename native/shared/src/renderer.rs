@@ -1,4 +1,5 @@
 use wgpu::util::DeviceExt;
+use std::collections::HashMap;
 
 // ============================================================
 // Constants
@@ -29,6 +30,7 @@ struct Uniforms2D {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms3D {
     mvp: [[f32; 4]; 4],
+    model_tint: [f32; 4],
 }
 
 #[repr(C)]
@@ -170,6 +172,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 const SHADER_3D: &str = "
 struct Uniforms3D {
     mvp: mat4x4<f32>,
+    model_tint: vec4<f32>,
 };
 
 struct Lighting {
@@ -227,7 +230,7 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
     }
     out.clip_position = u.mvp * pos;
     out.normal = norm.xyz;
-    out.color = in.color;
+    out.color = in.color * u.model_tint;
     out.uv = in.uv;
     return out;
 }
@@ -264,6 +267,23 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
+}
+
+// ============================================================
+// Cached model GPU data
+// ============================================================
+
+struct GpuMesh {
+    vb: wgpu::Buffer,
+    ib: wgpu::Buffer,
+    index_count: u32,
+    texture_idx: u32,
+}
+
+struct CachedModelDraw {
+    uniform_slot: usize,
+    cache_handle: u64,
+    mesh_idx: usize,
 }
 
 // ============================================================
@@ -331,6 +351,15 @@ pub struct Renderer {
     persistent_ib_2d_capacity: usize,
     persistent_vb_3d_capacity: usize,
     persistent_ib_3d_capacity: usize,
+
+    // Cached model GPU buffers (static models only)
+    model_gpu_cache: HashMap<u64, Option<Vec<GpuMesh>>>,
+    model_draw_commands: Vec<CachedModelDraw>,
+    model_uniform_buffers: Vec<wgpu::Buffer>,
+    model_uniform_bind_groups: Vec<wgpu::BindGroup>,
+    next_model_uniform_slot: usize,
+    current_vp_matrix: [[f32; 4]; 4],
+    uniform_3d_layout: wgpu::BindGroupLayout,
 
     // State
     pub render_mode: RenderMode,
@@ -439,7 +468,7 @@ impl Renderer {
         // --- 3D uniform buffer ---
         let uniform_buffer_3d = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("uniform_3d"),
-            contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4 }),
+            contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model_tint: [1.0, 1.0, 1.0, 1.0] }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let uniform_bind_group_3d = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -695,6 +724,28 @@ impl Renderer {
             cache: None,
         });
 
+        // --- Pre-allocate model uniform buffer pool (64 slots for cached model draws) ---
+        let model_uniform_count = 64;
+        let mut model_uniform_buffers = Vec::with_capacity(model_uniform_count);
+        let mut model_uniform_bind_groups = Vec::with_capacity(model_uniform_count);
+        for _ in 0..model_uniform_count {
+            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("model_uniform"),
+                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model_tint: [1.0; 4] }),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("model_uniform_bg"),
+                layout: &uniform_3d_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                }],
+            });
+            model_uniform_buffers.push(buf);
+            model_uniform_bind_groups.push(bg);
+        }
+
         Self {
             device,
             queue,
@@ -735,6 +786,13 @@ impl Renderer {
             persistent_ib_2d_capacity: ib_2d_cap,
             persistent_vb_3d_capacity: vb_3d_cap,
             persistent_ib_3d_capacity: ib_3d_cap,
+            model_gpu_cache: HashMap::new(),
+            model_draw_commands: Vec::with_capacity(64),
+            model_uniform_buffers,
+            model_uniform_bind_groups,
+            next_model_uniform_slot: 0,
+            current_vp_matrix: IDENTITY_MAT4,
+            uniform_3d_layout,
             render_mode: RenderMode::ScreenSpace,
             debug_frame: 0,
             pending_joint_matrices: None,
@@ -771,6 +829,8 @@ impl Renderer {
         self.vertices_3d.clear();
         self.indices_3d.clear();
         self.draw_calls_3d.clear();
+        self.model_draw_commands.clear();
+        self.next_model_uniform_slot = 0;
         self.current_texture_3d = 0;
         self.current_uniform_idx = 0;
         self.uniform_slot_count = 0;
@@ -888,6 +948,31 @@ impl Renderer {
                             pass.set_bind_group(2, &self.texture_bind_groups[0], &[]);
                         }
                         pass.draw_indexed(call.index_start..next_start, 0, 0..1);
+                    }
+                }
+            }
+
+            // Draw cached models (static models with GPU-resident buffers)
+            if !self.model_draw_commands.is_empty() {
+                pass.set_pipeline(&self.pipeline_3d);
+                pass.set_bind_group(1, &self.lighting_bind_group, &[]);
+                pass.set_bind_group(3, &self.joint_bind_group, &[]);
+
+                for cmd in &self.model_draw_commands {
+                    if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
+                        if cmd.mesh_idx < meshes.len() {
+                            let mesh = &meshes[cmd.mesh_idx];
+                            pass.set_bind_group(0, &self.model_uniform_bind_groups[cmd.uniform_slot], &[]);
+                            let tex_idx = mesh.texture_idx as usize;
+                            if tex_idx < self.texture_bind_groups.len() {
+                                pass.set_bind_group(2, &self.texture_bind_groups[tex_idx], &[]);
+                            } else {
+                                pass.set_bind_group(2, &self.texture_bind_groups[0], &[]);
+                            }
+                            pass.set_vertex_buffer(0, mesh.vb.slice(..));
+                            pass.set_index_buffer(mesh.ib.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                        }
                     }
                 }
             }
@@ -1334,11 +1419,12 @@ impl Renderer {
             [up_x, up_y, up_z],
         );
         let mvp = mat4_multiply(proj, view);
+        self.current_vp_matrix = mvp;
 
         self.queue.write_buffer(
             &self.uniform_buffer_3d,
             0,
-            bytemuck::bytes_of(&Uniforms3D { mvp }),
+            bytemuck::bytes_of(&Uniforms3D { mvp, model_tint: [1.0, 1.0, 1.0, 1.0] }),
         );
         self.render_mode = RenderMode::Mode3D;
     }
@@ -1437,6 +1523,110 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             self.persistent_ib_2d_capacity = new_cap;
+        }
+    }
+
+    // ============================================================
+    // Cached model GPU buffers
+    // ============================================================
+
+    /// Check if a model's GPU buffers are cached (or marked uncacheable).
+    pub fn is_model_in_cache(&self, handle_bits: u64) -> bool {
+        self.model_gpu_cache.contains_key(&handle_bits)
+    }
+
+    /// Returns true if the model was cached successfully (static model).
+    /// Returns false if the model is skinned (uncacheable).
+    pub fn cache_model_if_static(&mut self, handle_bits: u64, meshes: &[crate::models::MeshData]) -> bool {
+        if let Some(entry) = self.model_gpu_cache.get(&handle_bits) {
+            return entry.is_some();
+        }
+
+        // Check if any vertex is skinned
+        let is_skinned = meshes.iter().any(|m|
+            m.vertices.iter().any(|v| v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01));
+
+        if is_skinned {
+            self.model_gpu_cache.insert(handle_bits, None);
+            return false;
+        }
+
+        let gpu_meshes: Vec<GpuMesh> = meshes.iter().map(|mesh| {
+            let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cached_model_vb"),
+                contents: bytemuck::cast_slice(&mesh.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cached_model_ib"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            GpuMesh {
+                vb,
+                ib,
+                index_count: mesh.indices.len() as u32,
+                texture_idx: mesh.texture_idx.unwrap_or(0),
+            }
+        }).collect();
+
+        self.model_gpu_cache.insert(handle_bits, Some(gpu_meshes));
+        true
+    }
+
+    /// Record a cached model draw command. The actual rendering happens in end_frame().
+    pub fn draw_model_cached(&mut self, handle_bits: u64, position: [f32; 3], scale: f32, tint: [f32; 4]) {
+        let mesh_count = match self.model_gpu_cache.get(&handle_bits) {
+            Some(Some(meshes)) => meshes.len(),
+            _ => return,
+        };
+
+        for mesh_idx in 0..mesh_count {
+            let slot = self.next_model_uniform_slot;
+            self.next_model_uniform_slot += 1;
+
+            // Grow uniform pool if needed
+            self.ensure_model_uniform_slot(slot);
+
+            // Compute model MVP: VP * translate(position) * scale(s)
+            let model_matrix = mat4_multiply(
+                mat4_translate(IDENTITY_MAT4, position),
+                mat4_scale(IDENTITY_MAT4, [scale, scale, scale]),
+            );
+            let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
+
+            // Write uniform for this draw
+            self.queue.write_buffer(
+                &self.model_uniform_buffers[slot],
+                0,
+                bytemuck::bytes_of(&Uniforms3D { mvp: model_mvp, model_tint: tint }),
+            );
+
+            self.model_draw_commands.push(CachedModelDraw {
+                uniform_slot: slot,
+                cache_handle: handle_bits,
+                mesh_idx,
+            });
+        }
+    }
+
+    fn ensure_model_uniform_slot(&mut self, slot: usize) {
+        while self.model_uniform_buffers.len() <= slot {
+            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("model_uniform"),
+                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model_tint: [1.0; 4] }),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("model_uniform_bg"),
+                layout: &self.uniform_3d_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                }],
+            });
+            self.model_uniform_buffers.push(buf);
+            self.model_uniform_bind_groups.push(bg);
         }
     }
 
