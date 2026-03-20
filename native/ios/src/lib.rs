@@ -951,7 +951,11 @@ pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64,
 pub extern "C" fn bloom_load_model(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
     match std::fs::read(resolve_path(path)) {
-        Ok(data) => engine().models.load_model(&data),
+        Ok(data) => {
+            let eng = engine();
+            let renderer_ptr = &mut eng.renderer as *mut crate::Renderer;
+            eng.models.load_model_with_textures(&data, unsafe { &mut *renderer_ptr })
+        }
         Err(_) => 0.0,
     }
 }
