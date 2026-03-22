@@ -171,7 +171,7 @@
         "windows": {
           "crate": "native/windows/",
           "lib": "bloom_windows.lib",
-          "libs": ["user32", "gdi32", "ole32", "shell32", "d3d12", "dxgi", "dxguid", "xinput"]
+          "libs": ["user32", "gdi32", "ole32", "shell32", "d3d12", "dxgi", "dxguid", "xinput", "opengl32", "d3dcompiler"]
         },
         "linux": {
           "crate": "native/linux/",

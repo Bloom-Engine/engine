@@ -788,7 +788,14 @@ pub extern "C" fn bloom_draw_ray(ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz
 #[no_mangle]
 pub extern "C" fn bloom_load_model(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) { Ok(data) => engine().models.load_model(&data), Err(_) => 0.0 }
+    match std::fs::read(path) {
+        Ok(data) => {
+            let eng = engine();
+            let renderer_ptr = &mut eng.renderer as *mut Renderer;
+            eng.models.load_model_with_textures(&data, unsafe { &mut *renderer_ptr })
+        }
+        Err(_) => 0.0,
+    }
 }
 #[no_mangle]
 pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f64, r: f64, g: f64, b: f64, a: f64) {
