@@ -33,12 +33,33 @@ struct Uniforms3D {
     model_tint: [f32; 4],
 }
 
+const MAX_DIR_LIGHTS: usize = 4;
+const MAX_POINT_LIGHTS: usize = 16;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DirLight {
+    direction: [f32; 4],  // xyz + intensity
+    color: [f32; 4],      // rgb + _pad
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct PointLight {
+    position: [f32; 4],   // xyz + range
+    color: [f32; 4],      // rgb + intensity
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct LightingUniforms {
-    ambient: [f32; 4],      // rgb + intensity
-    light_dir: [f32; 4],    // xyz + intensity
-    light_color: [f32; 4],  // rgb + _pad
+    ambient: [f32; 4],                              // rgb + intensity
+    light_dir: [f32; 4],                             // xyz + intensity (legacy, kept for compat)
+    light_color: [f32; 4],                           // rgb + _pad (legacy)
+    dir_light_count: [f32; 4],                       // [count, 0, 0, 0]
+    dir_lights: [DirLight; MAX_DIR_LIGHTS],          // additional directional lights
+    point_light_count: [f32; 4],                     // [count, 0, 0, 0]
+    point_lights: [PointLight; MAX_POINT_LIGHTS],    // point lights
 }
 
 impl LightingUniforms {
@@ -47,6 +68,10 @@ impl LightingUniforms {
             ambient: [1.0, 1.0, 1.0, 0.3],
             light_dir: [0.5, 1.0, 0.3, 0.7],
             light_color: [1.0, 1.0, 1.0, 0.0],
+            dir_light_count: [0.0; 4],
+            dir_lights: [DirLight { direction: [0.0; 4], color: [0.0; 4] }; MAX_DIR_LIGHTS],
+            point_light_count: [0.0; 4],
+            point_lights: [PointLight { position: [0.0; 4], color: [0.0; 4] }; MAX_POINT_LIGHTS],
         }
     }
 }
@@ -175,10 +200,24 @@ struct Uniforms3D {
     model_tint: vec4<f32>,
 };
 
+struct DirLight {
+    direction: vec4<f32>,
+    color: vec4<f32>,
+};
+
+struct PointLight {
+    position: vec4<f32>,
+    color: vec4<f32>,
+};
+
 struct Lighting {
     ambient: vec4<f32>,
     light_dir: vec4<f32>,
     light_color: vec4<f32>,
+    dir_light_count: vec4<f32>,
+    dir_lights: array<DirLight, 4>,
+    point_light_count: vec4<f32>,
+    point_lights: array<PointLight, 16>,
 };
 
 struct JointMatrices {
@@ -199,6 +238,7 @@ struct VertexOutput3D {
     @location(0) normal: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) world_pos: vec3<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms3D;
@@ -214,7 +254,6 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
     var pos = vec4<f32>(in.position, 1.0);
     var norm = vec4<f32>(in.normal, 0.0);
     if (total_weight > 0.01) {
-        // GPU skinning: joint matrices already include model scale
         let j0 = u32(in.joints.x); let j1 = u32(in.joints.y);
         let j2 = u32(in.joints.z); let j3 = u32(in.joints.w);
         let skinned_pos = joints.matrices[j0] * pos * in.weights.x
@@ -230,6 +269,7 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
     }
     out.clip_position = u.mvp * pos;
     out.normal = norm.xyz;
+    out.world_pos = pos.xyz;
     out.color = in.color * u.model_tint;
     out.uv = in.uv;
     return out;
@@ -238,11 +278,40 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
 @fragment
 fn fs_main_3d(in: VertexOutput3D) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
-    let light_dir = normalize(lighting.light_dir.xyz);
-    let diffuse = max(dot(n, light_dir), 0.0);
-    let ambient = lighting.ambient.rgb * lighting.ambient.a;
-    let direct = lighting.light_color.rgb * lighting.light_dir.w * diffuse;
-    let lit = ambient + direct;
+
+    // Ambient
+    var lit = lighting.ambient.rgb * lighting.ambient.a;
+
+    // Legacy directional light (backward compat)
+    let legacy_dir = normalize(lighting.light_dir.xyz);
+    let legacy_diffuse = max(dot(n, legacy_dir), 0.0);
+    lit += lighting.light_color.rgb * lighting.light_dir.w * legacy_diffuse;
+
+    // Additional directional lights
+    let dir_count = u32(lighting.dir_light_count.x);
+    for (var i = 0u; i < dir_count; i++) {
+        let dl = lighting.dir_lights[i];
+        let dir = normalize(dl.direction.xyz);
+        let diff = max(dot(n, dir), 0.0);
+        lit += dl.color.rgb * dl.direction.w * diff;
+    }
+
+    // Point lights
+    let pt_count = u32(lighting.point_light_count.x);
+    for (var i = 0u; i < pt_count; i++) {
+        let pl = lighting.point_lights[i];
+        let to_light = pl.position.xyz - in.world_pos;
+        let dist = length(to_light);
+        let range = pl.position.w;
+        if (dist < range) {
+            let dir = to_light / dist;
+            let diff = max(dot(n, dir), 0.0);
+            let atten = 1.0 - (dist / range);
+            let atten2 = atten * atten;
+            lit += pl.color.rgb * pl.color.w * diff * atten2;
+        }
+    }
+
     let tex_color = textureSample(tex3d, tex3d_sampler, in.uv);
     return vec4<f32>(tex_color.rgb * in.color.rgb * lit, tex_color.a * in.color.a);
 }
@@ -326,6 +395,7 @@ pub struct Renderer {
     textures: Vec<wgpu::Texture>,
     texture_sizes: Vec<(u32, u32)>,
     pub sampler: wgpu::Sampler,
+    pub nearest_sampler: wgpu::Sampler,
 
     // Depth buffer
     depth_texture: wgpu::Texture,
@@ -359,6 +429,9 @@ pub struct Renderer {
     model_uniform_bind_groups: Vec<wgpu::BindGroup>,
     next_model_uniform_slot: usize,
     current_vp_matrix: [[f32; 4]; 4],
+    current_view_matrix: [[f32; 4]; 4],
+    current_proj_matrix: [[f32; 4]; 4],
+    current_camera_pos: [f32; 3],
     uniform_3d_layout: wgpu::BindGroupLayout,
 
     // State
@@ -368,6 +441,9 @@ pub struct Renderer {
     // Pending joint matrices (written to GPU in end_frame)
     pub pending_joint_matrices: Option<Vec<[[f32; 4]; 4]>>,
     pub model_skin_scale: f32,
+
+    // Shadow mapping
+    pub shadow_map: crate::shadows::ShadowMap,
 }
 
 impl Renderer {
@@ -515,6 +591,15 @@ impl Renderer {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // --- Nearest-neighbor sampler (for pixel art) ---
+        let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("bloom_nearest_sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -746,6 +831,8 @@ impl Renderer {
             model_uniform_bind_groups.push(bg);
         }
 
+        let shadow_map = crate::shadows::ShadowMap::new(&device, Vertex3D::desc());
+
         Self {
             device,
             queue,
@@ -769,6 +856,7 @@ impl Renderer {
             textures,
             texture_sizes,
             sampler,
+            nearest_sampler,
             depth_texture,
             depth_view,
             vertices_2d: Vec::with_capacity(4096),
@@ -792,6 +880,9 @@ impl Renderer {
             model_uniform_bind_groups,
             next_model_uniform_slot: 0,
             current_vp_matrix: IDENTITY_MAT4,
+            current_view_matrix: IDENTITY_MAT4,
+            current_proj_matrix: IDENTITY_MAT4,
+            current_camera_pos: [0.0, 0.0, 0.0],
             uniform_3d_layout,
             render_mode: RenderMode::ScreenSpace,
             debug_frame: 0,
@@ -799,6 +890,7 @@ impl Renderer {
             model_skin_scale: 1.0,
             clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
+            shadow_map,
         }
     }
 
@@ -820,6 +912,31 @@ impl Renderer {
 
     pub fn set_clear_color(&mut self, r: f64, g: f64, b: f64, a: f64) {
         self.clear_color = wgpu::Color { r: r / 255.0, g: g / 255.0, b: b / 255.0, a: a / 255.0 };
+    }
+
+    /// Get the current view-projection matrix (set by begin_mode_3d).
+    pub fn vp_matrix(&self) -> [[f32; 4]; 4] {
+        self.current_vp_matrix
+    }
+
+    /// Get the current camera position (set by begin_mode_3d).
+    pub fn camera_pos(&self) -> [f32; 3] {
+        self.current_camera_pos
+    }
+
+    /// Get the inverse VP matrix for unprojecting screen coords to world rays.
+    pub fn inverse_vp_matrix(&self) -> [[f32; 4]; 4] {
+        mat4_invert(self.current_vp_matrix)
+    }
+
+    /// Get the 3D uniform bind group layout (for creating per-node uniform bind groups).
+    pub fn uniform_3d_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.uniform_3d_layout
+    }
+
+    /// Get texture bind groups (for scene graph rendering).
+    pub fn texture_bind_groups_slice(&self) -> &[wgpu::BindGroup] {
+        &self.texture_bind_groups
     }
 
     pub fn begin_frame(&mut self) {
@@ -846,9 +963,10 @@ impl Renderer {
         };
         self.queue.write_buffer(&self.uniform_buffers[0], 0, bytemuck::bytes_of(&uniforms));
 
-        // Reset lighting to defaults
+        // Reset lighting to defaults (clears additional lights too)
         self.lighting_uniforms = LightingUniforms::defaults();
         self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));
+        self.clear_additional_lights();
 
         // DEBUG: joint animation disabled for iOS port
         // self.debug_frame += 1;
@@ -1007,6 +1125,216 @@ impl Renderer {
         output.present();
     }
 
+    /// Like end_frame, but also renders retained scene graph nodes.
+    pub fn end_frame_with_scene(&mut self, scene: &crate::scene::SceneGraph) {
+        self.flush_joint_matrices();
+
+        let output = match self.surface.get_current_texture() {
+            Ok(t) => t,
+            Err(_) => {
+                self.surface.configure(&self.device, &self.surface_config);
+                return;
+            }
+        };
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("bloom_encoder"),
+        });
+
+        // Shadow pass: render scene nodes from light's perspective
+        if self.shadow_map.enabled {
+            // Compute light VP from the primary directional light direction
+            let light_dir = [
+                self.lighting_uniforms.light_dir[0],
+                self.lighting_uniforms.light_dir[1],
+                self.lighting_uniforms.light_dir[2],
+            ];
+            self.shadow_map.compute_light_vp(light_dir, [0.0, 0.0, 0.0]);
+
+            {
+                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("shadow_pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow_map.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                shadow_pass.set_pipeline(&self.shadow_map.pipeline);
+
+                // Render each visible scene node into shadow map
+                for (_handle, node) in scene.nodes.iter() {
+                    if !node.visible || !node.cast_shadow || node.indices.is_empty() {
+                        continue;
+                    }
+                    let Some(vb) = &node.gpu_vb else { continue };
+                    let Some(ib) = &node.gpu_ib else { continue };
+
+                    // Write shadow uniforms (light_vp * model)
+                    let shadow_uniforms = crate::shadows::ShadowUniforms {
+                        light_vp: self.shadow_map.light_vp,
+                        model: node.transform,
+                    };
+                    self.queue.write_buffer(
+                        &self.shadow_map.uniform_buffer,
+                        0,
+                        bytemuck::bytes_of(&shadow_uniforms),
+                    );
+
+                    shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[]);
+                    shadow_pass.set_vertex_buffer(0, vb.slice(..));
+                    shadow_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    shadow_pass.draw_indexed(0..node.gpu_index_count, 0, 0..1);
+                }
+            }
+        }
+
+        // Upload immediate-mode 2D data
+        let has_2d = !self.vertices_2d.is_empty();
+        if has_2d {
+            let vb_size = std::mem::size_of_val(self.vertices_2d.as_slice());
+            let ib_size = std::mem::size_of_val(self.indices_2d.as_slice());
+            self.ensure_buffer_capacity_2d(vb_size, ib_size);
+            self.queue.write_buffer(&self.persistent_vb_2d, 0, bytemuck::cast_slice(&self.vertices_2d));
+            self.queue.write_buffer(&self.persistent_ib_2d, 0, bytemuck::cast_slice(&self.indices_2d));
+        }
+
+        // Upload immediate-mode 3D data
+        let has_3d = !self.vertices_3d.is_empty();
+        if has_3d {
+            let vb_size = std::mem::size_of_val(self.vertices_3d.as_slice());
+            let ib_size = std::mem::size_of_val(self.indices_3d.as_slice());
+            self.ensure_buffer_capacity_3d(vb_size, ib_size);
+            self.queue.write_buffer(&self.persistent_vb_3d, 0, bytemuck::cast_slice(&self.vertices_3d));
+            self.queue.write_buffer(&self.persistent_ib_3d, 0, bytemuck::cast_slice(&self.indices_3d));
+        }
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Draw immediate-mode 3D geometry (same as end_frame)
+            if has_3d {
+                pass.set_pipeline(&self.pipeline_3d);
+                pass.set_bind_group(0, &self.uniform_bind_group_3d, &[]);
+                pass.set_bind_group(1, &self.lighting_bind_group, &[]);
+                pass.set_bind_group(3, &self.joint_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.persistent_vb_3d.slice(..));
+                pass.set_index_buffer(self.persistent_ib_3d.slice(..), wgpu::IndexFormat::Uint32);
+
+                if self.draw_calls_3d.is_empty() {
+                    pass.set_bind_group(2, &self.texture_bind_groups[0], &[]);
+                    pass.draw_indexed(0..self.indices_3d.len() as u32, 0, 0..1);
+                } else {
+                    let num_calls = self.draw_calls_3d.len();
+                    for i in 0..num_calls {
+                        let call = &self.draw_calls_3d[i];
+                        let next_start = if i + 1 < num_calls {
+                            self.draw_calls_3d[i + 1].index_start
+                        } else {
+                            self.indices_3d.len() as u32
+                        };
+                        let count = next_start - call.index_start;
+                        if count == 0 { continue; }
+                        let tex_idx = call.texture_idx as usize;
+                        if tex_idx < self.texture_bind_groups.len() {
+                            pass.set_bind_group(2, &self.texture_bind_groups[tex_idx], &[]);
+                        } else {
+                            pass.set_bind_group(2, &self.texture_bind_groups[0], &[]);
+                        }
+                        pass.draw_indexed(call.index_start..next_start, 0, 0..1);
+                    }
+                }
+            }
+
+            // Draw cached models
+            if !self.model_draw_commands.is_empty() {
+                pass.set_pipeline(&self.pipeline_3d);
+                pass.set_bind_group(1, &self.lighting_bind_group, &[]);
+                pass.set_bind_group(3, &self.joint_bind_group, &[]);
+
+                for cmd in &self.model_draw_commands {
+                    if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
+                        if cmd.mesh_idx < meshes.len() {
+                            let mesh = &meshes[cmd.mesh_idx];
+                            pass.set_bind_group(0, &self.model_uniform_bind_groups[cmd.uniform_slot], &[]);
+                            let tex_idx = mesh.texture_idx as usize;
+                            if tex_idx < self.texture_bind_groups.len() {
+                                pass.set_bind_group(2, &self.texture_bind_groups[tex_idx], &[]);
+                            } else {
+                                pass.set_bind_group(2, &self.texture_bind_groups[0], &[]);
+                            }
+                            pass.set_vertex_buffer(0, mesh.vb.slice(..));
+                            pass.set_index_buffer(mesh.ib.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                        }
+                    }
+                }
+            }
+
+            // Draw retained scene graph nodes
+            pass.set_pipeline(&self.pipeline_3d);
+            pass.set_bind_group(1, &self.lighting_bind_group, &[]);
+            pass.set_bind_group(3, &self.joint_bind_group, &[]);
+            scene.render(&mut pass, &self.texture_bind_groups);
+
+            // Draw immediate-mode 2D geometry (on top, no depth testing)
+            if has_2d {
+                pass.set_pipeline(&self.pipeline_2d);
+                pass.set_vertex_buffer(0, self.persistent_vb_2d.slice(..));
+                pass.set_index_buffer(self.persistent_ib_2d.slice(..), wgpu::IndexFormat::Uint32);
+
+                let num_calls = self.draw_calls_2d.len();
+                for i in 0..num_calls {
+                    let call = &self.draw_calls_2d[i];
+                    let next_start = if i + 1 < num_calls {
+                        self.draw_calls_2d[i + 1].index_start
+                    } else {
+                        self.indices_2d.len() as u32
+                    };
+                    let count = next_start - call.index_start;
+                    if count == 0 { continue; }
+
+                    pass.set_bind_group(0, &self.uniform_bind_groups[call.uniform_idx as usize], &[]);
+                    if (call.texture_idx as usize) < self.texture_bind_groups.len() {
+                        pass.set_bind_group(1, &self.texture_bind_groups[call.texture_idx as usize], &[]);
+                    }
+                    pass.draw_indexed(call.index_start..next_start, 0, 0..1);
+                }
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+    }
+
     // ============================================================
     // Texture management
     // ============================================================
@@ -1124,6 +1452,22 @@ impl Renderer {
         if i > 0 && i < self.textures.len() {
             self.texture_sizes[i] = (0, 0);
         }
+    }
+
+    pub fn set_texture_filter(&mut self, idx: u32, nearest: bool) {
+        let i = idx as usize;
+        if i >= self.textures.len() { return; }
+        let view = self.textures[i].create_view(&wgpu::TextureViewDescriptor::default());
+        let chosen_sampler = if nearest { &self.nearest_sampler } else { &self.sampler };
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("texture_bg_refiltered"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(chosen_sampler) },
+            ],
+        });
+        self.texture_bind_groups[i] = bind_group;
     }
 
     pub fn get_texture_width(&self, idx: u32) -> u32 {
@@ -1418,13 +1762,16 @@ impl Renderer {
             [target_x, target_y, target_z],
             [up_x, up_y, up_z],
         );
-        let mvp = mat4_multiply(proj, view);
-        self.current_vp_matrix = mvp;
+        let vp = mat4_multiply(proj, view);
+        self.current_vp_matrix = vp;
+        self.current_view_matrix = view;
+        self.current_proj_matrix = proj;
+        self.current_camera_pos = [pos_x, pos_y, pos_z];
 
         self.queue.write_buffer(
             &self.uniform_buffer_3d,
             0,
-            bytemuck::bytes_of(&Uniforms3D { mvp, model_tint: [1.0, 1.0, 1.0, 1.0] }),
+            bytemuck::bytes_of(&Uniforms3D { mvp: vp, model_tint: [1.0, 1.0, 1.0, 1.0] }),
         );
         self.render_mode = RenderMode::Mode3D;
     }
@@ -1460,15 +1807,26 @@ impl Renderer {
         self.model_skin_scale = scale;
     }
 
-    pub fn set_joint_matrices_scaled(&mut self, matrices: &[[[f32; 4]; 4]], scale: f32, position: [f32; 3]) {
+    pub fn set_joint_matrices_scaled(&mut self, matrices: &[[[f32; 4]; 4]], scale: f32, position: [f32; 3], rot_sin: f32, rot_cos: f32) {
+        let cos_r = rot_cos;
+        let sin_r = rot_sin;
         let mut scaled = Vec::with_capacity(matrices.len());
         for m in matrices {
             let mut sm = *m;
+            // Scale
             for col in 0..4 {
                 sm[col][0] *= scale;
                 sm[col][1] *= scale;
                 sm[col][2] *= scale;
             }
+            // Rotate around Y axis
+            for col in 0..4 {
+                let x = sm[col][0];
+                let z = sm[col][2];
+                sm[col][0] = cos_r * x + sin_r * z;
+                sm[col][2] = -sin_r * x + cos_r * z;
+            }
+            // Translate
             sm[3][0] += position[0];
             sm[3][1] += position[1];
             sm[3][2] += position[2];
@@ -1675,6 +2033,38 @@ impl Renderer {
         self.lighting_uniforms.light_dir = [dx as f32, dy as f32, dz as f32, intensity as f32];
         self.lighting_uniforms.light_color = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, 0.0];
         self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));
+    }
+
+    /// Add an additional directional light (up to MAX_DIR_LIGHTS).
+    /// Color is 0-1 range (not 0-255).
+    pub fn add_directional_light(&mut self, dx: f32, dy: f32, dz: f32, r: f32, g: f32, b: f32, intensity: f32) {
+        let idx = self.lighting_uniforms.dir_light_count[0] as usize;
+        if idx >= MAX_DIR_LIGHTS { return; }
+        self.lighting_uniforms.dir_lights[idx] = DirLight {
+            direction: [dx, dy, dz, intensity],
+            color: [r, g, b, 0.0],
+        };
+        self.lighting_uniforms.dir_light_count[0] = (idx + 1) as f32;
+        self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));
+    }
+
+    /// Add a point light (up to MAX_POINT_LIGHTS).
+    /// Color is 0-1 range.
+    pub fn add_point_light(&mut self, x: f32, y: f32, z: f32, range: f32, r: f32, g: f32, b: f32, intensity: f32) {
+        let idx = self.lighting_uniforms.point_light_count[0] as usize;
+        if idx >= MAX_POINT_LIGHTS { return; }
+        self.lighting_uniforms.point_lights[idx] = PointLight {
+            position: [x, y, z, range],
+            color: [r, g, b, intensity],
+        };
+        self.lighting_uniforms.point_light_count[0] = (idx + 1) as f32;
+        self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));
+    }
+
+    /// Clear all additional lights (called at begin_frame).
+    pub fn clear_additional_lights(&mut self) {
+        self.lighting_uniforms.dir_light_count = [0.0; 4];
+        self.lighting_uniforms.point_light_count = [0.0; 4];
     }
 
     // ============================================================

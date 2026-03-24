@@ -790,6 +790,15 @@ pub extern "C" fn bloom_gen_texture_mipmaps(_handle: f64) {
     // This is a no-op for now as wgpu handles mipmaps internally
 }
 
+#[no_mangle]
+pub extern "C" fn bloom_set_texture_filter(handle: f64, mode: f64) {
+    let eng = engine();
+    if let Some(tex) = eng.textures.get(handle) {
+        let bind_group_idx = tex.bind_group_idx;
+        eng.renderer.set_texture_filter(bind_group_idx, mode > 0.5);
+    }
+}
+
 // ============================================================
 // Camera 2D
 // ============================================================
@@ -980,12 +989,12 @@ pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64, scale: f64, px: f64, py: f64, pz: f64) {
+pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64, scale: f64, px: f64, py: f64, pz: f64, rot_sin: f64, rot_cos: f64) {
     let eng = engine();
     eng.models.update_model_animation(handle, anim_index as usize, time as f32);
     if let Some(anim) = eng.models.get_animation(handle) {
         if !anim.joint_matrices.is_empty() {
-            eng.renderer.set_joint_matrices_scaled(&anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32]);
+            eng.renderer.set_joint_matrices_scaled(&anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32], rot_sin as f32, rot_cos as f32);
         }
     }
 }
@@ -1286,8 +1295,21 @@ pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
     match std::fs::read_to_string(path) {
         Ok(contents) => {
-            let c_str = std::ffi::CString::new(contents).unwrap_or_default();
-            c_str.into_raw() as *const u8
+            // Return Perry-format string: StringHeader (length u32 + capacity u32) followed by UTF-8 data
+            let bytes = contents.as_bytes();
+            let len = bytes.len();
+            let total = 8 + len; // 8 bytes header + data
+            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
+            unsafe {
+                let ptr = std::alloc::alloc(layout);
+                if ptr.is_null() { return std::ptr::null(); }
+                // Write length and capacity as u32
+                *(ptr as *mut u32) = len as u32;
+                *(ptr.add(4) as *mut u32) = len as u32;
+                // Copy string data after header
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(8), len);
+                ptr
+            }
         }
         Err(_) => std::ptr::null(),
     }
@@ -1325,6 +1347,342 @@ pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
 }
 
 // ============================================================
+// Frame callbacks
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_register_frame_callback(priority: f64, callback: extern "C" fn(f64)) -> f64 {
+    engine().frame_callbacks.register(priority as i32, callback) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_unregister_frame_callback(id: f64) {
+    engine().frame_callbacks.unregister(id as u64);
+}
+
+// ============================================================
+// Multiple lights
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_add_directional_light(
+    dx: f64, dy: f64, dz: f64,
+    r: f64, g: f64, b: f64,
+    intensity: f64,
+) {
+    engine().renderer.add_directional_light(
+        dx as f32, dy as f32, dz as f32,
+        r as f32, g as f32, b as f32,
+        intensity as f32,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_add_point_light(
+    x: f64, y: f64, z: f64, range: f64,
+    r: f64, g: f64, b: f64,
+    intensity: f64,
+) {
+    engine().renderer.add_point_light(
+        x as f32, y as f32, z as f32, range as f32,
+        r as f32, g as f32, b as f32,
+        intensity as f32,
+    );
+}
+
+// ============================================================
+// Scene graph (retained mode)
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_create_node() -> f64 {
+    engine().scene.create_node()
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_destroy_node(handle: f64) {
+    engine().scene.destroy_node(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_visible(handle: f64, visible: f64) {
+    engine().scene.set_visible(handle, visible != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_cast_shadow(handle: f64, cast: f64) {
+    engine().scene.set_cast_shadow(handle, cast != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_receive_shadow(handle: f64, receive: f64) {
+    engine().scene.set_receive_shadow(handle, receive != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_parent(handle: f64, parent: f64) {
+    engine().scene.set_parent(handle, parent);
+}
+
+/// Set 4x4 transform matrix (16 floats passed as pointer to f64 array).
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_transform(handle: f64, mat_ptr: *const f64) {
+    if mat_ptr.is_null() { return; }
+    let slice = unsafe { std::slice::from_raw_parts(mat_ptr, 16) };
+    let mut mat = [[0.0f32; 4]; 4];
+    for col in 0..4 {
+        for row in 0..4 {
+            mat[col][row] = slice[col * 4 + row] as f32;
+        }
+    }
+    engine().scene.set_transform(handle, mat);
+}
+
+/// Update geometry from flat vertex array (12 floats/vertex: xyz, nxnynz, rgba, uv)
+/// and index array.
+#[no_mangle]
+pub extern "C" fn bloom_scene_update_geometry(
+    handle: f64,
+    vert_ptr: *const f64,
+    vert_count: f64,
+    idx_ptr: *const f64,
+    idx_count: f64,
+) {
+    if vert_ptr.is_null() || idx_ptr.is_null() { return; }
+    let nv = vert_count as usize;
+    let ni = idx_count as usize;
+
+    let vert_floats = unsafe { std::slice::from_raw_parts(vert_ptr, nv * 12) };
+    let idx_floats = unsafe { std::slice::from_raw_parts(idx_ptr, ni) };
+
+    let mut vertices = Vec::with_capacity(nv);
+    for i in 0..nv {
+        let base = i * 12;
+        vertices.push(bloom_shared::renderer::Vertex3D {
+            position: [vert_floats[base] as f32, vert_floats[base+1] as f32, vert_floats[base+2] as f32],
+            normal: [vert_floats[base+3] as f32, vert_floats[base+4] as f32, vert_floats[base+5] as f32],
+            color: [vert_floats[base+6] as f32, vert_floats[base+7] as f32, vert_floats[base+8] as f32, vert_floats[base+9] as f32],
+            uv: [vert_floats[base+10] as f32, vert_floats[base+11] as f32],
+            joints: [0.0; 4],
+            weights: [0.0; 4],
+        });
+    }
+
+    let indices: Vec<u32> = idx_floats.iter().map(|&v| v as u32).collect();
+
+    engine().scene.update_geometry(handle, vertices, indices);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_color(handle: f64, r: f64, g: f64, b: f64, a: f64) {
+    engine().scene.set_material_color(handle, r as f32, g as f32, b as f32, a as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_pbr(handle: f64, roughness: f64, metalness: f64) {
+    engine().scene.set_material_pbr(handle, roughness as f32, metalness as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_texture(handle: f64, texture_idx: f64) {
+    engine().scene.set_material_texture(handle, texture_idx as u32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_node_count() -> f64 {
+    engine().scene.node_count() as f64
+}
+
+// ============================================================
+// Geometry generation
+// ============================================================
+
+/// Extrude a 2D polygon along Y axis and store as a scene node's geometry.
+/// polygon_ptr: pointer to flat f64 array [x0, z0, x1, z1, ...]
+/// polygon_count: number of points (NOT number of floats)
+/// depth: extrusion height
+#[no_mangle]
+pub extern "C" fn bloom_scene_extrude_polygon(
+    handle: f64,
+    polygon_ptr: *const f64,
+    polygon_count: f64,
+    depth: f64,
+) {
+    if polygon_ptr.is_null() { return; }
+    let n = polygon_count as usize;
+    let polygon = unsafe { std::slice::from_raw_parts(polygon_ptr, n * 2) };
+
+    let geo = bloom_shared::geometry::extrude_polygon(polygon, &[], depth);
+    engine().scene.update_geometry(handle, geo.vertices, geo.indices);
+}
+
+/// Subtract an axis-aligned box from a scene node's geometry.
+/// Removes triangles fully inside the box (simplified CSG).
+#[no_mangle]
+pub extern "C" fn bloom_scene_subtract_box(
+    handle: f64,
+    min_x: f64, min_y: f64, min_z: f64,
+    max_x: f64, max_y: f64, max_z: f64,
+) {
+    let eng = engine();
+    if let Some(node) = eng.scene.nodes.get(handle) {
+        let current = bloom_shared::geometry::GeometryData {
+            vertices: node.vertices.clone(),
+            indices: node.indices.clone(),
+        };
+        let result = bloom_shared::geometry::subtract_box(
+            &current,
+            [min_x as f32, min_y as f32, min_z as f32],
+            [max_x as f32, max_y as f32, max_z as f32],
+        );
+        eng.scene.update_geometry(handle, result.vertices, result.indices);
+    }
+}
+
+// ============================================================
+// Shadow mapping
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_enable_shadows() {
+    engine().renderer.shadow_map.enable();
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_disable_shadows() {
+    engine().renderer.shadow_map.disable();
+}
+
+/// Attach a loaded GLTF model's mesh geometry to a scene node.
+/// Copies the vertex/index data from the model into the scene node.
+#[no_mangle]
+pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_index: f64) {
+    let eng = engine();
+    let mi = mesh_index as usize;
+
+    // Get model mesh data
+    let model_data = match eng.models.models.get(model_handle) {
+        Some(md) => md,
+        None => return,
+    };
+    if mi >= model_data.meshes.len() { return; }
+    let mesh = &model_data.meshes[mi];
+
+    // Copy vertices and indices to scene node
+    let vertices = mesh.vertices.clone();
+    let indices = mesh.indices.clone();
+    eng.scene.update_geometry(node_handle, vertices, indices);
+
+    // Set texture if the model mesh has one
+    if let Some(tex_idx) = mesh.texture_idx {
+        eng.scene.set_material_texture(node_handle, tex_idx);
+    }
+}
+
+// ============================================================
+// Thread-safe staging (for async asset loading via Perry threads)
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_stage_texture(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read(path) {
+        Ok(data) => bloom_shared::staging::decode_and_stage_texture(&data),
+        Err(_) => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_stage_model(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => return 0.0,
+    };
+    match bloom_shared::models::load_gltf_staged(&data) {
+        Some(staged) => bloom_shared::staging::stage_model(staged),
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_stage_sound(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => return 0.0,
+    };
+    let sound_data = if path.ends_with(".ogg") || path.ends_with(".OGG") {
+        parse_ogg(&data)
+    } else if path.ends_with(".mp3") || path.ends_with(".MP3") {
+        parse_mp3(&data)
+    } else {
+        parse_wav(&data)
+    };
+    match sound_data {
+        Some(sd) => bloom_shared::staging::stage_sound(sd),
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_commit_texture(staging_handle: f64) -> f64 {
+    let staged = match bloom_shared::staging::take_texture(staging_handle) {
+        Some(s) => s,
+        None => return 0.0,
+    };
+    let eng = engine();
+    let bind_group_idx = eng.renderer.register_texture(staged.width, staged.height, &staged.data);
+    eng.textures.textures.alloc(bloom_shared::textures::TextureData {
+        bind_group_idx, width: staged.width, height: staged.height,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_commit_model(staging_handle: f64) -> f64 {
+    let staged = match bloom_shared::staging::take_model(staging_handle) {
+        Some(s) => s,
+        None => return 0.0,
+    };
+    let eng = engine();
+    // Register staged textures with GPU and build index map.
+    // Staged texture_idx values are 1-based into staged.textures.
+    // We map them to actual renderer bind_group_idx values.
+    let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
+    for tex in &staged.textures {
+        tex_map.push(eng.renderer.register_texture(tex.width, tex.height, &tex.data));
+    }
+    let mut model = staged.model;
+    for mesh in &mut model.meshes {
+        if let Some(ref mut idx) = mesh.texture_idx {
+            let staged_idx = *idx as usize;
+            if staged_idx > 0 && staged_idx <= tex_map.len() {
+                *idx = tex_map[staged_idx - 1];
+            } else {
+                mesh.texture_idx = None;
+            }
+        }
+    }
+    eng.models.models.alloc(model)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_commit_sound(staging_handle: f64) -> f64 {
+    match bloom_shared::staging::take_sound(staging_handle) {
+        Some(sd) => engine().audio.load_sound(sd),
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_commit_music(staging_handle: f64) -> f64 {
+    match bloom_shared::staging::take_sound(staging_handle) {
+        Some(sd) => engine().audio.load_music(sd),
+        None => 0.0,
+    }
+}
+
+// ============================================================
 // Simple blocking executor for wgpu async calls
 // ============================================================
 
@@ -1349,4 +1707,69 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
+}
+
+// ============================================================
+// Scene picking (raycasting)
+// ============================================================
+
+static mut LAST_PICK: Option<bloom_shared::picking::PickResult> = None;
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_pick(screen_x: f64, screen_y: f64) -> f64 {
+    let eng = engine();
+    let inv_vp = eng.renderer.inverse_vp_matrix();
+    let cam_pos = eng.renderer.camera_pos();
+    let w = eng.renderer.width() as f32;
+    let h = eng.renderer.height() as f32;
+
+    let (origin, direction) = bloom_shared::picking::screen_to_ray(
+        screen_x as f32, screen_y as f32,
+        w, h, &inv_vp, &cam_pos,
+    );
+
+    let result = bloom_shared::picking::raycast_scene(&eng.scene, &origin, &direction);
+    let hit = result.hit;
+    unsafe { LAST_PICK = Some(result); }
+    if hit { 1.0 } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_handle() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.handle).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_distance() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.distance as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_x() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.point[0] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_y() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.point[1] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_z() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.point[2] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_normal_x() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.normal[0] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_normal_y() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.normal[1] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_normal_z() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.normal[2] as f64).unwrap_or(0.0) }
 }

@@ -54,4 +54,23 @@ impl<T> HandleRegistry<T> {
         }
         item
     }
+
+    /// Number of slots (including freed). Use for iteration bounds.
+    pub fn capacity(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Iterate over all live (handle, &T) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (f64, &T)> {
+        self.items.iter().enumerate().filter_map(|(idx, slot)| {
+            slot.as_ref().map(|item| ((idx + 1) as f64, item))
+        })
+    }
+
+    /// Iterate over all live (handle, &mut T) pairs.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (f64, &mut T)> {
+        self.items.iter_mut().enumerate().filter_map(|(idx, slot)| {
+            slot.as_mut().map(|item| ((idx + 1) as f64, item))
+        })
+    }
 }

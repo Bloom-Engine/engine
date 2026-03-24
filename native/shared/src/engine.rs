@@ -4,6 +4,8 @@ use crate::renderer::Renderer;
 use crate::text_renderer::TextRenderer;
 use crate::textures::TextureManager;
 use crate::models::ModelManager;
+use crate::scene::SceneGraph;
+use crate::frame_callbacks::FrameCallbackSystem;
 
 pub struct EngineState {
     pub renderer: Renderer,
@@ -12,6 +14,8 @@ pub struct EngineState {
     pub audio: AudioMixer,
     pub textures: TextureManager,
     pub models: ModelManager,
+    pub scene: SceneGraph,
+    pub frame_callbacks: FrameCallbackSystem,
 
     // Timing
     pub target_fps: f64,
@@ -36,6 +40,8 @@ impl EngineState {
             audio: AudioMixer::new(),
             textures: TextureManager::new(),
             models: ModelManager::new(),
+            scene: SceneGraph::new(),
+            frame_callbacks: FrameCallbackSystem::new(),
             target_fps: 60.0,
             delta_time: 0.0,
             last_frame_time: now,
@@ -64,10 +70,20 @@ impl EngineState {
         self.input.begin_frame();
         self.renderer.begin_frame();
         self.frame_count += 1;
+
+        // Run frame callbacks after begin_frame (matching R3F's useFrame timing)
+        self.frame_callbacks.run_all(self.delta_time);
     }
 
     pub fn end_frame(&mut self) {
-        self.renderer.end_frame();
+        // Prepare scene graph GPU resources before rendering
+        self.scene.prepare(
+            &self.renderer.device,
+            &self.renderer.queue,
+            &self.renderer.vp_matrix(),
+            self.renderer.uniform_3d_layout(),
+        );
+        self.renderer.end_frame_with_scene(&self.scene);
         self.input.end_frame();
 
         // Vsync (PresentMode::Fifo, the wgpu default) already caps frame rate.

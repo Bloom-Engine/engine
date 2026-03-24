@@ -1,3 +1,4 @@
+import { spawn, parallelMap } from 'perry/thread';
 import { Sound, Music } from '../core/types';
 
 // FFI declarations
@@ -88,4 +89,36 @@ export function playSound3D(sound: Sound, x: number, y: number, z: number): void
 
 export function setListenerPosition(x: number, y: number, z: number, forwardX: number, forwardY: number, forwardZ: number): void {
   bloom_set_listener_position(x, y, z, forwardX, forwardY, forwardZ);
+}
+
+// Async / threaded loading
+
+declare function bloom_stage_sound(path: number): number;
+declare function bloom_commit_sound(handle: number): number;
+declare function bloom_commit_music(handle: number): number;
+
+export async function loadSoundAsync(path: string): Promise<Sound> {
+  const stagingHandle = await spawn(() => bloom_stage_sound(path as any));
+  const handle = bloom_commit_sound(stagingHandle);
+  return { handle };
+}
+
+export async function loadMusicAsync(path: string): Promise<Music> {
+  const stagingHandle = await spawn(() => bloom_stage_sound(path as any));
+  const handle = bloom_commit_music(stagingHandle);
+  return { handle };
+}
+
+export function stageSounds(paths: string[]): number[] {
+  return parallelMap(paths, (path: string) => bloom_stage_sound(path as any));
+}
+
+export function commitSound(stagingHandle: number): Sound {
+  const handle = bloom_commit_sound(stagingHandle);
+  return { handle };
+}
+
+export function commitMusic(stagingHandle: number): Music {
+  const handle = bloom_commit_music(stagingHandle);
+  return { handle };
 }

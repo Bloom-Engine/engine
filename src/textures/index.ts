@@ -1,3 +1,4 @@
+import { spawn, parallelMap } from 'perry/thread';
 import { Color, Rect, Texture } from '../core/types';
 
 // FFI declarations
@@ -15,6 +16,14 @@ declare function bloom_image_flip_h(handle: number): void;
 declare function bloom_image_flip_v(handle: number): void;
 declare function bloom_load_texture_from_image(handle: number): number;
 declare function bloom_gen_texture_mipmaps(handle: number): void;
+declare function bloom_set_texture_filter(handle: number, mode: number): void;
+
+export const FILTER_LINEAR = 0;
+export const FILTER_NEAREST = 1;
+
+export function setTextureFilter(texture: Texture, mode: number): void {
+  bloom_set_texture_filter(texture.id, mode);
+}
 
 export function loadTexture(path: string): Texture {
   const id = bloom_load_texture(path as any);
@@ -85,4 +94,28 @@ export function loadTextureFromImage(imageHandle: number): Texture {
 
 export function genTextureMipmaps(texture: Texture): void {
   bloom_gen_texture_mipmaps(texture.id);
+}
+
+// Async / threaded loading
+
+declare function bloom_stage_texture(path: number): number;
+declare function bloom_commit_texture(handle: number): number;
+
+export async function loadTextureAsync(path: string): Promise<Texture> {
+  const stagingHandle = await spawn(() => bloom_stage_texture(path as any));
+  const id = bloom_commit_texture(stagingHandle);
+  const width = bloom_get_texture_width(id);
+  const height = bloom_get_texture_height(id);
+  return { id, width, height };
+}
+
+export function stageTextures(paths: string[]): number[] {
+  return parallelMap(paths, (path: string) => bloom_stage_texture(path as any));
+}
+
+export function commitTexture(stagingHandle: number): Texture {
+  const id = bloom_commit_texture(stagingHandle);
+  const width = bloom_get_texture_width(id);
+  const height = bloom_get_texture_height(id);
+  return { id, width, height };
 }

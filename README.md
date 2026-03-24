@@ -25,7 +25,7 @@ while (!windowShouldClose()) {
 
 - **Simple API** — Functions, not classes. The entire API fits on a cheatsheet.
 - **True native** — Compiles to Metal, DirectX 12, Vulkan, and OpenGL via wgpu. No browser, no runtime.
-- **Ship everywhere** — macOS, Windows, Linux, iOS, Android from one codebase.
+- **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, Android from one codebase.
 - **Unified 2D/3D** — Shapes, textures, text, 3D models, and audio in one engine.
 - **Zero magic** — Explicit game loops, no hidden framework overhead.
 
@@ -43,13 +43,14 @@ while (!windowShouldClose()) {
 
 ## Platforms
 
-| Platform | Graphics API |
-|----------|-------------|
-| macOS | Metal |
-| Windows | DirectX 12 |
-| Linux | Vulkan / OpenGL |
-| iOS | Metal |
-| Android | Vulkan / OpenGL ES |
+| Platform | Graphics API | Input |
+|----------|-------------|-------|
+| macOS | Metal | Keyboard + mouse |
+| Windows | DirectX 12 | Keyboard + mouse |
+| Linux | Vulkan / OpenGL | Keyboard + mouse |
+| iOS | Metal | Touch + gamepad |
+| tvOS | Metal | Siri Remote + gamepad |
+| Android | Vulkan / OpenGL ES | Touch + gamepad |
 
 ## Architecture
 
@@ -67,6 +68,7 @@ native/               Rust implementations
   shared/             Cross-platform core (wgpu, fontdue, gltf)
   macos/              Metal + AppKit + Core Audio
   ios/                Metal + UIKit + Core Audio
+  tvos/               Metal + UIKit + GCController
   windows/            DirectX 12 + Win32 + XAudio2
   linux/              Vulkan/OpenGL + X11/Wayland + PulseAudio
   android/            Vulkan/OpenGL ES + NativeActivity + AAudio

@@ -974,6 +974,192 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
     Some(ModelData { meshes, bbox_min, bbox_max })
 }
 
+/// Like load_gltf_with_textures but decodes textures to RGBA without GPU registration.
+/// Returns a StagedModel with decoded textures that can later be committed on the main thread.
+pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
+    use crate::staging::{StagedTexture, StagedModel};
+
+    let gltf = gltf::Gltf::from_slice(data).ok()?;
+
+    let mut buffer_data: Vec<Vec<u8>> = Vec::new();
+    for buffer in gltf.buffers() {
+        match buffer.source() {
+            gltf::buffer::Source::Bin => {
+                if let Some(blob) = gltf.blob.as_ref() { buffer_data.push(blob.clone()); }
+            }
+            gltf::buffer::Source::Uri(uri) => {
+                if let Some(encoded) = uri.strip_prefix("data:application/octet-stream;base64,") {
+                    let mut decoded = Vec::new();
+                    let _ = base64_decode(encoded, &mut decoded);
+                    buffer_data.push(decoded);
+                } else {
+                    buffer_data.push(Vec::new());
+                }
+            }
+        }
+    }
+
+    // Decode textures to RGBA without GPU registration.
+    // staged_textures[i] corresponds to glTF image index i.
+    // texture_indices maps glTF image index -> 1-based index into staged_textures (0 = no texture).
+    let mut staged_textures: Vec<StagedTexture> = Vec::new();
+    let mut texture_indices: Vec<u32> = Vec::new();
+    for image in gltf.images() {
+        match image.source() {
+            gltf::image::Source::View { view, .. } => {
+                let buf_idx = view.buffer().index();
+                if buf_idx < buffer_data.len() {
+                    let offset = view.offset();
+                    let length = view.length();
+                    if offset + length <= buffer_data[buf_idx].len() {
+                        let img_data = &buffer_data[buf_idx][offset..offset + length];
+                        if let Ok(img) = image::load_from_memory(img_data) {
+                            let rgba = img.to_rgba8();
+                            let (w, h) = (rgba.width(), rgba.height());
+                            staged_textures.push(StagedTexture {
+                                data: rgba.into_raw(),
+                                width: w,
+                                height: h,
+                            });
+                            // 1-based index into staged_textures
+                            texture_indices.push(staged_textures.len() as u32);
+                        } else {
+                            texture_indices.push(0);
+                        }
+                    } else {
+                        texture_indices.push(0);
+                    }
+                } else {
+                    texture_indices.push(0);
+                }
+            }
+            _ => { texture_indices.push(0); }
+        }
+    }
+
+    // Detect armature scale (same logic as load_gltf_with_textures)
+    let skin_vertex_scale: f32 = {
+        let mut scale = 1.0f32;
+        for node in gltf.nodes() {
+            if node.mesh().is_some() && node.skin().is_some() {
+                for parent in gltf.nodes() {
+                    for child in parent.children() {
+                        if child.index() == node.index() {
+                            let (_, _, s) = parent.transform().decomposed();
+                            let avg_scale = (s[0] + s[1] + s[2]) / 3.0;
+                            if avg_scale > 0.001 && (avg_scale - 1.0).abs() > 0.01 {
+                                scale = 1.0 / avg_scale;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (scale - 1.0).abs() < 0.01 {
+            if let Some(skin) = gltf.skins().next() {
+                if let Some(accessor) = skin.inverse_bind_matrices() {
+                    let view = accessor.view().unwrap();
+                    let buf_idx = view.buffer().index();
+                    if buf_idx < buffer_data.len() {
+                        let offset = view.offset() + accessor.offset();
+                        let data = &buffer_data[buf_idx];
+                        if offset + 12 <= data.len() {
+                            let f0 = f32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
+                            let f1 = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
+                            let f2 = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
+                            let diag = (f0*f0 + f1*f1 + f2*f2).sqrt();
+                            if diag > 10.0 {
+                                scale = diag;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        scale
+    };
+
+    let mut meshes = Vec::new();
+    let mut bbox_min = [f32::MAX; 3];
+    let mut bbox_max = [f32::MIN; 3];
+
+    for mesh in gltf.meshes() {
+        for primitive in mesh.primitives() {
+            let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
+            let positions: Vec<[f32; 3]> = match reader.read_positions() {
+                Some(iter) => iter.collect(),
+                None => continue,
+            };
+            let normals: Vec<[f32; 3]> = reader.read_normals()
+                .map(|iter| iter.collect())
+                .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+            let tex_coords: Vec<[f32; 2]> = reader.read_tex_coords(0)
+                .map(|iter| iter.into_f32().collect())
+                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+            let vert_colors: Option<Vec<[f32; 4]>> = reader.read_colors(0)
+                .map(|iter| iter.into_rgba_f32().collect());
+            let base_color = primitive.material().pbr_metallic_roughness().base_color_factor();
+
+            // texture_idx stores a 1-based index into staged_textures (remapped on commit)
+            let tex_idx = primitive.material().pbr_metallic_roughness()
+                .base_color_texture()
+                .and_then(|info| {
+                    let img_idx = info.texture().source().index();
+                    texture_indices.get(img_idx).copied()
+                });
+
+            let mut vertices = Vec::with_capacity(positions.len());
+            for i in 0..positions.len() {
+                let p = positions[i];
+                for k in 0..3 {
+                    if p[k] < bbox_min[k] { bbox_min[k] = p[k]; }
+                    if p[k] > bbox_max[k] { bbox_max[k] = p[k]; }
+                }
+                let color = if let Some(ref vc) = vert_colors {
+                    vc[i]
+                } else {
+                    [base_color[0], base_color[1], base_color[2], base_color[3]]
+                };
+                let joint_vals: Option<Vec<[u16; 4]>> = reader.read_joints(0)
+                    .map(|iter| iter.into_u16().collect());
+                let weight_vals: Option<Vec<[f32; 4]>> = reader.read_weights(0)
+                    .map(|iter| iter.into_f32().collect());
+                let jv = if let Some(ref j) = joint_vals {
+                    [j[i][0] as f32, j[i][1] as f32, j[i][2] as f32, j[i][3] as f32]
+                } else {
+                    [0.0; 4]
+                };
+                let wv = if let Some(ref w) = weight_vals { w[i] } else { [0.0; 4] };
+                let is_skinned = wv[0] + wv[1] + wv[2] + wv[3] > 0.01;
+                let final_pos = if is_skinned && (skin_vertex_scale - 1.0).abs() > 0.01 {
+                    [p[0] * skin_vertex_scale, p[1] * skin_vertex_scale, p[2] * skin_vertex_scale]
+                } else {
+                    p
+                };
+                vertices.push(Vertex3D {
+                    position: final_pos,
+                    normal: normals[i],
+                    color,
+                    uv: tex_coords[i],
+                    joints: jv,
+                    weights: wv,
+                });
+            }
+            let indices: Vec<u32> = match reader.read_indices() {
+                Some(iter) => iter.into_u32().collect(),
+                None => (0..positions.len() as u32).collect(),
+            };
+            meshes.push(MeshData { vertices, indices, texture_idx: tex_idx });
+        }
+    }
+
+    if meshes.is_empty() { return None; }
+    Some(StagedModel {
+        model: ModelData { meshes, bbox_min, bbox_max },
+        textures: staged_textures,
+    })
+}
+
 fn load_gltf(data: &[u8]) -> Option<ModelData> {
     let gltf = gltf::Gltf::from_slice(data).ok()?;
 

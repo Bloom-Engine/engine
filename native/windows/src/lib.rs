@@ -700,6 +700,15 @@ pub extern "C" fn bloom_gen_texture_mipmaps(_handle: f64) {
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_set_texture_filter(handle: f64, mode: f64) {
+    let eng = engine();
+    if let Some(tex) = eng.textures.get(handle) {
+        let bind_group_idx = tex.bind_group_idx;
+        eng.renderer.set_texture_filter(bind_group_idx, mode > 0.5);
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_load_image(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
     match std::fs::read(path) { Ok(data) => engine().textures.load_image(&data), Err(_) => 0.0 }
@@ -877,12 +886,12 @@ pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64, scale: f64, px: f64, py: f64, pz: f64) {
+pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64, scale: f64, px: f64, py: f64, pz: f64, rot_sin: f64, rot_cos: f64) {
     let eng = engine();
     eng.models.update_model_animation(handle, anim_index as usize, time as f32);
     if let Some(anim) = eng.models.get_animation(handle) {
         if !anim.joint_matrices.is_empty() {
-            eng.renderer.set_joint_matrices_scaled(&anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32]);
+            eng.renderer.set_joint_matrices_scaled(&anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32], rot_sin as f32, rot_cos as f32);
         }
     }
 }
@@ -997,8 +1006,21 @@ pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
     match std::fs::read_to_string(path) {
         Ok(contents) => {
-            let c_str = std::ffi::CString::new(contents).unwrap_or_default();
-            c_str.into_raw() as *const u8
+            // Return Perry-format string: StringHeader (length u32 + capacity u32) followed by UTF-8 data
+            let bytes = contents.as_bytes();
+            let len = bytes.len();
+            let total = 8 + len; // 8 bytes header + data
+            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
+            unsafe {
+                let ptr = std::alloc::alloc(layout);
+                if ptr.is_null() { return std::ptr::null(); }
+                // Write length and capacity as u32
+                *(ptr as *mut u32) = len as u32;
+                *(ptr.add(4) as *mut u32) = len as u32;
+                // Copy string data after header
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(8), len);
+                ptr
+            }
         }
         Err(_) => std::ptr::null(),
     }
@@ -1039,6 +1061,106 @@ pub extern "C" fn bloom_get_platform() -> f64 { 3.0 }
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
+}
+
+// ============================================================
+// Thread-safe staging (for async asset loading via Perry threads)
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_stage_texture(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    match std::fs::read(path) {
+        Ok(data) => bloom_shared::staging::decode_and_stage_texture(&data),
+        Err(_) => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_stage_model(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => return 0.0,
+    };
+    match bloom_shared::models::load_gltf_staged(&data) {
+        Some(staged) => bloom_shared::staging::stage_model(staged),
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_stage_sound(path_ptr: *const u8) -> f64 {
+    let path = str_from_header(path_ptr);
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => return 0.0,
+    };
+    let sound_data = if path.ends_with(".ogg") || path.ends_with(".OGG") {
+        parse_ogg(&data)
+    } else if path.ends_with(".mp3") || path.ends_with(".MP3") {
+        parse_mp3(&data)
+    } else {
+        parse_wav(&data)
+    };
+    match sound_data {
+        Some(sd) => bloom_shared::staging::stage_sound(sd),
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_commit_texture(staging_handle: f64) -> f64 {
+    let staged = match bloom_shared::staging::take_texture(staging_handle) {
+        Some(s) => s,
+        None => return 0.0,
+    };
+    let eng = engine();
+    let bind_group_idx = eng.renderer.register_texture(staged.width, staged.height, &staged.data);
+    eng.textures.textures.alloc(bloom_shared::textures::TextureData {
+        bind_group_idx, width: staged.width, height: staged.height,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_commit_model(staging_handle: f64) -> f64 {
+    let staged = match bloom_shared::staging::take_model(staging_handle) {
+        Some(s) => s,
+        None => return 0.0,
+    };
+    let eng = engine();
+    let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
+    for tex in &staged.textures {
+        tex_map.push(eng.renderer.register_texture(tex.width, tex.height, &tex.data));
+    }
+    let mut model = staged.model;
+    for mesh in &mut model.meshes {
+        if let Some(ref mut idx) = mesh.texture_idx {
+            let staged_idx = *idx as usize;
+            if staged_idx > 0 && staged_idx <= tex_map.len() {
+                *idx = tex_map[staged_idx - 1];
+            } else {
+                mesh.texture_idx = None;
+            }
+        }
+    }
+    eng.models.models.alloc(model)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_commit_sound(staging_handle: f64) -> f64 {
+    match bloom_shared::staging::take_sound(staging_handle) {
+        Some(sd) => engine().audio.load_sound(sd),
+        None => 0.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_commit_music(staging_handle: f64) -> f64 {
+    match bloom_shared::staging::take_sound(staging_handle) {
+        Some(sd) => engine().audio.load_music(sd),
+        None => 0.0,
+    }
 }
 
 fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {

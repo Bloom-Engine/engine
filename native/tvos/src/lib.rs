@@ -186,6 +186,71 @@ unsafe fn handle_touches(touches: *const AnyObject, phase: TouchPhase) {
     }
 }
 
+// tvOS: allow the metal view to become focused (required for remote events)
+unsafe extern "C" fn bloom_can_become_focused(_this: *mut c_void, _sel: Sel) -> Bool {
+    Bool::YES
+}
+
+// tvOS: handle Siri Remote / game controller press events
+// UIPressType values: 0=UpArrow, 1=DownArrow, 2=LeftArrow, 3=RightArrow,
+//                     4=Select, 5=Menu, 6=PlayPause
+unsafe extern "C" fn bloom_presses_began(_this: *mut c_void, _sel: Sel, presses: *const AnyObject, _event: *const AnyObject) {
+    handle_presses(presses, true);
+}
+
+unsafe extern "C" fn bloom_presses_ended(_this: *mut c_void, _sel: Sel, presses: *const AnyObject, _event: *const AnyObject) {
+    handle_presses(presses, false);
+}
+
+unsafe fn handle_presses(presses: *const AnyObject, down: bool) {
+    if presses.is_null() { return; }
+
+    let enumerator: Retained<AnyObject> = msg_send![&*presses, objectEnumerator];
+    loop {
+        let press: *const AnyObject = msg_send![&*enumerator, nextObject];
+        if press.is_null() { break; }
+
+        let press_type: i64 = msg_send![&*press, r#type];
+        if let Some(eng) = ENGINE.get_mut() {
+            // Map tvOS press types to gamepad buttons
+            // D-pad: arrows → gamepad D-pad buttons (12=Up, 13=Down, 14=Left, 15=Right)
+            // Select → gamepad button 0 (A) + mouse button 0
+            // Menu → gamepad button 1 (B)
+            // PlayPause → gamepad button 9 (Start)
+            match press_type {
+                0 => { // Up arrow
+                    if down { eng.input.set_gamepad_button_down(12); } else { eng.input.set_gamepad_button_up(12); }
+                }
+                1 => { // Down arrow
+                    if down { eng.input.set_gamepad_button_down(13); } else { eng.input.set_gamepad_button_up(13); }
+                }
+                2 => { // Left arrow
+                    if down { eng.input.set_gamepad_button_down(14); } else { eng.input.set_gamepad_button_up(14); }
+                }
+                3 => { // Right arrow
+                    if down { eng.input.set_gamepad_button_down(15); } else { eng.input.set_gamepad_button_up(15); }
+                }
+                4 => { // Select (click)
+                    if down {
+                        eng.input.set_gamepad_button_down(0);
+                        eng.input.set_mouse_button_down(0);
+                    } else {
+                        eng.input.set_gamepad_button_up(0);
+                        eng.input.set_mouse_button_up(0);
+                    }
+                }
+                5 => { // Menu
+                    if down { eng.input.set_gamepad_button_down(1); } else { eng.input.set_gamepad_button_up(1); }
+                }
+                6 => { // PlayPause
+                    if down { eng.input.set_gamepad_button_down(9); } else { eng.input.set_gamepad_button_up(9); }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn register_metal_view_class() {
     if AnyClass::get(c"BloomMetalView").is_some() { return; }
 
@@ -204,6 +269,14 @@ fn register_metal_view_class() {
         class_addMethod(cls, sel!(touchesMoved:withEvent:), bloom_touches_moved as *const c_void, touch_types);
         class_addMethod(cls, sel!(touchesEnded:withEvent:), bloom_touches_ended as *const c_void, touch_types);
         class_addMethod(cls, sel!(touchesCancelled:withEvent:), bloom_touches_cancelled as *const c_void, touch_types);
+
+        // tvOS focus engine — view must be focusable to receive remote events
+        class_addMethod(cls, sel!(canBecomeFocused), bloom_can_become_focused as *const c_void, b"B8@0:8\0".as_ptr());
+
+        // tvOS press events — Siri Remote physical buttons
+        let press_types = b"v32@0:8@16@24\0".as_ptr();
+        class_addMethod(cls, sel!(pressesBegan:withEvent:), bloom_presses_began as *const c_void, press_types);
+        class_addMethod(cls, sel!(pressesEnded:withEvent:), bloom_presses_ended as *const c_void, press_types);
 
         objc_registerClassPair(cls);
     }
@@ -505,6 +578,120 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 }
 
 // ============================================================
+// GCController — Siri Remote and game controller monitoring
+// ============================================================
+
+/// Poll connected game controllers and feed their state into the engine input system.
+/// Called once during init and also from bloom_begin_drawing to poll controller state.
+fn poll_game_controllers() {
+    unsafe {
+        let gc_cls = match AnyClass::get(c"GCController") {
+            Some(c) => c,
+            None => return,
+        };
+        let controllers: Retained<AnyObject> = msg_send![gc_cls, controllers];
+        let count: usize = msg_send![&*controllers, count];
+        if count == 0 { return; }
+
+        // Use the first connected controller
+        let controller: Retained<AnyObject> = msg_send![&*controllers, objectAtIndex: 0usize];
+
+        // Try extended gamepad profile first (MFi, PS, Xbox controllers)
+        let extended: *const AnyObject = msg_send![&*controller, extendedGamepad];
+        if !extended.is_null() {
+            if let Some(eng) = ENGINE.get_mut() {
+                eng.input.set_gamepad_available(true);
+
+                // Left thumbstick
+                let left_stick: Retained<AnyObject> = msg_send![&*extended, leftThumbstick];
+                let lx: f64 = msg_send![&*left_stick, xAxis_value];
+                let ly: f64 = msg_send![&*left_stick, yAxis_value];
+                eng.input.set_gamepad_axis(0, lx);
+                eng.input.set_gamepad_axis(1, -ly); // Invert Y
+
+                // Right thumbstick
+                let right_stick: Retained<AnyObject> = msg_send![&*extended, rightThumbstick];
+                let rx: f64 = msg_send![&*right_stick, xAxis_value];
+                let ry: f64 = msg_send![&*right_stick, yAxis_value];
+                eng.input.set_gamepad_axis(2, rx);
+                eng.input.set_gamepad_axis(3, -ry);
+
+                // Buttons: A(0), B(1), X(2), Y(3)
+                let btn_a: Retained<AnyObject> = msg_send![&*extended, buttonA];
+                let btn_b: Retained<AnyObject> = msg_send![&*extended, buttonB];
+                let btn_x: Retained<AnyObject> = msg_send![&*extended, buttonX];
+                let btn_y: Retained<AnyObject> = msg_send![&*extended, buttonY];
+                let a_pressed: Bool = msg_send![&*btn_a, isPressed];
+                let b_pressed: Bool = msg_send![&*btn_b, isPressed];
+                let x_pressed: Bool = msg_send![&*btn_x, isPressed];
+                let y_pressed: Bool = msg_send![&*btn_y, isPressed];
+                if a_pressed.as_bool() { eng.input.set_gamepad_button_down(0); }
+                if b_pressed.as_bool() { eng.input.set_gamepad_button_down(1); }
+                if x_pressed.as_bool() { eng.input.set_gamepad_button_down(2); }
+                if y_pressed.as_bool() { eng.input.set_gamepad_button_down(3); }
+
+                // D-pad
+                let dpad: Retained<AnyObject> = msg_send![&*extended, dpad];
+                let up: Retained<AnyObject> = msg_send![&*dpad, up];
+                let down: Retained<AnyObject> = msg_send![&*dpad, down];
+                let left: Retained<AnyObject> = msg_send![&*dpad, left];
+                let right: Retained<AnyObject> = msg_send![&*dpad, right];
+                let up_p: Bool = msg_send![&*up, isPressed];
+                let down_p: Bool = msg_send![&*down, isPressed];
+                let left_p: Bool = msg_send![&*left, isPressed];
+                let right_p: Bool = msg_send![&*right, isPressed];
+                if up_p.as_bool() { eng.input.set_gamepad_button_down(12); }
+                if down_p.as_bool() { eng.input.set_gamepad_button_down(13); }
+                if left_p.as_bool() { eng.input.set_gamepad_button_down(14); }
+                if right_p.as_bool() { eng.input.set_gamepad_button_down(15); }
+
+                // Shoulders and triggers
+                let l_shoulder: Retained<AnyObject> = msg_send![&*extended, leftShoulder];
+                let r_shoulder: Retained<AnyObject> = msg_send![&*extended, rightShoulder];
+                let ls_p: Bool = msg_send![&*l_shoulder, isPressed];
+                let rs_p: Bool = msg_send![&*r_shoulder, isPressed];
+                if ls_p.as_bool() { eng.input.set_gamepad_button_down(4); }
+                if rs_p.as_bool() { eng.input.set_gamepad_button_down(5); }
+
+                let l_trigger: Retained<AnyObject> = msg_send![&*extended, leftTrigger];
+                let r_trigger: Retained<AnyObject> = msg_send![&*extended, rightTrigger];
+                eng.input.set_gamepad_axis(4, { let v: f64 = msg_send![&*l_trigger, value]; v });
+                eng.input.set_gamepad_axis(5, { let v: f64 = msg_send![&*r_trigger, value]; v });
+            }
+            return;
+        }
+
+        // Fall back to micro gamepad profile (Siri Remote)
+        let micro: *const AnyObject = msg_send![&*controller, microGamepad];
+        if !micro.is_null() {
+            if let Some(eng) = ENGINE.get_mut() {
+                eng.input.set_gamepad_available(true);
+
+                // Siri Remote touchpad → axes 0/1
+                let dpad: Retained<AnyObject> = msg_send![&*micro, dpad];
+                let x_val: f64 = { let axis: Retained<AnyObject> = msg_send![&*dpad, xAxis]; msg_send![&*axis, value] };
+                let y_val: f64 = { let axis: Retained<AnyObject> = msg_send![&*dpad, yAxis]; msg_send![&*axis, value] };
+                eng.input.set_gamepad_axis(0, x_val);
+                eng.input.set_gamepad_axis(1, -y_val);
+
+                // Button A (select/click) and Button X (play/pause)
+                let btn_a: Retained<AnyObject> = msg_send![&*micro, buttonA];
+                let btn_x: Retained<AnyObject> = msg_send![&*micro, buttonX];
+                let a_pressed: Bool = msg_send![&*btn_a, isPressed];
+                let x_pressed: Bool = msg_send![&*btn_x, isPressed];
+                if a_pressed.as_bool() { eng.input.set_gamepad_button_down(0); }
+                if x_pressed.as_bool() { eng.input.set_gamepad_button_down(9); } // start/pause
+            }
+        }
+    }
+}
+
+fn setup_game_controllers() {
+    // Initial poll to detect already-connected controllers
+    poll_game_controllers();
+}
+
+// ============================================================
 // FFI entry points
 // ============================================================
 
@@ -552,9 +739,12 @@ pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const
     }
 
     if unsafe { ENGINE.get().is_none() } {
-        panic!("[bloom-ios] Engine not initialized after 10s. \
-                Compile with: perry compile --target ios-simulator --features ios-game-loop");
+        panic!("[bloom-tvos] Engine not initialized after 10s. \
+                Compile with: perry compile --target tvos-simulator --features ios-game-loop");
     }
+
+    // Set up GCController monitoring for Siri Remote and game controllers
+    setup_game_controllers();
 }
 
 #[no_mangle]
@@ -571,6 +761,8 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
 pub extern "C" fn bloom_begin_drawing() {
     // No run loop pumping needed — UIApplicationMain handles the main run loop
     // on its own thread. The game runs on the game thread.
+    // Poll game controllers (Siri Remote + MFi/PS/Xbox) each frame
+    poll_game_controllers();
     engine().begin_frame();
 }
 
@@ -1472,108 +1664,8 @@ pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
     engine().input.set_gamepad_button_up(button as usize);
 }
 #[no_mangle]
-pub extern "C" fn bloom_get_platform() -> f64 { 2.0 }
+pub extern "C" fn bloom_get_platform() -> f64 { 6.0 }
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
-}
-
-// ============================================================
-// Thread-safe staging (for async asset loading via Perry threads)
-// ============================================================
-
-#[no_mangle]
-pub extern "C" fn bloom_stage_texture(path_ptr: *const u8) -> f64 {
-    let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
-        Ok(data) => bloom_shared::staging::decode_and_stage_texture(&data),
-        Err(_) => 0.0,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn bloom_stage_model(path_ptr: *const u8) -> f64 {
-    let path = str_from_header(path_ptr);
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return 0.0,
-    };
-    match bloom_shared::models::load_gltf_staged(&data) {
-        Some(staged) => bloom_shared::staging::stage_model(staged),
-        None => 0.0,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn bloom_stage_sound(path_ptr: *const u8) -> f64 {
-    let path = str_from_header(path_ptr);
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return 0.0,
-    };
-    let sound_data = if path.ends_with(".ogg") || path.ends_with(".OGG") {
-        parse_ogg(&data)
-    } else if path.ends_with(".mp3") || path.ends_with(".MP3") {
-        parse_mp3(&data)
-    } else {
-        parse_wav(&data)
-    };
-    match sound_data {
-        Some(sd) => bloom_shared::staging::stage_sound(sd),
-        None => 0.0,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn bloom_commit_texture(staging_handle: f64) -> f64 {
-    let staged = match bloom_shared::staging::take_texture(staging_handle) {
-        Some(s) => s,
-        None => return 0.0,
-    };
-    let eng = engine();
-    let bind_group_idx = eng.renderer.register_texture(staged.width, staged.height, &staged.data);
-    eng.textures.textures.alloc(bloom_shared::textures::TextureData {
-        bind_group_idx, width: staged.width, height: staged.height,
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn bloom_commit_model(staging_handle: f64) -> f64 {
-    let staged = match bloom_shared::staging::take_model(staging_handle) {
-        Some(s) => s,
-        None => return 0.0,
-    };
-    let eng = engine();
-    let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
-    for tex in &staged.textures {
-        tex_map.push(eng.renderer.register_texture(tex.width, tex.height, &tex.data));
-    }
-    let mut model = staged.model;
-    for mesh in &mut model.meshes {
-        if let Some(ref mut idx) = mesh.texture_idx {
-            let staged_idx = *idx as usize;
-            if staged_idx > 0 && staged_idx <= tex_map.len() {
-                *idx = tex_map[staged_idx - 1];
-            } else {
-                mesh.texture_idx = None;
-            }
-        }
-    }
-    eng.models.models.alloc(model)
-}
-
-#[no_mangle]
-pub extern "C" fn bloom_commit_sound(staging_handle: f64) -> f64 {
-    match bloom_shared::staging::take_sound(staging_handle) {
-        Some(sd) => engine().audio.load_sound(sd),
-        None => 0.0,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn bloom_commit_music(staging_handle: f64) -> f64 {
-    match bloom_shared::staging::take_sound(staging_handle) {
-        Some(sd) => engine().audio.load_music(sd),
-        None => 0.0,
-    }
 }

@@ -1,3 +1,4 @@
+import { spawn, parallelMap } from 'perry/thread';
 import { Color, Model, Vec3, Mat4 } from '../core/types';
 
 // FFI declarations
@@ -17,7 +18,7 @@ declare function bloom_gen_mesh_cube(w: number, h: number, d: number): number;
 declare function bloom_gen_mesh_heightmap(imageHandle: number, sizeX: number, sizeY: number, sizeZ: number): number;
 declare function bloom_load_shader(source: number): number;
 declare function bloom_load_model_animation(path: number): number;
-declare function bloom_update_model_animation(handle: number, animIndex: number, time: number): void;
+declare function bloom_update_model_animation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotSin: number, rotCos: number): void;
 declare function bloom_create_mesh(vertexPtr: number, vertexCount: number, indexPtr: number, indexCount: number): number;
 declare function bloom_set_ambient_light(r: number, g: number, b: number, intensity: number): void;
 declare function bloom_set_directional_light(dx: number, dy: number, dz: number, r: number, g: number, b: number, intensity: number): void;
@@ -188,8 +189,8 @@ export function loadModelAnimation(path: string): number {
   return bloom_load_model_animation(path as any);
 }
 
-export function updateModelAnimation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number): void {
-  bloom_update_model_animation(handle, animIndex, time, scale, px, py, pz);
+export function updateModelAnimation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotSin?: number, rotCos?: number): void {
+  bloom_update_model_animation(handle, animIndex, time, scale, px, py, pz, rotSin ?? 0.0, rotCos ?? 1.0);
 }
 
 export function createMesh(vertices: number[], indices: number[]): Model {
@@ -209,4 +210,41 @@ export function setDirectionalLight(direction: Vec3, color: Color, intensity: nu
 declare function bloom_set_joint_test(joint: number, angle: number): void;
 export function setJointTest(joint: number, angle: number): void {
   bloom_set_joint_test(joint, angle);
+}
+
+// Async / threaded loading
+
+declare function bloom_stage_model(path: number): number;
+declare function bloom_commit_model(handle: number): number;
+
+export async function loadModelAsync(path: string): Promise<Model> {
+  const pathLower = (path as string).toLowerCase();
+  if (pathLower.endsWith('.obj')) {
+    const parsed = await spawn(() => {
+      const text: string = bloom_read_file(path as any) as any;
+      return text ? parseOBJ(text) : null;
+    });
+    if (parsed) {
+      const handle = bloom_create_mesh(
+        parsed.vertices as any,
+        parsed.vertices.length / 12,
+        parsed.indices as any,
+        parsed.indices.length,
+      );
+      return makeModel(handle, 1, 1);
+    }
+    return makeModel(0, 0, 0);
+  }
+  const stagingHandle = await spawn(() => bloom_stage_model(path as any));
+  const handle = bloom_commit_model(stagingHandle);
+  return makeModel(handle);
+}
+
+export function stageModels(paths: string[]): number[] {
+  return parallelMap(paths, (path: string) => bloom_stage_model(path as any));
+}
+
+export function commitModel(stagingHandle: number): Model {
+  const handle = bloom_commit_model(stagingHandle);
+  return makeModel(handle);
 }

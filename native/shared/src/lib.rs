@@ -6,6 +6,12 @@ pub mod text_renderer;
 pub mod audio;
 pub mod textures;
 pub mod models;
+pub mod scene;
+pub mod frame_callbacks;
+pub mod geometry;
+pub mod picking;
+pub mod shadows;
+pub mod staging;
 pub mod engine;
 
 pub use engine::EngineState;
@@ -14,3 +20,5 @@ pub use string_header::str_from_header;
 pub use audio::{AudioMixer, SoundData, parse_wav, parse_ogg, parse_mp3};
 pub use textures::TextureManager;
 pub use models::ModelManager;
+pub use scene::SceneGraph;
+pub use frame_callbacks::FrameCallbackSystem;

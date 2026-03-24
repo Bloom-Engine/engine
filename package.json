@@ -13,7 +13,8 @@
     "./math": "./src/math/index.ts",
     "./textures": "./src/textures/index.ts",
     "./models": "./src/models/index.ts",
-    "./mobile": "./src/mobile/index.ts"
+    "./mobile": "./src/mobile/index.ts",
+    "./scene": "./src/scene/index.ts"
   },
   "license": "MIT",
   "perry": {
@@ -79,6 +80,7 @@
         { "name": "bloom_image_flip_v",             "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_load_texture_from_image",  "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_gen_texture_mipmaps",      "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_texture_filter",      "params": ["f64", "f64"],                                            "returns": "void" },
 
         { "name": "bloom_begin_mode_2d",            "params": ["f64", "f64", "f64", "f64", "f64", "f64"],               "returns": "void" },
         { "name": "bloom_end_mode_2d",              "params": [],                                                        "returns": "void" },
@@ -151,7 +153,47 @@
         { "name": "bloom_inject_gamepad_button_down", "params": ["f64"],        "returns": "void" },
         { "name": "bloom_inject_gamepad_button_up",   "params": ["f64"],        "returns": "void" },
         { "name": "bloom_get_platform",               "params": [],             "returns": "f64"  },
-        { "name": "bloom_is_any_input_pressed",       "params": [],             "returns": "f64"  }
+        { "name": "bloom_is_any_input_pressed",       "params": [],             "returns": "f64"  },
+
+        { "name": "bloom_register_frame_callback",     "params": ["f64", "i64"],                                            "returns": "f64"  },
+        { "name": "bloom_unregister_frame_callback",   "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_add_directional_light",       "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],        "returns": "void" },
+        { "name": "bloom_add_point_light",             "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
+
+        { "name": "bloom_scene_create_node",           "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_scene_destroy_node",          "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_scene_set_visible",           "params": ["f64", "f64"],                                            "returns": "void" },
+        { "name": "bloom_scene_set_cast_shadow",       "params": ["f64", "f64"],                                            "returns": "void" },
+        { "name": "bloom_scene_set_receive_shadow",    "params": ["f64", "f64"],                                            "returns": "void" },
+        { "name": "bloom_scene_set_parent",            "params": ["f64", "f64"],                                            "returns": "void" },
+        { "name": "bloom_scene_set_transform",         "params": ["f64", "i64"],                                            "returns": "void" },
+        { "name": "bloom_scene_update_geometry",       "params": ["f64", "i64", "f64", "i64", "f64"],                       "returns": "void" },
+        { "name": "bloom_scene_set_material_color",    "params": ["f64", "f64", "f64", "f64", "f64"],                       "returns": "void" },
+        { "name": "bloom_scene_set_material_pbr",      "params": ["f64", "f64", "f64"],                                     "returns": "void" },
+        { "name": "bloom_scene_set_material_texture",  "params": ["f64", "f64"],                                            "returns": "void" },
+        { "name": "bloom_scene_node_count",            "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_scene_extrude_polygon",      "params": ["f64", "i64", "f64", "f64"],                              "returns": "void" },
+        { "name": "bloom_scene_subtract_box",         "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],        "returns": "void" },
+        { "name": "bloom_enable_shadows",             "params": [],                                                        "returns": "void" },
+        { "name": "bloom_disable_shadows",            "params": [],                                                        "returns": "void" },
+        { "name": "bloom_scene_attach_model",         "params": ["f64", "f64", "f64"],                                     "returns": "void" },
+        { "name": "bloom_scene_pick",                "params": ["f64", "f64"],                                            "returns": "f64"  },
+        { "name": "bloom_pick_hit_handle",           "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_pick_hit_distance",         "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_pick_hit_x",                "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_pick_hit_y",                "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_pick_hit_z",                "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_pick_hit_normal_x",         "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_pick_hit_normal_y",         "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_pick_hit_normal_z",         "params": [],                                                        "returns": "f64"  },
+
+        { "name": "bloom_stage_texture",              "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_stage_model",                "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_stage_sound",                "params": ["i64"],                                                   "returns": "f64"  },
+        { "name": "bloom_commit_texture",             "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_commit_model",               "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_commit_sound",               "params": ["f64"],                                                   "returns": "f64"  },
+        { "name": "bloom_commit_music",               "params": ["f64"],                                                   "returns": "f64"  }
       ],
       "targets": {
         "macos": {
@@ -164,6 +206,13 @@
         "ios": {
           "crate": "native/ios/",
           "lib": "libbloom_ios.a",
+          "frameworks": ["Metal", "QuartzCore", "UIKit", "CoreGraphics", "CoreText",
+                          "CoreFoundation", "CoreAudio", "AudioToolbox", "AVFoundation",
+                          "GameController"]
+        },
+        "tvos": {
+          "crate": "native/tvos/",
+          "lib": "libbloom_tvos.a",
           "frameworks": ["Metal", "QuartzCore", "UIKit", "CoreGraphics", "CoreText",
                           "CoreFoundation", "CoreAudio", "AudioToolbox", "AVFoundation",
                           "GameController"]

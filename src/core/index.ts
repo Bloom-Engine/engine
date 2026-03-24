@@ -297,13 +297,17 @@ export function injectGamepadButtonUp(button: number): void { bloom_inject_gamep
 
 // Platform detection
 
-export const Platform = { UNKNOWN: 0, MACOS: 1, IOS: 2, WINDOWS: 3, LINUX: 4, ANDROID: 5 } as const;
+export const Platform = { UNKNOWN: 0, MACOS: 1, IOS: 2, WINDOWS: 3, LINUX: 4, ANDROID: 5, TVOS: 6 } as const;
 
 export function getPlatform(): number { return bloom_get_platform(); }
 
 export function isMobile(): boolean {
   const p = bloom_get_platform();
   return p === 2 || p === 5;
+}
+
+export function isTV(): boolean {
+  return bloom_get_platform() === 6;
 }
 
 export function isAnyInputPressed(): boolean {

@@ -15,7 +15,7 @@ export {
   writeFile, fileExists, readFile,
   getScreenToWorld2D, getWorldToScreen2D,
   Color, ColorConstants, Colors, Key, MouseButton,
-  injectKeyDown, injectKeyUp, isAnyInputPressed, getPlatform, isMobile, Platform,
+  injectKeyDown, injectKeyUp, isAnyInputPressed, getPlatform, isMobile, isTV, Platform,
   injectGamepadAxis, injectGamepadButtonDown, injectGamepadButtonUp,
 } from './core/index';
 
@@ -46,13 +46,15 @@ export {
   loadMusic, playMusic, stopMusic, updateMusicStream, updateMusic,
   setMusicVolume, isMusicPlaying,
   playSound3D, setListenerPosition,
+  loadSoundAsync, loadMusicAsync, stageSounds, commitSound, commitMusic,
 } from './audio/index';
 
 export {
   loadTexture, unloadTexture, drawTexture, drawTexturePro, drawTextureRec,
   getTextureWidth, getTextureHeight, loadImage,
   imageResize, imageCrop, imageFlipH, imageFlipV, loadTextureFromImage,
-  genTextureMipmaps,
+  genTextureMipmaps, setTextureFilter, FILTER_LINEAR, FILTER_NEAREST,
+  loadTextureAsync, stageTextures, commitTexture,
 } from './textures/index';
 
 export {
@@ -61,6 +63,7 @@ export {
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
   loadShader, loadModelAnimation, updateModelAnimation, createMesh,
   setAmbientLight, setDirectionalLight, setJointTest,
+  loadModelAsync, stageModels, commitModel,
 } from './models/index';
 
 export type { DrawCubeOpts } from './models/index';
@@ -92,3 +95,20 @@ export {
 } from './mobile/index';
 
 export type { VirtualJoystick, VirtualButton } from './mobile/index';
+
+export {
+  createSceneNode, destroySceneNode,
+  setSceneNodeVisible, setSceneNodeCastShadow, setSceneNodeReceiveShadow,
+  setSceneNodeParent, setSceneNodeTransform,
+  updateSceneNodeGeometry,
+  setSceneNodeColor, setSceneNodePbr, setSceneNodeTexture,
+  getSceneNodeCount,
+  registerFrameCallback, unregisterFrameCallback,
+  addDirectionalLight, addPointLight,
+  extrudePolygon, subtractBox,
+  pickScene,
+  enableShadows, disableShadows,
+  attachModelToNode,
+} from './scene/index';
+
+export type { SceneNodeHandle, PbrMaterial, PickHit } from './scene/index';

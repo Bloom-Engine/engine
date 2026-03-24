@@ -13,3 +13,4 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 gltf = "1"
 lewton = "0.10"
 minimp3 = "0.5"
+earcutr = "0.4"
