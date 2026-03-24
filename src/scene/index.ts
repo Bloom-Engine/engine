@@ -51,6 +51,14 @@ declare function bloom_add_point_light(
 declare function bloom_enable_shadows(): void;
 declare function bloom_disable_shadows(): void;
 
+// Post-processing
+declare function bloom_enable_postfx(): void;
+declare function bloom_disable_postfx(): void;
+declare function bloom_postfx_set_selected(handle: number): void;
+declare function bloom_postfx_set_hovered(handle: number): void;
+declare function bloom_postfx_set_outline_color(r: number, g: number, b: number, a: number): void;
+declare function bloom_postfx_set_outline_thickness(thickness: number): void;
+
 // Model attachment
 declare function bloom_scene_attach_model(nodeHandle: number, modelHandle: number, meshIndex: number): void;
 
@@ -257,6 +265,55 @@ export function enableShadows(): void {
  */
 export function disableShadows(): void {
   bloom_disable_shadows();
+}
+
+// ============================================================
+// Post-Processing (Outlines, SSAO)
+// ============================================================
+
+/**
+ * Enable the post-processing pipeline (outlines, SSAO).
+ * Must be called after initWindow.
+ */
+export function enablePostFx(): void {
+  bloom_enable_postfx();
+}
+
+/**
+ * Disable post-processing (render directly to screen).
+ */
+export function disablePostFx(): void {
+  bloom_disable_postfx();
+}
+
+/**
+ * Set the selected scene node for outline rendering.
+ * Pass 0 to clear selection. Matching Pascal Editor's outliner.selectedObjects.
+ */
+export function setPostFxSelected(handle: SceneNodeHandle): void {
+  bloom_postfx_set_selected(handle);
+}
+
+/**
+ * Set the hovered scene node for outline rendering.
+ * Pass 0 to clear hover.
+ */
+export function setPostFxHovered(handle: SceneNodeHandle): void {
+  bloom_postfx_set_hovered(handle);
+}
+
+/**
+ * Set the outline color for selected objects (0-1 range).
+ */
+export function setOutlineColor(r: number, g: number, b: number, a: number = 1): void {
+  bloom_postfx_set_outline_color(r, g, b, a);
+}
+
+/**
+ * Set the outline thickness in pixels.
+ */
+export function setOutlineThickness(thickness: number): void {
+  bloom_postfx_set_outline_thickness(thickness);
 }
 
 // ============================================================

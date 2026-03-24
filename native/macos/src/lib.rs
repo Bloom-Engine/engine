@@ -1553,6 +1553,58 @@ pub extern "C" fn bloom_disable_shadows() {
     engine().renderer.shadow_map.disable();
 }
 
+// ============================================================
+// Post-processing
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_enable_postfx() {
+    let eng = engine();
+    let w = eng.renderer.width();
+    let h = eng.renderer.height();
+    let fmt = eng.renderer.surface_format();
+    eng.postfx = Some(bloom_shared::postfx::PostFxPipeline::new(
+        &eng.renderer.device, w, h, fmt,
+    ));
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_disable_postfx() {
+    engine().postfx = None;
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_selected(handle: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        if handle == 0.0 {
+            pfx.set_selected(Vec::new());
+        } else {
+            pfx.set_selected(vec![handle]);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_hovered(handle: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        pfx.set_hovered(handle);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_outline_color(r: f64, g: f64, b: f64, a: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        pfx.outline_params.color_selected = [r as f32, g as f32, b as f32, a as f32];
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_outline_thickness(thickness: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        pfx.outline_params.thickness[0] = thickness as f32;
+    }
+}
+
 /// Attach a loaded GLTF model's mesh geometry to a scene node.
 /// Copies the vertex/index data from the model into the scene node.
 #[no_mangle]

@@ -109,6 +109,9 @@ export {
   pickScene,
   enableShadows, disableShadows,
   attachModelToNode,
+  enablePostFx, disablePostFx,
+  setPostFxSelected, setPostFxHovered,
+  setOutlineColor, setOutlineThickness,
 } from './scene/index';
 
 export type { SceneNodeHandle, PbrMaterial, PickHit } from './scene/index';

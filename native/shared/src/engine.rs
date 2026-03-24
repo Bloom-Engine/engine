@@ -6,6 +6,7 @@ use crate::textures::TextureManager;
 use crate::models::ModelManager;
 use crate::scene::SceneGraph;
 use crate::frame_callbacks::FrameCallbackSystem;
+use crate::postfx::PostFxPipeline;
 
 pub struct EngineState {
     pub renderer: Renderer,
@@ -16,6 +17,7 @@ pub struct EngineState {
     pub models: ModelManager,
     pub scene: SceneGraph,
     pub frame_callbacks: FrameCallbackSystem,
+    pub postfx: Option<PostFxPipeline>,
 
     // Timing
     pub target_fps: f64,
@@ -42,6 +44,7 @@ impl EngineState {
             models: ModelManager::new(),
             scene: SceneGraph::new(),
             frame_callbacks: FrameCallbackSystem::new(),
+            postfx: None,
             target_fps: 60.0,
             delta_time: 0.0,
             last_frame_time: now,

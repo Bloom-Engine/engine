@@ -11,6 +11,8 @@ pub mod frame_callbacks;
 pub mod geometry;
 pub mod picking;
 pub mod shadows;
+pub mod postfx;
+pub mod custom_shaders;
 pub mod staging;
 pub mod engine;
 

@@ -2330,6 +2330,10 @@ impl Renderer {
         self.surface_config.height
     }
 
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.surface_config.format
+    }
+
     /// Returns true if vsync is active (Fifo or FifoRelaxed present mode).
     pub fn vsync_active(&self) -> bool {
         matches!(self.surface_config.present_mode,
