@@ -112,6 +112,7 @@ export {
   enablePostFx, disablePostFx,
   setPostFxSelected, setPostFxHovered,
   setOutlineColor, setOutlineThickness,
+  projectToScreen,
 } from './scene/index';
 
 export type { SceneNodeHandle, PbrMaterial, PickHit } from './scene/index';

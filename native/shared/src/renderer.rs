@@ -444,6 +444,10 @@ pub struct Renderer {
 
     // Shadow mapping
     pub shadow_map: crate::shadows::ShadowMap,
+
+    // Screenshot capture (set flag, captured during end_frame)
+    pub screenshot_requested: bool,
+    pub screenshot_data: Option<(u32, u32, Vec<u8>)>,
 }
 
 impl Renderer {
@@ -891,6 +895,8 @@ impl Renderer {
             clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
             shadow_map,
+            screenshot_requested: false,
+            screenshot_data: None,
         }
     }
 
@@ -1331,7 +1337,67 @@ impl Renderer {
             }
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        // If screenshot requested, copy rendered texture to staging buffer before submitting
+        if self.screenshot_requested {
+            // Use actual texture dimensions (accounts for Retina/DPI scaling)
+            let tex_size = output.texture.size();
+            let width = tex_size.width;
+            let height = tex_size.height;
+            let bytes_per_pixel = 4u32;
+            let unpadded_bpr = width * bytes_per_pixel;
+            let padded_bpr = (unpadded_bpr + 255) & !255;
+            let buf_size = (padded_bpr * height) as u64;
+
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("screenshot_staging"),
+                size: buf_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &output.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bpr),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+
+            self.queue.submit(std::iter::once(encoder.finish()));
+
+            // Read back pixels synchronously
+            let slice = staging.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+            self.device.poll(wgpu::Maintain::Wait);
+
+            if let Ok(Ok(())) = rx.recv() {
+                let data = slice.get_mapped_range();
+                let mut rgba = Vec::with_capacity((width * height * bytes_per_pixel) as usize);
+                for row in 0..height {
+                    let start = (row * padded_bpr) as usize;
+                    let end = start + (width * bytes_per_pixel) as usize;
+                    rgba.extend_from_slice(&data[start..end]);
+                }
+                drop(data);
+                self.screenshot_data = Some((width, height, rgba));
+            }
+            staging.unmap();
+            self.screenshot_requested = false;
+        } else {
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
+
         output.present();
     }
 
@@ -2332,6 +2398,79 @@ impl Renderer {
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.surface_config.format
+    }
+
+    /// Capture the current framebuffer as RGBA pixels.
+    /// Returns (width, height, rgba_data). Call after end_frame.
+    pub fn capture_screenshot(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let width = self.surface_config.width;
+        let height = self.surface_config.height;
+        let bytes_per_pixel = 4u32;
+        // wgpu requires rows aligned to 256 bytes
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
+        let buffer_size = (padded_bytes_per_row * height) as u64;
+
+        // Render one frame to a texture we can copy from
+        let output = self.surface.get_current_texture().ok()?;
+        let texture = &output.texture;
+
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot_staging"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("screenshot_encoder"),
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map the buffer and read pixels
+        let buffer_slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+
+        if rx.recv().ok()?.is_err() {
+            return None;
+        }
+
+        let data = buffer_slice.get_mapped_range();
+        // Remove row padding
+        let mut rgba = Vec::with_capacity((width * height * bytes_per_pixel) as usize);
+        for row in 0..height {
+            let start = (row * padded_bytes_per_row) as usize;
+            let end = start + (width * bytes_per_pixel) as usize;
+            rgba.extend_from_slice(&data[start..end]);
+        }
+        drop(data);
+        staging_buffer.unmap();
+        output.present();
+
+        Some((width, height, rgba))
     }
 
     /// Returns true if vsync is active (Fifo or FifoRelaxed present mode).

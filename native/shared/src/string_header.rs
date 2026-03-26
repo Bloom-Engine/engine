@@ -6,6 +6,8 @@ pub struct StringHeader {
     pub length: u32,
     /// Capacity (allocated space for data)
     pub capacity: u32,
+    /// Reference hint: 0=shared, 1=unique (in-place append OK)
+    pub refcount: u32,
 }
 
 /// Extract a &str from a *const StringHeader pointer (Perry string format).

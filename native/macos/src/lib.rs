@@ -310,7 +310,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         .unwrap_or(surface_caps.formats[0]);
 
     let surface_config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         format,
         width: width as u32,
         height: height as u32,
@@ -328,6 +328,9 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         let _ = ENGINE.set(engine_state);
         WINDOW = Some(window);
     }
+
+    // Register Bloom's GPU screenshot capture with perry-geisterhand (if linked)
+    bloom_register_geisterhand_screenshot();
 }
 
 #[no_mangle]
@@ -430,6 +433,11 @@ pub extern "C" fn bloom_begin_drawing() {
 
 #[no_mangle]
 pub extern "C" fn bloom_end_drawing() {
+    // Pump geisterhand BEFORE end_frame.
+    // Screenshot function re-renders inline with captured VP + vertices.
+    extern "C" { fn perry_geisterhand_pump(); }
+    unsafe { perry_geisterhand_pump(); }
+
     engine().end_frame();
 }
 
@@ -1295,19 +1303,18 @@ pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
     match std::fs::read_to_string(path) {
         Ok(contents) => {
-            // Return Perry-format string: StringHeader (length u32 + capacity u32) followed by UTF-8 data
+            // Return Perry-format string: StringHeader (length u32 + capacity u32 + refcount u32) followed by UTF-8 data
             let bytes = contents.as_bytes();
             let len = bytes.len();
-            let total = 8 + len; // 8 bytes header + data
+            let total = 12 + len; // 12 bytes header (3 × u32) + data
             let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
             unsafe {
                 let ptr = std::alloc::alloc(layout);
                 if ptr.is_null() { return std::ptr::null(); }
-                // Write length and capacity as u32
-                *(ptr as *mut u32) = len as u32;
-                *(ptr.add(4) as *mut u32) = len as u32;
-                // Copy string data after header
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(8), len);
+                *(ptr as *mut u32) = len as u32;           // length
+                *(ptr.add(4) as *mut u32) = len as u32;    // capacity
+                *(ptr.add(8) as *mut u32) = 1;             // refcount (unique)
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
                 ptr
             }
         }
@@ -1493,6 +1500,24 @@ pub extern "C" fn bloom_scene_node_count() -> f64 {
     engine().scene.node_count() as f64
 }
 
+/// Debug: get vertex count for a scene node (0 if not found or empty)
+#[no_mangle]
+pub extern "C" fn bloom_scene_node_vertex_count(handle: f64) -> f64 {
+    match engine().scene.nodes.get(handle) {
+        Some(node) => node.vertices.len() as f64,
+        None => -1.0,
+    }
+}
+
+/// Debug: get index count for a scene node
+#[no_mangle]
+pub extern "C" fn bloom_scene_node_index_count(handle: f64) -> f64 {
+    match engine().scene.nodes.get(handle) {
+        Some(node) => node.indices.len() as f64,
+        None => -1.0,
+    }
+}
+
 // ============================================================
 // Geometry generation
 // ============================================================
@@ -1603,6 +1628,49 @@ pub extern "C" fn bloom_postfx_set_outline_thickness(thickness: f64) {
     if let Some(pfx) = &mut engine().postfx {
         pfx.outline_params.thickness[0] = thickness as f32;
     }
+}
+
+// ============================================================
+// 3D→2D Projection (for UI overlays positioned in 3D space)
+// ============================================================
+
+/// Project a world-space 3D point to screen coordinates.
+/// Returns screen X. Call bloom_project_y for Y. Returns -9999 if behind camera.
+static mut LAST_PROJECT: (f64, f64) = (0.0, 0.0);
+
+#[no_mangle]
+pub extern "C" fn bloom_project_to_screen(wx: f64, wy: f64, wz: f64) -> f64 {
+    let eng = engine();
+    let vp = eng.renderer.vp_matrix();
+    let w = eng.renderer.width() as f32;
+    let h = eng.renderer.height() as f32;
+
+    // Multiply by VP matrix
+    let x = wx as f32;
+    let y = wy as f32;
+    let z = wz as f32;
+    let clip_x = vp[0][0]*x + vp[1][0]*y + vp[2][0]*z + vp[3][0];
+    let clip_y = vp[0][1]*x + vp[1][1]*y + vp[2][1]*z + vp[3][1];
+    let clip_w = vp[0][3]*x + vp[1][3]*y + vp[2][3]*z + vp[3][3];
+
+    if clip_w <= 0.0 {
+        unsafe { LAST_PROJECT = (-9999.0, -9999.0); }
+        return -9999.0;
+    }
+
+    // NDC to screen
+    let ndc_x = clip_x / clip_w;
+    let ndc_y = clip_y / clip_w;
+    let screen_x = ((ndc_x + 1.0) * 0.5 * w) as f64;
+    let screen_y = ((1.0 - ndc_y) * 0.5 * h) as f64;
+
+    unsafe { LAST_PROJECT = (screen_x, screen_y); }
+    screen_x
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_project_screen_y() -> f64 {
+    unsafe { LAST_PROJECT.1 }
 }
 
 /// Attach a loaded GLTF model's mesh geometry to a scene node.
@@ -1759,6 +1827,185 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
+}
+
+// ============================================================
+// Geisterhand screenshot integration
+// ============================================================
+
+/// Register Bloom's GPU-based screenshot capture with perry-geisterhand.
+/// This replaces perry-ui-macos's CGWindowListCreateImage approach with
+/// direct wgpu texture readback — works for Metal/Vulkan rendered content.
+fn bloom_register_geisterhand_screenshot() {
+    // Try to register with geisterhand if it's linked (weak symbol)
+    extern "C" {
+        fn perry_geisterhand_register_screenshot_capture(
+            f: extern "C" fn(*mut usize) -> *mut u8,
+        );
+    }
+    unsafe {
+        perry_geisterhand_register_screenshot_capture(bloom_screenshot_capture);
+    }
+}
+
+/// Capture the Bloom framebuffer as PNG.
+/// Called from geisterhand pump BEFORE end_frame in bloom_end_drawing.
+/// The vertices_3d/2d and VP matrix from the game loop are still populated.
+/// We render to a fresh surface texture with screenshot capture, producing
+/// the same visual output as the real frame.
+extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
+    let eng = engine();
+
+    // Set capture flag and render inline
+    eng.renderer.screenshot_requested = true;
+    eng.scene.prepare(
+        &eng.renderer.device,
+        &eng.renderer.queue,
+        &eng.renderer.vp_matrix(),
+        eng.renderer.uniform_3d_layout(),
+    );
+    eng.renderer.end_frame_with_scene(&eng.scene);
+
+    match eng.renderer.screenshot_data.take() {
+        Some((width, height, rgba)) => {
+            // Encode RGBA pixels to PNG
+            match encode_png(width, height, &rgba) {
+                Some(png_data) => {
+                    let len = png_data.len();
+                    // Allocate with libc::malloc (caller will free with libc::free)
+                    let ptr = unsafe { libc::malloc(len) as *mut u8 };
+                    if ptr.is_null() {
+                        unsafe { *out_len = 0; }
+                        return std::ptr::null_mut();
+                    }
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(png_data.as_ptr(), ptr, len);
+                        *out_len = len;
+                    }
+                    ptr
+                }
+                None => {
+                    unsafe { *out_len = 0; }
+                    std::ptr::null_mut()
+                }
+            }
+        }
+        None => {
+            unsafe { *out_len = 0; }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Minimal PNG encoder (no external dependency).
+fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+
+    let mut png = Vec::new();
+    // PNG signature
+    png.write_all(&[137, 80, 78, 71, 13, 10, 26, 10]).ok()?;
+
+    // IHDR chunk
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.push(8); // bit depth
+    ihdr.push(6); // color type: RGBA
+    ihdr.push(0); // compression
+    ihdr.push(0); // filter
+    ihdr.push(0); // interlace
+    write_png_chunk(&mut png, b"IHDR", &ihdr);
+
+    // IDAT chunk — raw pixel data with zlib
+    // Build raw scanlines: each row starts with filter byte 0 (None)
+    let row_bytes = (width * 4) as usize;
+    let mut raw = Vec::with_capacity((row_bytes + 1) * height as usize);
+    for y in 0..height as usize {
+        raw.push(0); // filter: None
+        let start = y * row_bytes;
+        // Copy BGRA pixels, swapping B and R for PNG (which expects RGBA)
+        for x in 0..width as usize {
+            let idx = start + x * 4;
+            // Metal Bgra8UnormSrgb: byte order is B, G, R, A
+            raw.push(rgba[idx + 2]); // R (was at offset 2 in BGRA)
+            raw.push(rgba[idx + 1]); // G (same position)
+            raw.push(rgba[idx + 0]); // B (was at offset 0 in BGRA)
+            raw.push(255);           // A (force opaque — alpha from sRGB surface is unreliable)
+        }
+    }
+
+    // Compress with deflate (store blocks, no actual compression for simplicity)
+    let deflated = deflate_store(&raw);
+    write_png_chunk(&mut png, b"IDAT", &deflated);
+
+    // IEND chunk
+    write_png_chunk(&mut png, b"IEND", &[]);
+
+    Some(png)
+}
+
+fn write_png_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+    let len = data.len() as u32;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(chunk_type);
+    out.extend_from_slice(data);
+    // CRC32 over type + data
+    let crc = crc32(&[chunk_type.as_slice(), data].concat());
+    out.extend_from_slice(&crc.to_be_bytes());
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFFFFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+/// Minimal deflate: store blocks (no compression). Wraps in zlib format.
+fn deflate_store(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    // Zlib header: CMF=0x78 (deflate, window=32K), FLG=0x01 (no dict, check bits)
+    out.push(0x78);
+    out.push(0x01);
+
+    // Split into 65535-byte store blocks
+    let mut remaining = data.len();
+    let mut offset = 0;
+    while remaining > 0 {
+        let block_size = remaining.min(65535);
+        let is_last = remaining <= 65535;
+        out.push(if is_last { 1 } else { 0 }); // BFINAL + BTYPE=00 (store)
+        let len = block_size as u16;
+        let nlen = !len;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&nlen.to_le_bytes());
+        out.extend_from_slice(&data[offset..offset + block_size]);
+        offset += block_size;
+        remaining -= block_size;
+    }
+
+    // Adler-32 checksum
+    let adler = adler32(data);
+    out.extend_from_slice(&adler.to_be_bytes());
+    out
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    let mut a: u32 = 1;
+    let mut b: u32 = 0;
+    for &byte in data {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
 }
 
 // ============================================================

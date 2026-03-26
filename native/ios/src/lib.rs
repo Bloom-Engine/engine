@@ -1422,19 +1422,18 @@ pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
     match std::fs::read_to_string(resolve_path(path)) {
         Ok(contents) => {
-            // Return Perry-format string: StringHeader (length u32 + capacity u32) followed by UTF-8 data
+            // Return Perry-format string: StringHeader (length u32 + capacity u32 + refcount u32) followed by UTF-8 data
             let bytes = contents.as_bytes();
             let len = bytes.len();
-            let total = 8 + len; // 8 bytes header + data
+            let total = 12 + len; // 12 bytes header (3 × u32) + data
             let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
             unsafe {
                 let ptr = std::alloc::alloc(layout);
                 if ptr.is_null() { return std::ptr::null(); }
-                // Write length and capacity as u32
-                *(ptr as *mut u32) = len as u32;
-                *(ptr.add(4) as *mut u32) = len as u32;
-                // Copy string data after header
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(8), len);
+                *(ptr as *mut u32) = len as u32;           // length
+                *(ptr.add(4) as *mut u32) = len as u32;    // capacity
+                *(ptr.add(8) as *mut u32) = 1;             // refcount (unique)
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
                 ptr
             }
         }
