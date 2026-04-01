@@ -18,6 +18,7 @@ pub struct EngineState {
     pub scene: SceneGraph,
     pub frame_callbacks: FrameCallbackSystem,
     pub postfx: Option<PostFxPipeline>,
+    pub screenshot_pending: bool,
 
     // Timing
     pub target_fps: f64,
@@ -45,6 +46,7 @@ impl EngineState {
             scene: SceneGraph::new(),
             frame_callbacks: FrameCallbackSystem::new(),
             postfx: None,
+            screenshot_pending: false,
             target_fps: 60.0,
             delta_time: 0.0,
             last_frame_time: now,
@@ -79,7 +81,7 @@ impl EngineState {
     }
 
     pub fn end_frame(&mut self) {
-        // Prepare scene graph GPU resources before rendering
+        // Prepare and render with scene graph
         self.scene.prepare(
             &self.renderer.device,
             &self.renderer.queue,

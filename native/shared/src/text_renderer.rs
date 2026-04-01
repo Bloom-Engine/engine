@@ -85,6 +85,30 @@ pub struct TextRenderer {
 }
 
 impl TextRenderer {
+    /// Cheap placeholder that allocates nothing. Used as a temporary swap target
+    /// when we need to split borrows on EngineState (text + renderer).
+    pub fn empty() -> Self {
+        Self {
+            fonts: Vec::new(),
+            glyph_cache: HashMap::new(),
+            atlas_data: Vec::new(),
+            atlas_width: 0,
+            atlas_height: 0,
+            atlas_cursor_x: 0,
+            atlas_cursor_y: 0,
+            atlas_row_height: 0,
+            atlas_bind_group_idx: None,
+            atlas_dirty: false,
+            sdf_glyph_cache: HashMap::new(),
+            sdf_atlas_data: Vec::new(),
+            sdf_atlas_cursor_x: 0,
+            sdf_atlas_cursor_y: 0,
+            sdf_atlas_row_height: 0,
+            sdf_atlas_bind_group_idx: None,
+            sdf_atlas_dirty: false,
+        }
+    }
+
     pub fn new() -> Self {
         let default_font = Font::from_bytes(DEFAULT_FONT_DATA, FontSettings::default())
             .expect("Failed to load default font");

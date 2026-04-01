@@ -96,27 +96,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "bloom-ios"
-version = "0.1.0"
-dependencies = [
- "bloom-shared",
- "objc2",
- "objc2-foundation",
- "raw-window-handle",
- "wgpu",
-]
-
-[[package]]
 name = "bloom-shared"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "earcutr",
  "fontdue",
  "gltf",
  "image",
  "lewton",
  "libc",
  "minimp3",
+ "raw-window-handle",
+ "wgpu",
+]
+
+[[package]]
+name = "bloom-tvos"
+version = "0.1.0"
+dependencies = [
+ "bloom-shared",
+ "objc2",
+ "objc2-foundation",
  "raw-window-handle",
  "wgpu",
 ]
@@ -245,6 +246,22 @@ checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
 ]
+
+[[package]]
+name = "earcutr"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79127ed59a85d7687c409e9978547cffb7dc79675355ed22da6b66fd5f6ead01"
+dependencies = [
+ "itertools",
+ "num-traits",
+]
+
+[[package]]
+name = "either"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "equivalent"
@@ -527,6 +544,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a257582fdcde896fd96463bf2d40eefea0580021c0712a0e2b028b60b47a837a"
 
 [[package]]
+name = "itertools"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1c173a5686ce8bfa551b3563d0c2170bf24ca44da99c7ca4bfdab5418c3fe57"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -646,8 +672,6 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "metal"
 version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f569fb946490b5743ad69813cb19629130ce9374034abe31614a36402d18f99e"
 dependencies = [
  "bitflags 2.11.0",
  "block",

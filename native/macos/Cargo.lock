@@ -100,6 +100,7 @@ name = "bloom-macos"
 version = "0.1.0"
 dependencies = [
  "bloom-shared",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

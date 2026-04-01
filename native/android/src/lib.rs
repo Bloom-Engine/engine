@@ -353,7 +353,7 @@ pub extern "C" fn bloom_draw_poly(cx: f64, cy: f64, sides: f64, radius: f64, rot
 pub extern "C" fn bloom_draw_text(text_ptr: *const u8, x: f64, y: f64, size: f64, r: f64, g: f64, b: f64, a: f64) {
     let text = str_from_header(text_ptr);
     let eng = engine();
-    let mut text_renderer = std::mem::replace(&mut eng.text, bloom_shared::text_renderer::TextRenderer::new());
+    let mut text_renderer = std::mem::replace(&mut eng.text, bloom_shared::text_renderer::TextRenderer::empty());
     text_renderer.draw_text(&mut eng.renderer, text, x, y, size as u32, r, g, b, a);
     eng.text = text_renderer;
 }
@@ -379,7 +379,7 @@ pub extern "C" fn bloom_unload_font(font_handle: f64) {
 pub extern "C" fn bloom_draw_text_ex(font_handle: f64, text_ptr: *const u8, x: f64, y: f64, size: f64, spacing: f64, r: f64, g: f64, b: f64, a: f64) {
     let text = str_from_header(text_ptr);
     let eng = engine();
-    let mut text_renderer = std::mem::replace(&mut eng.text, bloom_shared::text_renderer::TextRenderer::new());
+    let mut text_renderer = std::mem::replace(&mut eng.text, bloom_shared::text_renderer::TextRenderer::empty());
     text_renderer.draw_text_ex(&mut eng.renderer, font_handle as usize, text, x, y, size as u32, spacing as f32, r, g, b, a);
     eng.text = text_renderer;
 }
@@ -1028,7 +1028,7 @@ pub extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeOnDestroy(
 #[no_mangle]
 pub extern "C" fn bloom_stage_texture(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    match std::fs::read(path) {
+    match std::fs::read(resolve_path(path)) {
         Ok(data) => bloom_shared::staging::decode_and_stage_texture(&data),
         Err(_) => 0.0,
     }
@@ -1037,7 +1037,7 @@ pub extern "C" fn bloom_stage_texture(path_ptr: *const u8) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_stage_model(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    let data = match std::fs::read(path) {
+    let data = match std::fs::read(resolve_path(path)) {
         Ok(d) => d,
         Err(_) => return 0.0,
     };
@@ -1050,7 +1050,7 @@ pub extern "C" fn bloom_stage_model(path_ptr: *const u8) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_stage_sound(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
-    let data = match std::fs::read(path) {
+    let data = match std::fs::read(resolve_path(path)) {
         Ok(d) => d,
         Err(_) => return 0.0,
     };

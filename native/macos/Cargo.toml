@@ -15,3 +15,4 @@ objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSEvent", 
 objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
 raw-window-handle = "0.6"
 wgpu = "24"
+libc = "0.2"

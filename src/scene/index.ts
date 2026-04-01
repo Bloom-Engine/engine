@@ -62,6 +62,10 @@ declare function bloom_postfx_set_outline_thickness(thickness: number): void;
 // Model attachment
 declare function bloom_scene_attach_model(nodeHandle: number, modelHandle: number, meshIndex: number): void;
 
+// 3D→2D Projection
+declare function bloom_project_to_screen(wx: number, wy: number, wz: number): number;
+declare function bloom_project_screen_y(): number;
+
 // Scene picking
 declare function bloom_scene_pick(screenX: number, screenY: number): number;
 declare function bloom_pick_hit_handle(): number;
@@ -335,6 +339,29 @@ export function attachModelToNode(
   meshIndex: number = 0,
 ): void {
   bloom_scene_attach_model(nodeHandle, modelHandle, meshIndex);
+}
+
+// ============================================================
+// 3D → 2D Projection (for UI overlays in 3D space)
+// ============================================================
+
+/**
+ * Project a world-space 3D point to screen coordinates.
+ * Returns { x, y, visible }. If the point is behind the camera, visible is false.
+ *
+ * This is the native equivalent of R3F's drei Html component positioning.
+ * Used for zone labels, dimension references, interactive controls.
+ */
+export function projectToScreen(
+  worldX: number, worldY: number, worldZ: number,
+): { x: number; y: number; visible: boolean } {
+  const sx = bloom_project_to_screen(worldX, worldY, worldZ);
+  const sy = bloom_project_screen_y();
+  return {
+    x: sx,
+    y: sy,
+    visible: sx > -9000,
+  };
 }
 
 // ============================================================
