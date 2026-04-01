@@ -1178,3 +1178,45 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
         }
     }
 }
+
+// 3D engine stubs — not yet implemented on Windows
+#[no_mangle] pub extern "C" fn bloom_register_frame_callback(_priority: f64, _callback: extern "C" fn(f64)) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_unregister_frame_callback(_id: f64) {}
+#[no_mangle] pub extern "C" fn bloom_add_directional_light(_dx: f64, _dy: f64, _dz: f64, _r: f64, _g: f64, _b: f64, _intensity: f64) {}
+#[no_mangle] pub extern "C" fn bloom_add_point_light(_x: f64, _y: f64, _z: f64, _range: f64, _r: f64, _g: f64, _b: f64, _intensity: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_create_node() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_scene_destroy_node(_handle: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_set_visible(_handle: f64, _visible: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_set_cast_shadow(_handle: f64, _cast: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_set_receive_shadow(_handle: f64, _receive: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_set_parent(_handle: f64, _parent: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_set_transform(_handle: f64, _mat_ptr: *const f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_update_geometry(_handle: f64, _vert_ptr: *const f64, _vert_count: f64, _idx_ptr: *const f64, _idx_count: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_color(_handle: f64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_pbr(_handle: f64, _roughness: f64, _metalness: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_texture(_handle: f64, _texture_idx: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_node_count() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_scene_node_vertex_count(_handle: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_scene_node_index_count(_handle: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_scene_extrude_polygon(_handle: f64, _polygon_ptr: *const f64, _polygon_count: f64, _depth: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_subtract_box(_handle: f64, _min_x: f64, _min_y: f64, _min_z: f64, _max_x: f64, _max_y: f64, _max_z: f64) {}
+#[no_mangle] pub extern "C" fn bloom_enable_shadows() {}
+#[no_mangle] pub extern "C" fn bloom_disable_shadows() {}
+#[no_mangle] pub extern "C" fn bloom_enable_postfx() {}
+#[no_mangle] pub extern "C" fn bloom_disable_postfx() {}
+#[no_mangle] pub extern "C" fn bloom_postfx_set_selected(_handle: f64) {}
+#[no_mangle] pub extern "C" fn bloom_postfx_set_hovered(_handle: f64) {}
+#[no_mangle] pub extern "C" fn bloom_postfx_set_outline_color(_r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn bloom_postfx_set_outline_thickness(_thickness: f64) {}
+#[no_mangle] pub extern "C" fn bloom_project_to_screen(_wx: f64, _wy: f64, _wz: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_project_screen_y() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_scene_attach_model(_node_handle: f64, _model_handle: f64, _mesh_index: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_pick(_screen_x: f64, _screen_y: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_pick_hit_handle() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_pick_hit_distance() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_pick_hit_x() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_pick_hit_y() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_pick_hit_z() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_pick_hit_normal_x() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_pick_hit_normal_y() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_pick_hit_normal_z() -> f64 { 0.0 }
