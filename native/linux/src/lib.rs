@@ -185,7 +185,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
         let surface = unsafe {
             let raw_window = raw_window_handle::RawWindowHandle::Xlib(
-                raw_window_handle::XlibWindowHandle::new(x11_impl::window() as u32)
+                raw_window_handle::XlibWindowHandle::new(x11_impl::window())
             );
             let raw_display = raw_window_handle::RawDisplayHandle::Xlib(
                 raw_window_handle::XlibDisplayHandle::new(
@@ -958,6 +958,397 @@ pub extern "C" fn bloom_get_platform() -> f64 { 4.0 }
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
+}
+
+// ============================================================
+// Frame callbacks
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_register_frame_callback(priority: f64, callback: extern "C" fn(f64)) -> f64 {
+    engine().frame_callbacks.register(priority as i32, callback) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_unregister_frame_callback(id: f64) {
+    engine().frame_callbacks.unregister(id as u64);
+}
+
+// ============================================================
+// Multiple lights
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_add_directional_light(
+    dx: f64, dy: f64, dz: f64,
+    r: f64, g: f64, b: f64,
+    intensity: f64,
+) {
+    engine().renderer.add_directional_light(
+        dx as f32, dy as f32, dz as f32,
+        r as f32, g as f32, b as f32,
+        intensity as f32,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_add_point_light(
+    x: f64, y: f64, z: f64, range: f64,
+    r: f64, g: f64, b: f64,
+    intensity: f64,
+) {
+    engine().renderer.add_point_light(
+        x as f32, y as f32, z as f32, range as f32,
+        r as f32, g as f32, b as f32,
+        intensity as f32,
+    );
+}
+
+// ============================================================
+// Scene graph (retained mode)
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_create_node() -> f64 {
+    engine().scene.create_node()
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_destroy_node(handle: f64) {
+    engine().scene.destroy_node(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_visible(handle: f64, visible: f64) {
+    engine().scene.set_visible(handle, visible != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_cast_shadow(handle: f64, cast: f64) {
+    engine().scene.set_cast_shadow(handle, cast != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_receive_shadow(handle: f64, receive: f64) {
+    engine().scene.set_receive_shadow(handle, receive != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_parent(handle: f64, parent: f64) {
+    engine().scene.set_parent(handle, parent);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_transform(handle: f64, mat_ptr: *const f64) {
+    if mat_ptr.is_null() { return; }
+    let slice = unsafe { std::slice::from_raw_parts(mat_ptr, 16) };
+    let mut mat = [[0.0f32; 4]; 4];
+    for col in 0..4 {
+        for row in 0..4 {
+            mat[col][row] = slice[col * 4 + row] as f32;
+        }
+    }
+    engine().scene.set_transform(handle, mat);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_update_geometry(
+    handle: f64,
+    vert_ptr: *const f64,
+    vert_count: f64,
+    idx_ptr: *const f64,
+    idx_count: f64,
+) {
+    if vert_ptr.is_null() || idx_ptr.is_null() { return; }
+    let nv = vert_count as usize;
+    let ni = idx_count as usize;
+
+    let vert_floats = unsafe { std::slice::from_raw_parts(vert_ptr, nv * 12) };
+    let idx_floats = unsafe { std::slice::from_raw_parts(idx_ptr, ni) };
+
+    let mut vertices = Vec::with_capacity(nv);
+    for i in 0..nv {
+        let base = i * 12;
+        vertices.push(bloom_shared::renderer::Vertex3D {
+            position: [vert_floats[base] as f32, vert_floats[base+1] as f32, vert_floats[base+2] as f32],
+            normal: [vert_floats[base+3] as f32, vert_floats[base+4] as f32, vert_floats[base+5] as f32],
+            color: [vert_floats[base+6] as f32, vert_floats[base+7] as f32, vert_floats[base+8] as f32, vert_floats[base+9] as f32],
+            uv: [vert_floats[base+10] as f32, vert_floats[base+11] as f32],
+            joints: [0.0; 4],
+            weights: [0.0; 4],
+        });
+    }
+
+    let indices: Vec<u32> = idx_floats.iter().map(|&v| v as u32).collect();
+
+    engine().scene.update_geometry(handle, vertices, indices);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_color(handle: f64, r: f64, g: f64, b: f64, a: f64) {
+    engine().scene.set_material_color(handle, r as f32, g as f32, b as f32, a as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_pbr(handle: f64, roughness: f64, metalness: f64) {
+    engine().scene.set_material_pbr(handle, roughness as f32, metalness as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_texture(handle: f64, texture_idx: f64) {
+    engine().scene.set_material_texture(handle, texture_idx as u32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_node_count() -> f64 {
+    engine().scene.node_count() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_node_vertex_count(handle: f64) -> f64 {
+    match engine().scene.nodes.get(handle) {
+        Some(node) => node.vertices.len() as f64,
+        None => -1.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_node_index_count(handle: f64) -> f64 {
+    match engine().scene.nodes.get(handle) {
+        Some(node) => node.indices.len() as f64,
+        None => -1.0,
+    }
+}
+
+// ============================================================
+// Geometry generation
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_extrude_polygon(
+    handle: f64,
+    polygon_ptr: *const f64,
+    polygon_count: f64,
+    depth: f64,
+) {
+    if polygon_ptr.is_null() { return; }
+    let n = polygon_count as usize;
+    let polygon = unsafe { std::slice::from_raw_parts(polygon_ptr, n * 2) };
+
+    let geo = bloom_shared::geometry::extrude_polygon(polygon, &[], depth);
+    engine().scene.update_geometry(handle, geo.vertices, geo.indices);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_subtract_box(
+    handle: f64,
+    min_x: f64, min_y: f64, min_z: f64,
+    max_x: f64, max_y: f64, max_z: f64,
+) {
+    let eng = engine();
+    if let Some(node) = eng.scene.nodes.get(handle) {
+        let current = bloom_shared::geometry::GeometryData {
+            vertices: node.vertices.clone(),
+            indices: node.indices.clone(),
+        };
+        let result = bloom_shared::geometry::subtract_box(
+            &current,
+            [min_x as f32, min_y as f32, min_z as f32],
+            [max_x as f32, max_y as f32, max_z as f32],
+        );
+        eng.scene.update_geometry(handle, result.vertices, result.indices);
+    }
+}
+
+// ============================================================
+// Shadow mapping
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_enable_shadows() {
+    engine().renderer.shadow_map.enable();
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_disable_shadows() {
+    engine().renderer.shadow_map.disable();
+}
+
+// ============================================================
+// Post-processing
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_enable_postfx() {
+    let eng = engine();
+    let w = eng.renderer.width();
+    let h = eng.renderer.height();
+    let fmt = eng.renderer.surface_format();
+    eng.postfx = Some(bloom_shared::postfx::PostFxPipeline::new(
+        &eng.renderer.device, w, h, fmt,
+    ));
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_disable_postfx() {
+    engine().postfx = None;
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_selected(handle: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        if handle == 0.0 {
+            pfx.set_selected(Vec::new());
+        } else {
+            pfx.set_selected(vec![handle]);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_hovered(handle: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        pfx.set_hovered(handle);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_outline_color(r: f64, g: f64, b: f64, a: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        pfx.outline_params.color_selected = [r as f32, g as f32, b as f32, a as f32];
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_outline_thickness(thickness: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        pfx.outline_params.thickness[0] = thickness as f32;
+    }
+}
+
+// ============================================================
+// 3D→2D Projection (for UI overlays positioned in 3D space)
+// ============================================================
+
+static mut LAST_PROJECT: (f64, f64) = (0.0, 0.0);
+
+#[no_mangle]
+pub extern "C" fn bloom_project_to_screen(wx: f64, wy: f64, wz: f64) -> f64 {
+    let eng = engine();
+    let vp = eng.renderer.vp_matrix();
+    let w = eng.renderer.width() as f32;
+    let h = eng.renderer.height() as f32;
+
+    let x = wx as f32;
+    let y = wy as f32;
+    let z = wz as f32;
+    let clip_x = vp[0][0]*x + vp[1][0]*y + vp[2][0]*z + vp[3][0];
+    let clip_y = vp[0][1]*x + vp[1][1]*y + vp[2][1]*z + vp[3][1];
+    let clip_w = vp[0][3]*x + vp[1][3]*y + vp[2][3]*z + vp[3][3];
+
+    if clip_w <= 0.0 {
+        unsafe { LAST_PROJECT = (-9999.0, -9999.0); }
+        return -9999.0;
+    }
+
+    let ndc_x = clip_x / clip_w;
+    let ndc_y = clip_y / clip_w;
+    let screen_x = ((ndc_x + 1.0) * 0.5 * w) as f64;
+    let screen_y = ((1.0 - ndc_y) * 0.5 * h) as f64;
+
+    unsafe { LAST_PROJECT = (screen_x, screen_y); }
+    screen_x
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_project_screen_y() -> f64 {
+    unsafe { LAST_PROJECT.1 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_index: f64) {
+    let eng = engine();
+    let mi = mesh_index as usize;
+
+    let model_data = match eng.models.models.get(model_handle) {
+        Some(md) => md,
+        None => return,
+    };
+    if mi >= model_data.meshes.len() { return; }
+    let mesh = &model_data.meshes[mi];
+
+    let vertices = mesh.vertices.clone();
+    let indices = mesh.indices.clone();
+    eng.scene.update_geometry(node_handle, vertices, indices);
+
+    if let Some(tex_idx) = mesh.texture_idx {
+        eng.scene.set_material_texture(node_handle, tex_idx);
+    }
+}
+
+// ============================================================
+// Scene picking (raycasting)
+// ============================================================
+
+static mut LAST_PICK: Option<bloom_shared::picking::PickResult> = None;
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_pick(screen_x: f64, screen_y: f64) -> f64 {
+    let eng = engine();
+    let inv_vp = eng.renderer.inverse_vp_matrix();
+    let cam_pos = eng.renderer.camera_pos();
+    let w = eng.renderer.width() as f32;
+    let h = eng.renderer.height() as f32;
+
+    let (origin, direction) = bloom_shared::picking::screen_to_ray(
+        screen_x as f32, screen_y as f32,
+        w, h, &inv_vp, &cam_pos,
+    );
+
+    let result = bloom_shared::picking::raycast_scene(&eng.scene, &origin, &direction);
+    let hit = result.hit;
+    unsafe { LAST_PICK = Some(result); }
+    if hit { 1.0 } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_handle() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.handle).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_distance() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.distance as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_x() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.point[0] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_y() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.point[1] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_z() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.point[2] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_normal_x() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.normal[0] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_normal_y() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.normal[1] as f64).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_hit_normal_z() -> f64 {
+    unsafe { LAST_PICK.as_ref().map(|r| r.normal[2] as f64).unwrap_or(0.0) }
 }
 
 // ============================================================
