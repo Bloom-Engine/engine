@@ -1267,7 +1267,7 @@ fn setup_game_controllers() {
 // ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const u8) {
+pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const u8, _fullscreen: f64) {
     let _title = str_from_header(title_ptr);
 
     // Register ObjC classes for the scene delegate (window/view creation)

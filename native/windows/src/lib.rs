@@ -56,6 +56,53 @@ mod win32 {
     use raw_window_handle::{RawWindowHandle, Win32WindowHandle, RawDisplayHandle, WindowsDisplayHandle};
 
     static mut HWND_GLOBAL: Option<HWND> = None;
+    static mut IS_FULLSCREEN: bool = false;
+    static mut WINDOWED_STYLE: u32 = 0;
+    static mut WINDOWED_RECT: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+
+    pub fn set_fullscreen(fullscreen: bool) {
+        unsafe {
+            let Some(hwnd) = HWND_GLOBAL else { return };
+
+            if fullscreen && !IS_FULLSCREEN {
+                // Save current style and window rect for restore
+                WINDOWED_STYLE = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+                let _ = GetWindowRect(hwnd, &mut WINDOWED_RECT);
+
+                // Get monitor dimensions
+                let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                let mut mi: MONITORINFO = std::mem::zeroed();
+                mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                let _ = GetMonitorInfoW(monitor, &mut mi);
+
+                // Set borderless fullscreen
+                SetWindowLongW(hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE).0 as i32);
+                let _ = SetWindowPos(
+                    hwnd, HWND_TOP,
+                    mi.rcMonitor.left, mi.rcMonitor.top,
+                    mi.rcMonitor.right - mi.rcMonitor.left,
+                    mi.rcMonitor.bottom - mi.rcMonitor.top,
+                    SWP_FRAMECHANGED | SWP_NOOWNERZORDER,
+                );
+                IS_FULLSCREEN = true;
+            } else if !fullscreen && IS_FULLSCREEN {
+                // Restore windowed mode
+                SetWindowLongW(hwnd, GWL_STYLE, WINDOWED_STYLE as i32);
+                let _ = SetWindowPos(
+                    hwnd, None,
+                    WINDOWED_RECT.left, WINDOWED_RECT.top,
+                    WINDOWED_RECT.right - WINDOWED_RECT.left,
+                    WINDOWED_RECT.bottom - WINDOWED_RECT.top,
+                    SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_NOZORDER,
+                );
+                IS_FULLSCREEN = false;
+            }
+        }
+    }
+
+    pub fn toggle_fullscreen() {
+        unsafe { set_fullscreen(!IS_FULLSCREEN); }
+    }
 
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         match msg {
@@ -179,7 +226,7 @@ mod win32 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8) {
+pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8, fullscreen: f64) {
     let title = str_from_header(title_ptr);
 
     #[cfg(windows)]
@@ -231,6 +278,10 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
         let renderer = Renderer::new(device, queue, surface, surface_config);
         unsafe { let _ = ENGINE.set(EngineState::new(renderer)); }
+
+        if fullscreen != 0.0 {
+            win32::set_fullscreen(true);
+        }
     }
 
     #[cfg(not(windows))]
@@ -959,7 +1010,10 @@ pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64,
 // --- Utility FFI ---
 
 #[no_mangle]
-pub extern "C" fn bloom_toggle_fullscreen() {}
+pub extern "C" fn bloom_toggle_fullscreen() {
+    #[cfg(windows)]
+    win32::toggle_fullscreen();
+}
 #[no_mangle]
 pub extern "C" fn bloom_set_window_title(title_ptr: *const u8) { let _ = str_from_header(title_ptr); }
 #[no_mangle]

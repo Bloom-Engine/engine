@@ -235,7 +235,7 @@ unsafe extern "C" fn audio_render_callback(
 // ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8) {
+pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8, fullscreen: f64) {
     let title = str_from_header(title_ptr);
     let mtm = MainThreadMarker::from(unsafe { MainThreadMarker::new_unchecked() });
 
@@ -331,6 +331,10 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
     // Register Bloom's GPU screenshot capture with perry-geisterhand (if linked)
     bloom_register_geisterhand_screenshot();
+
+    if fullscreen != 0.0 {
+        bloom_toggle_fullscreen();
+    }
 }
 
 #[no_mangle]

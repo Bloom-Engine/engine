@@ -86,7 +86,7 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 // ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8) {
+pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8, _fullscreen: f64) {
     let _title = str_from_header(title_ptr);
 
     unsafe {

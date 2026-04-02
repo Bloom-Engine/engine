@@ -6,7 +6,7 @@ export { ColorConstants as Color } from './colors';
 export { Key, MouseButton } from './keys';
 
 // FFI declarations
-declare function bloom_init_window(width: number, height: number, title: number): void;
+declare function bloom_init_window(width: number, height: number, title: number, fullscreen: number): void;
 declare function bloom_close_window(): void;
 declare function bloom_window_should_close(): number;
 declare function bloom_begin_drawing(): void;
@@ -69,8 +69,8 @@ declare function bloom_read_file(path: number): number;
 
 // Window management
 
-export function initWindow(width: number, height: number, title: string): void {
-  bloom_init_window(width, height, title as any);
+export function initWindow(width: number, height: number, title: string, fullscreen: boolean = false): void {
+  bloom_init_window(width, height, title as any, fullscreen ? 1.0 : 0.0);
 }
 
 export function closeWindow(): void {

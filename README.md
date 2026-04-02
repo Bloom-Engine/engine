@@ -93,6 +93,25 @@ interface Sound { handle: number }
 interface Model { handle: number }
 ```
 
+## Fullscreen
+
+Launch your game in fullscreen by passing `true` as the fourth argument to `initWindow`:
+
+```typescript
+initWindow(800, 450, "My Game", true);   // launches fullscreen
+initWindow(800, 450, "My Game");         // windowed (default)
+```
+
+Toggle fullscreen at runtime:
+
+```typescript
+if (isKeyPressed(Key.F11)) {
+  toggleFullscreen();
+}
+```
+
+Fullscreen is supported on macOS (native AppKit fullscreen), Windows (borderless fullscreen), and Linux (EWMH/X11). The width and height you pass are used as the windowed dimensions when exiting fullscreen.
+
 ## Skeletal Animation
 
 Bloom supports GPU-accelerated skeletal animation via glTF/GLB models. The pipeline uses 4-bone linear blend skinning with a 128-joint uniform buffer, running entirely on the GPU.

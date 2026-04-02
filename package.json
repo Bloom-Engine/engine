@@ -21,7 +21,7 @@
     "nativeLibrary": {
       "module": "bloom",
       "functions": [
-        { "name": "bloom_init_window",              "params": ["f64", "f64", "i64"],                                     "returns": "void" },
+        { "name": "bloom_init_window",              "params": ["f64", "f64", "i64", "f64"],                              "returns": "void" },
         { "name": "bloom_close_window",             "params": [],                                                        "returns": "void" },
         { "name": "bloom_window_should_close",      "params": [],                                                        "returns": "f64"  },
         { "name": "bloom_begin_drawing",            "params": [],                                                        "returns": "void" },

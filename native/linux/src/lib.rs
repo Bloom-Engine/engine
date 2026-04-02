@@ -65,6 +65,51 @@ mod x11_impl {
 
     static mut DISPLAY: *mut x11::xlib::Display = std::ptr::null_mut();
     static mut X11_WINDOW: x11::xlib::Window = 0;
+    static mut IS_FULLSCREEN: bool = false;
+
+    pub fn set_fullscreen(fullscreen: bool) {
+        unsafe {
+            if DISPLAY.is_null() || X11_WINDOW == 0 { return; }
+
+            let wm_state = x11::xlib::XInternAtom(
+                DISPLAY,
+                b"_NET_WM_STATE\0".as_ptr() as *const _,
+                0,
+            );
+            let wm_fullscreen = x11::xlib::XInternAtom(
+                DISPLAY,
+                b"_NET_WM_STATE_FULLSCREEN\0".as_ptr() as *const _,
+                0,
+            );
+
+            let action = if fullscreen { 1 } else { 0 }; // _NET_WM_STATE_ADD / _REMOVE
+
+            let mut event: x11::xlib::XClientMessageEvent = std::mem::zeroed();
+            event.type_ = x11::xlib::ClientMessage;
+            event.window = X11_WINDOW;
+            event.message_type = wm_state;
+            event.format = 32;
+            event.data.set_long(0, action);
+            event.data.set_long(1, wm_fullscreen as i64);
+            event.data.set_long(2, 0);
+            event.data.set_long(3, 1); // source: normal application
+
+            let root = x11::xlib::XDefaultRootWindow(DISPLAY);
+            x11::xlib::XSendEvent(
+                DISPLAY,
+                root,
+                0,
+                x11::xlib::SubstructureRedirectMask | x11::xlib::SubstructureNotifyMask,
+                &mut event as *mut x11::xlib::XClientMessageEvent as *mut x11::xlib::XEvent,
+            );
+            x11::xlib::XFlush(DISPLAY);
+            IS_FULLSCREEN = fullscreen;
+        }
+    }
+
+    pub fn toggle_fullscreen() {
+        unsafe { set_fullscreen(!IS_FULLSCREEN); }
+    }
 
     pub fn create_window(width: f64, height: f64, title: &str) {
         unsafe {
@@ -171,7 +216,7 @@ mod x11_impl {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8) {
+pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8, fullscreen: f64) {
     let title = str_from_header(title_ptr);
 
     #[cfg(target_os = "linux")]
@@ -224,6 +269,10 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
         let renderer = Renderer::new(device, queue, surface, surface_config);
         unsafe { let _ = ENGINE.set(EngineState::new(renderer)); }
+
+        if fullscreen != 0.0 {
+            x11_impl::set_fullscreen(true);
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -857,7 +906,10 @@ pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64,
 // --- Utility FFI ---
 
 #[no_mangle]
-pub extern "C" fn bloom_toggle_fullscreen() {}
+pub extern "C" fn bloom_toggle_fullscreen() {
+    #[cfg(target_os = "linux")]
+    x11_impl::toggle_fullscreen();
+}
 #[no_mangle]
 pub extern "C" fn bloom_set_window_title(title_ptr: *const u8) { let _ = str_from_header(title_ptr); }
 #[no_mangle]
