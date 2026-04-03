@@ -607,6 +607,27 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
 pub extern "C" fn bloom_begin_drawing() {
     // No run loop pumping needed — UIApplicationMain handles the main run loop
     // on its own thread. The game runs on the game thread.
+
+    // Update drawable size to match actual view bounds (handles orientation changes)
+    unsafe {
+        if let Some(view) = &UI_VIEW {
+            let view_ptr = Retained::as_ptr(view);
+            let layer: Retained<AnyObject> = msg_send![&*view_ptr, layer];
+            let view_bounds: CGRect = msg_send![&*view_ptr, bounds];
+            let scale = SCREEN_SCALE;
+            let pw = (view_bounds.size.width * scale) as u32;
+            let ph = (view_bounds.size.height * scale) as u32;
+            let eng = engine();
+            if pw > 0 && ph > 0 && (pw != eng.renderer.width() || ph != eng.renderer.height()) {
+                let ds = CGSize { width: pw as f64, height: ph as f64 };
+                let _: () = msg_send![&*layer, setDrawableSize: ds];
+                eng.renderer.resize(pw, ph);
+            } else {
+                eng.begin_frame();
+                return;
+            }
+        }
+    }
     engine().begin_frame();
 }
 
