@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bloom Engine</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100vw; height: 100vh; overflow: hidden; background: #000; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; font-family: monospace; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <canvas id="bloom-canvas"></canvas>
+  <div id="loading">Loading Bloom Engine...</div>
+
+  <script type="module">
+    // 1. Load Bloom engine WASM (compiled from native/web via wasm-pack)
+    import init, * as bloom from './pkg/bloom_web.js';
+    await init();
+    globalThis.__bloomModule = bloom;
+
+    // 2. Build FFI imports for Perry WASM
+    //    Perry WASM passes all args as i64 (NaN-boxed BigInt).
+    //    Most bloom_* functions expect f64 (plain numbers).
+    //    Functions with string params need special handling.
+    const ffiImports = {};
+
+    // Helper: convert Perry i64 (BigInt) to f64
+    const _buf = new ArrayBuffer(8);
+    const _f64v = new Float64Array(_buf);
+    const _u64v = new BigUint64Array(_buf);
+    function i64ToF64(bigint) { _u64v[0] = BigInt.asUintN(64, bigint); return _f64v[0]; }
+    function f64ToI64(f) { _f64v[0] = f; return _u64v[0]; }
+
+    // Helper: convert Perry NaN-boxed value to JS (uses Perry's exposed runtime)
+    function perryVal(i64) {
+      const f = i64ToF64(i64);
+      return globalThis.__perryToJsValue ? globalThis.__perryToJsValue(f) : f;
+    }
+
+    // Default: wrap all bloom_* exports — convert i64 args to f64
+    for (const [name, fn] of Object.entries(bloom)) {
+      if (typeof fn === 'function' && name.startsWith('bloom_')) {
+        // Default wrapper: convert all BigInt args to f64
+        ffiImports[name] = (...args) => {
+          const converted = args.map(a => typeof a === 'bigint' ? i64ToF64(a) : a);
+          const result = fn(...converted);
+          // Convert return value back to i64 for Perry
+          return typeof result === 'number' ? f64ToI64(result) : undefined;
+        };
+      }
+    }
+
+    // Override: functions with string params call _str variants
+    // bloom_draw_text(text_i64, x, y, size, r, g, b, a)
+    ffiImports['bloom_draw_text'] = (text, x, y, size, r, g, b, a) => {
+      bloom.bloom_draw_text_str(String(perryVal(text)),
+        i64ToF64(x), i64ToF64(y), i64ToF64(size),
+        i64ToF64(r), i64ToF64(g), i64ToF64(b), i64ToF64(a));
+    };
+    ffiImports['bloom_measure_text'] = (text, size) => {
+      return f64ToI64(bloom.bloom_measure_text_str(String(perryVal(text)), i64ToF64(size)));
+    };
+    ffiImports['bloom_draw_text_ex'] = (font, text, x, y, size, spacing, r, g, b, a) => {
+      bloom.bloom_draw_text_ex_str(i64ToF64(font), String(perryVal(text)),
+        i64ToF64(x), i64ToF64(y), i64ToF64(size), i64ToF64(spacing),
+        i64ToF64(r), i64ToF64(g), i64ToF64(b), i64ToF64(a));
+    };
+    ffiImports['bloom_measure_text_ex'] = (font, text, size, spacing) => {
+      return f64ToI64(bloom.bloom_measure_text_ex_str(
+        i64ToF64(font), String(perryVal(text)), i64ToF64(size), i64ToF64(spacing)));
+    };
+
+    // bloom_load_font: fetch font file by URL, then call bloom_load_font_bytes
+    ffiImports['bloom_load_font'] = (path, size) => {
+      const url = String(perryVal(path));
+      // Synchronous loading not possible — return 0 and load async
+      // For Phase 4, use default font (handle 0). Async loading in Phase 5.
+      console.warn('bloom_load_font: async font loading not yet supported, using default font');
+      return f64ToI64(0.0);
+    };
+
+    // bloom_load_texture: fetch image by URL, then call bloom_load_texture_bytes
+    // --- Synchronous asset fetching ---
+    // Uses sync XMLHttpRequest to fetch files. This blocks the main thread but
+    // allows Perry WASM to call load functions synchronously (like native).
+    function syncFetchBytes(url) {
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', url, false); // synchronous
+        xhr.responseType = 'arraybuffer';
+        xhr.send();
+        if (xhr.status === 200 || xhr.status === 0) {
+          return new Uint8Array(xhr.response);
+        }
+      } catch (e) {
+        console.warn('syncFetchBytes failed for', url, e);
+      }
+      return null;
+    }
+
+    // bloom_load_texture: sync fetch image → bloom_load_texture_bytes
+    ffiImports['bloom_load_texture'] = (path) => {
+      const url = String(perryVal(path));
+      const data = syncFetchBytes(url);
+      if (data) return f64ToI64(bloom.bloom_load_texture_bytes(data));
+      return f64ToI64(0.0);
+    };
+
+    // bloom_load_font: sync fetch font → bloom_load_font_bytes
+    ffiImports['bloom_load_font'] = (path, size) => {
+      const url = String(perryVal(path));
+      const data = syncFetchBytes(url);
+      if (data) return f64ToI64(bloom.bloom_load_font_bytes(data));
+      return f64ToI64(0.0);
+    };
+
+    // bloom_load_sound: sync fetch audio → bloom_load_sound_bytes
+    ffiImports['bloom_load_sound'] = (path) => {
+      const url = String(perryVal(path));
+      const data = syncFetchBytes(url);
+      if (data) return f64ToI64(bloom.bloom_load_sound_bytes(data));
+      return f64ToI64(0.0);
+    };
+
+    // bloom_load_music: sync fetch audio → bloom_load_music_bytes
+    ffiImports['bloom_load_music'] = (path) => {
+      const url = String(perryVal(path));
+      const data = syncFetchBytes(url);
+      if (data) return f64ToI64(bloom.bloom_load_music_bytes(data));
+      return f64ToI64(0.0);
+    };
+
+    // bloom_load_model: sync fetch glTF → bloom_load_model_bytes
+    ffiImports['bloom_load_model'] = (path) => {
+      const url = String(perryVal(path));
+      const data = syncFetchBytes(url);
+      if (data) return f64ToI64(bloom.bloom_load_model_bytes(data));
+      return f64ToI64(0.0);
+    };
+
+    // bloom_load_model_animation: sync fetch → bloom_load_model_animation_bytes
+    ffiImports['bloom_load_model_animation'] = (path) => {
+      const url = String(perryVal(path));
+      const data = syncFetchBytes(url);
+      if (data) return f64ToI64(bloom.bloom_load_model_animation_bytes(data));
+      return f64ToI64(0.0);
+    };
+
+    // bloom_load_image: sync fetch → bloom_load_image_bytes
+    ffiImports['bloom_load_image'] = (path) => {
+      const url = String(perryVal(path));
+      const data = syncFetchBytes(url);
+      if (data) return f64ToI64(bloom.bloom_load_image_bytes(data));
+      return f64ToI64(0.0);
+    };
+
+    // bloom_load_shader: sync fetch shader source
+    ffiImports['bloom_load_shader'] = (source) => {
+      // Shader source is a string, not a file path
+      return f64ToI64(0.0); // TODO: custom shader loading
+    };
+
+    // --- Web Audio API ---
+    let audioContext = null;
+    let audioProcessor = null;
+
+    ffiImports['bloom_init_audio'] = () => {
+      try {
+        audioContext = new AudioContext({ sampleRate: 44100 });
+        // ScriptProcessorNode: feeds Bloom's AudioMixer output to the speakers
+        const bufSize = 4096;
+        audioProcessor = audioContext.createScriptProcessor(bufSize, 0, 2);
+        audioProcessor.onaudioprocess = (e) => {
+          const left = e.outputBuffer.getChannelData(0);
+          const right = e.outputBuffer.getChannelData(1);
+          // Create interleaved stereo buffer for the Rust mixer
+          const interleaved = new Float32Array(left.length * 2);
+          bloom.bloom_audio_mix(interleaved);
+          // Deinterleave
+          for (let i = 0; i < left.length; i++) {
+            left[i] = interleaved[i * 2];
+            right[i] = interleaved[i * 2 + 1];
+          }
+        };
+        audioProcessor.connect(audioContext.destination);
+      } catch (e) {
+        console.warn('Web Audio init failed:', e);
+      }
+    };
+
+    ffiImports['bloom_close_audio'] = () => {
+      if (audioProcessor) { audioProcessor.disconnect(); audioProcessor = null; }
+      if (audioContext) { audioContext.close(); audioContext = null; }
+    };
+
+    // bloom_init_window: extract title string, pass others as f64
+    ffiImports['bloom_init_window'] = (w, h, title, fs) => {
+      const titleStr = String(perryVal(title));
+      document.title = titleStr || 'Bloom Engine';
+      bloom.bloom_init_window(i64ToF64(w), i64ToF64(h), 0, i64ToF64(fs));
+    };
+    ffiImports['bloom_set_window_title'] = (title) => {
+      document.title = String(perryVal(title));
+    };
+
+    // --- File I/O via localStorage ---
+    const LS_PREFIX = 'bloom_fs:';
+
+    ffiImports['bloom_write_file'] = (path, data) => {
+      try {
+        const key = LS_PREFIX + String(perryVal(path));
+        const value = String(perryVal(data));
+        localStorage.setItem(key, value);
+        return f64ToI64(1.0); // success
+      } catch (e) {
+        return f64ToI64(0.0);
+      }
+    };
+
+    ffiImports['bloom_file_exists'] = (path) => {
+      const key = LS_PREFIX + String(perryVal(path));
+      return f64ToI64(localStorage.getItem(key) !== null ? 1.0 : 0.0);
+    };
+
+    ffiImports['bloom_read_file'] = (path) => {
+      const key = LS_PREFIX + String(perryVal(path));
+      const data = localStorage.getItem(key);
+      if (data === null) return f64ToI64(0.0);
+      // Return as Perry string via __perryFromJsValue
+      if (globalThis.__perryFromJsValue) return f64ToI64(__perryFromJsValue(data));
+      return f64ToI64(0.0);
+    };
+
+    // --- Fullscreen ---
+    ffiImports['bloom_toggle_fullscreen'] = () => {
+      const canvas = document.getElementById('bloom-canvas');
+      if (!document.fullscreenElement) {
+        canvas.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    };
+
+    // --- Cursor lock ---
+    ffiImports['bloom_disable_cursor'] = () => {
+      const canvas = document.getElementById('bloom-canvas');
+      canvas.requestPointerLock().catch(() => {});
+      bloom.bloom_disable_cursor();
+    };
+
+    ffiImports['bloom_enable_cursor'] = () => {
+      document.exitPointerLock();
+      bloom.bloom_enable_cursor();
+    };
+
+    // 3. Set up DOM event listeners for input injection
+    const canvas = document.getElementById('bloom-canvas');
+    const keyMap = {
+      'KeyA': 65, 'KeyB': 66, 'KeyC': 67, 'KeyD': 68, 'KeyE': 69, 'KeyF': 70,
+      'KeyG': 71, 'KeyH': 72, 'KeyI': 73, 'KeyJ': 74, 'KeyK': 75, 'KeyL': 76,
+      'KeyM': 77, 'KeyN': 78, 'KeyO': 79, 'KeyP': 80, 'KeyQ': 81, 'KeyR': 82,
+      'KeyS': 83, 'KeyT': 84, 'KeyU': 85, 'KeyV': 86, 'KeyW': 87, 'KeyX': 88,
+      'KeyY': 89, 'KeyZ': 90,
+      'Digit0': 48, 'Digit1': 49, 'Digit2': 50, 'Digit3': 51, 'Digit4': 52,
+      'Digit5': 53, 'Digit6': 54, 'Digit7': 55, 'Digit8': 56, 'Digit9': 57,
+      'Space': 32, 'Enter': 257, 'Escape': 256, 'Backspace': 259, 'Tab': 258,
+      'ArrowUp': 265, 'ArrowDown': 264, 'ArrowLeft': 263, 'ArrowRight': 262,
+      'ShiftLeft': 340, 'ShiftRight': 344, 'ControlLeft': 341, 'ControlRight': 345,
+      'AltLeft': 342, 'AltRight': 346,
+      'F1': 290, 'F2': 291, 'F3': 292, 'F4': 293, 'F5': 294, 'F6': 295,
+      'F7': 296, 'F8': 297, 'F9': 298, 'F10': 299, 'F11': 300, 'F12': 301,
+      'Comma': 44, 'Period': 46, 'Slash': 47, 'Semicolon': 59, 'Quote': 39,
+      'BracketLeft': 91, 'BracketRight': 93, 'Backslash': 92, 'Minus': 45, 'Equal': 61,
+      'Backquote': 96, 'Delete': 261, 'Insert': 260, 'Home': 268, 'End': 269,
+      'PageUp': 266, 'PageDown': 267,
+    };
+
+    document.addEventListener('keydown', (e) => {
+      const code = keyMap[e.code];
+      if (code !== undefined) { bloom.bloom_inject_key_down(code); e.preventDefault(); }
+    });
+    document.addEventListener('keyup', (e) => {
+      const code = keyMap[e.code];
+      if (code !== undefined) { bloom.bloom_inject_key_up(code); e.preventDefault(); }
+    });
+
+    // 4. Game loop state
+    let gameCallback = null;
+    let gameRunning = false;
+
+    // Helper to convert f64 <-> i64 bits (for Perry NaN-boxing)
+    function f64ToI64(v) {
+      const buf = new ArrayBuffer(8);
+      new Float64Array(buf)[0] = v;
+      return new BigUint64Array(buf)[0];
+    }
+
+    // Intercept bloom_run_game: the JS glue captures the callback and starts rAF
+    ffiImports['bloom_run_game'] = (callbackHandle) => {
+      gameCallback = callbackHandle;
+      gameRunning = true;
+    };
+
+    // Intercept bloom_window_should_close: return 1.0 once runGame is called
+    const origShouldClose = ffiImports['bloom_window_should_close'];
+    ffiImports['bloom_window_should_close'] = () => {
+      if (gameRunning) return f64ToI64(1.0);
+      return origShouldClose();
+    };
+
+    // Expose FFI imports for Perry WASM
+    globalThis.__ffiImports = ffiImports;
+
+    // 5. Hide loading indicator
+    document.getElementById('loading').style.display = 'none';
+
+    // 6. Perry WASM will be loaded separately (either via bootPerryWasm in the HTML,
+    //    or via a separate script that loads the .wasm file).
+    //    After Perry's main() returns, the rAF loop starts:
+    globalThis.__bloomStartLoop = function(perryClosureCall1) {
+      if (!gameRunning || !gameCallback) return;
+      function frame() {
+        if (!gameRunning) return;
+        bloom.bloom_begin_drawing();
+        if (gameCallback !== null && perryClosureCall1) {
+          const dt = bloom.bloom_get_delta_time();
+          perryClosureCall1(gameCallback, dt);
+        }
+        bloom.bloom_end_drawing();
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    };
+
+    console.log('Bloom Engine ready. Awaiting game WASM...');
+  </script>
+</body>
+</html>

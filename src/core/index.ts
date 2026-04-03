@@ -66,6 +66,7 @@ declare function bloom_get_mouse_delta_y(): number;
 declare function bloom_write_file(path: number, data: number): number;
 declare function bloom_file_exists(path: number): number;
 declare function bloom_read_file(path: number): number;
+declare function bloom_run_game(callback: number): void;
 
 // Window management
 
@@ -297,7 +298,7 @@ export function injectGamepadButtonUp(button: number): void { bloom_inject_gamep
 
 // Platform detection
 
-export const Platform = { UNKNOWN: 0, MACOS: 1, IOS: 2, WINDOWS: 3, LINUX: 4, ANDROID: 5, TVOS: 6 } as const;
+export const Platform = { UNKNOWN: 0, MACOS: 1, IOS: 2, WINDOWS: 3, LINUX: 4, ANDROID: 5, TVOS: 6, WEB: 7 } as const;
 
 export function getPlatform(): number { return bloom_get_platform(); }
 
@@ -312,6 +313,35 @@ export function isTV(): boolean {
 
 export function isAnyInputPressed(): boolean {
   return bloom_is_any_input_pressed() !== 0;
+}
+
+/**
+ * Cross-platform game loop entry point (Emscripten-style).
+ *
+ * On native: blocks in a while loop calling beginDrawing/update/endDrawing each frame.
+ * On web: passes the callback to the JS runtime which drives it via requestAnimationFrame.
+ *
+ * Usage:
+ *   initWindow(800, 600, "My Game");
+ *   runGame((dt) => {
+ *     clearBackground({ r: 0, g: 0, b: 0, a: 255 });
+ *     // game logic + draw calls
+ *   });
+ */
+export function runGame(update: (dt: number) => void): void {
+  const platform = bloom_get_platform();
+  if (platform === 7) {
+    // Web: delegate to JS glue layer via FFI.
+    // bloom_glue.js intercepts this call and sets up requestAnimationFrame.
+    bloom_run_game(update as any);
+  } else {
+    // Native: blocking game loop
+    while (!windowShouldClose()) {
+      beginDrawing();
+      update(getDeltaTime());
+      endDrawing();
+    }
+  }
 }
 
 // Pure TS camera helpers

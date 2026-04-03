@@ -2,8 +2,8 @@
 
 **Native games from TypeScript.**
 
-Write TypeScript. Ship native games. No browser, no C++.
-Bloom compiles your game to Metal, DirectX 12, Vulkan, and OpenGL — one codebase for every platform.
+Write TypeScript. Ship native games — and now the web too.
+Bloom compiles your game to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU — one codebase for every platform.
 
 ## Quick Start
 
@@ -21,11 +21,33 @@ while (!windowShouldClose()) {
 }
 ```
 
+### Web-Compatible Pattern
+
+Use `runGame()` for code that works on both native and web:
+
+```typescript
+import { initWindow, runGame, clearBackground, drawText, Colors } from "bloom";
+
+initWindow(800, 450, "My Game");
+
+runGame((dt) => {
+  clearBackground(Colors.RAYWHITE);
+  drawText("Hello, Bloom!", 190, 200, 20, Colors.DARKGRAY);
+});
+```
+
+Build for web:
+
+```bash
+./native/web/build.sh main.ts
+cd dist/web && python3 -m http.server 8080
+```
+
 ## Features
 
 - **Simple API** — Functions, not classes. The entire API fits on a cheatsheet.
-- **True native** — Compiles to Metal, DirectX 12, Vulkan, and OpenGL via wgpu. No browser, no runtime.
-- **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, Android from one codebase.
+- **True native** — Compiles to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU via wgpu.
+- **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, Android, and Web from one codebase.
 - **Unified 2D/3D** — Shapes, textures, text, 3D models, and audio in one engine.
 - **Zero magic** — Explicit game loops, no hidden framework overhead.
 
@@ -51,6 +73,7 @@ while (!windowShouldClose()) {
 | iOS | Metal | Touch + gamepad |
 | tvOS | Metal | Siri Remote + gamepad |
 | Android | Vulkan / OpenGL ES | Touch + gamepad |
+| **Web** | **WebGPU / WebGL** | **Keyboard + mouse + touch + gamepad** |
 
 ## Architecture
 
@@ -72,6 +95,7 @@ native/               Rust implementations
   windows/            DirectX 12 + Win32 + XAudio2
   linux/              Vulkan/OpenGL + X11/Wayland + PulseAudio
   android/            Vulkan/OpenGL ES + NativeActivity + AAudio
+  web/                WebGPU/WebGL + Canvas + Web Audio (WASM)
 
 examples/
   pong/               Complete working example (~170 lines)

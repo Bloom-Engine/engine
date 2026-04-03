@@ -17,6 +17,7 @@ export {
   Color, ColorConstants, Colors, Key, MouseButton,
   injectKeyDown, injectKeyUp, isAnyInputPressed, getPlatform, isMobile, isTV, Platform,
   injectGamepadAxis, injectGamepadButtonDown, injectGamepadButtonUp,
+  runGame,
 } from './core/index';
 
 export type {

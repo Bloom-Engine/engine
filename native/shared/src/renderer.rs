@@ -1337,7 +1337,9 @@ impl Renderer {
             }
         }
 
-        // If screenshot requested, copy rendered texture to staging buffer before submitting
+        // If screenshot requested, copy rendered texture to staging buffer before submitting.
+        // Synchronous GPU readback is not available on WASM (device.poll(Wait) blocks).
+        #[cfg(not(target_arch = "wasm32"))]
         if self.screenshot_requested {
             // Use actual texture dimensions (accounts for Retina/DPI scaling)
             let tex_size = output.texture.size();
@@ -1395,6 +1397,11 @@ impl Renderer {
             staging.unmap();
             self.screenshot_requested = false;
         } else {
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
             self.queue.submit(std::iter::once(encoder.finish()));
         }
 
@@ -2402,6 +2409,8 @@ impl Renderer {
 
     /// Capture the current framebuffer as RGBA pixels.
     /// Returns (width, height, rgba_data). Call after end_frame.
+    /// Not available on WASM (requires synchronous GPU readback).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn capture_screenshot(&self) -> Option<(u32, u32, Vec<u8>)> {
         let width = self.surface_config.width;
         let height = self.surface_config.height;

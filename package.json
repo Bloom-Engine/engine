@@ -149,6 +149,7 @@
 
         { "name": "bloom_register_frame_callback",     "params": ["f64", "i64"],                                            "returns": "f64"  },
         { "name": "bloom_unregister_frame_callback",   "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_run_game",                    "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_add_directional_light",       "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],        "returns": "void" },
         { "name": "bloom_add_point_light",             "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
 
@@ -233,6 +234,12 @@
           "crate": "native/android/",
           "lib": "libbloom_android.a",
           "libs": ["android", "log", "c++_static", "c++abi", "OpenSLES"]
+        },
+        "web": {
+          "crate": "native/web/",
+          "target": "wasm32-unknown-unknown",
+          "buildTool": "wasm-pack",
+          "output": "native/web/pkg/"
         }
       }
     }

@@ -1026,6 +1026,11 @@ pub extern "C" fn bloom_unregister_frame_callback(id: f64) {
     engine().frame_callbacks.unregister(id as u64);
 }
 
+#[no_mangle]
+pub extern "C" fn bloom_run_game(_callback: extern "C" fn(f64)) {
+    // No-op on native. The TypeScript runGame() helper provides the while loop.
+}
+
 // ============================================================
 // Multiple lights
 // ============================================================

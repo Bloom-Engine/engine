@@ -1236,6 +1236,12 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 // 3D engine stubs — not yet implemented on Windows
 #[no_mangle] pub extern "C" fn bloom_register_frame_callback(_priority: f64, _callback: extern "C" fn(f64)) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_unregister_frame_callback(_id: f64) {}
+
+#[no_mangle]
+pub extern "C" fn bloom_run_game(_callback: extern "C" fn(f64)) {
+    // No-op on native. The TypeScript runGame() helper provides the while loop.
+}
+
 #[no_mangle] pub extern "C" fn bloom_add_directional_light(_dx: f64, _dy: f64, _dz: f64, _r: f64, _g: f64, _b: f64, _intensity: f64) {}
 #[no_mangle] pub extern "C" fn bloom_add_point_light(_x: f64, _y: f64, _z: f64, _range: f64, _r: f64, _g: f64, _b: f64, _intensity: f64) {}
 #[no_mangle] pub extern "C" fn bloom_scene_create_node() -> f64 { 0.0 }

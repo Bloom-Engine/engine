@@ -317,6 +317,7 @@ pub fn parse_wav(data: &[u8]) -> Option<SoundData> {
 }
 
 /// Parse an MP3 file into SoundData.
+#[cfg(feature = "mp3")]
 pub fn parse_mp3(data: &[u8]) -> Option<SoundData> {
     let mut decoder = minimp3::Decoder::new(std::io::Cursor::new(data));
     let mut samples = Vec::new();

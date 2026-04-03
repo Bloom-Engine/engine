@@ -1633,3 +1633,8 @@ pub extern "C" fn bloom_commit_music(staging_handle: f64) -> f64 {
         None => 0.0,
     }
 }
+
+#[no_mangle]
+pub extern "C" fn bloom_run_game(_callback: extern "C" fn(f64)) {
+    // No-op on native. The TypeScript runGame() helper provides the while loop.
+}
