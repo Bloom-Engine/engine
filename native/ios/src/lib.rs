@@ -19,6 +19,9 @@ static mut UI_VIEW: Option<Retained<AnyObject>> = None;
 static mut TOUCH_MAP: [*const c_void; 10] = [std::ptr::null(); 10];
 static mut BUNDLE_PATH: Option<String> = None;
 static mut SCREEN_SCALE: f64 = 1.0;
+/// UIInterfaceOrientationMask for the root view controller.
+/// Default: all (0x1E). Set to landscape (0x18) from bloom_init_window when width > height.
+static mut ORIENTATION_MASK: u64 = 0x1E; // UIInterfaceOrientationMaskAll
 
 
 /// Resolve a relative asset path to the app bundle path.
@@ -210,6 +213,29 @@ fn register_metal_view_class() {
 }
 
 // ============================================================
+// Register BloomViewController — UIViewController with orientation lock
+// ============================================================
+
+unsafe extern "C" fn bloom_vc_supported_orientations(_this: *const c_void, _sel: Sel) -> u64 {
+    unsafe { ORIENTATION_MASK }
+}
+
+fn register_view_controller_class() {
+    if AnyClass::get(c"BloomViewController").is_some() { return; }
+
+    unsafe {
+        let superclass = AnyClass::get(c"UIViewController").unwrap();
+        let cls = objc_allocateClassPair(superclass as *const AnyClass, b"BloomViewController\0".as_ptr(), 0);
+        if cls.is_null() { return; }
+
+        let sel = Sel::register(c"supportedInterfaceOrientations");
+        class_addMethod(cls, sel, bloom_vc_supported_orientations as *const c_void, b"Q16@0:8\0".as_ptr());
+
+        objc_registerClassPair(cls);
+    }
+}
+
+// ============================================================
 // Scene delegate — creates UIWindow + Metal view + wgpu engine
 // ============================================================
 
@@ -236,8 +262,9 @@ unsafe extern "C" fn scene_will_connect(
     let window: Allocated<AnyObject> = msg_send![window_cls, alloc];
     let window: Retained<AnyObject> = msg_send![window, initWithWindowScene: scene];
 
-    // Create UIViewController
-    let vc_cls = AnyClass::get(c"UIViewController").unwrap();
+    // Create BloomViewController (with orientation lock support)
+    let vc_cls = AnyClass::get(c"BloomViewController")
+        .unwrap_or_else(|| AnyClass::get(c"UIViewController").unwrap());
     let vc: Allocated<AnyObject> = msg_send![vc_cls, alloc];
     let vc: Retained<AnyObject> = msg_send![vc, init];
 
@@ -345,6 +372,7 @@ unsafe extern "C" fn scene_will_connect(
 #[no_mangle]
 pub unsafe extern "C" fn perry_register_native_classes() {
     register_metal_view_class();
+    register_view_controller_class();
     register_scene_delegate();
 }
 
@@ -373,8 +401,9 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
         msg_send![w, initWithFrame: bounds]
     };
 
-    // Create UIViewController
-    let vc_cls = AnyClass::get(c"UIViewController").unwrap();
+    // Create BloomViewController (with orientation lock support)
+    let vc_cls = AnyClass::get(c"BloomViewController")
+        .unwrap_or_else(|| AnyClass::get(c"UIViewController").unwrap());
     let vc: Allocated<AnyObject> = msg_send![vc_cls, alloc];
     let vc: Retained<AnyObject> = msg_send![vc, init];
 
@@ -512,8 +541,15 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const u8, _fullscreen: f64) {
     let _title = str_from_header(title_ptr);
 
+    // Set orientation mask based on requested dimensions
+    // width > height → landscape, otherwise all orientations
+    if _width > _height {
+        unsafe { ORIENTATION_MASK = 0x18; } // UIInterfaceOrientationMaskLandscape
+    }
+
     // Register ObjC classes for the scene delegate (window/view creation)
     register_metal_view_class();
+    register_view_controller_class();
     register_scene_delegate();
 
     // Signal the main thread that our ObjC classes are ready.
