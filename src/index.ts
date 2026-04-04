@@ -117,3 +117,25 @@ export {
 } from './scene/index';
 
 export type { SceneNodeHandle, PbrMaterial, PickHit } from './scene/index';
+
+export {
+  createPhysicsWorld, setGravity, setPhysicsTimestep,
+  createRigidBody, destroyRigidBody,
+  setBodyEnabled, setBodyCcd, setBodyGravityScale,
+  setKinematicTarget, lockRotations,
+  addBoxCollider, addSphereCollider, addCapsuleCollider, addCylinderCollider,
+  setColliderProperties,
+  applyForce, applyImpulse, applyTorque, applyTorqueImpulse,
+  setLinearVelocity, setAngularVelocity,
+  stepPhysics, syncPhysicsTransforms,
+  getBodyPosition, getBodyRotation, getLinearVelocity, getAngularVelocity,
+  physicsRaycast, getCollisions,
+  attachPhysicsBody,
+  createFixedJoint, createRevoluteJoint, createPrismaticJoint, destroyJoint,
+  BodyType,
+} from './physics/index';
+
+export type {
+  RigidBodyHandle, ColliderHandle, JointHandle,
+  PhysicsRayHit, CollisionInfo,
+} from './physics/index';

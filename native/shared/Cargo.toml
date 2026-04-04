@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["mp3"]
+default = ["mp3", "physics"]
 mp3 = ["dep:minimp3"]
+physics = ["dep:rapier3d"]
 web = ["dep:web-time"]
 
 [dependencies]
@@ -19,4 +20,5 @@ gltf = "1"
 lewton = "0.10"
 minimp3 = { version = "0.5", optional = true }
 earcutr = "0.4"
+rapier3d = { version = "0.32", optional = true }
 web-time = { version = "0.2", optional = true }

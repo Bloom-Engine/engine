@@ -7,6 +7,8 @@ use crate::models::ModelManager;
 use crate::scene::SceneGraph;
 use crate::frame_callbacks::FrameCallbackSystem;
 use crate::postfx::PostFxPipeline;
+#[cfg(feature = "physics")]
+use crate::physics::PhysicsWorld;
 
 #[cfg(feature = "web")]
 use web_time::Instant;
@@ -36,6 +38,9 @@ pub struct EngineState {
     start_time: Instant,
 
     pub should_close: bool,
+
+    #[cfg(feature = "physics")]
+    pub physics: Option<PhysicsWorld>,
 }
 
 impl EngineState {
@@ -61,6 +66,8 @@ impl EngineState {
             current_fps: 0.0,
             start_time: now,
             should_close: false,
+            #[cfg(feature = "physics")]
+            physics: None,
         }
     }
 
