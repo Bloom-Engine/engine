@@ -277,11 +277,11 @@ export function getMouseDeltaY(): number {
 // File I/O
 
 export function writeFile(path: string, data: string): boolean {
-  return bloom_write_file(path as any, data as any) !== 0;
+  return bloom_write_file(path as any, data as any) !== 0.0;
 }
 
 export function fileExists(path: string): boolean {
-  return bloom_file_exists(path as any) !== 0;
+  return bloom_file_exists(path as any) !== 0.0;
 }
 
 export function readFile(path: string): string {
