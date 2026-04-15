@@ -1250,38 +1250,42 @@ fn create_ssao_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Text
 /// each subsequent mip halves down to ~surface/2^N. Caller is
 /// responsible for deciding N (usually BLOOM_MIP_COUNT). At least
 /// 1×1 is enforced per mip.
+/// Build the bloom chain as N separate single-mip textures rather
+/// than one multi-mip texture. Multi-mip textures with one mip
+/// bound as render target while another mip is sampled in the
+/// same encoder trips wgpu/Metal's per-subresource state tracking
+/// — symptoms include large black bars in the sampled output. N
+/// separate textures sidestep the problem entirely (each pass's
+/// read/write hits a distinct texture). `bloom_full_view` is a
+/// view onto mip 0's texture, kept for backward compatibility.
 fn create_bloom_chain(
     device: &wgpu::Device,
     width: u32,
     height: u32,
     mip_count: u32,
-) -> (wgpu::Texture, Vec<wgpu::TextureView>, wgpu::TextureView) {
-    let mip0_w = (width / 2).max(1);
-    let mip0_h = (height / 2).max(1);
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("bloom_chain"),
-        size: wgpu::Extent3d { width: mip0_w, height: mip0_h, depth_or_array_layers: 1 },
-        mip_level_count: mip_count,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let mut mip_views = Vec::with_capacity(mip_count as usize);
+) -> (Vec<wgpu::Texture>, Vec<wgpu::TextureView>, wgpu::TextureView) {
+    let mut textures = Vec::with_capacity(mip_count as usize);
+    let mut views = Vec::with_capacity(mip_count as usize);
     for i in 0..mip_count {
-        mip_views.push(texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("bloom_mip_view"),
-            base_mip_level: i,
-            mip_level_count: Some(1),
-            base_array_layer: 0,
-            array_layer_count: Some(1),
-            ..Default::default()
-        }));
+        let w = ((width / 2) >> i).max(1);
+        let h = ((height / 2) >> i).max(1);
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("bloom_mip_tex"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        textures.push(tex);
+        views.push(view);
     }
-    let full_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, mip_views, full_view)
+    let full_view = textures[0].create_view(&wgpu::TextureViewDescriptor::default());
+    (textures, views, full_view)
 }
 
 /// Bloom mip-chain shader. Three fragment entry points share a
@@ -2435,7 +2439,9 @@ pub struct Renderer {
     /// previous. Downsample chain (with HDR threshold on first tap)
     /// fills it, upsample chain blends back up. Composite shader
     /// reads mip 0 and adds it to the HDR sample before tonemap.
-    pub bloom_chain_texture: wgpu::Texture,
+    /// One distinct texture per bloom mip — see create_bloom_chain
+    /// for why this isn't a single multi-mip texture.
+    pub bloom_chain_textures: Vec<wgpu::Texture>,
     pub bloom_mip_views: Vec<wgpu::TextureView>,
     pub bloom_full_view: wgpu::TextureView,
     pub bloom_pipeline_threshold_downsample: wgpu::RenderPipeline,
@@ -3006,7 +3012,7 @@ impl Renderer {
         let (depth_texture, depth_view) = create_depth_texture(&device, surface_config.width, surface_config.height);
         let (hdr_rt_texture, hdr_rt_view) = create_hdr_rt(&device, surface_config.width, surface_config.height);
         let (material_rt_texture, material_rt_view) = create_material_rt(&device, surface_config.width, surface_config.height);
-        let (bloom_chain_texture, bloom_mip_views, bloom_full_view) = create_bloom_chain(
+        let (bloom_chain_textures, bloom_mip_views, bloom_full_view) = create_bloom_chain(
             &device,
             surface_config.width,
             surface_config.height,
@@ -4237,7 +4243,7 @@ impl Renderer {
             exposure_layout,
             exposure_uniform_buffer,
             composite_uniform_buffer,
-            bloom_chain_texture,
+            bloom_chain_textures,
             bloom_mip_views,
             bloom_full_view,
             bloom_pipeline_threshold_downsample,
@@ -4425,7 +4431,7 @@ impl Renderer {
             self.material_rt_texture = mat_t;
             self.material_rt_view = mat_v;
             let (bt, bm, bf) = create_bloom_chain(&self.device, width, height, BLOOM_MIP_COUNT);
-            self.bloom_chain_texture = bt;
+            self.bloom_chain_textures = bt;
             self.bloom_mip_views = bm;
             self.bloom_full_view = bf;
             let (st, sv) = create_ssao_rt(&self.device, width, height);
@@ -5587,6 +5593,13 @@ impl Renderer {
                 &self.bloom_pipeline_downsample
             };
             pass.set_pipeline(pl);
+            // Force the viewport to this mip's actual size — wgpu's
+            // auto-viewport derives from the surface config, not the
+            // mip-view attachment, so without this the bloom pass
+            // writes into a fraction of the mip and leaves the rest
+            // uninitialized.
+            let (mw, mh) = mip_dims[i];
+            pass.set_viewport(0.0, 0.0, mw as f32, mh as f32, 0.0, 1.0);
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -5629,6 +5642,11 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.bloom_pipeline_upsample);
+            // Same viewport fix as the downsample loop above — without
+            // this the upsample tents only cover a sub-region of the
+            // destination mip.
+            let (mw, mh) = mip_dims[i];
+            pass.set_viewport(0.0, 0.0, mw as f32, mh as f32, 0.0, 1.0);
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..3, 0..1);
         }
