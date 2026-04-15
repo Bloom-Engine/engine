@@ -935,6 +935,65 @@ pub extern "C" fn bloom_get_mouse_delta_y() -> f64 {
     engine().input.mouse_delta_y
 }
 
+// Accumulated scroll wheel delta since the last call. Reading consumes the
+// value (returns 0 on the next call until the user scrolls again). Used by
+// the editor's orbit camera and any scrollable UI panel.
+#[no_mangle]
+pub extern "C" fn bloom_get_mouse_wheel() -> f64 {
+    engine().input.consume_mouse_wheel()
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_char_pressed() -> f64 {
+    engine().input.pop_char() as f64
+}
+
+// Q2: Cursor shape
+#[no_mangle]
+pub extern "C" fn bloom_set_cursor_shape(shape: f64) {
+    engine().input.cursor_shape = shape as u32;
+}
+
+// E4: Clipboard (stub on this platform)
+#[no_mangle]
+pub extern "C" fn bloom_set_clipboard_text(_text_ptr: *const u8) {}
+#[no_mangle]
+pub extern "C" fn bloom_get_clipboard_text() -> *const u8 { std::ptr::null() }
+
+// E5b: File dialogs (stub on this platform)
+#[no_mangle]
+pub extern "C" fn bloom_open_file_dialog(_filter_ptr: *const u8, _title_ptr: *const u8) -> *const u8 { std::ptr::null() }
+#[no_mangle]
+pub extern "C" fn bloom_save_file_dialog(_default_name_ptr: *const u8, _title_ptr: *const u8) -> *const u8 { std::ptr::null() }
+
+// Model bounds accessors. Return the axis-aligned bounding box of a loaded
+// model in model-local coordinates. Editors use these to size gizmos, auto-
+// frame the camera on selection, and snap placed entities onto terrain.
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_x(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).0[0] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_y(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).0[1] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_z(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).0[2] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_x(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).1[0] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_y(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).1[1] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_z(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).1[2] as f64
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_write_file(path_ptr: *const u8, data_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
@@ -1177,6 +1236,70 @@ pub extern "C" fn bloom_scene_node_index_count(handle: f64) -> f64 {
     }
 }
 
+
+// Q8: Set a water material on a scene node (translucent tint, low roughness).
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_water(handle: f64, wave_amp: f64, wave_speed: f64, r: f64, g: f64, b: f64, a: f64) {
+    engine().scene.set_material_water(handle, wave_amp as f32, wave_speed as f32, r as f32, g as f32, b as f32, a as f32);
+}
+
+// Q9: Generate a ribbon mesh along a Catmull-Rom spline.
+#[no_mangle]
+pub extern "C" fn bloom_gen_mesh_spline_ribbon(points_ptr: *const u8, point_count: f64, widths_ptr: *const u8, width_count: f64) -> f64 {
+    let n = point_count as usize;
+    let wn = width_count as usize;
+    let points = unsafe { std::slice::from_raw_parts(points_ptr as *const f32, n * 3) };
+    let widths = unsafe { std::slice::from_raw_parts(widths_ptr as *const f32, wn) };
+    engine().models.gen_mesh_spline_ribbon(points, widths)
+}
+
+// Q1: Render texture FFI (stub — GPU implementation deferred).
+#[no_mangle]
+pub extern "C" fn bloom_load_render_texture(width: f64, height: f64) -> f64 {
+    engine().textures.load_render_texture(width as u32, height as u32)
+}
+#[no_mangle]
+pub extern "C" fn bloom_unload_render_texture(handle: f64) {
+    engine().textures.unload_render_texture(handle);
+}
+#[no_mangle]
+pub extern "C" fn bloom_begin_texture_mode(_handle: f64) {
+    // Stub: no-op until GPU render-to-texture is wired.
+}
+#[no_mangle]
+pub extern "C" fn bloom_end_texture_mode() {
+    // Stub: no-op.
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_render_texture_texture(handle: f64) -> f64 {
+    engine().textures.get_render_texture_texture(handle)
+}
+
+// Scene graph QoL — Q4/Q5/Q6/Q7
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_transform(handle: f64, index: f64) -> f64 {
+    let mat = engine().scene.get_transform(handle);
+    let i = index as usize;
+    let col = i / 4;
+    let row = i % 4;
+    if col < 4 && row < 4 { mat[col][row] as f64 } else { 0.0 }
+}
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[0] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[1] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[2] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[0] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[1] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[2] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_user_data(handle: f64, data: f64) { engine().scene.set_user_data(handle, data as i64); }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_user_data(handle: f64) -> f64 { engine().scene.get_user_data(handle) as f64 }
 // ============================================================
 // Geometry generation
 // ============================================================
@@ -1336,11 +1459,31 @@ pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, 
 
     let vertices = mesh.vertices.clone();
     let indices = mesh.indices.clone();
+    let base_color_tex = mesh.texture_idx;
+    let normal_tex = mesh.normal_texture_idx;
+    let mr_tex = mesh.metallic_roughness_texture_idx;
+    let emissive_tex = mesh.emissive_texture_idx;
+    let emissive_factor = mesh.emissive_factor;
     eng.scene.update_geometry(node_handle, vertices, indices);
 
-    if let Some(tex_idx) = mesh.texture_idx {
+    if let Some(tex_idx) = base_color_tex {
         eng.scene.set_material_texture(node_handle, tex_idx);
     }
+    if let Some(tex_idx) = normal_tex {
+        eng.scene.set_material_normal_texture(node_handle, tex_idx);
+    }
+    if let Some(tex_idx) = mr_tex {
+        eng.scene.set_material_metallic_roughness_texture(node_handle, tex_idx);
+    }
+    if let Some(tex_idx) = emissive_tex {
+        eng.scene.set_material_emissive_texture(node_handle, tex_idx);
+    }
+    eng.scene.set_material_emissive_factor(
+        node_handle,
+        emissive_factor[0],
+        emissive_factor[1],
+        emissive_factor[2],
+    );
 }
 
 // ============================================================
@@ -1526,6 +1669,35 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 }
 
 
+
+// Q6: Multi-hit picking
+static mut LAST_PICK_ALL: Vec<bloom_shared::picking::PickResult> = Vec::new();
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_pick_all(screen_x: f64, screen_y: f64, max_results: f64) -> f64 {
+    let eng = engine();
+    let inv_vp = eng.renderer.inverse_vp_matrix();
+    let cam_pos = eng.renderer.camera_pos();
+    let w = eng.renderer.width() as f32;
+    let h = eng.renderer.height() as f32;
+    let (origin, direction) = bloom_shared::picking::screen_to_ray(
+        screen_x as f32, screen_y as f32, w, h, &inv_vp, &cam_pos,
+    );
+    let results = bloom_shared::picking::raycast_scene_all(&eng.scene, &origin, &direction, max_results as usize);
+    let count = results.len();
+    unsafe { LAST_PICK_ALL = results; }
+    count as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_pick_all_handle(index: f64) -> f64 {
+    let i = index as usize;
+    unsafe { LAST_PICK_ALL.get(i).map(|r| r.handle).unwrap_or(0.0) }
+}
+#[no_mangle]
+pub extern "C" fn bloom_pick_all_distance(index: f64) -> f64 {
+    let i = index as usize;
+    unsafe { LAST_PICK_ALL.get(i).map(|r| r.distance as f64).unwrap_or(0.0) }
+}
 // ============================================================
 // Physics (Rapier 3D)
 // ============================================================

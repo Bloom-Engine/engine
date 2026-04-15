@@ -374,6 +374,18 @@ pub extern "C" fn bloom_begin_drawing() {
                         if bloom_key > 0 {
                             engine().input.set_key_down(bloom_key);
                         }
+                        // Extract typed characters for text input (E3b).
+                        let chars_obj = unsafe { event.characters() };
+                        if let Some(chars) = chars_obj {
+                            let s = chars.to_string();
+                            for c in s.chars() {
+                                let cp = c as u32;
+                                // Filter out control characters (keep printable + backspace).
+                                if cp >= 32 || cp == 8 || cp == 13 || cp == 9 {
+                                    engine().input.push_char(cp);
+                                }
+                            }
+                        }
                     }
                     NSEventType::KeyUp => {
                         let keycode = unsafe { event.keyCode() };
@@ -406,6 +418,13 @@ pub extern "C" fn bloom_begin_drawing() {
                     NSEventType::RightMouseUp => {
                         engine().input.set_mouse_button_up(1);
                     }
+                    NSEventType::ScrollWheel => {
+                        // NSEvent's scrollingDeltaY is positive when scrolling up
+                        // (away from the user). Normalize to "positive = zoom in"
+                        // by flipping the sign — matches editor orbit convention.
+                        let dy: f64 = unsafe { msg_send![&*event, scrollingDeltaY] };
+                        engine().input.accumulate_mouse_wheel(dy);
+                    }
                     _ => {}
                 }
                 unsafe { app.sendEvent(&event) };
@@ -432,6 +451,17 @@ pub extern "C" fn bloom_begin_drawing() {
         }
     }
 
+    // Apply cursor shape (Q2).
+    match engine().input.cursor_shape {
+        1 => unsafe { objc2_app_kit::NSCursor::pointingHandCursor().set() },
+        2 => unsafe { objc2_app_kit::NSCursor::openHandCursor().set() },
+        3 => unsafe { objc2_app_kit::NSCursor::IBeamCursor().set() },
+        4 => unsafe { objc2_app_kit::NSCursor::resizeLeftRightCursor().set() },
+        5 => unsafe { objc2_app_kit::NSCursor::resizeUpDownCursor().set() },
+        6 => unsafe { objc2_app_kit::NSCursor::crosshairCursor().set() },
+        _ => {},
+    }
+
     engine().begin_frame();
 }
 
@@ -445,9 +475,52 @@ pub extern "C" fn bloom_end_drawing() {
     engine().end_frame();
 }
 
+/// Request a PNG screenshot of the next rendered frame.
+/// The capture happens during the next end_drawing(), so the caller
+/// should call beginDrawing/endDrawing once after this for the file
+/// to actually appear on disk. Used by bloom-diff and CI image
+/// regression workflows.
+#[no_mangle]
+pub extern "C" fn bloom_take_screenshot(path_ptr: *const u8) {
+    let path = str_from_header(path_ptr).to_string();
+    let eng = engine();
+    eng.renderer.screenshot_requested = true;
+    eng.renderer.pending_screenshot_path = Some(path);
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_clear_background(r: f64, g: f64, b: f64, a: f64) {
     engine().renderer.set_clear_color(r, g, b, a);
+}
+
+/// Load an HDR equirectangular environment map and upload it to the
+/// GPU. Subsequent frames sample it per-background-pixel via a sky
+/// pass, so the background matches a path-traced reference instead of
+/// being a flat clear color. The file must be Radiance HDR (.hdr).
+#[no_mangle]
+pub extern "C" fn bloom_set_env_clear_from_hdr(path_ptr: *const u8) {
+    use image::ImageDecoder;
+    let path = str_from_header(path_ptr).to_string();
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let decoder = match image::codecs::hdr::HdrDecoder::new(std::io::BufReader::new(file)) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let (w, h) = decoder.dimensions();
+    let byte_len = (w as usize) * (h as usize) * 3 * 4;
+    let mut buf = vec![0u8; byte_len];
+    if decoder.read_image(&mut buf).is_err() {
+        return;
+    }
+    // Reinterpret the byte buffer as f32 RGB triples for the renderer.
+    let rgb_f32: Vec<f32> = buf
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    engine().renderer.load_env_from_hdr(w, h, &rgb_f32);
 }
 
 #[no_mangle]
@@ -982,13 +1055,27 @@ pub extern "C" fn bloom_load_shader(source_ptr: *const u8) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f32, vertex_count: f64, index_ptr: *const u32, index_count: f64) -> f64 {
+pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f64, vertex_count: f64, index_ptr: *const f64, index_count: f64) -> f64 {
+    // Perry's TS `number[]` is f64-laid-out in memory; Perry passes a
+    // pointer to that data. A previous version of this FFI declared
+    // *const f32 / *const u32, which silently read the low 4 bytes
+    // of each f64 slot as garbage f32/u32 values — meshes registered
+    // (non-zero handle) but were unrenderable.
+    //
+    // Caller must pass `vertex_count` and `index_count` derived from
+    // a literal-initialized array OR from values it computed itself.
+    // Don't compute these via `arr.length` after `.push()` — Perry's
+    // `.length` property currently reflects the literal-init size,
+    // not the post-push count (a Perry codegen bug). Workaround on
+    // the TS side: track the count manually or use literal arrays.
     if vertex_ptr.is_null() || index_ptr.is_null() { return 0.0; }
     let vcount = vertex_count as usize;
     let icount = index_count as usize;
-    let vertex_data = unsafe { std::slice::from_raw_parts(vertex_ptr, vcount * 12) }; // 12 floats per vertex
-    let index_data = unsafe { std::slice::from_raw_parts(index_ptr, icount) };
-    engine().models.create_mesh(vertex_data, index_data)
+    let vertex_f64 = unsafe { std::slice::from_raw_parts(vertex_ptr, vcount * 12) };
+    let index_f64 = unsafe { std::slice::from_raw_parts(index_ptr, icount) };
+    let vertex_data: Vec<f32> = vertex_f64.iter().map(|&v| v as f32).collect();
+    let index_data: Vec<u32> = index_f64.iter().map(|&v| v as u32).collect();
+    engine().models.create_mesh(&vertex_data, &index_data)
 }
 
 #[no_mangle]
@@ -1288,6 +1375,150 @@ pub extern "C" fn bloom_get_mouse_delta_y() -> f64 {
     engine().input.mouse_delta_y
 }
 
+// Accumulated scroll wheel delta since the last call. Reading consumes the
+// value (returns 0 on the next call until the user scrolls again). Used by
+// the editor's orbit camera and any scrollable UI panel.
+#[no_mangle]
+pub extern "C" fn bloom_get_mouse_wheel() -> f64 {
+    engine().input.consume_mouse_wheel()
+}
+
+// Dequeue the next typed character (Unicode codepoint). Returns 0 when the
+// queue is empty. Call in a loop each frame to consume all pending characters.
+// Used by the editor's in-window text-input widget.
+#[no_mangle]
+pub extern "C" fn bloom_get_char_pressed() -> f64 {
+    engine().input.pop_char() as f64
+}
+
+// Q2: Cursor shape
+#[no_mangle]
+pub extern "C" fn bloom_set_cursor_shape(shape: f64) {
+    engine().input.cursor_shape = shape as u32;
+}
+
+// E4: Clipboard
+#[no_mangle]
+pub extern "C" fn bloom_set_clipboard_text(text_ptr: *const u8) {
+    let text = str_from_header(text_ptr);
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        let _ = clipboard.set_text(text.to_string());
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_clipboard_text() -> *const u8 {
+    match arboard::Clipboard::new() {
+        Ok(mut clipboard) => {
+            match clipboard.get_text() {
+                Ok(text) => {
+                    let bytes = text.as_bytes();
+                    let len = bytes.len();
+                    let total = 12 + len;
+                    let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
+                    unsafe {
+                        let ptr = std::alloc::alloc(layout);
+                        if ptr.is_null() { return std::ptr::null(); }
+                        *(ptr as *mut u32) = len as u32;
+                        *(ptr.add(4) as *mut u32) = len as u32;
+                        *(ptr.add(8) as *mut u32) = 1;
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
+                        ptr
+                    }
+                }
+                Err(_) => std::ptr::null(),
+            }
+        }
+        Err(_) => std::ptr::null(),
+    }
+}
+
+// E5b: Native file dialogs (via rfd crate)
+#[no_mangle]
+pub extern "C" fn bloom_open_file_dialog(filter_ptr: *const u8, title_ptr: *const u8) -> *const u8 {
+    let filter = str_from_header(filter_ptr);
+    let title = str_from_header(title_ptr);
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    if !filter.is_empty() {
+        dialog = dialog.add_filter("Files", &[filter]);
+    }
+    match dialog.pick_file() {
+        Some(path) => {
+            let s = path.to_string_lossy();
+            let bytes = s.as_bytes();
+            let len = bytes.len();
+            let total = 12 + len;
+            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
+            unsafe {
+                let ptr = std::alloc::alloc(layout);
+                if ptr.is_null() { return std::ptr::null(); }
+                *(ptr as *mut u32) = len as u32;
+                *(ptr.add(4) as *mut u32) = len as u32;
+                *(ptr.add(8) as *mut u32) = 1;
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
+                ptr
+            }
+        }
+        None => std::ptr::null(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_save_file_dialog(default_name_ptr: *const u8, title_ptr: *const u8) -> *const u8 {
+    let default_name = str_from_header(default_name_ptr);
+    let title = str_from_header(title_ptr);
+    let dialog = rfd::FileDialog::new()
+        .set_title(title)
+        .set_file_name(default_name);
+    match dialog.save_file() {
+        Some(path) => {
+            let s = path.to_string_lossy();
+            let bytes = s.as_bytes();
+            let len = bytes.len();
+            let total = 12 + len;
+            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
+            unsafe {
+                let ptr = std::alloc::alloc(layout);
+                if ptr.is_null() { return std::ptr::null(); }
+                *(ptr as *mut u32) = len as u32;
+                *(ptr.add(4) as *mut u32) = len as u32;
+                *(ptr.add(8) as *mut u32) = 1;
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
+                ptr
+            }
+        }
+        None => std::ptr::null(),
+    }
+}
+
+// Model bounds accessors. Return the axis-aligned bounding box of a loaded
+// model in model-local coordinates. Editors use these to size gizmos, auto-
+// frame the camera on selection, and snap placed entities onto terrain.
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_x(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).0[0] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_y(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).0[1] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_z(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).0[2] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_x(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).1[0] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_y(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).1[1] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_z(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).1[2] as f64
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_write_file(path_ptr: *const u8, data_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
@@ -1487,6 +1718,7 @@ pub extern "C" fn bloom_scene_update_geometry(
             uv: [vert_floats[base+10] as f32, vert_floats[base+11] as f32],
             joints: [0.0; 4],
             weights: [0.0; 4],
+            tangent: [0.0; 4],
         });
     }
 
@@ -1531,6 +1763,126 @@ pub extern "C" fn bloom_scene_node_index_count(handle: f64) -> f64 {
         Some(node) => node.indices.len() as f64,
         None => -1.0,
     }
+}
+
+
+// Q8: Set a water material on a scene node (translucent tint, low roughness).
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_water(handle: f64, wave_amp: f64, wave_speed: f64, r: f64, g: f64, b: f64, a: f64) {
+    engine().scene.set_material_water(handle, wave_amp as f32, wave_speed as f32, r as f32, g as f32, b as f32, a as f32);
+}
+
+// Q9: Generate a ribbon mesh along a Catmull-Rom spline.
+#[no_mangle]
+pub extern "C" fn bloom_gen_mesh_spline_ribbon(points_ptr: *const u8, point_count: f64, widths_ptr: *const u8, width_count: f64) -> f64 {
+    let n = point_count as usize;
+    let wn = width_count as usize;
+    let points = unsafe { std::slice::from_raw_parts(points_ptr as *const f32, n * 3) };
+    let widths = unsafe { std::slice::from_raw_parts(widths_ptr as *const f32, wn) };
+    engine().models.gen_mesh_spline_ribbon(points, widths)
+}
+
+// Q1: Render texture FFI — create GPU textures for render-to-texture.
+#[no_mangle]
+pub extern "C" fn bloom_load_render_texture(width: f64, height: f64) -> f64 {
+    let w = width as u32;
+    let h = height as u32;
+    let eng = engine();
+    let rt_handle = eng.textures.load_render_texture(w, h);
+
+    // Create the GPU texture via the renderer's public method.
+    let (bind_group_idx, _tex_vec_idx) = eng.renderer.create_render_texture(w, h);
+
+    // Register as a texture handle so drawTexture can sample it.
+    let tex_handle = eng.textures.textures.alloc(bloom_shared::textures::TextureData {
+        bind_group_idx, width: w, height: h,
+    });
+    eng.textures.set_render_texture_handle(rt_handle, tex_handle);
+
+    rt_handle
+}
+#[no_mangle]
+pub extern "C" fn bloom_unload_render_texture(handle: f64) {
+    engine().textures.unload_render_texture(handle);
+}
+#[no_mangle]
+pub extern "C" fn bloom_begin_texture_mode(handle: f64) {
+    let eng = engine();
+    let (w, h, bg_idx) = match eng.textures.render_textures.get(handle) {
+        Some(rt) => {
+            let tex_handle = rt.texture_handle;
+            match eng.textures.textures.get(tex_handle) {
+                Some(td) => (rt.width, rt.height, td.bind_group_idx as usize),
+                None => return,
+            }
+        }
+        None => return,
+    };
+    if let Some(texture) = eng.renderer.get_texture_ref(bg_idx) {
+        // We need to call begin_texture_mode with a reference to the texture,
+        // but get_texture_ref borrows renderer immutably. Clone the texture view
+        // data we need first, then call the mutable method.
+        let color_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Create depth texture for this RT.
+        let depth_tex = eng.renderer.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rt_depth"), size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        eng.renderer.rt_color_view = Some(color_view);
+        eng.renderer.rt_depth_view = Some(depth_view);
+        eng.renderer.rt_depth_texture = Some(depth_tex);
+        eng.renderer.rt_width = w;
+        eng.renderer.rt_height = h;
+    }
+}
+#[no_mangle]
+pub extern "C" fn bloom_end_texture_mode() {
+    engine().renderer.end_texture_mode();
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_render_texture_texture(handle: f64) -> f64 {
+    engine().textures.get_render_texture_texture(handle)
+}
+// ============================================================
+// Scene graph QoL — Q4/Q5/Q6/Q7
+// ============================================================
+
+/// Q4: Read back the 4x4 transform matrix of a scene node.
+/// Returns the column-major float at the specified index (0-15).
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_transform(handle: f64, index: f64) -> f64 {
+    let mat = engine().scene.get_transform(handle);
+    let i = index as usize;
+    let col = i / 4;
+    let row = i % 4;
+    if col < 4 && row < 4 { mat[col][row] as f64 } else { 0.0 }
+}
+
+/// Q5: Get the cached AABB min of a scene node.
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[0] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[1] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[2] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[0] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[1] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[2] as f64 }
+
+/// Q7: Set arbitrary user data on a scene node.
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_user_data(handle: f64, data: f64) {
+    engine().scene.set_user_data(handle, data as i64);
+}
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_user_data(handle: f64) -> f64 {
+    engine().scene.get_user_data(handle) as f64
 }
 
 // ============================================================
@@ -1706,12 +2058,33 @@ pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, 
     // Copy vertices and indices to scene node
     let vertices = mesh.vertices.clone();
     let indices = mesh.indices.clone();
+    let base_color_tex = mesh.texture_idx;
+    let normal_tex = mesh.normal_texture_idx;
+    let mr_tex = mesh.metallic_roughness_texture_idx;
+    let emissive_tex = mesh.emissive_texture_idx;
+    let emissive_factor = mesh.emissive_factor;
     eng.scene.update_geometry(node_handle, vertices, indices);
 
-    // Set texture if the model mesh has one
-    if let Some(tex_idx) = mesh.texture_idx {
+    // Pipe PBR textures through to the scene node material so the
+    // renderer's scene pipeline can sample them.
+    if let Some(tex_idx) = base_color_tex {
         eng.scene.set_material_texture(node_handle, tex_idx);
     }
+    if let Some(tex_idx) = normal_tex {
+        eng.scene.set_material_normal_texture(node_handle, tex_idx);
+    }
+    if let Some(tex_idx) = mr_tex {
+        eng.scene.set_material_metallic_roughness_texture(node_handle, tex_idx);
+    }
+    if let Some(tex_idx) = emissive_tex {
+        eng.scene.set_material_emissive_texture(node_handle, tex_idx);
+    }
+    eng.scene.set_material_emissive_factor(
+        node_handle,
+        emissive_factor[0],
+        emissive_factor[1],
+        emissive_factor[2],
+    );
 }
 
 // ============================================================
@@ -1879,6 +2252,7 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
         &eng.renderer.vp_matrix(),
         eng.renderer.uniform_3d_layout(),
     );
+    eng.scene.prepare_materials(&eng.renderer);
     eng.renderer.end_frame_with_scene(&eng.scene);
 
     match eng.renderer.screenshot_data.take() {
@@ -2086,6 +2460,37 @@ pub extern "C" fn bloom_pick_hit_normal_y() -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_pick_hit_normal_z() -> f64 {
     unsafe { LAST_PICK.as_ref().map(|r| r.normal[2] as f64).unwrap_or(0.0) }
+}
+
+// Q6: Multi-hit picking — returns all hits sorted by distance.
+static mut LAST_PICK_ALL: Vec<bloom_shared::picking::PickResult> = Vec::new();
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_pick_all(screen_x: f64, screen_y: f64, max_results: f64) -> f64 {
+    let eng = engine();
+    let inv_vp = eng.renderer.inverse_vp_matrix();
+    let cam_pos = eng.renderer.camera_pos();
+    let w = eng.renderer.width() as f32;
+    let h = eng.renderer.height() as f32;
+    let (origin, direction) = bloom_shared::picking::screen_to_ray(
+        screen_x as f32, screen_y as f32, w, h, &inv_vp, &cam_pos,
+    );
+    let results = bloom_shared::picking::raycast_scene_all(&eng.scene, &origin, &direction, max_results as usize);
+    let count = results.len();
+    unsafe { LAST_PICK_ALL = results; }
+    count as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_all_handle(index: f64) -> f64 {
+    let i = index as usize;
+    unsafe { LAST_PICK_ALL.get(i).map(|r| r.handle).unwrap_or(0.0) }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_pick_all_distance(index: f64) -> f64 {
+    let i = index as usize;
+    unsafe { LAST_PICK_ALL.get(i).map(|r| r.distance as f64).unwrap_or(0.0) }
 }
 
 // ============================================================
