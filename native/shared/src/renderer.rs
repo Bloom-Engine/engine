@@ -3089,13 +3089,14 @@ impl Renderer {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            // No depth-stencil — 2D never tests or writes depth, and
+            // the pipeline runs in two different passes: one with a
+            // depth attachment (composited into hdr_rt) and one
+            // without (drawn on top of the tonemapped surface).
+            // wgpu allows a depth-less pipeline in either pass; the
+            // reverse — a depth-bound pipeline in a depth-less pass
+            // — is a validation error.
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -4260,7 +4261,7 @@ impl Renderer {
             taa_layout,
             taa_uniform_buffer,
             taa_frame_index: 0,
-            taa_enabled: true,
+            taa_enabled: false,
             prev_vp_matrix: IDENTITY_MAT4,
             fog_color: [0.7, 0.75, 0.82],
             fog_density: 0.0,
