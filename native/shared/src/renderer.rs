@@ -811,14 +811,13 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let ibl_spec = prefiltered_env * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
     // Shadow-attenuate the indirect lighting. Physically, a point
-    // in shadow from the sun is ALSO occluded from the sky in the
-    // direction that occludes the sun — so indirect from that
-    // angular region should drop too. We approximate with a
-    // linear blend: 60% of IBL survives in full shadow, 100% when
-    // fully lit. Without this, shadows on overexposed surfaces
-    // (outdoor scene + bright IBL) are completely invisible
-    // because direct sun is only a small fraction of total light.
-    let indirect_shadow = mix(0.6, 1.0, shadow_factor);
+    // in shadow from the sun is also occluded from the sky region
+    // containing the sun. 25% of IBL survives in full shadow — a
+    // heavy hack, but necessary for shadows to be visible against
+    // bright IBL after tonemap saturation (ACES already compresses
+    // everything above ~1.0 hard; subtle shadow attenuation on
+    // overexposed-HDR surfaces gets flattened away).
+    let indirect_shadow = mix(0.25, 1.0, shadow_factor);
 
     // Multi-scatter also adds a diffuse-like term back from the
     // 'lost' energy, but it gets absorbed wherever there is no metal
