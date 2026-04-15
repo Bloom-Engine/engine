@@ -78,6 +78,27 @@ declare function bloom_pick_hit_normal_y(): number;
 declare function bloom_pick_hit_normal_z(): number;
 
 // Geometry generation
+// Q6: multi-hit picking
+declare function bloom_scene_pick_all(screenX: number, screenY: number, maxResults: number): number;
+declare function bloom_pick_all_handle(index: number): number;
+declare function bloom_pick_all_distance(index: number): number;
+
+// Q8: water material
+declare function bloom_scene_set_material_water(handle: number, waveAmp: number, waveSpeed: number, r: number, g: number, b: number, a: number): void;
+
+// Q4: transform read-back
+declare function bloom_scene_get_transform(handle: number, index: number): number;
+// Q5: node bounds
+declare function bloom_scene_get_bounds_min_x(handle: number): number;
+declare function bloom_scene_get_bounds_min_y(handle: number): number;
+declare function bloom_scene_get_bounds_min_z(handle: number): number;
+declare function bloom_scene_get_bounds_max_x(handle: number): number;
+declare function bloom_scene_get_bounds_max_y(handle: number): number;
+declare function bloom_scene_get_bounds_max_z(handle: number): number;
+// Q7: user data
+declare function bloom_scene_set_user_data(handle: number, data: number): void;
+declare function bloom_scene_get_user_data(handle: number): number;
+
 declare function bloom_scene_extrude_polygon(
   handle: number,
   polygon: number,
@@ -437,6 +458,99 @@ export function subtractBox(
   maxX: number, maxY: number, maxZ: number,
 ): void {
   bloom_scene_subtract_box(handle, minX, minY, minZ, maxX, maxY, maxZ);
+}
+
+// ============================================================
+// Q4: Transform Read-back
+// ============================================================
+
+/**
+ * Read back the 4x4 transform matrix of a scene node as a flat 16-element
+ * array in column-major order (same layout as setSceneNodeTransform).
+ */
+export function getSceneNodeTransform(handle: SceneNodeHandle): number[] {
+  const m: number[] = new Array(16);
+  for (let i = 0; i < 16; i++) {
+    m[i] = bloom_scene_get_transform(handle, i);
+  }
+  return m;
+}
+
+// ============================================================
+// Q5: Scene Node Bounds
+// ============================================================
+
+/**
+ * Return the cached AABB of a scene node's geometry in local space.
+ * Recomputed automatically when geometry is updated via updateSceneNodeGeometry.
+ */
+export function getSceneNodeBounds(handle: SceneNodeHandle): { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } } {
+  return {
+    min: {
+      x: bloom_scene_get_bounds_min_x(handle),
+      y: bloom_scene_get_bounds_min_y(handle),
+      z: bloom_scene_get_bounds_min_z(handle),
+    },
+    max: {
+      x: bloom_scene_get_bounds_max_x(handle),
+      y: bloom_scene_get_bounds_max_y(handle),
+      z: bloom_scene_get_bounds_max_z(handle),
+    },
+  };
+}
+
+// ============================================================
+// Q7: Scene Node User Data
+// ============================================================
+
+/**
+ * Attach an arbitrary integer to a scene node. Used by editors to associate
+ * entity ids with scene nodes so picking can return the entity id directly.
+ */
+export function setSceneNodeUserData(handle: SceneNodeHandle, data: number): void {
+  bloom_scene_set_user_data(handle, data);
+}
+
+export function getSceneNodeUserData(handle: SceneNodeHandle): number {
+  return bloom_scene_get_user_data(handle);
+}
+
+// ============================================================
+// Q6: Multi-Hit Picking
+// ============================================================
+
+/**
+ * Raycast against all visible scene nodes and return all hits sorted by
+ * distance (closest first). Used by editors for Alt-click cycling through
+ * occluded objects. Returns an array of { handle, distance }.
+ */
+export function pickSceneAll(screenX: number, screenY: number, maxResults: number = 8): { handle: number; distance: number }[] {
+  const count = bloom_scene_pick_all(screenX, screenY, maxResults);
+  const results: { handle: number; distance: number }[] = [];
+  for (let i = 0; i < count; i++) {
+    results.push({
+      handle: bloom_pick_all_handle(i),
+      distance: bloom_pick_all_distance(i),
+    });
+  }
+  return results;
+}
+
+// ============================================================
+// Q8: Water Material
+// ============================================================
+
+/**
+ * Set a water-like material on a scene node with translucent tint and
+ * low roughness. The wave parameters are stored for a future animated
+ * water shader; currently they're visual-only placeholders.
+ */
+export function setSceneNodeWaterMaterial(
+  handle: SceneNodeHandle,
+  waveAmplitude: number, waveSpeed: number,
+  r: number, g: number, b: number, a: number,
+): void {
+  bloom_scene_set_material_water(handle, waveAmplitude, waveSpeed, r, g, b, a);
 }
 
 export function addPointLight(

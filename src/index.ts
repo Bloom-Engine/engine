@@ -1,6 +1,6 @@
 export {
   initWindow, closeWindow, windowShouldClose,
-  beginDrawing, endDrawing, clearBackground,
+  beginDrawing, endDrawing, takeScreenshot, clearBackground, setEnvClearFromHdr,
   setTargetFPS, getDeltaTime, getFPS, getTime,
   getScreenWidth, getScreenHeight,
   isKeyPressed, isKeyDown, isKeyReleased,
@@ -11,7 +11,10 @@ export {
   isGamepadButtonDown, isGamepadButtonReleased, getGamepadAxisCount,
   getTouchX, getTouchY, getTouchCount, getTouchPointCount,
   toggleFullscreen, setWindowTitle, setWindowIcon,
-  disableCursor, enableCursor, getMouseDeltaX, getMouseDeltaY,
+  disableCursor, enableCursor, getMouseDeltaX, getMouseDeltaY, getMouseWheel, getCharPressed,
+  setCursorShape, CursorShape,
+  setClipboardText, getClipboardText,
+  openFileDialog, saveFileDialog,
   writeFile, fileExists, readFile,
   getScreenToWorld2D, getWorldToScreen2D,
   Color, ColorConstants, Colors, Key, MouseButton,
@@ -56,10 +59,11 @@ export {
   imageResize, imageCrop, imageFlipH, imageFlipV, loadTextureFromImage,
   genTextureMipmaps, setTextureFilter, FILTER_LINEAR, FILTER_NEAREST,
   loadTextureAsync, stageTextures, commitTexture,
+  loadRenderTexture, unloadRenderTexture, beginTextureMode, endTextureMode, getRenderTextureTexture,
 } from './textures/index';
 
 export {
-  loadModel, drawModel, unloadModel,
+  loadModel, drawModel, unloadModel, getModelBounds, genMeshSplineRibbon,
   drawCube, drawCubeWires, drawSphere, drawSphereWires,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
   loadShader, loadModelAnimation, updateModelAnimation, createMesh,
@@ -102,7 +106,9 @@ export {
   setSceneNodeVisible, setSceneNodeCastShadow, setSceneNodeReceiveShadow,
   setSceneNodeParent, setSceneNodeTransform,
   updateSceneNodeGeometry,
-  setSceneNodeColor, setSceneNodePbr, setSceneNodeTexture,
+  setSceneNodeColor, setSceneNodePbr, setSceneNodeTexture, setSceneNodeWaterMaterial, pickSceneAll,
+  getSceneNodeTransform, getSceneNodeBounds,
+  setSceneNodeUserData, getSceneNodeUserData,
   getSceneNodeCount,
   registerFrameCallback, unregisterFrameCallback,
   addDirectionalLight, addPointLight,

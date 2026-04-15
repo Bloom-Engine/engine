@@ -11,7 +11,9 @@ declare function bloom_close_window(): void;
 declare function bloom_window_should_close(): number;
 declare function bloom_begin_drawing(): void;
 declare function bloom_end_drawing(): void;
+declare function bloom_take_screenshot(path: number): void;
 declare function bloom_clear_background(r: number, g: number, b: number, a: number): void;
+declare function bloom_set_env_clear_from_hdr(path: number): void;
 declare function bloom_set_target_fps(fps: number): void;
 declare function bloom_get_delta_time(): number;
 declare function bloom_get_fps(): number;
@@ -63,6 +65,13 @@ declare function bloom_disable_cursor(): void;
 declare function bloom_enable_cursor(): void;
 declare function bloom_get_mouse_delta_x(): number;
 declare function bloom_get_mouse_delta_y(): number;
+declare function bloom_get_mouse_wheel(): number;
+declare function bloom_get_char_pressed(): number;
+declare function bloom_set_cursor_shape(shape: number): void;
+declare function bloom_set_clipboard_text(text: number): void;
+declare function bloom_get_clipboard_text(): number;
+declare function bloom_open_file_dialog(filter: number, title: number): number;
+declare function bloom_save_file_dialog(defaultName: number, title: number): number;
 declare function bloom_write_file(path: number, data: number): number;
 declare function bloom_file_exists(path: number): number;
 declare function bloom_read_file(path: number): number;
@@ -92,8 +101,31 @@ export function endDrawing(): void {
   bloom_end_drawing();
 }
 
+/**
+ * Capture the next rendered frame and write it as a PNG to `path`.
+ * The actual capture happens during the next `endDrawing()` call —
+ * call this immediately before that endDrawing(), and the file will
+ * be on disk afterwards.
+ *
+ * Used by `bloom-diff` and CI image regression workflows.
+ */
+export function takeScreenshot(path: string): void {
+  bloom_take_screenshot(path as any);
+}
+
 export function clearBackground(color: Color): void {
   bloom_clear_background(color.r, color.g, color.b, color.a);
+}
+
+/**
+ * Set the clear color from the average luminance-weighted color of
+ * an HDR environment map (.hdr / Radiance format). A stand-in for
+ * proper equirect-sky-pass rendering until that lands — lets us
+ * immediately close most of the background-color gap between Bloom's
+ * realtime output and the path-traced reference.
+ */
+export function setEnvClearFromHdr(path: string): void {
+  bloom_set_env_clear_from_hdr(path as any);
 }
 
 // Timing
@@ -272,6 +304,78 @@ export function getMouseDeltaX(): number {
 
 export function getMouseDeltaY(): number {
   return bloom_get_mouse_delta_y();
+}
+
+/**
+ * Accumulated vertical scroll-wheel delta since the last call to this
+ * function. Positive values mean scrolling up (away from user on macOS);
+ * use this for camera zoom and scrollable UI panels. Reading consumes
+ * the value, so call it exactly once per frame.
+ */
+export function getMouseWheel(): number {
+  return bloom_get_mouse_wheel();
+}
+
+/**
+ * Dequeue the next typed character as a Unicode codepoint. Returns 0 when
+ * the queue is empty. Call in a loop each frame to consume all pending
+ * characters:
+ *
+ *   let c = getCharPressed();
+ *   while (c !== 0) {
+ *     // handle character c
+ *     c = getCharPressed();
+ *   }
+ *
+ * Printable characters (codepoint >= 32) plus backspace (8), return (13),
+ * and tab (9) are enqueued. Platform-specific text input methods (NSEvent
+ * characters on macOS, WM_CHAR on Windows, etc.) feed this queue.
+ */
+export function getCharPressed(): number {
+  return bloom_get_char_pressed();
+}
+
+/**
+ * Set the mouse cursor shape. Values:
+ *   0 = default (arrow), 1 = hand, 2 = move, 3 = text (I-beam),
+ *   4 = resize horizontal, 5 = resize vertical, 6 = crosshair.
+ * Applied per-frame by the platform event loop.
+ */
+export const CursorShape = { Default: 0, Hand: 1, Move: 2, Text: 3, ResizeH: 4, ResizeV: 5, Crosshair: 6 } as const;
+
+export function setCursorShape(shape: number): void {
+  bloom_set_cursor_shape(shape);
+}
+
+/**
+ * Copy text to the system clipboard.
+ */
+export function setClipboardText(text: string): void {
+  bloom_set_clipboard_text(text as any);
+}
+
+/**
+ * Read text from the system clipboard. Returns empty string on failure.
+ */
+export function getClipboardText(): string {
+  return bloom_get_clipboard_text() as any;
+}
+
+/**
+ * Open a native file-open dialog. Returns the selected file path, or
+ * empty string if the user cancelled. `filter` is a file extension
+ * (e.g. "world.json") or empty for all files.
+ */
+export function openFileDialog(filter: string, title: string): string {
+  return bloom_open_file_dialog(filter as any, title as any) as any;
+}
+
+/**
+ * Open a native file-save dialog. Returns the chosen save path, or
+ * empty string if cancelled.
+ */
+export function saveFileDialog(defaultName: string, title: string): string {
+  return bloom_save_file_dialog(defaultName as any, title as any) as any;
 }
 
 // File I/O

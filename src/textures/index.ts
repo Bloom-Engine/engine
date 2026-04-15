@@ -100,6 +100,11 @@ export function genTextureMipmaps(texture: Texture): void {
 
 declare function bloom_stage_texture(path: number): number;
 declare function bloom_commit_texture(handle: number): number;
+declare function bloom_load_render_texture(width: number, height: number): number;
+declare function bloom_unload_render_texture(handle: number): void;
+declare function bloom_begin_texture_mode(handle: number): void;
+declare function bloom_end_texture_mode(): void;
+declare function bloom_get_render_texture_texture(handle: number): number;
 
 export async function loadTextureAsync(path: string): Promise<Texture> {
   const stagingHandle = await spawn(() => bloom_stage_texture(path as any));
@@ -118,4 +123,39 @@ export function commitTexture(stagingHandle: number): Texture {
   const width = bloom_get_texture_width(id);
   const height = bloom_get_texture_height(id);
   return { id, width, height };
+}
+
+// ============================================================
+// Q1: Offscreen Render Targets
+// ============================================================
+
+/**
+ * Create an offscreen render texture. Rendering commands between
+ * beginTextureMode and endTextureMode draw into this texture instead
+ * of the screen. Use getRenderTextureTexture to get a Texture for
+ * drawing the result via drawTexture.
+ *
+ * NOTE: GPU implementation is a stub in this version. The FFI surface
+ * is stable; the actual render-to-texture plumbing will land in a
+ * focused GPU session.
+ */
+export function loadRenderTexture(width: number, height: number): number {
+  return bloom_load_render_texture(width, height);
+}
+
+export function unloadRenderTexture(handle: number): void {
+  bloom_unload_render_texture(handle);
+}
+
+export function beginTextureMode(handle: number): void {
+  bloom_begin_texture_mode(handle);
+}
+
+export function endTextureMode(): void {
+  bloom_end_texture_mode();
+}
+
+export function getRenderTextureTexture(handle: number): Texture {
+  const id = bloom_get_render_texture_texture(handle);
+  return { id, width: 0, height: 0 };
 }
