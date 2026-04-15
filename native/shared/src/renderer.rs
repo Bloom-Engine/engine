@@ -569,17 +569,40 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
     let bias = 0.0008;
     let depth_ref = light_ndc.z - bias;
 
-    // 4-tap PCF: corners of a 1-texel offset. Cheap and gives a
-    // visible softening over single-tap. Increase to 9-tap for
-    // smoother penumbras.
+    // 16-tap Poisson-disc PCF. Spreads taps over a wider kernel
+    // for smoother penumbras than the old 4-tap box, while keeping
+    // the sample budget bounded. Disc offsets pre-baked from a
+    // standard Poisson distribution (Wyman/Hardy-style sequence)
+    // so we don't pay for per-pixel rotation. Filter radius is
+    // 2 texels — gives a noticeable but not blurry-soft shadow
+    // with the current 2048×2048 shadow map.
     let dims = textureDimensions(shadow_tex);
     let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
+    let radius = 2.0;
     var sum = 0.0;
-    sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + vec2<f32>(-texel.x, -texel.y), depth_ref);
-    sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + vec2<f32>( texel.x, -texel.y), depth_ref);
-    sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + vec2<f32>(-texel.x,  texel.y), depth_ref);
-    sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + vec2<f32>( texel.x,  texel.y), depth_ref);
-    return sum * 0.25;
+    let poisson = array<vec2<f32>, 16>(
+        vec2<f32>(-0.94201624, -0.39906216),
+        vec2<f32>( 0.94558609, -0.76890725),
+        vec2<f32>(-0.09418410, -0.92938870),
+        vec2<f32>( 0.34495938,  0.29387760),
+        vec2<f32>(-0.91588581,  0.45771432),
+        vec2<f32>(-0.81544232, -0.87912464),
+        vec2<f32>(-0.38277543,  0.27676845),
+        vec2<f32>( 0.97484398,  0.75648379),
+        vec2<f32>( 0.44323325, -0.97511554),
+        vec2<f32>( 0.53742981, -0.47373420),
+        vec2<f32>(-0.26496911, -0.41893023),
+        vec2<f32>( 0.79197514,  0.19090188),
+        vec2<f32>(-0.24188840,  0.99706507),
+        vec2<f32>(-0.81409955,  0.91437590),
+        vec2<f32>( 0.19984126,  0.78641367),
+        vec2<f32>( 0.14383161, -0.14100790),
+    );
+    for (var i: i32 = 0; i < 16; i = i + 1) {
+        let off = poisson[i] * texel * radius;
+        sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + off, depth_ref);
+    }
+    return sum / 16.0;
 }
 
 // Evaluate a single directional light's PBR contribution. Returns
