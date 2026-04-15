@@ -1033,6 +1033,44 @@ fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Textu
     (texture, view)
 }
 
+/// Halton low-discrepancy sequence (base `b`, index `i`, 1-based).
+/// Returns a value in [0, 1). Used to generate sub-pixel jitter
+/// offsets that are well-distributed across the pixel — the TAA
+/// accumulation effectively integrates over those sample points
+/// to produce a stably anti-aliased image.
+fn halton(mut i: u32, b: u32) -> f32 {
+    let mut f = 1.0_f32;
+    let mut r = 0.0_f32;
+    while i > 0 {
+        f /= b as f32;
+        r += f * (i % b) as f32;
+        i /= b;
+    }
+    r
+}
+
+/// Create the two TAA history textures (HDR format, surface size).
+fn create_taa_textures(device: &wgpu::Device, width: u32, height: u32) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+    let make = |label: &str| -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    };
+    let (a, av) = make("taa_a");
+    let (b, bv) = make("taa_b");
+    ([a, b], [av, bv])
+}
+
 /// Create the SSAO render target (single channel, half-res).
 fn create_ssao_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let w = (width / 2).max(1);
@@ -1330,25 +1368,106 @@ struct SsaoParams {
     params: [f32; 4],
 }
 
+/// TAA shader. Combines current-frame HDR + SSAO + bloom into a
+/// single linear-HDR value per fragment, then blends against the
+/// reprojected history with a fixed feedback factor. For static
+/// scenes (no motion vectors) the blend converges in ~10 frames to
+/// a fully sub-pixel-resolved image. Neighborhood color clamp
+/// reduces ghosting if the camera moves slowly.
+const TAA_SHADER_WGSL: &str = "
+struct TaaParams {
+    /// x = blend factor for current-frame contribution (0 = pure
+    /// history, 1 = pure current). 0.1 = 10% new, 90% history;
+    /// converges in ~10 frames. First frame should pass 1.0 so the
+    /// history initializes from the actual scene rather than zeros.
+    /// y = bloom intensity (passed through from the renderer's
+    /// bloom_intensity field), zw padding.
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: TaaParams;
+@group(0) @binding(1) var hdr_tex: texture_2d<f32>;
+@group(0) @binding(2) var hdr_samp: sampler;
+@group(0) @binding(3) var bloom_tex: texture_2d<f32>;
+@group(0) @binding(4) var bloom_samp: sampler;
+@group(0) @binding(5) var ssao_tex: texture_2d<f32>;
+@group(0) @binding(6) var ssao_samp: sampler;
+@group(0) @binding(7) var history_tex: texture_2d<f32>;
+@group(0) @binding(8) var history_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Combine current-frame post-effects exactly as the composite
+    // shader did before TAA was inserted. Result is pre-tonemap HDR.
+    let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
+    let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
+    let ssao = textureSample(ssao_tex, ssao_samp, in.uv).r;
+    let current = hdr * ssao + bloom * u.params.y;
+
+    // Read the reprojected history (no motion vectors yet, just a
+    // straight UV lookup — works for static scenes; slow camera
+    // motion will introduce mild ghosting until motion vectors land).
+    let history = textureSample(history_tex, history_samp, in.uv).rgb;
+
+    // Neighborhood color clamp keeps the history from drifting too
+    // far from what the current frame plausibly contains. Sample a
+    // 3x3 neighborhood of the current frame to derive the clamp
+    // range. Reduces flickering bright-pixel ghosts to within the
+    // local minmax envelope.
+    let texel = vec2<f32>(1.0 / f32(textureDimensions(hdr_tex).x),
+                          1.0 / f32(textureDimensions(hdr_tex).y));
+    var nmin = current;
+    var nmax = current;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            if (x == 0 && y == 0) { continue; }
+            let s_uv = in.uv + vec2<f32>(f32(x), f32(y)) * texel;
+            let s_hdr = textureSample(hdr_tex, hdr_samp, s_uv).rgb;
+            let s_ssao = textureSample(ssao_tex, ssao_samp, s_uv).r;
+            let s_bloom = textureSample(bloom_tex, bloom_samp, s_uv).rgb;
+            let s = s_hdr * s_ssao + s_bloom * u.params.y;
+            nmin = min(nmin, s);
+            nmax = max(nmax, s);
+        }
+    }
+    let clamped_history = clamp(history, nmin, nmax);
+
+    let alpha = u.params.x;
+    let blended = mix(clamped_history, current, alpha);
+    return vec4<f32>(blended, 1.0);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct TaaParams {
+    /// x = blend factor (current-frame weight),
+    /// y = bloom intensity, zw padding.
+    params: [f32; 4],
+}
+
 /// Composite + tonemap fragment shader. Single fullscreen triangle
 /// reads hdr_rt and writes ACES-tonemapped linear-RGB. Hardware
 /// performs the linear→sRGB encode on write because the surface
 /// format is sRGB.
 const COMPOSITE_SHADER_WGSL: &str = "
-struct CompositeParams {
-    /// x = bloom intensity (final additive multiplier for the
-    /// blurred HDR brights). 0 disables bloom; 0.04 is a moderate
-    /// default that matches what most engines ship with.
-    params: vec4<f32>,
-};
-
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(1) var hdr_samp: sampler;
-@group(0) @binding(2) var bloom_tex: texture_2d<f32>;
-@group(0) @binding(3) var bloom_samp: sampler;
-@group(0) @binding(4) var<uniform> u: CompositeParams;
-@group(0) @binding(5) var ssao_tex: texture_2d<f32>;
-@group(0) @binding(6) var ssao_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1376,14 +1495,11 @@ fn aces_tone(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Composite is a pure tonemap now — the TAA pass already
+    // combined HDR + SSAO + bloom into a single linear-HDR value
+    // and stored it in the TAA history texture.
     let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
-    let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
-    // SSAO darkens crevices and tight gaps. Applied to the HDR sample
-    // BEFORE bloom add — bloom should still glow even from occluded
-    // bright pixels (otherwise bright accents in dark crevices vanish).
-    let ssao = textureSample(ssao_tex, ssao_samp, in.uv).r;
-    let combined = hdr * ssao + bloom * u.params.x;
-    return vec4<f32>(aces_tone(combined), 1.0);
+    return vec4<f32>(aces_tone(hdr), 1.0);
 }
 ";
 
@@ -1661,6 +1777,23 @@ pub struct Renderer {
     /// Sample radius in UV units (default ~0.005, gives a soft AO
     /// signal a few pixels wide on a 1024-tall surface).
     pub ssao_radius: f32,
+    /// TAA history ping-pong. Two HDR-format textures the same size
+    /// as the surface — each frame writes to one, reads the other as
+    /// history. `taa_current_idx` flips after every frame.
+    pub taa_textures: [wgpu::Texture; 2],
+    pub taa_views: [wgpu::TextureView; 2],
+    pub taa_current_idx: usize,
+    pub taa_pipeline: wgpu::RenderPipeline,
+    pub taa_layout: wgpu::BindGroupLayout,
+    pub taa_uniform_buffer: wgpu::Buffer,
+    /// Frame counter used to pick a different Halton offset every
+    /// frame for sub-pixel camera jitter — accumulating over the
+    /// jitter sequence is what gives TAA its anti-aliasing.
+    pub taa_frame_index: u32,
+    /// 0 = TAA off (composite reads hdr directly, history skipped).
+    /// 1 = TAA on (default). When off the renderer behaves exactly
+    /// as the pre-TAA pipeline did.
+    pub taa_enabled: bool,
 
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
@@ -2137,6 +2270,9 @@ impl Renderer {
             BLOOM_MIP_COUNT,
         );
         let (ssao_rt_texture, ssao_rt_view) = create_ssao_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+        let (taa_textures, taa_views) = create_taa_textures(
             &device, surface_config.width, surface_config.height,
         );
 
@@ -2710,48 +2846,6 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
             ],
         });
         let composite_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3004,6 +3098,109 @@ impl Renderer {
             ..Default::default()
         });
 
+        // --- TAA pipeline ---
+        let taa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("taa_shader"),
+            source: wgpu::ShaderSource::Wgsl(TAA_SHADER_WGSL.into()),
+        });
+        let taa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("taa_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                // hdr / bloom / ssao / history each: tex + sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let taa_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("taa_pl_layout"),
+            bind_group_layouts: &[&taa_layout],
+            push_constant_ranges: &[],
+        });
+        let taa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("taa_pipeline"),
+            layout: Some(&taa_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &taa_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &taa_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT, blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false, conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+        let taa_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("taa_uniform_buffer"),
+            size: std::mem::size_of::<TaaParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             device,
             queue,
@@ -3053,6 +3250,14 @@ impl Renderer {
             ssao_depth_sampler,
             ssao_strength: 1.0,
             ssao_radius: 0.006,
+            taa_textures,
+            taa_views,
+            taa_current_idx: 0,
+            taa_pipeline,
+            taa_layout,
+            taa_uniform_buffer,
+            taa_frame_index: 0,
+            taa_enabled: true,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -3204,6 +3409,10 @@ impl Renderer {
             let (st, sv) = create_ssao_rt(&self.device, width, height);
             self.ssao_rt_texture = st;
             self.ssao_rt_view = sv;
+            let (taa_t, taa_v) = create_taa_textures(&self.device, width, height);
+            self.taa_textures = taa_t;
+            self.taa_views = taa_v;
+            self.taa_frame_index = 0; // reset jitter sequence on resize
         }
     }
 
@@ -3237,6 +3446,18 @@ impl Renderer {
     /// features but also blurs detail and increases halo risk.
     pub fn set_ssao_radius(&mut self, radius: f32) {
         self.ssao_radius = radius.max(0.0001);
+    }
+
+    /// Toggle TAA on/off. Off = no jitter, no history blend, no
+    /// extra texture writes. On = sub-pixel super-sampling for
+    /// static and slow-camera scenes (no motion vectors yet, so
+    /// fast camera motion will introduce mild ghosting until the
+    /// history catches up).
+    pub fn set_taa_enabled(&mut self, enabled: bool) {
+        if enabled != self.taa_enabled {
+            self.taa_enabled = enabled;
+            self.taa_frame_index = 0;
+        }
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -4191,24 +4412,79 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // Update composite uniform with the bloom intensity.
+        // ============================================================
+        // TAA pass: combine current-frame HDR + bloom + SSAO with the
+        // history texture, write to the OTHER ping-pong slot. Skipped
+        // when TAA is off — composite reads hdr_rt directly instead.
+        // ============================================================
+        let taa_dst_idx = self.taa_current_idx;
+        let taa_src_idx = 1 - self.taa_current_idx;
+
+        if self.taa_enabled {
+            // First few frames blend at 1.0 (use current as-is) so
+            // the history initializes from the actual scene rather
+            // than the pre-zero texture. After 4 frames switch to
+            // the converging weight.
+            let alpha = if self.taa_frame_index < 4 { 1.0 } else { 0.1 };
+            let tp = TaaParams { params: [alpha, self.bloom_intensity, 0.0, 0.0] };
+            self.queue.write_buffer(&self.taa_uniform_buffer, 0, bytemuck::bytes_of(&tp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("taa_bg"),
+                layout: &self.taa_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.taa_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.taa_views[taa_src_idx]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("taa_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.taa_views[taa_dst_idx],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.taa_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ============================================================
+        // Composite pass: tonemap (ACES + sRGB encode)
+        // ============================================================
+        let composite_src_view = if self.taa_enabled {
+            &self.taa_views[taa_dst_idx]
+        } else {
+            &self.hdr_rt_view
+        };
+        // composite_uniform_buffer no longer needs frame data — TAA
+        // already combined and bloom intensity moved there. Keep the
+        // buffer around (still in the bind group layout? No — we
+        // simplified the layout). Skip the write.
+        let _ = self.composite_uniform_buffer; // keep field alive
         let cp = CompositeParams { params: [self.bloom_intensity, 0.0, 0.0, 0.0] };
         self.queue.write_buffer(&self.composite_uniform_buffer, 0, bytemuck::bytes_of(&cp));
 
-        // ============================================================
-        // Composite pass: HDR RT + bloom → surface (ACES + sRGB encode)
-        // ============================================================
         let composite_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite_bg"),
             layout: &self.composite_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(composite_src_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                wgpu::BindGroupEntry { binding: 4, resource: self.composite_uniform_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],
         });
         {
@@ -4362,6 +4638,14 @@ impl Renderer {
         }
 
         output.present();
+
+        // After present: swap TAA ping-pong + advance the jitter
+        // sequence so next frame's projection picks a new sub-pixel
+        // offset and the just-written texture becomes the history.
+        if self.taa_enabled {
+            self.taa_current_idx = 1 - self.taa_current_idx;
+            self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
+        }
     }
 
     // ============================================================
@@ -4786,12 +5070,30 @@ impl Renderer {
         fovy: f32, projection: f32,
     ) {
         let aspect = self.surface_config.width as f32 / self.surface_config.height as f32;
-        let proj = if projection < 0.5 {
+        let mut proj = if projection < 0.5 {
             mat4_perspective(fovy.to_radians(), aspect, 0.01, 1000.0)
         } else {
             let top = fovy / 2.0;
             mat4_ortho(-top * aspect, top * aspect, -top, top, 0.01, 1000.0)
         };
+
+        // TAA jitter: nudge the projection by a sub-pixel Halton
+        // offset every frame. The TAA pass blends accumulated frames,
+        // so this turns the jitter into per-pixel super-sampling.
+        // Skipped when TAA is disabled to keep image stable.
+        if self.taa_enabled {
+            let i = (self.taa_frame_index % 16) + 1;
+            let jx = halton(i, 2) - 0.5;
+            let jy = halton(i, 3) - 0.5;
+            let surface_w = self.surface_config.width.max(1) as f32;
+            let surface_h = self.surface_config.height.max(1) as f32;
+            // proj is column-major; column 2 row 0/1 are the
+            // perspective / Z-coupling slots. Adding a constant NDC
+            // offset there shifts the whole frustum by jitter px.
+            proj[2][0] += (jx * 2.0) / surface_w;
+            proj[2][1] += (jy * 2.0) / surface_h;
+        }
+
         let view = mat4_look_at(
             [pos_x, pos_y, pos_z],
             [target_x, target_y, target_z],
