@@ -1105,6 +1105,29 @@ fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Textu
     (texture, view)
 }
 
+/// Create the two ping-pong 1×1 exposure textures. Single fragment
+/// writes to one, composite samples the other, swap each frame.
+fn create_exposure_textures(device: &wgpu::Device) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+    let make = |label: &str| -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    };
+    let (a, av) = make("exposure_a");
+    let (b, bv) = make("exposure_b");
+    ([a, b], [av, bv])
+}
+
 /// Create the material G-buffer (Rg8Unorm, surface size).
 fn create_material_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1756,6 +1779,73 @@ struct TaaParams {
     prev_vp: [[f32; 4]; 4],
 }
 
+/// Auto-exposure update shader. Runs at 1×1 viewport → single
+/// fragment. Samples hdr_rt at a 4×4 grid (16 taps), averages
+/// luminance, derives a target exposure via `key / avg_luma`,
+/// smooths toward it from last frame's exposure. One fragment's
+/// worth of work — way cheaper than having every composite
+/// fragment redundantly do the same average.
+const EXPOSURE_SHADER_WGSL: &str = "
+struct ExposureParams {
+    /// x = target key value (0.18 = photography 18%-gray).
+    /// y = smoothing rate (0 = no adapt, 1 = instant).
+    /// z = min exposure clamp (prevents pitch-black scenes from
+    ///     exploding to max brightness).
+    /// w = max exposure clamp (prevents sun scenes from crushing
+    ///     to zero).
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: ExposureParams;
+@group(0) @binding(1) var hdr_tex: texture_2d<f32>;
+@group(0) @binding(2) var hdr_samp: sampler;
+@group(0) @binding(3) var prev_exposure_tex: texture_2d<f32>;
+@group(0) @binding(4) var prev_exposure_samp: sampler;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    // 16-tap luma average — same as the old composite inline path,
+    // but now only one fragment does it instead of every pixel.
+    var luma_sum = 0.0;
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        let sx = (f32(i % 4u) + 0.5) * 0.25;
+        let sy = (f32(i / 4u) + 0.5) * 0.25;
+        let s = textureSample(hdr_tex, hdr_samp, vec2<f32>(sx, sy)).rgb;
+        luma_sum = luma_sum + dot(s, vec3<f32>(0.2126, 0.7152, 0.0722));
+    }
+    let avg_luma = luma_sum * (1.0 / 16.0);
+
+    let key = u.params.x;
+    let rate = u.params.y;
+    let min_e = u.params.z;
+    let max_e = u.params.w;
+
+    let target_exp = clamp(key / max(avg_luma, 0.01), min_e, max_e);
+    let prev = textureSample(prev_exposure_tex, prev_exposure_samp, vec2<f32>(0.5, 0.5)).r;
+    // First frame the prev texture is cleared to 0 — in that case
+    // the mix would converge very slowly from 0. Detect that and
+    // snap to the target instead of blending from 0.
+    var smoothed = mix(prev, target_exp, rate);
+    if (prev < min_e * 0.5) {
+        smoothed = target_exp;
+    }
+    return vec4<f32>(smoothed, 0.0, 0.0, 1.0);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ExposureParams {
+    params: [f32; 4],
+}
+
 /// Composite + tonemap fragment shader. Single fullscreen triangle
 /// reads hdr_rt and writes ACES-tonemapped linear-RGB. Hardware
 /// performs the linear→sRGB encode on write because the surface
@@ -1772,6 +1862,8 @@ struct CompositeParams {
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(1) var hdr_samp: sampler;
 @group(0) @binding(2) var<uniform> u: CompositeParams;
+@group(0) @binding(3) var exposure_tex: texture_2d<f32>;
+@group(0) @binding(4) var exposure_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1858,32 +1950,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Exposure. Two modes:
     //   auto off → manual exposure multiplier (u.params.z).
-    //   auto on  → compute average luminance from a 4×4 grid of
-    //              hdr samples, aim for the target key (u.params.w).
-    // Every fragment redundantly computes the same 16-sample
-    // average, which would be wasteful if the cost mattered, but at
-    // ~16 extra samples per pixel on a 1080p frame it stays well
-    // under 1% of the composite pass's already-tiny cost. A proper
-    // reduction-to-1×1 texture is a follow-up for scene-cut
-    // smoothing — this is instant-adapt per frame, good enough for
-    // static or slow-motion cameras.
+    //   auto on  → read the smoothed exposure value from a 1×1
+    //              texture populated by the exposure update pass
+    //              (which does the 16-tap average + blends with
+    //              last-frame exposure at u.params.w).
+    // One sample instead of the 16 the old in-composite path did
+    // every pixel — and inter-frame smoothing removes scene-cut
+    // pop.
     var exposure: f32;
     if (u.params.y < 0.5) {
         exposure = u.params.z;
     } else {
-        var luma_sum = 0.0;
-        for (var i = 0u; i < 16u; i = i + 1u) {
-            let sx = (f32(i % 4u) + 0.5) * 0.25;
-            let sy = (f32(i / 4u) + 0.5) * 0.25;
-            let s = textureSample(hdr_tex, hdr_samp, vec2<f32>(sx, sy)).rgb;
-            luma_sum = luma_sum + dot(s, vec3<f32>(0.2126, 0.7152, 0.0722));
-        }
-        let avg_luma = luma_sum * (1.0 / 16.0);
-        // Target key is typically 0.18 (18% gray, photography std).
-        // Divide by average luma + epsilon; clamp to sane range so
-        // a pitch-black scene can't infinite-brighten and a sun-blast
-        // scene can't crush to zero.
-        exposure = clamp(u.params.w / max(avg_luma, 0.01), 0.1, 10.0);
+        exposure = textureSample(exposure_tex, exposure_samp, vec2<f32>(0.5, 0.5)).r;
     }
     let hdr = hdr_raw * exposure;
 
@@ -2161,6 +2239,19 @@ pub struct Renderer {
     /// Auto-exposure target key value (scene-average luma target).
     /// 0.18 = photography 18%-gray standard.
     pub auto_exposure_key: f32,
+    /// Auto-exposure smoothing rate per frame (0 = no adapt, 0.05
+    /// = ~20-frame half-life at 60fps, 1 = instant). Only used
+    /// when auto_exposure is on.
+    pub auto_exposure_rate: f32,
+    /// Ping-pong 1×1 R16Float textures holding the smoothed
+    /// exposure value. Composite reads the "current" slot; the
+    /// exposure update pass reads "prev" and writes to "current".
+    pub exposure_textures: [wgpu::Texture; 2],
+    pub exposure_views: [wgpu::TextureView; 2],
+    pub exposure_current_idx: usize,
+    pub exposure_pipeline: wgpu::RenderPipeline,
+    pub exposure_layout: wgpu::BindGroupLayout,
+    pub exposure_uniform_buffer: wgpu::Buffer,
     /// Bloom mip-chain texture. Single texture with BLOOM_MIP_COUNT
     /// mips starting at surface/2 size — each mip is half the
     /// previous. Downsample chain (with HDR threshold on first tap)
@@ -2733,6 +2824,7 @@ impl Renderer {
         let (ssr_rt_texture, ssr_rt_view) = create_ssr_rt(
             &device, surface_config.width, surface_config.height,
         );
+        let (exposure_textures, exposure_views) = create_exposure_textures(&device);
 
         // --- Persistent GPU buffers (reused across frames) ---
         let vb_3d_cap = 1024 * 1024; // 1MB ~= 10,900 Vertex3D
@@ -3334,6 +3426,22 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let composite_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3803,6 +3911,85 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- Auto-exposure pipeline ---
+        let exposure_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("exposure_shader"),
+            source: wgpu::ShaderSource::Wgsl(EXPOSURE_SHADER_WGSL.into()),
+        });
+        let exposure_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("exposure_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let exposure_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("exposure_pl_layout"),
+            bind_group_layouts: &[&exposure_layout],
+            push_constant_ranges: &[],
+        });
+        let exposure_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("exposure_pipeline"),
+            layout: Some(&exposure_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &exposure_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &exposure_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R16Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::RED,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false, conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+        let exposure_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("exposure_uniform_buffer"),
+            size: std::mem::size_of::<ExposureParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             device,
             queue,
@@ -3840,6 +4027,13 @@ impl Renderer {
             auto_exposure: false,
             manual_exposure: 1.0,
             auto_exposure_key: 0.18,
+            auto_exposure_rate: 0.05,
+            exposure_textures,
+            exposure_views,
+            exposure_current_idx: 0,
+            exposure_pipeline,
+            exposure_layout,
+            exposure_uniform_buffer,
             composite_uniform_buffer,
             bloom_chain_texture,
             bloom_mip_views,
@@ -4126,6 +4320,14 @@ impl Renderer {
     /// moodier look, 0.25 a brighter one.
     pub fn set_auto_exposure_key(&mut self, key: f32) {
         self.auto_exposure_key = key.clamp(0.01, 1.0);
+    }
+
+    /// Auto-exposure smoothing rate per frame. 0 = no adapt (stuck
+    /// at whatever the current texture holds), 0.05 ≈ 20-frame
+    /// half-life at 60 fps (default — feels natural for camera
+    /// moves), 1 = instant (pops on scene cuts).
+    pub fn set_auto_exposure_rate(&mut self, rate: f32) {
+        self.auto_exposure_rate = rate.clamp(0.0, 1.0);
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -5230,6 +5432,55 @@ impl Renderer {
         } else {
             &self.hdr_rt_view
         };
+
+        // ============================================================
+        // Auto-exposure update pass (runs only when auto_exposure is
+        // on; otherwise the composite reads the old exposure texture
+        // which is fine since manual_exposure bypasses the read).
+        // ============================================================
+        let exposure_src_idx = self.exposure_current_idx;
+        let exposure_dst_idx = 1 - self.exposure_current_idx;
+        if self.auto_exposure {
+            let ep = ExposureParams {
+                params: [
+                    self.auto_exposure_key,
+                    self.auto_exposure_rate,
+                    0.1, // min exposure clamp
+                    10.0, // max exposure clamp
+                ],
+            };
+            self.queue.write_buffer(&self.exposure_uniform_buffer, 0, bytemuck::bytes_of(&ep));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("exposure_bg"),
+                layout: &self.exposure_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.exposure_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(composite_src_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.exposure_views[exposure_src_idx]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("exposure_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.exposure_views[exposure_dst_idx],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.exposure_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         // composite_uniform_buffer carries per-frame composite state.
         // x = tonemap kind (0 ACES / 1 AgX)
         // y = auto-exposure toggle
@@ -5252,6 +5503,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(composite_src_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: self.composite_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.exposure_views[exposure_dst_idx]) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],
         });
         {
@@ -5415,6 +5668,11 @@ impl Renderer {
             self.taa_current_idx = 1 - self.taa_current_idx;
             self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
             self.prev_vp_matrix = self.current_vp_matrix;
+        }
+        // Swap exposure ping-pong so next frame's exposure pass
+        // reads what we just wrote.
+        if self.auto_exposure {
+            self.exposure_current_idx = 1 - self.exposure_current_idx;
         }
     }
 
