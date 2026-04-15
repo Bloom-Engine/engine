@@ -1890,6 +1890,15 @@ struct CompositeParams {
     /// z = manual exposure multiplier (used when auto is off)
     /// w = auto-exposure target key value (0.18 = 18% gray photo standard)
     params: vec4<f32>,
+    /// Filmic-look knobs — all default to 0 (effect off).
+    /// x = chromatic aberration strength (0..~0.01 radial UV offset)
+    /// y = vignette strength (0..1, darkens corners)
+    /// z = vignette softness (0..1, smaller = harder edge)
+    /// w = film grain strength (0..~0.1 amplitude added to luma)
+    filmic: vec4<f32>,
+    /// x = grain seed (frame index, randomizes the noise per frame),
+    /// yzw padding.
+    misc: vec4<f32>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -1975,21 +1984,44 @@ fn agx_eotf(val_in: vec3<f32>) -> vec3<f32> {
     return agx_mat_inv * val_in;
 }
 
+// Hash-based pseudo-random in [0, 1). Cheap noise function for grain;
+// not great for cryptography or stratified sampling, but visually
+// indistinguishable from white noise at film-grain strengths.
+fn hash21(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
+    p3 = p3 + dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Composite is a pure tonemap — the TAA pass already combined
-    // HDR + SSAO + bloom + SSR into a single linear-HDR value.
-    let hdr_raw = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
+    // Composite samples the TAA-blended HDR. The TAA pass has
+    // already combined HDR + SSAO + bloom + SSR + fog into one
+    // linear-HDR value, so all that's left is exposure, tonemap,
+    // and the optional filmic-look layer (CA / vignette / grain).
+    var sample_uv = in.uv;
+
+    // --- Chromatic aberration ---
+    // Radial offset of the R/B channels away from the screen center
+    // — gives a subtle 'cinema lens' fringe at the edges. Strength
+    // is the worst-case UV offset at the corner.
+    let ca_strength = u.filmic.x;
+    var hdr_raw: vec3<f32>;
+    if (ca_strength > 0.0) {
+        let center = vec2<f32>(0.5, 0.5);
+        let dir = sample_uv - center;
+        let r = textureSample(hdr_tex, hdr_samp, sample_uv + dir * ca_strength).r;
+        let g = textureSample(hdr_tex, hdr_samp, sample_uv).g;
+        let b = textureSample(hdr_tex, hdr_samp, sample_uv - dir * ca_strength).b;
+        hdr_raw = vec3<f32>(r, g, b);
+    } else {
+        hdr_raw = textureSample(hdr_tex, hdr_samp, sample_uv).rgb;
+    }
 
     // Exposure. Two modes:
     //   auto off → manual exposure multiplier (u.params.z).
     //   auto on  → read the smoothed exposure value from a 1×1
-    //              texture populated by the exposure update pass
-    //              (which does the 16-tap average + blends with
-    //              last-frame exposure at u.params.w).
-    // One sample instead of the 16 the old in-composite path did
-    // every pixel — and inter-frame smoothing removes scene-cut
-    // pop.
+    //              texture populated by the exposure update pass.
     var exposure: f32;
     if (u.params.y < 0.5) {
         exposure = u.params.z;
@@ -2007,6 +2039,32 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     } else {
         ldr = agx_eotf(agx_tone(hdr));
     }
+
+    // --- Vignette (post-tonemap) ---
+    // Smooth radial darkening. Applied after tonemap so it stays
+    // perceptually uniform across exposures (otherwise bright
+    // scenes wash out the vignette).
+    let vig_strength = u.filmic.y;
+    if (vig_strength > 0.0) {
+        let vig_softness = max(u.filmic.z, 0.001);
+        let dist = length(in.uv - vec2<f32>(0.5, 0.5));
+        // smoothstep gives a natural falloff; remap so strength=1
+        // fully blackens the corner and softness controls width.
+        let edge = smoothstep(0.5 - vig_softness, 0.75, dist);
+        ldr = ldr * (1.0 - edge * vig_strength);
+    }
+
+    // --- Film grain (post-tonemap) ---
+    // Per-pixel noise added to luma. Animated by frame seed in
+    // misc.x so grain crawls naturally; if seed stays fixed (e.g.
+    // headless screenshots) the grain freezes.
+    let grain_strength = u.filmic.w;
+    if (grain_strength > 0.0) {
+        let seed = u.misc.x;
+        let n = hash21(in.uv * 1024.0 + vec2<f32>(seed, seed * 1.7)) - 0.5;
+        ldr = ldr + vec3<f32>(n * grain_strength);
+    }
+
     return vec4<f32>(ldr, 1.0);
 }
 ";
@@ -2022,8 +2080,15 @@ struct BloomParams {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CompositeParams {
-    /// x = bloom intensity, yzw padding.
+    /// x = tonemap kind (0 ACES / 1 AgX), y = auto-exposure toggle,
+    /// z = manual exposure, w = auto-exposure target key.
     params: [f32; 4],
+    /// Filmic-look knobs — see WGSL comment.
+    /// x = chromatic-aberration strength, y = vignette strength,
+    /// z = vignette softness, w = grain strength.
+    filmic: [f32; 4],
+    /// x = grain seed (frame index, animates the noise), yzw padding.
+    misc: [f32; 4],
 }
 
 // ============================================================
@@ -2276,6 +2341,13 @@ pub struct Renderer {
     /// = ~20-frame half-life at 60fps, 1 = instant). Only used
     /// when auto_exposure is on.
     pub auto_exposure_rate: f32,
+    /// Filmic-look composite knobs. All default to 0 (effect off)
+    /// so validation parity with the path-traced reference stays
+    /// bit-meaningful.
+    pub chromatic_aberration: f32,
+    pub vignette_strength: f32,
+    pub vignette_softness: f32,
+    pub grain_strength: f32,
     /// Ping-pong 1×1 R16Float textures holding the smoothed
     /// exposure value. Composite reads the "current" slot; the
     /// exposure update pass reads "prev" and writes to "current".
@@ -4071,6 +4143,10 @@ impl Renderer {
             manual_exposure: 1.0,
             auto_exposure_key: 0.18,
             auto_exposure_rate: 0.05,
+            chromatic_aberration: 0.0,
+            vignette_strength: 0.0,
+            vignette_softness: 0.25,
+            grain_strength: 0.0,
             exposure_textures,
             exposure_views,
             exposure_current_idx: 0,
@@ -4396,6 +4472,29 @@ impl Renderer {
     pub fn set_fog_height_falloff(&mut self, height_ref: f32, falloff_rate: f32) {
         self.fog_height_ref = height_ref;
         self.fog_height_falloff = falloff_rate.max(0.0);
+    }
+
+    /// Chromatic aberration strength — radial RGB-channel split at
+    /// the screen edges. 0 (default) = off. 0.002 ≈ subtle film
+    /// fringe, 0.01 ≈ obvious lens defect.
+    pub fn set_chromatic_aberration(&mut self, strength: f32) {
+        self.chromatic_aberration = strength.max(0.0);
+    }
+
+    /// Vignette darkening of the screen corners. `strength` 0..1
+    /// (0 = off, 1 = corners fully black). `softness` 0..1
+    /// controls the falloff width — smaller = harder edge.
+    pub fn set_vignette(&mut self, strength: f32, softness: f32) {
+        self.vignette_strength = strength.clamp(0.0, 1.0);
+        self.vignette_softness = softness.clamp(0.001, 1.0);
+    }
+
+    /// Animated film-grain strength (added to luma post-tonemap).
+    /// 0 (default) = off. 0.02 = subtle, 0.08 = noticeable.
+    /// Grain reseeds per frame so it crawls naturally; freezes when
+    /// the renderer's frame index isn't advancing.
+    pub fn set_film_grain(&mut self, strength: f32) {
+        self.grain_strength = strength.max(0.0);
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -5568,6 +5667,13 @@ impl Renderer {
                 self.manual_exposure,
                 self.auto_exposure_key,
             ],
+            filmic: [
+                self.chromatic_aberration,
+                self.vignette_strength,
+                self.vignette_softness,
+                self.grain_strength,
+            ],
+            misc: [self.taa_frame_index as f32, 0.0, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.composite_uniform_buffer, 0, bytemuck::bytes_of(&cp));
 
