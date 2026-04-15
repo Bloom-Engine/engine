@@ -5,3 +5,31 @@ node_modules/
 *.dll
 *.a
 *.app/
+
+# Perry build artifacts
+*.ts.o
+*_ts.o
+package-lock.json
+
+# macOS junk
+.DS_Store
+
+# Per-binary outputs from Perry compile (executable name = TS file basename)
+examples/pong/pong_test
+examples/renderer-test/main
+examples/renderer-test/renderer-test
+examples/renderer-test/bloom-renderer-test
+examples/renderer-test/argv_test
+examples/renderer-test/debug_ffi
+examples/pbr-spheres/main
+
+# Validation artifacts (regenerated on demand by tools/validate.sh)
+examples/renderer-test/*.png
+examples/pbr-spheres/*.png
+tools/bloom-reference/*.png
+tools/bloom-diff/diff-*.png
+tools/validate-out/
+
+# Throwaway probe scripts
+/test_*.ts
+_perry_stubs.o
