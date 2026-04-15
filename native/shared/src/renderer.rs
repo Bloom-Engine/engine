@@ -721,16 +721,10 @@ fn fs_main_scene(in: VertexOutputScene) -> @location(0) vec4<f32> {
     // dielectric path is unchanged.
     let hdr = lit + ibl_diffuse + ibl_spec + emissive;
 
-    // Tonemap only — the surface format is sRGB on every native
-    // backend we target (the adapter's sRGB format is picked at window
-    // init), so the hardware handles the linear→sRGB encode on write.
-    // Applying linear_to_srgb_v here would double-encode and wash out
-    // highlights. Output stays in linear [0,1].
-    let ldr = aces_tone(hdr);
-    // DEBUG: output just metallic-roughness channel to verify MR
-    // texture is bound correctly.
-    // return vec4<f32>(mr_tex_sample.b, mr_tex_sample.g, 0.0, 1.0);
-    return vec4<f32>(ldr, base_alpha);
+    // Output linear HDR — the dedicated composite pass tonemaps and
+    // hands the result to the sRGB surface format. Keeps brights in
+    // their full HDR range here so bloom can extract them downstream.
+    return vec4<f32>(hdr, base_alpha);
 }
 ";
 
@@ -961,10 +955,11 @@ fn sky_fs(in: VsOut) -> @location(0) vec4<f32> {
     let v_coord = theta / PI;
 
     let radiance = textureSample(env_tex, env_samp, vec2<f32>(u_coord, v_coord)).rgb * u.intensity.x;
-    // Tonemap only — surface format is sRGB so the hardware does the
-    // linear→sRGB encode on write. A prior version did the encode in
-    // the shader too, double-encoding (visible as washed-out sky).
-    return vec4<f32>(aces_tone(radiance), 1.0);
+    // Output linear HDR radiance — the composite pass downstream does
+    // the ACES tonemap + sRGB encode in one place. Keeping the sky in
+    // HDR also lets bloom pick up bright sky pixels (sun glare etc.)
+    // without the curve squashing them first.
+    return vec4<f32>(radiance, 1.0);
 }
 ";
 
@@ -988,6 +983,10 @@ struct SkyUniforms {
 // ============================================================
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// Linear HDR format for the offscreen render target. The scene + sky
+/// + immediate-mode 3D passes write here in linear space; a final
+/// composite pass tonemaps to the sRGB surface format.
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1003,6 +1002,61 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
 }
+
+fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("hdr_rt"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Composite + tonemap fragment shader. Single fullscreen triangle
+/// reads hdr_rt and writes ACES-tonemapped linear-RGB. Hardware
+/// performs the linear→sRGB encode on write because the surface
+/// format is sRGB.
+const COMPOSITE_SHADER_WGSL: &str = "
+@group(0) @binding(0) var hdr_tex: texture_2d<f32>;
+@group(0) @binding(1) var hdr_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+fn aces_tone(c: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let cc = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((c * (c * a + b)) / (c * (c * cc + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
+    return vec4<f32>(aces_tone(hdr), 1.0);
+}
+";
 
 // ============================================================
 // Split-sum BRDF LUT
@@ -1219,6 +1273,18 @@ pub struct Renderer {
     // Depth buffer
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// Linear HDR offscreen render target the scene + sky + 3D
+    /// pipelines write into. A composite-tonemap pass reads it and
+    /// writes the final image to the sRGB surface. Sized to surface
+    /// dimensions; recreated in `resize`.
+    pub hdr_rt_texture: wgpu::Texture,
+    pub hdr_rt_view: wgpu::TextureView,
+    /// Composite-tonemap pipeline + bind group layout. Single full-
+    /// screen draw that samples hdr_rt and writes ACES-tonemapped
+    /// linear-rgb (sRGB hardware encode handles the transfer fn).
+    pub composite_pipeline: wgpu::RenderPipeline,
+    pub composite_layout: wgpu::BindGroupLayout,
+    pub composite_sampler: wgpu::Sampler,
 
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
@@ -1687,6 +1753,7 @@ impl Renderer {
 
         // --- Depth texture ---
         let (depth_texture, depth_view) = create_depth_texture(&device, surface_config.width, surface_config.height);
+        let (hdr_rt_texture, hdr_rt_view) = create_hdr_rt(&device, surface_config.width, surface_config.height);
 
         // --- Persistent GPU buffers (reused across frames) ---
         let vb_3d_cap = 1024 * 1024; // 1MB ~= 10,900 Vertex3D
@@ -1830,7 +1897,10 @@ impl Renderer {
                 module: &shader_3d,
                 entry_point: Some("fs_main_3d"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_config.format,
+                    // pipeline_3d now writes into the HDR offscreen RT
+                    // along with sky + scene. Final composite pass
+                    // tonemaps the HDR RT into the sRGB surface.
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1954,7 +2024,7 @@ impl Renderer {
                 module: &sky_shader,
                 entry_point: Some("sky_fs"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_config.format,
+                    format: HDR_FORMAT,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -2173,7 +2243,7 @@ impl Renderer {
                 module: &scene_shader,
                 entry_point: Some("fs_main_scene"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -2229,6 +2299,83 @@ impl Renderer {
         // here and caused all base-color lookups to silently hit this
         // flat-blue normal map instead.
 
+        // --- Composite-tonemap pipeline ---
+        // Single fullscreen draw that samples the HDR RT and writes
+        // ACES-tonemapped linear RGB into the sRGB surface.
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("composite_shader"),
+            source: wgpu::ShaderSource::Wgsl(COMPOSITE_SHADER_WGSL.into()),
+        });
+        let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composite_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let composite_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("composite_pl_layout"),
+            bind_group_layouts: &[&composite_layout],
+            push_constant_ranges: &[],
+        });
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite_pipeline"),
+            layout: Some(&composite_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("composite_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         Self {
             device,
             queue,
@@ -2255,6 +2402,11 @@ impl Renderer {
             nearest_sampler,
             depth_texture,
             depth_view,
+            hdr_rt_texture,
+            hdr_rt_view,
+            composite_pipeline,
+            composite_layout,
+            composite_sampler,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -2396,6 +2548,9 @@ impl Renderer {
             let (dt, dv) = create_depth_texture(&self.device, width, height);
             self.depth_texture = dt;
             self.depth_view = dv;
+            let (hdr_t, hdr_v) = create_hdr_rt(&self.device, width, height);
+            self.hdr_rt_texture = hdr_t;
+            self.hdr_rt_view = hdr_v;
         }
     }
 
@@ -3115,11 +3270,22 @@ impl Renderer {
             self.queue.write_buffer(&self.persistent_ib_3d, 0, bytemuck::cast_slice(&self.indices_3d));
         }
 
+        // ============================================================
+        // HDR pass: sky + 3D + scene → linear HDR offscreen RT.
+        // ============================================================
+        // The composite-tonemap pass downstream reads this RT and
+        // writes the final image to the sRGB surface. Keeping the
+        // intermediate radiance in HDR sets up a future bloom pass
+        // and means tonemap + sRGB encode happen exactly once, in
+        // one place.
         {
+            // HDR clear: the user's clear_color is in 0-1 srgb-ish
+            // range; treat it as the linear background for the HDR
+            // RT. After tonemap it ends up roughly the same shade.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("bloom_pass"),
+                label: Some("bloom_hdr_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.hdr_rt_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(self.clear_color),
@@ -3138,13 +3304,8 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            // Sky pass: full-screen equirect HDR sample. Drawn first
-            // so the 3D opaque pass's depth test naturally occludes it
-            // anywhere geometry is present. No-op when no env map has
-            // been loaded — leaves the clear color intact.
             self.render_sky_pass(&mut pass, 1.0);
 
-            // Draw immediate-mode 3D geometry (same as end_frame)
             if has_3d {
                 pass.set_pipeline(&self.pipeline_3d);
                 pass.set_bind_group(0, &self.uniform_bind_group_3d, &[]);
@@ -3178,10 +3339,7 @@ impl Renderer {
                 }
             }
 
-            // Draw cached models + retained scene graph — both go
-            // through the scene pipeline now. One pipeline switch, one
-            // set_bind_group(1)/(3) at the start, then per-draw updates
-            // for group 0 (uniforms) and group 2 (material).
+            // Cached models + retained scene graph — both via scene_pipeline.
             let has_cached_models = !self.model_draw_commands.is_empty();
             if has_cached_models || scene.node_count() > 0 {
                 pass.set_pipeline(&self.scene_pipeline);
@@ -3205,30 +3363,80 @@ impl Renderer {
 
                 scene.render(&mut pass);
             }
+        }
 
-            // Draw immediate-mode 2D geometry (on top, no depth testing)
-            if has_2d {
-                pass.set_pipeline(&self.pipeline_2d);
-                pass.set_vertex_buffer(0, self.persistent_vb_2d.slice(..));
-                pass.set_index_buffer(self.persistent_ib_2d.slice(..), wgpu::IndexFormat::Uint32);
+        // ============================================================
+        // Composite pass: HDR RT → surface (ACES tonemap + sRGB encode)
+        // ============================================================
+        let composite_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite_bg"),
+            layout: &self.composite_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom_composite_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Composite covers the full surface anyway,
+                        // but Clear is safer than Load (cheaper too —
+                        // tile-based GPUs love Clear).
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.composite_pipeline);
+            pass.set_bind_group(0, &composite_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
 
-                let num_calls = self.draw_calls_2d.len();
-                for i in 0..num_calls {
-                    let call = &self.draw_calls_2d[i];
-                    let next_start = if i + 1 < num_calls {
-                        self.draw_calls_2d[i + 1].index_start
-                    } else {
-                        self.indices_2d.len() as u32
-                    };
-                    let count = next_start - call.index_start;
-                    if count == 0 { continue; }
+        // ============================================================
+        // 2D pass: immediate-mode 2D geometry on top of composited image
+        // ============================================================
+        if has_2d {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom_2d_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline_2d);
+            pass.set_vertex_buffer(0, self.persistent_vb_2d.slice(..));
+            pass.set_index_buffer(self.persistent_ib_2d.slice(..), wgpu::IndexFormat::Uint32);
 
-                    pass.set_bind_group(0, &self.uniform_bind_groups[call.uniform_idx as usize], &[]);
-                    if (call.texture_idx as usize) < self.texture_bind_groups.len() {
-                        pass.set_bind_group(1, &self.texture_bind_groups[call.texture_idx as usize], &[]);
-                    }
-                    pass.draw_indexed(call.index_start..next_start, 0, 0..1);
+            let num_calls = self.draw_calls_2d.len();
+            for i in 0..num_calls {
+                let call = &self.draw_calls_2d[i];
+                let next_start = if i + 1 < num_calls {
+                    self.draw_calls_2d[i + 1].index_start
+                } else {
+                    self.indices_2d.len() as u32
+                };
+                let count = next_start - call.index_start;
+                if count == 0 { continue; }
+
+                pass.set_bind_group(0, &self.uniform_bind_groups[call.uniform_idx as usize], &[]);
+                if (call.texture_idx as usize) < self.texture_bind_groups.len() {
+                    pass.set_bind_group(1, &self.texture_bind_groups[call.texture_idx as usize], &[]);
                 }
+                pass.draw_indexed(call.index_start..next_start, 0, 0..1);
             }
         }
 
