@@ -794,9 +794,21 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // total (brdf.x + brdf.y) as 'how much energy did single-scatter
     // capture' so 1 - that_total is what we missed. Visually: rough
     // metals (gold, copper) get noticeably brighter and more saturated.
+    // Multi-scatter compensation (Fdez-Aguera 2019, proper form).
+    //   E_ss     = brdf.x + brdf.y        single-scatter energy
+    //   E_ms     = 1 - E_ss               missing (multi-scatter) energy
+    //   F_avg    = F0 + (1-F0)/21         average fresnel (Karis)
+    //   F_ms     = F_avg * E_ss / (1 - F_avg * E_ms)   multi-scatter fresnel
+    //   ms       = F_ms * E_ms            extra radiance to add back
+    // The previous simpler form `1 + f_avg*(1/E_ss - 1)` exploded
+    // as E_ss → 0 (rough dielectrics at grazing), blowing the
+    // ground out to white.
+    let ess = brdf.x + brdf.y;
+    let ems = 1.0 - ess;
     let f_avg = f0 + (vec3<f32>(1.0) - f0) * (1.0 / 21.0);
-    let energy_compensation = vec3<f32>(1.0) + f_avg * (1.0 / max(brdf.x + brdf.y, 1e-4) - 1.0);
-    let ibl_spec = single_spec * energy_compensation;
+    let f_ms = f_avg * ess / (vec3<f32>(1.0) - f_avg * ems);
+    let ms_contribution = f_ms * ems;
+    let ibl_spec = prefiltered_env * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
     // Multi-scatter also adds a diffuse-like term back from the
     // 'lost' energy, but it gets absorbed wherever there is no metal
@@ -4255,7 +4267,11 @@ impl Renderer {
             auto_exposure: false,
             manual_exposure: 1.0,
             auto_exposure_key: 0.18,
-            auto_exposure_rate: 0.05,
+            // 0.015 per frame at 60fps → ~45-frame (0.75s) half-life.
+            // Faster than a camera pan; slow enough to not "hunt" on
+            // scene detail as the camera moves between bright sky
+            // and dark geometry.
+            auto_exposure_rate: 0.015,
             chromatic_aberration: 0.0,
             vignette_strength: 0.0,
             vignette_softness: 0.25,
