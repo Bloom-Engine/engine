@@ -389,6 +389,7 @@ impl SceneGraph {
                     node.material.normal_texture_idx,
                     node.material.metallic_roughness_texture_idx,
                     node.material.emissive_texture_idx,
+                    node.material.occlusion_texture_idx,
                     &uniform,
                 );
                 node.gpu_material_bg = Some(bg);

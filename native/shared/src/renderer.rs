@@ -431,6 +431,8 @@ struct VertexOutputScene {
 @group(2) @binding(6) var em_tex: texture_2d<f32>;
 @group(2) @binding(7) var em_samp: sampler;
 @group(2) @binding(8) var<uniform> material: MaterialFactors;
+@group(2) @binding(9) var occ_tex: texture_2d<f32>;
+@group(2) @binding(10) var occ_samp: sampler;
 
 const PI: f32 = 3.14159265;
 
@@ -618,6 +620,12 @@ fn fs_main_scene(in: VertexOutputScene) -> @location(0) vec4<f32> {
     let em_tex_sample = textureSample(em_tex, em_samp, in.uv);
     let emissive = srgb_to_linear_v(em_tex_sample.rgb) * material.emissive.rgb;
 
+    // glTF occlusion: R channel, attenuates indirect lighting (IBL
+    // diffuse + ambient) only — direct lights and specular IBL are
+    // unchanged per spec. Default texture is white (idx 0) so the
+    // sample is 1.0 for materials without an occlusion map.
+    let occlusion = textureSample(occ_tex, occ_samp, in.uv).r;
+
     // --- PBR direct lighting ---
     let v = normalize(lighting.camera_pos.xyz - in.world_pos);
     var lit = vec3<f32>(0.0);
@@ -679,7 +687,7 @@ fn fs_main_scene(in: VertexOutputScene) -> @location(0) vec4<f32> {
     let fc_n = pow(1.0 - n_dot_v_ibl, 5.0);
     let f_ibl = f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * fc_n;
     let kd = (vec3<f32>(1.0) - f_ibl) * (1.0 - metallic);
-    let ibl_diffuse = irradiance * base_color * kd;
+    let ibl_diffuse = irradiance * base_color * kd * occlusion;
 
     // Pre-filtered specular sample at mip = roughness * (mips - 2).
     // Cap one below the diffuse mip — that mip is the irradiance
@@ -1986,6 +1994,7 @@ impl Renderer {
         //   2: normal     texture      6: emissive             texture
         //   3: normal     sampler      7: emissive             sampler
         //   8: material factors uniform (metallic/roughness/emissive)
+        //   9: occlusion  texture     10: occlusion           sampler
         let tex_entry = |b| wgpu::BindGroupLayoutEntry {
             binding: b,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -2019,6 +2028,7 @@ impl Renderer {
                     },
                     count: None,
                 },
+                tex_entry(9),  samp_entry(10),
             ],
         });
         // Env IBL binding is folded into the lighting bind group
@@ -2737,6 +2747,7 @@ impl Renderer {
         normal_tex_idx: u32,
         metallic_roughness_tex_idx: u32,
         emissive_tex_idx: u32,
+        occlusion_tex_idx: u32,
         material_uniform: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         let view_or_white = |idx: u32| -> wgpu::TextureView {
@@ -2752,6 +2763,10 @@ impl Renderer {
         let base_view = view_or_white(base_color_tex_idx);
         let mr_view = view_or_white(metallic_roughness_tex_idx);
         let em_view = view_or_white(emissive_tex_idx);
+        // Occlusion default = white texture: shader does
+        // `mix(1.0, occlusion, strength)`, so a white sample gives
+        // 1.0 (no occlusion) regardless of strength.
+        let occ_view = view_or_white(occlusion_tex_idx);
 
         // Normal map uses the flat-normal default when not specified
         // (white here would give incorrect perturbation since it
@@ -2780,6 +2795,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&em_view) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 8, resource: material_uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&occ_view) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         })
     }
@@ -3910,13 +3927,14 @@ impl Renderer {
             let normal_idx = mesh.normal_texture_idx.unwrap_or(0);
             let mr_idx = mesh.metallic_roughness_texture_idx.unwrap_or(0);
             let em_idx = mesh.emissive_texture_idx.unwrap_or(0);
+            let occ_idx = mesh.occlusion_texture_idx.unwrap_or(0);
             let material_uniform = self.create_scene_material_uniform(
                 mesh.metallic_factor,
                 mesh.roughness_factor,
                 mesh.emissive_factor,
             );
             let material_bg = self.create_scene_material_bg(
-                base_color_idx, normal_idx, mr_idx, em_idx, &material_uniform,
+                base_color_idx, normal_idx, mr_idx, em_idx, occ_idx, &material_uniform,
             );
             GpuMesh {
                 vb,
