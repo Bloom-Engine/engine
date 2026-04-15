@@ -5825,12 +5825,13 @@ impl Renderer {
                 params: [
                     self.auto_exposure_key,
                     self.auto_exposure_rate,
-                    // Min exposure needs to go low enough to handle
-                    // bright outdoor HDRs where scene avg_luma is
-                    // > 10. At min=0.1, a 10-luma ground saturates
-                    // to 1.0 (white). 0.01 lets it crush to 0.1.
+                    // Min low enough to handle bright outdoor HDRs
+                    // (avg luma > 10). Max at 1.5 so dark close-ups
+                    // don't overshoot and blow the scene out.
+                    // Real cameras typically allow ~3-5 EV of auto
+                    // compensation; these clamps give about 7 EV.
                     0.01,
-                    10.0,
+                    1.5,
                 ],
             };
             self.queue.write_buffer(&self.exposure_uniform_buffer, 0, bytemuck::bytes_of(&ep));
