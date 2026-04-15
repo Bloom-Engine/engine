@@ -988,6 +988,11 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// composite pass tonemaps to the sRGB surface format.
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// Number of bloom mip levels. 5 mips gives a long-tail glow that
+/// covers ~32× the source pixel size. More mips = more haloing,
+/// fewer = less coverage. Each mip is half the previous size.
+const BLOOM_MIP_COUNT: u32 = 5;
+
 fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth_texture"),
@@ -1019,13 +1024,214 @@ fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Textu
     (texture, view)
 }
 
+/// Create the bloom mip-chain texture + per-mip render views + a
+/// full-chain view for sampling. Mip 0 starts at surface/2 size and
+/// each subsequent mip halves down to ~surface/2^N. Caller is
+/// responsible for deciding N (usually BLOOM_MIP_COUNT). At least
+/// 1×1 is enforced per mip.
+fn create_bloom_chain(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    mip_count: u32,
+) -> (wgpu::Texture, Vec<wgpu::TextureView>, wgpu::TextureView) {
+    let mip0_w = (width / 2).max(1);
+    let mip0_h = (height / 2).max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bloom_chain"),
+        size: wgpu::Extent3d { width: mip0_w, height: mip0_h, depth_or_array_layers: 1 },
+        mip_level_count: mip_count,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let mut mip_views = Vec::with_capacity(mip_count as usize);
+    for i in 0..mip_count {
+        mip_views.push(texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("bloom_mip_view"),
+            base_mip_level: i,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            ..Default::default()
+        }));
+    }
+    let full_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, mip_views, full_view)
+}
+
+/// Bloom mip-chain shader. Three fragment entry points share a
+/// single vertex stage and uniform layout:
+///
+/// - `fs_downsample`: 4-tap box-filter downsample for mips ≥ 1.
+/// - `fs_threshold_downsample`: same downsample but applies a
+///   Karis-style soft threshold first to extract HDR brights and
+///   suppress fireflies. Used only when sampling the source HDR
+///   into bloom mip 0.
+/// - `fs_upsample`: 9-tap tent-filter upsample, additive blend
+///   (set via wgpu's blend state on the upsample pipeline).
+///
+/// Uniform: `params.xy` = source texel size (1/src_w, 1/src_h);
+/// `params.z` = bloom intensity (only used by upsample); `params.w`
+/// reserved.
+const BLOOM_SHADER_WGSL: &str = "
+struct BloomParams {
+    /// xy = source texel size (1/src_w, 1/src_h),
+    /// z = filter radius (upsample tent),
+    /// w = HDR threshold (downsample-threshold variant only).
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: BloomParams;
+@group(0) @binding(1) var src_tex: texture_2d<f32>;
+@group(0) @binding(2) var src_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+fn karis_average(c: vec4<f32>) -> vec4<f32> {
+    // 1 / (luma + 1) weighting to suppress fireflies — heavy bright
+    // pixels get downweighted so a single hot texel can't dominate
+    // a bloom kernel and create visible specks.
+    let luma = dot(c.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let weight = 1.0 / (1.0 + luma);
+    return c * weight;
+}
+
+// Soft HDR threshold (UE-style). Pixels with luminance below
+// `threshold - knee` get zero contribution; above `threshold + knee`
+// pass through fully; in-between blends smoothly. Without this,
+// bloom would brighten EVERY pixel in the scene rather than just
+// the visibly-overbright ones (sun glare, emissive accents, etc.).
+fn extract_brights(c: vec3<f32>, threshold: f32, knee: f32) -> vec3<f32> {
+    let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let lower = max(threshold - knee, 0.0);
+    let upper = threshold + knee;
+    let factor = smoothstep(lower, upper, luma);
+    return c * factor;
+}
+
+// 13-tap downsample (Sledgehammer / Karis 2013). Takes 5 dual-2x2
+// box samples + 4 cross samples around each fragment for a smoother
+// reduction than a naive 4-tap.
+fn downsample_13(uv: vec2<f32>, src_size: vec2<f32>, do_threshold: bool) -> vec3<f32> {
+    let dx = src_size.x;
+    let dy = src_size.y;
+
+    let a = textureSample(src_tex, src_samp, uv + vec2<f32>(-2.0 * dx, -2.0 * dy));
+    let b = textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0,       -2.0 * dy));
+    let c = textureSample(src_tex, src_samp, uv + vec2<f32>( 2.0 * dx, -2.0 * dy));
+    let d = textureSample(src_tex, src_samp, uv + vec2<f32>(-2.0 * dx,  0.0));
+    let e = textureSample(src_tex, src_samp, uv);
+    let f = textureSample(src_tex, src_samp, uv + vec2<f32>( 2.0 * dx,  0.0));
+    let g = textureSample(src_tex, src_samp, uv + vec2<f32>(-2.0 * dx,  2.0 * dy));
+    let h = textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0,        2.0 * dy));
+    let i = textureSample(src_tex, src_samp, uv + vec2<f32>( 2.0 * dx,  2.0 * dy));
+    let j = textureSample(src_tex, src_samp, uv + vec2<f32>(-1.0 * dx, -1.0 * dy));
+    let k = textureSample(src_tex, src_samp, uv + vec2<f32>( 1.0 * dx, -1.0 * dy));
+    let l = textureSample(src_tex, src_samp, uv + vec2<f32>(-1.0 * dx,  1.0 * dy));
+    let m = textureSample(src_tex, src_samp, uv + vec2<f32>( 1.0 * dx,  1.0 * dy));
+
+    // Five 2x2 boxes weighted to eliminate aliasing.
+    var groups: array<vec4<f32>, 5>;
+    groups[0] = (a + b + d + e) * 0.25;
+    groups[1] = (b + c + e + f) * 0.25;
+    groups[2] = (d + e + g + h) * 0.25;
+    groups[3] = (e + f + h + i) * 0.25;
+    groups[4] = (j + k + l + m) * 0.25;
+
+    if (do_threshold) {
+        // First extract HDR brights via soft threshold, then Karis
+        // weight to keep fireflies from poking through.
+        // Threshold defaults: bright = luminance > 1.0 (anything
+        // above tonemap's display range), knee = 0.5 for a soft
+        // falloff so emissive accents fade in instead of popping.
+        let thr = 1.0;
+        let knee = 0.5;
+        for (var n = 0u; n < 5u; n = n + 1u) {
+            let bright = extract_brights(groups[n].rgb, thr, knee);
+            let weighted = karis_average(vec4<f32>(bright, 1.0));
+            groups[n] = weighted;
+        }
+    }
+
+    let weights = array<f32, 5>(0.125, 0.125, 0.125, 0.125, 0.5);
+    var sum = vec4<f32>(0.0);
+    for (var n = 0u; n < 5u; n = n + 1u) {
+        sum = sum + groups[n] * weights[n];
+    }
+    return sum.rgb;
+}
+
+@fragment
+fn fs_downsample(in: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(downsample_13(in.uv, u.params.xy, false), 1.0);
+}
+
+@fragment
+fn fs_threshold_downsample(in: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(downsample_13(in.uv, u.params.xy, true), 1.0);
+}
+
+// 9-tap tent filter upsample (Sledgehammer). Texel-radius scaled by
+// the small radius factor in u.params.z (defaults to ~1.0 — wider
+// = more blurry overlap). Output is BLENDED additively into the
+// destination via the upsample pipeline's blend state.
+@fragment
+fn fs_upsample(in: VsOut) -> @location(0) vec4<f32> {
+    let dx = u.params.x * u.params.z;
+    let dy = u.params.y * u.params.z;
+    let uv = in.uv;
+
+    var sum = vec3<f32>(0.0);
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>(-dx,  dy)).rgb * 1.0;
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0,  dy)).rgb * 2.0;
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( dx,  dy)).rgb * 1.0;
+
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>(-dx,  0.0)).rgb * 2.0;
+    sum = sum + textureSample(src_tex, src_samp, uv).rgb                          * 4.0;
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( dx,  0.0)).rgb * 2.0;
+
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>(-dx, -dy)).rgb * 1.0;
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0, -dy)).rgb * 2.0;
+    sum = sum + textureSample(src_tex, src_samp, uv + vec2<f32>( dx, -dy)).rgb * 1.0;
+
+    return vec4<f32>(sum * (1.0 / 16.0), 1.0);
+}
+";
+
 /// Composite + tonemap fragment shader. Single fullscreen triangle
 /// reads hdr_rt and writes ACES-tonemapped linear-RGB. Hardware
 /// performs the linear→sRGB encode on write because the surface
 /// format is sRGB.
 const COMPOSITE_SHADER_WGSL: &str = "
+struct CompositeParams {
+    /// x = bloom intensity (final additive multiplier for the
+    /// blurred HDR brights). 0 disables bloom; 0.04 is a moderate
+    /// default that matches what most engines ship with.
+    params: vec4<f32>,
+};
+
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(1) var hdr_samp: sampler;
+@group(0) @binding(2) var bloom_tex: texture_2d<f32>;
+@group(0) @binding(3) var bloom_samp: sampler;
+@group(0) @binding(4) var<uniform> u: CompositeParams;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1054,9 +1260,26 @@ fn aces_tone(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
-    return vec4<f32>(aces_tone(hdr), 1.0);
+    let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
+    let combined = hdr + bloom * u.params.x;
+    return vec4<f32>(aces_tone(combined), 1.0);
 }
 ";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct BloomParams {
+    /// xy = source texel size, z = filter radius (upsample),
+    /// w = HDR threshold (downsample-threshold variant).
+    params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CompositeParams {
+    /// x = bloom intensity, yzw padding.
+    params: [f32; 4],
+}
 
 // ============================================================
 // Split-sum BRDF LUT
@@ -1282,9 +1505,28 @@ pub struct Renderer {
     /// Composite-tonemap pipeline + bind group layout. Single full-
     /// screen draw that samples hdr_rt and writes ACES-tonemapped
     /// linear-rgb (sRGB hardware encode handles the transfer fn).
+    /// Now also samples bloom_chain[0] and additively merges before
+    /// the tonemap.
     pub composite_pipeline: wgpu::RenderPipeline,
     pub composite_layout: wgpu::BindGroupLayout,
     pub composite_sampler: wgpu::Sampler,
+    /// Bloom mip-chain texture. Single texture with BLOOM_MIP_COUNT
+    /// mips starting at surface/2 size — each mip is half the
+    /// previous. Downsample chain (with HDR threshold on first tap)
+    /// fills it, upsample chain blends back up. Composite shader
+    /// reads mip 0 and adds it to the HDR sample before tonemap.
+    pub bloom_chain_texture: wgpu::Texture,
+    pub bloom_mip_views: Vec<wgpu::TextureView>,
+    pub bloom_full_view: wgpu::TextureView,
+    pub bloom_pipeline_threshold_downsample: wgpu::RenderPipeline,
+    pub bloom_pipeline_downsample: wgpu::RenderPipeline,
+    pub bloom_pipeline_upsample: wgpu::RenderPipeline,
+    pub bloom_layout: wgpu::BindGroupLayout,
+    pub bloom_uniform_buffer: wgpu::Buffer,
+    /// Composite-shader uniform — bloom intensity etc. Written each
+    /// frame from the renderer's `bloom_intensity` field.
+    pub composite_uniform_buffer: wgpu::Buffer,
+    pub bloom_intensity: f32,
 
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
@@ -1754,6 +1996,12 @@ impl Renderer {
         // --- Depth texture ---
         let (depth_texture, depth_view) = create_depth_texture(&device, surface_config.width, surface_config.height);
         let (hdr_rt_texture, hdr_rt_view) = create_hdr_rt(&device, surface_config.width, surface_config.height);
+        let (bloom_chain_texture, bloom_mip_views, bloom_full_view) = create_bloom_chain(
+            &device,
+            surface_config.width,
+            surface_config.height,
+            BLOOM_MIP_COUNT,
+        );
 
         // --- Persistent GPU buffers (reused across frames) ---
         let vb_3d_cap = 1024 * 1024; // 1MB ~= 10,900 Vertex3D
@@ -2325,6 +2573,32 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let composite_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2376,6 +2650,110 @@ impl Renderer {
             ..Default::default()
         });
 
+        let composite_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("composite_uniform_buffer"),
+            size: std::mem::size_of::<CompositeParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // --- Bloom mip-chain pipelines ---
+        let bloom_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bloom_shader"),
+            source: wgpu::ShaderSource::Wgsl(BLOOM_SHADER_WGSL.into()),
+        });
+        let bloom_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bloom_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let bloom_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("bloom_pl_layout"),
+            bind_group_layouts: &[&bloom_layout],
+            push_constant_ranges: &[],
+        });
+        let bloom_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bloom_uniform_buffer"),
+            size: std::mem::size_of::<BloomParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let make_bloom_pipeline = |entry: &str, blend: Option<wgpu::BlendState>| -> wgpu::RenderPipeline {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("bloom_pipeline"),
+                layout: Some(&bloom_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &bloom_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &bloom_shader,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let bloom_pipeline_threshold_downsample = make_bloom_pipeline("fs_threshold_downsample", None);
+        let bloom_pipeline_downsample = make_bloom_pipeline("fs_downsample", None);
+        // Upsample blends additively into the destination mip so each
+        // pass progressively builds up the final bloom.
+        let upsample_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::REPLACE,
+        };
+        let bloom_pipeline_upsample = make_bloom_pipeline("fs_upsample", Some(upsample_blend));
+
         Self {
             device,
             queue,
@@ -2407,6 +2785,16 @@ impl Renderer {
             composite_pipeline,
             composite_layout,
             composite_sampler,
+            composite_uniform_buffer,
+            bloom_chain_texture,
+            bloom_mip_views,
+            bloom_full_view,
+            bloom_pipeline_threshold_downsample,
+            bloom_pipeline_downsample,
+            bloom_pipeline_upsample,
+            bloom_layout,
+            bloom_uniform_buffer,
+            bloom_intensity: 0.04,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -2551,6 +2939,10 @@ impl Renderer {
             let (hdr_t, hdr_v) = create_hdr_rt(&self.device, width, height);
             self.hdr_rt_texture = hdr_t;
             self.hdr_rt_view = hdr_v;
+            let (bt, bm, bf) = create_bloom_chain(&self.device, width, height, BLOOM_MIP_COUNT);
+            self.bloom_chain_texture = bt;
+            self.bloom_mip_views = bm;
+            self.bloom_full_view = bf;
         }
     }
 
@@ -2566,6 +2958,13 @@ impl Renderer {
     /// Set the multiplier applied to every env-map sample (sky pass +
     /// IBL diffuse + IBL specular). Defaults to 1.0. Storing in the
     /// lighting uniform's camera_pos.w avoids a new bind point.
+    /// Bloom additive intensity (0 = off, 0.04 = default, 1.0 = very
+    /// strong). Affects only pixels above the HDR threshold (1.0
+    /// luminance), so dim scenes look unchanged regardless of value.
+    pub fn set_bloom_intensity(&mut self, intensity: f32) {
+        self.bloom_intensity = intensity.max(0.0);
+    }
+
     pub fn set_env_intensity(&mut self, intensity: f32) {
         self.lighting_uniforms.camera_pos[3] = intensity;
         self.queue.write_buffer(
@@ -3366,7 +3765,121 @@ impl Renderer {
         }
 
         // ============================================================
-        // Composite pass: HDR RT → surface (ACES tonemap + sRGB encode)
+        // Bloom: progressive downsample (Karis-thresholded first tap)
+        // followed by additive upsample back up the chain.
+        // ============================================================
+        let surf_w = self.surface_config.width;
+        let surf_h = self.surface_config.height;
+        let mip_dims: Vec<(u32, u32)> = (0..BLOOM_MIP_COUNT)
+            .map(|i| (
+                ((surf_w / 2) >> i).max(1),
+                ((surf_h / 2) >> i).max(1),
+            ))
+            .collect();
+
+        // Build per-pass bind groups + uniform writes. Each downsample
+        // reads the previous mip (or hdr_rt for the first) and writes
+        // to the current mip. Each upsample reads mip i+1 and blends
+        // additively into mip i.
+        let bloom_filter_radius = 1.0_f32; // upsample tent radius
+
+        // Downsample chain: mip 0 reads HDR, mips 1..N read previous mip.
+        for i in 0..BLOOM_MIP_COUNT as usize {
+            let (src_view, src_w, src_h, threshold_pass) = if i == 0 {
+                (&self.hdr_rt_view, surf_w as f32, surf_h as f32, true)
+            } else {
+                let prev = &self.bloom_mip_views[i - 1];
+                let (pw, ph) = mip_dims[i - 1];
+                (prev, pw as f32, ph as f32, false)
+            };
+
+            let bp = BloomParams {
+                params: [1.0 / src_w, 1.0 / src_h, bloom_filter_radius, 1.0],
+            };
+            self.queue.write_buffer(&self.bloom_uniform_buffer, 0, bytemuck::bytes_of(&bp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bloom_downsample_bg"),
+                layout: &self.bloom_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.bloom_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom_downsample_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_mip_views[i],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let pl = if threshold_pass {
+                &self.bloom_pipeline_threshold_downsample
+            } else {
+                &self.bloom_pipeline_downsample
+            };
+            pass.set_pipeline(pl);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Upsample chain: blend mip i+1 additively into mip i for
+        // i = N-2..0. Final mip 0 ends up with the full bloom result.
+        for i in (0..(BLOOM_MIP_COUNT as usize - 1)).rev() {
+            let src_view = &self.bloom_mip_views[i + 1];
+            let (sw, sh) = mip_dims[i + 1];
+
+            let bp = BloomParams {
+                params: [1.0 / sw as f32, 1.0 / sh as f32, bloom_filter_radius, 0.0],
+            };
+            self.queue.write_buffer(&self.bloom_uniform_buffer, 0, bytemuck::bytes_of(&bp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bloom_upsample_bg"),
+                layout: &self.bloom_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.bloom_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom_upsample_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_mip_views[i],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Load — additive blend on top of what
+                        // downsample wrote.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.bloom_pipeline_upsample);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Update composite uniform with the bloom intensity.
+        let cp = CompositeParams { params: [self.bloom_intensity, 0.0, 0.0, 0.0] };
+        self.queue.write_buffer(&self.composite_uniform_buffer, 0, bytemuck::bytes_of(&cp));
+
+        // ============================================================
+        // Composite pass: HDR RT + bloom → surface (ACES + sRGB encode)
         // ============================================================
         let composite_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite_bg"),
@@ -3374,6 +3887,9 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: self.composite_uniform_buffer.as_entire_binding() },
             ],
         });
         {
