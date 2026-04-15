@@ -100,6 +100,7 @@ impl EngineState {
             &self.renderer.vp_matrix(),
             self.renderer.uniform_3d_layout(),
         );
+        self.scene.prepare_materials(&self.renderer);
         self.renderer.end_frame_with_scene(&self.scene);
         self.input.end_frame();
 

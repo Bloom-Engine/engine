@@ -147,6 +147,80 @@ pub fn raycast_scene(
     best
 }
 
+/// Q6: Raycast against all visible scene nodes. Returns ALL hits sorted by distance.
+/// Used by editors for alt-click cycling through occluded objects.
+pub fn raycast_scene_all(
+    scene: &SceneGraph,
+    origin: &[f32; 3],
+    direction: &[f32; 3],
+    max_results: usize,
+) -> Vec<PickResult> {
+    let mut results: Vec<PickResult> = Vec::new();
+
+    for (handle, node) in scene.nodes.iter() {
+        if !node.visible || node.indices.is_empty() {
+            continue;
+        }
+
+        let inv_transform = mat4_inverse_local(&node.transform);
+        let local_origin = mat4_transform_point(&inv_transform, origin);
+        let local_dir = mat4_transform_dir(&inv_transform, direction);
+
+        let mut node_best_dist = f32::MAX;
+        let mut node_best: Option<PickResult> = None;
+
+        for tri in node.indices.chunks(3) {
+            if tri.len() < 3 { continue; }
+            let v0 = &node.vertices[tri[0] as usize];
+            let v1 = &node.vertices[tri[1] as usize];
+            let v2 = &node.vertices[tri[2] as usize];
+
+            if let Some((t, u, v)) = ray_triangle_intersection(
+                &local_origin, &local_dir,
+                &v0.position, &v1.position, &v2.position,
+            ) {
+                if t > 0.0 && t < node_best_dist {
+                    node_best_dist = t;
+                    let hit_local = [
+                        local_origin[0] + local_dir[0] * t,
+                        local_origin[1] + local_dir[1] * t,
+                        local_origin[2] + local_dir[2] * t,
+                    ];
+                    let hit_world = mat4_transform_point(&node.transform, &hit_local);
+                    let w = 1.0 - u - v;
+                    let normal = [
+                        v0.normal[0] * w + v1.normal[0] * u + v2.normal[0] * v,
+                        v0.normal[1] * w + v1.normal[1] * u + v2.normal[1] * v,
+                        v0.normal[2] * w + v1.normal[2] * u + v2.normal[2] * v,
+                    ];
+                    let nl = (normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]).sqrt();
+                    let normal = if nl > 1e-6 {
+                        [normal[0]/nl, normal[1]/nl, normal[2]/nl]
+                    } else {
+                        [0.0, 1.0, 0.0]
+                    };
+                    node_best = Some(PickResult {
+                        hit: true,
+                        handle,
+                        distance: t,
+                        point: hit_world,
+                        normal,
+                    });
+                }
+            }
+        }
+
+        if let Some(result) = node_best {
+            results.push(result);
+        }
+    }
+
+    // Sort by distance (closest first).
+    results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(max_results);
+    results
+}
+
 // ============================================================
 // Moller-Trumbore ray-triangle intersection
 // ============================================================

@@ -26,6 +26,20 @@ pub struct InputState {
     prev_mouse_y: f64,
     raw_delta_x: f64,
     raw_delta_y: f64,
+    /// Scroll wheel accumulator. Platform event loops call `accumulate_mouse_wheel`
+    /// when a scroll event arrives; games/editors call `consume_mouse_wheel` once
+    /// per frame to read the total delta (and reset it to 0).
+    mouse_wheel_y: f64,
+    /// Character input ring buffer for text-entry support (E3b). Platform
+    /// event loops push Unicode codepoints here on key-down; editors pop them
+    /// one at a time via `pop_char`.
+    char_queue: [u32; 32],
+    char_queue_head: usize,
+    char_queue_tail: usize,
+    /// Cursor shape requested by the editor. The platform event loop polls
+    /// this and applies the appropriate native cursor.
+    /// 0=default, 1=hand, 2=move, 3=text, 4=resize_h, 5=resize_v, 6=crosshair
+    pub cursor_shape: u32,
     pub cursor_disabled: bool,
     mouse_pressed: [bool; MAX_MOUSE_BUTTONS],
     mouse_down: [bool; MAX_MOUSE_BUTTONS],
@@ -62,6 +76,11 @@ impl InputState {
             prev_mouse_y: 0.0,
             raw_delta_x: 0.0,
             raw_delta_y: 0.0,
+            mouse_wheel_y: 0.0,
+            char_queue: [0; 32],
+            char_queue_head: 0,
+            char_queue_tail: 0,
+            cursor_shape: 0,
             cursor_disabled: false,
             mouse_pressed: [false; MAX_MOUSE_BUTTONS],
             mouse_down: [false; MAX_MOUSE_BUTTONS],
@@ -123,6 +142,36 @@ impl InputState {
     pub fn set_mouse_position(&mut self, x: f64, y: f64) { self.mouse_x = x; self.mouse_y = y; }
     pub fn accumulate_mouse_delta(&mut self, dx: f64, dy: f64) { self.raw_delta_x += dx; self.raw_delta_y += dy; }
     pub fn clear_mouse_delta(&mut self) { self.raw_delta_x = 0.0; self.raw_delta_y = 0.0; self.mouse_delta_x = 0.0; self.mouse_delta_y = 0.0; }
+    pub fn accumulate_mouse_wheel(&mut self, dy: f64) { self.mouse_wheel_y += dy; }
+    /// Returns the accumulated scroll delta since the last call, and resets it.
+    /// Games/editors call this once per frame.
+    pub fn consume_mouse_wheel(&mut self) -> f64 {
+        let v = self.mouse_wheel_y;
+        self.mouse_wheel_y = 0.0;
+        v
+    }
+    /// Push a Unicode codepoint into the character input queue. Called by
+    /// platform event loops when a key-down event produces a printable char.
+    pub fn push_char(&mut self, c: u32) {
+        let next = (self.char_queue_head + 1) % self.char_queue.len();
+        if next != self.char_queue_tail {
+            self.char_queue[self.char_queue_head] = c;
+            self.char_queue_head = next;
+        }
+        // If the queue is full, silently drop the character.
+    }
+
+    /// Pop the next queued character. Returns 0 when the queue is empty.
+    /// Called once per frame by the editor's text-input widget.
+    pub fn pop_char(&mut self) -> u32 {
+        if self.char_queue_tail == self.char_queue_head {
+            return 0;
+        }
+        let c = self.char_queue[self.char_queue_tail];
+        self.char_queue_tail = (self.char_queue_tail + 1) % self.char_queue.len();
+        c
+    }
+
     pub fn set_mouse_button_down(&mut self, button: usize) { if button < MAX_MOUSE_BUTTONS { self.mouse_down[button] = true; } }
     pub fn set_mouse_button_up(&mut self, button: usize) { if button < MAX_MOUSE_BUTTONS { self.mouse_down[button] = false; } }
 

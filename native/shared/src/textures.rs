@@ -13,9 +13,20 @@ pub struct ImageData {
     pub height: u32,
 }
 
+/// Placeholder for Q1 render texture data. Actual GPU implementation
+/// requires creating a wgpu::Texture with RENDER_ATTACHMENT + TEXTURE_BINDING
+/// usage and wiring it into the renderer's pass management. The FFI surface
+/// is stable; the implementation lands in a focused GPU session.
+pub struct RenderTextureData {
+    pub width: u32,
+    pub height: u32,
+    pub texture_handle: f64,  // Points to the corresponding TextureData entry.
+}
+
 pub struct TextureManager {
     pub textures: HandleRegistry<TextureData>,
     pub images: HandleRegistry<ImageData>,
+    pub render_textures: HandleRegistry<RenderTextureData>,
 }
 
 impl TextureManager {
@@ -23,6 +34,33 @@ impl TextureManager {
         Self {
             textures: HandleRegistry::new(),
             images: HandleRegistry::new(),
+            render_textures: HandleRegistry::new(),
+        }
+    }
+
+    /// Q1: Create a render texture. Returns a handle. The actual wgpu texture
+    /// is created by the calling FFI function which has access to the Renderer.
+    pub fn load_render_texture(&mut self, width: u32, height: u32) -> f64 {
+        self.render_textures.alloc(RenderTextureData {
+            width, height, texture_handle: 0.0,
+        })
+    }
+
+    /// Set the texture handle for a render texture (called after GPU creation).
+    pub fn set_render_texture_handle(&mut self, rt_handle: f64, tex_handle: f64) {
+        if let Some(rt) = self.render_textures.get_mut(rt_handle) {
+            rt.texture_handle = tex_handle;
+        }
+    }
+
+    pub fn unload_render_texture(&mut self, handle: f64) {
+        self.render_textures.free(handle);
+    }
+
+    pub fn get_render_texture_texture(&self, handle: f64) -> f64 {
+        match self.render_textures.get(handle) {
+            Some(rt) => rt.texture_handle,
+            None => 0.0,
         }
     }
 
