@@ -1762,7 +1762,10 @@ struct TaaParams {
 /// format is sRGB.
 const COMPOSITE_SHADER_WGSL: &str = "
 struct CompositeParams {
-    /// x = tonemap mode (0 = ACES, 1 = AgX), yzw padding.
+    /// x = tonemap mode (0 = ACES, 1 = AgX)
+    /// y = auto-exposure enabled (0 = off, uses manual x)
+    /// z = manual exposure multiplier (used when auto is off)
+    /// w = auto-exposure target key value (0.18 = 18% gray photo standard)
     params: vec4<f32>,
 };
 
@@ -1851,7 +1854,38 @@ fn agx_eotf(val_in: vec3<f32>) -> vec3<f32> {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Composite is a pure tonemap — the TAA pass already combined
     // HDR + SSAO + bloom + SSR into a single linear-HDR value.
-    let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
+    let hdr_raw = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
+
+    // Exposure. Two modes:
+    //   auto off → manual exposure multiplier (u.params.z).
+    //   auto on  → compute average luminance from a 4×4 grid of
+    //              hdr samples, aim for the target key (u.params.w).
+    // Every fragment redundantly computes the same 16-sample
+    // average, which would be wasteful if the cost mattered, but at
+    // ~16 extra samples per pixel on a 1080p frame it stays well
+    // under 1% of the composite pass's already-tiny cost. A proper
+    // reduction-to-1×1 texture is a follow-up for scene-cut
+    // smoothing — this is instant-adapt per frame, good enough for
+    // static or slow-motion cameras.
+    var exposure: f32;
+    if (u.params.y < 0.5) {
+        exposure = u.params.z;
+    } else {
+        var luma_sum = 0.0;
+        for (var i = 0u; i < 16u; i = i + 1u) {
+            let sx = (f32(i % 4u) + 0.5) * 0.25;
+            let sy = (f32(i / 4u) + 0.5) * 0.25;
+            let s = textureSample(hdr_tex, hdr_samp, vec2<f32>(sx, sy)).rgb;
+            luma_sum = luma_sum + dot(s, vec3<f32>(0.2126, 0.7152, 0.0722));
+        }
+        let avg_luma = luma_sum * (1.0 / 16.0);
+        // Target key is typically 0.18 (18% gray, photography std).
+        // Divide by average luma + epsilon; clamp to sane range so
+        // a pitch-black scene can't infinite-brighten and a sun-blast
+        // scene can't crush to zero.
+        exposure = clamp(u.params.w / max(avg_luma, 0.01), 0.1, 10.0);
+    }
+    let hdr = hdr_raw * exposure;
 
     // Branch between ACES and AgX via the uniform. Costs one
     // compare per fragment; the dead branch gets DCE'd per-draw
@@ -2118,6 +2152,15 @@ pub struct Renderer {
     pub composite_sampler: wgpu::Sampler,
     /// 0 = ACES (default, matches bloom-reference), 1 = AgX.
     pub tonemap_kind: u32,
+    /// Auto-exposure on/off. Default off so validation against
+    /// the path-traced reference (fixed exposure) stays meaningful.
+    pub auto_exposure: bool,
+    /// Manual exposure multiplier (used when auto_exposure is off).
+    /// Default 1.0 = no change.
+    pub manual_exposure: f32,
+    /// Auto-exposure target key value (scene-average luma target).
+    /// 0.18 = photography 18%-gray standard.
+    pub auto_exposure_key: f32,
     /// Bloom mip-chain texture. Single texture with BLOOM_MIP_COUNT
     /// mips starting at surface/2 size — each mip is half the
     /// previous. Downsample chain (with HDR threshold on first tap)
@@ -3794,6 +3837,9 @@ impl Renderer {
             composite_layout,
             composite_sampler,
             tonemap_kind: 0,
+            auto_exposure: false,
+            manual_exposure: 1.0,
+            auto_exposure_key: 0.18,
             composite_uniform_buffer,
             bloom_chain_texture,
             bloom_mip_views,
@@ -4056,6 +4102,30 @@ impl Renderer {
     /// UE5 "PBR Neutral" look.
     pub fn set_tonemap_kind(&mut self, kind: u32) {
         self.tonemap_kind = kind;
+    }
+
+    /// Toggle auto-exposure. Off (default) = manual exposure
+    /// multiplier. On = per-frame average scene luminance drives
+    /// exposure toward `auto_exposure_key` (0.18 photography
+    /// standard). Instant adapt — no inter-frame smoothing yet,
+    /// so scene cuts pop. Fine for static or slow-motion cameras.
+    pub fn set_auto_exposure(&mut self, on: bool) {
+        self.auto_exposure = on;
+    }
+
+    /// Manual exposure multiplier. Applied when auto_exposure
+    /// is off. 1.0 = no change. 2.0 = twice as bright. Clamp is
+    /// [0, +∞) — negative silently becomes 0.
+    pub fn set_manual_exposure(&mut self, value: f32) {
+        self.manual_exposure = value.max(0.0);
+    }
+
+    /// Auto-exposure target scene key (average luminance to drive
+    /// toward). Lower = darker overall, higher = brighter. 0.18
+    /// is the 18%-gray photography standard; 0.14 gives a slightly
+    /// moodier look, 0.25 a brighter one.
+    pub fn set_auto_exposure_key(&mut self, key: f32) {
+        self.auto_exposure_key = key.clamp(0.01, 1.0);
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -5160,11 +5230,19 @@ impl Renderer {
         } else {
             &self.hdr_rt_view
         };
-        // composite_uniform_buffer now carries per-frame composite
-        // state (tonemap kind, room for exposure / color grading).
-        // bloom_intensity is still tracked for reporting but consumed
-        // inside the TAA shader, not composite.
-        let cp = CompositeParams { params: [self.tonemap_kind as f32, 0.0, 0.0, 0.0] };
+        // composite_uniform_buffer carries per-frame composite state.
+        // x = tonemap kind (0 ACES / 1 AgX)
+        // y = auto-exposure toggle
+        // z = manual exposure multiplier
+        // w = auto-exposure target key value
+        let cp = CompositeParams {
+            params: [
+                self.tonemap_kind as f32,
+                if self.auto_exposure { 1.0 } else { 0.0 },
+                self.manual_exposure,
+                self.auto_exposure_key,
+            ],
+        };
         self.queue.write_buffer(&self.composite_uniform_buffer, 0, bytemuck::bytes_of(&cp));
 
         let composite_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
