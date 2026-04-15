@@ -5049,8 +5049,14 @@ impl Renderer {
         };
         self.queue.write_buffer(&self.uniform_buffers[0], 0, bytemuck::bytes_of(&uniforms));
 
-        // Reset lighting to defaults (clears additional lights too)
+        // Reset lighting to defaults (clears additional lights too).
+        // Preserve env_intensity — it's set once at app init via
+        // set_env_intensity, not per-frame, so the default-reset
+        // would clobber it. camera_pos.xyz gets rewritten below by
+        // begin_mode_3d with the actual camera position.
+        let preserved_env_intensity = self.lighting_uniforms.camera_pos[3];
         self.lighting_uniforms = LightingUniforms::defaults();
+        self.lighting_uniforms.camera_pos[3] = preserved_env_intensity;
         self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));
         self.clear_additional_lights();
 
