@@ -1672,6 +1672,13 @@ struct TaaParams {
     /// world-space pos into the history-frame's clip space so we
     /// can sample the history texture at the right UV.
     prev_vp: mat4x4<f32>,
+    /// Fog color (rgb) + density (w). Density 0 = fog disabled
+    /// (exp(-0) = 1, fog factor = 0, mix stays at scene color).
+    fog_color_density: vec4<f32>,
+    /// Fog falloff parameters: x = height at which density is 1×
+    /// (above this, density drops exponentially), y = falloff rate
+    /// per world-space Y unit, zw padding.
+    fog_params: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TaaParams;
@@ -1761,7 +1768,28 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let clamped_history = clamp(history, nmin, nmax);
 
     let alpha = u.params.x;
-    let blended = mix(clamped_history, current, alpha);
+    var blended = mix(clamped_history, current, alpha);
+
+    // Height-based exponential fog. Density > 0 engages fog; 0 is
+    // a no-op. Fog factor = 1 - exp(-density * distance * height_fade)
+    // where height_fade = exp(-falloff * (world.y - height_ref))
+    // so low-altitude fragments get the full density but anything
+    // above `height_ref` fades out exponentially — typical 'ground
+    // haze' look.
+    let fog_density = u.fog_color_density.w;
+    if (fog_density > 0.0) {
+        let height_ref = u.fog_params.x;
+        let height_falloff = u.fog_params.y;
+        let cam_pos = vec3<f32>(
+            u.inv_vp[3][0] / u.inv_vp[3][3],
+            u.inv_vp[3][1] / u.inv_vp[3][3],
+            u.inv_vp[3][2] / u.inv_vp[3][3],
+        );
+        let dist = length(world - cam_pos);
+        let height_fade = exp(-height_falloff * max(world.y - height_ref, 0.0));
+        let fog_factor = 1.0 - exp(-fog_density * dist * height_fade);
+        blended = mix(blended, u.fog_color_density.rgb, clamp(fog_factor, 0.0, 1.0));
+    }
     return vec4<f32>(blended, 1.0);
 }
 ";
@@ -1777,6 +1805,11 @@ struct TaaParams {
     inv_vp: [[f32; 4]; 4],
     /// Previous frame's VP (reprojects world pos into history UVs).
     prev_vp: [[f32; 4]; 4],
+    /// Fog color (rgb) + density (w).
+    fog_color_density: [f32; 4],
+    /// Fog falloff: x = height reference, y = falloff rate,
+    /// zw padding.
+    fog_params: [f32; 4],
 }
 
 /// Auto-exposure update shader. Runs at 1×1 viewport → single
@@ -2304,6 +2337,16 @@ pub struct Renderer {
     /// removing ghosting under camera motion. Updated at the end
     /// of each frame from current_vp_matrix.
     pub prev_vp_matrix: [[f32; 4]; 4],
+    /// Fog color (rgb) — blended into scene where fog factor > 0.
+    pub fog_color: [f32; 3],
+    /// Fog density. 0 = disabled (default). Positive values engage
+    /// exponential fog: fog_factor = 1 - exp(-density * distance).
+    pub fog_density: f32,
+    /// Height above which fog density starts to fall off.
+    pub fog_height_ref: f32,
+    /// Fog falloff rate in world-space Y units — how quickly fog
+    /// thins out with altitude above `fog_height_ref`.
+    pub fog_height_falloff: f32,
     /// SSR (screen-space reflections) pass output — half-res HDR
     /// holding the reflected color for each fragment. Composited
     /// into the final image by the TAA pass.
@@ -4061,6 +4104,10 @@ impl Renderer {
             taa_frame_index: 0,
             taa_enabled: true,
             prev_vp_matrix: IDENTITY_MAT4,
+            fog_color: [0.7, 0.75, 0.82],
+            fog_density: 0.0,
+            fog_height_ref: 0.0,
+            fog_height_falloff: 0.25,
             ssr_rt_texture,
             ssr_rt_view,
             ssr_pipeline,
@@ -4328,6 +4375,27 @@ impl Renderer {
     /// moves), 1 = instant (pops on scene cuts).
     pub fn set_auto_exposure_rate(&mut self, rate: f32) {
         self.auto_exposure_rate = rate.clamp(0.0, 1.0);
+    }
+
+    /// Fog color that distant geometry fades to (rgb, 0-1).
+    pub fn set_fog_color(&mut self, r: f32, g: f32, b: f32) {
+        self.fog_color = [r, g, b];
+    }
+
+    /// Fog density. 0 (default) = fog disabled. 0.02 = gentle
+    /// atmospheric haze, 0.1 = heavy smog, 1+ = soup. Applied
+    /// exponentially over world-space distance.
+    pub fn set_fog_density(&mut self, density: f32) {
+        self.fog_density = density.max(0.0);
+    }
+
+    /// Fog altitude-based falloff. `height_ref` is the world Y
+    /// below which density stays at the full value; `falloff_rate`
+    /// controls how fast density drops as you go above it. Default
+    /// 0.0 / 0.25 gives a natural ground-haze look.
+    pub fn set_fog_height_falloff(&mut self, height_ref: f32, falloff_rate: f32) {
+        self.fog_height_ref = height_ref;
+        self.fog_height_falloff = falloff_rate.max(0.0);
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -5383,6 +5451,13 @@ impl Renderer {
                 params: [alpha, self.bloom_intensity, 0.0, 0.0],
                 inv_vp,
                 prev_vp: self.prev_vp_matrix,
+                fog_color_density: [
+                    self.fog_color[0],
+                    self.fog_color[1],
+                    self.fog_color[2],
+                    self.fog_density,
+                ],
+                fog_params: [self.fog_height_ref, self.fog_height_falloff, 0.0, 0.0],
             };
             self.queue.write_buffer(&self.taa_uniform_buffer, 0, bytemuck::bytes_of(&tp));
 
