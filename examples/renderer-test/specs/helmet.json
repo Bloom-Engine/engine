@@ -1,0 +1,30 @@
+{
+  "$schema": "bloom-view-spec-v1",
+  "_comment": "Shared viewpoint/scene spec read by both bloom-reference (CPU ground truth) and Bloom's realtime renderer. When both read the same spec file, the reference and realtime images are apples-to-apples comparable.",
+
+  "scene": "../assets/DamagedHelmet.glb",
+  "resolution": [1024, 1024],
+
+  "camera": {
+    "position": [1.8, 1.2, 2.4],
+    "target":   [0.0, 0.0, 0.0],
+    "up":       [0.0, 1.0, 0.0],
+    "fov_y_deg": 45
+  },
+
+  "env": {
+    "path": "../assets/outdoor.hdr",
+    "intensity": 1.0
+  },
+
+  "sun": null,
+
+  "reference_defaults": {
+    "spp": 256,
+    "bounces": 6
+  },
+
+  "realtime_defaults": {
+    "warmup_frames": 3
+  }
+}
