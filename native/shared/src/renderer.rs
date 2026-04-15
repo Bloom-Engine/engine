@@ -1380,9 +1380,15 @@ struct TaaParams {
     /// history, 1 = pure current). 0.1 = 10% new, 90% history;
     /// converges in ~10 frames. First frame should pass 1.0 so the
     /// history initializes from the actual scene rather than zeros.
-    /// y = bloom intensity (passed through from the renderer's
-    /// bloom_intensity field), zw padding.
+    /// y = bloom intensity, zw padding.
     params: vec4<f32>,
+    /// Inverse of the current-frame view-projection matrix —
+    /// reconstructs world-space position from depth + NDC.
+    inv_vp: mat4x4<f32>,
+    /// Previous-frame view-projection — projects the reconstructed
+    /// world-space pos into the history-frame's clip space so we
+    /// can sample the history texture at the right UV.
+    prev_vp: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TaaParams;
@@ -1394,6 +1400,8 @@ struct TaaParams {
 @group(0) @binding(6) var ssao_samp: sampler;
 @group(0) @binding(7) var history_tex: texture_2d<f32>;
 @group(0) @binding(8) var history_samp: sampler;
+@group(0) @binding(9) var depth_tex: texture_depth_2d;
+@group(0) @binding(10) var depth_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1419,10 +1427,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ssao = textureSample(ssao_tex, ssao_samp, in.uv).r;
     let current = hdr * ssao + bloom * u.params.y;
 
-    // Read the reprojected history (no motion vectors yet, just a
-    // straight UV lookup — works for static scenes; slow camera
-    // motion will introduce mild ghosting until motion vectors land).
-    let history = textureSample(history_tex, history_samp, in.uv).rgb;
+    // Reproject history via depth + previous VP. Reconstruct the
+    // fragment's world-space position from current-frame depth, then
+    // project through the previous VP to get the prev-frame clip-
+    // space position → prev_uv. Removes ghosting from camera motion
+    // for all static geometry. (Animated meshes need per-vertex
+    // motion vectors — not handled yet.)
+    let depth = textureSample(depth_tex, depth_samp, in.uv);
+    let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
+    let world_h = u.inv_vp * ndc;
+    let world = world_h.xyz / world_h.w;
+    let prev_clip = u.prev_vp * vec4<f32>(world, 1.0);
+    let prev_ndc = prev_clip.xyz / prev_clip.w;
+    let prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 1.0 - (prev_ndc.y * 0.5 + 0.5));
+
+    // If the prev_uv falls off-screen, fall back to current — no
+    // history available. Otherwise sample the reprojected position.
+    var history = current;
+    if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 && prev_uv.y >= 0.0 && prev_uv.y <= 1.0) {
+        history = textureSample(history_tex, history_samp, prev_uv).rgb;
+    }
 
     // Neighborhood color clamp keeps the history from drifting too
     // far from what the current frame plausibly contains. Sample a
@@ -1459,6 +1483,11 @@ struct TaaParams {
     /// x = blend factor (current-frame weight),
     /// y = bloom intensity, zw padding.
     params: [f32; 4],
+    /// Inverse of the current frame's VP (reconstructs world pos
+    /// from depth + NDC).
+    inv_vp: [[f32; 4]; 4],
+    /// Previous frame's VP (reprojects world pos into history UVs).
+    prev_vp: [[f32; 4]; 4],
 }
 
 /// Composite + tonemap fragment shader. Single fullscreen triangle
@@ -1794,6 +1823,11 @@ pub struct Renderer {
     /// 1 = TAA on (default). When off the renderer behaves exactly
     /// as the pre-TAA pipeline did.
     pub taa_enabled: bool,
+    /// Previous frame's view-projection matrix — TAA reads this to
+    /// reproject the history texture into current-frame UV space,
+    /// removing ghosting under camera motion. Updated at the end
+    /// of each frame from current_vp_matrix.
+    pub prev_vp_matrix: [[f32; 4]; 4],
 
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
@@ -3162,6 +3196,18 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
             ],
         });
         let taa_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3258,6 +3304,7 @@ impl Renderer {
             taa_uniform_buffer,
             taa_frame_index: 0,
             taa_enabled: true,
+            prev_vp_matrix: IDENTITY_MAT4,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -4426,7 +4473,16 @@ impl Renderer {
             // than the pre-zero texture. After 4 frames switch to
             // the converging weight.
             let alpha = if self.taa_frame_index < 4 { 1.0 } else { 0.1 };
-            let tp = TaaParams { params: [alpha, self.bloom_intensity, 0.0, 0.0] };
+            // Inverse of current VP for world-pos reconstruction.
+            // Use the unjittered version when feasible — for now we
+            // pass the actual jittered current_vp_matrix; the jitter
+            // is sub-pixel so reprojection error is negligible.
+            let inv_vp = mat4_invert(self.current_vp_matrix);
+            let tp = TaaParams {
+                params: [alpha, self.bloom_intensity, 0.0, 0.0],
+                inv_vp,
+                prev_vp: self.prev_vp_matrix,
+            };
             self.queue.write_buffer(&self.taa_uniform_buffer, 0, bytemuck::bytes_of(&tp));
 
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4442,6 +4498,8 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.taa_views[taa_src_idx]) },
                     wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
                 ],
             });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4642,9 +4700,12 @@ impl Renderer {
         // After present: swap TAA ping-pong + advance the jitter
         // sequence so next frame's projection picks a new sub-pixel
         // offset and the just-written texture becomes the history.
+        // Snapshot current VP into prev_vp so next frame's TAA pass
+        // can reproject through it.
         if self.taa_enabled {
             self.taa_current_idx = 1 - self.taa_current_idx;
             self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
+            self.prev_vp_matrix = self.current_vp_matrix;
         }
     }
 
