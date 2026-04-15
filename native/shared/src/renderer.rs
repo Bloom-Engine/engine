@@ -1761,8 +1761,14 @@ struct TaaParams {
 /// performs the linear→sRGB encode on write because the surface
 /// format is sRGB.
 const COMPOSITE_SHADER_WGSL: &str = "
+struct CompositeParams {
+    /// x = tonemap mode (0 = ACES, 1 = AgX), yzw padding.
+    params: vec4<f32>,
+};
+
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(1) var hdr_samp: sampler;
+@group(0) @binding(2) var<uniform> u: CompositeParams;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1788,13 +1794,75 @@ fn aces_tone(c: vec3<f32>) -> vec3<f32> {
     return clamp((c * (c * a + b)) / (c * (c * cc + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// --- AgX tonemap (Troy Sobotka 2022) ---
+// Better hue preservation than ACES in saturated regions — reds
+// stay red instead of shifting toward orange, blues stay blue
+// instead of shifting toward cyan. Same sigmoid shape overall,
+// so the overall contrast is similar.
+
+fn agx_contrast_approx(x: vec3<f32>) -> vec3<f32> {
+    let x2 = x * x;
+    let x4 = x2 * x2;
+    return vec3<f32>(15.5) * x4 * x2
+         - vec3<f32>(40.14) * x4 * x
+         + vec3<f32>(31.96) * x4
+         - vec3<f32>(6.868) * x2 * x
+         + vec3<f32>(0.4298) * x2
+         + vec3<f32>(0.1191) * x
+         - vec3<f32>(0.00232);
+}
+
+fn agx_tone(val_in: vec3<f32>) -> vec3<f32> {
+    // AgX input transform — compresses the input color gamut.
+    let agx_mat = mat3x3<f32>(
+        vec3<f32>(0.842479062253094,  0.0423282422610123, 0.0423756549057051),
+        vec3<f32>(0.0784335999999992, 0.878468636469772,  0.0784336),
+        vec3<f32>(0.0792237451477643, 0.0791661274605434, 0.879142973793104),
+    );
+    // Log2-space normalization range. Anything outside gets clamped
+    // — the sigmoid maps this window to [0, 1].
+    let min_ev = -12.47393;
+    let max_ev = 4.026069;
+
+    var val = agx_mat * val_in;
+    // Log2 encode, clamp to range, normalize to [0, 1].
+    val = max(val, vec3<f32>(1e-10));
+    val = clamp(log2(val), vec3<f32>(min_ev), vec3<f32>(max_ev));
+    val = (val - vec3<f32>(min_ev)) / (max_ev - min_ev);
+
+    // Sigmoid contrast curve.
+    val = agx_contrast_approx(val);
+    return clamp(val, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn agx_eotf(val_in: vec3<f32>) -> vec3<f32> {
+    // AgX inverse input transform — re-expands back to target
+    // display gamut. The surface is sRGB-format so hardware
+    // applies the sRGB EOTF on write; we output linear here.
+    let agx_mat_inv = mat3x3<f32>(
+        vec3<f32>( 1.19687900512017,   -0.0528968517574562, -0.0529716355144438),
+        vec3<f32>(-0.0980208811401368,  1.15190312990417,   -0.0980434501171241),
+        vec3<f32>(-0.0990297440797205, -0.0989611768448433,  1.15107367264116),
+    );
+    return agx_mat_inv * val_in;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Composite is a pure tonemap now — the TAA pass already
-    // combined HDR + SSAO + bloom into a single linear-HDR value
-    // and stored it in the TAA history texture.
+    // Composite is a pure tonemap — the TAA pass already combined
+    // HDR + SSAO + bloom + SSR into a single linear-HDR value.
     let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
-    return vec4<f32>(aces_tone(hdr), 1.0);
+
+    // Branch between ACES and AgX via the uniform. Costs one
+    // compare per fragment; the dead branch gets DCE'd per-draw
+    // since the uniform is constant across the frame.
+    var ldr: vec3<f32>;
+    if (u.params.x < 0.5) {
+        ldr = aces_tone(hdr);
+    } else {
+        ldr = agx_eotf(agx_tone(hdr));
+    }
+    return vec4<f32>(ldr, 1.0);
 }
 ";
 
@@ -2048,6 +2116,8 @@ pub struct Renderer {
     pub composite_pipeline: wgpu::RenderPipeline,
     pub composite_layout: wgpu::BindGroupLayout,
     pub composite_sampler: wgpu::Sampler,
+    /// 0 = ACES (default, matches bloom-reference), 1 = AgX.
+    pub tonemap_kind: u32,
     /// Bloom mip-chain texture. Single texture with BLOOM_MIP_COUNT
     /// mips starting at surface/2 size — each mip is half the
     /// previous. Downsample chain (with HDR threshold on first tap)
@@ -3211,6 +3281,16 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let composite_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3713,6 +3793,7 @@ impl Renderer {
             composite_pipeline,
             composite_layout,
             composite_sampler,
+            tonemap_kind: 0,
             composite_uniform_buffer,
             bloom_chain_texture,
             bloom_mip_views,
@@ -3966,6 +4047,15 @@ impl Renderer {
     /// adding sharp on-screen reflections where they exist.
     pub fn set_ssr_strength(&mut self, strength: f32) {
         self.ssr_strength = strength.max(0.0);
+    }
+
+    /// Select the display tonemap curve. 0 = ACES (default, used
+    /// by the bloom-reference path tracer so validation diffs stay
+    /// meaningful). 1 = AgX (Troy Sobotka 2022) — better hue
+    /// preservation in saturated colors, matches Blender 4.0+ /
+    /// UE5 "PBR Neutral" look.
+    pub fn set_tonemap_kind(&mut self, kind: u32) {
+        self.tonemap_kind = kind;
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -5070,12 +5160,11 @@ impl Renderer {
         } else {
             &self.hdr_rt_view
         };
-        // composite_uniform_buffer no longer needs frame data — TAA
-        // already combined and bloom intensity moved there. Keep the
-        // buffer around (still in the bind group layout? No — we
-        // simplified the layout). Skip the write.
-        let _ = self.composite_uniform_buffer; // keep field alive
-        let cp = CompositeParams { params: [self.bloom_intensity, 0.0, 0.0, 0.0] };
+        // composite_uniform_buffer now carries per-frame composite
+        // state (tonemap kind, room for exposure / color grading).
+        // bloom_intensity is still tracked for reporting but consumed
+        // inside the TAA shader, not composite.
+        let cp = CompositeParams { params: [self.tonemap_kind as f32, 0.0, 0.0, 0.0] };
         self.queue.write_buffer(&self.composite_uniform_buffer, 0, bytemuck::bytes_of(&cp));
 
         let composite_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -5084,6 +5173,7 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(composite_src_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.composite_uniform_buffer.as_entire_binding() },
             ],
         });
         {
