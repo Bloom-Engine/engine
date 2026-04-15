@@ -7,7 +7,7 @@
 use crate::renderer::{Vertex3D, IDENTITY_MAT4};
 
 /// Shadow map configuration.
-pub const SHADOW_MAP_SIZE: u32 = 2048;
+pub const SHADOW_MAP_SIZE: u32 = 4096;
 pub const SHADOW_NEAR: f32 = 0.1;
 pub const SHADOW_FAR: f32 = 100.0;
 pub const SHADOW_EXTENT: f32 = 30.0; // orthographic extent in world units
@@ -217,8 +217,10 @@ impl ShadowMap {
     }
 
     /// Compute the light view-projection matrix for a directional light.
+    /// Snaps the center to texel boundaries so a moving camera doesn't
+    /// make shadow edges crawl — a single-texel shift per frame would
+    /// otherwise show as "shadow swimming" at edges.
     pub fn compute_light_vp(&mut self, light_dir: [f32; 3], center: [f32; 3]) {
-        // Light "position" = center - light_dir * distance
         let dist = SHADOW_FAR * 0.5;
         let len = (light_dir[0]*light_dir[0] + light_dir[1]*light_dir[1] + light_dir[2]*light_dir[2]).sqrt();
         let d = if len > 1e-6 {
@@ -227,13 +229,45 @@ impl ShadowMap {
             [0.0, 1.0, 0.0]
         };
 
-        let light_pos = [
-            center[0] - d[0] * dist,
-            center[1] - d[1] * dist,
-            center[2] - d[2] * dist,
+        // Snap the center to texel boundaries in light-space. Get the
+        // light-space X/Y of the center first, quantize to multiples
+        // of the texel world-size, then reconstruct the world-space
+        // center. Uses the same basis as mat4_look_at so the snap is
+        // exact in the light projection.
+        let up = [0.0f32, 1.0, 0.0];
+        let f = d; // forward-to-light (target direction)
+        // Right = up × f, then Up = f × right  (standard look-at basis)
+        let right = normalize3([
+            up[1]*f[2] - up[2]*f[1],
+            up[2]*f[0] - up[0]*f[2],
+            up[0]*f[1] - up[1]*f[0],
+        ]);
+        let ortho_up = [
+            f[1]*right[2] - f[2]*right[1],
+            f[2]*right[0] - f[0]*right[2],
+            f[0]*right[1] - f[1]*right[0],
+        ];
+        let texel_world = (2.0 * SHADOW_EXTENT) / SHADOW_MAP_SIZE as f32;
+        let ls_x = dot3(center, right);
+        let ls_y = dot3(center, ortho_up);
+        let snapped_x = (ls_x / texel_world).floor() * texel_world;
+        let snapped_y = (ls_y / texel_world).floor() * texel_world;
+        // Reproject snapped (x, y) + unchanged depth onto world center.
+        let dx = snapped_x - ls_x;
+        let dy = snapped_y - ls_y;
+        let snapped_center = [
+            center[0] + dx * right[0] + dy * ortho_up[0],
+            center[1] + dx * right[1] + dy * ortho_up[1],
+            center[2] + dx * right[2] + dy * ortho_up[2],
         ];
 
-        let view = crate::renderer::mat4_look_at(light_pos, center, [0.0, 1.0, 0.0]);
+        let light_pos = [
+            snapped_center[0] - d[0] * dist,
+            snapped_center[1] - d[1] * dist,
+            snapped_center[2] - d[2] * dist,
+        ];
+
+        let view = crate::renderer::mat4_look_at(light_pos, snapped_center, [0.0, 1.0, 0.0]);
         let proj = crate::renderer::mat4_ortho(
             -SHADOW_EXTENT, SHADOW_EXTENT,
             -SHADOW_EXTENT, SHADOW_EXTENT,
@@ -251,4 +285,17 @@ impl ShadowMap {
     pub fn disable(&mut self) {
         self.enabled = false;
     }
+}
+
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt();
+    if len > 1e-6 {
+        [v[0]/len, v[1]/len, v[2]/len]
+    } else {
+        [0.0, 0.0, 1.0]
+    }
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
 }

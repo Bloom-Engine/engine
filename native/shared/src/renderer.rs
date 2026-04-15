@@ -5288,13 +5288,34 @@ impl Renderer {
 
         // Shadow pass: render scene nodes from light's perspective
         if self.shadow_map.enabled {
-            // Compute light VP from the primary directional light direction
+            // Compute light VP from the primary directional light direction.
+            // Center the shadow frustum on a point slightly ahead of the
+            // camera so the fixed-size ortho cube covers the player's
+            // field of view at maximum per-texel resolution, instead of
+            // being pinned at world origin (which gave terrible shadow
+            // quality anywhere outside the origin cube).
             let light_dir = [
                 self.lighting_uniforms.light_dir[0],
                 self.lighting_uniforms.light_dir[1],
                 self.lighting_uniforms.light_dir[2],
             ];
-            self.shadow_map.compute_light_vp(light_dir, [0.0, 0.0, 0.0]);
+            // Forward direction from view matrix (column 2 of view inverse
+            // = -row 2 of view matrix for an orthonormal view).
+            let fwd = [
+                -self.current_view_matrix[0][2],
+                -self.current_view_matrix[1][2],
+                -self.current_view_matrix[2][2],
+            ];
+            // Bias the shadow cube half a frustum forward of the camera
+            // so more of the cube covers visible geometry rather than
+            // the area behind the camera.
+            let bias = crate::shadows::SHADOW_EXTENT * 0.5;
+            let shadow_center = [
+                self.current_camera_pos[0] + fwd[0] * bias,
+                self.current_camera_pos[1] + fwd[1] * bias,
+                self.current_camera_pos[2] + fwd[2] * bias,
+            ];
+            self.shadow_map.compute_light_vp(light_dir, shadow_center);
 
             {
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
