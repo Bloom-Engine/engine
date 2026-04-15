@@ -588,7 +588,10 @@ if (!headlessMode) {
   setEnvIntensity(0.3);
   // Log-average auto-exposure handles the remaining dynamic range.
   setAutoExposure(true);
-  setFog(0.55, 0.62, 0.72, 0.025, 0.0, 0.18);
+  // Heavier fog hides the ground-plane edge at ~60 units and blends
+  // it into the sky, giving a natural horizon instead of a sharp
+  // boundary where the sky env-map shows through past the ground.
+  setFog(0.75, 0.80, 0.87, 0.06, 0.0, 0.22);
   setVignette(0.35, 0.30);
   setFilmGrain(0.025);
   setChromaticAberration(0.0025);
