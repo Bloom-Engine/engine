@@ -1,0 +1,15 @@
+[package]
+name = "bloom-diff"
+version = "0.1.0"
+edition = "2021"
+description = "Pixel-accurate image diff for comparing Bloom realtime renders against bloom-reference ground truth. Outputs RMSE, SSIM, per-pixel difference heatmap, and a side-by-side composite."
+
+[[bin]]
+name = "bloom-diff"
+path = "src/main.rs"
+
+[dependencies]
+image = "0.25"
+
+[profile.release]
+opt-level = 3
