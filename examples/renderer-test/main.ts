@@ -566,14 +566,9 @@ setEnvClearFromHdr("assets/outdoor.hdr");
 if (headlessMode) {
   setupGltfModel();
 } else {
-  setupGround();
-  setupMaterialGallery();
-  setupLightArena();
+  // Minimal scene: just the shadow demo. Nothing else to confuse
+  // what's shadow vs what's other zone geometry.
   setupShadowTest();
-  setupWater();
-  setupGeometryDensity();
-  setupThinGeometry();
-  setupGltfModel();
 }
 
 if (!headlessMode) {
@@ -584,19 +579,11 @@ if (!headlessMode) {
 // are visible. Headless skips them so the path-traced reference
 // comparison stays bit-meaningful.
 if (!headlessMode) {
-  // IBL is bright outdoors; dial it down so ACES has headroom.
   setEnvIntensity(0.3);
-  // Log-average auto-exposure handles the remaining dynamic range.
   setAutoExposure(true);
-  // Light atmospheric haze. The horizon transition isn't perfect
-  // (ground plane ends at ~60 units, beyond which the sky env-map
-  // shows) but modest fog softens it without blowing out near
-  // material detail.
-  setFog(0.65, 0.72, 0.80, 0.02, 0.0, 0.18);
-  setVignette(0.35, 0.30);
-  setFilmGrain(0.025);
-  setChromaticAberration(0.0025);
-  setSunShafts(0.6, 0.97, 1.0, 0.92, 0.78);
+  // Post-fx layer disabled for the shadow demo — CA fringes and
+  // sun-shaft streaks were reading as "triangle-shaped specks"
+  // that looked like they could be the shadows.
 }
 
 // ============================================================
