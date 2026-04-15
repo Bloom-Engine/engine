@@ -497,14 +497,18 @@ function setupGltfModel(): void {
 // Camera state
 // ============================================================
 
-// Spawn at zone 3 (Shadows) by default so the user immediately
-// sees the dramatic cast shadows on the white floor. Yaw ≈ 0 =
-// looking toward -Z; pitch slightly down to show the ground.
-let camX = -28.0;
-let camY = 4.0;
-let camZ = 10.0;
-let camYaw = 0.0;
-let camPitch = -0.3;
+// Spawn high above zone 3 looking down at the floor. From this
+// angle the shadows cast by the pillars appear clearly as
+// separate dark streaks on the white floor, rather than joining
+// visually onto each pillar's base.
+// Spawn in zone 3 (Shadows) — a simplified demo-friendly zone
+// with a pure-white floor and gray pillars. The low-angle sun
+// (set below) casts clear shadows across the floor.
+let camX = -20.0;
+let camY = 5.0;
+let camZ = 8.0;
+let camYaw = -0.4;
+let camPitch = -0.25;
 let cursorLocked = true;
 
 // Zone teleport positions [x, y, z, yaw]
@@ -562,10 +566,14 @@ setEnvClearFromHdr("assets/outdoor.hdr");
 if (headlessMode) {
   setupGltfModel();
 } else {
-  // DEBUG: only the shadow demo zone — other zones have dark
-  // floors that bleed into the view and confuse what's shadow
-  // vs what's scene geometry.
+  setupGround();
+  setupMaterialGallery();
+  setupLightArena();
   setupShadowTest();
+  setupWater();
+  setupGeometryDensity();
+  setupThinGeometry();
+  setupGltfModel();
 }
 
 if (!headlessMode) {
