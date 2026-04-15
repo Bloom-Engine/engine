@@ -318,24 +318,12 @@ function setupLightArena(): void {
 // shadow resolution, PCF quality, contact shadows.
 
 function setupShadowTest(): void {
-  const cx = -28.0;
+  // Single pillar at origin on a white floor. Simplest possible
+  // shadow test.
+  const floor = placeCube(0, -0.05, 0, 40, 0.1, 40, 1.0, 1.0, 1.0, 0.8, 0.0);
+  setSceneNodeCastShadow(floor, false);
 
-  // Big pure-white floor — deliberately bigger than the camera's
-  // view cone so the entire floor fills the lower half of the
-  // screen. Shadows are the ONLY source of darkness on this floor;
-  // anything dark the user sees IS a shadow.
-  placeCube(cx, -0.05, 0, 40, 0.1, 40, 1.0, 1.0, 1.0, 0.8, 0.0);
-
-  // Three tall gray pillars spaced wide apart. Medium-gray color
-  // so they read as objects (not overexposed to white).
-  placeCube(cx - 6, 4, 0, 1.5, 8, 1.5, 0.5, 0.5, 0.5, 0.5, 0.0);
-  placeCube(cx,     3, 0, 1.5, 6, 1.5, 0.5, 0.5, 0.5, 0.5, 0.0);
-  placeCube(cx + 6, 2, 0, 1.5, 4, 1.5, 0.5, 0.5, 0.5, 0.5, 0.0);
-
-  // One sphere per pillar so the curved-object shadow is also visible.
-  placeSphere(cx - 6, 1.0, 4, 1.0, 0.5, 0.5, 0.5, 0.4, 0.0);
-  placeSphere(cx,     1.0, 4, 1.0, 0.5, 0.5, 0.5, 0.4, 0.0);
-  placeSphere(cx + 6, 1.0, 4, 1.0, 0.5, 0.5, 0.5, 0.4, 0.0);
+  placeCube(0, 4, 0, 1.5, 8, 1.5, 0.5, 0.5, 0.5, 0.5, 0.0);
 }
 
 // ============================================================
@@ -501,14 +489,17 @@ function setupGltfModel(): void {
 // angle the shadows cast by the pillars appear clearly as
 // separate dark streaks on the white floor, rather than joining
 // visually onto each pillar's base.
-// Spawn in zone 3 (Shadows) — a simplified demo-friendly zone
-// with a pure-white floor and gray pillars. The low-angle sun
-// (set below) casts clear shadows across the floor.
-let camX = -20.0;
-let camY = 5.0;
-let camZ = 8.0;
-let camYaw = -0.4;
-let camPitch = -0.25;
+// Camera looks at pillars from +Z (standing in front of them,
+// looking -Z toward the row). Sun is almost directly overhead
+// from +Y with a slight tilt toward -X, so shadows fall
+// LEFTWARD across the floor — perpendicular to the viewing
+// direction, visible as clear elongated dark shapes on the
+// white ground rather than hiding behind each pillar.
+let camX = 0.0;
+let camY = 6.0;
+let camZ = 14.0;
+let camYaw = 0.0;
+let camPitch = -0.3;
 let cursorLocked = true;
 
 // Zone teleport positions [x, y, z, yaw]
@@ -566,8 +557,6 @@ setEnvClearFromHdr("assets/outdoor.hdr");
 if (headlessMode) {
   setupGltfModel();
 } else {
-  // Minimal scene: just the shadow demo. Nothing else to confuse
-  // what's shadow vs what's other zone geometry.
   setupShadowTest();
 }
 
@@ -580,10 +569,9 @@ if (!headlessMode) {
 // comparison stays bit-meaningful.
 if (!headlessMode) {
   setEnvIntensity(0.3);
-  setAutoExposure(true);
-  // Post-fx layer disabled for the shadow demo — CA fringes and
-  // sun-shaft streaks were reading as "triangle-shaped specks"
-  // that looked like they could be the shadows.
+  // DEBUG: auto-exposure off, fixed manual exposure
+  setAutoExposure(false);
+  setManualExposure(1.0);
 }
 
 // ============================================================
@@ -687,11 +675,10 @@ while (!windowShouldClose()) {
   // the reference for no good reason during validation.
   if (!headlessMode) {
     setAmbientLight({ r: 70, g: 80, b: 100, a: 255 }, 0.25);
-    // Low-angle morning sun from +X — shadows stretch long to
-    // the -X (screen-left) side of each object where they're
-    // unambiguously readable as shadows, not pedestals.
+    // Low-angle sun from the left — shadows stretch long to the
+    // right, perpendicular to the camera view.
     setDirectionalLight(
-      { x: 0.95, y: 0.3, z: 0.1 },
+      { x: -0.95, y: 0.25, z: 0.0 },
       { r: 255, g: 248, b: 235, a: 255 },
       2.0,
     );

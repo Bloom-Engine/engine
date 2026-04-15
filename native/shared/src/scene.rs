@@ -331,11 +331,20 @@ impl SceneGraph {
 
             // Compute MVP = VP * Model
             let mvp = mat4_mul(vp_matrix, &node.transform);
+            // Guard against NaN/Inf opacity (Perry TS passes NaN
+            // when a default-arg alpha isn't provided) — a single
+            // NaN in model_tint.w propagates through every shader
+            // output.
+            let opacity = if node.material.opacity.is_finite() {
+                node.material.opacity
+            } else {
+                1.0
+            };
             let tint = [
                 node.material.color[0],
                 node.material.color[1],
                 node.material.color[2],
-                node.material.opacity,
+                opacity,
             ];
             let uniforms = NodeUniforms { mvp, model_tint: tint };
 
@@ -405,26 +414,27 @@ impl SceneGraph {
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
     ) {
+        let mut drawn = 0;
+        let mut skipped_vb = 0;
+        let mut skipped_ib = 0;
+        let mut skipped_bg = 0;
+        let mut skipped_matbg = 0;
         for (_handle, node) in self.nodes.iter() {
             if !node.visible || node.indices.is_empty() {
                 continue;
             }
-            let Some(vb) = &node.gpu_vb else { continue };
-            let Some(ib) = &node.gpu_ib else { continue };
-            let Some(bg) = &node.gpu_uniform_bg else { continue };
-            let Some(mat_bg) = &node.gpu_material_bg else { continue };
-
-            // Bind per-node uniforms (group 0)
+            let Some(vb) = &node.gpu_vb else { skipped_vb += 1; continue };
+            let Some(ib) = &node.gpu_ib else { skipped_ib += 1; continue };
+            let Some(bg) = &node.gpu_uniform_bg else { skipped_bg += 1; continue };
+            let Some(mat_bg) = &node.gpu_material_bg else { skipped_matbg += 1; continue };
             pass.set_bind_group(0, bg, &[]);
-
-            // Bind per-node material (group 2: base color + normal map)
             pass.set_bind_group(2, mat_bg, &[]);
-
-            // Bind vertex/index buffers and draw
             pass.set_vertex_buffer(0, vb.slice(..));
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..node.gpu_index_count, 0, 0..1);
+            drawn += 1;
         }
+        let _ = std::fs::write("/tmp/bloom_scene_render.txt", format!("drawn={} skipped_vb={} skipped_ib={} skipped_bg={} skipped_matbg={}\n", drawn, skipped_vb, skipped_ib, skipped_bg, skipped_matbg));
     }
 
     pub fn node_count(&self) -> usize {

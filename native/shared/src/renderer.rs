@@ -365,7 +365,7 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
     // Immediate-mode 3D draws (drawCube etc.) aren't PBR — output
     // 0 metallic / 1 roughness so SSR doesn't try to reflect them.
     return Fs3DOut(
-        vec4<f32>(tex_color.rgb * in.color.rgb * lit, tex_color.a * in.color.a),
+        vec4<f32>(0.0, 1.0, 0.0, 1.0), // DEBUG: green if pipeline_3d renders this
         vec2<f32>(0.0, 1.0),
     );
 }
@@ -568,7 +568,7 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
         return 1.0;
     }
     let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
-    let bias = 0.0008;
+    let bias = 0.005;
     let depth_ref = light_ndc.z - bias;
     let dims = textureDimensions(shadow_tex);
     let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
@@ -808,7 +808,11 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // shadowed areas comes from the direct sun being zeroed in
     // shadow, so the directional light needs to contribute enough
     // of the final brightness for shadows to be visible.
-    let indirect_shadow = mix(0.8, 1.0, shadow_factor);
+    let indirect_shadow = mix(0.15, 1.0, shadow_factor);
+    // DEBUG tint: multiply hdr by the shadow factor mapped to a
+    // color so regions with shadow_factor < 1 are visibly green.
+    // Debug removed — scene shader outputs real HDR below.
+    let dbg = vec3<f32>(0.0);
 
     // Multi-scatter also adds a diffuse-like term back from the
     // 'lost' energy, but it gets absorbed wherever there is no metal
@@ -5317,29 +5321,40 @@ impl Renderer {
 
                 shadow_pass.set_pipeline(&self.shadow_map.pipeline);
 
-                // Render each visible scene node into shadow map
+                // Collect per-node shadow uniforms so we can write
+                // ONE batched upload and then bind per-node via
+                // dynamic offsets. Writing the same buffer N times
+                // in one frame coalesces to the last write (bug).
+                let mut draw_list: Vec<(&wgpu::Buffer, &wgpu::Buffer, u32, u32)> = Vec::new();
+                let stride = crate::shadows::SHADOW_UNIFORM_STRIDE as usize;
+                let max = crate::shadows::SHADOW_MAX_NODES as usize;
+                let mut uniform_data: Vec<u8> = vec![0u8; stride * max];
+                let mut slot = 0usize;
                 for (_handle, node) in scene.nodes.iter() {
                     if !node.visible || !node.cast_shadow || node.indices.is_empty() {
                         continue;
                     }
                     let Some(vb) = &node.gpu_vb else { continue };
                     let Some(ib) = &node.gpu_ib else { continue };
-
-                    // Write shadow uniforms (light_vp * model)
-                    let shadow_uniforms = crate::shadows::ShadowUniforms {
+                    if slot >= max { break; }
+                    let uniforms = crate::shadows::ShadowUniforms {
                         light_vp: self.shadow_map.light_vp,
                         model: node.transform,
                     };
-                    self.queue.write_buffer(
-                        &self.shadow_map.uniform_buffer,
-                        0,
-                        bytemuck::bytes_of(&shadow_uniforms),
-                    );
-
-                    shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[]);
-                    shadow_pass.set_vertex_buffer(0, vb.slice(..));
-                    shadow_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    shadow_pass.draw_indexed(0..node.gpu_index_count, 0, 0..1);
+                    let off = slot * stride;
+                    uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
+                        .copy_from_slice(bytemuck::bytes_of(&uniforms));
+                    draw_list.push((vb, ib, node.gpu_index_count, (slot * stride) as u32));
+                    slot += 1;
+                }
+                if !draw_list.is_empty() {
+                    self.queue.write_buffer(&self.shadow_map.uniform_buffer, 0, &uniform_data[..slot * stride]);
+                    for (vb, ib, index_count, offset) in draw_list {
+                        shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[offset]);
+                        shadow_pass.set_vertex_buffer(0, vb.slice(..));
+                        shadow_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                        shadow_pass.draw_indexed(0..index_count, 0, 0..1);
+                    }
                 }
             }
         }
@@ -5451,6 +5466,7 @@ impl Renderer {
 
             // Cached models + retained scene graph — both via scene_pipeline.
             let has_cached_models = !self.model_draw_commands.is_empty();
+            let _ = std::fs::write("/tmp/bloom_scene_state.txt", format!("cached={} node_count={}\n", has_cached_models, scene.node_count()));
             if has_cached_models || scene.node_count() > 0 {
                 pass.set_pipeline(&self.scene_pipeline);
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);

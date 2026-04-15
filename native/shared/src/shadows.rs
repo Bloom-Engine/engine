@@ -10,7 +10,12 @@ use crate::renderer::{Vertex3D, IDENTITY_MAT4};
 pub const SHADOW_MAP_SIZE: u32 = 4096;
 pub const SHADOW_NEAR: f32 = 0.1;
 pub const SHADOW_FAR: f32 = 100.0;
-pub const SHADOW_EXTENT: f32 = 30.0; // orthographic extent in world units
+pub const SHADOW_EXTENT: f32 = 50.0; // orthographic extent in world units
+/// Dynamic-uniform buffer stride for per-node shadow uniforms. Must
+/// be ≥ sizeof(ShadowUniforms) (128B) and a multiple of the device's
+/// min_uniform_buffer_offset_alignment. 256 is safe on every platform.
+pub const SHADOW_UNIFORM_STRIDE: u32 = 256;
+pub const SHADOW_MAX_NODES: u32 = 1024;
 
 /// Depth-only shader for shadow pass.
 pub const SHADOW_SHADER: &str = "
@@ -126,7 +131,12 @@ impl ShadowMap {
             ],
         });
 
-        // Shadow pass uniform layout
+        // Shadow pass uniform layout. Dynamic offset so we can
+        // rebind to a different per-node slot in a single buffer
+        // (critical — queue.write_buffer on the same buffer before
+        // the encoder submits coalesces all writes to the last
+        // value, so a non-dynamic design would give every shadow
+        // draw the same model matrix).
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow_uniform_layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -134,16 +144,21 @@ impl ShadowMap {
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    has_dynamic_offset: true,
+                    min_binding_size: std::num::NonZeroU64::new(
+                        std::mem::size_of::<ShadowUniforms>() as u64,
+                    ),
                 },
                 count: None,
             }],
         });
 
+        // 1024 nodes × 256-byte slots = 256 KiB buffer. More than
+        // enough for even busy scenes; falls back to wrapping via
+        // modulo in the caller if the node count exceeds this.
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shadow_uniform_buf"),
-            size: std::mem::size_of::<ShadowUniforms>() as u64,
+            size: (SHADOW_UNIFORM_STRIDE * SHADOW_MAX_NODES) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -153,7 +168,13 @@ impl ShadowMap {
             layout: &uniform_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &uniform_buffer,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(
+                        std::mem::size_of::<ShadowUniforms>() as u64,
+                    ),
+                }),
             }],
         });
 
@@ -182,7 +203,21 @@ impl ShadowMap {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                // Cull FRONT faces, not back, when rendering the
+                // shadow map. Standard for sun shadows: only the
+                // side of each object FACING AWAY from the light
+                // should write to the shadow map, so that fragments
+                // on the same side as the light (self-shadow acne)
+                // don't get falsely marked as occluded. Previously
+                // cull_mode was Back, which meant only front-
+                // facing-from-light triangles rendered — for a
+                // pillar under an overhead sun, that's just the
+                // top face. Every fragment BELOW the top (pillar
+                // side, nearby ground) then failed the depth
+                // compare and read as "in shadow" from the top,
+                // which is why the pillar's bottom half went black
+                // and no visible shadow ever fell on the floor.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -231,12 +266,11 @@ impl ShadowMap {
 
         let snapped_center = center;
 
-        // light_dir points FROM the shaded surface TOWARD the light
-        // (convention matches the scene shader's shade_pbr: NdotL =
-        // dot(n, l_dir)). So the light sits at `center + d * dist` —
-        // previously was `center - d * dist`, which placed the
-        // shadow camera underground shooting upward, so the shadow
-        // map was effectively empty and every surface read as lit.
+        // light_dir is "from surface to light" — the light is at
+        // center + d*dist. (Earlier I had this as center - d*dist
+        // on the incorrect hypothesis that the convention was
+        // "ray-travel" direction; testing showed shadows cast in
+        // the wrong direction with that form.)
         let light_pos = [
             snapped_center[0] + d[0] * dist,
             snapped_center[1] + d[1] * dist,
@@ -250,6 +284,7 @@ impl ShadowMap {
             SHADOW_NEAR, SHADOW_FAR,
         );
         self.light_vp = crate::renderer::mat4_multiply(proj, view);
+
     }
 
     /// Enable shadow mapping.
