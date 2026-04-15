@@ -1679,6 +1679,15 @@ struct TaaParams {
     /// (above this, density drops exponentially), y = falloff rate
     /// per world-space Y unit, zw padding.
     fog_params: vec4<f32>,
+    /// Sun-shafts (god rays) state.
+    /// xy = sun's screen-space UV (precomputed CPU-side from
+    /// camera VP and sun direction; clipped to ±2 so the march
+    /// can step beyond the screen edge cleanly)
+    /// z  = strength (0 = effect off)
+    /// w  = per-sample decay (0..1, controls shaft length)
+    sun_shaft_uv_strength: vec4<f32>,
+    /// xyz = sun shaft tint color, w = padding.
+    sun_shaft_color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TaaParams;
@@ -1790,6 +1799,42 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let fog_factor = 1.0 - exp(-fog_density * dist * height_fade);
         blended = mix(blended, u.fog_color_density.rgb, clamp(fog_factor, 0.0, 1.0));
     }
+
+    // Sun shafts (god rays). March a fixed number of taps from the
+    // pixel toward the projected sun position, sampling depth at
+    // each tap. Where depth ≥ ~1 (sky), the sun is visible — add
+    // its tinted contribution (decayed by distance from the pixel)
+    // back into the image. Defers the visibility test to the depth
+    // buffer so any geometry occluding the sun naturally cuts the
+    // shaft. Strength 0 = effect off; the early-out keeps the
+    // 32-tap loop from running.
+    let shaft_strength = u.sun_shaft_uv_strength.z;
+    if (shaft_strength > 0.0) {
+        let sun_uv = u.sun_shaft_uv_strength.xy;
+        let decay = u.sun_shaft_uv_strength.w;
+        let n_samples: i32 = 32;
+        let delta = (sun_uv - in.uv) / f32(n_samples);
+        var pos = in.uv;
+        var weight = 1.0;
+        var accum = 0.0;
+        for (var i: i32 = 0; i < n_samples; i = i + 1) {
+            pos = pos + delta;
+            // Skip taps that walk off-screen.
+            if (pos.x < 0.0 || pos.x > 1.0 || pos.y < 0.0 || pos.y > 1.0) {
+                continue;
+            }
+            let d = textureSample(depth_tex, depth_samp, pos);
+            // Sky pixels (d ≈ 1) contribute; surfaces (d < 1) shadow.
+            // Soft step around 0.999 avoids hard banding.
+            let sky = smoothstep(0.998, 1.0, d);
+            accum = accum + sky * weight;
+            weight = weight * decay;
+        }
+        // Normalize so a fully unobstructed shaft maps to 1.
+        let norm = accum / f32(n_samples);
+        blended = blended + u.sun_shaft_color.rgb * norm * shaft_strength;
+    }
+
     return vec4<f32>(blended, 1.0);
 }
 ";
@@ -1810,6 +1855,11 @@ struct TaaParams {
     /// Fog falloff: x = height reference, y = falloff rate,
     /// zw padding.
     fog_params: [f32; 4],
+    /// Sun shaft state: xy = sun screen-space UV, z = strength,
+    /// w = decay.
+    sun_shaft_uv_strength: [f32; 4],
+    /// Sun shaft tint (rgb) + padding.
+    sun_shaft_color: [f32; 4],
 }
 
 /// Auto-exposure update shader. Runs at 1×1 viewport → single
@@ -2419,6 +2469,15 @@ pub struct Renderer {
     /// Fog falloff rate in world-space Y units — how quickly fog
     /// thins out with altitude above `fog_height_ref`.
     pub fog_height_falloff: f32,
+    /// Sun shaft (god rays) strength — additive contribution
+    /// where the depth buffer says the sun is visible. 0 = off
+    /// (default — keeps validation parity).
+    pub sun_shaft_strength: f32,
+    /// Per-sample decay for the sun shaft march. 0.95–0.99 = long
+    /// shafts, 0.85 = short, 0.5 = barely visible.
+    pub sun_shaft_decay: f32,
+    /// Sun shaft tint (rgb 0..1).
+    pub sun_shaft_color: [f32; 3],
     /// SSR (screen-space reflections) pass output — half-res HDR
     /// holding the reflected color for each fragment. Composited
     /// into the final image by the TAA pass.
@@ -4184,6 +4243,9 @@ impl Renderer {
             fog_density: 0.0,
             fog_height_ref: 0.0,
             fog_height_falloff: 0.25,
+            sun_shaft_strength: 0.0,
+            sun_shaft_decay: 0.96,
+            sun_shaft_color: [1.0, 0.92, 0.78],
             ssr_rt_texture,
             ssr_rt_view,
             ssr_pipeline,
@@ -4495,6 +4557,26 @@ impl Renderer {
     /// the renderer's frame index isn't advancing.
     pub fn set_film_grain(&mut self, strength: f32) {
         self.grain_strength = strength.max(0.0);
+    }
+
+    /// Sun shaft (screen-space god ray) strength. 0 (default) = off.
+    /// 0.4 = subtle haze, 1.0+ = obvious cinematic shafts. The
+    /// shafts are sampled from the depth buffer along a screen-space
+    /// line toward the sun's projected position, so any geometry
+    /// occluding the sun naturally cuts the shafts.
+    pub fn set_sun_shaft_strength(&mut self, strength: f32) {
+        self.sun_shaft_strength = strength.max(0.0);
+    }
+
+    /// Per-sample decay (0..1). Larger = longer shafts. 0.96 default
+    /// gives ~32-tap visible falloff.
+    pub fn set_sun_shaft_decay(&mut self, decay: f32) {
+        self.sun_shaft_decay = decay.clamp(0.0, 1.0);
+    }
+
+    /// Sun shaft tint (rgb).
+    pub fn set_sun_shaft_color(&mut self, r: f32, g: f32, b: f32) {
+        self.sun_shaft_color = [r, g, b];
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -5546,6 +5628,27 @@ impl Renderer {
             // pass the actual jittered current_vp_matrix; the jitter
             // is sub-pixel so reprojection error is negligible.
             let inv_vp = mat4_invert(self.current_vp_matrix);
+            // Sun shaft screen-space position. Project a point far
+            // along the sun direction through the current VP. If it
+            // ends up behind the camera (clip.w ≤ 0) the sun is
+            // off-screen — disable shafts this frame.
+            let sun_dir = self.lighting_uniforms.light_dir;
+            let sun_world = [sun_dir[0] * 1000.0, sun_dir[1] * 1000.0, sun_dir[2] * 1000.0, 1.0];
+            let clip = mat4_mul_vec4(&self.current_vp_matrix, &sun_world);
+            let (sun_uv, shaft_strength_eff) = if clip[3] > 0.0 {
+                let ndc_x = clip[0] / clip[3];
+                let ndc_y = clip[1] / clip[3];
+                let u = ndc_x * 0.5 + 0.5;
+                let v = 1.0 - (ndc_y * 0.5 + 0.5);
+                // Allow off-screen suns to still cast shafts that
+                // streak in from the edge — clamp to a small margin
+                // beyond ±[0,1] rather than disabling outright.
+                let off = u < -1.0 || u > 2.0 || v < -1.0 || v > 2.0;
+                if off { ([0.0, 0.0], 0.0) } else { ([u, v], self.sun_shaft_strength) }
+            } else {
+                ([0.0, 0.0], 0.0)
+            };
+
             let tp = TaaParams {
                 params: [alpha, self.bloom_intensity, 0.0, 0.0],
                 inv_vp,
@@ -5557,6 +5660,17 @@ impl Renderer {
                     self.fog_density,
                 ],
                 fog_params: [self.fog_height_ref, self.fog_height_falloff, 0.0, 0.0],
+                sun_shaft_uv_strength: [
+                    sun_uv[0], sun_uv[1],
+                    shaft_strength_eff,
+                    self.sun_shaft_decay,
+                ],
+                sun_shaft_color: [
+                    self.sun_shaft_color[0],
+                    self.sun_shaft_color[1],
+                    self.sun_shaft_color[2],
+                    0.0,
+                ],
             };
             self.queue.write_buffer(&self.taa_uniform_buffer, 0, bytemuck::bytes_of(&tp));
 
@@ -7119,6 +7233,16 @@ pub fn mat4_multiply(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
         }
     }
     out
+}
+
+/// Multiply a column-major 4x4 matrix by a column vector.
+pub fn mat4_mul_vec4(m: &[[f32; 4]; 4], v: &[f32; 4]) -> [f32; 4] {
+    [
+        m[0][0]*v[0] + m[1][0]*v[1] + m[2][0]*v[2] + m[3][0]*v[3],
+        m[0][1]*v[0] + m[1][1]*v[1] + m[2][1]*v[2] + m[3][1]*v[3],
+        m[0][2]*v[0] + m[1][2]*v[1] + m[2][2]*v[2] + m[3][2]*v[3],
+        m[0][3]*v[0] + m[1][3]*v[1] + m[2][3]*v[2] + m[3][3]*v[3],
+    ]
 }
 
 pub fn mat4_translate(m: [[f32; 4]; 4], v: [f32; 3]) -> [[f32; 4]; 4] {
