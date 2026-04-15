@@ -637,6 +637,7 @@ unsafe extern "C" fn scene_will_connect(
     _session: *const AnyObject,
     _options: *const AnyObject,
 ) {
+    let _ = std::fs::write("/tmp/bloom_scene_connect.txt", format!("scene_will_connect called, scene={:?}\n", scene));
     if scene.is_null() { return; }
     std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] scene_will_connect called\n").ok();
 
@@ -677,12 +678,14 @@ unsafe extern "C" fn scene_will_connect(
     let black: Retained<AnyObject> = msg_send![color_cls, blackColor];
     let _: () = msg_send![&*view, setBackgroundColor: &*black];
 
-    // Configure CAMetalLayer
+    // Configure CAMetalLayer - set framebufferOnly=NO for screenshot capture
     let layer: Retained<AnyObject> = msg_send![&*view, layer];
     let drawable_size = CGSize { width: pixel_width as f64, height: pixel_height as f64 };
     let _: () = msg_send![&*layer, setDrawableSize: drawable_size];
     let _: () = msg_send![&*layer, setContentsScale: scale];
     let _: () = msg_send![&*layer, setOpaque: Bool::YES];
+    let _: () = msg_send![&*layer, setFramebufferOnly: Bool::NO];
+    let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::YES];
 
     // Enable touches & focus
     let _: () = msg_send![&*view, setUserInteractionEnabled: Bool::YES];
@@ -696,7 +699,7 @@ unsafe extern "C" fn scene_will_connect(
     UI_VIEW = Some(view.clone());
     UI_WINDOW = Some(window);
 
-    // Create wgpu surface and engine
+    // Create wgpu surface and engine on the main thread (like iOS)
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::METAL,
         ..Default::default()
@@ -712,32 +715,31 @@ unsafe extern "C" fn scene_will_connect(
         raw_display_handle: RawDisplayHandle::UiKit(UiKitDisplayHandle::new()),
         raw_window_handle: raw,
     }) {
-        Ok(s) => { std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] surface OK\n").ok(); s },
+        Ok(s) => s,
         Err(e) => panic!("[bloom-tvos] Failed to create wgpu surface: {e}"),
     };
 
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] requesting adapter\n").ok();
     let adapter = match pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         compatible_surface: Some(&surface),
-        power_preference: wgpu::PowerPreference::default(),
+        power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
     })) {
-        Some(a) => { std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] adapter OK\n").ok(); a },
-        None => panic!("[bloom-tvos] No GPU adapter found — Metal may not be available"),
+        Some(a) => a,
+        None => panic!("[bloom-tvos] No GPU adapter found"),
     };
 
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] requesting device\n").ok();
     let (device, queue) = match pollster_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
         None,
     )) {
-        Ok(dq) => { std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] device OK\n").ok(); dq },
+        Ok(dq) => dq,
         Err(e) => panic!("[bloom-tvos] Failed to create device: {e}"),
     };
 
     let surface_caps = surface.get_capabilities(&adapter);
+    // Use non-sRGB format to match game's sRGB color space (colors are specified as sRGB 0-255)
     let format = surface_caps.formats.iter()
-        .find(|f| f.is_srgb()).copied()
+        .find(|f| !f.is_srgb()).copied()
         .unwrap_or(surface_caps.formats[0]);
 
     let surface_config = wgpu::SurfaceConfiguration {
@@ -754,6 +756,7 @@ unsafe extern "C" fn scene_will_connect(
 
     let renderer = Renderer::new(device, queue, surface, surface_config);
     let _ = ENGINE.set(EngineState::new(renderer));
+    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] ENGINE created on main thread\n").ok();
 }
 
 /// Called by the perry runtime's main() before UIApplicationMain to register
@@ -765,7 +768,7 @@ unsafe extern "C" fn configuration_for_connecting_scene(
     scene_session: *const AnyObject,
     _options: *const AnyObject,
 ) -> *const AnyObject {
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] configurationForConnecting called\n").ok();
+    let _ = std::fs::write("/tmp/bloom_config_scene.txt", "configurationForConnecting called\n");
     // Get the session's role
     let role: *const AnyObject = msg_send![&*scene_session, role];
     // Create UISceneConfiguration
@@ -774,7 +777,8 @@ unsafe extern "C" fn configuration_for_connecting_scene(
     let name_str: Retained<AnyObject> = msg_send![ns_cls, stringWithUTF8String: b"Default Configuration\0".as_ptr()];
     let config: Allocated<AnyObject> = msg_send![config_cls, alloc];
     let config: Retained<AnyObject> = msg_send![config, initWithName: &*name_str sessionRole: role];
-    let delegate_cls = AnyClass::get(c"PerrySceneDelegate").unwrap();
+    // Use PerryGameLoopAppDelegate as scene delegate (it has scene:willConnectToSession: added)
+    let delegate_cls = AnyClass::get(c"PerryGameLoopAppDelegate").unwrap();
     let _: () = msg_send![&*config, setDelegateClass: delegate_cls];
     std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] returning scene config with delegate\n").ok();
     // Leak the config — UIKit retains it. We can't use autorelease pool from extern C.
@@ -785,7 +789,7 @@ unsafe extern "C" fn configuration_for_connecting_scene(
 
 #[no_mangle]
 pub unsafe extern "C" fn perry_register_native_classes() {
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] perry_register_native_classes\n").ok();
+    let _ = std::fs::write("/tmp/bloom_register_classes.txt", "perry_register_native_classes called\n");
     register_bloom_application_class();
     register_metal_view_class();
     register_window_class();
@@ -815,6 +819,25 @@ pub unsafe extern "C" fn perry_register_native_classes() {
             configuration_for_connecting_scene as *const c_void,
             types,
         );
+
+        // Also add scene:willConnectToSession:connectionOptions: to the app delegate
+        // so it can act as its own scene delegate (PerrySceneDelegate dispatch never fires)
+        let scene_sel = Sel::register(c"scene:willConnectToSession:connectionOptions:");
+        let scene_types = b"v48@0:8@16@24@32\0".as_ptr();
+        class_addMethod(
+            app_delegate_cls as *const AnyClass as *mut AnyClass,
+            scene_sel,
+            scene_will_connect as *const c_void,
+            scene_types,
+        );
+
+        // Add UIWindowSceneDelegate protocol to app delegate
+        extern "C" { fn objc_getProtocol(name: *const u8) -> *const c_void; }
+        extern "C" { fn class_addProtocol(cls: *mut c_void, protocol: *const c_void) -> bool; }
+        let protocol = objc_getProtocol(b"UIWindowSceneDelegate\0".as_ptr());
+        if !protocol.is_null() {
+            class_addProtocol(app_delegate_cls as *const AnyClass as *mut c_void, protocol);
+        }
     }
     std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] classes registered, scene delegate ready\n").ok();
 }
@@ -823,43 +846,189 @@ pub unsafe extern "C" fn perry_register_native_classes() {
 /// This runs on the main thread — safe for all UIKit operations.
 #[no_mangle]
 unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] deferred_init: attaching window to scene\n").ok();
+    let _ = std::fs::write("/tmp/bloom_deferred_init.txt", "deferred_init called\n");
 
-    // Find a connected scene and attach our window to it
+    // Find the connected scene
     let app_cls = AnyClass::get(c"UIApplication").unwrap();
     let app: *const AnyObject = msg_send![app_cls, sharedApplication];
     let scenes: *const AnyObject = msg_send![&*app, connectedScenes];
     let count: usize = msg_send![&*scenes, count];
-    std::io::Write::write_all(&mut std::io::stderr(),
-        format!("[bloom-tvos] connected scenes: {}\n", count).as_bytes()).ok();
-
-    if count > 0 {
-        if let Some(ref window) = UI_WINDOW {
-            let scene: Retained<AnyObject> = msg_send![&*scenes, anyObject];
-            let _: () = msg_send![&**window, setWindowScene: &*scene];
-            std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] attached window to scene\n").ok();
+    if count == 0 {
+        let _ = std::fs::write("/tmp/bloom_deferred_2.txt", "scenes=0, retrying in 500ms\n");
+        // Retry after a delay
+        extern "C" {
+            static _dispatch_main_q: c_void;
+            fn dispatch_after_f(when: u64, queue: *const c_void, context: *mut c_void, work: unsafe extern "C" fn(*mut c_void));
+            fn dispatch_time(when: u64, delta: i64) -> u64;
         }
+        let when = dispatch_time(0, 500_000_000); // 500ms
+        dispatch_after_f(when, &_dispatch_main_q as *const _, std::ptr::null_mut(), deferred_init);
+        return;
     }
 
-    // Configure the CAMetalLayer now that we have a scene
-    if let Some(ref view) = UI_VIEW {
-        let layer: Retained<AnyObject> = msg_send![&**view, layer];
-        let screen_cls = AnyClass::get(c"UIScreen").unwrap();
-        let screen: Retained<AnyObject> = msg_send![screen_cls, mainScreen];
-        let bounds: CGRect = msg_send![&*screen, bounds];
-        let scale: f64 = msg_send![&*screen, scale];
-        let pixel_width = (bounds.size.width * scale) as u32;
-        let pixel_height = (bounds.size.height * scale) as u32;
-        let drawable_size = CGSize { width: pixel_width as f64, height: pixel_height as f64 };
-        let _: () = msg_send![&*layer, setDrawableSize: drawable_size];
-        let _: () = msg_send![&*layer, setContentsScale: scale];
-        let _: () = msg_send![&*layer, setOpaque: Bool::YES];
+    let scene: Retained<AnyObject> = msg_send![&*scenes, anyObject];
+    // Log the scene class name for debugging
+    extern "C" { fn class_getName(cls: *const c_void) -> *const u8; }
+    let scene_class: *const c_void = msg_send![&*scene, class];
+    let scene_class_name = std::ffi::CStr::from_ptr(class_getName(scene_class) as *const i8).to_str().unwrap_or("?");
+    let scene_state: i64 = msg_send![&*scene, activationState];
+    let _ = std::fs::write("/tmp/bloom_deferred_2.txt", format!("scenes={}\nclass={}\nactivationState={}\n", count, scene_class_name, scene_state));
 
-        // Signal the game thread with the layer pointer
-        SCENE_PTR.store(Retained::as_ptr(&layer) as u64, std::sync::atomic::Ordering::Release);
-        SCREEN_DIMS.store(((pixel_width as u64) << 32) | (pixel_height as u64), std::sync::atomic::Ordering::Release);
-        std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] layer ready for game thread\n").ok();
+    // Get screen dimensions
+    let screen_cls = AnyClass::get(c"UIScreen").unwrap();
+    let screen: Retained<AnyObject> = msg_send![screen_cls, mainScreen];
+    let bounds: CGRect = msg_send![&*screen, bounds];
+    let scale: f64 = msg_send![&*screen, scale];
+    let pixel_width = (bounds.size.width * scale) as u32;
+    let pixel_height = (bounds.size.height * scale) as u32;
+    SCREEN_SCALE = scale;
+
+    // Create window WITH the scene (required on tvOS for visibility)
+    let window_cls = AnyClass::get(c"BloomWindow").unwrap();
+    let w: Allocated<AnyObject> = msg_send![window_cls, alloc];
+    let window: Retained<AnyObject> = msg_send![w, initWithWindowScene: &*scene];
+
+    // Create view controller
+    let gc_vc_cls = AnyClass::get(c"GCEventViewController");
+    let vc_cls = gc_vc_cls.unwrap_or_else(|| AnyClass::get(c"UIViewController").unwrap());
+    let vc: Allocated<AnyObject> = msg_send![vc_cls, alloc];
+    let vc: Retained<AnyObject> = msg_send![vc, init];
+    if gc_vc_cls.is_some() {
+        let _: () = msg_send![&*vc, setControllerUserInteractionEnabled: Bool::NO];
     }
+
+    // Create BloomMetalView
+    let view_cls = AnyClass::get(c"BloomMetalView").unwrap();
+    let v: Allocated<AnyObject> = msg_send![view_cls, alloc];
+    let view: Retained<AnyObject> = msg_send![v, initWithFrame: bounds];
+
+    let color_cls = AnyClass::get(c"UIColor").unwrap();
+    let black: Retained<AnyObject> = msg_send![color_cls, blackColor];
+    let _: () = msg_send![&*view, setBackgroundColor: &*black];
+    let _: () = msg_send![&*view, setUserInteractionEnabled: Bool::YES];
+
+    // Configure CAMetalLayer
+    let layer: Retained<AnyObject> = msg_send![&*view, layer];
+    let drawable_size = CGSize { width: pixel_width as f64, height: pixel_height as f64 };
+    let _: () = msg_send![&*layer, setDrawableSize: drawable_size];
+    let _: () = msg_send![&*layer, setContentsScale: scale];
+    let _: () = msg_send![&*layer, setOpaque: Bool::YES];
+    let _: () = msg_send![&*layer, setFramebufferOnly: Bool::NO];
+    let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::YES];
+
+    // Set up window hierarchy
+    let _: () = msg_send![&*vc, setView: &*view];
+    let _: () = msg_send![&*window, setRootViewController: &*vc];
+    let _: () = msg_send![&*window, makeKeyAndVisible];
+
+    // DEBUG: Add a bright UILabel to verify UIKit content is visible
+    let label_cls = AnyClass::get(c"UILabel").unwrap();
+    let lbl: Allocated<AnyObject> = msg_send![label_cls, alloc];
+    let label_frame = CGRect { origin: CGPoint { x: 100.0, y: 100.0 }, size: CGSize { width: 800.0, height: 200.0 } };
+    let lbl: Retained<AnyObject> = msg_send![lbl, initWithFrame: label_frame];
+    let ns_cls2 = AnyClass::get(c"NSString").unwrap();
+    let text: Retained<AnyObject> = msg_send![ns_cls2, stringWithUTF8String: b"BLOOM JUMP TVOS\0".as_ptr()];
+    let _: () = msg_send![&*lbl, setText: &*text];
+    let white: Retained<AnyObject> = msg_send![color_cls, whiteColor];
+    let _: () = msg_send![&*lbl, setTextColor: &*white];
+    let red_bg: Retained<AnyObject> = msg_send![color_cls, redColor];
+    let _: () = msg_send![&*lbl, setBackgroundColor: &*red_bg];
+    let font_cls = AnyClass::get(c"UIFont").unwrap();
+    let font: Retained<AnyObject> = msg_send![font_cls, systemFontOfSize: 72.0f64];
+    let _: () = msg_send![&*lbl, setFont: &*font];
+    let _: () = msg_send![&*window, addSubview: &*lbl];
+
+    UI_VIEW = Some(view.clone());
+    UI_WINDOW = Some(window.clone());
+
+    // Verify window state
+    let is_key: Bool = msg_send![&*window, isKeyWindow];
+    let is_hidden: Bool = msg_send![&*window, isHidden];
+    let win_scene: *const AnyObject = msg_send![&*window, windowScene];
+    let win_frame: CGRect = msg_send![&*window, frame];
+    let win_alpha: f64 = msg_send![&*window, alpha];
+    let root_vc: *const AnyObject = msg_send![&*window, rootViewController];
+    let vc_view: *const AnyObject = if !root_vc.is_null() { msg_send![&*root_vc, view] } else { std::ptr::null() };
+
+    // Check scene's windows
+    let scene_windows: *const AnyObject = msg_send![&*scene, windows];
+    let scene_win_count: usize = msg_send![&*scene_windows, count];
+
+    let debug = format!(
+        "window+view created with scene, {}x{}\n\
+         isKey={} isHidden={} alpha={}\n\
+         windowScene={:?} (expected={:?})\n\
+         frame=({},{},{},{})\n\
+         rootVC={:?} vcView={:?}\n\
+         scene.windows.count={}\n",
+        pixel_width, pixel_height,
+        is_key.as_bool(), is_hidden.as_bool(), win_alpha,
+        win_scene, Retained::as_ptr(&scene),
+        win_frame.origin.x, win_frame.origin.y, win_frame.size.width, win_frame.size.height,
+        root_vc, vc_view,
+        scene_win_count,
+    );
+    let _ = std::fs::write("/tmp/bloom_deferred_3.txt", &debug);
+
+    // DEBUG: Add UILabel to verify window visibility (non-Metal)
+    let label_cls = AnyClass::get(c"UILabel").unwrap();
+    let lbl: Allocated<AnyObject> = msg_send![label_cls, alloc];
+    let lf = CGRect { origin: CGPoint { x: 200.0, y: 200.0 }, size: CGSize { width: 600.0, height: 100.0 } };
+    let lbl: Retained<AnyObject> = msg_send![lbl, initWithFrame: lf];
+    let ns = AnyClass::get(c"NSString").unwrap();
+    let txt: Retained<AnyObject> = msg_send![ns, stringWithUTF8String: b"BLOOM JUMP TVOS DEBUG\0".as_ptr()];
+    let _: () = msg_send![&*lbl, setText: &*txt];
+    let white_c: Retained<AnyObject> = msg_send![color_cls, whiteColor];
+    let _: () = msg_send![&*lbl, setTextColor: &*white_c];
+    let red_c: Retained<AnyObject> = msg_send![color_cls, redColor];
+    let _: () = msg_send![&*lbl, setBackgroundColor: &*red_c];
+    let font_cls = AnyClass::get(c"UIFont").unwrap();
+    let fnt: Retained<AnyObject> = msg_send![font_cls, boldSystemFontOfSize: 48.0f64];
+    let _: () = msg_send![&*lbl, setFont: &*fnt];
+    let _: () = msg_send![&*window, addSubview: &*lbl];
+
+    // Create wgpu engine using CAMetalLayer
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::METAL,
+        ..Default::default()
+    });
+
+    let layer_ptr = Retained::as_ptr(&layer) as *mut c_void;
+    let surface = instance.create_surface_unsafe(
+        wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr)
+    ).expect("[bloom-tvos] Failed to create wgpu surface");
+
+    let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&surface),
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    })).expect("[bloom-tvos] No GPU adapter found");
+
+    let (device, queue) = pollster_block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
+        None,
+    )).expect("[bloom-tvos] Failed to create device");
+
+    let surface_caps = surface.get_capabilities(&adapter);
+    let format = surface_caps.formats.iter()
+        .find(|f| !f.is_srgb()).copied()
+        .unwrap_or(surface_caps.formats[0]);
+
+    let surface_config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: pixel_width,
+        height: pixel_height,
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: surface_caps.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(&device, &surface_config);
+
+    let renderer = Renderer::new(device, queue, surface, surface_config);
+    let _ = ENGINE.set(EngineState::new(renderer));
+    let _ = std::fs::write("/tmp/bloom_tvos_debug.txt", format!("ENGINE created\nformat={:?}\nsize={}x{}\n", format, pixel_width, pixel_height));
 }
 
 #[no_mangle]
@@ -869,45 +1038,15 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
     // window synchronously so UIKit knows we handle events. Then dispatch async
     // to attach to the scene (needed for Metal rendering).
     if scene.is_null() {
-        std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] creating window synchronously (no scene)\n").ok();
-        let screen_cls = AnyClass::get(c"UIScreen").unwrap();
-        let screen: Retained<AnyObject> = msg_send![screen_cls, mainScreen];
-        let bounds: CGRect = msg_send![&*screen, bounds];
-        let scale: f64 = msg_send![&*screen, scale];
-        SCREEN_SCALE = scale;
-
-        // BloomWindow overrides sendEvent: to eat press/keyboard events
-        let window_cls = AnyClass::get(c"BloomWindow").unwrap();
-        let w: Allocated<AnyObject> = msg_send![window_cls, alloc];
-        let window: Retained<AnyObject> = msg_send![w, initWithFrame: bounds];
-
-        // BloomViewController is a UIViewController subclass with pressesBegan override
-        let vc_cls = AnyClass::get(c"BloomViewController").unwrap();
-        let vc: Allocated<AnyObject> = msg_send![vc_cls, alloc];
-        let vc: Retained<AnyObject> = msg_send![vc, init];
-
-        let view_cls = AnyClass::get(c"BloomMetalView").unwrap();
-        let v: Allocated<AnyObject> = msg_send![view_cls, alloc];
-        let view: Retained<AnyObject> = msg_send![v, initWithFrame: bounds];
-
-        let color_cls = AnyClass::get(c"UIColor").unwrap();
-        let black: Retained<AnyObject> = msg_send![color_cls, blackColor];
-        let _: () = msg_send![&*view, setBackgroundColor: &*black];
-        let _: () = msg_send![&*view, setUserInteractionEnabled: Bool::YES];
-
-        let _: () = msg_send![&*vc, setView: &*view];
-        let _: () = msg_send![&*window, setRootViewController: &*vc];
-        let _: () = msg_send![&*window, makeKeyAndVisible];
-
-        UI_VIEW = Some(view.clone());
-        UI_WINDOW = Some(window);
-
-        // Now dispatch async to attach to scene and set up Metal
+        // On tvOS, windows MUST be attached to a UIWindowScene to be visible.
+        // Dispatch deferred_init with a delay so the scene is fully connected.
         extern "C" {
             static _dispatch_main_q: c_void;
-            fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: unsafe extern "C" fn(*mut c_void));
+            fn dispatch_after_f(when: u64, queue: *const c_void, context: *mut c_void, work: unsafe extern "C" fn(*mut c_void));
+            fn dispatch_time(when: u64, delta: i64) -> u64;
         }
-        dispatch_async_f(&_dispatch_main_q as *const _, std::ptr::null_mut(), deferred_init);
+        let when = dispatch_time(0, 500_000_000); // 500ms delay
+        dispatch_after_f(when, &_dispatch_main_q as *const _, std::ptr::null_mut(), deferred_init);
         return;
     }
 
@@ -1301,75 +1440,23 @@ pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const
     }
 
     // With --features ios-game-loop, this function runs on the game thread.
-    // UIApplicationMain runs on the main thread. The runtime's scene delegate
-    // calls perry_scene_will_connect() which creates the window, view, wgpu
-    // surface, and ENGINE — all on the main thread. We just wait for it.
-    // Wait for the main thread to set up UIWindow and store the CAMetalLayer pointer
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] waiting for layer...\n").ok();
-    let mut layer_ptr = 0u64;
-    for i in 0..3000 {
-        layer_ptr = SCENE_PTR.load(std::sync::atomic::Ordering::Acquire);
-        if layer_ptr != 0 { break; }
-        if i % 100 == 0 && i > 0 {
-            let msg = format!("[bloom-tvos] still waiting... {}s\n", i / 100);
-            std::io::Write::write_all(&mut std::io::stderr(), msg.as_bytes()).ok();
+    // The engine is created on the main thread by scene_will_connect (like iOS).
+    // Just wait for it here.
+    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] waiting for ENGINE...\n").ok();
+    unsafe {
+        for i in 0..3000 {
+            if ENGINE.get().is_some() { break; }
+            if i % 100 == 0 && i > 0 {
+                let msg = format!("[bloom-tvos] still waiting for ENGINE... {}s\n", i / 100);
+                std::io::Write::write_all(&mut std::io::stderr(), msg.as_bytes()).ok();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        if ENGINE.get().is_none() {
+            panic!("[bloom-tvos] ENGINE not available after 30s");
+        }
     }
-    if layer_ptr == 0 {
-        panic!("[bloom-tvos] CAMetalLayer not available after 30s");
-    }
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] got layer, creating wgpu on game thread\n").ok();
-
-    // Read screen dimensions
-    let dims = SCREEN_DIMS.load(std::sync::atomic::Ordering::Acquire);
-    let pixel_width = (dims >> 32) as u32;
-    let pixel_height = (dims & 0xFFFFFFFF) as u32;
-
-    // Create wgpu surface from the CAMetalLayer on the game thread
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::METAL,
-        ..Default::default()
-    });
-
-    let surface = unsafe { instance.create_surface_unsafe(
-        wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr as *mut std::ffi::c_void)
-    ).expect("[bloom-tvos] Failed to create wgpu surface from CAMetalLayer") };
-
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] requesting adapter\n").ok();
-    let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        compatible_surface: Some(&surface),
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    })).expect("[bloom-tvos] No GPU adapter found");
-
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] requesting device\n").ok();
-    let (device, queue) = pollster_block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
-        None,
-    )).expect("[bloom-tvos] Failed to create device");
-
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] configuring surface\n").ok();
-    let surface_caps = surface.get_capabilities(&adapter);
-    let format = surface_caps.formats.iter()
-        .find(|f| f.is_srgb()).copied()
-        .unwrap_or(surface_caps.formats[0]);
-
-    let surface_config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
-        width: pixel_width,
-        height: pixel_height,
-        present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: surface_caps.alpha_modes[0],
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
-    };
-    surface.configure(&device, &surface_config);
-
-    let renderer = Renderer::new(device, queue, surface, surface_config);
-    unsafe { let _ = ENGINE.set(EngineState::new(renderer)); }
-    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] ENGINE initialized!\n").ok();
+    std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] ENGINE ready on game thread\n").ok();
 
     // Set up GCController monitoring for Siri Remote and game controllers
     setup_game_controllers();
@@ -2394,6 +2481,65 @@ pub extern "C" fn bloom_get_mouse_delta_y() -> f64 {
     engine().input.mouse_delta_y
 }
 
+// Accumulated scroll wheel delta since the last call. Reading consumes the
+// value (returns 0 on the next call until the user scrolls again). Used by
+// the editor's orbit camera and any scrollable UI panel.
+#[no_mangle]
+pub extern "C" fn bloom_get_mouse_wheel() -> f64 {
+    engine().input.consume_mouse_wheel()
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_char_pressed() -> f64 {
+    engine().input.pop_char() as f64
+}
+
+// Q2: Cursor shape
+#[no_mangle]
+pub extern "C" fn bloom_set_cursor_shape(shape: f64) {
+    engine().input.cursor_shape = shape as u32;
+}
+
+// E4: Clipboard (stub on this platform)
+#[no_mangle]
+pub extern "C" fn bloom_set_clipboard_text(_text_ptr: *const u8) {}
+#[no_mangle]
+pub extern "C" fn bloom_get_clipboard_text() -> *const u8 { std::ptr::null() }
+
+// E5b: File dialogs (stub on this platform)
+#[no_mangle]
+pub extern "C" fn bloom_open_file_dialog(_filter_ptr: *const u8, _title_ptr: *const u8) -> *const u8 { std::ptr::null() }
+#[no_mangle]
+pub extern "C" fn bloom_save_file_dialog(_default_name_ptr: *const u8, _title_ptr: *const u8) -> *const u8 { std::ptr::null() }
+
+// Model bounds accessors. Return the axis-aligned bounding box of a loaded
+// model in model-local coordinates. Editors use these to size gizmos, auto-
+// frame the camera on selection, and snap placed entities onto terrain.
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_x(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).0[0] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_y(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).0[1] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_z(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).0[2] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_x(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).1[0] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_y(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).1[1] as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_z(model_handle: f64) -> f64 {
+    engine().models.get_bounds(model_handle).1[2] as f64
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_write_file(path_ptr: *const u8, data_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
@@ -2477,6 +2623,35 @@ pub extern "C" fn bloom_run_game(_callback: extern "C" fn(f64)) {
     // No-op on native. The TypeScript runGame() helper provides the while loop.
 }
 
+
+// Q6: Multi-hit picking
+static mut LAST_PICK_ALL: Vec<bloom_shared::picking::PickResult> = Vec::new();
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_pick_all(screen_x: f64, screen_y: f64, max_results: f64) -> f64 {
+    let eng = engine();
+    let inv_vp = eng.renderer.inverse_vp_matrix();
+    let cam_pos = eng.renderer.camera_pos();
+    let w = eng.renderer.width() as f32;
+    let h = eng.renderer.height() as f32;
+    let (origin, direction) = bloom_shared::picking::screen_to_ray(
+        screen_x as f32, screen_y as f32, w, h, &inv_vp, &cam_pos,
+    );
+    let results = bloom_shared::picking::raycast_scene_all(&eng.scene, &origin, &direction, max_results as usize);
+    let count = results.len();
+    unsafe { LAST_PICK_ALL = results; }
+    count as f64
+}
+#[no_mangle]
+pub extern "C" fn bloom_pick_all_handle(index: f64) -> f64 {
+    let i = index as usize;
+    unsafe { LAST_PICK_ALL.get(i).map(|r| r.handle).unwrap_or(0.0) }
+}
+#[no_mangle]
+pub extern "C" fn bloom_pick_all_distance(index: f64) -> f64 {
+    let i = index as usize;
+    unsafe { LAST_PICK_ALL.get(i).map(|r| r.distance as f64).unwrap_or(0.0) }
+}
 // ============================================================
 // Physics (Rapier 3D)
 // ============================================================
@@ -2953,6 +3128,70 @@ pub extern "C" fn bloom_physics_create_prismatic_joint(
     0.0
 }
 
+
+// Q8: Set a water material on a scene node (translucent tint, low roughness).
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_water(handle: f64, wave_amp: f64, wave_speed: f64, r: f64, g: f64, b: f64, a: f64) {
+    engine().scene.set_material_water(handle, wave_amp as f32, wave_speed as f32, r as f32, g as f32, b as f32, a as f32);
+}
+
+// Q9: Generate a ribbon mesh along a Catmull-Rom spline.
+#[no_mangle]
+pub extern "C" fn bloom_gen_mesh_spline_ribbon(points_ptr: *const u8, point_count: f64, widths_ptr: *const u8, width_count: f64) -> f64 {
+    let n = point_count as usize;
+    let wn = width_count as usize;
+    let points = unsafe { std::slice::from_raw_parts(points_ptr as *const f32, n * 3) };
+    let widths = unsafe { std::slice::from_raw_parts(widths_ptr as *const f32, wn) };
+    engine().models.gen_mesh_spline_ribbon(points, widths)
+}
+
+// Q1: Render texture FFI (stub — GPU implementation deferred).
+#[no_mangle]
+pub extern "C" fn bloom_load_render_texture(width: f64, height: f64) -> f64 {
+    engine().textures.load_render_texture(width as u32, height as u32)
+}
+#[no_mangle]
+pub extern "C" fn bloom_unload_render_texture(handle: f64) {
+    engine().textures.unload_render_texture(handle);
+}
+#[no_mangle]
+pub extern "C" fn bloom_begin_texture_mode(_handle: f64) {
+    // Stub: no-op until GPU render-to-texture is wired.
+}
+#[no_mangle]
+pub extern "C" fn bloom_end_texture_mode() {
+    // Stub: no-op.
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_render_texture_texture(handle: f64) -> f64 {
+    engine().textures.get_render_texture_texture(handle)
+}
+
+// Scene graph QoL — Q4/Q5/Q6/Q7
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_transform(handle: f64, index: f64) -> f64 {
+    let mat = engine().scene.get_transform(handle);
+    let i = index as usize;
+    let col = i / 4;
+    let row = i % 4;
+    if col < 4 && row < 4 { mat[col][row] as f64 } else { 0.0 }
+}
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[0] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[1] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[2] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[0] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[1] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[2] as f64 }
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_user_data(handle: f64, data: f64) { engine().scene.set_user_data(handle, data as i64); }
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_user_data(handle: f64) -> f64 { engine().scene.get_user_data(handle) as f64 }
 #[no_mangle]
 pub extern "C" fn bloom_physics_destroy_joint(handle: f64) {
     #[cfg(feature = "physics")]
