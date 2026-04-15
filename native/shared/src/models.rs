@@ -5,6 +5,13 @@ pub struct MeshData {
     pub vertices: Vec<Vertex3D>,
     pub indices: Vec<u32>,
     pub texture_idx: Option<u32>,
+    pub normal_texture_idx: Option<u32>,
+    pub metallic_roughness_texture_idx: Option<u32>,
+    pub emissive_texture_idx: Option<u32>,
+    pub occlusion_texture_idx: Option<u32>,
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+    pub emissive_factor: [f32; 3],
 }
 
 pub struct ModelData {
@@ -26,7 +33,9 @@ pub struct AnimationChannel {
     pub joint_index: usize,
     pub timestamps: Vec<f32>,
     pub translations: Vec<[f32; 3]>,
+    pub rotation_timestamps: Vec<f32>,
     pub rotations: Vec<[f32; 4]>,
+    pub scale_timestamps: Vec<f32>,
     pub scales: Vec<[f32; 3]>,
 }
 
@@ -79,6 +88,18 @@ impl ModelManager {
 
     pub fn get(&self, handle: f64) -> Option<&ModelData> {
         self.models.get(handle)
+    }
+
+    /// Return the axis-aligned bounding box of a loaded model as
+    /// `(min_xyz, max_xyz)`. Used by editors to size move/rotate gizmos,
+    /// auto-frame the camera on selection, and snap placed entities onto
+    /// terrain. Returns the origin for unknown handles so callers can read
+    /// without checking for None.
+    pub fn get_bounds(&self, handle: f64) -> ([f32; 3], [f32; 3]) {
+        match self.models.get(handle) {
+            Some(model) => (model.bbox_min, model.bbox_max),
+            None => ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+        }
     }
 
     pub fn get_animation(&self, handle: f64) -> Option<&ModelAnimation> {
@@ -136,6 +157,7 @@ impl ModelManager {
             uv: *uv,
             joints: [0.0; 4],
             weights: [0.0; 4],
+            tangent: [0.0; 4],
         }).collect();
 
         let mut indices = Vec::with_capacity(36);
@@ -145,7 +167,7 @@ impl ModelManager {
         }
 
         let model = ModelData {
-            meshes: vec![MeshData { vertices, indices, texture_idx: None }],
+            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] }],
             bbox_min: [-hw, -hh, -hd],
             bbox_max: [hw, hh, hd],
         };
@@ -184,6 +206,7 @@ impl ModelManager {
                     uv: [u, v],
                     joints: [0.0; 4],
                     weights: [0.0; 4],
+                    tangent: [0.0; 4],
                 });
             }
         }
@@ -217,7 +240,7 @@ impl ModelManager {
         }
 
         let model = ModelData {
-            meshes: vec![MeshData { vertices, indices, texture_idx: None }],
+            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] }],
             bbox_min: [-size_x * 0.5, 0.0, -size_z * 0.5],
             bbox_max: [size_x * 0.5, size_y, size_z * 0.5],
         };
@@ -249,12 +272,122 @@ impl ModelManager {
                 uv: [vertex_data[o+10], vertex_data[o+11]],
                 joints: [0.0; 4],
                 weights: [0.0; 4],
+                tangent: [0.0; 4],
             });
         }
 
         let indices = index_data.to_vec();
         let model = ModelData {
-            meshes: vec![MeshData { vertices, indices, texture_idx: None }],
+            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] }],
+            bbox_min,
+            bbox_max,
+        };
+        self.models.alloc(model)
+    }
+
+    /// Q9: Generate a ribbon mesh along a Catmull-Rom spline. Used by the
+    /// editor's river tool. `points` is flat [x0,y0,z0, x1,y1,z1, ...],
+    /// `widths` has one width per control point.
+    pub fn gen_mesh_spline_ribbon(&mut self, points: &[f32], widths: &[f32]) -> f64 {
+        let n = points.len() / 3;
+        if n < 2 || widths.len() < n { return 0.0; }
+
+        // Evaluate Catmull-Rom at fine intervals.
+        let segments = (n - 1) * 8; // 8 subdivisions per segment.
+        let mut center_pts: Vec<[f32; 3]> = Vec::with_capacity(segments + 1);
+        let mut center_widths: Vec<f32> = Vec::with_capacity(segments + 1);
+
+        for i in 0..n - 1 {
+            for sub in 0..8 {
+                let t = sub as f32 / 8.0;
+                let p = catmull_rom_point(points, n, i, t);
+                let w = widths[i] * (1.0 - t) + widths[i + 1] * t;
+                center_pts.push(p);
+                center_widths.push(w);
+            }
+        }
+        // Add the last point.
+        let last = n - 1;
+        center_pts.push([points[last * 3], points[last * 3 + 1], points[last * 3 + 2]]);
+        center_widths.push(widths[last]);
+
+        // Build ribbon vertices (two per center point: left and right).
+        let ribbon_len = center_pts.len();
+        let mut vertices = Vec::with_capacity(ribbon_len * 2);
+        let mut bbox_min = [f32::MAX; 3];
+        let mut bbox_max = [f32::MIN; 3];
+        let white = [0.3, 0.5, 0.8, 0.7]; // Water-blue tint.
+
+        for i in 0..ribbon_len {
+            // Tangent direction.
+            let tangent = if i < ribbon_len - 1 {
+                let dx = center_pts[i + 1][0] - center_pts[i][0];
+                let dz = center_pts[i + 1][2] - center_pts[i][2];
+                let len = (dx * dx + dz * dz).sqrt().max(1e-6);
+                [dx / len, dz / len]
+            } else if i > 0 {
+                let dx = center_pts[i][0] - center_pts[i - 1][0];
+                let dz = center_pts[i][2] - center_pts[i - 1][2];
+                let len = (dx * dx + dz * dz).sqrt().max(1e-6);
+                [dx / len, dz / len]
+            } else {
+                [0.0, 1.0]
+            };
+
+            // Perpendicular in XZ plane (rotate tangent 90 degrees).
+            let perp = [-tangent[1], tangent[0]];
+            let hw = center_widths[i] * 0.5;
+            let cp = center_pts[i];
+            let u = i as f32 / (ribbon_len - 1).max(1) as f32;
+
+            // Left vertex.
+            let lx = cp[0] + perp[0] * hw;
+            let ly = cp[1];
+            let lz = cp[2] + perp[1] * hw;
+            update_bounds(&mut bbox_min, &mut bbox_max, lx, ly, lz);
+            vertices.push(Vertex3D {
+                position: [lx, ly, lz],
+                normal: [0.0, 1.0, 0.0],
+                color: white,
+                uv: [u, 0.0],
+                joints: [0.0; 4],
+                weights: [0.0; 4],
+                tangent: [0.0; 4],
+            });
+
+            // Right vertex.
+            let rx = cp[0] - perp[0] * hw;
+            let ry = cp[1];
+            let rz = cp[2] - perp[1] * hw;
+            update_bounds(&mut bbox_min, &mut bbox_max, rx, ry, rz);
+            vertices.push(Vertex3D {
+                position: [rx, ry, rz],
+                normal: [0.0, 1.0, 0.0],
+                color: white,
+                uv: [u, 1.0],
+                joints: [0.0; 4],
+                weights: [0.0; 4],
+                tangent: [0.0; 4],
+            });
+        }
+
+        // Triangle strip indices.
+        let mut indices = Vec::with_capacity((ribbon_len - 1) * 6);
+        for i in 0..(ribbon_len - 1) as u32 {
+            let bl = i * 2;
+            let br = bl + 1;
+            let tl = bl + 2;
+            let tr = bl + 3;
+            indices.extend_from_slice(&[bl, tl, br, br, tl, tr]);
+        }
+
+        if vertices.is_empty() {
+            bbox_min = [0.0; 3];
+            bbox_max = [0.0; 3];
+        }
+
+        let model = ModelData {
+            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] }],
             bbox_min,
             bbox_max,
         };
@@ -303,11 +436,17 @@ impl ModelManager {
                 if !channel.translations.is_empty() && !channel.timestamps.is_empty() {
                     local_translations[ji] = sample_vec3(&channel.timestamps, &channel.translations, t);
                 }
-                if !channel.rotations.is_empty() && !channel.timestamps.is_empty() {
-                    local_rotations[ji] = sample_quat(&channel.timestamps, &channel.rotations, t);
+                if !channel.rotations.is_empty() {
+                    let rot_ts = if !channel.rotation_timestamps.is_empty() { &channel.rotation_timestamps } else { &channel.timestamps };
+                    if !rot_ts.is_empty() {
+                        local_rotations[ji] = sample_quat(rot_ts, &channel.rotations, t);
+                    }
                 }
-                if !channel.scales.is_empty() && !channel.timestamps.is_empty() {
-                    local_scales[ji] = sample_vec3(&channel.timestamps, &channel.scales, t);
+                if !channel.scales.is_empty() {
+                    let scale_ts = if !channel.scale_timestamps.is_empty() { &channel.scale_timestamps } else { &channel.timestamps };
+                    if !scale_ts.is_empty() {
+                        local_scales[ji] = sample_vec3(scale_ts, &channel.scales, t);
+                    }
                 }
             }
 
@@ -372,6 +511,82 @@ fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
         }
     }
     out
+}
+
+/// Walk a glTF scene subtree, composing node transforms down and
+/// recording the world transform of the first node that instances
+/// each mesh. Used by the loader to bake mesh-local vertices into
+/// world space so the realtime render matches reference framings.
+fn walk_scene_for_mesh_transforms(
+    node: &gltf::Node,
+    parent: &[[f32; 4]; 4],
+    out: &mut [Option<[[f32; 4]; 4]>],
+) {
+    let local = node.transform().matrix();
+    let world = mat4_mul(parent, &local);
+    if let Some(mesh) = node.mesh() {
+        let idx = mesh.index();
+        if idx < out.len() && out[idx].is_none() {
+            out[idx] = Some(world);
+        }
+    }
+    for child in node.children() {
+        walk_scene_for_mesh_transforms(&child, &world, out);
+    }
+}
+
+/// Transform a 3D point by a 4x4 matrix (column-major). Treats the
+/// point as having w=1 and drops w from the result.
+fn mat4_transform_point(m: &[[f32; 4]; 4], p: &[f32; 3]) -> [f32; 3] {
+    [
+        m[0][0]*p[0] + m[1][0]*p[1] + m[2][0]*p[2] + m[3][0],
+        m[0][1]*p[0] + m[1][1]*p[1] + m[2][1]*p[2] + m[3][1],
+        m[0][2]*p[0] + m[1][2]*p[1] + m[2][2]*p[2] + m[3][2],
+    ]
+}
+
+/// Transform a direction vector by a 3x3 matrix (extracted from a 4x4
+/// column-major stored as the top-left 3x3). Used for normals under
+/// the inverse-transpose matrix.
+fn mat3_transform_vec(m: &[[f32; 3]; 3], v: &[f32; 3]) -> [f32; 3] {
+    [
+        m[0][0]*v[0] + m[1][0]*v[1] + m[2][0]*v[2],
+        m[0][1]*v[0] + m[1][1]*v[1] + m[2][1]*v[2],
+        m[0][2]*v[0] + m[1][2]*v[1] + m[2][2]*v[2],
+    ]
+}
+
+/// Inverse-transpose of the 3x3 rotation+scale part of a 4x4 matrix.
+/// Correct way to transform normals when the matrix has non-uniform
+/// scale; falls back to identity if the 3x3 block isn't invertible.
+fn mat4_inverse_transpose_3x3(m: &[[f32; 4]; 4]) -> [[f32; 3]; 3] {
+    let a = m[0][0]; let b = m[1][0]; let c = m[2][0];
+    let d = m[0][1]; let e = m[1][1]; let f = m[2][1];
+    let g = m[0][2]; let h = m[1][2]; let i = m[2][2];
+
+    let inv00 =  e*i - f*h;
+    let inv01 =  f*g - d*i;
+    let inv02 =  d*h - e*g;
+    let inv10 =  c*h - b*i;
+    let inv11 =  a*i - c*g;
+    let inv12 =  b*g - a*h;
+    let inv20 =  b*f - c*e;
+    let inv21 =  c*d - a*f;
+    let inv22 =  a*e - b*d;
+
+    let det = a*inv00 + b*inv01 + c*inv02;
+    if det.abs() < 1e-10 {
+        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    }
+    let inv_det = 1.0 / det;
+    // Store in column-major like the rest of the file (columns first).
+    // The result is the inverse-transpose, so rows/cols are swapped
+    // from the plain inverse.
+    [
+        [inv00 * inv_det, inv01 * inv_det, inv02 * inv_det],
+        [inv10 * inv_det, inv11 * inv_det, inv12 * inv_det],
+        [inv20 * inv_det, inv21 * inv_det, inv22 * inv_det],
+    ]
 }
 
 fn mat4_from_trs(t: &[f32; 3], r: &[f32; 4], s: &[f32; 3]) -> [[f32; 4]; 4] {
@@ -666,8 +881,8 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
             std::collections::HashMap::new()
         };
 
-        // Group channels by target node
-        let mut node_channels: std::collections::HashMap<usize, (Vec<f32>, Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<[f32; 3]>)> = std::collections::HashMap::new();
+        // Group channels by target node: (trans_ts, translations, rot_ts, rotations, scale_ts, scales)
+        let mut node_channels: std::collections::HashMap<usize, (Vec<f32>, Vec<[f32; 3]>, Vec<f32>, Vec<[f32; 4]>, Vec<f32>, Vec<[f32; 3]>)> = std::collections::HashMap::new();
 
         #[cfg(debug_assertions)]
         let mut skipped_channels = 0usize;
@@ -712,7 +927,7 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
                 if last > duration { duration = last; }
             }
 
-            let entry = node_channels.entry(joint_index).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+            let entry = node_channels.entry(joint_index).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
 
             match channel.target().property() {
                 gltf::animation::Property::Translation => {
@@ -720,23 +935,33 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
                     entry.1 = values.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
                 }
                 gltf::animation::Property::Rotation => {
-                    if entry.0.is_empty() { entry.0 = timestamps; }
-                    entry.2 = values.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+                    entry.2 = timestamps;
+                    entry.3 = values.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
                 }
                 gltf::animation::Property::Scale => {
-                    if entry.0.is_empty() { entry.0 = timestamps; }
-                    entry.3 = values.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
+                    entry.4 = timestamps;
+                    entry.5 = values.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
                 }
                 _ => {}
             }
         }
 
-        for (joint_index, (timestamps, translations, rotations, scales)) in node_channels {
+        for (joint_index, (trans_ts, translations, rot_ts, rotations, scale_ts, scales)) in node_channels {
+            // Use the longest timestamp array as the primary (for backward compat)
+            let timestamps = if rot_ts.len() >= trans_ts.len() && rot_ts.len() >= scale_ts.len() {
+                rot_ts.clone()
+            } else if trans_ts.len() >= scale_ts.len() {
+                trans_ts.clone()
+            } else {
+                scale_ts.clone()
+            };
             channels.push(AnimationChannel {
                 joint_index,
                 timestamps,
                 translations,
+                rotation_timestamps: rot_ts,
                 rotations,
+                scale_timestamps: scale_ts,
                 scales,
             });
         }
@@ -890,7 +1115,29 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
     let mut bbox_min = [f32::MAX; 3];
     let mut bbox_max = [f32::MIN; 3];
 
+    // Walk the scene node tree to collect the world-space transform
+    // for each mesh index. glTF meshes live in a "mesh-local" frame
+    // and get re-oriented via their node's transform. Without applying
+    // these during load, a model like DamagedHelmet would render in
+    // the wrong pose compared to any renderer that walks the tree
+    // properly (e.g. the bloom-reference path tracer). We record the
+    // first node that references each mesh; instanced meshes (same
+    // mesh under multiple nodes) fall back to the first-seen pose,
+    // which is good enough for static scenes. Animated / skinned
+    // meshes are unaffected — the armature transforms apply on top.
+    let mesh_count = gltf.meshes().count();
+    let mut mesh_world_transform: Vec<Option<[[f32; 4]; 4]>> = vec![None; mesh_count];
+    let identity = [[1.0f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    for scene in gltf.scenes() {
+        for node in scene.nodes() {
+            walk_scene_for_mesh_transforms(&node, &identity, &mut mesh_world_transform);
+        }
+    }
+
     for mesh in gltf.meshes() {
+        let mesh_world = mesh_world_transform[mesh.index()];
+        // Inverse-transpose 3×3 for normals under non-uniform scale.
+        let normal_xform = mesh_world.map(|m| mat4_inverse_transpose_3x3(&m));
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
             let positions: Vec<[f32; 3]> = match reader.read_positions() {
@@ -903,20 +1150,39 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
             let tex_coords: Vec<[f32; 2]> = reader.read_tex_coords(0)
                 .map(|iter| iter.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+            // Tangents (vec4: xyz = tangent, w = bitangent sign ±1).
+            // If absent, we leave them as zero so the shader knows to
+            // skip normal-map perturbation for this mesh.
+            let tangents: Vec<[f32; 4]> = reader.read_tangents()
+                .map(|iter| iter.collect())
+                .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
 
             // Get vertex colors if available
             let vert_colors: Option<Vec<[f32; 4]>> = reader.read_colors(0)
                 .map(|iter| iter.into_rgba_f32().collect());
 
-            let base_color = primitive.material().pbr_metallic_roughness().base_color_factor();
+            let mat = primitive.material();
+            let pbr = mat.pbr_metallic_roughness();
+            let base_color = pbr.base_color_factor();
+            let metallic_factor = pbr.metallic_factor();
+            let roughness_factor = pbr.roughness_factor();
+            let emissive_factor = mat.emissive_factor();
 
-            // Determine texture index for this mesh
-            let tex_idx = primitive.material().pbr_metallic_roughness()
-                .base_color_texture()
-                .and_then(|info| {
-                    let img_idx = info.texture().source().index();
-                    texture_indices.get(img_idx).copied()
-                });
+            let tex_idx_of = |img_idx: usize| -> Option<u32> {
+                texture_indices.get(img_idx).copied()
+            };
+
+            // Material textures (all optional)
+            let tex_idx = pbr.base_color_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
+            let normal_tex_idx = mat.normal_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
+            let mr_tex_idx = pbr.metallic_roughness_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
+            let emissive_tex_idx = mat.emissive_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
+            let occlusion_tex_idx = mat.occlusion_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
 
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
@@ -948,25 +1214,76 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
                 };
                 // Apply inverse armature scale to skinned vertex positions
                 let is_skinned = wv[0] + wv[1] + wv[2] + wv[3] > 0.01;
-                let final_pos = if is_skinned && (skin_vertex_scale - 1.0).abs() > 0.01 {
+                let base_pos = if is_skinned && (skin_vertex_scale - 1.0).abs() > 0.01 {
                     [p[0] * skin_vertex_scale, p[1] * skin_vertex_scale, p[2] * skin_vertex_scale]
                 } else {
                     p
                 };
+                // Bake the mesh's scene node transform into world-space
+                // position/normal. Skinned meshes are NOT world-baked:
+                // their node transform is expected to be consumed by the
+                // armature, and the pose is driven by joint matrices at
+                // draw time. Static (non-skinned) meshes get the baked
+                // transform so drawModel's position/scale arguments
+                // apply on top of the correct base pose.
+                let (final_pos, final_normal, final_tangent) = if is_skinned {
+                    (base_pos, normals[i], tangents[i])
+                } else if let Some(xform) = mesh_world {
+                    let t_in = [tangents[i][0], tangents[i][1], tangents[i][2]];
+                    let t_out = match normal_xform {
+                        // Tangents transform like positions (as directions)
+                        // under the linear part of the transform — we use
+                        // the upper 3×3 of the model matrix, not its
+                        // inverse-transpose. But since our mesh_world is
+                        // rigid-ish (no shear), the normal_xform gets us
+                        // close enough for the common case. For a purely
+                        // orthonormal node transform these are identical.
+                        Some(ref n) => mat3_transform_vec(n, &t_in),
+                        None => t_in,
+                    };
+                    (
+                        mat4_transform_point(&xform, &base_pos),
+                        match normal_xform {
+                            Some(ref n) => mat3_transform_vec(n, &normals[i]),
+                            None => normals[i],
+                        },
+                        [t_out[0], t_out[1], t_out[2], tangents[i][3]],
+                    )
+                } else {
+                    (base_pos, normals[i], tangents[i])
+                };
+                // Update bbox to reflect the final (possibly transformed)
+                // position so the camera auto-framing still works right.
+                for k in 0..3 {
+                    if final_pos[k] < bbox_min[k] { bbox_min[k] = final_pos[k]; }
+                    if final_pos[k] > bbox_max[k] { bbox_max[k] = final_pos[k]; }
+                }
                 vertices.push(Vertex3D {
                     position: final_pos,
-                    normal: normals[i],
+                    normal: final_normal,
                     color,
                     uv: tex_coords[i],
                     joints: jv,
                     weights: wv,
+                    tangent: final_tangent,
                 });
             }
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(iter) => iter.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
             };
-            meshes.push(MeshData { vertices, indices, texture_idx: tex_idx });
+            meshes.push(MeshData {
+                vertices,
+                indices,
+                texture_idx: tex_idx,
+                normal_texture_idx: normal_tex_idx,
+                metallic_roughness_texture_idx: mr_tex_idx,
+                emissive_texture_idx: emissive_tex_idx,
+                occlusion_texture_idx: occlusion_tex_idx,
+                metallic_factor,
+                roughness_factor,
+                emissive_factor,
+            });
         }
     }
 
@@ -1096,17 +1413,34 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
             let tex_coords: Vec<[f32; 2]> = reader.read_tex_coords(0)
                 .map(|iter| iter.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+            let tangents: Vec<[f32; 4]> = reader.read_tangents()
+                .map(|iter| iter.collect())
+                .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
             let vert_colors: Option<Vec<[f32; 4]>> = reader.read_colors(0)
                 .map(|iter| iter.into_rgba_f32().collect());
-            let base_color = primitive.material().pbr_metallic_roughness().base_color_factor();
+
+            let mat = primitive.material();
+            let pbr = mat.pbr_metallic_roughness();
+            let base_color = pbr.base_color_factor();
+            let metallic_factor = pbr.metallic_factor();
+            let roughness_factor = pbr.roughness_factor();
+            let emissive_factor = mat.emissive_factor();
+
+            let tex_idx_of = |img_idx: usize| -> Option<u32> {
+                texture_indices.get(img_idx).copied()
+            };
 
             // texture_idx stores a 1-based index into staged_textures (remapped on commit)
-            let tex_idx = primitive.material().pbr_metallic_roughness()
-                .base_color_texture()
-                .and_then(|info| {
-                    let img_idx = info.texture().source().index();
-                    texture_indices.get(img_idx).copied()
-                });
+            let tex_idx = pbr.base_color_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
+            let normal_tex_idx = mat.normal_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
+            let mr_tex_idx = pbr.metallic_roughness_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
+            let emissive_tex_idx = mat.emissive_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
+            let occlusion_tex_idx = mat.occlusion_texture()
+                .and_then(|info| tex_idx_of(info.texture().source().index()));
 
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
@@ -1143,13 +1477,25 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                     uv: tex_coords[i],
                     joints: jv,
                     weights: wv,
+                    tangent: tangents[i],
                 });
             }
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(iter) => iter.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
             };
-            meshes.push(MeshData { vertices, indices, texture_idx: tex_idx });
+            meshes.push(MeshData {
+                vertices,
+                indices,
+                texture_idx: tex_idx,
+                normal_texture_idx: normal_tex_idx,
+                metallic_roughness_texture_idx: mr_tex_idx,
+                emissive_texture_idx: emissive_tex_idx,
+                occlusion_texture_idx: occlusion_tex_idx,
+                metallic_factor,
+                roughness_factor,
+                emissive_factor,
+            });
         }
     }
 
@@ -1235,6 +1581,7 @@ fn load_gltf(data: &[u8]) -> Option<ModelData> {
                     uv: tex_coords[i],
                     joints: jv,
                     weights: wv,
+                    tangent: [0.0; 4],
                 });
             }
 
@@ -1243,7 +1590,7 @@ fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 None => (0..positions.len() as u32).collect(),
             };
 
-            meshes.push(MeshData { vertices, indices, texture_idx: None });
+            meshes.push(MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] });
         }
     }
 
@@ -1272,4 +1619,42 @@ fn base64_decode(input: &str, output: &mut Vec<u8>) {
             buf &= (1 << bits) - 1;
         }
     }
+}
+
+// ---- Catmull-Rom spline helpers (Q9) ----
+
+fn catmull_rom_point(points: &[f32], n: usize, segment: usize, t: f32) -> [f32; 3] {
+    // Indices: p0 = segment - 1, p1 = segment, p2 = segment + 1, p3 = segment + 2.
+    // Clamp at boundaries.
+    let i0 = if segment > 0 { segment - 1 } else { 0 };
+    let i1 = segment;
+    let i2 = if segment + 1 < n { segment + 1 } else { n - 1 };
+    let i3 = if segment + 2 < n { segment + 2 } else { n - 1 };
+
+    let p0 = [points[i0 * 3], points[i0 * 3 + 1], points[i0 * 3 + 2]];
+    let p1 = [points[i1 * 3], points[i1 * 3 + 1], points[i1 * 3 + 2]];
+    let p2 = [points[i2 * 3], points[i2 * 3 + 1], points[i2 * 3 + 2]];
+    let p3 = [points[i3 * 3], points[i3 * 3 + 1], points[i3 * 3 + 2]];
+
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let mut out = [0.0f32; 3];
+    for k in 0..3 {
+        out[k] = 0.5 * (
+            (2.0 * p1[k]) +
+            (-p0[k] + p2[k]) * t +
+            (2.0 * p0[k] - 5.0 * p1[k] + 4.0 * p2[k] - p3[k]) * t2 +
+            (-p0[k] + 3.0 * p1[k] - 3.0 * p2[k] + p3[k]) * t3
+        );
+    }
+    out
+}
+
+fn update_bounds(bmin: &mut [f32; 3], bmax: &mut [f32; 3], x: f32, y: f32, z: f32) {
+    if x < bmin[0] { bmin[0] = x; }
+    if y < bmin[1] { bmin[1] = y; }
+    if z < bmin[2] { bmin[2] = z; }
+    if x > bmax[0] { bmax[0] = x; }
+    if y > bmax[1] { bmax[1] = y; }
+    if z > bmax[2] { bmax[2] = z; }
 }

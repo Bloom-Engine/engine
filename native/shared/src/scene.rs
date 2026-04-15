@@ -21,6 +21,14 @@ pub struct PbrMaterial {
     pub emissive: [f32; 3],
     pub double_sided: bool,
     pub texture_idx: u32,
+    /// Normal-map texture. 0 means "no normal map" — scene shader falls
+    /// back to the geometric normal. Stored as a texture index rather
+    /// than bind group so the renderer can build per-material bind
+    /// groups lazily without SceneGraph holding GPU references.
+    pub normal_texture_idx: u32,
+    pub metallic_roughness_texture_idx: u32,
+    pub emissive_texture_idx: u32,
+    pub occlusion_texture_idx: u32,
 }
 
 impl Default for PbrMaterial {
@@ -33,6 +41,10 @@ impl Default for PbrMaterial {
             emissive: [0.0, 0.0, 0.0],
             double_sided: false,
             texture_idx: 0,
+            normal_texture_idx: 0,
+            metallic_roughness_texture_idx: 0,
+            emissive_texture_idx: 0,
+            occlusion_texture_idx: 0,
         }
     }
 }
@@ -65,12 +77,26 @@ pub struct SceneNode {
     pub cast_shadow: bool,
     pub receive_shadow: bool,
     pub parent: f64,
+    // Editor user data — an arbitrary i64 attached to the node. The editor
+    // uses this to store the entity id directly on the scene node so picking
+    // can return the entity id without a handle → id map lookup (Q7).
+    pub user_data: i64,
+    // Cached world-space AABB, recomputed when geometry changes (Q5).
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
     // GPU resources (lazily created)
     pub gpu_vb: Option<wgpu::Buffer>,
     pub gpu_ib: Option<wgpu::Buffer>,
     pub gpu_index_count: u32,
     gpu_uniform_buf: Option<wgpu::Buffer>,
     gpu_uniform_bg: Option<wgpu::BindGroup>,
+    /// Material bind group for the scene pipeline — holds base color,
+    /// normal, metallic-roughness and emissive texture views in one
+    /// group. Rebuilt whenever one of the material texture indices
+    /// changes (tracked via `mat_dirty`).
+    pub gpu_material_bg: Option<wgpu::BindGroup>,
+    pub gpu_material_uniform_buf: Option<wgpu::Buffer>,
+    pub mat_dirty: bool,
     geo_dirty: bool,
 }
 
@@ -85,11 +111,17 @@ impl SceneNode {
             cast_shadow: true,
             receive_shadow: true,
             parent: 0.0,
+            user_data: 0,
+            bounds_min: [0.0; 3],
+            bounds_max: [0.0; 3],
             gpu_vb: None,
             gpu_ib: None,
             gpu_index_count: 0,
             gpu_uniform_buf: None,
             gpu_uniform_bg: None,
+            gpu_material_bg: None,
+            gpu_material_uniform_buf: None,
+            mat_dirty: true,
             geo_dirty: true,
         }
     }
@@ -150,9 +182,59 @@ impl SceneGraph {
 
     pub fn update_geometry(&mut self, handle: f64, vertices: Vec<Vertex3D>, indices: Vec<u32>) {
         if let Some(node) = self.nodes.get_mut(handle) {
+            // Recompute bounds from vertex positions (Q5).
+            let mut bmin = [f32::MAX; 3];
+            let mut bmax = [f32::MIN; 3];
+            for v in &vertices {
+                for k in 0..3 {
+                    if v.position[k] < bmin[k] { bmin[k] = v.position[k]; }
+                    if v.position[k] > bmax[k] { bmax[k] = v.position[k]; }
+                }
+            }
+            if vertices.is_empty() {
+                bmin = [0.0; 3];
+                bmax = [0.0; 3];
+            }
+            node.bounds_min = bmin;
+            node.bounds_max = bmax;
             node.vertices = vertices;
             node.indices = indices;
             node.geo_dirty = true;
+        }
+    }
+
+    // ---- Q4: transform read-back -------------------------------------------
+
+    /// Read back the current 4x4 transform matrix of a scene node.
+    pub fn get_transform(&self, handle: f64) -> [[f32; 4]; 4] {
+        match self.nodes.get(handle) {
+            Some(node) => node.transform,
+            None => crate::renderer::IDENTITY_MAT4,
+        }
+    }
+
+    // ---- Q5: world-space bounds query --------------------------------------
+
+    /// Return the cached AABB of a scene node's geometry (local space).
+    pub fn get_bounds(&self, handle: f64) -> ([f32; 3], [f32; 3]) {
+        match self.nodes.get(handle) {
+            Some(node) => (node.bounds_min, node.bounds_max),
+            None => ([0.0; 3], [0.0; 3]),
+        }
+    }
+
+    // ---- Q7: user data -----------------------------------------------------
+
+    pub fn set_user_data(&mut self, handle: f64, data: i64) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.user_data = data;
+        }
+    }
+
+    pub fn get_user_data(&self, handle: f64) -> i64 {
+        match self.nodes.get(handle) {
+            Some(node) => node.user_data,
+            None => 0,
         }
     }
 
@@ -170,9 +252,50 @@ impl SceneGraph {
         }
     }
 
+    /// Q8: Set a water-like material on a scene node. The actual animated
+    /// wave shader requires a dedicated WGSL pipeline pass (deferred).
+    /// For now, this sets a translucent tinted material that approximates water.
+    pub fn set_material_water(&mut self, handle: f64, _wave_amp: f32, _wave_speed: f32, r: f32, g: f32, b: f32, a: f32) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.material.color = [r, g, b];
+            node.material.opacity = a;
+            node.material.roughness = 0.1;
+            node.material.metalness = 0.3;
+        }
+    }
+
     pub fn set_material_texture(&mut self, handle: f64, texture_idx: u32) {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.material.texture_idx = texture_idx;
+            node.mat_dirty = true;
+        }
+    }
+
+    pub fn set_material_normal_texture(&mut self, handle: f64, texture_idx: u32) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.material.normal_texture_idx = texture_idx;
+            node.mat_dirty = true;
+        }
+    }
+
+    pub fn set_material_metallic_roughness_texture(&mut self, handle: f64, texture_idx: u32) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.material.metallic_roughness_texture_idx = texture_idx;
+            node.mat_dirty = true;
+        }
+    }
+
+    pub fn set_material_emissive_texture(&mut self, handle: f64, texture_idx: u32) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.material.emissive_texture_idx = texture_idx;
+            node.mat_dirty = true;
+        }
+    }
+
+    pub fn set_material_emissive_factor(&mut self, handle: f64, r: f32, g: f32, b: f32) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.material.emissive = [r, g, b];
+            node.mat_dirty = true;
         }
     }
 
@@ -243,12 +366,43 @@ impl SceneGraph {
         }
     }
 
+    /// Build / refresh per-node material bind groups for the scene
+    /// pipeline. Must be called every frame after `prepare` and before
+    /// `render`. Only rebuilds when a material changed (mat_dirty).
+    pub fn prepare_materials(&mut self, renderer: &crate::renderer::Renderer) {
+        for (_handle, node) in self.nodes.iter_mut() {
+            if !node.visible || node.indices.is_empty() {
+                continue;
+            }
+            if node.mat_dirty || node.gpu_material_bg.is_none() {
+                // Allocate or reuse the per-material uniform buffer.
+                // (Could be updated in place when factors change, but
+                // the current path always rebuilds together with the
+                // bind group — cheap and simpler.)
+                let uniform = renderer.create_scene_material_uniform(
+                    node.material.metalness,
+                    node.material.roughness,
+                    node.material.emissive,
+                );
+                let bg = renderer.create_scene_material_bg(
+                    node.material.texture_idx,
+                    node.material.normal_texture_idx,
+                    node.material.metallic_roughness_texture_idx,
+                    node.material.emissive_texture_idx,
+                    &uniform,
+                );
+                node.gpu_material_bg = Some(bg);
+                node.gpu_material_uniform_buf = Some(uniform);
+                node.mat_dirty = false;
+            }
+        }
+    }
+
     /// Render all visible scene nodes into the given render pass.
     /// Must be called after prepare() and after the pipeline/lighting/joints are set.
     pub fn render<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
-        texture_bind_groups: &'a [wgpu::BindGroup],
     ) {
         for (_handle, node) in self.nodes.iter() {
             if !node.visible || node.indices.is_empty() {
@@ -257,17 +411,13 @@ impl SceneGraph {
             let Some(vb) = &node.gpu_vb else { continue };
             let Some(ib) = &node.gpu_ib else { continue };
             let Some(bg) = &node.gpu_uniform_bg else { continue };
+            let Some(mat_bg) = &node.gpu_material_bg else { continue };
 
             // Bind per-node uniforms (group 0)
             pass.set_bind_group(0, bg, &[]);
 
-            // Bind texture (group 2)
-            let tex_idx = node.material.texture_idx as usize;
-            if tex_idx < texture_bind_groups.len() {
-                pass.set_bind_group(2, &texture_bind_groups[tex_idx], &[]);
-            } else if !texture_bind_groups.is_empty() {
-                pass.set_bind_group(2, &texture_bind_groups[0], &[]);
-            }
+            // Bind per-node material (group 2: base color + normal map)
+            pass.set_bind_group(2, mat_bg, &[]);
 
             // Bind vertex/index buffers and draw
             pass.set_vertex_buffer(0, vb.slice(..));

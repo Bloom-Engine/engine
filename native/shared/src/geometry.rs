@@ -57,6 +57,7 @@ pub fn extrude_polygon(
             uv: [x, z], // planar UV
             joints: [0.0; 4],
             weights: [0.0; 4],
+            tangent: [0.0; 4],
         });
     }
     // Bottom triangles (reversed winding for downward-facing)
@@ -78,6 +79,7 @@ pub fn extrude_polygon(
             uv: [x, z],
             joints: [0.0; 4],
             weights: [0.0; 4],
+            tangent: [0.0; 4],
         });
     }
     for tri in triangles.chunks(3) {
@@ -133,6 +135,7 @@ pub fn extrude_polygon(
                 uv: [0.0, 0.0],
                 joints: [0.0; 4],
                 weights: [0.0; 4],
+                tangent: [0.0; 4],
             });
             vertices.push(Vertex3D {
                 position: [x1, 0.0, z1],
@@ -141,6 +144,7 @@ pub fn extrude_polygon(
                 uv: [u_len, 0.0],
                 joints: [0.0; 4],
                 weights: [0.0; 4],
+                tangent: [0.0; 4],
             });
             vertices.push(Vertex3D {
                 position: [x1, depth, z1],
@@ -149,6 +153,7 @@ pub fn extrude_polygon(
                 uv: [u_len, depth],
                 joints: [0.0; 4],
                 weights: [0.0; 4],
+                tangent: [0.0; 4],
             });
             vertices.push(Vertex3D {
                 position: [x0, depth, z0],
@@ -157,6 +162,7 @@ pub fn extrude_polygon(
                 uv: [0.0, depth],
                 joints: [0.0; 4],
                 weights: [0.0; 4],
+                tangent: [0.0; 4],
             });
 
             indices.push(base);

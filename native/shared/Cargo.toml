@@ -15,7 +15,8 @@ raw-window-handle = "0.6"
 fontdue = "0.9"
 libc = "0.2"
 bytemuck = { version = "1", features = ["derive"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga"] }
+half = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga", "hdr"] }
 gltf = "1"
 lewton = "0.10"
 minimp3 = { version = "0.5", optional = true }
