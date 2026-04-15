@@ -320,29 +320,22 @@ function setupLightArena(): void {
 function setupShadowTest(): void {
   const cx = -28.0;
 
-  // Ground slab (light colored to show shadows clearly)
-  placeCube(cx, -0.05, 0, 20, 0.1, 14, 0.85, 0.82, 0.78, 0.7, 0.0);
+  // Big pure-white floor — deliberately bigger than the camera's
+  // view cone so the entire floor fills the lower half of the
+  // screen. Shadows are the ONLY source of darkness on this floor;
+  // anything dark the user sees IS a shadow.
+  placeCube(cx, -0.05, 0, 40, 0.1, 40, 1.0, 1.0, 1.0, 0.8, 0.0);
 
-  // Tall pillars (cast long shadows)
-  placeCube(cx - 4, 3, 0, 1.2, 6, 1.2, 0.6, 0.58, 0.55, 0.5, 0.0);
-  placeCube(cx + 4, 2, 0, 1.2, 4, 1.2, 0.6, 0.58, 0.55, 0.5, 0.0);
-  placeCube(cx, 4, -3, 1.2, 8, 1.2, 0.6, 0.58, 0.55, 0.5, 0.0);
+  // Three tall gray pillars spaced wide apart. Medium-gray color
+  // so they read as objects (not overexposed to white).
+  placeCube(cx - 6, 4, 0, 1.5, 8, 1.5, 0.5, 0.5, 0.5, 0.5, 0.0);
+  placeCube(cx,     3, 0, 1.5, 6, 1.5, 0.5, 0.5, 0.5, 0.5, 0.0);
+  placeCube(cx + 6, 2, 0, 1.5, 4, 1.5, 0.5, 0.5, 0.5, 0.5, 0.0);
 
-  // Floating platform (shadow from above onto objects below)
-  placeCube(cx, 5, 3, 6, 0.3, 4, 0.5, 0.48, 0.45, 0.4, 0.0);
-
-  // Small objects under the platform (receiving shadow)
-  placeSphere(cx - 1, 0.5, 2.5, 0.8, 0.9, 0.2, 0.15, 0.3, 0.0);
-  placeSphere(cx + 1, 0.5, 3.5, 0.8, 0.15, 0.6, 0.2, 0.3, 0.0);
-  placeCube(cx, 0.4, 3, 0.8, 0.8, 0.8, 0.2, 0.3, 0.8, 0.3, 0.0);
-
-  // Thin shadow caster (tests shadow map resolution)
-  placeCube(cx + 6, 1.5, 0, 0.1, 3, 2, 0.4, 0.4, 0.42, 0.3, 0.0);
-
-  // Row of small spheres (fine shadow detail)
-  for (let i = 0; i < 6; i = i + 1) {
-    placeSphere(cx - 6 + i * 2.4, 0.35, -4, 0.5, 0.8, 0.8, 0.75, 0.4, 0.0);
-  }
+  // One sphere per pillar so the curved-object shadow is also visible.
+  placeSphere(cx - 6, 1.0, 4, 1.0, 0.5, 0.5, 0.5, 0.4, 0.0);
+  placeSphere(cx,     1.0, 4, 1.0, 0.5, 0.5, 0.5, 0.4, 0.0);
+  placeSphere(cx + 6, 1.0, 4, 1.0, 0.5, 0.5, 0.5, 0.4, 0.0);
 }
 
 // ============================================================
@@ -504,11 +497,14 @@ function setupGltfModel(): void {
 // Camera state
 // ============================================================
 
-let camX = 0.0;
+// Spawn at zone 3 (Shadows) by default so the user immediately
+// sees the dramatic cast shadows on the white floor. Yaw ≈ 0 =
+// looking toward -Z; pitch slightly down to show the ground.
+let camX = -28.0;
 let camY = 4.0;
-let camZ = 16.0;
-let camYaw = 0.0;   // 0 = looking toward -Z
-let camPitch = -0.2;
+let camZ = 10.0;
+let camYaw = 0.0;
+let camPitch = -0.3;
 let cursorLocked = true;
 
 // Zone teleport positions [x, y, z, yaw]
