@@ -92,6 +92,12 @@ let headlessTargetZ = 0.0;
 let headlessFov = 45.0;
 let headlessResW = 0;
 let headlessResH = 0;
+// Auto-capture in interactive mode: render the full scene (all zones,
+// HUD, the actual interactive path) for N frames, then screenshot and
+// exit. Used to programmatically hunt the TAA+bloom corruption that
+// only appears with surface presentation.
+let interactiveCaptureFrames = 0;
+let interactiveCapturePath = "";
 
 declare const process: { argv: string[] };
 const argv: string[] = process.argv;
@@ -121,6 +127,9 @@ for (let i = 2; i < argv.length; i = i + 1) {
     headlessResW = Math.floor(parseFloat(argv[i + 1]));
     headlessResH = Math.floor(parseFloat(argv[i + 2]));
     headlessMode = true;
+  } else if (argv[i] === "--interactive-capture" && i + 2 < argv.length) {
+    interactiveCaptureFrames = Math.floor(parseFloat(argv[i + 1]));
+    interactiveCapturePath = argv[i + 2];
   }
 }
 
@@ -569,12 +578,23 @@ if (!headlessMode) {
   enableShadows();
 }
 
+// Turn on the post-fx layer in interactive mode so the new effects
+// are visible. Headless skips them so the path-traced reference
+// comparison stays bit-meaningful.
+if (!headlessMode) {
+  setFog(0.55, 0.62, 0.72, 0.025, 0.0, 0.18);
+  setVignette(0.35, 0.30);
+  setFilmGrain(0.025);
+  setChromaticAberration(0.0025);
+  setSunShafts(0.6, 0.97, 1.0, 0.92, 0.78);
+}
+
 // ============================================================
 // Main loop
 // ============================================================
 
 let headlessFrame = 0;
-const HEADLESS_WARMUP_FRAMES = 30; // wgpu pipelines take a few frames to fully populate
+const HEADLESS_WARMUP_FRAMES = 30;
 
 while (!windowShouldClose()) {
   const dt = getDeltaTime();
@@ -768,6 +788,15 @@ while (!windowShouldClose()) {
       takeScreenshot(headlessOutPath);
     }
     if (headlessFrame > HEADLESS_WARMUP_FRAMES) {
+      endDrawing();
+      break;
+    }
+  } else if (interactiveCaptureFrames > 0) {
+    headlessFrame = headlessFrame + 1;
+    if (headlessFrame === interactiveCaptureFrames) {
+      takeScreenshot(interactiveCapturePath);
+    }
+    if (headlessFrame > interactiveCaptureFrames) {
       endDrawing();
       break;
     }

@@ -1343,7 +1343,15 @@ fn karis_average(c: vec4<f32>) -> vec4<f32> {
 // pass through fully; in-between blends smoothly. Without this,
 // bloom would brighten EVERY pixel in the scene rather than just
 // the visibly-overbright ones (sun glare, emissive accents, etc.).
-fn extract_brights(c: vec3<f32>, threshold: f32, knee: f32) -> vec3<f32> {
+//
+// The min() clamps the input to a large finite value — prevents
+// Inf/NaN from PBR edge cases (grazing-angle divides in the scene
+// shader, specular hotspots hitting Rgba16Float's max) from
+// propagating through bloom and poisoning every downstream pass.
+fn extract_brights(c_in: vec3<f32>, threshold: f32, knee: f32) -> vec3<f32> {
+    // NaN-safe clamp: max(.,0) first (flushes NaN→0 on most
+    // platforms), then cap at a large finite to avoid Inf.
+    let c = min(max(c_in, vec3<f32>(0.0)), vec3<f32>(64000.0));
     let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     let lower = max(threshold - knee, 0.0);
     let upper = threshold + knee;
@@ -1354,23 +1362,31 @@ fn extract_brights(c: vec3<f32>, threshold: f32, knee: f32) -> vec3<f32> {
 // 13-tap downsample (Sledgehammer / Karis 2013). Takes 5 dual-2x2
 // box samples + 4 cross samples around each fragment for a smoother
 // reduction than a naive 4-tap.
+// Sanitize a sample: force NaN→0 via max-with-0, cap Inf via min.
+// Needed because the HDR source can contain Inf from PBR edge cases
+// (grazing-angle specular, division-by-zero-ish terms). Without
+// this, one bad texel poisons the whole downsample kernel.
+fn sanitize(c: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(min(max(c.rgb, vec3<f32>(0.0)), vec3<f32>(64000.0)), c.a);
+}
+
 fn downsample_13(uv: vec2<f32>, src_size: vec2<f32>, do_threshold: bool) -> vec3<f32> {
     let dx = src_size.x;
     let dy = src_size.y;
 
-    let a = textureSample(src_tex, src_samp, uv + vec2<f32>(-2.0 * dx, -2.0 * dy));
-    let b = textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0,       -2.0 * dy));
-    let c = textureSample(src_tex, src_samp, uv + vec2<f32>( 2.0 * dx, -2.0 * dy));
-    let d = textureSample(src_tex, src_samp, uv + vec2<f32>(-2.0 * dx,  0.0));
-    let e = textureSample(src_tex, src_samp, uv);
-    let f = textureSample(src_tex, src_samp, uv + vec2<f32>( 2.0 * dx,  0.0));
-    let g = textureSample(src_tex, src_samp, uv + vec2<f32>(-2.0 * dx,  2.0 * dy));
-    let h = textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0,        2.0 * dy));
-    let i = textureSample(src_tex, src_samp, uv + vec2<f32>( 2.0 * dx,  2.0 * dy));
-    let j = textureSample(src_tex, src_samp, uv + vec2<f32>(-1.0 * dx, -1.0 * dy));
-    let k = textureSample(src_tex, src_samp, uv + vec2<f32>( 1.0 * dx, -1.0 * dy));
-    let l = textureSample(src_tex, src_samp, uv + vec2<f32>(-1.0 * dx,  1.0 * dy));
-    let m = textureSample(src_tex, src_samp, uv + vec2<f32>( 1.0 * dx,  1.0 * dy));
+    let a = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>(-2.0 * dx, -2.0 * dy)));
+    let b = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0,       -2.0 * dy)));
+    let c = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>( 2.0 * dx, -2.0 * dy)));
+    let d = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>(-2.0 * dx,  0.0)));
+    let e = sanitize(textureSample(src_tex, src_samp, uv));
+    let f = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>( 2.0 * dx,  0.0)));
+    let g = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>(-2.0 * dx,  2.0 * dy)));
+    let h = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>( 0.0,        2.0 * dy)));
+    let i = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>( 2.0 * dx,  2.0 * dy)));
+    let j = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>(-1.0 * dx, -1.0 * dy)));
+    let k = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>( 1.0 * dx, -1.0 * dy)));
+    let l = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>(-1.0 * dx,  1.0 * dy)));
+    let m = sanitize(textureSample(src_tex, src_samp, uv + vec2<f32>( 1.0 * dx,  1.0 * dy)));
 
     // Five 2x2 boxes weighted to eliminate aliasing.
     var groups: array<vec4<f32>, 5>;
@@ -4267,7 +4283,7 @@ impl Renderer {
             taa_layout,
             taa_uniform_buffer,
             taa_frame_index: 0,
-            taa_enabled: false,
+            taa_enabled: true,
             prev_vp_matrix: IDENTITY_MAT4,
             fog_color: [0.7, 0.75, 0.82],
             fog_density: 0.0,
@@ -5650,6 +5666,7 @@ impl Renderer {
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..3, 0..1);
         }
+
 
         // ============================================================
         // TAA pass: combine current-frame HDR + bloom + SSAO with the
