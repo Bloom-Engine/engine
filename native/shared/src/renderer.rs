@@ -87,6 +87,10 @@ struct LightingUniforms {
     /// sample so IBL stays in sync with the sky pass when the user
     /// scales their HDR. Written once per frame before the main pass.
     camera_pos: [f32; 4],
+    /// Light view-projection matrix for the primary directional
+    /// light's shadow map. Scene shader projects world_pos through
+    /// this to derive the shadow-map UV. Identity = no shadow cast.
+    shadow_light_vp: [[f32; 4]; 4],
 }
 
 impl LightingUniforms {
@@ -100,6 +104,7 @@ impl LightingUniforms {
             point_light_count: [0.0; 4],
             point_lights: [PointLight { position: [0.0; 4], color: [0.0; 4] }; MAX_POINT_LIGHTS],
             camera_pos: [0.0, 0.0, 0.0, 1.0],
+            shadow_light_vp: IDENTITY_MAT4,
         }
     }
 }
@@ -390,6 +395,7 @@ struct Lighting {
     point_light_count: vec4<f32>,
     point_lights: array<PointLight, 16>,
     camera_pos: vec4<f32>,
+    shadow_light_vp: mat4x4<f32>,
 };
 
 struct MaterialFactors {
@@ -422,6 +428,8 @@ struct VertexOutputScene {
 @group(1) @binding(2) var env_samp: sampler;
 @group(1) @binding(3) var brdf_lut_tex: texture_2d<f32>;
 @group(1) @binding(4) var brdf_lut_samp: sampler;
+@group(1) @binding(5) var shadow_tex: texture_depth_2d;
+@group(1) @binding(6) var shadow_samp: sampler_comparison;
 @group(2) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(2) @binding(1) var base_color_samp: sampler;
 @group(2) @binding(2) var normal_tex: texture_2d<f32>;
@@ -534,6 +542,36 @@ fn f_schlick(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * fc;
 }
 
+// Sample the shadow map with 4-tap PCF — softens the cascade-edge
+// stair-stepping you'd get from a single comparison. Returns 1.0
+// for fully lit, 0.0 for fully shadowed. Caller multiplies the
+// directional light's diffuse + specular by the result.
+fn sample_shadow(world_pos: vec3<f32>) -> f32 {
+    let light_clip = lighting.shadow_light_vp * vec4<f32>(world_pos, 1.0);
+    let light_ndc = light_clip.xyz / light_clip.w;
+    // Out-of-frustum: no shadow info → treat as lit.
+    if (light_ndc.x < -1.0 || light_ndc.x > 1.0 ||
+        light_ndc.y < -1.0 || light_ndc.y > 1.0 ||
+        light_ndc.z < 0.0 || light_ndc.z > 1.0) {
+        return 1.0;
+    }
+    let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
+    let bias = 0.0008;
+    let depth_ref = light_ndc.z - bias;
+
+    // 4-tap PCF: corners of a 1-texel offset. Cheap and gives a
+    // visible softening over single-tap. Increase to 9-tap for
+    // smoother penumbras.
+    let dims = textureDimensions(shadow_tex);
+    let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
+    var sum = 0.0;
+    sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + vec2<f32>(-texel.x, -texel.y), depth_ref);
+    sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + vec2<f32>( texel.x, -texel.y), depth_ref);
+    sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + vec2<f32>(-texel.x,  texel.y), depth_ref);
+    sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + vec2<f32>( texel.x,  texel.y), depth_ref);
+    return sum * 0.25;
+}
+
 // Evaluate a single directional light's PBR contribution. Returns
 // linear-space radiance. `l_dir` points *from surface to light*,
 // `intensity` scales the light color.
@@ -630,10 +668,15 @@ fn fs_main_scene(in: VertexOutputScene) -> @location(0) vec4<f32> {
     let v = normalize(lighting.camera_pos.xyz - in.world_pos);
     var lit = vec3<f32>(0.0);
 
-    // Legacy primary directional (kept for back-compat)
+    // Legacy primary directional (kept for back-compat). Shadow-
+    // mapped: only this primary light casts because we currently
+    // render a single shadow map. Multi-cascade or multi-light
+    // shadowing is a future addition.
+    let shadow_factor = sample_shadow(in.world_pos);
     let legacy_dir = normalize(lighting.light_dir.xyz);
     lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
-                     lighting.light_dir.w, base_color, metallic, roughness);
+                     lighting.light_dir.w, base_color, metallic, roughness)
+         * shadow_factor;
 
     let dir_count = u32(lighting.dir_light_count.x);
     for (var i = 0u; i < dir_count; i++) {
@@ -2285,6 +2328,22 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
             ],
         });
         let lighting_uniforms = LightingUniforms::defaults();
@@ -2423,6 +2482,10 @@ impl Renderer {
             ..Default::default()
         });
 
+        // Shadow map needs to be created before the lighting bind
+        // group since the bind group binds the shadow depth view.
+        let shadow_map = crate::shadows::ShadowMap::new(&device, Vertex3D::desc());
+
         let lighting_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lighting_bg"),
             layout: &lighting_layout,
@@ -2432,6 +2495,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&env_sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&brdf_lut_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&brdf_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&shadow_map.sampler) },
             ],
         });
 
@@ -2682,7 +2747,7 @@ impl Renderer {
             model_uniform_bind_groups.push(bg);
         }
 
-        let shadow_map = crate::shadows::ShadowMap::new(&device, Vertex3D::desc());
+        // (shadow_map already created above before lighting bind group.)
 
         // Sky / equirectangular HDR environment background.
         // Compiled at startup so the pipeline is ready when the user
@@ -4004,6 +4069,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
             ],
         });
 
@@ -5525,6 +5592,10 @@ impl Renderer {
         // holds the env_intensity multiplier (set via load_env_from_hdr).
         let env_intensity_w = self.lighting_uniforms.camera_pos[3];
         self.lighting_uniforms.camera_pos = [pos_x, pos_y, pos_z, env_intensity_w];
+        // Pass the current shadow VP (computed in end_frame_with_scene
+        // based on the primary directional light direction) so the
+        // scene shader's PCF sample lands on the right map.
+        self.lighting_uniforms.shadow_light_vp = self.shadow_map.light_vp;
         self.queue.write_buffer(
             &self.lighting_buffer,
             0,
