@@ -993,6 +993,11 @@ const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// fewer = less coverage. Each mip is half the previous size.
 const BLOOM_MIP_COUNT: u32 = 5;
 
+/// SSAO render target format. R8Unorm gives 256 occlusion levels
+/// (plenty for AO) at 1 byte/pixel — half-res keeps the cost in
+/// the noise on modern GPUs.
+const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+
 fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth_texture"),
@@ -1001,7 +1006,11 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // SSAO samples this texture in a separate pass after the
+        // depth-write HDR pass — needs TEXTURE_BINDING in addition
+        // to RENDER_ATTACHMENT.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1016,6 +1025,25 @@ fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Textu
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Create the SSAO render target (single channel, half-res).
+fn create_ssao_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let w = (width / 2).max(1);
+    let h = (height / 2).max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ssao_rt"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SSAO_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
              | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
@@ -1215,6 +1243,93 @@ fn fs_upsample(in: VsOut) -> @location(0) vec4<f32> {
 }
 ";
 
+/// SSAO fragment shader. Spiral-samples 16 nearby UVs, depth-
+/// compares each against the center, accumulates occlusion with a
+/// smooth range falloff so distant geometry doesn't haloed
+/// silhouettes. Output is single-channel (1 = open, 0 = fully
+/// occluded). Cheaper than view-space hemispheric SSAO since we
+/// skip view-space reconstruction; halo artifacts on geometry
+/// edges are mitigated by the range-falloff term.
+const SSAO_SHADER_WGSL: &str = "
+struct SsaoParams {
+    /// xy = inv_size of source depth (1/width, 1/height) — used to
+    /// keep sample radius pixel-coherent regardless of resolution.
+    /// z = world-space radius scale (sample distance in UV units),
+    /// w = strength (occlusion multiplier).
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: SsaoParams;
+@group(0) @binding(1) var depth_tex: texture_depth_2d;
+@group(0) @binding(2) var depth_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+const N_SAMPLES: u32 = 16u;
+const PI: f32 = 3.14159265;
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let center_depth = textureSample(depth_tex, depth_samp, in.uv);
+
+    // Skip the sky (depth == 1.0 at the far plane after sky pass).
+    if (center_depth >= 0.9999) {
+        return vec4<f32>(1.0);
+    }
+
+    // Per-pixel rotation jitter via interleaved-gradient noise
+    // (Jorge Jimenez 2014) — breaks up the spiral pattern so the
+    // residual structure looks like noise instead of bands.
+    let coord = in.clip_pos.xy;
+    let ign = fract(52.9829189 * fract(0.06711056 * coord.x + 0.00583715 * coord.y));
+    let rot_offset = ign * 2.0 * PI;
+
+    let radius = u.params.z;
+    var occlusion = 0.0;
+    let depth_bias = 0.0001;
+    let max_delta = 0.01; // beyond this depth gap, sample is too distant to occlude
+
+    for (var i = 0u; i < N_SAMPLES; i = i + 1u) {
+        // Spiral with golden-angle rotation.
+        let r_norm = sqrt((f32(i) + 0.5) / f32(N_SAMPLES));
+        let theta = f32(i) * 2.39996323 + rot_offset;
+        let offset = vec2<f32>(cos(theta), sin(theta)) * r_norm * radius;
+        let sample_uv = in.uv + offset;
+        let sample_depth = textureSample(depth_tex, depth_samp, sample_uv);
+
+        // delta > 0 means sample is closer (occluder).
+        let delta = center_depth - sample_depth - depth_bias;
+        if (delta > 0.0 && delta < max_delta) {
+            // Smooth falloff so silhouette edges don't get a sharp halo.
+            let weight = smoothstep(max_delta, 0.0, delta);
+            occlusion = occlusion + weight;
+        }
+    }
+    let ao = 1.0 - (occlusion / f32(N_SAMPLES)) * u.params.w;
+    return vec4<f32>(clamp(ao, 0.0, 1.0));
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsaoParams {
+    /// xy = inv_size, z = radius (UV), w = strength
+    params: [f32; 4],
+}
+
 /// Composite + tonemap fragment shader. Single fullscreen triangle
 /// reads hdr_rt and writes ACES-tonemapped linear-RGB. Hardware
 /// performs the linear→sRGB encode on write because the surface
@@ -1232,6 +1347,8 @@ struct CompositeParams {
 @group(0) @binding(2) var bloom_tex: texture_2d<f32>;
 @group(0) @binding(3) var bloom_samp: sampler;
 @group(0) @binding(4) var<uniform> u: CompositeParams;
+@group(0) @binding(5) var ssao_tex: texture_2d<f32>;
+@group(0) @binding(6) var ssao_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1261,7 +1378,11 @@ fn aces_tone(c: vec3<f32>) -> vec3<f32> {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
     let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
-    let combined = hdr + bloom * u.params.x;
+    // SSAO darkens crevices and tight gaps. Applied to the HDR sample
+    // BEFORE bloom add — bloom should still glow even from occluded
+    // bright pixels (otherwise bright accents in dark crevices vanish).
+    let ssao = textureSample(ssao_tex, ssao_samp, in.uv).r;
+    let combined = hdr * ssao + bloom * u.params.x;
     return vec4<f32>(aces_tone(combined), 1.0);
 }
 ";
@@ -1527,6 +1648,19 @@ pub struct Renderer {
     /// frame from the renderer's `bloom_intensity` field.
     pub composite_uniform_buffer: wgpu::Buffer,
     pub bloom_intensity: f32,
+    /// SSAO RT (R8Unorm, half-res) + pipeline + uniforms. Run after
+    /// the HDR pass; sampled by the composite to darken crevices.
+    pub ssao_rt_texture: wgpu::Texture,
+    pub ssao_rt_view: wgpu::TextureView,
+    pub ssao_pipeline: wgpu::RenderPipeline,
+    pub ssao_layout: wgpu::BindGroupLayout,
+    pub ssao_uniform_buffer: wgpu::Buffer,
+    pub ssao_depth_sampler: wgpu::Sampler,
+    /// Strength multiplier for SSAO (0 = off, 1 = full). Default 1.0.
+    pub ssao_strength: f32,
+    /// Sample radius in UV units (default ~0.005, gives a soft AO
+    /// signal a few pixels wide on a 1024-tall surface).
+    pub ssao_radius: f32,
 
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
@@ -2001,6 +2135,9 @@ impl Renderer {
             surface_config.width,
             surface_config.height,
             BLOOM_MIP_COUNT,
+        );
+        let (ssao_rt_texture, ssao_rt_view) = create_ssao_rt(
+            &device, surface_config.width, surface_config.height,
         );
 
         // --- Persistent GPU buffers (reused across frames) ---
@@ -2599,6 +2736,22 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let composite_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2754,6 +2907,103 @@ impl Renderer {
         };
         let bloom_pipeline_upsample = make_bloom_pipeline("fs_upsample", Some(upsample_blend));
 
+        // --- SSAO pipeline ---
+        let ssao_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ssao_shader"),
+            source: wgpu::ShaderSource::Wgsl(SSAO_SHADER_WGSL.into()),
+        });
+        let ssao_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ssao_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        // Depth32Float texture — sampled as
+                        // texture_depth_2d in the shader.
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // Non-comparison sampler — ordinary linear
+                    // sample of the depth texture.
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+        let ssao_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ssao_pl_layout"),
+            bind_group_layouts: &[&ssao_layout],
+            push_constant_ranges: &[],
+        });
+        let ssao_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ssao_pipeline"),
+            layout: Some(&ssao_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &ssao_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ssao_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: SSAO_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let ssao_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ssao_uniform_buffer"),
+            size: std::mem::size_of::<SsaoParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Non-filtering sampler for the depth texture (Depth32Float
+        // with non-comparison sampler is a NonFiltering combination).
+        let ssao_depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ssao_depth_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         Self {
             device,
             queue,
@@ -2795,6 +3045,14 @@ impl Renderer {
             bloom_layout,
             bloom_uniform_buffer,
             bloom_intensity: 0.04,
+            ssao_rt_texture,
+            ssao_rt_view,
+            ssao_pipeline,
+            ssao_layout,
+            ssao_uniform_buffer,
+            ssao_depth_sampler,
+            ssao_strength: 1.0,
+            ssao_radius: 0.006,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -2943,6 +3201,9 @@ impl Renderer {
             self.bloom_chain_texture = bt;
             self.bloom_mip_views = bm;
             self.bloom_full_view = bf;
+            let (st, sv) = create_ssao_rt(&self.device, width, height);
+            self.ssao_rt_texture = st;
+            self.ssao_rt_view = sv;
         }
     }
 
@@ -2963,6 +3224,19 @@ impl Renderer {
     /// luminance), so dim scenes look unchanged regardless of value.
     pub fn set_bloom_intensity(&mut self, intensity: f32) {
         self.bloom_intensity = intensity.max(0.0);
+    }
+
+    /// SSAO strength (0 = off, 1 = default, ≥3 = stylized). Always
+    /// works since SSAO darkens crevices regardless of HDR levels.
+    pub fn set_ssao_strength(&mut self, strength: f32) {
+        self.ssao_strength = strength.max(0.0);
+    }
+
+    /// SSAO sample radius in UV units. 0.006 (~0.6% of viewport
+    /// height) is the default — wider radius catches larger AO
+    /// features but also blurs detail and increases halo risk.
+    pub fn set_ssao_radius(&mut self, radius: f32) {
+        self.ssao_radius = radius.max(0.0001);
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -3765,11 +4039,54 @@ impl Renderer {
         }
 
         // ============================================================
-        // Bloom: progressive downsample (Karis-thresholded first tap)
-        // followed by additive upsample back up the chain.
+        // SSAO: half-res spiral-sample of the depth buffer.
         // ============================================================
         let surf_w = self.surface_config.width;
         let surf_h = self.surface_config.height;
+        {
+            let sp = SsaoParams {
+                params: [
+                    1.0 / surf_w as f32,
+                    1.0 / surf_h as f32,
+                    self.ssao_radius,
+                    self.ssao_strength,
+                ],
+            };
+            self.queue.write_buffer(&self.ssao_uniform_buffer, 0, bytemuck::bytes_of(&sp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ssao_bg"),
+                layout: &self.ssao_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ssao_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                ],
+            });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssao_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssao_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.ssao_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ============================================================
+        // Bloom: progressive downsample (Karis-thresholded first tap)
+        // followed by additive upsample back up the chain.
+        // ============================================================
         let mip_dims: Vec<(u32, u32)> = (0..BLOOM_MIP_COUNT)
             .map(|i| (
                 ((surf_w / 2) >> i).max(1),
@@ -3890,6 +4207,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 wgpu::BindGroupEntry { binding: 4, resource: self.composite_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],
         });
         {
