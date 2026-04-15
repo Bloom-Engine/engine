@@ -572,16 +572,13 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
     let bias = 0.0008;
     let depth_ref = light_ndc.z - bias;
 
-    // 16-tap Poisson-disc PCF. Spreads taps over a wider kernel
-    // for smoother penumbras than the old 4-tap box, while keeping
-    // the sample budget bounded. Disc offsets pre-baked from a
-    // standard Poisson distribution (Wyman/Hardy-style sequence)
-    // so we don't pay for per-pixel rotation. Filter radius is
-    // 2 texels — gives a noticeable but not blurry-soft shadow
-    // with the current 2048×2048 shadow map.
+    // 16-tap Poisson-disc PCF. Radius 20 texels at 4096² =
+    // ~0.5% of the shadow frustum width = ~0.3 world units of
+    // penumbra at the default ±30 extent. Wide kernel reads as
+    // diffuse outdoor shade rather than a hard geometric edge.
     let dims = textureDimensions(shadow_tex);
     let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
-    let radius = 2.0;
+    let radius = 20.0;
     var sum = 0.0;
     let poisson = array<vec2<f32>, 16>(
         vec2<f32>(-0.94201624, -0.39906216),
@@ -810,14 +807,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let ms_contribution = f_ms * ems;
     let ibl_spec = prefiltered_env * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
-    // Shadow-attenuate the indirect lighting. Physically, a point
-    // in shadow from the sun is also occluded from the sky region
-    // containing the sun. 25% of IBL survives in full shadow — a
-    // heavy hack, but necessary for shadows to be visible against
-    // bright IBL after tonemap saturation (ACES already compresses
-    // everything above ~1.0 hard; subtle shadow attenuation on
-    // overexposed-HDR surfaces gets flattened away).
-    let indirect_shadow = mix(0.25, 1.0, shadow_factor);
+    // Indirect-shadow attenuation — approximates reduced sky
+    // contribution from the direction containing the sun. Subtle
+    // (80% IBL in shadow) so the scene retains color in shadow
+    // rather than going black. The main contrast between lit and
+    // shadowed areas comes from the direct sun being zeroed in
+    // shadow, so the directional light needs to contribute enough
+    // of the final brightness for shadows to be visible.
+    let indirect_shadow = mix(0.8, 1.0, shadow_factor);
 
     // Multi-scatter also adds a diffuse-like term back from the
     // 'lost' energy, but it gets absorbed wherever there is no metal

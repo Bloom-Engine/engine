@@ -700,10 +700,13 @@ while (!windowShouldClose()) {
   // the reference for no good reason during validation.
   if (!headlessMode) {
     setAmbientLight({ r: 70, g: 80, b: 100, a: 255 }, 0.25);
+    // Sun pitched toward the horizon so shadows extend across the
+    // ground. Intensity 2.0 is strong enough for shadows to read
+    // as "dimmed shade" after AgX tonemap without crushing to black.
     setDirectionalLight(
-      { x: 0.4, y: 0.8, z: 0.3 },
+      { x: 0.5, y: 0.4, z: 0.7 },
       { r: 255, g: 248, b: 235, a: 255 },
-      1.0,
+      2.0,
     );
   }
 
