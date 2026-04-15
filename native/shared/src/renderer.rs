@@ -316,8 +316,13 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
     return out;
 }
 
+struct Fs3DOut {
+    @location(0) color: vec4<f32>,
+    @location(1) material: vec2<f32>,
+};
+
 @fragment
-fn fs_main_3d(in: VertexOutput3D) -> @location(0) vec4<f32> {
+fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
     let n = normalize(in.normal);
 
     // Ambient
@@ -354,7 +359,12 @@ fn fs_main_3d(in: VertexOutput3D) -> @location(0) vec4<f32> {
     }
 
     let tex_color = textureSample(tex3d, tex3d_sampler, in.uv);
-    return vec4<f32>(tex_color.rgb * in.color.rgb * lit, tex_color.a * in.color.a);
+    // Immediate-mode 3D draws (drawCube etc.) aren't PBR — output
+    // 0 metallic / 1 roughness so SSR doesn't try to reflect them.
+    return Fs3DOut(
+        vec4<f32>(tex_color.rgb * in.color.rgb * lit, tex_color.a * in.color.a),
+        vec2<f32>(0.0, 1.0),
+    );
 }
 ";
 
@@ -609,8 +619,13 @@ fn shade_pbr(
     return (diffuse + specular) * light_color * intensity * n_dot_l;
 }
 
+struct SceneOut {
+    @location(0) color: vec4<f32>,
+    @location(1) material: vec2<f32>,
+};
+
 @fragment
-fn fs_main_scene(in: VertexOutputScene) -> @location(0) vec4<f32> {
+fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     var n = normalize(in.normal);
 
     // --- Normal mapping (tangent-space) ---
@@ -764,10 +779,13 @@ fn fs_main_scene(in: VertexOutputScene) -> @location(0) vec4<f32> {
     // dielectric path is unchanged.
     let hdr = lit + ibl_diffuse + ibl_spec + emissive;
 
-    // Output linear HDR — the dedicated composite pass tonemaps and
-    // hands the result to the sRGB surface format. Keeps brights in
-    // their full HDR range here so bloom can extract them downstream.
-    return vec4<f32>(hdr, base_alpha);
+    // Output linear HDR + per-pixel material info (metallic /
+    // roughness) so the SSR pass can modulate reflections by
+    // surface response.
+    return SceneOut(
+        vec4<f32>(hdr, base_alpha),
+        vec2<f32>(metallic, roughness),
+    );
 }
 ";
 
@@ -979,8 +997,13 @@ fn linear_to_srgb_v(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= cutoff);
 }
 
+struct SkyOut {
+    @location(0) color: vec4<f32>,
+    @location(1) material: vec2<f32>,
+};
+
 @fragment
-fn sky_fs(in: VsOut) -> @location(0) vec4<f32> {
+fn sky_fs(in: VsOut) -> SkyOut {
     // View direction = forward + ndc.x * (right*tan*aspect)
     //                + ndc.y * (up*tan)
     // The right/up vectors already have the scale baked in.
@@ -999,10 +1022,11 @@ fn sky_fs(in: VsOut) -> @location(0) vec4<f32> {
 
     let radiance = textureSample(env_tex, env_samp, vec2<f32>(u_coord, v_coord)).rgb * u.intensity.x;
     // Output linear HDR radiance — the composite pass downstream does
-    // the ACES tonemap + sRGB encode in one place. Keeping the sky in
-    // HDR also lets bloom pick up bright sky pixels (sun glare etc.)
-    // without the curve squashing them first.
-    return vec4<f32>(radiance, 1.0);
+    // the ACES tonemap + sRGB encode in one place. Sky writes to the
+    // material G-buffer too: 0 metallic, 1 roughness — sky never
+    // reflects, never gets reflected from (well, it gets sampled by
+    // SSR via the HDR RT, but that's expected behavior).
+    return SkyOut(vec4<f32>(radiance, 1.0), vec2<f32>(0.0, 1.0));
 }
 ";
 
@@ -1041,6 +1065,11 @@ const BLOOM_MIP_COUNT: u32 = 5;
 /// the noise on modern GPUs.
 const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
+/// Material G-buffer format. Rg8Unorm: R = metallic, G = roughness.
+/// Written as a second color attachment in the HDR pass; SSR (and
+/// any future deferred passes) reads it for per-pixel material info.
+const MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
+
 fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth_texture"),
@@ -1068,6 +1097,23 @@ fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Textu
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Create the material G-buffer (Rg8Unorm, surface size).
+fn create_material_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("material_rt"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: MATERIAL_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
              | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
@@ -1464,6 +1510,8 @@ struct SsrParams {
 @group(0) @binding(2) var depth_samp: sampler;
 @group(0) @binding(3) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(4) var hdr_samp: sampler;
+@group(0) @binding(5) var mat_tex: texture_2d<f32>;
+@group(0) @binding(6) var mat_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1491,6 +1539,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let depth = textureSample(depth_tex, depth_samp, in.uv);
     if (depth >= 0.9999) {
         // Sky — no reflections.
+        return vec4<f32>(0.0);
+    }
+
+    // Read per-pixel material info. Reflectivity is concentrated in
+    // smooth metals: weight = metallic * (1 - roughness)². Skip
+    // shading when the surface is too rough or non-metal to matter.
+    let mat = textureSample(mat_tex, mat_samp, in.uv).rg;
+    let metallic = mat.r;
+    let roughness = mat.g;
+    let reflectivity = metallic * (1.0 - roughness) * (1.0 - roughness);
+    if (reflectivity < 0.02) {
         return vec4<f32>(0.0);
     }
 
@@ -1554,7 +1613,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fade = clamp(edge_fade, 0.0, 1.0);
 
     let reflected = textureSample(hdr_tex, hdr_samp, hit_uv).rgb;
-    return vec4<f32>(reflected * u.params.x * fade, fade);
+    // Modulate by reflectivity (material-aware) AND user strength
+    // AND screen-edge fade.
+    return vec4<f32>(reflected * reflectivity * u.params.x * fade, fade);
 }
 ";
 
@@ -1973,6 +2034,12 @@ pub struct Renderer {
     /// dimensions; recreated in `resize`.
     pub hdr_rt_texture: wgpu::Texture,
     pub hdr_rt_view: wgpu::TextureView,
+    /// Material G-buffer (Rg8Unorm: R=metallic, G=roughness).
+    /// Second color attachment in the HDR pass. SSR reads this so
+    /// only smooth metallic surfaces reflect — rough or non-metal
+    /// surfaces fade to zero.
+    pub material_rt_texture: wgpu::Texture,
+    pub material_rt_view: wgpu::TextureView,
     /// Composite-tonemap pipeline + bind group layout. Single full-
     /// screen draw that samples hdr_rt and writes ACES-tonemapped
     /// linear-rgb (sRGB hardware encode handles the transfer fn).
@@ -2537,6 +2604,7 @@ impl Renderer {
         // --- Depth texture ---
         let (depth_texture, depth_view) = create_depth_texture(&device, surface_config.width, surface_config.height);
         let (hdr_rt_texture, hdr_rt_view) = create_hdr_rt(&device, surface_config.width, surface_config.height);
+        let (material_rt_texture, material_rt_view) = create_material_rt(&device, surface_config.width, surface_config.height);
         let (bloom_chain_texture, bloom_mip_views, bloom_full_view) = create_bloom_chain(
             &device,
             surface_config.width,
@@ -2694,14 +2762,18 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &shader_3d,
                 entry_point: Some("fs_main_3d"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    // pipeline_3d now writes into the HDR offscreen RT
-                    // along with sky + scene. Final composite pass
-                    // tonemaps the HDR RT into the sRGB surface.
-                    format: HDR_FORMAT,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: MATERIAL_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -2821,11 +2893,18 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &sky_shader,
                 entry_point: Some("sky_fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: MATERIAL_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -3040,11 +3119,20 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &scene_shader,
                 entry_point: Some("fs_main_scene"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: MATERIAL_FORMAT,
+                        // Replace blend so the material slot reflects
+                        // the topmost-fragment material, not blended.
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -3541,6 +3629,18 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let ssr_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3608,6 +3708,8 @@ impl Renderer {
             depth_view,
             hdr_rt_texture,
             hdr_rt_view,
+            material_rt_texture,
+            material_rt_view,
             composite_pipeline,
             composite_layout,
             composite_sampler,
@@ -3789,6 +3891,9 @@ impl Renderer {
             let (hdr_t, hdr_v) = create_hdr_rt(&self.device, width, height);
             self.hdr_rt_texture = hdr_t;
             self.hdr_rt_view = hdr_v;
+            let (mat_t, mat_v) = create_material_rt(&self.device, width, height);
+            self.material_rt_texture = mat_t;
+            self.material_rt_view = mat_v;
             let (bt, bm, bf) = create_bloom_chain(&self.device, width, height, BLOOM_MIP_COUNT);
             self.bloom_chain_texture = bt;
             self.bloom_mip_views = bm;
@@ -4583,14 +4688,27 @@ impl Renderer {
             // RT. After tonemap it ends up roughly the same shade.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom_hdr_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.hdr_rt_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.hdr_rt_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(self.clear_color),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.material_rt_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // Default = (0, 1) = non-metal, fully
+                            // rough — sky / 3D / blank pixels won't
+                            // SSR-reflect.
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 1.0, b: 0.0, a: 0.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -4730,6 +4848,8 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.material_rt_view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 ],
             });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
