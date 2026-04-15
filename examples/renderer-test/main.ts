@@ -562,14 +562,10 @@ setEnvClearFromHdr("assets/outdoor.hdr");
 if (headlessMode) {
   setupGltfModel();
 } else {
-  setupGround();
-  setupMaterialGallery();
-  setupLightArena();
+  // DEBUG: only the shadow demo zone — other zones have dark
+  // floors that bleed into the view and confuse what's shadow
+  // vs what's scene geometry.
   setupShadowTest();
-  setupWater();
-  setupGeometryDensity();
-  setupThinGeometry();
-  setupGltfModel();
 }
 
 if (!headlessMode) {
@@ -696,11 +692,11 @@ while (!windowShouldClose()) {
   // the reference for no good reason during validation.
   if (!headlessMode) {
     setAmbientLight({ r: 70, g: 80, b: 100, a: 255 }, 0.25);
-    // Sun pitched toward the horizon so shadows extend across the
-    // ground. Intensity 2.0 is strong enough for shadows to read
-    // as "dimmed shade" after AgX tonemap without crushing to black.
+    // Low-angle morning sun from +X — shadows stretch long to
+    // the -X (screen-left) side of each object where they're
+    // unambiguously readable as shadows, not pedestals.
     setDirectionalLight(
-      { x: 0.5, y: 0.4, z: 0.7 },
+      { x: 0.95, y: 0.3, z: 0.1 },
       { r: 255, g: 248, b: 235, a: 255 },
       2.0,
     );
