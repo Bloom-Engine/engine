@@ -229,42 +229,18 @@ impl ShadowMap {
             [0.0, 1.0, 0.0]
         };
 
-        // Snap the center to texel boundaries in light-space. Get the
-        // light-space X/Y of the center first, quantize to multiples
-        // of the texel world-size, then reconstruct the world-space
-        // center. Uses the same basis as mat4_look_at so the snap is
-        // exact in the light projection.
-        let up = [0.0f32, 1.0, 0.0];
-        let f = d; // forward-to-light (target direction)
-        // Right = up × f, then Up = f × right  (standard look-at basis)
-        let right = normalize3([
-            up[1]*f[2] - up[2]*f[1],
-            up[2]*f[0] - up[0]*f[2],
-            up[0]*f[1] - up[1]*f[0],
-        ]);
-        let ortho_up = [
-            f[1]*right[2] - f[2]*right[1],
-            f[2]*right[0] - f[0]*right[2],
-            f[0]*right[1] - f[1]*right[0],
-        ];
-        let texel_world = (2.0 * SHADOW_EXTENT) / SHADOW_MAP_SIZE as f32;
-        let ls_x = dot3(center, right);
-        let ls_y = dot3(center, ortho_up);
-        let snapped_x = (ls_x / texel_world).floor() * texel_world;
-        let snapped_y = (ls_y / texel_world).floor() * texel_world;
-        // Reproject snapped (x, y) + unchanged depth onto world center.
-        let dx = snapped_x - ls_x;
-        let dy = snapped_y - ls_y;
-        let snapped_center = [
-            center[0] + dx * right[0] + dy * ortho_up[0],
-            center[1] + dx * right[1] + dy * ortho_up[1],
-            center[2] + dx * right[2] + dy * ortho_up[2],
-        ];
+        let snapped_center = center;
 
+        // light_dir points FROM the shaded surface TOWARD the light
+        // (convention matches the scene shader's shade_pbr: NdotL =
+        // dot(n, l_dir)). So the light sits at `center + d * dist` —
+        // previously was `center - d * dist`, which placed the
+        // shadow camera underground shooting upward, so the shadow
+        // map was effectively empty and every surface read as lit.
         let light_pos = [
-            snapped_center[0] - d[0] * dist,
-            snapped_center[1] - d[1] * dist,
-            snapped_center[2] - d[2] * dist,
+            snapped_center[0] + d[0] * dist,
+            snapped_center[1] + d[1] * dist,
+            snapped_center[2] + d[2] * dist,
         ];
 
         let view = crate::renderer::mat4_look_at(light_pos, snapped_center, [0.0, 1.0, 0.0]);

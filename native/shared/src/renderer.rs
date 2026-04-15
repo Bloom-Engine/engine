@@ -562,7 +562,6 @@ fn f_schlick(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
 fn sample_shadow(world_pos: vec3<f32>) -> f32 {
     let light_clip = lighting.shadow_light_vp * vec4<f32>(world_pos, 1.0);
     let light_ndc = light_clip.xyz / light_clip.w;
-    // Out-of-frustum: no shadow info → treat as lit.
     if (light_ndc.x < -1.0 || light_ndc.x > 1.0 ||
         light_ndc.y < -1.0 || light_ndc.y > 1.0 ||
         light_ndc.z < 0.0 || light_ndc.z > 1.0) {
@@ -571,11 +570,6 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
     let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
     let bias = 0.0008;
     let depth_ref = light_ndc.z - bias;
-
-    // 16-tap Poisson-disc PCF. Radius 20 texels at 4096² =
-    // ~0.5% of the shadow frustum width = ~0.3 world units of
-    // penumbra at the default ±30 extent. Wide kernel reads as
-    // diffuse outdoor shade rather than a hard geometric edge.
     let dims = textureDimensions(shadow_tex);
     let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
     let radius = 20.0;
@@ -823,9 +817,6 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // dielectric path is unchanged.
     let hdr = lit + (ibl_diffuse + ibl_spec) * indirect_shadow + emissive;
 
-    // Output linear HDR + per-pixel material info (metallic /
-    // roughness) so the SSR pass can modulate reflections by
-    // surface response.
     return SceneOut(
         vec4<f32>(hdr, base_alpha),
         vec2<f32>(metallic, roughness),
@@ -5305,22 +5296,7 @@ impl Renderer {
                 self.lighting_uniforms.light_dir[1],
                 self.lighting_uniforms.light_dir[2],
             ];
-            // Forward direction from view matrix (column 2 of view inverse
-            // = -row 2 of view matrix for an orthonormal view).
-            let fwd = [
-                -self.current_view_matrix[0][2],
-                -self.current_view_matrix[1][2],
-                -self.current_view_matrix[2][2],
-            ];
-            // Bias the shadow cube half a frustum forward of the camera
-            // so more of the cube covers visible geometry rather than
-            // the area behind the camera.
-            let bias = crate::shadows::SHADOW_EXTENT * 0.5;
-            let shadow_center = [
-                self.current_camera_pos[0] + fwd[0] * bias,
-                self.current_camera_pos[1] + fwd[1] * bias,
-                self.current_camera_pos[2] + fwd[2] * bias,
-            ];
+            let shadow_center = self.current_camera_pos;
             self.shadow_map.compute_light_vp(light_dir, shadow_center);
 
             {
@@ -7313,14 +7289,18 @@ pub fn mat4_perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4
 }
 
 pub fn mat4_ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
+    // wgpu NDC z range is [0, 1] (not OpenGL's [-1, 1]). Matching
+    // this so shadow-map fragments at near half-depth don't get
+    // clipped and sample_shadow's in-frustum test (z in [0, 1])
+    // actually works.
     let lr = 1.0 / (left - right);
     let bt = 1.0 / (bottom - top);
     let nf = 1.0 / (near - far);
     [
         [-2.0 * lr, 0.0, 0.0, 0.0],
         [0.0, -2.0 * bt, 0.0, 0.0],
-        [0.0, 0.0, 2.0 * nf, 0.0],
-        [(left + right) * lr, (top + bottom) * bt, (far + near) * nf, 1.0],
+        [0.0, 0.0, nf,   0.0],
+        [(left + right) * lr, (top + bottom) * bt, near * nf, 1.0],
     ]
 }
 
