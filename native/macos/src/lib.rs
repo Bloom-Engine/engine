@@ -989,6 +989,54 @@ pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64,
     engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
 }
 
+// --- Post-FX knobs (heuristic visual layer; default-off) ---
+
+#[no_mangle]
+pub extern "C" fn bloom_set_fog(r: f64, g: f64, b: f64, density: f64, height_ref: f64, height_falloff: f64) {
+    let r_ = engine();
+    r_.renderer.set_fog_color(r as f32, g as f32, b as f32);
+    r_.renderer.set_fog_density(density as f32);
+    r_.renderer.set_fog_height_falloff(height_ref as f32, height_falloff as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) {
+    engine().renderer.set_chromatic_aberration(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_vignette(strength: f64, softness: f64) {
+    engine().renderer.set_vignette(strength as f32, softness as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_film_grain(strength: f64) {
+    engine().renderer.set_film_grain(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_sun_shafts(strength: f64, decay: f64, r: f64, g: f64, b: f64) {
+    let eng = engine();
+    eng.renderer.set_sun_shaft_strength(strength as f32);
+    eng.renderer.set_sun_shaft_decay(decay as f32);
+    eng.renderer.set_sun_shaft_color(r as f32, g as f32, b as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_auto_exposure(on: f64) {
+    engine().renderer.set_auto_exposure(on != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_manual_exposure(value: f64) {
+    engine().renderer.set_manual_exposure(value as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_env_intensity(intensity: f64) {
+    engine().renderer.set_env_intensity(intensity as f32);
+}
+
 // ============================================================
 // Models
 // ============================================================

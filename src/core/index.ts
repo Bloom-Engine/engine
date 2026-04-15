@@ -14,6 +14,14 @@ declare function bloom_end_drawing(): void;
 declare function bloom_take_screenshot(path: number): void;
 declare function bloom_clear_background(r: number, g: number, b: number, a: number): void;
 declare function bloom_set_env_clear_from_hdr(path: number): void;
+declare function bloom_set_fog(r: number, g: number, b: number, density: number, height_ref: number, height_falloff: number): void;
+declare function bloom_set_chromatic_aberration(strength: number): void;
+declare function bloom_set_vignette(strength: number, softness: number): void;
+declare function bloom_set_film_grain(strength: number): void;
+declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): void;
+declare function bloom_set_auto_exposure(on: number): void;
+declare function bloom_set_manual_exposure(value: number): void;
+declare function bloom_set_env_intensity(intensity: number): void;
 declare function bloom_set_target_fps(fps: number): void;
 declare function bloom_get_delta_time(): number;
 declare function bloom_get_fps(): number;
@@ -126,6 +134,51 @@ export function clearBackground(color: Color): void {
  */
 export function setEnvClearFromHdr(path: string): void {
   bloom_set_env_clear_from_hdr(path as any);
+}
+
+// ---- Post-FX knobs ----
+// All default to off. Calling these turns the corresponding
+// composite-pass / TAA-pass effect on for the rest of the run
+// (or until called again with 0 / disabled values).
+
+/** Height-based exponential fog. Density 0 = off. */
+export function setFog(r: number, g: number, b: number, density: number, heightRef: number, heightFalloff: number): void {
+  bloom_set_fog(r, g, b, density, heightRef, heightFalloff);
+}
+
+/** Radial RGB-channel split at the screen edges. 0 = off. */
+export function setChromaticAberration(strength: number): void {
+  bloom_set_chromatic_aberration(strength);
+}
+
+/** Smooth radial darkening of the corners. strength 0..1, softness 0..1. */
+export function setVignette(strength: number, softness: number): void {
+  bloom_set_vignette(strength, softness);
+}
+
+/** Animated film grain post-tonemap. 0 = off. */
+export function setFilmGrain(strength: number): void {
+  bloom_set_film_grain(strength);
+}
+
+/** Screen-space sun shafts (god rays). strength 0 = off. */
+export function setSunShafts(strength: number, decay: number, r: number, g: number, b: number): void {
+  bloom_set_sun_shafts(strength, decay, r, g, b);
+}
+
+/** Toggle physically-based auto-exposure. 18% gray target, log-average metered. */
+export function setAutoExposure(on: boolean): void {
+  bloom_set_auto_exposure(on ? 1 : 0);
+}
+
+/** Manual exposure multiplier (ignored when auto-exposure is on). 1.0 = default. */
+export function setManualExposure(value: number): void {
+  bloom_set_manual_exposure(value);
+}
+
+/** Env-map intensity multiplier for IBL + sky pass. 1.0 = reference, 0.2–0.5 typical for bright outdoor HDRs. */
+export function setEnvIntensity(intensity: number): void {
+  bloom_set_env_intensity(intensity);
 }
 
 // Timing

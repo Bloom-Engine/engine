@@ -103,6 +103,9 @@ impl LightingUniforms {
             dir_lights: [DirLight { direction: [0.0; 4], color: [0.0; 4] }; MAX_DIR_LIGHTS],
             point_light_count: [0.0; 4],
             point_lights: [PointLight { position: [0.0; 4], color: [0.0; 4] }; MAX_POINT_LIGHTS],
+            // w = env_intensity multiplier for IBL + sky. 1.0 matches
+            // the path-traced reference; apps with bright HDR envs
+            // typically dial to 0.2–0.5 via set_env_intensity.
             camera_pos: [0.0, 0.0, 0.0, 1.0],
             shadow_light_vp: IDENTITY_MAT4,
         }
@@ -1937,16 +1940,21 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-    // 16-tap luma average — same as the old composite inline path,
-    // but now only one fragment does it instead of every pixel.
-    var luma_sum = 0.0;
+    // 16-tap LOG-average luma. Linear average gets dominated by
+    // a few very bright pixels — in an outdoor HDR scene with
+    // the sun, the mean can land 10x higher than what the eye
+    // perceives as average scene brightness. Log-average matches
+    // human perception and gives far better auto-exposure on
+    // high-dynamic-range content.
+    var log_sum = 0.0;
     for (var i = 0u; i < 16u; i = i + 1u) {
         let sx = (f32(i % 4u) + 0.5) * 0.25;
         let sy = (f32(i / 4u) + 0.5) * 0.25;
         let s = textureSample(hdr_tex, hdr_samp, vec2<f32>(sx, sy)).rgb;
-        luma_sum = luma_sum + dot(s, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let luma = dot(s, vec3<f32>(0.2126, 0.7152, 0.0722));
+        log_sum = log_sum + log(max(luma, 1e-5));
     }
-    let avg_luma = luma_sum * (1.0 / 16.0);
+    let avg_luma = exp(log_sum * (1.0 / 16.0));
 
     let key = u.params.x;
     let rate = u.params.y;
@@ -5378,7 +5386,10 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            self.render_sky_pass(&mut pass, 1.0);
+            // Sky uses the same env_intensity as IBL so the background
+            // and lighting stay in sync — otherwise bumping IBL down
+            // would leave the sky blown out.
+            self.render_sky_pass(&mut pass, self.lighting_uniforms.camera_pos[3]);
 
             if has_3d {
                 pass.set_pipeline(&self.pipeline_3d);
@@ -5792,8 +5803,12 @@ impl Renderer {
                 params: [
                     self.auto_exposure_key,
                     self.auto_exposure_rate,
-                    0.1, // min exposure clamp
-                    10.0, // max exposure clamp
+                    // Min exposure needs to go low enough to handle
+                    // bright outdoor HDRs where scene avg_luma is
+                    // > 10. At min=0.1, a 10-luma ground saturates
+                    // to 1.0 (white). 0.01 lets it crush to 0.1.
+                    0.01,
+                    10.0,
                 ],
             };
             self.queue.write_buffer(&self.exposure_uniform_buffer, 0, bytemuck::bytes_of(&ep));

@@ -34,6 +34,8 @@ import {
   getMouseDeltaX, getMouseDeltaY,
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
+  setFog, setChromaticAberration, setVignette, setFilmGrain, setSunShafts,
+  setAutoExposure, setEnvIntensity,
 } from "bloom/core";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
@@ -553,9 +555,9 @@ initSharedMeshes();
 // sky rendering (equirect sample per background pixel) comes in a
 // follow-up — this first-pass "solid color from env average" already
 // closes most of the background-gap RMSE.
-if (headlessMode) {
-  setEnvClearFromHdr("assets/outdoor.hdr");
-}
+// Always load the HDR env map — needed for IBL and for the sky pass
+// to render anything other than the default clear color.
+setEnvClearFromHdr("assets/outdoor.hdr");
 
 // Build the scene. In headless mode we draw ONLY the glTF model at
 // origin so the view matches what bloom-reference renders from the
@@ -582,6 +584,10 @@ if (!headlessMode) {
 // are visible. Headless skips them so the path-traced reference
 // comparison stays bit-meaningful.
 if (!headlessMode) {
+  // IBL is bright outdoors; dial it down so ACES has headroom.
+  setEnvIntensity(0.3);
+  // Log-average auto-exposure handles the remaining dynamic range.
+  setAutoExposure(true);
   setFog(0.55, 0.62, 0.72, 0.025, 0.0, 0.18);
   setVignette(0.35, 0.30);
   setFilmGrain(0.025);
