@@ -1033,6 +1033,26 @@ fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Textu
     (texture, view)
 }
 
+/// Create the SSR render target (half-res HDR — reflections are
+/// low-frequency enough that half-res hides bilinear blur).
+fn create_ssr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let w = (width / 2).max(1);
+    let h = (height / 2).max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ssr_rt"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Halton low-discrepancy sequence (base `b`, index `i`, 1-based).
 /// Returns a value in [0, 1). Used to generate sub-pixel jitter
 /// offsets that are well-distributed across the pixel — the TAA
@@ -1368,6 +1388,142 @@ struct SsaoParams {
     params: [f32; 4],
 }
 
+/// SSR (screen-space reflections) shader. View-space ray march:
+///
+/// 1. Reconstruct view-space position from the depth buffer.
+/// 2. Reconstruct view-space normal from depth derivatives
+///    (cross of dpdx/dpdy of view position).
+/// 3. Reflect view direction around N → reflection direction R.
+/// 4. March along R in view space, project each step to screen
+///    coords, sample depth there, hit if our marched z is past the
+///    sampled surface.
+/// 5. On hit, sample the HDR RT at the hit UV and output it
+///    (faded toward edges of screen so off-screen reflections
+///    don't pop into existence).
+///
+/// Output is half-res HDR. The TAA pass adds it on top of the
+/// prefiltered IBL specular for the final image.
+const SSR_SHADER_WGSL: &str = "
+struct SsrParams {
+    /// Inverse of the projection matrix — depth → view-space pos.
+    inv_proj: mat4x4<f32>,
+    /// Projection matrix — view-space pos → clip-space.
+    proj: mat4x4<f32>,
+    /// x = SSR strength (0 = off, 1 = full)
+    /// y = max march distance in view-space units
+    /// z = number of march steps
+    /// w = padding
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: SsrParams;
+@group(0) @binding(1) var depth_tex: texture_depth_2d;
+@group(0) @binding(2) var depth_samp: sampler;
+@group(0) @binding(3) var hdr_tex: texture_2d<f32>;
+@group(0) @binding(4) var hdr_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+fn view_pos_from_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
+    let view_h = u.inv_proj * ndc;
+    return view_h.xyz / view_h.w;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let depth = textureSample(depth_tex, depth_samp, in.uv);
+    if (depth >= 0.9999) {
+        // Sky — no reflections.
+        return vec4<f32>(0.0);
+    }
+
+    let view_pos = view_pos_from_depth(in.uv, depth);
+    // Reconstruct view-space normal from screen-space derivatives.
+    let dx = dpdx(view_pos);
+    let dy = dpdy(view_pos);
+    let n = normalize(cross(dx, dy));
+
+    // V points from surface to camera (camera is at origin in view
+    // space, so V = -view_pos / length).
+    let v = normalize(-view_pos);
+    // Reflection direction.
+    let r = reflect(-v, n);
+
+    // Skip rays heading toward the camera — those would walk back
+    // into the surface and never find a real hit.
+    if (r.z > 0.0) {
+        return vec4<f32>(0.0);
+    }
+
+    let max_dist = u.params.y;
+    let n_steps = u.params.z;
+    let step_size = max_dist / n_steps;
+
+    var hit_uv = vec2<f32>(-1.0);
+    var hit_found = false;
+    var t = step_size; // skip the first step to avoid self-intersection
+    for (var i = 0u; i < u32(n_steps); i = i + 1u) {
+        let ray_view = view_pos + r * t;
+        let ray_clip = u.proj * vec4<f32>(ray_view, 1.0);
+        let ray_ndc = ray_clip.xyz / ray_clip.w;
+        // Off-screen ray — no hit possible.
+        if (ray_ndc.x < -1.0 || ray_ndc.x > 1.0 ||
+            ray_ndc.y < -1.0 || ray_ndc.y > 1.0 ||
+            ray_ndc.z < 0.0 || ray_ndc.z > 1.0) {
+            break;
+        }
+        let ray_uv = vec2<f32>(ray_ndc.x * 0.5 + 0.5, 1.0 - (ray_ndc.y * 0.5 + 0.5));
+        let scene_depth = textureSample(depth_tex, depth_samp, ray_uv);
+        // Ray has gone past the surface — record the hit.
+        if (ray_ndc.z >= scene_depth) {
+            hit_uv = ray_uv;
+            hit_found = true;
+            break;
+        }
+        t = t + step_size;
+    }
+
+    if (!hit_found) {
+        return vec4<f32>(0.0);
+    }
+
+    // Edge fade — pull hits near the screen border to zero so the
+    // reflection doesn't pop in/out as the camera moves. 0.1 of the
+    // screen on each side gets feathered.
+    let edge_fade = min(
+        min(hit_uv.x, 1.0 - hit_uv.x),
+        min(hit_uv.y, 1.0 - hit_uv.y),
+    ) * 10.0;
+    let fade = clamp(edge_fade, 0.0, 1.0);
+
+    let reflected = textureSample(hdr_tex, hdr_samp, hit_uv).rgb;
+    return vec4<f32>(reflected * u.params.x * fade, fade);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsrParams {
+    inv_proj: [[f32; 4]; 4],
+    proj: [[f32; 4]; 4],
+    /// x=strength, y=max_dist, z=n_steps, w=padding
+    params: [f32; 4],
+}
+
 /// TAA shader. Combines current-frame HDR + SSAO + bloom into a
 /// single linear-HDR value per fragment, then blends against the
 /// reprojected history with a fixed feedback factor. For static
@@ -1402,6 +1558,8 @@ struct TaaParams {
 @group(0) @binding(8) var history_samp: sampler;
 @group(0) @binding(9) var depth_tex: texture_depth_2d;
 @group(0) @binding(10) var depth_samp: sampler;
+@group(0) @binding(11) var ssr_tex: texture_2d<f32>;
+@group(0) @binding(12) var ssr_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1425,7 +1583,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
     let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
     let ssao = textureSample(ssao_tex, ssao_samp, in.uv).r;
-    let current = hdr * ssao + bloom * u.params.y;
+    let ssr = textureSample(ssr_tex, ssr_samp, in.uv).rgb;
+    // SSR is added on top of HDR (pre-tonemap) — already strength-
+    // and edge-faded by the SSR pass, so a flat add here is fine.
+    let current = (hdr + ssr) * ssao + bloom * u.params.y;
 
     // Reproject history via depth + previous VP. Reconstruct the
     // fragment's world-space position from current-frame depth, then
@@ -1464,7 +1625,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let s_hdr = textureSample(hdr_tex, hdr_samp, s_uv).rgb;
             let s_ssao = textureSample(ssao_tex, ssao_samp, s_uv).r;
             let s_bloom = textureSample(bloom_tex, bloom_samp, s_uv).rgb;
-            let s = s_hdr * s_ssao + s_bloom * u.params.y;
+            let s_ssr = textureSample(ssr_tex, ssr_samp, s_uv).rgb;
+            let s = (s_hdr + s_ssr) * s_ssao + s_bloom * u.params.y;
             nmin = min(nmin, s);
             nmax = max(nmax, s);
         }
@@ -1828,6 +1990,19 @@ pub struct Renderer {
     /// removing ghosting under camera motion. Updated at the end
     /// of each frame from current_vp_matrix.
     pub prev_vp_matrix: [[f32; 4]; 4],
+    /// SSR (screen-space reflections) pass output — half-res HDR
+    /// holding the reflected color for each fragment. Composited
+    /// into the final image by the TAA pass.
+    pub ssr_rt_texture: wgpu::Texture,
+    pub ssr_rt_view: wgpu::TextureView,
+    pub ssr_pipeline: wgpu::RenderPipeline,
+    pub ssr_layout: wgpu::BindGroupLayout,
+    pub ssr_uniform_buffer: wgpu::Buffer,
+    /// SSR strength multiplier (0 = off, 1 = full). Default 0.5
+    /// is conservative — too much SSR makes diffuse surfaces look
+    /// like wet floors. Applies on top of the prefiltered IBL.
+    pub ssr_strength: f32,
+    pub ssr_enabled: bool,
 
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
@@ -2307,6 +2482,9 @@ impl Renderer {
             &device, surface_config.width, surface_config.height,
         );
         let (taa_textures, taa_views) = create_taa_textures(
+            &device, surface_config.width, surface_config.height,
+        );
+        let (ssr_rt_texture, ssr_rt_view) = create_ssr_rt(
             &device, surface_config.width, surface_config.height,
         );
 
@@ -3208,6 +3386,18 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let taa_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3243,6 +3433,84 @@ impl Renderer {
         let taa_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("taa_uniform_buffer"),
             size: std::mem::size_of::<TaaParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // --- SSR pipeline ---
+        let ssr_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ssr_shader"),
+            source: wgpu::ShaderSource::Wgsl(SSR_SHADER_WGSL.into()),
+        });
+        let ssr_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ssr_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ssr_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ssr_pl_layout"),
+            bind_group_layouts: &[&ssr_layout],
+            push_constant_ranges: &[],
+        });
+        let ssr_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ssr_pipeline"),
+            layout: Some(&ssr_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &ssr_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ssr_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT, blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false, conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+        let ssr_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ssr_uniform_buffer"),
+            size: std::mem::size_of::<SsrParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -3305,6 +3573,13 @@ impl Renderer {
             taa_frame_index: 0,
             taa_enabled: true,
             prev_vp_matrix: IDENTITY_MAT4,
+            ssr_rt_texture,
+            ssr_rt_view,
+            ssr_pipeline,
+            ssr_layout,
+            ssr_uniform_buffer,
+            ssr_strength: 0.5,
+            ssr_enabled: true,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -3460,6 +3735,9 @@ impl Renderer {
             self.taa_textures = taa_t;
             self.taa_views = taa_v;
             self.taa_frame_index = 0; // reset jitter sequence on resize
+            let (sr_t, sr_v) = create_ssr_rt(&self.device, width, height);
+            self.ssr_rt_texture = sr_t;
+            self.ssr_rt_view = sr_v;
         }
     }
 
@@ -3497,14 +3775,27 @@ impl Renderer {
 
     /// Toggle TAA on/off. Off = no jitter, no history blend, no
     /// extra texture writes. On = sub-pixel super-sampling for
-    /// static and slow-camera scenes (no motion vectors yet, so
-    /// fast camera motion will introduce mild ghosting until the
-    /// history catches up).
+    /// static and slow-camera scenes.
     pub fn set_taa_enabled(&mut self, enabled: bool) {
         if enabled != self.taa_enabled {
             self.taa_enabled = enabled;
             self.taa_frame_index = 0;
         }
+    }
+
+    /// Toggle SSR on/off. SSR contributes nothing in scenes with
+    /// no on-screen geometry to reflect (e.g., single object
+    /// against sky) — turning it off there saves a fullscreen
+    /// pass.
+    pub fn set_ssr_enabled(&mut self, enabled: bool) {
+        self.ssr_enabled = enabled;
+    }
+
+    /// SSR strength multiplier (0 = off, 0.5 = default, 1+ = strong).
+    /// Applies on top of the prefiltered IBL specular reflection,
+    /// adding sharp on-screen reflections where they exist.
+    pub fn set_ssr_strength(&mut self, strength: f32) {
+        self.ssr_strength = strength.max(0.0);
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -4352,6 +4643,67 @@ impl Renderer {
         }
 
         // ============================================================
+        // SSR: view-space ray march of the depth buffer + HDR sample.
+        // ============================================================
+        if self.ssr_enabled {
+            let inv_proj = mat4_invert(self.current_proj_matrix);
+            let sp = SsrParams {
+                inv_proj,
+                proj: self.current_proj_matrix,
+                params: [self.ssr_strength, 8.0, 32.0, 0.0],
+            };
+            self.queue.write_buffer(&self.ssr_uniform_buffer, 0, bytemuck::bytes_of(&sp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ssr_bg"),
+                layout: &self.ssr_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ssr_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssr_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssr_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.ssr_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        } else {
+            // SSR disabled — clear the RT so TAA's read returns 0
+            // (transparent black). One-time clear is cheaper than a
+            // full clear+pipeline switch every frame.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssr_clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssr_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            drop(pass);
+        }
+
+        // ============================================================
         // Bloom: progressive downsample (Karis-thresholded first tap)
         // followed by additive upsample back up the chain.
         // ============================================================
@@ -4500,6 +4852,8 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
                     wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
+                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 ],
             });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
