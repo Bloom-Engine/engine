@@ -384,32 +384,26 @@ impl ShadowMap {
                 world_corners[i] = [h[0] / w, h[1] / w, h[2] / w];
             }
 
-            // Compute light view matrix (looking from far away toward the
-            // center of the frustum slice).
-            let mut center = [0.0f32; 3];
-            for corner in &world_corners {
-                center[0] += corner[0];
-                center[1] += corner[1];
-                center[2] += corner[2];
-            }
-            center[0] /= 8.0;
-            center[1] /= 8.0;
-            center[2] /= 8.0;
+            // Use camera position as cascade center — NOT the frustum
+            // slice center. This makes shadow coverage independent of
+            // camera rotation (no shadow popping when looking around).
+            // The radius is computed from the max distance a frustum
+            // corner can be from the camera at this cascade's far
+            // plane — that's view-direction-independent.
+            let center = camera_pos;
 
-            // Determine the radius of a bounding sphere around the frustum
-            // slice center so the ortho extent stays constant as the camera
-            // rotates (prevents shadow edge swimming on yaw changes).
+            // Radius = distance from camera to the farthest frustum
+            // corner at this cascade's far split. For a symmetric
+            // perspective projection: max_dist = c_far / cos(half_diag_fov).
+            // We just use the world-space corners to get a stable value.
             let mut radius = 0.0f32;
             for corner in &world_corners {
                 let dx = corner[0] - center[0];
                 let dy = corner[1] - center[1];
                 let dz = corner[2] - center[2];
                 let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                if dist > radius {
-                    radius = dist;
-                }
+                if dist > radius { radius = dist; }
             }
-            // Ceil to avoid sub-texel jitter when the sphere barely changes.
             radius = (radius * 16.0).ceil() / 16.0;
 
             // Texel snap: quantize the ortho center to texel boundaries in
