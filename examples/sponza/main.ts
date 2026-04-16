@@ -55,7 +55,7 @@ enableShadows();
 // compensates for lack of GI bounce.
 setEnvIntensity(1.5);
 setAutoExposure(false);
-setManualExposure(3.0);
+setManualExposure(7.0);
 // Fog disabled — was causing brightness variation in corridors
 // setFog(0.7, 0.75, 0.82, 0.008, 0.0, 0.1);
 setVignette(0.25, 0.25);
