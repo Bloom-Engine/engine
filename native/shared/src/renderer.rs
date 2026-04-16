@@ -6042,7 +6042,7 @@ impl Renderer {
             ssgi_layout,
             ssgi_uniform_buffer,
             ssgi_intensity: 0.5,
-            ssgi_enabled: false,
+            ssgi_enabled: false,  // needs temporal denoiser to look good
             dof_rt_texture,
             dof_rt_view,
             dof_pipeline,
