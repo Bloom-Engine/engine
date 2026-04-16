@@ -1280,6 +1280,25 @@ fn create_ssao_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Text
     (texture, view)
 }
 
+/// Create the SSAO bilateral-blur render target (same format/size as ssao_rt).
+fn create_ssao_blur_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let w = (width / 2).max(1);
+    let h = (height / 2).max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ssao_blur_rt"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SSAO_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Create the bloom mip-chain texture + per-mip render views + a
 /// full-chain view for sampling. Mip 0 starts at surface/2 size and
 /// each subsequent mip halves down to ~surface/2^N. Caller is
@@ -1701,6 +1720,113 @@ struct SsaoParams {
 }
 
 // ============================================================
+// SSAO Bilateral Blur post-process
+// ============================================================
+
+/// Bilateral blur applied to the raw GTAO output.
+///
+/// A 5×5 cross-bilateral filter: for each tap we weight by a spatial
+/// Gaussian AND by depth similarity so the blur stops at depth edges,
+/// preserving contact-shadow / crease detail while suppressing the
+/// per-pixel noise introduced by the horizon-sampling in GTAO.
+///
+/// Bindings:
+///   0 – uniform  (SsaoBlurParams)
+///   1 – ssao_rt  (noisy GTAO output, R8Unorm)
+///   2 – ao sampler (filtering)
+///   3 – depth_tex (Depth32Float for edge-stopping)
+///   4 – depth sampler (non-filtering)
+const SSAO_BLUR_SHADER_WGSL: &str = "
+struct SsaoBlurParams {
+    // xy = texel_size (1/w, 1/h of the SSAO RT, i.e. half-res)
+    // z  = depth_sigma (edge-stop threshold, ~0.01–0.1 in NDC depth)
+    // w  = unused
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: SsaoBlurParams;
+@group(0) @binding(1) var ao_tex:    texture_2d<f32>;
+@group(0) @binding(2) var ao_samp:   sampler;
+@group(0) @binding(3) var depth_tex: texture_depth_2d;
+@group(0) @binding(4) var depth_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+// Pre-computed Gaussian weights for a 5-tap 1-D kernel (sigma ≈ 1.4).
+// Offsets: -2, -1, 0, +1, +2
+const GAUSS5: array<f32, 5> = array<f32, 5>(
+    0.0625, 0.25, 0.375, 0.25, 0.0625
+);
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let texel  = u.params.xy;
+    let d_sigma = u.params.z;
+
+    let center_depth = textureSample(depth_tex, depth_samp, in.uv);
+
+    // Sky pixels get AO = 1 (fully unoccluded) — no need to blur.
+    if (center_depth >= 0.9999) {
+        return vec4<f32>(1.0);
+    }
+
+    var ao_sum     = 0.0;
+    var weight_sum = 0.0;
+
+    // 5×5 separable-style bilateral gather.
+    for (var dy: i32 = -2; dy <= 2; dy = dy + 1) {
+        for (var dx: i32 = -2; dx <= 2; dx = dx + 1) {
+            let offset = vec2<f32>(f32(dx), f32(dy)) * texel;
+            let s_uv   = in.uv + offset;
+
+            let s_ao    = textureSample(ao_tex, ao_samp, s_uv).r;
+            let s_depth = textureSample(depth_tex, depth_samp, s_uv);
+
+            // Spatial weight: product of 1-D Gaussian weights for x and y.
+            let gx = GAUSS5[dx + 2];
+            let gy = GAUSS5[dy + 2];
+            let spatial = gx * gy;
+
+            // Depth edge-stop: exponential falloff with depth difference.
+            let depth_diff = abs(center_depth - s_depth);
+            let range_w = exp(-depth_diff / d_sigma);
+
+            let w = spatial * range_w;
+            ao_sum     += s_ao * w;
+            weight_sum += w;
+        }
+    }
+
+    let result = select(
+        textureSample(ao_tex, ao_samp, in.uv).r,
+        ao_sum / weight_sum,
+        weight_sum > 0.0001
+    );
+    return vec4<f32>(result, result, result, 1.0);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsaoBlurParams {
+    /// xy = texel_size (of the half-res SSAO RT), z = depth_sigma, w = unused.
+    params: [f32; 4],
+}
+
+// ============================================================
 // Depth of Field (DoF) post-process
 // ============================================================
 
@@ -1774,9 +1900,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         view_z = linearize_depth(center_depth_raw);
     }
 
-    // Circle of confusion: how far this pixel is from focus plane,
-    // scaled by aperture. Larger CoC = more blur.
-    let coc = clamp(abs(view_z - focus_dist) * aperture, 0.0, max_blur);
+    // Circle of confusion: thin-lens approximation.
+    // Dividing by view_z ensures distant objects don't get disproportionately
+    // blurred — CoC grows with defocus distance but falls off with depth.
+    // max(view_z, 0.1) prevents division by zero for geometry very close to
+    // the camera.
+    let coc = clamp(aperture * abs(view_z - focus_dist) / max(view_z, 0.1), 0.0, max_blur);
 
     // If CoC is negligibly small, return the source pixel unchanged.
     let threshold = 0.0005;
@@ -2781,6 +2910,14 @@ pub struct Renderer {
     pub ssao_layout: wgpu::BindGroupLayout,
     pub ssao_uniform_buffer: wgpu::Buffer,
     pub ssao_depth_sampler: wgpu::Sampler,
+    /// Bilateral blur pass applied to the raw GTAO output. Reads
+    /// ssao_rt, writes ssao_blur_rt (same half-res R8Unorm format).
+    /// The TAA pass then samples ssao_blur_rt instead of ssao_rt.
+    pub ssao_blur_rt_texture: wgpu::Texture,
+    pub ssao_blur_rt_view: wgpu::TextureView,
+    pub ssao_blur_pipeline: wgpu::RenderPipeline,
+    pub ssao_blur_layout: wgpu::BindGroupLayout,
+    pub ssao_blur_uniform_buffer: wgpu::Buffer,
     /// Strength multiplier for SSAO (0 = off, 1 = full). Default 1.0.
     pub ssao_strength: f32,
     /// Sample radius in UV units (default ~0.005, gives a soft AO
@@ -5222,7 +5359,7 @@ impl Renderer {
                 // even for high-contrast HDRs.
                 1024.0
             } else {
-                (32.0 + 96.0 * roughness).round()
+                (128.0 + 384.0 * roughness).round()
             };
 
             let uniforms = PrefilterUniforms {
