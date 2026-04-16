@@ -653,15 +653,16 @@ fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
 // cascade's VP, and performs PCF. Blends between cascades at boundaries
 // for smooth transitions.
 fn sample_shadow(world_pos: vec3<f32>) -> f32 {
-    // Compute view-space Z for cascade selection
-    let view_pos = lighting.shadow_view_matrix * vec4<f32>(world_pos, 1.0);
-    let view_z = -view_pos.z; // positive distance from camera
+    // Select cascade by world-space DISTANCE from camera (not
+    // view-space Z). Distance is rotation-independent — spinning
+    // the camera doesn't change which cascade a surface falls in.
+    let cam = lighting.camera_pos.xyz;
+    let dist = length(world_pos - cam);
 
-    // Select cascade based on view-space depth
     var cascade = 2;
-    if (view_z <= lighting.shadow_cascade_splits.x) {
+    if (dist <= lighting.shadow_cascade_splits.x) {
         cascade = 0;
-    } else if (view_z <= lighting.shadow_cascade_splits.y) {
+    } else if (dist <= lighting.shadow_cascade_splits.y) {
         cascade = 1;
     }
 
