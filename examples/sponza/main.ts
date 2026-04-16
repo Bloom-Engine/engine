@@ -55,7 +55,7 @@ enableShadows();
 // compensates for lack of GI bounce.
 setEnvIntensity(1.5);
 setAutoExposure(false);
-setManualExposure(1.0);
+setManualExposure(3.0);
 // Fog disabled — was causing brightness variation in corridors
 // setFog(0.7, 0.75, 0.82, 0.008, 0.0, 0.1);
 setVignette(0.25, 0.25);
@@ -120,7 +120,11 @@ while (!windowShouldClose()) {
   // Fill light from below — bounced light that would come from
   // the lit floor illuminating the vaulted ceilings. Without GI
   // this is the only way to keep ceilings visible.
-  addDirectionalLight(0.0, -0.8, 0.0, 0.7, 0.75, 0.85, 5.0);
+  // Fill light from below — simulates bounced skylight on ceilings
+  addDirectionalLight(0.0, -1.0, 0.0, 0.6, 0.65, 0.75, 8.0);
+  // Fill from sides — catches inner vault surfaces
+  addDirectionalLight(1.0, 0.0, 0.0, 0.5, 0.55, 0.6, 3.0);
+  addDirectionalLight(-1.0, 0.0, 0.0, 0.5, 0.55, 0.6, 3.0);
 
   beginMode3D({
     position: { x: camX, y: camY, z: camZ },
