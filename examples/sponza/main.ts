@@ -19,12 +19,14 @@ import {
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
 import {
-  setAmbientLight, setDirectionalLight, loadModel, drawModel,
+  setAmbientLight, setDirectionalLight, loadModel,
 } from "bloom/models";
 import {
   enableShadows, addDirectionalLight,
+  createSceneNode, attachModelToNode, setSceneNodeTransform,
+  setSceneNodeCastShadow,
 } from "bloom/scene";
-import { clamp } from "bloom/math";
+import { clamp, mat4Identity } from "bloom/math";
 
 const SCREEN_W = 1280;
 const SCREEN_H = 720;
@@ -61,8 +63,14 @@ setManualExposure(2.5);
 setVignette(0.25, 0.25);
 setChromaticAberration(0.001);
 
-// ---- Load Sponza ----
+// ---- Load Sponza into scene graph (enables shadows) ----
 const sponza = loadModel("assets/Sponza.glb");
+const identity = mat4Identity();
+for (let i = 0; i < sponza.meshCount; i = i + 1) {
+  const node = createSceneNode();
+  attachModelToNode(node, sponza.handle, i);
+  setSceneNodeTransform(node, identity);
+}
 
 // ---- Camera ----
 // Sponza courtyard center, looking down the main axis
@@ -131,9 +139,7 @@ while (!windowShouldClose()) {
     projection: "perspective",
   });
 
-  if (sponza.handle !== 0) {
-    drawModel(sponza, { x: 0, y: 0, z: 0 }, 1.0, { r: 255, g: 255, b: 255, a: 255 });
-  }
+  // Sponza is in the scene graph — rendered automatically with shadows.
 
   endMode3D();
 
