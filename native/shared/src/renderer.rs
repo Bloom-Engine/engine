@@ -88,10 +88,19 @@ struct LightingUniforms {
     /// sample so IBL stays in sync with the sky pass when the user
     /// scales their HDR. Written once per frame before the main pass.
     camera_pos: [f32; 4],
-    /// Light view-projection matrix for the primary directional
-    /// light's shadow map. Scene shader projects world_pos through
-    /// this to derive the shadow-map UV. Identity = no shadow cast.
-    shadow_light_vp: [[f32; 4]; 4],
+    /// Cascaded shadow map: 3 light view-projection matrices (one per
+    /// cascade). Scene shader selects the tightest cascade based on
+    /// the fragment's view-space depth and projects through the
+    /// corresponding matrix for shadow-map UV.
+    shadow_cascade_vps: [[[f32; 4]; 4]; 3],
+    /// View-space Z split distances for cascade selection (xyz = split
+    /// distances for cascades 0/1/2, w = unused). Fragment at depth z
+    /// uses cascade i where z <= cascade_splits[i].
+    shadow_cascade_splits: [f32; 4],
+    /// Camera view matrix — passed to the shader so the fragment shader
+    /// can compute view-space Z for cascade selection without an extra
+    /// buffer binding.
+    shadow_view_matrix: [[f32; 4]; 4],
 }
 
 impl LightingUniforms {
@@ -108,7 +117,9 @@ impl LightingUniforms {
             // the path-traced reference; apps with bright HDR envs
             // typically dial to 0.2–0.5 via set_env_intensity.
             camera_pos: [0.0, 0.0, 0.0, 1.0],
-            shadow_light_vp: IDENTITY_MAT4,
+            shadow_cascade_vps: [IDENTITY_MAT4; 3],
+            shadow_cascade_splits: [8.0, 25.0, 80.0, 0.0],
+            shadow_view_matrix: IDENTITY_MAT4,
         }
     }
 }
@@ -411,7 +422,9 @@ struct Lighting {
     point_light_count: vec4<f32>,
     point_lights: array<PointLight, 16>,
     camera_pos: vec4<f32>,
-    shadow_light_vp: mat4x4<f32>,
+    shadow_cascade_vps: array<mat4x4<f32>, 3>,
+    shadow_cascade_splits: vec4<f32>,
+    shadow_view_matrix: mat4x4<f32>,
 };
 
 struct MaterialFactors {
@@ -444,8 +457,10 @@ struct VertexOutputScene {
 @group(1) @binding(2) var env_samp: sampler;
 @group(1) @binding(3) var brdf_lut_tex: texture_2d<f32>;
 @group(1) @binding(4) var brdf_lut_samp: sampler;
-@group(1) @binding(5) var shadow_tex: texture_depth_2d;
-@group(1) @binding(6) var shadow_samp: sampler_comparison;
+@group(1) @binding(5) var shadow_tex_0: texture_depth_2d;
+@group(1) @binding(6) var shadow_tex_1: texture_depth_2d;
+@group(1) @binding(7) var shadow_tex_2: texture_depth_2d;
+@group(1) @binding(8) var shadow_samp: sampler_comparison;
 @group(2) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(2) @binding(1) var base_color_samp: sampler;
 @group(2) @binding(2) var normal_tex: texture_2d<f32>;
@@ -568,24 +583,18 @@ fn f_schlick(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * fc;
 }
 
-// Sample the shadow map with 4-tap PCF — softens the cascade-edge
-// stair-stepping you'd get from a single comparison. Returns 1.0
-// for fully lit, 0.0 for fully shadowed. Caller multiplies the
-// directional light's diffuse + specular by the result.
-fn sample_shadow(world_pos: vec3<f32>) -> f32 {
-    let light_clip = lighting.shadow_light_vp * vec4<f32>(world_pos, 1.0);
-    let light_ndc = light_clip.xyz / light_clip.w;
-    if (light_ndc.x < -1.0 || light_ndc.x > 1.0 ||
-        light_ndc.y < -1.0 || light_ndc.y > 1.0 ||
-        light_ndc.z < 0.0 || light_ndc.z > 1.0) {
-        return 1.0;
+// Sample a single cascade's shadow texture with 4-tap Poisson PCF.
+fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
+    var dims: vec2<u32>;
+    if (cascade == 0) {
+        dims = textureDimensions(shadow_tex_0);
+    } else if (cascade == 1) {
+        dims = textureDimensions(shadow_tex_1);
+    } else {
+        dims = textureDimensions(shadow_tex_2);
     }
-    let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
-    let bias = 0.005;
-    let depth_ref = light_ndc.z - bias;
-    let dims = textureDimensions(shadow_tex);
     let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
-    let radius = 3.0;
+    let radius = 2.0;
     var sum = 0.0;
     let poisson = array<vec2<f32>, 16>(
         vec2<f32>(-0.94201624, -0.39906216),
@@ -607,9 +616,76 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
     );
     for (var i: i32 = 0; i < 16; i = i + 1) {
         let off = poisson[i] * texel * radius;
-        sum = sum + textureSampleCompare(shadow_tex, shadow_samp, shadow_uv + off, depth_ref);
+        let uv = shadow_uv + off;
+        if (cascade == 0) {
+            sum += textureSampleCompare(shadow_tex_0, shadow_samp, uv, depth_ref);
+        } else if (cascade == 1) {
+            sum += textureSampleCompare(shadow_tex_1, shadow_samp, uv, depth_ref);
+        } else {
+            sum += textureSampleCompare(shadow_tex_2, shadow_samp, uv, depth_ref);
+        }
     }
     return sum / 16.0;
+}
+
+// Cascaded shadow map sampling. Determines which cascade the fragment
+// belongs to based on its view-space depth, projects through that
+// cascade's VP, and performs PCF. Blends between cascades at boundaries
+// for smooth transitions.
+fn sample_shadow(world_pos: vec3<f32>) -> f32 {
+    // Compute view-space Z for cascade selection
+    let view_pos = lighting.shadow_view_matrix * vec4<f32>(world_pos, 1.0);
+    let view_z = -view_pos.z; // positive distance from camera
+
+    // Select cascade based on view-space depth
+    var cascade = 2;
+    if (view_z <= lighting.shadow_cascade_splits.x) {
+        cascade = 0;
+    } else if (view_z <= lighting.shadow_cascade_splits.y) {
+        cascade = 1;
+    }
+
+    // Project through the selected cascade's VP
+    let light_clip = lighting.shadow_cascade_vps[cascade] * vec4<f32>(world_pos, 1.0);
+    let light_ndc = light_clip.xyz / light_clip.w;
+    if (light_ndc.x < -1.0 || light_ndc.x > 1.0 ||
+        light_ndc.y < -1.0 || light_ndc.y > 1.0 ||
+        light_ndc.z < 0.0 || light_ndc.z > 1.0) {
+        return 1.0;
+    }
+    let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
+    let bias = 0.003;
+    let depth_ref = light_ndc.z - bias;
+
+    let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);
+
+    // Blend between cascades at boundary regions for smooth transitions.
+    // The blend zone is 10% of each cascade's range.
+    var split_near = 0.0;
+    var split_far = lighting.shadow_cascade_splits.x;
+    if (cascade == 1) {
+        split_near = lighting.shadow_cascade_splits.x;
+        split_far = lighting.shadow_cascade_splits.y;
+    } else if (cascade == 2) {
+        split_near = lighting.shadow_cascade_splits.y;
+        split_far = lighting.shadow_cascade_splits.z;
+    }
+    let blend_zone = (split_far - split_near) * 0.1;
+    let dist_to_edge = split_far - view_z;
+
+    if (dist_to_edge < blend_zone && cascade < 2) {
+        // In the blend zone: sample the next cascade too and lerp
+        let next_cascade = cascade + 1;
+        let next_clip = lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(world_pos, 1.0);
+        let next_ndc = next_clip.xyz / next_clip.w;
+        let next_uv = vec2<f32>(next_ndc.x * 0.5 + 0.5, 1.0 - (next_ndc.y * 0.5 + 0.5));
+        let next_depth_ref = next_ndc.z - bias;
+        let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);
+        let t = dist_to_edge / blend_zone;
+        return mix(next_val, shadow_val, t);
+    }
+
+    return shadow_val;
 }
 
 // Evaluate a single directional light's PBR contribution. Returns
@@ -3308,6 +3384,26 @@ impl Renderer {
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
@@ -3462,8 +3558,10 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&env_sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&brdf_lut_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_view) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&shadow_map.sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[0]) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[1]) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[2]) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&shadow_map.sampler) },
             ],
         });
 
@@ -5558,8 +5656,10 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_view) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
             ],
         });
 
@@ -5989,84 +6089,121 @@ impl Renderer {
             label: Some("bloom_encoder"),
         });
 
-        // Shadow pass: render scene nodes from light's perspective
+        // Shadow pass: render scene nodes from light's perspective into
+        // cascaded shadow maps (3 cascades).
         if self.shadow_map.enabled {
-            // Compute light VP from the primary directional light direction.
-            // Center the shadow frustum on a point slightly ahead of the
-            // camera so the fixed-size ortho cube covers the player's
-            // field of view at maximum per-texel resolution, instead of
-            // being pinned at world origin (which gave terrible shadow
-            // quality anywhere outside the origin cube).
+            // Compute cascade VPs from the primary directional light and camera.
             let light_dir = [
                 self.lighting_uniforms.light_dir[0],
                 self.lighting_uniforms.light_dir[1],
                 self.lighting_uniforms.light_dir[2],
             ];
-            let shadow_center = self.current_camera_pos;
-            self.shadow_map.compute_light_vp(light_dir, shadow_center);
+            self.shadow_map.compute_cascade_vps(
+                light_dir,
+                self.current_camera_pos,
+                self.current_view_matrix,
+                self.current_proj_matrix,
+                0.5,   // near — start cascades slightly past the camera
+                80.0,  // far — shadow coverage range
+            );
 
-            // Re-upload lighting uniforms with the CURRENT frame's shadow VP.
-            // begin_mode_3d wrote the previous frame's VP; the shadow map is
-            // about to be rendered with the new VP, so the scene shader must
-            // use the same matrix for its shadow lookups.
-            self.lighting_uniforms.shadow_light_vp = self.shadow_map.light_vp;
+            // Re-upload lighting uniforms with cascade VPs and splits.
+            self.lighting_uniforms.shadow_cascade_vps = self.shadow_map.light_vps;
+            self.lighting_uniforms.shadow_cascade_splits = [
+                self.shadow_map.cascade_splits[0],
+                self.shadow_map.cascade_splits[1],
+                self.shadow_map.cascade_splits[2],
+                0.0,
+            ];
+            self.lighting_uniforms.shadow_view_matrix = self.current_view_matrix;
             self.queue.write_buffer(
                 &self.lighting_buffer,
                 0,
                 bytemuck::bytes_of(&self.lighting_uniforms),
             );
 
-            {
-                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("shadow_pass"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.shadow_map.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
+            // Build draw list once (shared across all cascades).
+            // Collect per-node data before any render pass borrows the scene.
+            struct ShadowDrawEntry {
+                vb_idx: usize,
+                ib_idx: usize,
+                index_count: u32,
+                transform: [[f32; 4]; 4],
+            }
+            let mut shadow_nodes: Vec<ShadowDrawEntry> = Vec::new();
+            // Collect buffer references separately for the render pass
+            let mut shadow_vbs: Vec<&wgpu::Buffer> = Vec::new();
+            let mut shadow_ibs: Vec<&wgpu::Buffer> = Vec::new();
+            for (_handle, node) in scene.nodes.iter() {
+                if !node.visible || !node.cast_shadow || node.indices.is_empty() {
+                    continue;
+                }
+                let Some(vb) = &node.gpu_vb else { continue };
+                let Some(ib) = &node.gpu_ib else { continue };
+                let vb_idx = shadow_vbs.len();
+                shadow_vbs.push(vb);
+                shadow_ibs.push(ib);
+                shadow_nodes.push(ShadowDrawEntry {
+                    vb_idx,
+                    ib_idx: vb_idx,
+                    index_count: node.gpu_index_count,
+                    transform: node.transform,
                 });
+            }
 
-                shadow_pass.set_pipeline(&self.shadow_map.pipeline);
-
-                // Collect per-node shadow uniforms so we can write
-                // ONE batched upload and then bind per-node via
-                // dynamic offsets. Writing the same buffer N times
-                // in one frame coalesces to the last write (bug).
-                let mut draw_list: Vec<(&wgpu::Buffer, &wgpu::Buffer, u32, u32)> = Vec::new();
+            // Render each cascade
+            for cascade in 0..crate::shadows::NUM_CASCADES {
                 let stride = crate::shadows::SHADOW_UNIFORM_STRIDE as usize;
                 let max = crate::shadows::SHADOW_MAX_NODES as usize;
                 let mut uniform_data: Vec<u8> = vec![0u8; stride * max];
                 let mut slot = 0usize;
-                for (_handle, node) in scene.nodes.iter() {
-                    if !node.visible || !node.cast_shadow || node.indices.is_empty() {
-                        continue;
-                    }
-                    let Some(vb) = &node.gpu_vb else { continue };
-                    let Some(ib) = &node.gpu_ib else { continue };
+                let cascade_vp = self.shadow_map.light_vps[cascade];
+
+                for entry in &shadow_nodes {
                     if slot >= max { break; }
                     let uniforms = crate::shadows::ShadowUniforms {
-                        light_vp: self.shadow_map.light_vp,
-                        model: node.transform,
+                        light_vp: cascade_vp,
+                        model: entry.transform,
                     };
                     let off = slot * stride;
                     uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
                         .copy_from_slice(bytemuck::bytes_of(&uniforms));
-                    draw_list.push((vb, ib, node.gpu_index_count, (slot * stride) as u32));
                     slot += 1;
                 }
-                if !draw_list.is_empty() {
-                    self.queue.write_buffer(&self.shadow_map.uniform_buffer, 0, &uniform_data[..slot * stride]);
-                    for (vb, ib, index_count, offset) in draw_list {
+
+                if slot > 0 {
+                    self.queue.write_buffer(
+                        &self.shadow_map.uniform_buffer,
+                        0,
+                        &uniform_data[..slot * stride],
+                    );
+                }
+
+                {
+                    let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("shadow_pass"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.shadow_map.depth_views[cascade],
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+
+                    shadow_pass.set_pipeline(&self.shadow_map.pipeline);
+
+                    for (i, entry) in shadow_nodes.iter().enumerate() {
+                        if i >= max { break; }
+                        let offset = (i * stride) as u32;
                         shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[offset]);
-                        shadow_pass.set_vertex_buffer(0, vb.slice(..));
-                        shadow_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                        shadow_pass.draw_indexed(0..index_count, 0, 0..1);
+                        shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
+                        shadow_pass.set_index_buffer(shadow_ibs[entry.ib_idx].slice(..), wgpu::IndexFormat::Uint32);
+                        shadow_pass.draw_indexed(0..entry.index_count, 0, 0..1);
                     }
                 }
             }
@@ -7371,10 +7508,17 @@ impl Renderer {
         // holds the env_intensity multiplier (set via load_env_from_hdr).
         let env_intensity_w = self.lighting_uniforms.camera_pos[3];
         self.lighting_uniforms.camera_pos = [pos_x, pos_y, pos_z, env_intensity_w];
-        // Pass the current shadow VP (computed in end_frame_with_scene
-        // based on the primary directional light direction) so the
-        // scene shader's PCF sample lands on the right map.
-        self.lighting_uniforms.shadow_light_vp = self.shadow_map.light_vp;
+        // Pass the current cascade shadow VPs and view matrix (computed
+        // in end_frame_with_scene) so the scene shader's CSM lookup
+        // lands on the right cascade map.
+        self.lighting_uniforms.shadow_cascade_vps = self.shadow_map.light_vps;
+        self.lighting_uniforms.shadow_cascade_splits = [
+            self.shadow_map.cascade_splits[0],
+            self.shadow_map.cascade_splits[1],
+            self.shadow_map.cascade_splits[2],
+            0.0,
+        ];
+        self.lighting_uniforms.shadow_view_matrix = self.current_view_matrix;
         self.queue.write_buffer(
             &self.lighting_buffer,
             0,
@@ -8037,11 +8181,18 @@ impl Renderer {
         Some((width, height, rgba))
     }
 
-    /// Dump the shadow map depth texture to a grayscale PNG for debugging.
+    /// Dump a shadow cascade's depth texture to a grayscale PNG for debugging.
     /// Depth 0.0 (near) → white, depth 1.0 (far / clear) → black.
+    /// `cascade` selects which cascade to dump (0, 1, or 2).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn dump_shadow_map(&self, path: &str) {
-        let size = crate::shadows::SHADOW_MAP_SIZE;
+        self.dump_shadow_cascade(path, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn dump_shadow_cascade(&self, path: &str, cascade: usize) {
+        let cascade = cascade.min(crate::shadows::NUM_CASCADES - 1);
+        let size = crate::shadows::CASCADE_MAP_SIZE;
         let bytes_per_pixel = 4u32; // Depth32Float = 4 bytes
         let unpadded_bpr = size * bytes_per_pixel;
         let padded_bpr = (unpadded_bpr + 255) & !255;
@@ -8060,7 +8211,7 @@ impl Renderer {
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.shadow_map.depth_texture,
+                texture: &self.shadow_map.depth_textures[cascade],
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::DepthOnly,

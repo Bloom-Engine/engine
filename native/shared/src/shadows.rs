@@ -1,18 +1,22 @@
-//! Shadow mapping for Bloom Engine.
+//! Cascaded shadow mapping (CSM) for Bloom Engine.
 //!
-//! Implements directional light shadow mapping with PCF (Percentage-Closer Filtering).
-//! The shadow system renders the scene from the light's perspective into a depth texture,
-//! then samples it during the main pass to determine shadowed areas.
+//! Implements 3-cascade directional light shadow mapping with PCF
+//! (Percentage-Closer Filtering). The camera frustum is split into
+//! near/mid/far slices, each rendered from the light's perspective into
+//! its own depth texture. The scene shader selects the tightest cascade
+//! for each fragment, giving high shadow resolution near the camera and
+//! coverage out to the far plane.
 
-use crate::renderer::{Vertex3D, IDENTITY_MAT4};
+use crate::renderer::IDENTITY_MAT4;
 
-/// Shadow map configuration.
-pub const SHADOW_MAP_SIZE: u32 = 4096;
+/// Number of shadow cascades.
+pub const NUM_CASCADES: usize = 3;
+/// Per-cascade shadow map resolution.
+pub const CASCADE_MAP_SIZE: u32 = 2048;
 pub const SHADOW_NEAR: f32 = 0.1;
 pub const SHADOW_FAR: f32 = 100.0;
-pub const SHADOW_EXTENT: f32 = 30.0;
 /// Dynamic-uniform buffer stride for per-node shadow uniforms. Must
-/// be ≥ sizeof(ShadowUniforms) (128B) and a multiple of the device's
+/// be >= sizeof(ShadowUniforms) (128B) and a multiple of the device's
 /// min_uniform_buffer_offset_alignment. 256 is safe on every platform.
 pub const SHADOW_UNIFORM_STRIDE: u32 = 256;
 pub const SHADOW_MAX_NODES: u32 = 1024;
@@ -50,10 +54,10 @@ pub struct ShadowUniforms {
     pub model: [[f32; 4]; 4],
 }
 
-/// Shadow map resources.
+/// Shadow map resources for cascaded shadow mapping.
 pub struct ShadowMap {
-    pub depth_texture: wgpu::Texture,
-    pub depth_view: wgpu::TextureView,
+    pub depth_textures: [wgpu::Texture; NUM_CASCADES],
+    pub depth_views: [wgpu::TextureView; NUM_CASCADES],
     pub sampler: wgpu::Sampler,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
@@ -61,28 +65,45 @@ pub struct ShadowMap {
     pub uniform_buffer: wgpu::Buffer,
     pub uniform_bind_group: wgpu::BindGroup,
     pub uniform_layout: wgpu::BindGroupLayout,
-    pub light_vp: [[f32; 4]; 4],
+    pub light_vps: [[[f32; 4]; 4]; NUM_CASCADES],
+    /// View-space Z split distances for each cascade. Cascade i covers
+    /// [cascade_splits[i-1], cascade_splits[i]]; cascade 0 starts at near.
+    pub cascade_splits: [f32; NUM_CASCADES],
     pub enabled: bool,
 }
 
 impl ShadowMap {
     pub fn new(device: &wgpu::Device, vertex_layout: wgpu::VertexBufferLayout<'static>) -> Self {
-        // Shadow depth texture
-        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow_depth"),
-            size: wgpu::Extent3d {
-                width: SHADOW_MAP_SIZE,
-                height: SHADOW_MAP_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Create NUM_CASCADES depth textures
+        let mut depth_textures_vec: Vec<wgpu::Texture> = Vec::new();
+        let mut depth_views_vec: Vec<wgpu::TextureView> = Vec::new();
+        for i in 0..NUM_CASCADES {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("shadow_depth_cascade_{}", i)),
+                size: wgpu::Extent3d {
+                    width: CASCADE_MAP_SIZE,
+                    height: CASCADE_MAP_SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            depth_textures_vec.push(tex);
+            depth_views_vec.push(view);
+        }
+
+        // Convert Vecs to fixed-size arrays
+        let depth_textures: [wgpu::Texture; NUM_CASCADES] =
+            depth_textures_vec.try_into().unwrap_or_else(|_| panic!("cascade texture count mismatch"));
+        let depth_views: [wgpu::TextureView; NUM_CASCADES] =
+            depth_views_vec.try_into().unwrap_or_else(|_| panic!("cascade view count mismatch"));
 
         // Comparison sampler for PCF
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -93,7 +114,8 @@ impl ShadowMap {
             ..Default::default()
         });
 
-        // Bind group layout for sampling shadow map in the main pass
+        // Bind group layout for sampling shadow maps in the main pass:
+        // 3 depth textures (bindings 0,1,2) + 1 comparison sampler (binding 3)
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow_sample_layout"),
             entries: &[
@@ -110,6 +132,26 @@ impl ShadowMap {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
@@ -122,21 +164,24 @@ impl ShadowMap {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&depth_view),
+                    resource: wgpu::BindingResource::TextureView(&depth_views[0]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&depth_views[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&depth_views[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
         });
 
-        // Shadow pass uniform layout. Dynamic offset so we can
-        // rebind to a different per-node slot in a single buffer
-        // (critical — queue.write_buffer on the same buffer before
-        // the encoder submits coalesces all writes to the last
-        // value, so a non-dynamic design would give every shadow
-        // draw the same model matrix).
+        // Shadow pass uniform layout (dynamic offset for per-node)
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow_uniform_layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -153,9 +198,6 @@ impl ShadowMap {
             }],
         });
 
-        // 1024 nodes × 256-byte slots = 256 KiB buffer. More than
-        // enough for even busy scenes; falls back to wrapping via
-        // modulo in the caller if the node count exceeds this.
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shadow_uniform_buf"),
             size: (SHADOW_UNIFORM_STRIDE * SHADOW_MAX_NODES) as u64,
@@ -203,20 +245,6 @@ impl ShadowMap {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                // Cull FRONT faces, not back, when rendering the
-                // shadow map. Standard for sun shadows: only the
-                // side of each object FACING AWAY from the light
-                // should write to the shadow map, so that fragments
-                // on the same side as the light (self-shadow acne)
-                // don't get falsely marked as occluded. Previously
-                // cull_mode was Back, which meant only front-
-                // facing-from-light triangles rendered — for a
-                // pillar under an overhead sun, that's just the
-                // top face. Every fragment BELOW the top (pillar
-                // side, nearby ground) then failed the depth
-                // compare and read as "in shadow" from the top,
-                // which is why the pillar's bottom half went black
-                // and no visible shadow ever fell on the floor.
                 cull_mode: None,
                 ..Default::default()
             },
@@ -237,8 +265,8 @@ impl ShadowMap {
         });
 
         Self {
-            depth_texture,
-            depth_view,
+            depth_textures,
+            depth_views,
             sampler,
             bind_group_layout,
             bind_group,
@@ -246,70 +274,175 @@ impl ShadowMap {
             uniform_buffer,
             uniform_bind_group,
             uniform_layout,
-            light_vp: IDENTITY_MAT4,
+            light_vps: [IDENTITY_MAT4; NUM_CASCADES],
+            cascade_splits: [8.0, 25.0, 80.0],
             enabled: false,
         }
     }
 
-    /// Compute the light view-projection matrix for a directional light.
-    /// Snaps the center to texel boundaries so a moving camera doesn't
-    /// make shadow edges crawl — a single-texel shift per frame would
-    /// otherwise show as "shadow swimming" at edges.
-    pub fn compute_light_vp(&mut self, light_dir: [f32; 3], center: [f32; 3]) {
-        let dist = SHADOW_FAR * 0.5;
-        let len = (light_dir[0]*light_dir[0] + light_dir[1]*light_dir[1] + light_dir[2]*light_dir[2]).sqrt();
+    /// Compute cascade view-projection matrices by splitting the camera
+    /// frustum into NUM_CASCADES slices and fitting a tight ortho projection
+    /// around each slice from the light's perspective.
+    ///
+    /// `light_dir` points from the surface toward the light (the same
+    /// convention as the rest of the engine).
+    pub fn compute_cascade_vps(
+        &mut self,
+        light_dir: [f32; 3],
+        _camera_pos: [f32; 3],
+        camera_view: [[f32; 4]; 4],
+        camera_proj: [[f32; 4]; 4],
+        near: f32,
+        far: f32,
+    ) {
+        let len = (light_dir[0] * light_dir[0]
+            + light_dir[1] * light_dir[1]
+            + light_dir[2] * light_dir[2])
+            .sqrt();
         let d = if len > 1e-6 {
-            [light_dir[0]/len, light_dir[1]/len, light_dir[2]/len]
+            [light_dir[0] / len, light_dir[1] / len, light_dir[2] / len]
         } else {
             [0.0, 1.0, 0.0]
         };
 
-        // Snap center to texel boundaries so shadow edges don't
-        // crawl/flicker when camera moves smoothly.
-        let up = [0.0f32, 1.0, 0.0];
-        let f = d;
+        // Compute frustum split distances using practical split scheme
+        // (Nvidia GPU Gems 3, Chapter 10): blend of logarithmic and
+        // uniform split for stability.
+        let lambda = 0.5f32; // blend factor (0 = uniform, 1 = logarithmic)
+        let ratio = far / near;
+        let mut splits = [0.0f32; NUM_CASCADES + 1];
+        splits[0] = near;
+        for i in 1..NUM_CASCADES {
+            let p = i as f32 / NUM_CASCADES as f32;
+            let log_split = near * ratio.powf(p);
+            let uniform_split = near + (far - near) * p;
+            splits[i] = lambda * log_split + (1.0 - lambda) * uniform_split;
+        }
+        splits[NUM_CASCADES] = far;
+
+        // Store view-space Z split distances for shader cascade selection.
+        // cascade_splits[i] = far edge of cascade i.
+        for i in 0..NUM_CASCADES {
+            self.cascade_splits[i] = splits[i + 1];
+        }
+
+        // Light-space basis vectors for texel snapping
+        let up_hint = if d[1].abs() > 0.99 {
+            [1.0f32, 0.0, 0.0]
+        } else {
+            [0.0f32, 1.0, 0.0]
+        };
         let right = normalize3([
-            up[1]*f[2] - up[2]*f[1],
-            up[2]*f[0] - up[0]*f[2],
-            up[0]*f[1] - up[1]*f[0],
+            up_hint[1] * d[2] - up_hint[2] * d[1],
+            up_hint[2] * d[0] - up_hint[0] * d[2],
+            up_hint[0] * d[1] - up_hint[1] * d[0],
         ]);
         let ortho_up = [
-            f[1]*right[2] - f[2]*right[1],
-            f[2]*right[0] - f[0]*right[2],
-            f[0]*right[1] - f[1]*right[0],
-        ];
-        let texel_world = (2.0 * SHADOW_EXTENT) / SHADOW_MAP_SIZE as f32;
-        let ls_x = dot3(center, right);
-        let ls_y = dot3(center, ortho_up);
-        let snapped_x = (ls_x / texel_world).floor() * texel_world;
-        let snapped_y = (ls_y / texel_world).floor() * texel_world;
-        let dx = snapped_x - ls_x;
-        let dy = snapped_y - ls_y;
-        let snapped_center = [
-            center[0] + dx * right[0] + dy * ortho_up[0],
-            center[1] + dx * right[1] + dy * ortho_up[1],
-            center[2] + dx * right[2] + dy * ortho_up[2],
+            d[1] * right[2] - d[2] * right[1],
+            d[2] * right[0] - d[0] * right[2],
+            d[0] * right[1] - d[1] * right[0],
         ];
 
-        // light_dir is "from surface to light" — the light is at
-        // center + d*dist. (Earlier I had this as center - d*dist
-        // on the incorrect hypothesis that the convention was
-        // "ray-travel" direction; testing showed shadows cast in
-        // the wrong direction with that form.)
-        let light_pos = [
-            snapped_center[0] + d[0] * dist,
-            snapped_center[1] + d[1] * dist,
-            snapped_center[2] + d[2] * dist,
-        ];
+        for c in 0..NUM_CASCADES {
+            let c_near = splits[c];
+            let c_far = splits[c + 1];
 
-        let view = crate::renderer::mat4_look_at(light_pos, snapped_center, [0.0, 1.0, 0.0]);
-        let proj = crate::renderer::mat4_ortho(
-            -SHADOW_EXTENT, SHADOW_EXTENT,
-            -SHADOW_EXTENT, SHADOW_EXTENT,
-            SHADOW_NEAR, SHADOW_FAR,
-        );
-        self.light_vp = crate::renderer::mat4_multiply(proj, view);
+            // Build a sub-projection that matches the camera's projection
+            // but with the near/far planes replaced by cascade limits.
+            // For a perspective projection, that means re-deriving the
+            // z-mapping while keeping the x/y fields intact.
+            let mut sub_proj = camera_proj;
+            // camera_proj is column-major, standard wgpu perspective layout:
+            //   col2 row2 = (far+near)/(near-far)
+            //   col3 row2 = 2*far*near/(near-far)
+            //   col2 row3 = -1
+            let nf = 1.0 / (c_near - c_far);
+            sub_proj[2][2] = (c_far + c_near) * nf;
+            sub_proj[3][2] = 2.0 * c_far * c_near * nf;
 
+            let sub_inv_vp = crate::renderer::mat4_invert(
+                crate::renderer::mat4_multiply(sub_proj, camera_view),
+            );
+
+            // The 8 NDC corners of a clip cube. wgpu uses z in [0,1].
+            let ndc_corners: [[f32; 4]; 8] = [
+                [-1.0, -1.0, 0.0, 1.0],
+                [ 1.0, -1.0, 0.0, 1.0],
+                [-1.0,  1.0, 0.0, 1.0],
+                [ 1.0,  1.0, 0.0, 1.0],
+                [-1.0, -1.0, 1.0, 1.0],
+                [ 1.0, -1.0, 1.0, 1.0],
+                [-1.0,  1.0, 1.0, 1.0],
+                [ 1.0,  1.0, 1.0, 1.0],
+            ];
+
+            // Unproject to world space
+            let mut world_corners = [[0.0f32; 3]; 8];
+            for i in 0..8 {
+                let h = crate::renderer::mat4_mul_vec4(&sub_inv_vp, &ndc_corners[i]);
+                let w = if h[3].abs() > 1e-8 { h[3] } else { 1.0 };
+                world_corners[i] = [h[0] / w, h[1] / w, h[2] / w];
+            }
+
+            // Compute light view matrix (looking from far away toward the
+            // center of the frustum slice).
+            let mut center = [0.0f32; 3];
+            for corner in &world_corners {
+                center[0] += corner[0];
+                center[1] += corner[1];
+                center[2] += corner[2];
+            }
+            center[0] /= 8.0;
+            center[1] /= 8.0;
+            center[2] /= 8.0;
+
+            // Determine the radius of a bounding sphere around the frustum
+            // slice center so the ortho extent stays constant as the camera
+            // rotates (prevents shadow edge swimming on yaw changes).
+            let mut radius = 0.0f32;
+            for corner in &world_corners {
+                let dx = corner[0] - center[0];
+                let dy = corner[1] - center[1];
+                let dz = corner[2] - center[2];
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                if dist > radius {
+                    radius = dist;
+                }
+            }
+            // Ceil to avoid sub-texel jitter when the sphere barely changes.
+            radius = (radius * 16.0).ceil() / 16.0;
+
+            // Texel snap: quantize the ortho center to texel boundaries in
+            // light space so moving the camera doesn't make shadow edges crawl.
+            let texel_world = (2.0 * radius) / CASCADE_MAP_SIZE as f32;
+            let ls_x = dot3(center, right);
+            let ls_y = dot3(center, ortho_up);
+            let snapped_x = (ls_x / texel_world).floor() * texel_world;
+            let snapped_y = (ls_y / texel_world).floor() * texel_world;
+            let dx_snap = snapped_x - ls_x;
+            let dy_snap = snapped_y - ls_y;
+            let snapped_center = [
+                center[0] + dx_snap * right[0] + dy_snap * ortho_up[0],
+                center[1] + dx_snap * right[1] + dy_snap * ortho_up[1],
+                center[2] + dx_snap * right[2] + dy_snap * ortho_up[2],
+            ];
+
+            let snapped_light_pos = [
+                snapped_center[0] + d[0] * radius * 2.0,
+                snapped_center[1] + d[1] * radius * 2.0,
+                snapped_center[2] + d[2] * radius * 2.0,
+            ];
+
+            let snapped_view = crate::renderer::mat4_look_at(snapped_light_pos, snapped_center, up_hint);
+            let light_proj = crate::renderer::mat4_ortho(
+                -radius, radius,
+                -radius, radius,
+                0.01,
+                radius * 4.0,
+            );
+
+            self.light_vps[c] = crate::renderer::mat4_multiply(light_proj, snapped_view);
+        }
     }
 
     /// Enable shadow mapping.
@@ -324,14 +457,14 @@ impl ShadowMap {
 }
 
 fn normalize3(v: [f32; 3]) -> [f32; 3] {
-    let len = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt();
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     if len > 1e-6 {
-        [v[0]/len, v[1]/len, v[2]/len]
+        [v[0] / len, v[1] / len, v[2] / len]
     } else {
         [0.0, 0.0, 1.0]
     }
 }
 
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
