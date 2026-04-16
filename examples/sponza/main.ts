@@ -40,10 +40,14 @@ const argv: string[] = process.argv;
 let captureFrames = 0;
 let capturePath = "";
 let frameCount = 0;
+let initYaw = 0.0;
 for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
     capturePath = argv[i + 2];
+  }
+  if (argv[i] === "--yaw" && i + 1 < argv.length) {
+    initYaw = parseFloat(argv[i + 1]);
   }
 }
 
@@ -56,8 +60,11 @@ enableShadows();
 // Sponza ceilings face down = dark IBL. High env_intensity
 // compensates for lack of GI bounce.
 setEnvIntensity(1.5);
-setAutoExposure(false);
-setManualExposure(2.5);
+// Auto-exposure with a conservative key + slow adaptation.
+// Without SSGI, shadowed corridors have a very different HDR
+// average than sunlit openings — auto-exposure smooths the
+// perceptual gap the way a real eye / camera does.
+setAutoExposure(true);
 // Fog disabled — was causing brightness variation in corridors
 // setFog(0.7, 0.75, 0.82, 0.008, 0.0, 0.1);
 setVignette(0.25, 0.25);
@@ -77,7 +84,7 @@ for (let i = 0; i < sponza.meshCount; i = i + 1) {
 let camX = 0.0;
 let camY = 2.0;
 let camZ = 0.0;
-let camYaw = 0.0;
+let camYaw = initYaw;
 let camPitch = 0.0;
 let cursorLocked = false;
 
@@ -117,9 +124,7 @@ while (!windowShouldClose()) {
   // ---- Rendering ----
   beginDrawing();
 
-  // Lighting
   setAmbientLight({ r: 160, g: 165, b: 180, a: 255 }, 0.3);
-  // Primary sun
   setDirectionalLight(
     { x: 0.6, y: 0.8, z: 0.3 },
     { r: 255, g: 245, b: 230, a: 255 },

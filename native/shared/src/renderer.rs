@@ -812,7 +812,12 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
 
     // --- PBR direct lighting ---
     let v = normalize(lighting.camera_pos.xyz - in.world_pos);
-    var lit = vec3<f32>(0.0);
+    // Seed with ambient light contribution, modulated by base color
+    // so white walls pick up a white ambient and darker materials
+    // don't get over-brightened. This is the base illumination for
+    // surfaces that receive no direct light and are outside the IBL
+    // environment's strongest region (e.g. shadowed interiors).
+    var lit = lighting.ambient.rgb * lighting.ambient.a * base_color;
 
     // Legacy primary directional (kept for back-compat). Shadow-
     // mapped: only this primary light casts because we currently
@@ -1766,7 +1771,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 }
 
 const N_DIRS: u32 = 8u;
-const N_STEPS: u32 = 4u;
+const N_STEPS: u32 = 8u;
 const PI: f32 = 3.14159265;
 
 // Reconstruct view-space position from UV + depth via inverse projection.
@@ -1812,7 +1817,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let proj_scale_y = 1.0 / abs(u.inv_proj[1][1]);
     let screen_radius = radius_ws * 0.5 * (proj_scale_x + proj_scale_y) / abs(P.z);
     // Clamp so we don't oversample nearby surfaces or undersample distant ones.
-    let clamped_radius = clamp(screen_radius, 2.0 * max(inv_sz.x, inv_sz.y), 0.1);
+    // Clamp to reasonable screen-space range. 0.25 UV = ~25% of screen,
+    // enough for 4m world radius at depths around 5m.
+    let clamped_radius = clamp(screen_radius, 2.0 * max(inv_sz.x, inv_sz.y), 0.25);
 
     var ao_sum = 0.0;
     let step_size = clamped_radius / f32(N_STEPS);
@@ -1917,8 +1924,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // Combine: AO * contact shadow.
-    let final_ao = mix(1.0, ao * contact, strength);
+    // Gentle contrast + floor. Without the floor, dense near-field
+    // views (facing a close wall / curtain / carving) saturate the
+    // horizon-angle integral for every sample direction, dragging
+    // raw AO down to ~0.3 across the WHOLE screen — which then
+    // multiplied as a uniform darkening. The floor lets us keep
+    // selective crevice AO in open views while preventing whole-
+    // screen brownout in dense views.
+    // Gentle contrast + floor, and bypass contact shadow (which was
+    // dragging the whole screen to black in dense near-field views:
+    // every march ray hits nearby geometry, collapsing `contact` to
+    // ~0, then multiplying the clean AO result into zero). True
+    // contact shadows need tighter thresholds than a global GTAO
+    // pass can provide — leave that to dedicated shadow maps.
+    let ao_contrasted = pow(ao, 1.5);
+    let ao_floored = max(ao_contrasted, 0.6);
+    let final_ao = mix(1.0, ao_floored, strength);
     return vec4<f32>(saturate(final_ao));
 }
 ";
@@ -2902,16 +2923,17 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Combine current-frame post-effects exactly as the composite
     // shader did before TAA was inserted. Result is pre-tonemap HDR.
+    // SSAO is applied in the composite pass (not here) so it stays
+    // consistent regardless of whether TAA is on.
     let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
     let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
-    let ssao = textureSample(ssao_tex, ssao_samp, in.uv).r;
     let ssr = textureSample(ssr_tex, ssr_samp, in.uv).rgb;
     let ssgi = textureSample(ssgi_tex, ssgi_samp, in.uv).rgb;
     // SSR is added on top of HDR (pre-tonemap) — already strength-
     // and edge-faded by the SSR pass, so a flat add here is fine.
     // SSGI adds indirect diffuse bounce light — pre-multiplied by
     // intensity in the SSGI pass, so a flat add here works.
-    let current = (hdr + ssr + ssgi) * ssao + bloom * u.params.y;
+    let current = hdr + ssr + ssgi + bloom * u.params.y;
 
     // Reconstruct world-space position from depth — needed for both
     // TAA reprojection fallback and volumetric fog ray marching.
@@ -2960,11 +2982,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             if (x == 0 && y == 0) { continue; }
             let s_uv = in.uv + vec2<f32>(f32(x), f32(y)) * texel;
             let s_hdr = textureSample(hdr_tex, hdr_samp, s_uv).rgb;
-            let s_ssao = textureSample(ssao_tex, ssao_samp, s_uv).r;
             let s_bloom = textureSample(bloom_tex, bloom_samp, s_uv).rgb;
             let s_ssr = textureSample(ssr_tex, ssr_samp, s_uv).rgb;
             let s_ssgi = textureSample(ssgi_tex, ssgi_samp, s_uv).rgb;
-            let s = (s_hdr + s_ssr + s_ssgi) * s_ssao + s_bloom * u.params.y;
+            let s = s_hdr + s_ssr + s_ssgi + s_bloom * u.params.y;
             nmin = min(nmin, s);
             nmax = max(nmax, s);
         }
@@ -3190,6 +3211,8 @@ struct CompositeParams {
 @group(0) @binding(2) var<uniform> u: CompositeParams;
 @group(0) @binding(3) var exposure_tex: texture_2d<f32>;
 @group(0) @binding(4) var exposure_samp: sampler;
+@group(0) @binding(5) var ssao_tex: texture_2d<f32>;
+@group(0) @binding(6) var ssao_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -3302,6 +3325,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         hdr_raw = textureSample(hdr_tex, hdr_samp, sample_uv).rgb;
     }
 
+    let ao = textureSample(ssao_tex, ssao_samp, sample_uv).r;
+    let hdr_ao = hdr_raw * ao;
+
     // Exposure. Two modes:
     //   auto off → manual exposure multiplier (u.params.z).
     //   auto on  → read the smoothed exposure value from a 1×1
@@ -3312,7 +3338,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     } else {
         exposure = textureSample(exposure_tex, exposure_samp, vec2<f32>(0.5, 0.5)).r;
     }
-    let hdr = hdr_raw * exposure;
+    let hdr = hdr_ao * exposure;
 
     // Branch between ACES and AgX via the uniform. Costs one
     // compare per fragment; the dead branch gets DCE'd per-draw
@@ -5007,6 +5033,22 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let composite_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -6197,7 +6239,7 @@ impl Renderer {
             // Faster than a camera pan; slow enough to not "hunt" on
             // scene detail as the camera moves between bright sky
             // and dark geometry.
-            auto_exposure_rate: 0.008,  // ~2 second half-life at 60fps
+            auto_exposure_rate: 0.05,  // ~0.3 second half-life at 60fps
             chromatic_aberration: 0.0,
             vignette_strength: 0.0,
             vignette_softness: 0.25,
@@ -6229,8 +6271,11 @@ impl Renderer {
             ssao_blur_pipeline,
             ssao_blur_layout,
             ssao_blur_uniform_buffer,
-            ssao_strength: 0.0, // TEST: disable GTAO+contact shadows
-            ssao_radius: 0.006,
+            ssao_strength: 1.0,
+            // World-space AO radius in meters. Sponza-scale arches
+            // and columns span 3-5m, so 4m catches proper architectural
+            // occlusion.
+            ssao_radius: 4.0,
             taa_textures,
             taa_views,
             taa_current_idx: 0,
@@ -6238,7 +6283,7 @@ impl Renderer {
             taa_layout,
             taa_uniform_buffer,
             taa_frame_index: 0,
-            taa_enabled: false, // TEST: check if TAA causes rotation brightness lag
+            taa_enabled: true,
             prev_vp_matrix: IDENTITY_MAT4,
             fog_color: [0.7, 0.75, 0.82],
             fog_density: 0.0,
@@ -6260,7 +6305,7 @@ impl Renderer {
             ssgi_layout,
             ssgi_uniform_buffer,
             ssgi_intensity: 0.25,
-            ssgi_enabled: false, // TEST: check if SSGI causes rotation-dependent brightness
+            ssgi_enabled: true,
             ssgi_history_textures,
             ssgi_history_views,
             ssgi_history_idx: 0,
@@ -8025,16 +8070,13 @@ impl Renderer {
         // ============================================================
         // TAA pass: combine current-frame HDR + bloom + SSAO with the
         // history texture, write to the OTHER ping-pong slot. Skipped
-        // when TAA is off — composite reads hdr_rt directly instead.
+        // when TAA is off — composite reads hdr_rt directly and the
+        // SSAO is applied in the composite shader instead.
         // ============================================================
         let taa_dst_idx = self.taa_current_idx;
         let taa_src_idx = 1 - self.taa_current_idx;
 
         if self.taa_enabled {
-            // First few frames blend at 1.0 (use current as-is) so
-            // the history initializes from the actual scene rather
-            // than the pre-zero texture. After 4 frames switch to
-            // the converging weight.
             let alpha = if self.taa_frame_index < 4 { 1.0 } else { 0.1 };
             // Inverse of current VP for world-pos reconstruction.
             // Use the unjittered version when feasible — for now we
@@ -8304,11 +8346,13 @@ impl Renderer {
                 params: [
                     self.auto_exposure_key,
                     self.auto_exposure_rate,
-                    // Narrow range: ±30% around neutral. Enough to
-                    // gently compensate bright/dark views without
-                    // dramatic swings.
-                    0.7,
-                    1.3,
+                    // Wide clamp — without SSGI, Sponza's shadowed
+                    // corridors have ~7× less average luma than its
+                    // sunlit courtyard, so exposure needs to span
+                    // the same range to keep perceived brightness
+                    // stable across rotations.
+                    0.1,
+                    10.0,
                 ],
             };
             self.queue.write_buffer(&self.exposure_uniform_buffer, 0, bytemuck::bytes_of(&ep));
@@ -8374,6 +8418,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: self.composite_uniform_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.exposure_views[exposure_dst_idx]) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.ssao_blur_rt_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],
         });
         {
