@@ -489,17 +489,11 @@ function setupGltfModel(): void {
 // angle the shadows cast by the pillars appear clearly as
 // separate dark streaks on the white floor, rather than joining
 // visually onto each pillar's base.
-// Camera looks at pillars from +Z (standing in front of them,
-// looking -Z toward the row). Sun is almost directly overhead
-// from +Y with a slight tilt toward -X, so shadows fall
-// LEFTWARD across the floor — perpendicular to the viewing
-// direction, visible as clear elongated dark shapes on the
-// white ground rather than hiding behind each pillar.
 let camX = 0.0;
-let camY = 6.0;
-let camZ = 14.0;
+let camY = 4.0;
+let camZ = 16.0;
 let camYaw = 0.0;
-let camPitch = -0.3;
+let camPitch = -0.2;
 let cursorLocked = true;
 
 // Zone teleport positions [x, y, z, yaw]
@@ -557,21 +551,28 @@ setEnvClearFromHdr("assets/outdoor.hdr");
 if (headlessMode) {
   setupGltfModel();
 } else {
+  setupGround();
+  setupMaterialGallery();
+  setupLightArena();
   setupShadowTest();
+  setupWater();
+  setupGeometryDensity();
+  setupThinGeometry();
+  setupGltfModel();
 }
 
 if (!headlessMode) {
   enableShadows();
 }
 
-// Turn on the post-fx layer in interactive mode so the new effects
-// are visible. Headless skips them so the path-traced reference
-// comparison stays bit-meaningful.
 if (!headlessMode) {
   setEnvIntensity(0.3);
-  // DEBUG: auto-exposure off, fixed manual exposure
-  setAutoExposure(false);
-  setManualExposure(1.0);
+  setAutoExposure(true);
+  setFog(0.65, 0.72, 0.80, 0.02, 0.0, 0.18);
+  setVignette(0.35, 0.30);
+  setFilmGrain(0.025);
+  setChromaticAberration(0.0025);
+  setSunShafts(0.6, 0.97, 1.0, 0.92, 0.78);
 }
 
 // ============================================================
@@ -675,10 +676,9 @@ while (!windowShouldClose()) {
   // the reference for no good reason during validation.
   if (!headlessMode) {
     setAmbientLight({ r: 70, g: 80, b: 100, a: 255 }, 0.25);
-    // Low-angle sun from the left — shadows stretch long to the
-    // right, perpendicular to the camera view.
+    // ~45° afternoon sun — shadows roughly pillar-length.
     setDirectionalLight(
-      { x: -0.95, y: 0.25, z: 0.0 },
+      { x: -0.5, y: 0.7, z: 0.3 },
       { r: 255, g: 248, b: 235, a: 255 },
       2.0,
     );
