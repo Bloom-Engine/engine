@@ -808,7 +808,7 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // shadowed areas comes from the direct sun being zeroed in
     // shadow, so the directional light needs to contribute enough
     // of the final brightness for shadows to be visible.
-    let indirect_shadow = mix(0.15, 1.0, shadow_factor);
+    let indirect_shadow = mix(0.5, 1.0, shadow_factor);
     // DEBUG tint: multiply hdr by the shadow factor mapped to a
     // color so regions with shadow_factor < 1 are visibly green.
     // Debug removed — scene shader outputs real HDR below.
