@@ -4740,7 +4740,7 @@ impl Renderer {
             dof_enabled: false,
             dof_focus_distance: 10.0,
             dof_aperture: 0.0,
-            dof_max_blur: 0.02,
+            dof_max_blur: 0.006,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),

@@ -35,7 +35,7 @@ import {
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
   setFog, setChromaticAberration, setVignette, setFilmGrain, setSunShafts,
-  setAutoExposure, setEnvIntensity,
+  setAutoExposure, setEnvIntensity, setDepthOfField,
 } from "bloom/core";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
@@ -616,6 +616,8 @@ if (headlessShadows) {
   setFilmGrain(0.025);
   setChromaticAberration(0.0025);
   setSunShafts(0.6, 0.97, 1.0, 0.92, 0.78);
+  // Very subtle DoF — barely perceptible blur on distant/near objects.
+  setDepthOfField(20.0, 0.005);
 }
 
 // ============================================================

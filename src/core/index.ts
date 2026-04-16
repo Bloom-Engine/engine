@@ -22,6 +22,7 @@ declare function bloom_set_sun_shafts(strength: number, decay: number, r: number
 declare function bloom_set_auto_exposure(on: number): void;
 declare function bloom_set_manual_exposure(value: number): void;
 declare function bloom_set_env_intensity(intensity: number): void;
+declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): void;
 declare function bloom_set_target_fps(fps: number): void;
 declare function bloom_get_delta_time(): number;
 declare function bloom_get_fps(): number;
@@ -179,6 +180,11 @@ export function setManualExposure(value: number): void {
 /** Env-map intensity multiplier for IBL + sky pass. 1.0 = reference, 0.2–0.5 typical for bright outdoor HDRs. */
 export function setEnvIntensity(intensity: number): void {
   bloom_set_env_intensity(intensity);
+}
+
+/** Depth of field. focusDistance = view-space distance in world units. aperture = blur strength (0 = off, 0.03 = subtle, 0.1 = heavy). */
+export function setDepthOfField(focusDistance: number, aperture: number): void {
+  bloom_set_dof(aperture > 0 ? 1 : 0, focusDistance, aperture);
 }
 
 // Timing

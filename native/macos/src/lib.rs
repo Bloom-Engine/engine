@@ -1037,6 +1037,14 @@ pub extern "C" fn bloom_set_env_intensity(intensity: f64) {
     engine().renderer.set_env_intensity(intensity as f32);
 }
 
+#[no_mangle]
+pub extern "C" fn bloom_set_dof(enabled: f64, focus_distance: f64, aperture: f64) {
+    let r = &mut engine().renderer;
+    r.set_dof_enabled(enabled != 0.0);
+    r.set_dof_focus_distance(focus_distance as f32);
+    r.set_dof_aperture(aperture as f32);
+}
+
 // ============================================================
 // Models
 // ============================================================
