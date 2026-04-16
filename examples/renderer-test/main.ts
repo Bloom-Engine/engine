@@ -239,6 +239,12 @@ function placeCube(
   const node = placeNode(cubeHandle, 0, px, py, pz, sx, sy, sz);
   setSceneNodeColor(node, cr, cg, cb);
   setSceneNodePbr(node, roughness, metalness);
+  // Thin horizontal slabs (floors) should receive but not cast
+  // shadows — otherwise they fill the shadow map with their own
+  // depth and everything reads as "in shadow of the ground".
+  if (sy <= 0.3) {
+    setSceneNodeCastShadow(node, false);
+  }
   return node;
 }
 
@@ -449,7 +455,7 @@ function setupThinGeometry(): void {
 // ============================================================
 
 function setupGround(): void {
-  // Ground plane (flat box covering the whole scene)
+  // Ground plane — sy=0.1 ≤ 0.3, so placeCube auto-disables cast_shadow.
   placeCube(0, -0.3, 0, 120, 0.1, 120, 0.25, 0.27, 0.22, 0.85, 0.0);
 
   // Bright sphere high up — tests tone mapping / bloom when those land
