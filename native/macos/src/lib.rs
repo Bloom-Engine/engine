@@ -1028,6 +1028,11 @@ pub extern "C" fn bloom_set_auto_exposure(on: f64) {
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_set_taa_enabled(on: f64) {
+    engine().renderer.set_taa_enabled(on != 0.0);
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_set_manual_exposure(value: f64) {
     engine().renderer.set_manual_exposure(value as f32);
 }

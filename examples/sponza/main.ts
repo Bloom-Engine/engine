@@ -14,7 +14,7 @@ import {
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
   setFog, setVignette, setChromaticAberration,
-  setAutoExposure, setEnvIntensity, setManualExposure,
+  setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
 } from "bloom/core";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
@@ -41,6 +41,7 @@ let captureFrames = 0;
 let capturePath = "";
 let frameCount = 0;
 let initYaw = 0.0;
+let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
 for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -48,6 +49,9 @@ for (let i = 2; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--yaw" && i + 1 < argv.length) {
     initYaw = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--taa" && i + 1 < argv.length) {
+    taaOverride = parseInt(argv[i + 1]);
   }
 }
 
@@ -60,11 +64,9 @@ enableShadows();
 // Sponza ceilings face down = dark IBL. High env_intensity
 // compensates for lack of GI bounce.
 setEnvIntensity(1.5);
-// Auto-exposure with a conservative key + slow adaptation.
-// Without SSGI, shadowed corridors have a very different HDR
-// average than sunlit openings — auto-exposure smooths the
-// perceptual gap the way a real eye / camera does.
 setAutoExposure(true);
+if (taaOverride === 0) { setTaaEnabled(false); }
+if (taaOverride === 1) { setTaaEnabled(true); }
 // Fog disabled — was causing brightness variation in corridors
 // setFog(0.7, 0.75, 0.82, 0.008, 0.0, 0.1);
 setVignette(0.25, 0.25);

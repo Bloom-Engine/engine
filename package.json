@@ -118,6 +118,7 @@
         { "name": "bloom_set_film_grain",          "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_sun_shafts",          "params": ["f64", "f64", "f64", "f64", "f64"],                      "returns": "void" },
         { "name": "bloom_set_auto_exposure",       "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_taa_enabled",         "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_manual_exposure",     "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_env_intensity",       "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_dof",                 "params": ["f64", "f64", "f64"],                                    "returns": "void" },

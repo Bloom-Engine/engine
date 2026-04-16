@@ -20,6 +20,7 @@ declare function bloom_set_vignette(strength: number, softness: number): void;
 declare function bloom_set_film_grain(strength: number): void;
 declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): void;
 declare function bloom_set_auto_exposure(on: number): void;
+declare function bloom_set_taa_enabled(on: number): void;
 declare function bloom_set_manual_exposure(value: number): void;
 declare function bloom_set_env_intensity(intensity: number): void;
 declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): void;
@@ -170,6 +171,11 @@ export function setSunShafts(strength: number, decay: number, r: number, g: numb
 /** Toggle physically-based auto-exposure. 18% gray target, log-average metered. */
 export function setAutoExposure(on: boolean): void {
   bloom_set_auto_exposure(on ? 1 : 0);
+}
+
+/** Toggle temporal anti-aliasing (sub-pixel jitter + reprojected history blend). */
+export function setTaaEnabled(on: boolean): void {
+  bloom_set_taa_enabled(on ? 1 : 0);
 }
 
 /** Manual exposure multiplier (ignored when auto-exposure is on). 1.0 = default. */
