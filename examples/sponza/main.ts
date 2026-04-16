@@ -54,8 +54,11 @@ enableShadows();
 // Sponza ceilings face down = dark IBL. High env_intensity
 // compensates for lack of GI bounce.
 setEnvIntensity(1.5);
-setAutoExposure(false);
-setManualExposure(3.0);
+// Narrow auto-exposure: adapts gently around the baseline
+// without wild swings. The fill lights handle the base level;
+// auto-exp just smooths the last bit of contrast.
+setAutoExposure(true);
+setManualExposure(3.0); // fallback if auto disabled
 // Fog disabled — was causing brightness variation in corridors
 // setFog(0.7, 0.75, 0.82, 0.008, 0.0, 0.1);
 setVignette(0.25, 0.25);
