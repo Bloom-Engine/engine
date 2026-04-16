@@ -675,12 +675,8 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
         return 1.0;
     }
     let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
-    // Bias is in NDC z space. For a 120m-deep ortho, 0.0002 ≈ 2.4cm
-    // world-space offset — enough to kill acne, small enough to not
-    // swallow shadows from thin columns/arches.
-    let bias = 0.0002;
+    let bias = 0.001;
     let depth_ref = light_ndc.z - bias;
-
     let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);
 
     // Blend between cascades at boundary regions for smooth transitions.
@@ -1931,14 +1927,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // multiplied as a uniform darkening. The floor lets us keep
     // selective crevice AO in open views while preventing whole-
     // screen brownout in dense views.
-    // Gentle contrast + floor, and bypass contact shadow (which was
-    // dragging the whole screen to black in dense near-field views:
-    // every march ray hits nearby geometry, collapsing `contact` to
-    // ~0, then multiplying the clean AO result into zero). True
-    // contact shadows need tighter thresholds than a global GTAO
-    // pass can provide — leave that to dedicated shadow maps.
+    // Stronger crevice AO. The 0.6 floor was a conservative response
+    // to dense-view brown-out on Khronos Sponza, but on higher-detail
+    // scenes (Intel Sponza) it was neutering the pronounced arch /
+    // column-base AO that gives photogrammetric scenes their depth.
+    // 0.3 allows real architectural crevices to read as dark while
+    // still protecting against the pathological case of every march
+    // ray hitting nearby geometry in tight corridors.
     let ao_contrasted = pow(ao, 1.5);
-    let ao_floored = max(ao_contrasted, 0.6);
+    let ao_floored = max(ao_contrasted, 0.3);
     let final_ao = mix(1.0, ao_floored, strength);
     return vec4<f32>(saturate(final_ao));
 }

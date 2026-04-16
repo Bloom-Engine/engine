@@ -80,7 +80,22 @@ impl ModelManager {
     }
 
     pub fn load_model_with_textures(&mut self, file_data: &[u8], renderer: &mut crate::renderer::Renderer) -> f64 {
-        match load_gltf_with_textures(file_data, renderer) {
+        match load_gltf_with_textures(file_data, renderer, None) {
+            Some(model) => self.models.alloc(model),
+            None => 0.0,
+        }
+    }
+
+    /// Like `load_model_with_textures` but also resolves external `.bin`
+    /// and image URIs relative to `base_dir` — required for loose glTF
+    /// files (as opposed to single-file .glb). Intel Sponza etc.
+    pub fn load_model_with_textures_from_path(
+        &mut self,
+        file_data: &[u8],
+        base_dir: &std::path::Path,
+        renderer: &mut crate::renderer::Renderer,
+    ) -> f64 {
+        match load_gltf_with_textures(file_data, renderer, Some(base_dir)) {
             Some(model) => self.models.alloc(model),
             None => 0.0,
         }
@@ -1004,7 +1019,11 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
     })
 }
 
-fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer) -> Option<ModelData> {
+fn load_gltf_with_textures(
+    data: &[u8],
+    renderer: &mut crate::renderer::Renderer,
+    base_dir: Option<&std::path::Path>,
+) -> Option<ModelData> {
     let gltf = gltf::Gltf::from_slice(data).ok()?;
 
     // Get buffer data
@@ -1019,6 +1038,13 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
                     let mut decoded = Vec::new();
                     let _ = base64_decode(encoded, &mut decoded);
                     buffer_data.push(decoded);
+                } else if let Some(dir) = base_dir {
+                    // External .bin file alongside the .gltf.
+                    let path = dir.join(uri);
+                    match std::fs::read(&path) {
+                        Ok(bytes) => buffer_data.push(bytes),
+                        Err(_) => buffer_data.push(Vec::new()),
+                    }
                 } else {
                     buffer_data.push(Vec::new());
                 }
@@ -1053,7 +1079,31 @@ fn load_gltf_with_textures(data: &[u8], renderer: &mut crate::renderer::Renderer
                     texture_indices.push(0);
                 }
             }
-            _ => { texture_indices.push(0); }
+            gltf::image::Source::Uri { uri, .. } => {
+                // External image file (loose glTF). Resolve relative to
+                // the .gltf file's directory.
+                let decoded_bytes = if let Some(encoded) = uri.strip_prefix("data:") {
+                    // data:... URI (rare for images, but possible)
+                    encoded.find(";base64,").map(|pos| {
+                        let b64 = &encoded[pos + 8..];
+                        let mut out = Vec::new();
+                        let _ = base64_decode(b64, &mut out);
+                        out
+                    })
+                } else if let Some(dir) = base_dir {
+                    std::fs::read(dir.join(uri)).ok()
+                } else {
+                    None
+                };
+                match decoded_bytes.and_then(|b| image::load_from_memory(&b).ok()) {
+                    Some(img) => {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = (rgba.width(), rgba.height());
+                        texture_indices.push(renderer.register_texture(w, h, &rgba));
+                    }
+                    None => texture_indices.push(0),
+                }
+            }
         }
     }
 

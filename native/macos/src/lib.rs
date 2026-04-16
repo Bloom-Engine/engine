@@ -1061,6 +1061,16 @@ pub extern "C" fn bloom_load_model(path_ptr: *const u8) -> f64 {
         Ok(data) => {
             let eng = engine();
             let EngineState { ref mut models, ref mut renderer, .. } = *eng;
+            // .gltf = loose file with external .bin + image URIs; pass
+            // the directory so relative paths resolve. .glb (binary)
+            // embeds everything and needs no base dir.
+            let p = std::path::Path::new(&path);
+            let is_loose = p.extension().and_then(|e| e.to_str()) == Some("gltf");
+            if is_loose {
+                if let Some(dir) = p.parent() {
+                    return models.load_model_with_textures_from_path(&data, dir, renderer);
+                }
+            }
             models.load_model_with_textures(&data, renderer)
         }
         Err(_) => 0.0,

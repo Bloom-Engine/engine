@@ -22,6 +22,10 @@ examples/renderer-test/bloom-renderer-test
 examples/renderer-test/argv_test
 examples/renderer-test/debug_ffi
 examples/pbr-spheres/main
+examples/sponza/main
+examples/intel-sponza/main
+examples/intel-sponza/assets/NewSponza_Main_glTF_003.*
+examples/intel-sponza/assets/textures/
 
 # Validation artifacts (regenerated on demand by tools/validate.sh)
 examples/renderer-test/*.png
