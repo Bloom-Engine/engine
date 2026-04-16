@@ -63,7 +63,7 @@ setManualExposure(2.5);
 setVignette(0.25, 0.25);
 setChromaticAberration(0.001);
 
-// ---- Load Sponza into scene graph (enables shadows) ----
+// ---- Load Sponza into scene graph ----
 const sponza = loadModel("assets/Sponza.glb");
 const identity = mat4Identity();
 for (let i = 0; i < sponza.meshCount; i = i + 1) {
@@ -139,7 +139,9 @@ while (!windowShouldClose()) {
     projection: "perspective",
   });
 
-  // Sponza is in the scene graph — rendered automatically with shadows.
+  if (sponza.handle !== 0) {
+    drawModel(sponza, { x: 0, y: 0, z: 0 }, 1.0, { r: 255, g: 255, b: 255, a: 255 });
+  }
 
   endMode3D();
 

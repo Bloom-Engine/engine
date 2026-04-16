@@ -32,11 +32,9 @@ declare function bloom_get_model_bounds_max_x(handle: number): number;
 declare function bloom_get_model_bounds_max_y(handle: number): number;
 declare function bloom_get_model_bounds_max_z(handle: number): number;
 
-function makeModel(handle: number, meshCount?: number, materialCount?: number): Model {
-  let mc = 1.0;
-  if (meshCount !== undefined) mc = meshCount;
-  let matc = 1.0;
-  if (materialCount !== undefined) matc = materialCount;
+function makeModel(handle: number): Model {
+  const mc = bloom_get_model_mesh_count(handle);
+  const matc = bloom_get_model_material_count(handle);
   return { handle, meshCount: mc, materialCount: matc, transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0] };
 }
 
@@ -124,7 +122,7 @@ export function loadModel(path: string): Model {
         return makeModel(handle, 1, 1);
       }
     }
-    return makeModel(0, 0, 0);
+    return makeModel(0);
   }
 
   const handle = bloom_load_model(path as any);
@@ -295,7 +293,7 @@ export async function loadModelAsync(path: string): Promise<Model> {
       );
       return makeModel(handle, 1, 1);
     }
-    return makeModel(0, 0, 0);
+    return makeModel(0);
   }
   const stagingHandle = await spawn(() => bloom_stage_model(path as any));
   const handle = bloom_commit_model(stagingHandle);
