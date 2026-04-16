@@ -6255,7 +6255,7 @@ impl Renderer {
             ssgi_pipeline,
             ssgi_layout,
             ssgi_uniform_buffer,
-            ssgi_intensity: 0.5,
+            ssgi_intensity: 1.0,
             ssgi_enabled: true,
             ssgi_history_textures,
             ssgi_history_views,
