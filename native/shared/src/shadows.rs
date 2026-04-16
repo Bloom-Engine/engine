@@ -384,27 +384,25 @@ impl ShadowMap {
                 world_corners[i] = [h[0] / w, h[1] / w, h[2] / w];
             }
 
-            // Use camera position as cascade center — NOT the frustum
-            // slice center. This makes shadow coverage independent of
-            // camera rotation (no shadow popping when looking around).
-            // The radius is computed from the max distance a frustum
-            // corner can be from the camera at this cascade's far
-            // plane — that's view-direction-independent.
+            // Rotation-stable cascade: center = camera pos, radius
+            // computed analytically from FOV + cascade far distance.
+            // This is PURELY a function of (fov, aspect, c_far) —
+            // no dependence on camera direction whatsoever.
             let center = camera_pos;
 
-            // Radius = distance from camera to the farthest frustum
-            // corner at this cascade's far split. For a symmetric
-            // perspective projection: max_dist = c_far / cos(half_diag_fov).
-            // We just use the world-space corners to get a stable value.
-            let mut radius = 0.0f32;
-            for corner in &world_corners {
-                let dx = corner[0] - center[0];
-                let dy = corner[1] - center[1];
-                let dz = corner[2] - center[2];
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                if dist > radius { radius = dist; }
-            }
-            radius = (radius * 16.0).ceil() / 16.0;
+            // For a symmetric perspective with half-fov θ and aspect a,
+            // the farthest frustum corner at distance d is at:
+            //   half_h = d * tan(θ)
+            //   half_w = half_h * a
+            //   max_dist = sqrt(d² + half_h² + half_w²)
+            // camera_proj[1][1] = 1/tan(half_fov), so tan_half_fov = 1/proj[1][1]
+            // camera_proj[0][0] = 1/(tan(half_fov)*aspect), so aspect = proj[1][1]/proj[0][0]
+            let tan_hfov = 1.0 / camera_proj[1][1].abs().max(0.001);
+            let aspect = camera_proj[1][1].abs() / camera_proj[0][0].abs().max(0.001);
+            let half_h = c_far * tan_hfov;
+            let half_w = half_h * aspect;
+            let radius = (c_far * c_far + half_h * half_h + half_w * half_w).sqrt();
+            let radius = (radius * 16.0).ceil() / 16.0;
 
             // Texel snap: quantize the ortho center to texel boundaries in
             // light space so moving the camera doesn't make shadow edges crawl.
