@@ -289,11 +289,12 @@ impl ShadowMap {
     pub fn compute_cascade_vps(
         &mut self,
         light_dir: [f32; 3],
-        camera_pos: [f32; 3],
+        _camera_pos: [f32; 3],
         camera_view: [[f32; 4]; 4],
         camera_proj: [[f32; 4]; 4],
         near: f32,
         far: f32,
+        scene_bounds: Option<([f32; 3], [f32; 3])>,
     ) {
         let len = (light_dir[0] * light_dir[0]
             + light_dir[1] * light_dir[1]
@@ -384,12 +385,33 @@ impl ShadowMap {
                 world_corners[i] = [h[0] / w, h[1] / w, h[2] / w];
             }
 
-            // Static scene-centered shadow map. For bounded indoor
-            // scenes (Sponza etc.) a fixed shadow ortho volume avoids
-            // all camera-following artifacts. The center never moves,
-            // so texel snapping keeps shadows perfectly stable.
-            let center = [0.0f32, 5.0, 0.0]; // Sponza atrium center
-            let radius = 30.0f32; // covers full scene (~25m wide)
+            // Static scene-AABB-centered shadow map. Using the union of
+            // world-space AABBs of every cast-shadow node gives us a
+            // stable ortho volume that covers the whole scene — no
+            // camera-following, so shadows can't slide as the player
+            // moves. Falls back to a generous default volume if the
+            // scene is empty (e.g. very first frame before meshes have
+            // been prepared).
+            let (center, radius) = match scene_bounds {
+                Some((bmin, bmax)) => {
+                    let cx = (bmin[0] + bmax[0]) * 0.5;
+                    let cy = (bmin[1] + bmax[1]) * 0.5;
+                    let cz = (bmin[2] + bmax[2]) * 0.5;
+                    let hx = (bmax[0] - bmin[0]) * 0.5;
+                    let hy = (bmax[1] - bmin[1]) * 0.5;
+                    let hz = (bmax[2] - bmin[2]) * 0.5;
+                    // Bounding sphere radius. 5% padding so geometry
+                    // right at the AABB edge still gets shadow samples
+                    // at grazing angles without clipping.
+                    let r = (hx*hx + hy*hy + hz*hz).sqrt() * 1.05;
+                    // Quantize radius so floating-point drift in the
+                    // bounds computation (e.g. a tiny mesh flickering
+                    // visibility) can't shift the shadow texel grid.
+                    let r_q = (r * 16.0).ceil() / 16.0;
+                    ([cx, cy, cz], r_q)
+                }
+                None => ([0.0f32, 0.0, 0.0], 50.0),
+            };
 
             // Texel snap: quantize the ortho center to texel boundaries in
             // light space so moving the camera doesn't make shadow edges crawl.

@@ -229,6 +229,51 @@ impl SceneGraph {
         }
     }
 
+    /// World-space AABB of every visible, shadow-casting node.
+    /// Used to auto-fit the directional shadow ortho volume — no
+    /// scene-specific magic numbers, works for Sponza / Bistro /
+    /// anything a user loads.
+    ///
+    /// Returns `None` if the scene is empty (caller should fall back
+    /// to a safe default).
+    pub fn compute_shadow_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        let mut bmin = [f32::MAX; 3];
+        let mut bmax = [f32::MIN; 3];
+        let mut any = false;
+        for (_h, node) in self.nodes.iter() {
+            if !node.visible || !node.cast_shadow {
+                continue;
+            }
+            if node.bounds_min[0] > node.bounds_max[0] {
+                continue; // empty bounds
+            }
+            // Transform the 8 local-AABB corners by the node's world matrix
+            // and union into the running bounds.
+            let t = &node.transform;
+            for ix in 0..2 {
+                for iy in 0..2 {
+                    for iz in 0..2 {
+                        let lx = if ix == 0 { node.bounds_min[0] } else { node.bounds_max[0] };
+                        let ly = if iy == 0 { node.bounds_min[1] } else { node.bounds_max[1] };
+                        let lz = if iz == 0 { node.bounds_min[2] } else { node.bounds_max[2] };
+                        // column-major mat4 * vec4(x,y,z,1)
+                        let wx = t[0][0]*lx + t[1][0]*ly + t[2][0]*lz + t[3][0];
+                        let wy = t[0][1]*lx + t[1][1]*ly + t[2][1]*lz + t[3][1];
+                        let wz = t[0][2]*lx + t[1][2]*ly + t[2][2]*lz + t[3][2];
+                        if wx < bmin[0] { bmin[0] = wx; }
+                        if wy < bmin[1] { bmin[1] = wy; }
+                        if wz < bmin[2] { bmin[2] = wz; }
+                        if wx > bmax[0] { bmax[0] = wx; }
+                        if wy > bmax[1] { bmax[1] = wy; }
+                        if wz > bmax[2] { bmax[2] = wz; }
+                        any = true;
+                    }
+                }
+            }
+        }
+        if any { Some((bmin, bmax)) } else { None }
+    }
+
     // ---- Q7: user data -----------------------------------------------------
 
     pub fn set_user_data(&mut self, handle: f64, data: i64) {

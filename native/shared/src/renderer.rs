@@ -7408,6 +7408,11 @@ impl Renderer {
                 self.lighting_uniforms.light_dir[1],
                 self.lighting_uniforms.light_dir[2],
             ];
+            // Auto-fit: compute world-space AABB across every visible,
+            // cast-shadow node so the ortho volume always covers the
+            // scene regardless of what's loaded. No per-scene magic
+            // numbers.
+            let scene_bounds = scene.compute_shadow_bounds();
             self.shadow_map.compute_cascade_vps(
                 light_dir,
                 self.current_camera_pos,
@@ -7415,6 +7420,7 @@ impl Renderer {
                 self.current_proj_matrix,
                 0.5,   // near — start cascades slightly past the camera
                 80.0,  // far — shadow coverage range
+                scene_bounds,
             );
 
             // Re-upload lighting uniforms with cascade VPs and splits.
