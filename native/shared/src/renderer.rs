@@ -572,7 +572,7 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
     let depth_ref = light_ndc.z - bias;
     let dims = textureDimensions(shadow_tex);
     let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
-    let radius = 20.0;
+    let radius = 3.0;
     var sum = 0.0;
     let poisson = array<vec2<f32>, 16>(
         vec2<f32>(-0.94201624, -0.39906216),

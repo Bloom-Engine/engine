@@ -10,7 +10,7 @@ use crate::renderer::{Vertex3D, IDENTITY_MAT4};
 pub const SHADOW_MAP_SIZE: u32 = 4096;
 pub const SHADOW_NEAR: f32 = 0.1;
 pub const SHADOW_FAR: f32 = 100.0;
-pub const SHADOW_EXTENT: f32 = 50.0; // orthographic extent in world units
+pub const SHADOW_EXTENT: f32 = 30.0;
 /// Dynamic-uniform buffer stride for per-node shadow uniforms. Must
 /// be ≥ sizeof(ShadowUniforms) (128B) and a multiple of the device's
 /// min_uniform_buffer_offset_alignment. 256 is safe on every platform.
@@ -264,7 +264,32 @@ impl ShadowMap {
             [0.0, 1.0, 0.0]
         };
 
-        let snapped_center = center;
+        // Snap center to texel boundaries so shadow edges don't
+        // crawl/flicker when camera moves smoothly.
+        let up = [0.0f32, 1.0, 0.0];
+        let f = d;
+        let right = normalize3([
+            up[1]*f[2] - up[2]*f[1],
+            up[2]*f[0] - up[0]*f[2],
+            up[0]*f[1] - up[1]*f[0],
+        ]);
+        let ortho_up = [
+            f[1]*right[2] - f[2]*right[1],
+            f[2]*right[0] - f[0]*right[2],
+            f[0]*right[1] - f[1]*right[0],
+        ];
+        let texel_world = (2.0 * SHADOW_EXTENT) / SHADOW_MAP_SIZE as f32;
+        let ls_x = dot3(center, right);
+        let ls_y = dot3(center, ortho_up);
+        let snapped_x = (ls_x / texel_world).floor() * texel_world;
+        let snapped_y = (ls_y / texel_world).floor() * texel_world;
+        let dx = snapped_x - ls_x;
+        let dy = snapped_y - ls_y;
+        let snapped_center = [
+            center[0] + dx * right[0] + dy * ortho_up[0],
+            center[1] + dx * right[1] + dy * ortho_up[1],
+            center[2] + dx * right[2] + dy * ortho_up[2],
+        ];
 
         // light_dir is "from surface to light" — the light is at
         // center + d*dist. (Earlier I had this as center - d*dist
