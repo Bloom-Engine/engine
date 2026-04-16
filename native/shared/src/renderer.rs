@@ -470,17 +470,26 @@ fn dir_to_equirect_uv(dir: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(u_coord, v_coord);
 }
 
+// Clamp equirectangular UV so the bilinear filter never reaches
+// across the ±180° seam (u = 0 / 1 boundary). Half a texel on
+// each side keeps every tap on the correct hemisphere.
+fn seamless_equirect_uv(uv: vec2<f32>) -> vec2<f32> {
+    let tex_w = f32(textureDimensions(env_tex, 0).x);
+    let half_texel = 0.5 / tex_w;
+    return vec2<f32>(clamp(uv.x, half_texel, 1.0 - half_texel), uv.y);
+}
+
 // Sample the env map at a specific mip level, multiplied by the
 // global env_intensity (lighting.camera_pos.w). Keeps IBL diffuse,
 // IBL specular and the sky pass scaling in sync so loading the same
 // HDR with intensity=2 brightens everything proportionally.
 fn env_sample_lod(dir: vec3<f32>, lod: f32) -> vec3<f32> {
-    return textureSampleLevel(env_tex, env_samp, dir_to_equirect_uv(dir), lod).rgb
+    return textureSampleLevel(env_tex, env_samp, seamless_equirect_uv(dir_to_equirect_uv(dir)), lod).rgb
          * lighting.camera_pos.w;
 }
 
 fn env_sample(dir: vec3<f32>) -> vec3<f32> {
-    return textureSample(env_tex, env_samp, dir_to_equirect_uv(dir)).rgb
+    return textureSample(env_tex, env_samp, seamless_equirect_uv(dir_to_equirect_uv(dir))).rgb
          * lighting.camera_pos.w;
 }
 
@@ -1059,7 +1068,13 @@ fn sky_fs(in: VsOut) -> SkyOut {
     let u_coord = raw_u - floor(raw_u); // fract(); WGSL has no rem_euclid
     let v_coord = theta / PI;
 
-    let radiance = textureSample(env_tex, env_samp, vec2<f32>(u_coord, v_coord)).rgb * u.intensity.x;
+    // Clamp u to half-texel inside [0,1] so the bilinear filter
+    // never reaches across the ±180° seam (u wraps 0↔1).
+    let tex_w = f32(textureDimensions(env_tex, 0).x);
+    let half_texel = 0.5 / tex_w;
+    let safe_u = clamp(u_coord, half_texel, 1.0 - half_texel);
+
+    let radiance = textureSample(env_tex, env_samp, vec2<f32>(safe_u, v_coord)).rgb * u.intensity.x;
     // Output linear HDR radiance — the composite pass downstream does
     // the ACES tonemap + sRGB encode in one place. Sky writes to the
     // material G-buffer too: 0 metallic, 1 roughness — sky never
@@ -2457,13 +2472,13 @@ fn aces_tone(c: vec3<f32>) -> vec3<f32> {
     return clamp((c * (c * a + b)) / (c * (c * cc + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// --- AgX tonemap (Troy Sobotka 2022) ---
+// --- AgX tonemap (Blender/Filament reference) ---
 // Better hue preservation than ACES in saturated regions — reds
 // stay red instead of shifting toward orange, blues stay blue
 // instead of shifting toward cyan. Same sigmoid shape overall,
 // so the overall contrast is similar.
 
-fn agx_contrast_approx(x: vec3<f32>) -> vec3<f32> {
+fn agx_default_contrast_approx(x: vec3<f32>) -> vec3<f32> {
     let x2 = x * x;
     let x4 = x2 * x2;
     return vec3<f32>(15.5) * x4 * x2
@@ -2494,8 +2509,8 @@ fn agx_tone(val_in: vec3<f32>) -> vec3<f32> {
     val = (val - vec3<f32>(min_ev)) / (max_ev - min_ev);
 
     // Sigmoid contrast curve.
-    val = agx_contrast_approx(val);
-    return clamp(val, vec3<f32>(0.0), vec3<f32>(1.0));
+    val = agx_default_contrast_approx(val);
+    return val;
 }
 
 fn agx_eotf(val_in: vec3<f32>) -> vec3<f32> {
@@ -2563,7 +2578,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (u.params.x < 0.5) {
         ldr = aces_tone(hdr);
     } else {
-        ldr = agx_eotf(agx_tone(hdr));
+        let hdr_safe = max(hdr, vec3<f32>(0.0));
+        ldr = clamp(agx_eotf(agx_tone(hdr_safe)), vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
     // --- Vignette (post-tonemap) ---
