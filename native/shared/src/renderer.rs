@@ -31,6 +31,7 @@ struct Uniforms2D {
 struct Uniforms3D {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
+    prev_mvp: [[f32; 4]; 4],
     model_tint: [f32; 4],
 }
 
@@ -254,6 +255,7 @@ const SHADER_3D: &str = "
 struct Uniforms3D {
     mvp: mat4x4<f32>,
     model: mat4x4<f32>,
+    prev_mvp: mat4x4<f32>,
     model_tint: vec4<f32>,
 };
 
@@ -296,6 +298,8 @@ struct VertexOutput3D {
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) world_pos: vec3<f32>,
+    @location(4) curr_clip: vec4<f32>,
+    @location(5) prev_clip: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms3D;
@@ -324,7 +328,10 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
         pos = skinned_pos;
         norm = skinned_norm;
     }
-    out.clip_position = u.mvp * pos;
+    let curr = u.mvp * pos;
+    out.clip_position = curr;
+    out.curr_clip = curr;
+    out.prev_clip = u.prev_mvp * pos;
     out.normal = normalize((u.model * norm).xyz);
     out.world_pos = (u.model * pos).xyz;
     out.color = in.color * u.model_tint;
@@ -335,6 +342,7 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
 struct Fs3DOut {
     @location(0) color: vec4<f32>,
     @location(1) material: vec2<f32>,
+    @location(2) velocity: vec2<f32>,
 };
 
 @fragment
@@ -375,11 +383,16 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
     }
 
     let tex_color = textureSample(tex3d, tex3d_sampler, in.uv);
+    // Per-pixel velocity for motion blur / TAA reprojection.
+    let curr_ndc = in.curr_clip.xy / in.curr_clip.w;
+    let prev_ndc = in.prev_clip.xy / in.prev_clip.w;
+    let vel = (curr_ndc - prev_ndc) * 0.5;
     // Immediate-mode 3D draws (drawCube etc.) aren't PBR — output
     // 0 metallic / 1 roughness so SSR doesn't try to reflect them.
     return Fs3DOut(
         vec4<f32>(0.0, 1.0, 0.0, 1.0), // DEBUG: green if pipeline_3d renders this
         vec2<f32>(0.0, 1.0),
+        vel,
     );
 }
 ";
@@ -400,6 +413,7 @@ const SCENE_SHADER: &str = "
 struct Uniforms3D {
     mvp: mat4x4<f32>,
     model: mat4x4<f32>,
+    prev_mvp: mat4x4<f32>,
     model_tint: vec4<f32>,
 };
 
@@ -449,6 +463,8 @@ struct VertexOutputScene {
     @location(2) uv: vec2<f32>,
     @location(3) world_pos: vec3<f32>,
     @location(4) tangent: vec4<f32>,
+    @location(5) curr_clip: vec4<f32>,
+    @location(6) prev_clip: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms3D;
@@ -511,8 +527,12 @@ fn env_sample(dir: vec3<f32>) -> vec3<f32> {
 @vertex
 fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
     var out: VertexOutputScene;
-    out.clip_position = u.mvp * vec4<f32>(in.position, 1.0);
-    let world4 = u.model * vec4<f32>(in.position, 1.0);
+    let pos4 = vec4<f32>(in.position, 1.0);
+    let curr = u.mvp * pos4;
+    out.clip_position = curr;
+    out.curr_clip = curr;
+    out.prev_clip = u.prev_mvp * pos4;
+    let world4 = u.model * pos4;
     out.world_pos = world4.xyz;
     out.normal = normalize((u.model * vec4<f32>(in.normal, 0.0)).xyz);
     out.color = in.color * u.model_tint;
@@ -728,6 +748,7 @@ fn shade_pbr(
 struct SceneOut {
     @location(0) color: vec4<f32>,
     @location(1) material: vec2<f32>,
+    @location(2) velocity: vec2<f32>,
 };
 
 @fragment
@@ -906,9 +927,17 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // dielectric path is unchanged.
     let hdr = lit + (ibl_diffuse + ibl_spec) * indirect_shadow + emissive;
 
+    // Per-pixel velocity: difference between current and previous NDC,
+    // scaled by 0.5 so the result is in UV-space units. Used by the
+    // motion blur pass and TAA per-object reprojection.
+    let curr_ndc = in.curr_clip.xy / in.curr_clip.w;
+    let prev_ndc = in.prev_clip.xy / in.prev_clip.w;
+    let vel = (curr_ndc - prev_ndc) * 0.5;
+
     return SceneOut(
         vec4<f32>(hdr, base_alpha),
         vec2<f32>(metallic, roughness),
+        vel,
     );
 }
 ";
@@ -1124,6 +1153,7 @@ fn linear_to_srgb_v(c: vec3<f32>) -> vec3<f32> {
 struct SkyOut {
     @location(0) color: vec4<f32>,
     @location(1) material: vec2<f32>,
+    @location(2) velocity: vec2<f32>,
 };
 
 @fragment
@@ -1156,7 +1186,8 @@ fn sky_fs(in: VsOut) -> SkyOut {
     // material G-buffer too: 0 metallic, 1 roughness — sky never
     // reflects, never gets reflected from (well, it gets sampled by
     // SSR via the HDR RT, but that's expected behavior).
-    return SkyOut(vec4<f32>(radiance, 1.0), vec2<f32>(0.0, 1.0));
+    // Sky is at infinity — zero velocity (stationary background).
+    return SkyOut(vec4<f32>(radiance, 1.0), vec2<f32>(0.0, 1.0), vec2<f32>(0.0, 0.0));
 }
 ";
 
@@ -1199,6 +1230,11 @@ const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// Written as a second color attachment in the HDR pass; SSR (and
 /// any future deferred passes) reads it for per-pixel material info.
 const MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
+
+/// Velocity buffer format. Rg16Float: two-channel 16-bit float for
+/// sub-pixel precision screen-space velocity. Written as a third
+/// color attachment in the HDR pass; motion blur and TAA read it.
+const VELOCITY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 
 fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1275,6 +1311,24 @@ fn create_material_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::
     (texture, view)
 }
 
+/// Create the velocity render target (Rg16Float, surface size).
+/// Per-pixel screen-space velocity for motion blur and TAA.
+fn create_velocity_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("velocity_rt"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: VELOCITY_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Create the SSR render target (half-res HDR — reflections are
 /// low-frequency enough that half-res hides bilinear blur).
 fn create_ssr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
@@ -1282,6 +1336,27 @@ fn create_ssr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Textu
     let h = (height / 2).max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssr_rt"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Create the SSGI render target (half-res HDR — indirect diffuse bounce light).
+/// Same half-res HDR strategy as SSR: keeps the per-pixel ray march cheap
+/// while still providing enough color resolution for colored bounce light.
+fn create_ssgi_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let w = (width / 2).max(1);
+    let h = (height / 2).max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ssgi_rt"),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
@@ -2062,6 +2137,284 @@ struct DofParams {
     inv_proj: [[f32; 4]; 4],
 }
 
+// ============================================================
+// Motion Blur post-process
+// ============================================================
+//
+// Reads the TAA/DoF output (color) and the per-pixel velocity buffer.
+// For each pixel, samples 8 taps along the velocity direction with a
+// tent (linear) weight, blending them into a directionally-blurred
+// result. Default OFF — no perf cost when disabled.
+
+const MOTION_BLUR_SHADER_WGSL: &str = "
+struct MotionBlurParams {
+    /// x = strength (velocity multiplier), y = max_blur (UV clamp), zw = unused.
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: MotionBlurParams;
+@group(0) @binding(1) var color_tex: texture_2d<f32>;
+@group(0) @binding(2) var color_samp: sampler;
+@group(0) @binding(3) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(4) var velocity_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let strength = u.params.x;
+    let max_blur = u.params.y;
+
+    let vel_raw = textureSample(velocity_tex, velocity_samp, in.uv).rg;
+    // Scale velocity by strength and clamp to max_blur radius.
+    var vel = vel_raw * strength;
+    let vel_len = length(vel);
+    if (vel_len > max_blur) {
+        vel = vel * (max_blur / vel_len);
+    }
+
+    // If velocity is negligible, return source pixel unchanged.
+    if (vel_len < 0.0001) {
+        return textureSample(color_tex, color_samp, in.uv);
+    }
+
+    // 8-tap directional blur with tent (linear) weighting.
+    // Samples are placed symmetrically around the center pixel
+    // along the velocity vector. The tent filter peaks at the
+    // center and falls off linearly toward the endpoints.
+    let n_samples: i32 = 8;
+    var color_sum = vec3<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var i: i32 = 0; i < n_samples; i = i + 1) {
+        let t = (f32(i) + 0.5) / f32(n_samples) - 0.5; // range [-0.5, 0.5)
+        let sample_uv = in.uv + vel * t;
+        let w = 1.0 - abs(t * 2.0); // tent weight: 1.0 at center, 0 at edges
+        color_sum += textureSample(color_tex, color_samp, sample_uv).rgb * w;
+        weight_sum += w;
+    }
+
+    return vec4<f32>(color_sum / weight_sum, 1.0);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct MotionBlurParams {
+    /// x = strength, y = max_blur (UV), zw = unused.
+    params: [f32; 4],
+}
+
+// ============================================================
+// SSGI (Screen-Space Global Illumination) post-process
+// ============================================================
+
+/// SSGI shader. Single-bounce indirect diffuse lighting approximation.
+///
+/// For each pixel:
+/// 1. Reconstruct view-space position P and normal N from the depth buffer.
+/// 2. Generate N_SAMPLES cosine-weighted directions around N in view space.
+/// 3. For each direction, project to screen space and march a few steps
+///    (similar to SSR but for diffuse).
+/// 4. On hit, read hdr_rt at that UV — that's the incoming radiance from
+///    one bounce of indirect light.
+/// 5. Weight by NdotL (cosine of angle between normal and sample direction).
+/// 6. Average all samples → indirect diffuse color at half-res.
+///
+/// Output is half-res Rgba16Float (needs RGB for colored bounce light).
+/// The TAA pass adds it on top of the direct lighting.
+const SSGI_SHADER_WGSL: &str = "
+struct SsgiParams {
+    inv_proj: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    /// x = intensity, y = radius (view-space), z = n_samples, w = frame_index (for noise)
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: SsgiParams;
+@group(0) @binding(1) var depth_tex: texture_depth_2d;
+@group(0) @binding(2) var depth_samp: sampler;
+@group(0) @binding(3) var hdr_tex: texture_2d<f32>;
+@group(0) @binding(4) var hdr_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+fn view_pos_from_depth_ssgi(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
+    let view_h = u.inv_proj * ndc;
+    return view_h.xyz / view_h.w;
+}
+
+/// Interleaved gradient noise — per-pixel pseudo-random in [0,1).
+/// Varies by position and frame index for temporal variation.
+fn ign(frag_coord: vec2<f32>) -> f32 {
+    let frame = u.params.w;
+    let shifted = frag_coord + vec2<f32>(frame * 5.588238, frame * 3.127137);
+    return fract(52.9829189 * fract(0.06711056 * shifted.x + 0.00583715 * shifted.y));
+}
+
+/// Build a rotation matrix that takes the +Y axis to the given normal N.
+/// Returns the 3 basis vectors as columns: tangent (T), normal (N), bitangent (B).
+fn build_tbn(n: vec3<f32>) -> mat3x3<f32> {
+    // Choose an up vector that isn't parallel to N.
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(n.y) > 0.99) {
+        up = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let t = normalize(cross(up, n));
+    let b = cross(n, t);
+    // Columns: T, N, B so that (x, y, z) in hemisphere maps to
+    // x*T + y*N + z*B in view space (y = up = along normal).
+    return mat3x3<f32>(t, n, b);
+}
+
+/// Cosine-weighted hemisphere sample from 2D random values (u1, u2 in [0,1)).
+/// Returns direction in hemisphere-local coords where Y is up (along normal).
+fn cosine_hemisphere(u1: f32, u2: f32) -> vec3<f32> {
+    let r = sqrt(u1);
+    let theta = 6.2831853 * u2;
+    let x = r * cos(theta);
+    let z = r * sin(theta);
+    let y = sqrt(max(1.0 - u1, 0.0)); // cosTheta = sqrt(1 - r^2)
+    return vec3<f32>(x, y, z);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let depth = textureSample(depth_tex, depth_samp, in.uv);
+    // Sky — no indirect lighting.
+    if (depth >= 0.9999) {
+        return vec4<f32>(0.0);
+    }
+
+    let view_pos = view_pos_from_depth_ssgi(in.uv, depth);
+
+    // Reconstruct view-space normal from screen-space derivatives.
+    let dx = dpdx(view_pos);
+    let dy = dpdy(view_pos);
+    let n = normalize(cross(dx, dy));
+
+    let intensity = u.params.x;
+    let radius = u.params.y;
+    let n_samples_f = u.params.z;
+    let n_samples = i32(n_samples_f);
+
+    let tbn = build_tbn(n);
+
+    var accum = vec3<f32>(0.0);
+    var valid_samples = 0.0;
+
+    // Per-pixel noise seed from fragment position.
+    let noise_base = ign(in.clip_pos.xy);
+
+    let march_steps = 4;
+    let step_size = radius / f32(march_steps);
+
+    for (var i = 0; i < n_samples; i = i + 1) {
+        // Two pseudo-random values per sample using golden ratio offsets.
+        let fi = f32(i);
+        let u1 = fract(noise_base + fi * 0.6180339887);
+        let u2 = fract(noise_base * 1.3247179572 + fi * 0.7548776662);
+
+        // Cosine-weighted direction in hemisphere-local space, then
+        // rotate into view space via TBN.
+        let local_dir = cosine_hemisphere(u1, u2);
+        let dir = normalize(tbn * local_dir);
+
+        // NdotL is implicitly the cosine weight from the hemisphere
+        // sampling — cosine-weighted samples already include it.
+        let ndotl = max(dot(dir, n), 0.0);
+
+        // March along the direction in view space.
+        var hit_found = false;
+        var hit_color = vec3<f32>(0.0);
+
+        // Start slightly offset to avoid self-intersection.
+        var t = step_size;
+        for (var s = 0; s < march_steps; s = s + 1) {
+            let ray_view = view_pos + dir * t;
+            // Project to clip space.
+            let ray_clip = u.proj * vec4<f32>(ray_view, 1.0);
+            let ray_ndc = ray_clip.xyz / ray_clip.w;
+
+            // Off-screen — stop marching.
+            if (ray_ndc.x < -1.0 || ray_ndc.x > 1.0 ||
+                ray_ndc.y < -1.0 || ray_ndc.y > 1.0 ||
+                ray_ndc.z < 0.0 || ray_ndc.z > 1.0) {
+                break;
+            }
+
+            let ray_uv = vec2<f32>(ray_ndc.x * 0.5 + 0.5, 1.0 - (ray_ndc.y * 0.5 + 0.5));
+            let scene_depth = textureSample(depth_tex, depth_samp, ray_uv);
+
+            // Ray has gone past the surface — hit.
+            if (ray_ndc.z >= scene_depth && scene_depth < 0.9999) {
+                // Thickness check: reject hits where the ray is far
+                // behind the surface (likely a back face or thin wall).
+                let hit_view = view_pos_from_depth_ssgi(ray_uv, scene_depth);
+                let thickness = abs(ray_view.z - hit_view.z);
+                if (thickness < radius * 0.5) {
+                    hit_color = textureSample(hdr_tex, hdr_samp, ray_uv).rgb;
+                    hit_found = true;
+                }
+                break;
+            }
+            t = t + step_size;
+        }
+
+        if (hit_found) {
+            // Cosine-weighted hemisphere sampling means the PDF already
+            // includes the cos(theta) / pi term, so just accumulate
+            // the radiance directly.
+            accum += hit_color;
+            valid_samples += 1.0;
+        }
+    }
+
+    // Average the valid hits.
+    var result = vec3<f32>(0.0);
+    if (valid_samples > 0.0) {
+        result = accum / valid_samples * intensity;
+    }
+
+    return vec4<f32>(result, 1.0);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsgiParams {
+    inv_proj: [[f32; 4]; 4],
+    proj: [[f32; 4]; 4],
+    /// x = intensity, y = radius, z = n_samples, w = frame_index
+    params: [f32; 4],
+}
+
 /// SSR (screen-space reflections) shader. View-space ray march:
 ///
 /// 1. Reconstruct view-space position from the depth buffer.
@@ -2265,6 +2618,10 @@ struct TaaParams {
 @group(0) @binding(10) var depth_samp: sampler;
 @group(0) @binding(11) var ssr_tex: texture_2d<f32>;
 @group(0) @binding(12) var ssr_samp: sampler;
+@group(0) @binding(13) var ssgi_tex: texture_2d<f32>;
+@group(0) @binding(14) var ssgi_samp: sampler;
+@group(0) @binding(15) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(16) var velocity_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -2289,23 +2646,35 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
     let ssao = textureSample(ssao_tex, ssao_samp, in.uv).r;
     let ssr = textureSample(ssr_tex, ssr_samp, in.uv).rgb;
+    let ssgi = textureSample(ssgi_tex, ssgi_samp, in.uv).rgb;
     // SSR is added on top of HDR (pre-tonemap) — already strength-
     // and edge-faded by the SSR pass, so a flat add here is fine.
-    let current = (hdr + ssr) * ssao + bloom * u.params.y;
+    // SSGI adds indirect diffuse bounce light — pre-multiplied by
+    // intensity in the SSGI pass, so a flat add here works.
+    let current = (hdr + ssr + ssgi) * ssao + bloom * u.params.y;
 
-    // Reproject history via depth + previous VP. Reconstruct the
-    // fragment's world-space position from current-frame depth, then
-    // project through the previous VP to get the prev-frame clip-
-    // space position → prev_uv. Removes ghosting from camera motion
-    // for all static geometry. (Animated meshes need per-vertex
-    // motion vectors — not handled yet.)
-    let depth = textureSample(depth_tex, depth_samp, in.uv);
-    let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
-    let world_h = u.inv_vp * ndc;
-    let world = world_h.xyz / world_h.w;
-    let prev_clip = u.prev_vp * vec4<f32>(world, 1.0);
-    let prev_ndc = prev_clip.xyz / prev_clip.w;
-    let prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 1.0 - (prev_ndc.y * 0.5 + 0.5));
+    // Reproject history using per-pixel velocity when available,
+    // falling back to depth-based camera-only reprojection. The
+    // velocity buffer encodes (curr_ndc - prev_ndc) * 0.5 in UV
+    // space, so prev_uv = curr_uv - velocity (with Y flip for
+    // the NDC→UV conversion).
+    let vel = textureSample(velocity_tex, velocity_samp, in.uv).rg;
+    let vel_len = length(vel);
+    var prev_uv: vec2<f32>;
+    if (vel_len > 0.00001) {
+        // Per-pixel velocity available (animated mesh or camera motion
+        // baked into the velocity buffer by the vertex shader).
+        prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
+    } else {
+        // Fallback: depth + inverse VP reprojection for static geometry.
+        let depth = textureSample(depth_tex, depth_samp, in.uv);
+        let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
+        let world_h = u.inv_vp * ndc;
+        let world = world_h.xyz / world_h.w;
+        let prev_clip = u.prev_vp * vec4<f32>(world, 1.0);
+        let prev_ndc = prev_clip.xyz / prev_clip.w;
+        prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 1.0 - (prev_ndc.y * 0.5 + 0.5));
+    }
 
     // If the prev_uv falls off-screen, fall back to current — no
     // history available. Otherwise sample the reprojected position.
@@ -2331,7 +2700,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let s_ssao = textureSample(ssao_tex, ssao_samp, s_uv).r;
             let s_bloom = textureSample(bloom_tex, bloom_samp, s_uv).rgb;
             let s_ssr = textureSample(ssr_tex, ssr_samp, s_uv).rgb;
-            let s = (s_hdr + s_ssr) * s_ssao + s_bloom * u.params.y;
+            let s_ssgi = textureSample(ssgi_tex, ssgi_samp, s_uv).rgb;
+            let s = (s_hdr + s_ssr + s_ssgi) * s_ssao + s_bloom * u.params.y;
             nmin = min(nmin, s);
             nmax = max(nmax, s);
         }
@@ -3070,6 +3440,19 @@ pub struct Renderer {
     pub ssr_strength: f32,
     pub ssr_enabled: bool,
 
+    /// SSGI (screen-space global illumination) pass output — half-res
+    /// HDR holding the indirect diffuse bounce light for each fragment.
+    /// Composited into the final image by the TAA pass.
+    pub ssgi_rt_texture: wgpu::Texture,
+    pub ssgi_rt_view: wgpu::TextureView,
+    pub ssgi_pipeline: wgpu::RenderPipeline,
+    pub ssgi_layout: wgpu::BindGroupLayout,
+    pub ssgi_uniform_buffer: wgpu::Buffer,
+    /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
+    pub ssgi_intensity: f32,
+    /// SSGI master switch. Default false — no perf cost when off.
+    pub ssgi_enabled: bool,
+
     /// Depth of field render target (full-res HDR). DoF pass reads
     /// TAA output + depth, writes variable-radius Poisson disc blur
     /// here. Composite reads this instead of TAA when DoF is on.
@@ -3089,6 +3472,31 @@ pub struct Renderer {
     /// Maximum blur disc radius in UV units. Clamps the CoC so the
     /// blur never exceeds this radius. Default 0.02.
     pub dof_max_blur: f32,
+
+    /// Per-pixel velocity render target (Rg16Float, surface size).
+    /// Third color attachment in the HDR pass; written by the 3D and
+    /// scene fragment shaders with screen-space velocity. Read by
+    /// the motion blur pass and TAA for per-object reprojection.
+    pub velocity_rt_texture: wgpu::Texture,
+    pub velocity_rt_view: wgpu::TextureView,
+
+    /// Motion blur render target (full-res HDR). Motion blur pass
+    /// reads color + velocity, writes directionally-blurred result
+    /// here. Composite reads this instead of the upstream source
+    /// when motion blur is enabled.
+    pub motion_blur_rt_texture: wgpu::Texture,
+    pub motion_blur_rt_view: wgpu::TextureView,
+    pub motion_blur_pipeline: wgpu::RenderPipeline,
+    pub motion_blur_layout: wgpu::BindGroupLayout,
+    pub motion_blur_uniform_buffer: wgpu::Buffer,
+    /// Motion blur master switch. Default false — no perf cost when off.
+    pub motion_blur_enabled: bool,
+    /// Velocity multiplier. Higher = more blur for the same motion.
+    /// Default 1.0.
+    pub motion_blur_strength: f32,
+    /// Maximum blur radius in UV units. Clamps velocity so blur never
+    /// exceeds this radius. Default 0.05.
+    pub motion_blur_max_blur: f32,
 
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
@@ -3305,7 +3713,7 @@ impl Renderer {
         // --- 3D uniform buffer ---
         let uniform_buffer_3d = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("uniform_3d"),
-            contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, model_tint: [1.0, 1.0, 1.0, 1.0] }),
+            contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, prev_mvp: IDENTITY_MAT4, model_tint: [1.0, 1.0, 1.0, 1.0] }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let uniform_bind_group_3d = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3618,7 +4026,17 @@ impl Renderer {
         let (ssr_rt_texture, ssr_rt_view) = create_ssr_rt(
             &device, surface_config.width, surface_config.height,
         );
+        let (ssgi_rt_texture, ssgi_rt_view) = create_ssgi_rt(
+            &device, surface_config.width, surface_config.height,
+        );
         let (dof_rt_texture, dof_rt_view) = create_dof_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+        let (velocity_rt_texture, velocity_rt_view) = create_velocity_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+        // Motion blur RT reuses the same HDR format as DoF.
+        let (motion_blur_rt_texture, motion_blur_rt_view) = create_dof_rt(
             &device, surface_config.width, surface_config.height,
         );
         let (exposure_textures, exposure_views) = create_exposure_textures(&device);
@@ -3776,6 +4194,11 @@ impl Renderer {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
+                    Some(wgpu::ColorTargetState {
+                        format: VELOCITY_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
                 ],
                 compilation_options: Default::default(),
             }),
@@ -3807,7 +4230,7 @@ impl Renderer {
         for _ in 0..model_uniform_count {
             let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("model_uniform"),
-                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, model_tint: [1.0; 4] }),
+                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, prev_mvp: IDENTITY_MAT4, model_tint: [1.0; 4] }),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3904,6 +4327,11 @@ impl Renderer {
                     }),
                     Some(wgpu::ColorTargetState {
                         format: MATERIAL_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: VELOCITY_FORMAT,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -4132,6 +4560,11 @@ impl Renderer {
                         format: MATERIAL_FORMAT,
                         // Replace blend so the material slot reflects
                         // the topmost-fragment material, not blended.
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: VELOCITY_FORMAT,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -4680,6 +5113,30 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 15, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 16, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let taa_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -4809,6 +5266,84 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- SSGI pipeline ---
+        let ssgi_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ssgi_shader"),
+            source: wgpu::ShaderSource::Wgsl(SSGI_SHADER_WGSL.into()),
+        });
+        let ssgi_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ssgi_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ssgi_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ssgi_pl_layout"),
+            bind_group_layouts: &[&ssgi_layout],
+            push_constant_ranges: &[],
+        });
+        let ssgi_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ssgi_pipeline"),
+            layout: Some(&ssgi_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &ssgi_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ssgi_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT, blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false, conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+        let ssgi_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ssgi_uniform_buffer"),
+            size: std::mem::size_of::<SsgiParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- DoF (depth of field) pipeline ---
         let dof_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("dof_shader"),
@@ -4907,6 +5442,108 @@ impl Renderer {
         let dof_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dof_uniform_buffer"),
             size: std::mem::size_of::<DofParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // --- Motion blur pipeline ---
+        let motion_blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("motion_blur_shader"),
+            source: wgpu::ShaderSource::Wgsl(MOTION_BLUR_SHADER_WGSL.into()),
+        });
+        let motion_blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("motion_blur_layout"),
+            entries: &[
+                // binding 0: MotionBlurParams uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 1: color input (upstream HDR)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 2: color sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 3: velocity texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 4: velocity sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let motion_blur_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("motion_blur_pl_layout"),
+            bind_group_layouts: &[&motion_blur_layout],
+            push_constant_ranges: &[],
+        });
+        let motion_blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("motion_blur_pipeline"),
+            layout: Some(&motion_blur_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &motion_blur_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &motion_blur_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let motion_blur_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("motion_blur_uniform_buffer"),
+            size: std::mem::size_of::<MotionBlurParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -5088,6 +5725,13 @@ impl Renderer {
             ssr_uniform_buffer,
             ssr_strength: 0.5,
             ssr_enabled: true,
+            ssgi_rt_texture,
+            ssgi_rt_view,
+            ssgi_pipeline,
+            ssgi_layout,
+            ssgi_uniform_buffer,
+            ssgi_intensity: 0.5,
+            ssgi_enabled: false,
             dof_rt_texture,
             dof_rt_view,
             dof_pipeline,
@@ -5097,6 +5741,16 @@ impl Renderer {
             dof_focus_distance: 10.0,
             dof_aperture: 0.0,
             dof_max_blur: 0.006,
+            velocity_rt_texture,
+            velocity_rt_view,
+            motion_blur_rt_texture,
+            motion_blur_rt_view,
+            motion_blur_pipeline,
+            motion_blur_layout,
+            motion_blur_uniform_buffer,
+            motion_blur_enabled: false,
+            motion_blur_strength: 1.0,
+            motion_blur_max_blur: 0.05,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -5261,9 +5915,18 @@ impl Renderer {
             let (sr_t, sr_v) = create_ssr_rt(&self.device, width, height);
             self.ssr_rt_texture = sr_t;
             self.ssr_rt_view = sr_v;
+            let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, width, height);
+            self.ssgi_rt_texture = ssgi_t;
+            self.ssgi_rt_view = ssgi_v;
             let (dof_t, dof_v) = create_dof_rt(&self.device, width, height);
             self.dof_rt_texture = dof_t;
             self.dof_rt_view = dof_v;
+            let (vel_t, vel_v) = create_velocity_rt(&self.device, width, height);
+            self.velocity_rt_texture = vel_t;
+            self.velocity_rt_view = vel_v;
+            let (mb_t, mb_v) = create_dof_rt(&self.device, width, height);
+            self.motion_blur_rt_texture = mb_t;
+            self.motion_blur_rt_view = mb_v;
         }
     }
 
@@ -5324,6 +5987,19 @@ impl Renderer {
         self.ssr_strength = strength.max(0.0);
     }
 
+    /// Toggle SSGI (screen-space global illumination) on/off. Off
+    /// (default) = no SSGI pass, zero perf cost. On = single-bounce
+    /// indirect diffuse lighting via screen-space ray marching.
+    pub fn set_ssgi_enabled(&mut self, on: bool) {
+        self.ssgi_enabled = on;
+    }
+
+    /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
+    /// Controls the brightness of indirect bounce light.
+    pub fn set_ssgi_intensity(&mut self, intensity: f32) {
+        self.ssgi_intensity = intensity.max(0.0);
+    }
+
     /// Toggle depth of field on/off. Off (default) = no DoF pass,
     /// zero perf cost. On = variable-radius Poisson disc blur driven
     /// by circle of confusion from the depth buffer.
@@ -5343,6 +6019,21 @@ impl Renderer {
     /// produce stronger blur for the same distance from focus.
     pub fn set_dof_aperture(&mut self, aperture: f32) {
         self.dof_aperture = aperture.max(0.0);
+    }
+
+    /// Toggle motion blur on/off. Off (default) = no motion blur
+    /// pass, zero perf cost. On = 8-tap directional blur driven by
+    /// the per-pixel velocity buffer.
+    pub fn set_motion_blur_enabled(&mut self, on: bool) {
+        self.motion_blur_enabled = on;
+    }
+
+    /// Set the motion blur strength (velocity multiplier). 0 = no
+    /// visible blur even when enabled. 1.0 = default, subtle.
+    /// Higher values amplify the blur for the same screen-space
+    /// velocity.
+    pub fn set_motion_blur_strength(&mut self, strength: f32) {
+        self.motion_blur_strength = strength.max(0.0);
     }
 
     /// Select the display tonemap curve. 0 = ACES (default, used
@@ -6263,6 +6954,15 @@ impl Renderer {
                             store: wgpu::StoreOp::Store,
                         },
                     }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.velocity_rt_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // Zero velocity = stationary pixel.
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
@@ -6509,6 +7209,67 @@ impl Renderer {
         }
 
         // ============================================================
+        // SSGI: screen-space global illumination (single-bounce indirect
+        // diffuse). Half-res ray march similar to SSR but for diffuse.
+        // ============================================================
+        if self.ssgi_enabled {
+            let inv_proj = mat4_invert(self.current_proj_matrix);
+            let sp = SsgiParams {
+                inv_proj,
+                proj: self.current_proj_matrix,
+                params: [self.ssgi_intensity, 4.0, 8.0, self.taa_frame_index as f32],
+            };
+            self.queue.write_buffer(&self.ssgi_uniform_buffer, 0, bytemuck::bytes_of(&sp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ssgi_bg"),
+                layout: &self.ssgi_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ssgi_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssgi_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssgi_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.ssgi_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        } else {
+            // SSGI disabled — clear the RT so TAA's read returns 0
+            // (transparent black).
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssgi_clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssgi_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            drop(pass);
+        }
+
+        // ============================================================
         // Bloom: progressive downsample (Karis-thresholded first tap)
         // followed by additive upsample back up the chain.
         // ============================================================
@@ -6711,6 +7472,10 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
                     wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
                     wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&self.ssgi_rt_view) },
+                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
+                    wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 ],
             });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -6781,9 +7546,59 @@ impl Renderer {
         }
 
         // ============================================================
+        // Motion blur pass: 8-tap directional blur along velocity
+        // Reads upstream color + velocity_rt → motion_blur_rt
+        // ============================================================
+        let pre_mblur_view = if self.dof_enabled && self.dof_aperture > 0.0 {
+            &self.dof_rt_view
+        } else if self.taa_enabled {
+            &self.taa_views[taa_dst_idx]
+        } else {
+            &self.hdr_rt_view
+        };
+
+        if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
+            let mbp = MotionBlurParams {
+                params: [self.motion_blur_strength, self.motion_blur_max_blur, 0.0, 0.0],
+            };
+            self.queue.write_buffer(&self.motion_blur_uniform_buffer, 0, bytemuck::bytes_of(&mbp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("motion_blur_bg"),
+                layout: &self.motion_blur_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.motion_blur_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(pre_mblur_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("motion_blur_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.motion_blur_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.motion_blur_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ============================================================
         // Composite pass: tonemap (ACES + sRGB encode)
         // ============================================================
-        let composite_src_view = if self.dof_enabled && self.dof_aperture > 0.0 {
+        let composite_src_view = if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
+            &self.motion_blur_rt_view
+        } else if self.dof_enabled && self.dof_aperture > 0.0 {
             &self.dof_rt_view
         } else if self.taa_enabled {
             &self.taa_views[taa_dst_idx]
@@ -7528,7 +8343,7 @@ impl Renderer {
         self.queue.write_buffer(
             &self.uniform_buffer_3d,
             0,
-            bytemuck::bytes_of(&Uniforms3D { mvp: vp, model: IDENTITY_MAT4, model_tint: [1.0, 1.0, 1.0, 1.0] }),
+            bytemuck::bytes_of(&Uniforms3D { mvp: vp, model: IDENTITY_MAT4, prev_mvp: self.prev_vp_matrix, model_tint: [1.0, 1.0, 1.0, 1.0] }),
         );
         self.render_mode = RenderMode::Mode3D;
     }
@@ -7729,7 +8544,7 @@ impl Renderer {
             self.queue.write_buffer(
                 &self.model_uniform_buffers[slot],
                 0,
-                bytemuck::bytes_of(&Uniforms3D { mvp: model_mvp, model: model_matrix, model_tint: tint }),
+                bytemuck::bytes_of(&Uniforms3D { mvp: model_mvp, model: model_matrix, prev_mvp: model_mvp, model_tint: tint }),
             );
 
             self.model_draw_commands.push(CachedModelDraw {
@@ -7744,7 +8559,7 @@ impl Renderer {
         while self.model_uniform_buffers.len() <= slot {
             let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("model_uniform"),
-                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, model_tint: [1.0; 4] }),
+                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, prev_mvp: IDENTITY_MAT4, model_tint: [1.0; 4] }),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {

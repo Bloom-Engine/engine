@@ -2312,6 +2312,7 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
         &eng.renderer.device,
         &eng.renderer.queue,
         &eng.renderer.vp_matrix(),
+        &eng.renderer.prev_vp_matrix,
         eng.renderer.uniform_3d_layout(),
     );
     eng.scene.prepare_materials(&eng.renderer);

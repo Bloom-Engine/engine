@@ -58,6 +58,7 @@ impl Default for PbrMaterial {
 struct NodeUniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
+    prev_mvp: [[f32; 4]; 4],
     model_tint: [f32; 4],
 }
 
@@ -73,6 +74,9 @@ pub struct SceneNode {
     pub material: PbrMaterial,
     // Transform
     pub transform: [[f32; 4]; 4],
+    /// Previous frame's world transform — used to compute per-mesh
+    /// screen-space velocity for motion blur and TAA reprojection.
+    pub prev_transform: [[f32; 4]; 4],
     // Flags
     pub visible: bool,
     pub cast_shadow: bool,
@@ -108,6 +112,7 @@ impl SceneNode {
             indices: Vec::new(),
             material: PbrMaterial::default(),
             transform: crate::renderer::IDENTITY_MAT4,
+            prev_transform: crate::renderer::IDENTITY_MAT4,
             visible: true,
             cast_shadow: true,
             receive_shadow: true,
@@ -302,11 +307,15 @@ impl SceneGraph {
 
     /// Prepare GPU resources for all visible nodes. Must be called before render().
     /// Creates/updates vertex buffers, index buffers, and uniform bind groups.
+    /// `prev_vp_matrix` is the previous frame's view-projection — used together
+    /// with each node's `prev_transform` to compute `prev_mvp` for the velocity
+    /// buffer (motion blur + TAA per-object reprojection).
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         vp_matrix: &[[f32; 4]; 4],
+        prev_vp_matrix: &[[f32; 4]; 4],
         uniform_layout: &wgpu::BindGroupLayout,
     ) {
         for (_handle, node) in self.nodes.iter_mut() {
@@ -332,6 +341,8 @@ impl SceneGraph {
 
             // Compute MVP = VP * Model
             let mvp = mat4_mul(vp_matrix, &node.transform);
+            // Compute prev_mvp = prev_VP * prev_transform for velocity buffer
+            let prev_mvp = mat4_mul(prev_vp_matrix, &node.prev_transform);
             // Guard against NaN/Inf opacity (Perry TS passes NaN
             // when a default-arg alpha isn't provided) — a single
             // NaN in model_tint.w propagates through every shader
@@ -347,7 +358,10 @@ impl SceneGraph {
                 node.material.color[2],
                 opacity,
             ];
-            let uniforms = NodeUniforms { mvp, model: node.transform, model_tint: tint };
+            let uniforms = NodeUniforms { mvp, model: node.transform, prev_mvp, model_tint: tint };
+
+            // Snapshot this frame's transform as prev_transform for next frame.
+            node.prev_transform = node.transform;
 
             // Create or update uniform buffer
             if node.gpu_uniform_buf.is_none() {

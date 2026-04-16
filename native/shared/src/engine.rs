@@ -98,6 +98,7 @@ impl EngineState {
             &self.renderer.device,
             &self.renderer.queue,
             &self.renderer.vp_matrix(),
+            &self.renderer.prev_vp_matrix,
             self.renderer.uniform_3d_layout(),
         );
         self.scene.prepare_materials(&self.renderer);
