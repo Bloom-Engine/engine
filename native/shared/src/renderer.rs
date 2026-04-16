@@ -30,6 +30,7 @@ struct Uniforms2D {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms3D {
     mvp: [[f32; 4]; 4],
+    model: [[f32; 4]; 4],
     model_tint: [f32; 4],
 }
 
@@ -241,6 +242,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 const SHADER_3D: &str = "
 struct Uniforms3D {
     mvp: mat4x4<f32>,
+    model: mat4x4<f32>,
     model_tint: vec4<f32>,
 };
 
@@ -312,8 +314,8 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
         norm = skinned_norm;
     }
     out.clip_position = u.mvp * pos;
-    out.normal = norm.xyz;
-    out.world_pos = pos.xyz;
+    out.normal = normalize((u.model * norm).xyz);
+    out.world_pos = (u.model * pos).xyz;
     out.color = in.color * u.model_tint;
     out.uv = in.uv;
     return out;
@@ -386,6 +388,7 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
 const SCENE_SHADER: &str = "
 struct Uniforms3D {
     mvp: mat4x4<f32>,
+    model: mat4x4<f32>,
     model_tint: vec4<f32>,
 };
 
@@ -485,11 +488,12 @@ fn env_sample(dir: vec3<f32>) -> vec3<f32> {
 fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
     var out: VertexOutputScene;
     out.clip_position = u.mvp * vec4<f32>(in.position, 1.0);
-    out.normal = in.normal;
-    out.world_pos = in.position;
+    let world4 = u.model * vec4<f32>(in.position, 1.0);
+    out.world_pos = world4.xyz;
+    out.normal = normalize((u.model * vec4<f32>(in.normal, 0.0)).xyz);
     out.color = in.color * u.model_tint;
     out.uv = in.uv;
-    out.tangent = in.tangent;
+    out.tangent = vec4<f32>(normalize((u.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz), in.tangent.w);
     return out;
 }
 
@@ -1472,20 +1476,22 @@ fn fs_upsample(in: VsOut) -> @location(0) vec4<f32> {
 }
 ";
 
-/// SSAO fragment shader. Spiral-samples 16 nearby UVs, depth-
-/// compares each against the center, accumulates occlusion with a
-/// smooth range falloff so distant geometry doesn't haloed
-/// silhouettes. Output is single-channel (1 = open, 0 = fully
-/// occluded). Cheaper than view-space hemispheric SSAO since we
-/// skip view-space reconstruction; halo artifacts on geometry
-/// edges are mitigated by the range-falloff term.
+/// GTAO (Ground Truth Ambient Occlusion) shader.
+///
+/// Horizon-based AO: for each pixel, reconstruct view-space position
+/// from depth + inverse projection, then march 8 directions around
+/// the pixel (4 steps each). At each step, compute the horizon angle
+/// (elevation of the sample above the surface tangent plane). The
+/// final AO is the average fraction of the hemisphere that is
+/// unoccluded across all directions.
+///
+/// Uses interleaved gradient noise (IGN) for per-pixel direction
+/// jitter to break banding. Output is single-channel R8Unorm at
+/// half resolution (1 = unoccluded, 0 = fully occluded).
 const SSAO_SHADER_WGSL: &str = "
 struct SsaoParams {
-    /// xy = inv_size of source depth (1/width, 1/height) — used to
-    /// keep sample radius pixel-coherent regardless of resolution.
-    /// z = world-space radius scale (sample distance in UV units),
-    /// w = strength (occlusion multiplier).
-    params: vec4<f32>,
+    inv_proj: mat4x4<f32>,
+    params: vec4<f32>,  // xy = inv_size, z = radius (world units), w = strength
 };
 
 @group(0) @binding(0) var<uniform> u: SsaoParams;
@@ -1507,8 +1513,16 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
-const N_SAMPLES: u32 = 16u;
+const N_DIRS: u32 = 8u;
+const N_STEPS: u32 = 4u;
 const PI: f32 = 3.14159265;
+
+// Reconstruct view-space position from UV + depth via inverse projection.
+fn view_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
+    let vp = u.inv_proj * ndc;
+    return vp.xyz / vp.w;
+}
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -1519,43 +1533,107 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(1.0);
     }
 
-    // Per-pixel rotation jitter via interleaved-gradient noise
-    // (Jorge Jimenez 2014) — breaks up the spiral pattern so the
-    // residual structure looks like noise instead of bands.
+    let P = view_pos(in.uv, center_depth);
+
+    // Reconstruct view-space normal from depth buffer derivatives.
+    // Use offset UVs to get partial derivatives of view position.
+    let inv_sz = u.params.xy;
+    let P_r = view_pos(in.uv + vec2<f32>(inv_sz.x, 0.0),
+                        textureSample(depth_tex, depth_samp, in.uv + vec2<f32>(inv_sz.x, 0.0)));
+    let P_u = view_pos(in.uv + vec2<f32>(0.0, -inv_sz.y),
+                        textureSample(depth_tex, depth_samp, in.uv + vec2<f32>(0.0, -inv_sz.y)));
+    let N = normalize(cross(P_r - P, P_u - P));
+
+    // Per-pixel rotation jitter via interleaved gradient noise
+    // (Jimenez 2014).
     let coord = in.clip_pos.xy;
     let ign = fract(52.9829189 * fract(0.06711056 * coord.x + 0.00583715 * coord.y));
-    let rot_offset = ign * 2.0 * PI;
+    let jitter_angle = ign * PI;  // half-turn jitter (directions are symmetric)
 
-    let radius = u.params.z;
-    var occlusion = 0.0;
-    let depth_bias = 0.0001;
-    let max_delta = 0.01; // beyond this depth gap, sample is too distant to occlude
+    let radius_ws = u.params.z;   // world-space AO radius
+    let strength = u.params.w;
 
-    for (var i = 0u; i < N_SAMPLES; i = i + 1u) {
-        // Spiral with golden-angle rotation.
-        let r_norm = sqrt((f32(i) + 0.5) / f32(N_SAMPLES));
-        let theta = f32(i) * 2.39996323 + rot_offset;
-        let offset = vec2<f32>(cos(theta), sin(theta)) * r_norm * radius;
-        let sample_uv = in.uv + offset;
-        let sample_depth = textureSample(depth_tex, depth_samp, sample_uv);
+    // Convert world-space radius to a UV-space step size.
+    // Approximate: radius in screen UV ~ radius_ws / |P.z| * proj_scale.
+    // We use inv_proj[0][0] ~ 1/(aspect*tan(fov/2)), so proj_x = 1/inv_proj[0][0].
+    let proj_scale_x = 1.0 / u.inv_proj[0][0];
+    let proj_scale_y = 1.0 / abs(u.inv_proj[1][1]);
+    let screen_radius = radius_ws * 0.5 * (proj_scale_x + proj_scale_y) / abs(P.z);
+    // Clamp so we don't oversample nearby surfaces or undersample distant ones.
+    let clamped_radius = clamp(screen_radius, 2.0 * max(inv_sz.x, inv_sz.y), 0.1);
 
-        // delta > 0 means sample is closer (occluder).
-        let delta = center_depth - sample_depth - depth_bias;
-        if (delta > 0.0 && delta < max_delta) {
-            // Smooth falloff so silhouette edges don't get a sharp halo.
-            let weight = smoothstep(max_delta, 0.0, delta);
-            occlusion = occlusion + weight;
+    var ao_sum = 0.0;
+    let step_size = clamped_radius / f32(N_STEPS);
+
+    for (var d = 0u; d < N_DIRS; d = d + 1u) {
+        let angle = (f32(d) / f32(N_DIRS)) * PI + jitter_angle;
+        let dir = vec2<f32>(cos(angle), sin(angle));
+
+        // Track max horizon angle in both positive and negative march directions.
+        // Tangent angle = angle of the surface tangent plane in this slice.
+        // We initialize horizon to the tangent angle (sin of angle between
+        // view vector and the tangent in the slice plane).
+        var max_horizon_pos = -1.0;
+        var max_horizon_neg = -1.0;
+
+        for (var s = 1u; s <= N_STEPS; s = s + 1u) {
+            let offset = dir * step_size * f32(s);
+
+            // Positive direction
+            let uv_pos = in.uv + offset;
+            let d_pos = textureSample(depth_tex, depth_samp, uv_pos);
+            if (d_pos < 0.9999) {
+                let S_pos = view_pos(uv_pos, d_pos);
+                let diff_pos = S_pos - P;
+                let dist_pos = length(diff_pos);
+                // Horizon sine = dot(normalized_diff, N). Positive means above tangent plane.
+                if (dist_pos > 0.001) {
+                    let h_pos = dot(diff_pos, N) / dist_pos;
+                    // Distance-based attenuation: far samples contribute less.
+                    let atten = saturate(1.0 - dist_pos / radius_ws);
+                    let weighted_h = mix(-1.0, h_pos, atten);
+                    max_horizon_pos = max(max_horizon_pos, weighted_h);
+                }
+            }
+
+            // Negative direction
+            let uv_neg = in.uv - offset;
+            let d_neg = textureSample(depth_tex, depth_samp, uv_neg);
+            if (d_neg < 0.9999) {
+                let S_neg = view_pos(uv_neg, d_neg);
+                let diff_neg = S_neg - P;
+                let dist_neg = length(diff_neg);
+                if (dist_neg > 0.001) {
+                    let h_neg = dot(diff_neg, N) / dist_neg;
+                    let atten = saturate(1.0 - dist_neg / radius_ws);
+                    let weighted_h = mix(-1.0, h_neg, atten);
+                    max_horizon_neg = max(max_horizon_neg, weighted_h);
+                }
+            }
         }
+
+        // Each direction contributes an occlusion term.
+        // Horizon angle h in [-1, 1] (sine). Unoccluded when h = -1,
+        // fully occluded when h = 1. Visible fraction = (1 - h) / 2.
+        // Average of positive and negative half-directions:
+        let vis_pos = 1.0 - saturate(max_horizon_pos);
+        let vis_neg = 1.0 - saturate(max_horizon_neg);
+        ao_sum = ao_sum + (vis_pos + vis_neg) * 0.5;
     }
-    let ao = 1.0 - (occlusion / f32(N_SAMPLES)) * u.params.w;
-    return vec4<f32>(clamp(ao, 0.0, 1.0));
+
+    let ao = ao_sum / f32(N_DIRS);
+    // Apply strength: lerp between fully unoccluded (1) and computed AO.
+    let final_ao = mix(1.0, ao, strength);
+    return vec4<f32>(saturate(final_ao));
 }
 ";
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct SsaoParams {
-    /// xy = inv_size, z = radius (UV), w = strength
+    /// Inverse of the projection matrix — depth + UV → view-space position.
+    inv_proj: [[f32; 4]; 4],
+    /// xy = inv_size (1/width, 1/height), z = radius (world units), w = strength
     params: [f32; 4],
 }
 
@@ -2773,7 +2851,7 @@ impl Renderer {
         // --- 3D uniform buffer ---
         let uniform_buffer_3d = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("uniform_3d"),
-            contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model_tint: [1.0, 1.0, 1.0, 1.0] }),
+            contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, model_tint: [1.0, 1.0, 1.0, 1.0] }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let uniform_bind_group_3d = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3250,7 +3328,7 @@ impl Renderer {
         for _ in 0..model_uniform_count {
             let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("model_uniform"),
-                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model_tint: [1.0; 4] }),
+                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, model_tint: [1.0; 4] }),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -5303,6 +5381,17 @@ impl Renderer {
             let shadow_center = self.current_camera_pos;
             self.shadow_map.compute_light_vp(light_dir, shadow_center);
 
+            // Re-upload lighting uniforms with the CURRENT frame's shadow VP.
+            // begin_mode_3d wrote the previous frame's VP; the shadow map is
+            // about to be rendered with the new VP, so the scene shader must
+            // use the same matrix for its shadow lookups.
+            self.lighting_uniforms.shadow_light_vp = self.shadow_map.light_vp;
+            self.queue.write_buffer(
+                &self.lighting_buffer,
+                0,
+                bytemuck::bytes_of(&self.lighting_uniforms),
+            );
+
             {
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("shadow_pass"),
@@ -5492,12 +5581,14 @@ impl Renderer {
         }
 
         // ============================================================
-        // SSAO: half-res spiral-sample of the depth buffer.
+        // SSAO: half-res GTAO (horizon-based) of the depth buffer.
         // ============================================================
         let surf_w = self.surface_config.width;
         let surf_h = self.surface_config.height;
         {
+            let inv_proj = mat4_invert(self.current_proj_matrix);
             let sp = SsaoParams {
+                inv_proj,
                 params: [
                     1.0 / surf_w as f32,
                     1.0 / surf_h as f32,
@@ -6562,7 +6653,7 @@ impl Renderer {
         self.queue.write_buffer(
             &self.uniform_buffer_3d,
             0,
-            bytemuck::bytes_of(&Uniforms3D { mvp: vp, model_tint: [1.0, 1.0, 1.0, 1.0] }),
+            bytemuck::bytes_of(&Uniforms3D { mvp: vp, model: IDENTITY_MAT4, model_tint: [1.0, 1.0, 1.0, 1.0] }),
         );
         self.render_mode = RenderMode::Mode3D;
     }
@@ -6763,7 +6854,7 @@ impl Renderer {
             self.queue.write_buffer(
                 &self.model_uniform_buffers[slot],
                 0,
-                bytemuck::bytes_of(&Uniforms3D { mvp: model_mvp, model_tint: tint }),
+                bytemuck::bytes_of(&Uniforms3D { mvp: model_mvp, model: model_matrix, model_tint: tint }),
             );
 
             self.model_draw_commands.push(CachedModelDraw {
@@ -6778,7 +6869,7 @@ impl Renderer {
         while self.model_uniform_buffers.len() <= slot {
             let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("model_uniform"),
-                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model_tint: [1.0; 4] }),
+                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, model_tint: [1.0; 4] }),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -7213,6 +7304,78 @@ impl Renderer {
         output.present();
 
         Some((width, height, rgba))
+    }
+
+    /// Dump the shadow map depth texture to a grayscale PNG for debugging.
+    /// Depth 0.0 (near) → white, depth 1.0 (far / clear) → black.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn dump_shadow_map(&self, path: &str) {
+        let size = crate::shadows::SHADOW_MAP_SIZE;
+        let bytes_per_pixel = 4u32; // Depth32Float = 4 bytes
+        let unpadded_bpr = size * bytes_per_pixel;
+        let padded_bpr = (unpadded_bpr + 255) & !255;
+        let buf_size = (padded_bpr * size) as u64;
+
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadow_dump_staging"),
+            size: buf_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("shadow_dump_encoder"),
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.shadow_map.depth_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bpr),
+                    rows_per_image: Some(size),
+                },
+            },
+            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        self.device.poll(wgpu::Maintain::Wait);
+
+        if let Ok(Ok(())) = rx.recv() {
+            let data = slice.get_mapped_range();
+            // Convert f32 depth values to grayscale RGB
+            let mut rgb = Vec::with_capacity((size * size * 3) as usize);
+            for row in 0..size {
+                let row_start = (row * padded_bpr) as usize;
+                for col in 0..size {
+                    let offset = row_start + (col * bytes_per_pixel) as usize;
+                    let depth = f32::from_le_bytes([
+                        data[offset], data[offset+1], data[offset+2], data[offset+3],
+                    ]);
+                    // depth 0 = near (white), depth 1 = far/clear (black)
+                    let gray = ((1.0 - depth.clamp(0.0, 1.0)) * 255.0) as u8;
+                    rgb.push(gray);
+                    rgb.push(gray);
+                    rgb.push(gray);
+                }
+            }
+            drop(data);
+            if let Some(png) = encode_png_simple(size, size, &rgb) {
+                let _ = std::fs::write(path, &png);
+            }
+        }
+        staging.unmap();
     }
 
     /// Returns true if vsync is active (Fifo or FifoRelaxed present mode).
