@@ -117,13 +117,11 @@ while (!windowShouldClose()) {
     { r: 255, g: 245, b: 230, a: 255 },
     1.5,
   );
-  // Fill light from below — bounced light that would come from
-  // the lit floor illuminating the vaulted ceilings. Without GI
-  // this is the only way to keep ceilings visible.
-  // Gentle fill — just enough to keep ceilings from going black.
-  // Kept weak so back corridors stay naturally darker than the
-  // sunlit courtyard (matching real light falloff).
-  addDirectionalLight(0.0, -1.0, 0.0, 0.5, 0.55, 0.65, 2.0);
+  // Gentle fill from below — safety net for ceilings that SSGI
+  // bounce light might not fully reach. Kept very low (0.5) since
+  // SSGI now provides natural indirect diffuse bounce from the
+  // sunlit floor.
+  addDirectionalLight(0.0, -1.0, 0.0, 0.5, 0.55, 0.65, 0.5);
 
   beginMode3D({
     position: { x: camX, y: camY, z: camZ },

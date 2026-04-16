@@ -1370,6 +1370,34 @@ fn create_ssgi_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Text
     (texture, view)
 }
 
+/// Create the SSGI temporal history textures (ping-pong pair, same
+/// format/size as ssgi_rt — half-res HDR). Returns two textures and
+/// their views.
+fn create_ssgi_history_textures(
+    device: &wgpu::Device, width: u32, height: u32,
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+    let w = (width / 2).max(1);
+    let h = (height / 2).max(1);
+    let make = || {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ssgi_history"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    };
+    let (t0, v0) = make();
+    let (t1, v1) = make();
+    ([t0, t1], [v0, v1])
+}
+
 /// Create the DoF render target (full-res HDR, same format as TAA output).
 /// DoF reads the TAA output + depth, writes the blurred result here.
 /// Composite then reads this instead of the TAA output.
@@ -2565,6 +2593,84 @@ struct SsgiParams {
     params: [f32; 4],
 }
 
+/// SSGI temporal denoiser shader. Fullscreen pass that blends the
+/// current-frame noisy SSGI with the previous frame's accumulated
+/// result, reprojected via the velocity buffer. Neighborhood
+/// clamping (3x3 min/max) prevents ghosting on disoccluded regions.
+/// Alpha = 0.1 → 10% new, 90% history → ~10-frame convergence.
+const SSGI_TEMPORAL_SHADER_WGSL: &str = "
+struct SsgiTemporalParams {
+    /// x = blend_alpha (0.1), y = depth_reject_threshold, zw unused
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: SsgiTemporalParams;
+@group(0) @binding(1) var current_tex: texture_2d<f32>;
+@group(0) @binding(2) var current_samp: sampler;
+@group(0) @binding(3) var history_tex: texture_2d<f32>;
+@group(0) @binding(4) var history_samp: sampler;
+@group(0) @binding(5) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(6) var velocity_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let current = textureSample(current_tex, current_samp, in.uv);
+
+    // Read velocity at this pixel (velocity_rt is full-res, SSGI is half-res,
+    // but UV mapping handles the difference transparently).
+    let vel = textureSample(velocity_tex, velocity_samp, in.uv).xy;
+    let prev_uv = in.uv - vel;
+
+    // Disocclusion: if prev_uv is off-screen, snap to current frame.
+    let off_screen = prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0;
+
+    if (off_screen) {
+        return current;
+    }
+
+    let history = textureSample(history_tex, history_samp, prev_uv);
+
+    // Neighborhood clamp: prevent ghosting by clamping history to
+    // the min/max of a 3x3 neighborhood of current-frame samples.
+    let texel = vec2<f32>(1.0) / vec2<f32>(textureDimensions(current_tex));
+    var nmin = current;
+    var nmax = current;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let s = textureSample(current_tex, current_samp, in.uv + vec2<f32>(f32(x), f32(y)) * texel);
+            nmin = min(nmin, s);
+            nmax = max(nmax, s);
+        }
+    }
+    let clamped_history = clamp(history, nmin, nmax);
+
+    let alpha = u.params.x;  // 0.1 = 10% new, 90% history
+    return mix(clamped_history, current, alpha);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsgiTemporalParams {
+    /// x = blend_alpha (0.1), y = depth_reject_threshold, zw unused
+    params: [f32; 4],
+}
+
 /// SSR (screen-space reflections) shader. View-space ray march:
 ///
 /// 1. Reconstruct view-space position from the depth buffer.
@@ -3637,8 +3743,17 @@ pub struct Renderer {
     pub ssgi_uniform_buffer: wgpu::Buffer,
     /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
     pub ssgi_intensity: f32,
-    /// SSGI master switch. Default false — no perf cost when off.
+    /// SSGI master switch. Default true (temporal denoiser keeps it clean).
     pub ssgi_enabled: bool,
+
+    /// SSGI temporal denoiser: ping-pong history textures (same format/size
+    /// as ssgi_rt). Each frame blends noisy SSGI with reprojected history.
+    pub ssgi_history_textures: [wgpu::Texture; 2],
+    pub ssgi_history_views: [wgpu::TextureView; 2],
+    pub ssgi_history_idx: usize,
+    pub ssgi_temporal_pipeline: wgpu::RenderPipeline,
+    pub ssgi_temporal_layout: wgpu::BindGroupLayout,
+    pub ssgi_temporal_uniform_buffer: wgpu::Buffer,
 
     /// Depth of field render target (full-res HDR). DoF pass reads
     /// TAA output + depth, writes variable-radius Poisson disc blur
@@ -4235,6 +4350,9 @@ impl Renderer {
             &device, surface_config.width, surface_config.height,
         );
         let (ssgi_rt_texture, ssgi_rt_view) = create_ssgi_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+        let (ssgi_history_textures, ssgi_history_views) = create_ssgi_history_textures(
             &device, surface_config.width, surface_config.height,
         );
         let (dof_rt_texture, dof_rt_view) = create_dof_rt(
@@ -5556,6 +5674,99 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- SSGI temporal denoiser pipeline ---
+        let ssgi_temporal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ssgi_temporal_shader"),
+            source: wgpu::ShaderSource::Wgsl(SSGI_TEMPORAL_SHADER_WGSL.into()),
+        });
+        let ssgi_temporal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ssgi_temporal_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                // binding 1: current SSGI (noisy)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 3: history SSGI (previous frame accumulated)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 5: velocity buffer (motion vectors)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ssgi_temporal_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ssgi_temporal_pl_layout"),
+            bind_group_layouts: &[&ssgi_temporal_layout],
+            push_constant_ranges: &[],
+        });
+        let ssgi_temporal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ssgi_temporal_pipeline"),
+            layout: Some(&ssgi_temporal_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &ssgi_temporal_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ssgi_temporal_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT, blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false, conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+        let ssgi_temporal_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ssgi_temporal_uniform_buffer"),
+            size: std::mem::size_of::<SsgiTemporalParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- DoF (depth of field) pipeline ---
         let dof_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("dof_shader"),
@@ -6045,7 +6256,13 @@ impl Renderer {
             ssgi_layout,
             ssgi_uniform_buffer,
             ssgi_intensity: 0.5,
-            ssgi_enabled: false,  // needs temporal denoiser to look good
+            ssgi_enabled: true,
+            ssgi_history_textures,
+            ssgi_history_views,
+            ssgi_history_idx: 0,
+            ssgi_temporal_pipeline,
+            ssgi_temporal_layout,
+            ssgi_temporal_uniform_buffer,
             dof_rt_texture,
             dof_rt_view,
             dof_pipeline,
@@ -6240,6 +6457,10 @@ impl Renderer {
             let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, width, height);
             self.ssgi_rt_texture = ssgi_t;
             self.ssgi_rt_view = ssgi_v;
+            let (ssgi_ht, ssgi_hv) = create_ssgi_history_textures(&self.device, width, height);
+            self.ssgi_history_textures = ssgi_ht;
+            self.ssgi_history_views = ssgi_hv;
+            self.ssgi_history_idx = 0;
             let (dof_t, dof_v) = create_dof_rt(&self.device, width, height);
             self.dof_rt_texture = dof_t;
             self.dof_rt_view = dof_v;
@@ -7619,6 +7840,64 @@ impl Renderer {
         }
 
         // ============================================================
+        // SSGI temporal denoiser: blend noisy SSGI with reprojected
+        // history. Reads ssgi_rt + ssgi_history[prev] + velocity_rt,
+        // writes ssgi_history[current]. TAA reads the denoised result.
+        // ============================================================
+        if self.ssgi_enabled {
+            let prev_idx = 1 - self.ssgi_history_idx;
+            let cur_idx = self.ssgi_history_idx;
+
+            // First frame (taa_frame_index == 0): use alpha=1.0 to
+            // initialize history from the current noisy frame rather
+            // than blending with uninitialized zeros.
+            let alpha = if self.taa_frame_index == 0 { 1.0_f32 } else { 0.1_f32 };
+            let tp = SsgiTemporalParams {
+                params: [alpha, 0.1, 0.0, 0.0],
+            };
+            self.queue.write_buffer(&self.ssgi_temporal_uniform_buffer, 0, bytemuck::bytes_of(&tp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ssgi_temporal_bg"),
+                layout: &self.ssgi_temporal_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ssgi_temporal_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssgi_rt_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ssgi_history_views[prev_idx]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssgi_temporal_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssgi_history_views[cur_idx],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.ssgi_temporal_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // The TAA pass reads the denoised SSGI from the current
+        // history texture (or raw ssgi_rt if SSGI is off).
+        let ssgi_view_for_taa = if self.ssgi_enabled {
+            &self.ssgi_history_views[self.ssgi_history_idx]
+        } else {
+            &self.ssgi_rt_view
+        };
+
+        // ============================================================
         // Bloom: progressive downsample (Karis-thresholded first tap)
         // followed by additive upsample back up the chain.
         // ============================================================
@@ -7821,7 +8100,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
                     wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
                     wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&self.ssgi_rt_view) },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(ssgi_view_for_taa) },
                     wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
                     wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
@@ -8254,6 +8533,11 @@ impl Renderer {
             self.taa_current_idx = 1 - self.taa_current_idx;
             self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
             self.prev_vp_matrix = self.current_vp_matrix;
+        }
+        // Swap SSGI temporal history ping-pong so next frame reads
+        // what we just wrote and writes to the other buffer.
+        if self.ssgi_enabled {
+            self.ssgi_history_idx = 1 - self.ssgi_history_idx;
         }
         // Swap exposure ping-pong so next frame's exposure pass
         // reads what we just wrote.
