@@ -4378,6 +4378,106 @@ impl Renderer {
             ..Default::default()
         });
 
+        // --- SSAO bilateral blur pipeline ---
+        let ssao_blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ssao_blur_shader"),
+            source: wgpu::ShaderSource::Wgsl(SSAO_BLUR_SHADER_WGSL.into()),
+        });
+        let ssao_blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ssao_blur_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+        let ssao_blur_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ssao_blur_pl_layout"),
+            bind_group_layouts: &[&ssao_blur_layout],
+            push_constant_ranges: &[],
+        });
+        let ssao_blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ssao_blur_pipeline"),
+            layout: Some(&ssao_blur_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &ssao_blur_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ssao_blur_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: SSAO_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let ssao_blur_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ssao_blur_uniform_buffer"),
+            size: std::mem::size_of::<SsaoBlurParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let (ssao_blur_rt_texture, ssao_blur_rt_view) = create_ssao_blur_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+
         // --- TAA pipeline ---
         let taa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("taa_shader"),
@@ -4844,6 +4944,11 @@ impl Renderer {
             ssao_layout,
             ssao_uniform_buffer,
             ssao_depth_sampler,
+            ssao_blur_rt_texture,
+            ssao_blur_rt_view,
+            ssao_blur_pipeline,
+            ssao_blur_layout,
+            ssao_blur_uniform_buffer,
             ssao_strength: 1.0,
             ssao_radius: 0.006,
             taa_textures,
@@ -5032,6 +5137,9 @@ impl Renderer {
             let (st, sv) = create_ssao_rt(&self.device, width, height);
             self.ssao_rt_texture = st;
             self.ssao_rt_view = sv;
+            let (sbt, sbv) = create_ssao_blur_rt(&self.device, width, height);
+            self.ssao_blur_rt_texture = sbt;
+            self.ssao_blur_rt_view = sbv;
             let (taa_t, taa_v) = create_taa_textures(&self.device, width, height);
             self.taa_textures = taa_t;
             self.taa_views = taa_v;
@@ -6140,6 +6248,51 @@ impl Renderer {
         }
 
         // ============================================================
+        // SSAO bilateral blur: smooth the noisy GTAO output while
+        // preserving depth edges (depth-guided bilateral filter).
+        // Reads ssao_rt → writes ssao_blur_rt.
+        // ============================================================
+        {
+            // texel_size is the size of one SSAO RT texel (half-res).
+            let ao_w = (surf_w / 2).max(1) as f32;
+            let ao_h = (surf_h / 2).max(1) as f32;
+            let bp = SsaoBlurParams {
+                params: [1.0 / ao_w, 1.0 / ao_h, 0.05, 0.0],
+            };
+            self.queue.write_buffer(&self.ssao_blur_uniform_buffer, 0, bytemuck::bytes_of(&bp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ssao_blur_bg"),
+                layout: &self.ssao_blur_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ssao_blur_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                ],
+            });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssao_blur_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssao_blur_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.ssao_blur_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ============================================================
         // SSR: view-space ray march of the depth buffer + HDR sample.
         // ============================================================
         if self.ssr_enabled {
@@ -6397,7 +6550,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.ssao_blur_rt_view) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.taa_views[taa_src_idx]) },
                     wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
