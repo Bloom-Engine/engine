@@ -1993,6 +1993,12 @@ pub extern "C" fn bloom_disable_shadows() {
     engine().renderer.shadow_map.disable();
 }
 
+#[no_mangle]
+pub extern "C" fn bloom_dump_shadow_map(path_ptr: *const u8) {
+    let path = str_from_header(path_ptr).to_string();
+    engine().renderer.dump_shadow_map(&path);
+}
+
 // ============================================================
 // Post-processing
 // ============================================================

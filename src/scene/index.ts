@@ -50,6 +50,7 @@ declare function bloom_add_point_light(
 // Shadows
 declare function bloom_enable_shadows(): void;
 declare function bloom_disable_shadows(): void;
+declare function bloom_dump_shadow_map(path: number): void;
 
 // Post-processing
 declare function bloom_enable_postfx(): void;
@@ -290,6 +291,13 @@ export function enableShadows(): void {
  */
 export function disableShadows(): void {
   bloom_disable_shadows();
+}
+
+/**
+ * Dump the shadow map depth texture to a grayscale PNG for debugging.
+ */
+export function dumpShadowMap(path: string): void {
+  bloom_dump_shadow_map(path as any);
 }
 
 // ============================================================

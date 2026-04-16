@@ -53,7 +53,7 @@ import {
   updateSceneNodeGeometry,
   setSceneNodeColor, setSceneNodePbr,
   setSceneNodeCastShadow, setSceneNodeReceiveShadow,
-  enableShadows,
+  enableShadows, dumpShadowMap,
   addDirectionalLight, addPointLight,
   attachModelToNode,
   setSceneNodeWaterMaterial,
@@ -100,6 +100,8 @@ let headlessResH = 0;
 // only appears with surface presentation.
 let interactiveCaptureFrames = 0;
 let interactiveCapturePath = "";
+let headlessShadows = false;
+let shadowMapDumpPath = "";
 
 declare const process: { argv: string[] };
 const argv: string[] = process.argv;
@@ -132,6 +134,10 @@ for (let i = 2; i < argv.length; i = i + 1) {
   } else if (argv[i] === "--interactive-capture" && i + 2 < argv.length) {
     interactiveCaptureFrames = Math.floor(parseFloat(argv[i + 1]));
     interactiveCapturePath = argv[i + 2];
+  } else if (argv[i] === "--shadows") {
+    headlessShadows = true;
+  } else if (argv[i] === "--dump-shadow-map" && i + 1 < argv.length) {
+    shadowMapDumpPath = argv[i + 1];
   }
 }
 
@@ -324,12 +330,31 @@ function setupLightArena(): void {
 // shadow resolution, PCF quality, contact shadows.
 
 function setupShadowTest(): void {
-  // Single pillar at origin on a white floor. Simplest possible
-  // shadow test.
-  const floor = placeCube(0, -0.05, 0, 40, 0.1, 40, 1.0, 1.0, 1.0, 0.8, 0.0);
+  // Ground — bright warm-white floor, receive-only
+  const floor = placeCube(0, -0.05, 0, 50, 0.1, 50, 0.95, 0.93, 0.88, 0.85, 0.0);
   setSceneNodeCastShadow(floor, false);
 
-  placeCube(0, 4, 0, 1.5, 8, 1.5, 0.5, 0.5, 0.5, 0.5, 0.0);
+  // Central pillar — warm stone
+  placeCube(0, 4, 0, 1.5, 8, 1.5, 0.82, 0.78, 0.72, 0.5, 0.0);
+
+  // Surrounding pillars at varying heights
+  placeCube(6, 2.5, 0, 1.0, 5, 1.0, 0.85, 0.8, 0.74, 0.4, 0.0);
+  placeCube(-5, 1.5, 3, 0.8, 3, 0.8, 0.78, 0.75, 0.7, 0.6, 0.0);
+  placeCube(3, 3, -5, 1.2, 6, 1.2, 0.8, 0.76, 0.7, 0.5, 0.0);
+
+  // Spheres
+  placeSphere(-3, 1.2, -2, 1.2, 0.9, 0.82, 0.72, 0.3, 0.0);
+  placeSphere(4, 0.8, 4, 0.8, 0.95, 0.93, 0.88, 0.1, 1.0);
+
+  // Low wall / bench — casts a long thin shadow
+  placeCube(0, 0.5, 7, 8, 1, 0.3, 0.75, 0.72, 0.68, 0.7, 0.0);
+
+  // Fence posts
+  for (let i = -4; i <= 4; i = i + 1) {
+    placeCube(i * 2, 0.75, -8, 0.1, 1.5, 0.1, 0.6, 0.58, 0.55, 0.5, 1.0);
+  }
+  // Fence rail
+  placeCube(0, 1.4, -8, 8.1, 0.08, 0.08, 0.6, 0.58, 0.55, 0.5, 1.0);
 }
 
 // ============================================================
@@ -554,7 +579,10 @@ setEnvClearFromHdr("assets/outdoor.hdr");
 // origin so the view matches what bloom-reference renders from the
 // same spec. Interactive mode builds all seven zones for walking
 // around and eyeballing.
-if (headlessMode) {
+if (headlessMode && headlessShadows) {
+  // Shadow headless: isolated shadow scene for clean validation
+  setupShadowTest();
+} else if (headlessMode) {
   setupGltfModel();
 } else {
   setupGround();
@@ -567,11 +595,20 @@ if (headlessMode) {
   setupGltfModel();
 }
 
-if (!headlessMode) {
+if (!headlessMode || headlessShadows) {
   enableShadows();
 }
 
-if (!headlessMode) {
+if (headlessShadows) {
+  // Shadow showcase: moderate env so shadows have clear contrast
+  setEnvIntensity(0.4);
+  setAutoExposure(true);
+  setFog(0.72, 0.78, 0.85, 0.004, 0.0, 0.06);
+  setVignette(0.15, 0.12);
+  setFilmGrain(0.0);
+  setChromaticAberration(0.0);
+  setSunShafts(0.3, 0.97, 1.0, 0.95, 0.85);
+} else if (!headlessMode) {
   setEnvIntensity(0.3);
   setAutoExposure(true);
   setFog(0.65, 0.72, 0.80, 0.02, 0.0, 0.18);
@@ -671,7 +708,7 @@ while (!windowShouldClose()) {
   // Interactive mode: explicit dark clear color matching the spec
   // scenes. Headless mode uses the HDR env average seeded at init
   // time, so we skip clearBackground to preserve that color.
-  if (!headlessMode) {
+  if (!headlessMode || headlessShadows) {
     clearBackground({ r: 12, g: 14, b: 22, a: 255 });
   }
 
@@ -680,7 +717,15 @@ while (!windowShouldClose()) {
   // bloom-reference path tracer renders env-only. Adding a sun +
   // ambient here would skew the realtime brighter and warmer than
   // the reference for no good reason during validation.
-  if (!headlessMode) {
+  if (headlessShadows) {
+    setAmbientLight({ r: 140, g: 150, b: 170, a: 255 }, 0.3);
+    // ~30° late-afternoon sun — long dramatic shadows
+    setDirectionalLight(
+      { x: -0.65, y: 0.5, z: 0.35 },
+      { r: 255, g: 240, b: 210, a: 255 },
+      2.5,
+    );
+  } else if (!headlessMode) {
     setAmbientLight({ r: 70, g: 80, b: 100, a: 255 }, 0.25);
     // ~45° afternoon sun — shadows roughly pillar-length.
     setDirectionalLight(
@@ -779,6 +824,9 @@ while (!windowShouldClose()) {
     headlessFrame = headlessFrame + 1;
     if (headlessFrame === HEADLESS_WARMUP_FRAMES && headlessOutPath.length > 0) {
       takeScreenshot(headlessOutPath);
+      if (shadowMapDumpPath.length > 0) {
+        dumpShadowMap(shadowMapDumpPath);
+      }
     }
     if (headlessFrame > HEADLESS_WARMUP_FRAMES) {
       endDrawing();

@@ -1204,6 +1204,25 @@ fn create_ssr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Textu
     (texture, view)
 }
 
+/// Create the DoF render target (full-res HDR, same format as TAA output).
+/// DoF reads the TAA output + depth, writes the blurred result here.
+/// Composite then reads this instead of the TAA output.
+fn create_dof_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("dof_rt"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Halton low-discrepancy sequence (base `b`, index `i`, 1-based).
 /// Returns a value in [0, 1). Used to generate sub-pixel jitter
 /// offsets that are well-distributed across the pixel — the TAA
@@ -1679,6 +1698,148 @@ struct SsaoParams {
     params: [f32; 4],
     /// Light direction in view space (xyz, w unused). For contact shadows.
     light_dir_vs: [f32; 4],
+}
+
+// ============================================================
+// Depth of Field (DoF) post-process
+// ============================================================
+
+const DOF_SHADER_WGSL: &str = "
+struct DofParams {
+    params: vec4<f32>,  // x = focus_distance (view-space Z, positive), y = aperture (CoC scale), z = max_blur_radius (UV), w = unused
+    inv_proj: mat4x4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: DofParams;
+@group(0) @binding(1) var color_tex: texture_2d<f32>;
+@group(0) @binding(2) var color_samp: sampler;
+@group(0) @binding(3) var depth_tex: texture_depth_2d;
+@group(0) @binding(4) var depth_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+// Reconstruct view-space Z from depth buffer value via inverse projection.
+fn linearize_depth(depth: f32) -> f32 {
+    let ndc = vec4<f32>(0.0, 0.0, depth, 1.0);
+    let vp = u.inv_proj * ndc;
+    return -vp.z / vp.w; // positive distance from camera
+}
+
+// 16-sample Poisson disc (same offsets used by shadow PCF).
+const POISSON_16: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2<f32>(-0.94201624, -0.39906216),
+    vec2<f32>( 0.94558609, -0.76890725),
+    vec2<f32>(-0.09418410, -0.92938870),
+    vec2<f32>( 0.34495938,  0.29387760),
+    vec2<f32>(-0.91588581,  0.45771432),
+    vec2<f32>(-0.81544232, -0.87912464),
+    vec2<f32>(-0.38277543,  0.27676845),
+    vec2<f32>( 0.97484398,  0.75648379),
+    vec2<f32>( 0.44323325, -0.97511554),
+    vec2<f32>( 0.53742981, -0.47373420),
+    vec2<f32>(-0.26496911, -0.41893023),
+    vec2<f32>( 0.79197514,  0.19090188),
+    vec2<f32>(-0.24188840,  0.99706507),
+    vec2<f32>(-0.81409955,  0.91437590),
+    vec2<f32>( 0.19984126,  0.78641367),
+    vec2<f32>( 0.14383161, -0.14100790),
+);
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let focus_dist = u.params.x;
+    let aperture   = u.params.y;
+    let max_blur   = u.params.z;
+
+    let center_depth_raw = textureSample(depth_tex, depth_samp, in.uv);
+
+    // Sky pixels (depth ~1.0) get maximum blur — they are at infinity.
+    var view_z: f32;
+    if (center_depth_raw >= 0.9999) {
+        view_z = 1000.0; // treat as very far
+    } else {
+        view_z = linearize_depth(center_depth_raw);
+    }
+
+    // Circle of confusion: how far this pixel is from focus plane,
+    // scaled by aperture. Larger CoC = more blur.
+    let coc = clamp(abs(view_z - focus_dist) * aperture, 0.0, max_blur);
+
+    // If CoC is negligibly small, return the source pixel unchanged.
+    let threshold = 0.0005;
+    if (coc < threshold) {
+        return textureSample(color_tex, color_samp, in.uv);
+    }
+
+    // Gather 16 Poisson disc samples scaled by CoC.
+    var color_sum = vec3<f32>(0.0);
+    var weight_sum = 0.0;
+
+    let center_color = textureSample(color_tex, color_samp, in.uv).rgb;
+
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        let offset = POISSON_16[i] * coc;
+        let sample_uv = in.uv + offset;
+
+        let sample_color = textureSample(color_tex, color_samp, sample_uv).rgb;
+
+        // Read the depth at the sample location to compute its own CoC.
+        // This prevents sharp foreground objects from bleeding into
+        // blurred background — only samples that are themselves blurry
+        // (or at least as blurry as this pixel) contribute fully.
+        let sample_depth_raw = textureSample(depth_tex, depth_samp, sample_uv);
+        var sample_z: f32;
+        if (sample_depth_raw >= 0.9999) {
+            sample_z = 1000.0;
+        } else {
+            sample_z = linearize_depth(sample_depth_raw);
+        }
+        let sample_coc = clamp(abs(sample_z - focus_dist) * aperture, 0.0, max_blur);
+
+        // Weight: accept the sample if its CoC is at least as large as
+        // the center pixel's CoC, or if the sample is behind the center
+        // (background blurring into foreground is expected). Otherwise
+        // attenuate by the ratio of sample_coc / coc.
+        var w = 1.0;
+        if (sample_z < view_z) {
+            // Sample is in front of center — only contribute if it is
+            // itself blurry enough.
+            w = saturate(sample_coc / coc);
+        }
+
+        color_sum += sample_color * w;
+        weight_sum += w;
+    }
+
+    // Also blend in the center pixel with weight 1.
+    color_sum += center_color;
+    weight_sum += 1.0;
+
+    let result = color_sum / weight_sum;
+    return vec4<f32>(result, 1.0);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DofParams {
+    /// x = focus_distance, y = aperture, z = max_blur_radius (UV), w = unused
+    params: [f32; 4],
+    /// Inverse projection matrix — used to linearize depth.
+    inv_proj: [[f32; 4]; 4],
 }
 
 /// SSR (screen-space reflections) shader. View-space ray march:
@@ -2680,6 +2841,26 @@ pub struct Renderer {
     pub ssr_strength: f32,
     pub ssr_enabled: bool,
 
+    /// Depth of field render target (full-res HDR). DoF pass reads
+    /// TAA output + depth, writes variable-radius Poisson disc blur
+    /// here. Composite reads this instead of TAA when DoF is on.
+    pub dof_rt_texture: wgpu::Texture,
+    pub dof_rt_view: wgpu::TextureView,
+    pub dof_pipeline: wgpu::RenderPipeline,
+    pub dof_layout: wgpu::BindGroupLayout,
+    pub dof_uniform_buffer: wgpu::Buffer,
+    /// DoF master switch. Default false — no perf cost when off.
+    pub dof_enabled: bool,
+    /// Focus distance in world units from the camera. Objects at
+    /// this distance are perfectly sharp. Default 10.0.
+    pub dof_focus_distance: f32,
+    /// Aperture (CoC scale). 0 = no blur, 0.05 = subtle, 0.2 = heavy.
+    /// Default 0.0 (disabled even when dof_enabled is true).
+    pub dof_aperture: f32,
+    /// Maximum blur disc radius in UV units. Clamps the CoC so the
+    /// blur never exceeds this radius. Default 0.02.
+    pub dof_max_blur: f32,
+
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
     indices_2d: Vec<u32>,
@@ -3184,6 +3365,9 @@ impl Renderer {
             &device, surface_config.width, surface_config.height,
         );
         let (ssr_rt_texture, ssr_rt_view) = create_ssr_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+        let (dof_rt_texture, dof_rt_view) = create_dof_rt(
             &device, surface_config.width, surface_config.height,
         );
         let (exposure_textures, exposure_views) = create_exposure_textures(&device);
@@ -4274,6 +4458,108 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- DoF (depth of field) pipeline ---
+        let dof_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("dof_shader"),
+            source: wgpu::ShaderSource::Wgsl(DOF_SHADER_WGSL.into()),
+        });
+        let dof_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("dof_layout"),
+            entries: &[
+                // binding 0: DofParams uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 1: color input (TAA output or hdr_rt)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 2: color sampler (linear filtering)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 3: depth texture (texture_depth_2d)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 4: depth sampler (non-filtering, non-comparison)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+        let dof_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("dof_pl_layout"),
+            bind_group_layouts: &[&dof_layout],
+            push_constant_ranges: &[],
+        });
+        let dof_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("dof_pipeline"),
+            layout: Some(&dof_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &dof_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &dof_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let dof_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dof_uniform_buffer"),
+            size: std::mem::size_of::<DofParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- Auto-exposure pipeline ---
         let exposure_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("exposure_shader"),
@@ -4446,6 +4732,15 @@ impl Renderer {
             ssr_uniform_buffer,
             ssr_strength: 0.5,
             ssr_enabled: true,
+            dof_rt_texture,
+            dof_rt_view,
+            dof_pipeline,
+            dof_layout,
+            dof_uniform_buffer,
+            dof_enabled: true,  // TEST: enable to verify DoF works
+            dof_focus_distance: 14.0,
+            dof_aperture: 0.08,
+            dof_max_blur: 0.03,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -4607,6 +4902,9 @@ impl Renderer {
             let (sr_t, sr_v) = create_ssr_rt(&self.device, width, height);
             self.ssr_rt_texture = sr_t;
             self.ssr_rt_view = sr_v;
+            let (dof_t, dof_v) = create_dof_rt(&self.device, width, height);
+            self.dof_rt_texture = dof_t;
+            self.dof_rt_view = dof_v;
         }
     }
 
@@ -4665,6 +4963,27 @@ impl Renderer {
     /// adding sharp on-screen reflections where they exist.
     pub fn set_ssr_strength(&mut self, strength: f32) {
         self.ssr_strength = strength.max(0.0);
+    }
+
+    /// Toggle depth of field on/off. Off (default) = no DoF pass,
+    /// zero perf cost. On = variable-radius Poisson disc blur driven
+    /// by circle of confusion from the depth buffer.
+    pub fn set_dof_enabled(&mut self, on: bool) {
+        self.dof_enabled = on;
+    }
+
+    /// Set the DoF focus distance in world units from the camera.
+    /// Objects at this distance are perfectly sharp; objects closer
+    /// or farther blur proportionally to `dof_aperture`.
+    pub fn set_dof_focus_distance(&mut self, dist: f32) {
+        self.dof_focus_distance = dist.max(0.01);
+    }
+
+    /// Set the DoF aperture (CoC scale). 0 = no blur even when DoF
+    /// is enabled. 0.05 = subtle. 0.2 = heavy. Higher values
+    /// produce stronger blur for the same distance from focus.
+    pub fn set_dof_aperture(&mut self, aperture: f32) {
+        self.dof_aperture = aperture.max(0.0);
     }
 
     /// Select the display tonemap curve. 0 = ACES (default, used
@@ -5971,9 +6290,59 @@ impl Renderer {
         }
 
         // ============================================================
+        // DoF pass: variable-radius Poisson disc blur driven by CoC
+        // Reads TAA output (or hdr_rt if TAA off) + depth → dof_rt
+        // ============================================================
+        let pre_dof_view = if self.taa_enabled {
+            &self.taa_views[taa_dst_idx]
+        } else {
+            &self.hdr_rt_view
+        };
+
+        if self.dof_enabled && self.dof_aperture > 0.0 {
+            let inv_proj = mat4_invert(self.current_proj_matrix);
+            let dp = DofParams {
+                params: [self.dof_focus_distance, self.dof_aperture, self.dof_max_blur, 0.0],
+                inv_proj,
+            };
+            self.queue.write_buffer(&self.dof_uniform_buffer, 0, bytemuck::bytes_of(&dp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dof_bg"),
+                layout: &self.dof_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.dof_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(pre_dof_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("dof_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.dof_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.dof_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ============================================================
         // Composite pass: tonemap (ACES + sRGB encode)
         // ============================================================
-        let composite_src_view = if self.taa_enabled {
+        let composite_src_view = if self.dof_enabled && self.dof_aperture > 0.0 {
+            &self.dof_rt_view
+        } else if self.taa_enabled {
             &self.taa_views[taa_dst_idx]
         } else {
             &self.hdr_rt_view

@@ -215,6 +215,7 @@
         { "name": "bloom_scene_subtract_box",         "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],        "returns": "void" },
         { "name": "bloom_enable_shadows",             "params": [],                                                        "returns": "void" },
         { "name": "bloom_disable_shadows",            "params": [],                                                        "returns": "void" },
+        { "name": "bloom_dump_shadow_map",           "params": ["i64"],                                                   "returns": "void" },
         { "name": "bloom_scene_attach_model",         "params": ["f64", "f64", "f64"],                                     "returns": "void" },
         { "name": "bloom_enable_postfx",              "params": [],                                                        "returns": "void" },
         { "name": "bloom_disable_postfx",             "params": [],                                                        "returns": "void" },

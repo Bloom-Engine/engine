@@ -114,7 +114,7 @@ export {
   addDirectionalLight, addPointLight,
   extrudePolygon, subtractBox,
   pickScene,
-  enableShadows, disableShadows,
+  enableShadows, disableShadows, dumpShadowMap,
   attachModelToNode,
   enablePostFx, disablePostFx,
   setPostFxSelected, setPostFxHovered,

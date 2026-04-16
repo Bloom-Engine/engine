@@ -57,6 +57,7 @@ impl Default for PbrMaterial {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct NodeUniforms {
     mvp: [[f32; 4]; 4],
+    model: [[f32; 4]; 4],
     model_tint: [f32; 4],
 }
 
@@ -346,7 +347,7 @@ impl SceneGraph {
                 node.material.color[2],
                 opacity,
             ];
-            let uniforms = NodeUniforms { mvp, model_tint: tint };
+            let uniforms = NodeUniforms { mvp, model: node.transform, model_tint: tint };
 
             // Create or update uniform buffer
             if node.gpu_uniform_buf.is_none() {
