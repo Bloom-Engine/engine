@@ -1389,6 +1389,23 @@ fn create_dof_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Textu
     (texture, view)
 }
 
+/// Create the SSS render target (full-res HDR, same format as DoF/motion-blur).
+fn create_sss_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("sss_rt"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Halton low-discrepancy sequence (base `b`, index `i`, 1-based).
 /// Returns a value in [0, 1). Used to generate sub-pixel jitter
 /// offsets that are well-distributed across the pixel — the TAA
@@ -2218,6 +2235,139 @@ struct MotionBlurParams {
 }
 
 // ============================================================
+// Screen-Space Subsurface Scattering (SSS) post-process
+// ============================================================
+//
+// Single-pass 9-tap disc blur applied after the motion blur pass
+// (pre-composite). Uses a chromatic diffusion profile where red
+// scatters furthest (kernel width 1×), green 0.5×, blue 0.25×,
+// simulating the spectral absorption of skin/wax/leaves.
+// Depth-guided bilateral weighting prevents color bleeding across
+// depth discontinuities (hard edges stay sharp). Default OFF.
+
+const SSS_SHADER_WGSL: &str = "
+struct SssParams {
+    /// x = strength (0 = off, 1 = full blend), y = width (screen-space
+    /// blur radius in UV units, e.g. 0.01), z = falloff (bilateral
+    /// depth edge-stop steepness), w = unused.
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: SssParams;
+@group(0) @binding(1) var color_tex: texture_2d<f32>;
+@group(0) @binding(2) var color_samp: sampler;
+@group(0) @binding(3) var depth_tex: texture_depth_2d;
+@group(0) @binding(4) var depth_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+// 9-tap disc pattern (unit disc, slightly stratified).
+// Kept intentionally modest — SSS scatter radius is small.
+const DISC_9: array<vec2<f32>, 9> = array<vec2<f32>, 9>(
+    vec2<f32>( 0.0,      0.0),
+    vec2<f32>( 1.0,      0.0),
+    vec2<f32>(-1.0,      0.0),
+    vec2<f32>( 0.0,      1.0),
+    vec2<f32>( 0.0,     -1.0),
+    vec2<f32>( 0.7071,  0.7071),
+    vec2<f32>(-0.7071,  0.7071),
+    vec2<f32>( 0.7071, -0.7071),
+    vec2<f32>(-0.7071, -0.7071),
+);
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let strength = u.params.x;
+    let width    = u.params.y;
+    let falloff  = u.params.z;
+
+    let center_color = textureSample(color_tex, color_samp, in.uv);
+
+    // Sky pixels (raw depth ~1.0) skip SSS entirely — they have no
+    // geometry to scatter through. This also avoids depth-edge halos
+    // at the horizon.
+    let center_depth = textureSample(depth_tex, depth_samp, in.uv);
+    if (center_depth >= 0.9999) {
+        return center_color;
+    }
+
+    // Chromatic diffusion profile: red scatters furthest (skin
+    // absorbs blue/green more than red). Width multipliers:
+    //   red   = 1.0 × width
+    //   green = 0.5 × width
+    //   blue  = 0.25 × width
+    var sum_r = 0.0;
+    var sum_g = 0.0;
+    var sum_b = 0.0;
+    var weight_r = 0.0;
+    var weight_g = 0.0;
+    var weight_b = 0.0;
+
+    for (var i = 0u; i < 9u; i = i + 1u) {
+        let tap_r = in.uv + DISC_9[i] * width;
+        let tap_g = in.uv + DISC_9[i] * (width * 0.5);
+        let tap_b = in.uv + DISC_9[i] * (width * 0.25);
+
+        // Bilateral depth weight — each channel uses its own tap UV,
+        // so we sample depth at each channel's location independently.
+        let d_r = textureSample(depth_tex, depth_samp, tap_r);
+        let d_g = textureSample(depth_tex, depth_samp, tap_g);
+        let d_b = textureSample(depth_tex, depth_samp, tap_b);
+
+        let w_r = exp(-abs(d_r - center_depth) * falloff);
+        let w_g = exp(-abs(d_g - center_depth) * falloff);
+        let w_b = exp(-abs(d_b - center_depth) * falloff);
+
+        // Spatial Gaussian (unit disc → standard Gaussian weight from
+        // the squared distance within the disc).
+        let dist2 = dot(DISC_9[i], DISC_9[i]);
+        let gauss = exp(-dist2 * 2.0); // sigma ≈ 0.7 in disc-space
+
+        let c_r = textureSample(color_tex, color_samp, tap_r).r;
+        let c_g = textureSample(color_tex, color_samp, tap_g).g;
+        let c_b = textureSample(color_tex, color_samp, tap_b).b;
+
+        sum_r += c_r * w_r * gauss;
+        sum_g += c_g * w_g * gauss;
+        sum_b += c_b * w_b * gauss;
+        weight_r += w_r * gauss;
+        weight_g += w_g * gauss;
+        weight_b += w_b * gauss;
+    }
+
+    let blurred = vec3<f32>(
+        sum_r / max(weight_r, 1e-5),
+        sum_g / max(weight_g, 1e-5),
+        sum_b / max(weight_b, 1e-5),
+    );
+
+    // Blend blurred result with original by strength.
+    let result = mix(center_color.rgb, blurred, strength);
+    return vec4<f32>(result, center_color.a);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SssParams {
+    /// x = strength, y = width, z = falloff, w = unused.
+    params: [f32; 4],
+}
+
+// ============================================================
 // SSGI (Screen-Space Global Illumination) post-process
 // ============================================================
 
@@ -2653,6 +2803,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // intensity in the SSGI pass, so a flat add here works.
     let current = (hdr + ssr + ssgi) * ssao + bloom * u.params.y;
 
+    // Reconstruct world-space position from depth — needed for both
+    // TAA reprojection fallback and volumetric fog ray marching.
+    let depth = textureSample(depth_tex, depth_samp, in.uv);
+    let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
+    let world_h = u.inv_vp * ndc;
+    let world = world_h.xyz / world_h.w;
+
     // Reproject history using per-pixel velocity when available,
     // falling back to depth-based camera-only reprojection. The
     // velocity buffer encodes (curr_ndc - prev_ndc) * 0.5 in UV
@@ -2667,10 +2824,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
     } else {
         // Fallback: depth + inverse VP reprojection for static geometry.
-        let depth = textureSample(depth_tex, depth_samp, in.uv);
-        let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
-        let world_h = u.inv_vp * ndc;
-        let world = world_h.xyz / world_h.w;
         let prev_clip = u.prev_vp * vec4<f32>(world, 1.0);
         let prev_ndc = prev_clip.xyz / prev_clip.w;
         prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 1.0 - (prev_ndc.y * 0.5 + 0.5));
@@ -2711,12 +2864,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let alpha = u.params.x;
     var blended = mix(clamped_history, current, alpha);
 
-    // Height-based exponential fog. Density > 0 engages fog; 0 is
-    // a no-op. Fog factor = 1 - exp(-density * distance * height_fade)
-    // where height_fade = exp(-falloff * (world.y - height_ref))
-    // so low-altitude fragments get the full density but anything
-    // above `height_ref` fades out exponentially — typical 'ground
-    // haze' look.
+    // Volumetric fog via screen-space ray march. For each pixel we
+    // march 16 steps from the camera toward the world-space surface,
+    // evaluating height-based density at each sample and accumulating
+    // extinction (Beer-Lambert) and in-scattered fog color. This
+    // produces proper depth-varying fog with correct height falloff
+    // along the entire ray — a significant visual upgrade over the
+    // previous single-sample exponential which only evaluated density
+    // at the surface point.
+    //
+    // Density at a point P is: fog_density * exp(-falloff * max(P.y - height_ref, 0))
+    // Extinction per step: exp(-local_density * step_size)
+    // In-scatter per step: fog_color * local_density * step_size * transmittance
     let fog_density = u.fog_color_density.w;
     if (fog_density > 0.0) {
         let height_ref = u.fog_params.x;
@@ -2726,10 +2885,38 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             u.inv_vp[3][1] / u.inv_vp[3][3],
             u.inv_vp[3][2] / u.inv_vp[3][3],
         );
-        let dist = length(world - cam_pos);
-        let height_fade = exp(-height_falloff * max(world.y - height_ref, 0.0));
-        let fog_factor = 1.0 - exp(-fog_density * dist * height_fade);
-        blended = mix(blended, u.fog_color_density.rgb, clamp(fog_factor, 0.0, 1.0));
+        let ray = world - cam_pos;
+        let dist = length(ray);
+        let ray_dir = ray / max(dist, 0.001);
+
+        let n_steps = 16u;
+        let step_size = dist / f32(n_steps);
+        var transmittance = 1.0;
+        var in_scatter = vec3<f32>(0.0);
+
+        for (var i = 0u; i < n_steps; i = i + 1u) {
+            let t = (f32(i) + 0.5) * step_size;
+            let p = cam_pos + ray_dir * t;
+
+            // Height-based density: full density at/below height_ref,
+            // exponential falloff above.
+            let height_fade = exp(-height_falloff * max(p.y - height_ref, 0.0));
+            let local_density = fog_density * height_fade;
+
+            // Beer-Lambert extinction for this step.
+            let step_extinction = exp(-local_density * step_size);
+
+            // Isotropic in-scattering: fog color weighted by density,
+            // step length, and how much light still reaches this point
+            // (transmittance). This naturally darkens distant fog
+            // behind thick foreground fog.
+            in_scatter += u.fog_color_density.rgb * local_density * step_size * transmittance;
+            transmittance *= step_extinction;
+        }
+
+        // Apply: scene color attenuated by total extinction, plus
+        // accumulated in-scattered fog light.
+        blended = blended * transmittance + in_scatter;
     }
 
     // Sun shafts (god rays). March a fixed number of taps from the
@@ -3498,6 +3685,24 @@ pub struct Renderer {
     /// exceeds this radius. Default 0.05.
     pub motion_blur_max_blur: f32,
 
+    /// Screen-space subsurface scattering (SSS) render target — full-res
+    /// HDR. The SSS pass reads the motion-blur (or DoF/TAA/HDR) output and
+    /// writes a chromatically-blurred version here. Composite reads this
+    /// instead of the upstream source when SSS is on.
+    pub sss_rt_texture: wgpu::Texture,
+    pub sss_rt_view: wgpu::TextureView,
+    pub sss_pipeline: wgpu::RenderPipeline,
+    pub sss_layout: wgpu::BindGroupLayout,
+    pub sss_uniform_buffer: wgpu::Buffer,
+    /// SSS master switch. Default false — zero perf cost when off.
+    pub sss_enabled: bool,
+    /// SSS scatter strength: 0 = no blur (even when enabled), 1 = full
+    /// chromatic blur blended over the source. Default 0.5.
+    pub sss_strength: f32,
+    /// SSS blur radius in UV units. Controls how far light scatters
+    /// beneath the surface. Default 0.01 (~1% of viewport width).
+    pub sss_width: f32,
+
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
     indices_2d: Vec<u32>,
@@ -4037,6 +4242,10 @@ impl Renderer {
         );
         // Motion blur RT reuses the same HDR format as DoF.
         let (motion_blur_rt_texture, motion_blur_rt_view) = create_dof_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+        // SSS RT — full-res HDR, same format as DoF/motion-blur.
+        let (sss_rt_texture, sss_rt_view) = create_sss_rt(
             &device, surface_config.width, surface_config.height,
         );
         let (exposure_textures, exposure_views) = create_exposure_textures(&device);
@@ -5548,6 +5757,108 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- SSS (screen-space subsurface scattering) pipeline ---
+        let sss_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sss_shader"),
+            source: wgpu::ShaderSource::Wgsl(SSS_SHADER_WGSL.into()),
+        });
+        let sss_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sss_layout"),
+            entries: &[
+                // binding 0: SssParams uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 1: color input (upstream HDR)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 2: color sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 3: depth texture (texture_depth_2d — for bilateral weighting)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 4: depth sampler (non-filtering)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+        let sss_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sss_pl_layout"),
+            bind_group_layouts: &[&sss_layout],
+            push_constant_ranges: &[],
+        });
+        let sss_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sss_pipeline"),
+            layout: Some(&sss_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &sss_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sss_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let sss_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sss_uniform_buffer"),
+            size: std::mem::size_of::<SssParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- Auto-exposure pipeline ---
         let exposure_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("exposure_shader"),
@@ -5751,6 +6062,14 @@ impl Renderer {
             motion_blur_enabled: false,
             motion_blur_strength: 1.0,
             motion_blur_max_blur: 0.05,
+            sss_rt_texture,
+            sss_rt_view,
+            sss_pipeline,
+            sss_layout,
+            sss_uniform_buffer,
+            sss_enabled: false,
+            sss_strength: 0.5,
+            sss_width: 0.01,
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -5927,6 +6246,9 @@ impl Renderer {
             let (mb_t, mb_v) = create_dof_rt(&self.device, width, height);
             self.motion_blur_rt_texture = mb_t;
             self.motion_blur_rt_view = mb_v;
+            let (sss_t, sss_v) = create_sss_rt(&self.device, width, height);
+            self.sss_rt_texture = sss_t;
+            self.sss_rt_view = sss_v;
         }
     }
 
@@ -6034,6 +6356,30 @@ impl Renderer {
     /// velocity.
     pub fn set_motion_blur_strength(&mut self, strength: f32) {
         self.motion_blur_strength = strength.max(0.0);
+    }
+
+    /// Toggle screen-space subsurface scattering (SSS) on/off.
+    /// Off (default) — zero perf cost. On — single fullscreen pass
+    /// applies a 9-tap chromatic disc blur (red scatters furthest)
+    /// with depth-guided bilateral edge-stop weighting.
+    pub fn set_sss_enabled(&mut self, on: bool) {
+        self.sss_enabled = on;
+    }
+
+    /// SSS scatter strength (0 = transparent / no blur, 1 = full
+    /// chromatic blur). 0.5 (default) blends half blurred with half
+    /// original, giving a subtle translucent-skin look without
+    /// completely losing surface detail.
+    pub fn set_sss_strength(&mut self, strength: f32) {
+        self.sss_strength = strength.clamp(0.0, 1.0);
+    }
+
+    /// SSS blur radius in UV units. Controls how far light scatters
+    /// beneath the surface in screen space. 0.01 (default) ≈ 1% of
+    /// viewport width — a few pixels at 1080p. Larger values look
+    /// more waxy/translucent; smaller values are subtle.
+    pub fn set_sss_width(&mut self, width: f32) {
+        self.sss_width = width.max(0.0);
     }
 
     /// Select the display tonemap curve. 0 = ACES (default, used
@@ -7594,9 +7940,63 @@ impl Renderer {
         }
 
         // ============================================================
+        // SSS pass: chromatic disc blur (skin / wax / leaves)
+        // Reads upstream color + depth → sss_rt.
+        // Runs after motion blur so it applies to the fully composited
+        // motion state, not to individual geometry.
+        // ============================================================
+        let pre_sss_view = if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
+            &self.motion_blur_rt_view
+        } else if self.dof_enabled && self.dof_aperture > 0.0 {
+            &self.dof_rt_view
+        } else if self.taa_enabled {
+            &self.taa_views[taa_dst_idx]
+        } else {
+            &self.hdr_rt_view
+        };
+
+        if self.sss_enabled && self.sss_strength > 0.0 {
+            let sp = SssParams {
+                params: [self.sss_strength, self.sss_width, 500.0, 0.0],
+            };
+            self.queue.write_buffer(&self.sss_uniform_buffer, 0, bytemuck::bytes_of(&sp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sss_bg"),
+                layout: &self.sss_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.sss_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(pre_sss_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sss_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.sss_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.sss_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ============================================================
         // Composite pass: tonemap (ACES + sRGB encode)
         // ============================================================
-        let composite_src_view = if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
+        let composite_src_view = if self.sss_enabled && self.sss_strength > 0.0 {
+            &self.sss_rt_view
+        } else if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
             &self.motion_blur_rt_view
         } else if self.dof_enabled && self.dof_aperture > 0.0 {
             &self.dof_rt_view
