@@ -616,8 +616,9 @@ if (headlessShadows) {
   setFilmGrain(0.025);
   setChromaticAberration(0.0025);
   setSunShafts(0.6, 0.97, 1.0, 0.92, 0.78);
-  // Very subtle DoF — barely perceptible blur on distant/near objects.
-  setDepthOfField(20.0, 0.005);
+  // DoF available but disabled — aperture 0 = off.
+  // Enable with: setDepthOfField(20.0, 0.003);
+  setDepthOfField(0, 0);
 }
 
 // ============================================================
