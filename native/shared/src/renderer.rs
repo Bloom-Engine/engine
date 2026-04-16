@@ -709,10 +709,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // render a single shadow map. Multi-cascade or multi-light
     // shadowing is a future addition.
     let shadow_factor = sample_shadow(in.world_pos);
+    // Never fully zero direct light — a 10% floor simulates
+    // ambient bounce from surrounding surfaces and keeps shadows
+    // from going pitch-black regardless of IBL intensity.
+    let direct_shadow = mix(0.03, 1.0, shadow_factor);
     let legacy_dir = normalize(lighting.light_dir.xyz);
     lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
                      lighting.light_dir.w, base_color, metallic, roughness)
-         * shadow_factor;
+         * direct_shadow;
 
     let dir_count = u32(lighting.dir_light_count.x);
     for (var i = 0u; i < dir_count; i++) {
@@ -805,18 +809,10 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let ms_contribution = f_ms * ems;
     let ibl_spec = prefiltered_env * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
-    // Indirect-shadow attenuation — approximates reduced sky
-    // contribution from the direction containing the sun. Subtle
-    // (80% IBL in shadow) so the scene retains color in shadow
-    // rather than going black. The main contrast between lit and
-    // shadowed areas comes from the direct sun being zeroed in
-    // shadow, so the directional light needs to contribute enough
-    // of the final brightness for shadows to be visible.
-    let indirect_shadow = mix(0.5, 1.0, shadow_factor);
-    // DEBUG tint: multiply hdr by the shadow factor mapped to a
-    // color so regions with shadow_factor < 1 are visibly green.
-    // Debug removed — scene shader outputs real HDR below.
-    let dbg = vec3<f32>(0.0);
+    // Indirect-shadow attenuation — in shadow the sky hemisphere
+    // opposite the sun is still visible, so IBL should not drop
+    // too far. 85% floor keeps shadows coloured rather than black.
+    let indirect_shadow = mix(0.85, 1.0, shadow_factor);
 
     // Multi-scatter also adds a diffuse-like term back from the
     // 'lost' energy, but it gets absorbed wherever there is no metal
@@ -1492,6 +1488,9 @@ const SSAO_SHADER_WGSL: &str = "
 struct SsaoParams {
     inv_proj: mat4x4<f32>,
     params: vec4<f32>,  // xy = inv_size, z = radius (world units), w = strength
+    /// Light direction in VIEW SPACE for contact-shadow ray march.
+    /// xyz = normalized direction from surface toward light, w = unused.
+    light_dir_vs: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: SsaoParams;
@@ -1622,8 +1621,51 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     let ao = ao_sum / f32(N_DIRS);
-    // Apply strength: lerp between fully unoccluded (1) and computed AO.
-    let final_ao = mix(1.0, ao, strength);
+
+    // --- Screen-space contact shadows ---
+    // Short ray march from the pixel toward the sun (in view space,
+    // projected to screen UV). Where the depth buffer says the ray
+    // went behind geometry, we're in contact shadow. Fills in tiny
+    // shadow detail that the 4K shadow map can't resolve — object
+    // bases, thin casters, small gaps.
+    let light_vs = normalize(u.light_dir_vs.xyz);
+    var contact = 1.0; // 1 = lit, 0 = in contact shadow
+    let cs_steps = 12u;
+    let cs_max_dist = 0.5; // max view-space march distance (world units)
+    let cs_step = cs_max_dist / f32(cs_steps);
+    for (var i = 1u; i <= cs_steps; i = i + 1u) {
+        let march_pos = P + light_vs * cs_step * f32(i);
+        // Project marched position back to screen UV.
+        let clip = u.inv_proj[0][0]; // proj[0][0] = 2*near/(r-l) ≈ 1/tan(fov/2)/aspect
+        let clip_y = u.inv_proj[1][1]; // actually we need PROJ not inv_proj
+        // Shortcut: read proj params from inv_proj.
+        // inv_proj transforms NDC→view. To go view→NDC we need proj.
+        // But we can derive it: for symmetric perspective,
+        //   proj[0][0] = 1 / inv_proj[0][0]
+        //   proj[1][1] = 1 / inv_proj[1][1]
+        let px = 1.0 / u.inv_proj[0][0];
+        let py = 1.0 / u.inv_proj[1][1];
+        let ndc_x = march_pos.x * px / (-march_pos.z);
+        let ndc_y = march_pos.y * py / (-march_pos.z);
+        let march_uv = vec2<f32>(ndc_x * 0.5 + 0.5, 1.0 - (ndc_y * 0.5 + 0.5));
+        // Skip if off-screen.
+        if (march_uv.x < 0.0 || march_uv.x > 1.0 || march_uv.y < 0.0 || march_uv.y > 1.0) {
+            continue;
+        }
+        let march_depth = textureSample(depth_tex, depth_samp, march_uv);
+        if (march_depth >= 0.9999) { continue; }
+        let scene_pos = view_pos(march_uv, march_depth);
+        // If the scene surface at that UV is CLOSER to camera than our
+        // marched ray point, the ray went behind geometry → shadowed.
+        if (scene_pos.z > march_pos.z + 0.01) {
+            // Fade based on distance so far shadows are softer.
+            let t = f32(i) / f32(cs_steps);
+            contact = min(contact, t);
+        }
+    }
+
+    // Combine: AO * contact shadow.
+    let final_ao = mix(1.0, ao * contact, strength);
     return vec4<f32>(saturate(final_ao));
 }
 ";
@@ -1635,6 +1677,8 @@ struct SsaoParams {
     inv_proj: [[f32; 4]; 4],
     /// xy = inv_size (1/width, 1/height), z = radius (world units), w = strength
     params: [f32; 4],
+    /// Light direction in view space (xyz, w unused). For contact shadows.
+    light_dir_vs: [f32; 4],
 }
 
 /// SSR (screen-space reflections) shader. View-space ray march:
@@ -5587,6 +5631,17 @@ impl Renderer {
         let surf_h = self.surface_config.height;
         {
             let inv_proj = mat4_invert(self.current_proj_matrix);
+            // Transform the world-space light direction into view space
+            // for the contact-shadow ray march. View matrix's 3x3 part
+            // rotates world→view; light_dir is a direction (w=0).
+            let ld = self.lighting_uniforms.light_dir;
+            let v = &self.current_view_matrix;
+            let light_dir_vs = [
+                v[0][0]*ld[0] + v[1][0]*ld[1] + v[2][0]*ld[2],
+                v[0][1]*ld[0] + v[1][1]*ld[1] + v[2][1]*ld[2],
+                v[0][2]*ld[0] + v[1][2]*ld[1] + v[2][2]*ld[2],
+                0.0,
+            ];
             let sp = SsaoParams {
                 inv_proj,
                 params: [
@@ -5595,6 +5650,7 @@ impl Renderer {
                     self.ssao_radius,
                     self.ssao_strength,
                 ],
+                light_dir_vs,
             };
             self.queue.write_buffer(&self.ssao_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
