@@ -8,7 +8,7 @@
 
 import {
   initWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
-  setEnvClearFromHdr, setTargetFPS, getDeltaTime,
+  setEnvClearFromHdr, setTargetFPS, getDeltaTime, getFPS,
   isKeyDown, isKeyPressed,
   getMouseDeltaX, getMouseDeltaY,
   disableCursor, enableCursor,
@@ -153,6 +153,17 @@ while (!windowShouldClose()) {
 
   // HUD
   drawText("Bloom Sponza", 10, 10, 20, { r: 255, g: 255, b: 255, a: 255 });
+  const fps = getFPS();
+  const ms = fps > 0.0 ? 1000.0 / fps : 0.0;
+  // Color the FPS line based on perf bucket so glances give
+  // instant feedback during stress tests.
+  const fpsColor = fps >= 55.0
+    ? { r: 120, g: 230, b: 120, a: 255 }
+    : fps >= 30.0
+      ? { r: 230, g: 220, b: 120, a: 255 }
+      : { r: 230, g: 120, b: 120, a: 255 };
+  const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
+  drawText(fpsText, 10, 35, 16, fpsColor);
   drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 30, 14, { r: 180, g: 180, b: 180, a: 255 });
 
   // Auto-capture for automated testing
