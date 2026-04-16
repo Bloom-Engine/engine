@@ -139,9 +139,8 @@ while (!windowShouldClose()) {
     projection: "perspective",
   });
 
-  if (sponza.handle !== 0) {
-    drawModel(sponza, { x: 0, y: 0, z: 0 }, 1.0, { r: 255, g: 255, b: 255, a: 255 });
-  }
+  // Scene graph handles all rendering (shadows + PBR). No
+  // drawModel needed — it would double-render without shadows.
 
   endMode3D();
 

@@ -675,7 +675,10 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
         return 1.0;
     }
     let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, 1.0 - (light_ndc.y * 0.5 + 0.5));
-    let bias = 0.003;
+    // Bias is in NDC z space. For a 120m-deep ortho, 0.0002 ≈ 2.4cm
+    // world-space offset — enough to kill acne, small enough to not
+    // swallow shadows from thin columns/arches.
+    let bias = 0.0002;
     let depth_ref = light_ndc.z - bias;
 
     let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);
@@ -692,7 +695,7 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
         split_far = lighting.shadow_cascade_splits.z;
     }
     let blend_zone = (split_far - split_near) * 0.1;
-    let dist_to_edge = split_far - view_z;
+    let dist_to_edge = split_far - dist;
 
     if (dist_to_edge < blend_zone && cascade < 2) {
         // In the blend zone: sample the next cascade too and lerp
@@ -6226,7 +6229,7 @@ impl Renderer {
             ssao_blur_pipeline,
             ssao_blur_layout,
             ssao_blur_uniform_buffer,
-            ssao_strength: 1.0,
+            ssao_strength: 0.0, // TEST: disable GTAO+contact shadows
             ssao_radius: 0.006,
             taa_textures,
             taa_views,
@@ -6235,7 +6238,7 @@ impl Renderer {
             taa_layout,
             taa_uniform_buffer,
             taa_frame_index: 0,
-            taa_enabled: true,
+            taa_enabled: false, // TEST: check if TAA causes rotation brightness lag
             prev_vp_matrix: IDENTITY_MAT4,
             fog_color: [0.7, 0.75, 0.82],
             fog_density: 0.0,
@@ -6257,7 +6260,7 @@ impl Renderer {
             ssgi_layout,
             ssgi_uniform_buffer,
             ssgi_intensity: 0.25,
-            ssgi_enabled: true,
+            ssgi_enabled: false, // TEST: check if SSGI causes rotation-dependent brightness
             ssgi_history_textures,
             ssgi_history_views,
             ssgi_history_idx: 0,
