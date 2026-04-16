@@ -5979,7 +5979,7 @@ impl Renderer {
             // Faster than a camera pan; slow enough to not "hunt" on
             // scene detail as the camera moves between bright sky
             // and dark geometry.
-            auto_exposure_rate: 0.015,
+            auto_exposure_rate: 0.008,  // ~2 second half-life at 60fps
             chromatic_aberration: 0.0,
             vignette_strength: 0.0,
             vignette_softness: 0.25,
@@ -8020,11 +8020,11 @@ impl Renderer {
                     self.auto_exposure_rate,
                     // Min low enough to handle bright outdoor HDRs
                     // (avg luma > 10). Max at 1.5 so dark close-ups
-                    // don't overshoot and blow the scene out.
-                    // Real cameras typically allow ~3-5 EV of auto
-                    // compensation; these clamps give about 7 EV.
-                    0.01,
-                    1.5,
+                    // Tighter range so dark corridors don't go
+                    // pitch black and bright sky doesn't wash out.
+                    // ~3 EV total range (0.1 – 1.2).
+                    0.1,
+                    1.2,
                 ],
             };
             self.queue.write_buffer(&self.exposure_uniform_buffer, 0, bytemuck::bytes_of(&ep));
