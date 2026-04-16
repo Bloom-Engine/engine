@@ -8020,11 +8020,11 @@ impl Renderer {
                     self.auto_exposure_rate,
                     // Min low enough to handle bright outdoor HDRs
                     // (avg luma > 10). Max at 1.5 so dark close-ups
-                    // Tighter range so dark corridors don't go
-                    // pitch black and bright sky doesn't wash out.
-                    // ~3 EV total range (0.1 – 1.2).
-                    0.1,
-                    1.2,
+                    // Wide enough to handle both bright outdoor
+                    // and dark interior. Min 0.5 prevents interiors
+                    // from going pitch-black.
+                    0.5,
+                    2.0,
                 ],
             };
             self.queue.write_buffer(&self.exposure_uniform_buffer, 0, bytemuck::bytes_of(&ep));

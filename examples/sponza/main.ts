@@ -7,14 +7,14 @@
 // auto-exposure in bright courtyard vs shadowed corridors.
 
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing,
+  initWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
   setEnvClearFromHdr, setTargetFPS, getDeltaTime,
   isKeyDown, isKeyPressed,
   getMouseDeltaX, getMouseDeltaY,
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
   setFog, setVignette, setChromaticAberration,
-  setAutoExposure, setEnvIntensity,
+  setAutoExposure, setEnvIntensity, setManualExposure,
 } from "bloom/core";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
@@ -32,16 +32,32 @@ const MOUSE_SENS = 0.003;
 const MOVE_SPEED = 5.0;
 const SPRINT_MULT = 2.5;
 
+// Auto-capture args
+declare const process: { argv: string[] };
+const argv: string[] = process.argv;
+let captureFrames = 0;
+let capturePath = "";
+let frameCount = 0;
+for (let i = 2; i < argv.length; i = i + 1) {
+  if (argv[i] === "--capture" && i + 2 < argv.length) {
+    captureFrames = Math.floor(parseFloat(argv[i + 1]));
+    capturePath = argv[i + 2];
+  }
+}
+
 // ---- Init ----
 initWindow(SCREEN_W, SCREEN_H, "Bloom Sponza", 0);
 setTargetFPS(60);
 setEnvClearFromHdr("assets/outdoor.hdr");
 enableShadows();
 
-// Post-fx
-setEnvIntensity(0.4);
-setAutoExposure(true);
-setFog(0.7, 0.75, 0.82, 0.008, 0.0, 0.1);
+// Sponza ceilings face down = dark IBL. High env_intensity
+// compensates for lack of GI bounce.
+setEnvIntensity(1.5);
+setAutoExposure(false);
+setManualExposure(1.0);
+// Fog disabled — was causing brightness variation in corridors
+// setFog(0.7, 0.75, 0.82, 0.008, 0.0, 0.1);
 setVignette(0.25, 0.25);
 setChromaticAberration(0.001);
 
@@ -93,13 +109,18 @@ while (!windowShouldClose()) {
   // ---- Rendering ----
   beginDrawing();
 
-  // Lighting — warm afternoon sun angled through the columns
-  setAmbientLight({ r: 80, g: 90, b: 110, a: 255 }, 0.2);
+  // Lighting
+  setAmbientLight({ r: 160, g: 165, b: 180, a: 255 }, 0.3);
+  // Primary sun
   setDirectionalLight(
     { x: 0.6, y: 0.8, z: 0.3 },
     { r: 255, g: 245, b: 230, a: 255 },
     1.5,
   );
+  // Fill light from below — bounced light that would come from
+  // the lit floor illuminating the vaulted ceilings. Without GI
+  // this is the only way to keep ceilings visible.
+  addDirectionalLight(0.0, -0.8, 0.0, 0.7, 0.75, 0.85, 5.0);
 
   beginMode3D({
     position: { x: camX, y: camY, z: camZ },
@@ -118,6 +139,13 @@ while (!windowShouldClose()) {
   // HUD
   drawText("Bloom Sponza", 10, 10, 20, { r: 255, g: 255, b: 255, a: 255 });
   drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 30, 14, { r: 180, g: 180, b: 180, a: 255 });
+
+  // Auto-capture for automated testing
+  if (captureFrames > 0) {
+    frameCount = frameCount + 1;
+    if (frameCount === captureFrames) { takeScreenshot(capturePath); }
+    if (frameCount > captureFrames) { endDrawing(); break; }
+  }
 
   endDrawing();
 }
