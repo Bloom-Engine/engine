@@ -1008,16 +1008,15 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let ms_contribution = f_ms * ems;
     let ibl_spec = prefiltered_env * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
-    // Indirect-shadow attenuation — a shadowed surface still sees
-    // part of the sky hemisphere, but nowhere near all of it. A point
-    // on flat ground in shadow of a wall sees ~half the dome; under
-    // an awning, 10-20%. The old 0.85 floor was way too generous —
-    // it lifted every shadow toward the daylight IBL level and left
-    // the scene feeling flat and overlit in a way that read as
-    // 'CGI'. 0.4 gives deep-enough shadows to establish dynamic
-    // range while still picking up sky colour so shadows don't go
-    // pure black in outdoor scenes.
-    let indirect_shadow = mix(0.4, 1.0, shadow_factor);
+    // Indirect-shadow attenuation. A shadowed surface sees only the
+    // portion of the sky hemisphere its normal faces, minus local
+    // occlusion — under an awning 10-20% of full IBL, in a wall
+    // corner maybe 5%. 0.25 floor pushes shadows deeper toward what
+    // Cycles' ground-truth renders show (near-black interior windows,
+    // properly dark under-awning), while keeping a hint of sky colour
+    // so shadows aren't jet-black. Combined with AO-on-indirect this
+    // gives photoreal dynamic range without crushing detail.
+    let indirect_shadow = mix(0.25, 1.0, shadow_factor);
 
     // Multi-scatter also adds a diffuse-like term back from the
     // 'lost' energy, but it gets absorbed wherever there is no metal
@@ -3550,11 +3549,14 @@ fn tonemap_select(hdr: vec3<f32>) -> vec3<f32> {
 fn agx_look_punchy(val: vec3<f32>) -> vec3<f32> {
     let slope = vec3<f32>(1.0);
     let offset = vec3<f32>(0.0);
-    // Gentler than Filament's default 1.35 power + 1.4 saturation —
-    // full Punchy overshoots Cycles-AgX's natural muted look. 1.15 /
-    // 1.2 keeps reds/greens vibrant without going cartoonish.
-    let power = vec3<f32>(1.15);
-    let saturation = 1.2;
+    // A whisker above neutral — Cycles-AgX with its LUT-based DRT
+    // preserves enough chroma on its own that our polynomial fit only
+    // needs a gentle post-boost to catch up. 1.05 power + 1.1 sat is
+    // essentially 'AgX + tiny correction for the polynomial under-
+    // saturation', rather than Filament's Punchy which is a full
+    // stylised look.
+    let power = vec3<f32>(1.05);
+    let saturation = 1.1;
     // ASC-CDL-ish: (val * slope + offset) ^ power
     let toned = pow(max(val * slope + offset, vec3<f32>(0.0)), power);
     let luma = dot(toned, vec3<f32>(0.2126, 0.7152, 0.0722));
