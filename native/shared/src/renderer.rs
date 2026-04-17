@@ -1978,7 +1978,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ao_contrasted = pow(ao, 1.5);
     let ao_floored = max(ao_contrasted, 0.3);
     let final_ao = mix(1.0, ao_floored, strength);
-    return vec4<f32>(saturate(final_ao));
+
+    // Combine contact shadows with AO so the composite's
+    // hdr * ao multiplier darkens both together. The contact
+    // shadow acts as a fine-detail darkener in tight gaps
+    // that GTAO's horizon march can't resolve — crease at
+    // column bases, object-to-object seams, thin casters.
+    // mix(1, contact, cs_strength) keeps contact=1 (no shadow)
+    // a no-op; contact=0 drops brightness to (1 - cs_strength).
+    // Multiplicative combine so contact=0 can fully shadow even
+    // through the AO floor. mix(0.3, 1.0, contact) bounds contact's
+    // darkening so a shadowed fragment drops to 30% rather than 0.
+    let contact_scaled = mix(0.3, 1.0, contact);
+    let combined = final_ao * contact_scaled;
+    return vec4<f32>(saturate(combined));
 }
 ";
 
