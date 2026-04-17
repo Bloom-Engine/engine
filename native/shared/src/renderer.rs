@@ -1751,11 +1751,17 @@ fn downsample_13(uv: vec2<f32>, src_size: vec2<f32>, do_threshold: bool) -> vec3
     if (do_threshold) {
         // First extract HDR brights via soft threshold, then Karis
         // weight to keep fireflies from poking through.
-        // Threshold defaults: bright = luminance > 1.0 (anything
-        // above tonemap's display range), knee = 0.5 for a soft
-        // falloff so emissive accents fade in instead of popping.
-        let thr = 1.0;
-        let knee = 0.5;
+        //
+        // threshold = 1.5, knee = 0.3 (i.e. fade-in band 1.2..1.8).
+        // With auto-exposure normalising mid-gray to ~0.18, a sunlit
+        // white stucco wall ends up around 0.7..1.0 — still below
+        // the lower knee, so it does NOT bloom. Only genuinely
+        // overbright content (sky clipping, sun hotspots, emissive
+        // lights) crosses the threshold. Earlier defaults of 1.0/0.5
+        // caught sunlit diffuse and produced a soft halo around
+        // every bright edge.
+        let thr = 1.5;
+        let knee = 0.3;
         for (var n = 0u; n < 5u; n = n + 1u) {
             let bright = extract_brights(groups[n].rgb, thr, knee);
             let weighted = karis_average(vec4<f32>(bright, 1.0));
