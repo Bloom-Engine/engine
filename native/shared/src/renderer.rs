@@ -3493,8 +3493,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (u.params.x < 0.5) {
         ldr = aces_tone(hdr);
     } else {
+        // AgX returns a *display-encoded* (sRGB-gamma) value — that's
+        // how Troy Sobotka's DRT was originally designed to feed a
+        // non-sRGB framebuffer. But our surface is Bgra8Unorm_sRGB,
+        // so hardware applies linear→sRGB on write. Without undoing
+        // the gamma here we double-encode and the whole image washes
+        // out. Apply the sRGB EOTF (decode) so hardware's encode on
+        // write cancels it back to the display-encoded value AgX
+        // produced.
         let hdr_safe = max(hdr, vec3<f32>(0.0));
-        ldr = clamp(agx_eotf(agx_tone(hdr_safe)), vec3<f32>(0.0), vec3<f32>(1.0));
+        let agx_display = clamp(agx_eotf(agx_tone(hdr_safe)), vec3<f32>(0.0), vec3<f32>(1.0));
+        let cutoff = vec3<f32>(0.04045);
+        let lo = agx_display / 12.92;
+        let hi = pow((agx_display + 0.055) / 1.055, vec3<f32>(2.4));
+        ldr = select(hi, lo, agx_display <= cutoff);
     }
 
     // --- Vignette (post-tonemap) ---
@@ -6548,7 +6560,12 @@ impl Renderer {
             composite_pipeline,
             composite_layout,
             composite_sampler,
-            tonemap_kind: 0,
+            // 1 = AgX (Troy Sobotka 2022). Matches Blender 4.0+ and
+            // UE5 "PBR Neutral" look — softer highlight rolloff and
+            // better hue preservation than the Narkowicz ACES fit,
+            // which tends to read as "digital/plasticky" on saturated
+            // primary-colour materials (red awnings, green storefronts).
+            tonemap_kind: 1,
             auto_exposure: false,
             manual_exposure: 1.0,
             auto_exposure_key: 0.18,
