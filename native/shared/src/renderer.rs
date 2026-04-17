@@ -790,7 +790,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // matches bloom-reference's convention so the PBR lighting math
     // operates in linear space throughout.
     let base_tex = textureSample(base_color_tex, base_color_samp, in.uv);
-    let base_color = srgb_to_linear_v(base_tex.rgb) * srgb_to_linear_v(in.color.rgb);
+    // Vertex color carries the glTF baseColorFactor (linear per spec)
+    // when no per-vertex COLOR_0 stream exists, or the linear color
+    // attribute when it does. Do NOT srgb-decode it — that gave
+    // correct output only in the boundary case where baseColorFactor
+    // was (1,1,1,1), and silently darkened every legitimate tint
+    // (Bistro's spec-gloss diffuse factors land in the 0.5–0.9 range
+    // where the double-conversion is visibly off).
+    let base_color = srgb_to_linear_v(base_tex.rgb) * in.color.rgb;
     let base_alpha = base_tex.a * in.color.a;
 
     // glTF metallicRoughnessTexture: G=roughness, B=metallic (linear).
