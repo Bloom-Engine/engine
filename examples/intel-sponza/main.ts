@@ -27,7 +27,7 @@ import {
 import {
   enableShadows, addDirectionalLight,
   createSceneNode, attachModelToNode, setSceneNodeTransform,
-  setSceneNodeCastShadow,
+  setSceneNodeCastShadow, dumpShadowMap,
 } from "bloom/scene";
 import { clamp, mat4Identity } from "bloom/math";
 
@@ -45,6 +45,8 @@ let capturePath = "";
 let frameCount = 0;
 let initYaw = 0.0;
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
+let dumpShadowFrames = 0;
+let dumpShadowPath = "";
 for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -55,6 +57,10 @@ for (let i = 2; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--dump-shadow" && i + 2 < argv.length) {
+    dumpShadowFrames = Math.floor(parseFloat(argv[i + 1]));
+    dumpShadowPath = argv[i + 2];
   }
 }
 
@@ -177,6 +183,16 @@ while (!windowShouldClose()) {
     frameCount = frameCount + 1;
     if (frameCount === captureFrames) { takeScreenshot(capturePath); }
     if (frameCount > captureFrames) { endDrawing(); break; }
+  }
+
+  // Shadow-map dump for diagnostics — dump cascade 0 after N frames then exit.
+  if (dumpShadowFrames > 0) {
+    frameCount = frameCount + 1;
+    if (frameCount === dumpShadowFrames) {
+      endDrawing();
+      dumpShadowMap(dumpShadowPath);
+      break;
+    }
   }
 
   endDrawing();

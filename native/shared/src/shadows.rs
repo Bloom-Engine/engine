@@ -385,36 +385,33 @@ impl ShadowMap {
                 world_corners[i] = [h[0] / w, h[1] / w, h[2] / w];
             }
 
-            // Static scene-AABB-centered shadow map. Using the union of
-            // world-space AABBs of every cast-shadow node gives us a
-            // stable ortho volume that covers the whole scene — no
-            // camera-following, so shadows can't slide as the player
-            // moves. Falls back to a generous default volume if the
-            // scene is empty (e.g. very first frame before meshes have
-            // been prepared).
-            let (center, radius) = match scene_bounds {
-                Some((bmin, bmax)) => {
-                    let cx = (bmin[0] + bmax[0]) * 0.5;
-                    let cy = (bmin[1] + bmax[1]) * 0.5;
-                    let cz = (bmin[2] + bmax[2]) * 0.5;
-                    let hx = (bmax[0] - bmin[0]) * 0.5;
-                    let hy = (bmax[1] - bmin[1]) * 0.5;
-                    let hz = (bmax[2] - bmin[2]) * 0.5;
-                    // Bounding sphere radius. 5% padding so geometry
-                    // right at the AABB edge still gets shadow samples
-                    // at grazing angles without clipping.
-                    let r = (hx*hx + hy*hy + hz*hz).sqrt() * 1.05;
-                    // Quantize radius so floating-point drift in the
-                    // bounds computation (e.g. a tiny mesh flickering
-                    // visibility) can't shift the shadow texel grid.
-                    let r_q = (r * 16.0).ceil() / 16.0;
-                    ([cx, cy, cz], r_q)
-                }
-                None => ([0.0f32, 0.0, 0.0], 50.0),
-            };
+            // Bounding sphere of this cascade's frustum slice. Sphere
+            // (not AABB) gives rotation-invariant extent so the ortho
+            // volume doesn't resize as the camera rotates.
+            let mut center = [0.0f32; 3];
+            for i in 0..8 {
+                center[0] += world_corners[i][0];
+                center[1] += world_corners[i][1];
+                center[2] += world_corners[i][2];
+            }
+            center[0] /= 8.0;
+            center[1] /= 8.0;
+            center[2] /= 8.0;
+            let mut radius: f32 = 0.0;
+            for i in 0..8 {
+                let dx = world_corners[i][0] - center[0];
+                let dy = world_corners[i][1] - center[1];
+                let dz = world_corners[i][2] - center[2];
+                let r2 = dx*dx + dy*dy + dz*dz;
+                if r2 > radius { radius = r2; }
+            }
+            radius = radius.sqrt();
+            // Quantize radius so subpixel camera movement can't shift
+            // the texel grid.
+            let radius = (radius * 16.0).ceil() / 16.0;
 
-            // Texel snap: quantize the ortho center to texel boundaries in
-            // light space so moving the camera doesn't make shadow edges crawl.
+            // Texel snap: quantize the ortho center to texel boundaries
+            // in light space so camera translation doesn't crawl edges.
             let texel_world = (2.0 * radius) / CASCADE_MAP_SIZE as f32;
             let ls_x = dot3(center, right);
             let ls_y = dot3(center, ortho_up);
@@ -428,18 +425,53 @@ impl ShadowMap {
                 center[2] + dx_snap * right[2] + dy_snap * ortho_up[2],
             ];
 
-            let snapped_light_pos = [
-                snapped_center[0] + d[0] * radius * 2.0,
-                snapped_center[1] + d[1] * radius * 2.0,
-                snapped_center[2] + d[2] * radius * 2.0,
+            // Extend Z-range using the scene AABB so casters behind the
+            // visible slice (from the light's view) still project shadows
+            // into it. This is "pancaking" — cascade XY is tight to the
+            // frustum sphere, but Z reaches back to the full scene.
+            let mut pancake_back: f32 = radius; // +d distance (toward light)
+            let mut pancake_far:  f32 = radius; // -d distance (away from light)
+            if let Some((bmin, bmax)) = scene_bounds {
+                let corners = [
+                    [bmin[0], bmin[1], bmin[2]],
+                    [bmax[0], bmin[1], bmin[2]],
+                    [bmin[0], bmax[1], bmin[2]],
+                    [bmax[0], bmax[1], bmin[2]],
+                    [bmin[0], bmin[1], bmax[2]],
+                    [bmax[0], bmin[1], bmax[2]],
+                    [bmin[0], bmax[1], bmax[2]],
+                    [bmax[0], bmax[1], bmax[2]],
+                ];
+                for p in corners.iter() {
+                    let rel = [
+                        p[0] - snapped_center[0],
+                        p[1] - snapped_center[1],
+                        p[2] - snapped_center[2],
+                    ];
+                    let along_d = dot3(rel, d);
+                    if along_d      > pancake_back { pancake_back = along_d; }
+                    if -along_d     > pancake_far  { pancake_far  = -along_d; }
+                }
+            }
+            // Quantize Z range so tiny scene-bounds drift doesn't shift depths.
+            let pancake_back = (pancake_back * 16.0).ceil() / 16.0;
+            let pancake_far  = (pancake_far  * 16.0).ceil() / 16.0;
+
+            // Place light eye at the far-back edge of the Z range so
+            // ortho near=0 exactly touches the top of the pancake volume.
+            let eye_offset = pancake_back;
+            let light_pos = [
+                snapped_center[0] + d[0] * eye_offset,
+                snapped_center[1] + d[1] * eye_offset,
+                snapped_center[2] + d[2] * eye_offset,
             ];
 
-            let snapped_view = crate::renderer::mat4_look_at(snapped_light_pos, snapped_center, up_hint);
+            let snapped_view = crate::renderer::mat4_look_at(light_pos, snapped_center, up_hint);
             let light_proj = crate::renderer::mat4_ortho(
                 -radius, radius,
                 -radius, radius,
-                0.01,
-                radius * 4.0,
+                0.0,
+                eye_offset + pancake_far,
             );
 
             self.light_vps[c] = crate::renderer::mat4_multiply(light_proj, snapped_view);
