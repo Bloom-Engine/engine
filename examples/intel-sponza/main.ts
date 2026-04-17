@@ -31,8 +31,8 @@ import {
 } from "bloom/scene";
 import { clamp, mat4Identity } from "bloom/math";
 
-const SCREEN_W = 1280;
-const SCREEN_H = 720;
+const SCREEN_W = 800;
+const SCREEN_H = 450;
 const MOUSE_SENS = 0.003;
 const MOVE_SPEED = 5.0;
 const SPRINT_MULT = 2.5;
