@@ -764,7 +764,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     var n = normalize(in.normal);
 
     // --- Normal mapping (tangent-space) ---
-    let nm_sample = textureSample(normal_tex, normal_samp, in.uv).xyz * 2.0 - 1.0;
+    // Raw sample with linear mip + bilinear filtering. In regions with
+    // fine normal-map detail the hardware averaging shortens the vector
+    // — that shortening IS the Toksvig factor used for specular
+    // antialiasing below. Clamped denom so default (0, 0, 1) and any
+    // pathological mipmap still produce a valid unit direction.
+    let nm_raw = textureSample(normal_tex, normal_samp, in.uv).xyz * 2.0 - 1.0;
+    let toksvig_len2 = clamp(dot(nm_raw, nm_raw), 0.01, 1.0);
+    let nm_sample = nm_raw * inverseSqrt(toksvig_len2);
     let tlen2 = dot(in.tangent.xyz, in.tangent.xyz);
     if (tlen2 > 0.0001) {
         let t = normalize(in.tangent.xyz);
@@ -791,25 +798,29 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     var roughness = clamp(mr_tex_sample.g * material.metal_rough.y, 0.045, 1.0);
     let metallic  = clamp(mr_tex_sample.b * material.metal_rough.x, 0.0,   1.0);
 
-    // Geometric specular antialiasing (Kaplanyan/Hofmann/Karis 2016).
-    // High-frequency normal variation within a pixel produces aliasing
-    // shimmer on smooth metals — especially on the helmet's tightly-
-    // tessellated panels. Boost roughness based on the squared
-    // length of dN/dx + dN/dy so under-sampled regions widen their
-    // GGX lobe just enough to integrate over the missing detail.
-    // The 0.25 kernel constant is the value Karis uses in UE4.
+    // Specular antialiasing. Two sources of variance are folded into
+    // GGX α² as additive corrections:
+    //
+    //   1. Toksvig (Kaplanyan 2016) — texture-level normal variance.
+    //      The bilinearly-filtered+mipmapped normal map sample has
+    //      length < 1 wherever adjacent normals disagree. σ² =
+    //      (1 − r²)/r² is the Lambert-averaged normal variance,
+    //      added directly to α² to widen the GGX lobe by exactly
+    //      enough to integrate over the detail we can't resolve.
+    //
+    //   2. Screen-space kernel (Karis 2013) — geometry-level variance
+    //      from per-pixel normal derivatives. Smaller cap than the
+    //      pre-Toksvig version because Toksvig already handles the
+    //      texture case; this term now only covers sharp geometric
+    //      edges and tessellation that Toksvig can't see.
+    let sigma2 = (1.0 - toksvig_len2) / toksvig_len2;
+    var alpha2 = roughness * roughness + sigma2;
     let nm_dx = dpdx(n);
     let nm_dy = dpdy(n);
     let curvature_sq = dot(nm_dx, nm_dx) + dot(nm_dy, nm_dy);
-    // Previously clamped to 0.18 which works for slightly-rough metals
-    // but isn't enough for IBL specular on the *full* mip chain —
-    // dedicated diffuse texture freed the smallest mip for specular,
-    // so reflective materials hit much sharper mips and alias badly
-    // without a wider roughness boost. 0.5 kernel cap tames the
-    // sparkle on polished stone without blurring out legitimate detail.
-    let kernel_alpha = min(0.25 * curvature_sq, 0.5);
-    let alpha_base = roughness * roughness;
-    roughness = sqrt(min(alpha_base + kernel_alpha, 1.0));
+    let kernel_alpha = min(0.25 * curvature_sq, 0.2);
+    alpha2 = min(alpha2 + kernel_alpha, 1.0);
+    roughness = sqrt(alpha2);
 
     let em_tex_sample = textureSample(em_tex, em_samp, in.uv);
     let emissive = srgb_to_linear_v(em_tex_sample.rgb) * material.emissive.rgb;
