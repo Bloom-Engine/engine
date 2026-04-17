@@ -3200,8 +3200,12 @@ struct CompositeParams {
     /// z = vignette softness (0..1, smaller = harder edge)
     /// w = film grain strength (0..~0.1 amplitude added to luma)
     filmic: vec4<f32>,
-    /// x = grain seed (frame index, randomizes the noise per frame),
-    /// yzw padding.
+    /// x = grain seed (frame index, randomizes the noise per frame).
+    /// y = composite mode: 1.0 = TAA-on (post-effects already merged by
+    ///     the TAA pass), 0.0 = TAA-off (composite must fold in SSR +
+    ///     SSGI + bloom itself).
+    /// z = bloom intensity (only read when y = 0).
+    /// w = padding.
     misc: vec4<f32>,
 };
 
@@ -3212,6 +3216,12 @@ struct CompositeParams {
 @group(0) @binding(4) var exposure_samp: sampler;
 @group(0) @binding(5) var ssao_tex: texture_2d<f32>;
 @group(0) @binding(6) var ssao_samp: sampler;
+@group(0) @binding(7) var ssr_tex: texture_2d<f32>;
+@group(0) @binding(8) var ssr_samp: sampler;
+@group(0) @binding(9) var ssgi_tex: texture_2d<f32>;
+@group(0) @binding(10) var ssgi_samp: sampler;
+@group(0) @binding(11) var bloom_tex: texture_2d<f32>;
+@group(0) @binding(12) var bloom_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -3322,6 +3332,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         hdr_raw = vec3<f32>(r, g, b);
     } else {
         hdr_raw = textureSample(hdr_tex, hdr_samp, sample_uv).rgb;
+    }
+
+    // When TAA is off, the HDR source is the raw scene buffer which
+    // does not include post-process passes. Fold SSR + SSGI + bloom
+    // in here so the feature set matches the TAA-on path.
+    if (u.misc.y < 0.5) {
+        let ssr  = textureSample(ssr_tex,  ssr_samp,  sample_uv).rgb;
+        let ssgi = textureSample(ssgi_tex, ssgi_samp, sample_uv).rgb;
+        let bl   = textureSample(bloom_tex, bloom_samp, sample_uv).rgb;
+        hdr_raw = hdr_raw + ssr + ssgi + bl * u.misc.z;
     }
 
     let ao = textureSample(ssao_tex, ssao_samp, sample_uv).r;
@@ -5046,6 +5066,54 @@ impl Renderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -7953,9 +8021,10 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // The TAA pass reads the denoised SSGI from the current
-        // history texture (or raw ssgi_rt if SSGI is off).
-        let ssgi_view_for_taa = if self.ssgi_enabled {
+        // The TAA pass (and composite, on the TAA-off path) reads the
+        // denoised SSGI from the current history texture, or raw
+        // ssgi_rt if SSGI is off.
+        let ssgi_composite_view = if self.ssgi_enabled {
             &self.ssgi_history_views[self.ssgi_history_idx]
         } else {
             &self.ssgi_rt_view
@@ -8161,7 +8230,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
                     wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
                     wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(ssgi_view_for_taa) },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(ssgi_composite_view) },
                     wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
                     wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
@@ -8420,7 +8489,12 @@ impl Renderer {
                 self.vignette_softness,
                 self.grain_strength,
             ],
-            misc: [self.taa_frame_index as f32, 0.0, 0.0, 0.0],
+            misc: [
+                self.taa_frame_index as f32,
+                if self.taa_enabled { 1.0 } else { 0.0 },
+                self.bloom_intensity,
+                0.0,
+            ],
         };
         self.queue.write_buffer(&self.composite_uniform_buffer, 0, bytemuck::bytes_of(&cp));
 
@@ -8435,6 +8509,12 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.ssao_blur_rt_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(ssgi_composite_view) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],
         });
         {
