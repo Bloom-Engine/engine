@@ -12,6 +12,12 @@ pub struct MeshData {
     pub metallic_factor: f32,
     pub roughness_factor: f32,
     pub emissive_factor: [f32; 3],
+    /// glTF alpha cutoff for MASK mode — fragments with base-colour
+    /// alpha below this are discarded. 0.0 means OPAQUE mode (no
+    /// discard); glTF spec default for MASK is 0.5. BLEND mode is
+    /// currently treated as MASK @ 0.5 since we don't have a sorted
+    /// transparent pipeline yet.
+    pub alpha_cutoff: f32,
 }
 
 pub struct ModelData {
@@ -182,7 +188,7 @@ impl ModelManager {
         }
 
         let model = ModelData {
-            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] }],
+            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3], alpha_cutoff: 0.0 }],
             bbox_min: [-hw, -hh, -hd],
             bbox_max: [hw, hh, hd],
         };
@@ -255,7 +261,7 @@ impl ModelManager {
         }
 
         let model = ModelData {
-            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] }],
+            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3], alpha_cutoff: 0.0 }],
             bbox_min: [-size_x * 0.5, 0.0, -size_z * 0.5],
             bbox_max: [size_x * 0.5, size_y, size_z * 0.5],
         };
@@ -293,7 +299,7 @@ impl ModelManager {
 
         let indices = index_data.to_vec();
         let model = ModelData {
-            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] }],
+            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3], alpha_cutoff: 0.0 }],
             bbox_min,
             bbox_max,
         };
@@ -402,7 +408,7 @@ impl ModelManager {
         }
 
         let model = ModelData {
-            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] }],
+            meshes: vec![MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3], alpha_cutoff: 0.0 }],
             bbox_min,
             bbox_max,
         };
@@ -547,6 +553,30 @@ fn walk_scene_for_mesh_transforms(
     }
     for child in node.children() {
         walk_scene_for_mesh_transforms(&child, &world, out);
+    }
+}
+
+/// Walk the scene graph and collect EVERY world-space transform that
+/// references each mesh. Unlike `walk_scene_for_mesh_transforms` which
+/// records only the first occurrence, this version captures every
+/// instance — so glTF scenes with heavy mesh reuse (Bistro: 5910 nodes
+/// referencing 551 unique meshes) render every chair / bollard / chain
+/// / bush instead of collapsing to a single copy each.
+fn walk_scene_collect_instances(
+    node: &gltf::Node,
+    parent: &[[f32; 4]; 4],
+    out: &mut [Vec<[[f32; 4]; 4]>],
+) {
+    let local = node.transform().matrix();
+    let world = mat4_mul(parent, &local);
+    if let Some(mesh) = node.mesh() {
+        let idx = mesh.index();
+        if idx < out.len() {
+            out[idx].push(world);
+        }
+    }
+    for child in node.children() {
+        walk_scene_collect_instances(&child, &world, out);
     }
 }
 
@@ -1178,29 +1208,39 @@ fn load_gltf_with_textures(
     let mut bbox_min = [f32::MAX; 3];
     let mut bbox_max = [f32::MIN; 3];
 
-    // Walk the scene node tree to collect the world-space transform
-    // for each mesh index. glTF meshes live in a "mesh-local" frame
-    // and get re-oriented via their node's transform. Without applying
-    // these during load, a model like DamagedHelmet would render in
-    // the wrong pose compared to any renderer that walks the tree
-    // properly (e.g. the bloom-reference path tracer). We record the
-    // first node that references each mesh; instanced meshes (same
-    // mesh under multiple nodes) fall back to the first-seen pose,
-    // which is good enough for static scenes. Animated / skinned
+    // Walk the scene node tree to collect world-space transforms for
+    // each mesh-referencing node. glTF supports instancing by having
+    // multiple nodes reference the same mesh at different transforms
+    // — Bistro uses this heavily (5910 nodes, 551 meshes: chairs,
+    // bollards, chains, foliage repeated everywhere). We emit one
+    // MeshData PER (mesh, transform) pair so every instance actually
+    // shows up in the scene. Memory cost is linear in node count;
+    // not great for deep instancing but correct. Animated / skinned
     // meshes are unaffected — the armature transforms apply on top.
     let mesh_count = gltf.meshes().count();
-    let mut mesh_world_transform: Vec<Option<[[f32; 4]; 4]>> = vec![None; mesh_count];
+    let mut mesh_instances: Vec<Vec<[[f32; 4]; 4]>> = vec![Vec::new(); mesh_count];
     let identity = [[1.0f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
     for scene in gltf.scenes() {
         for node in scene.nodes() {
-            walk_scene_for_mesh_transforms(&node, &identity, &mut mesh_world_transform);
+            walk_scene_collect_instances(&node, &identity, &mut mesh_instances);
         }
     }
 
     for mesh in gltf.meshes() {
-        let mesh_world = mesh_world_transform[mesh.index()];
-        // Inverse-transpose 3×3 for normals under non-uniform scale.
-        let normal_xform = mesh_world.map(|m| mat4_inverse_transpose_3x3(&m));
+        let instances = mesh_instances[mesh.index()].clone();
+        // Meshes reachable from no scene node would have no instances;
+        // fall back to a single identity transform so orphan meshes
+        // still render (matches prior behaviour for simple models).
+        let instance_transforms: Vec<Option<[[f32; 4]; 4]>> = if instances.is_empty() {
+            vec![None]
+        } else {
+            instances.into_iter().map(Some).collect()
+        };
+
+        for mesh_world in &instance_transforms {
+            let mesh_world = *mesh_world;
+            // Inverse-transpose 3×3 for normals under non-uniform scale.
+            let normal_xform = mesh_world.map(|m| mat4_inverse_transpose_3x3(&m));
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
             let positions: Vec<[f32; 3]> = match reader.read_positions() {
@@ -1374,8 +1414,10 @@ fn load_gltf_with_textures(
                 metallic_factor,
                 roughness_factor,
                 emissive_factor,
+                alpha_cutoff: alpha_cutoff_from_material(&mat),
             });
         }
+        } // end instance loop
     }
 
     if meshes.is_empty() { return None; }
@@ -1619,6 +1661,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                 metallic_factor,
                 roughness_factor,
                 emissive_factor,
+                alpha_cutoff: alpha_cutoff_from_material(&mat),
             });
         }
     }
@@ -1714,7 +1757,7 @@ fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 None => (0..positions.len() as u32).collect(),
             };
 
-            meshes.push(MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3] });
+            meshes.push(MeshData { vertices, indices, texture_idx: None, normal_texture_idx: None, metallic_roughness_texture_idx: None, emissive_texture_idx: None, occlusion_texture_idx: None, metallic_factor: 0.0, roughness_factor: 1.0, emissive_factor: [0.0; 3], alpha_cutoff: 0.0 });
         }
     }
 
@@ -1735,6 +1778,21 @@ fn load_gltf(data: &[u8]) -> Option<ModelData> {
 /// specular color becomes their base_color; dielectrics carry their
 /// diffuse color through at metallic ≈ 0.
 ///
+/// Map glTF alpha mode + cutoff to a single shader cutoff value.
+/// OPAQUE → 0.0 (fragment shader's `< cutoff` discard never fires).
+/// MASK   → material-authored cutoff (default 0.5 per glTF spec).
+/// BLEND  → treated as MASK @ 0.5 since we don't yet have a sorted
+///          transparent pipeline. Better than silently rendering
+///          foliage + fabric as fully opaque — an alpha-cutout leaf
+///          card is at least the right *shape*.
+fn alpha_cutoff_from_material(mat: &gltf::Material) -> f32 {
+    match mat.alpha_mode() {
+        gltf::material::AlphaMode::Opaque => 0.0,
+        gltf::material::AlphaMode::Mask => mat.alpha_cutoff().unwrap_or(0.5),
+        gltf::material::AlphaMode::Blend => 0.5,
+    }
+}
+
 /// Fake KHR_materials_transmission as a near-mirror dielectric.
 ///
 /// We don't implement real refractive transmission (no back-buffer

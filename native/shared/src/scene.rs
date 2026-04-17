@@ -453,6 +453,10 @@ impl SceneGraph {
                     node.material.roughness,
                     node.material.emissive,
                     node.material.metallic_roughness_texture_idx != 0,
+                    // Scene-graph materials don't yet carry an alpha
+                    // mode — user code builds them via setMaterial(),
+                    // not from glTF. Default to OPAQUE.
+                    0.0,
                 );
                 let bg = renderer.create_scene_material_bg(
                     node.material.texture_idx,

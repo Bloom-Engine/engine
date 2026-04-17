@@ -43,23 +43,29 @@ struct Uniforms3D {
 pub struct SceneMaterialUniforms {
     /// x = metallic_factor, y = roughness_factor,
     /// z = has_mr_texture (1.0 = sample mr_tex and multiply, 0.0 = ignore
-    ///     mr_tex and use factors directly), w = padding.
-    ///
-    /// The `has_mr_texture` flag is needed because materials without a
-    /// metallic-roughness texture fall back to texture index 0 in the
-    /// binding, which is an arbitrary scene texture — multiplying our
-    /// factors by its random R/G channels produces garbage metallic and
-    /// roughness for any untextured material. The flag lets the shader
-    /// use material factors verbatim in that case.
+    ///     mr_tex and use factors directly),
+    /// w = alpha_cutoff (0.0 = OPAQUE mode, >0 = MASK/BLEND — fragments
+    ///     whose base-colour alpha is below this are discarded).
     pub metal_rough: [f32; 4],
     /// rgb = emissive_factor, w = padding
     pub emissive: [f32; 4],
 }
 
 impl SceneMaterialUniforms {
-    pub fn new(metallic: f32, roughness: f32, emissive: [f32; 3], has_mr_texture: bool) -> Self {
+    pub fn new(
+        metallic: f32,
+        roughness: f32,
+        emissive: [f32; 3],
+        has_mr_texture: bool,
+        alpha_cutoff: f32,
+    ) -> Self {
         Self {
-            metal_rough: [metallic, roughness, if has_mr_texture { 1.0 } else { 0.0 }, 0.0],
+            metal_rough: [
+                metallic,
+                roughness,
+                if has_mr_texture { 1.0 } else { 0.0 },
+                alpha_cutoff,
+            ],
             emissive: [emissive[0], emissive[1], emissive[2], 0.0],
         }
     }
@@ -814,6 +820,17 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // where the double-conversion is visibly off).
     let base_color = srgb_to_linear_v(base_tex.rgb) * in.color.rgb;
     let base_alpha = base_tex.a * in.color.a;
+
+    // glTF MASK / BLEND alpha mode — discard fragments below the
+    // authored cutoff so alpha-cutout foliage, fences, chains, and
+    // fabric render as their actual shape instead of opaque billboards.
+    // OPAQUE materials carry cutoff = 0 so the branch collapses.
+    // BLEND is treated as MASK @ 0.5 (via the loader) pending a real
+    // sorted transparent pipeline.
+    let alpha_cutoff = material.metal_rough.w;
+    if (alpha_cutoff > 0.0 && base_alpha < alpha_cutoff) {
+        discard;
+    }
 
     // glTF metallicRoughnessTexture: G=roughness, B=metallic (linear).
     // When the material has no MR texture (metal_rough.z == 0), the
@@ -7614,9 +7631,10 @@ impl Renderer {
         roughness: f32,
         emissive: [f32; 3],
         has_mr_texture: bool,
+        alpha_cutoff: f32,
     ) -> wgpu::Buffer {
         use wgpu::util::DeviceExt;
-        let uniforms = SceneMaterialUniforms::new(metallic, roughness, emissive, has_mr_texture);
+        let uniforms = SceneMaterialUniforms::new(metallic, roughness, emissive, has_mr_texture, alpha_cutoff);
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_material_uniform"),
             contents: bytemuck::bytes_of(&uniforms),
@@ -9832,6 +9850,7 @@ impl Renderer {
                 mesh.roughness_factor,
                 mesh.emissive_factor,
                 mesh.metallic_roughness_texture_idx.is_some(),
+                mesh.alpha_cutoff,
             );
             let material_bg = self.create_scene_material_bg(
                 base_color_idx, normal_idx, mr_idx, em_idx, occ_idx, &material_uniform,
