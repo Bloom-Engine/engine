@@ -1259,12 +1259,10 @@ const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// fewer = less coverage. Each mip is half the previous size.
 const BLOOM_MIP_COUNT: u32 = 5;
 
-/// SSAO render target format. R8Unorm gives 256 occlusion levels
-/// (plenty for AO) at 1 byte/pixel — half-res keeps the cost in
-/// the noise on modern GPUs.
-/// SSAO RT layout: R = GTAO occlusion (bilaterally blurred),
-/// G = contact-shadow factor (passed through blur unchanged so the
-/// fine-detail ray-march result survives).
+/// SSAO RT layout: R = GTAO occlusion (bilaterally blurred), G =
+/// contact-shadow factor (passed through blur unchanged so the fine-
+/// detail ray-march result survives). 256 levels per channel — plenty
+/// for an occlusion signal — at 2 bytes/pixel half-res.
 const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
 
 /// Material G-buffer format. Rg8Unorm: R = metallic, G = roughness.
@@ -1813,8 +1811,9 @@ fn fs_upsample(in: VsOut) -> @location(0) vec4<f32> {
 /// unoccluded across all directions.
 ///
 /// Uses interleaved gradient noise (IGN) for per-pixel direction
-/// jitter to break banding. Output is single-channel R8Unorm at
-/// half resolution (1 = unoccluded, 0 = fully occluded).
+/// jitter to break banding. Output is Rg8Unorm at half resolution
+/// — R = GTAO occlusion, G = contact-shadow factor (both 1 =
+/// unoccluded, 0 = fully occluded).
 const SSAO_SHADER_WGSL: &str = "
 struct SsaoParams {
     inv_proj: mat4x4<f32>,
@@ -2052,7 +2051,7 @@ struct SsaoParams {
 ///
 /// Bindings:
 ///   0 – uniform  (SsaoBlurParams)
-///   1 – ssao_rt  (noisy GTAO output, R8Unorm)
+///   1 – ssao_rt  (Rg8Unorm: R = noisy GTAO, G = contact shadow)
 ///   2 – ao sampler (filtering)
 ///   3 – depth_tex (Depth32Float for edge-stopping)
 ///   4 – depth sampler (non-filtering)
