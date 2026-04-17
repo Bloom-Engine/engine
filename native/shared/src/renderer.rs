@@ -3152,32 +3152,60 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-    // 16-tap LOG-average luma. Linear average gets dominated by
-    // a few very bright pixels — in an outdoor HDR scene with
-    // the sun, the mean can land 10x higher than what the eye
-    // perceives as average scene brightness. Log-average matches
-    // human perception and gives far better auto-exposure on
-    // high-dynamic-range content.
-    var log_sum = 0.0;
-    for (var i = 0u; i < 16u; i = i + 1u) {
-        let sx = (f32(i % 4u) + 0.5) * 0.25;
-        let sy = (f32(i / 4u) + 0.5) * 0.25;
-        let s = textureSample(hdr_tex, hdr_samp, vec2<f32>(sx, sy)).rgb;
-        let luma = dot(s, vec3<f32>(0.2126, 0.7152, 0.0722));
-        log_sum = log_sum + log(max(luma, 1e-5));
+    // Histogram-based auto-exposure. 1024-tap (32×32) log-luma
+    // sampling into 64 bins, then target the 50th-percentile
+    // (median) luma. Much more robust than log-average on scenes
+    // with small bright outliers (windows, sun, skylights) — the
+    // median ignores outliers while the average gets dragged
+    // toward them.
+    var bins: array<u32, 64>;
+    for (var i = 0u; i < 64u; i = i + 1u) { bins[i] = 0u; }
+
+    // Histogram log-luma range: 2^-8 (≈0.004) to 2^6 (64). Covers
+    // the common HDR exposure range for natural scenes; values
+    // outside get clamped into the edge bins so they still count.
+    let log_min = -8.0;
+    let log_max =  6.0;
+    let log_range = log_max - log_min;
+
+    var total: u32 = 0u;
+    let n = 32u;
+    for (var y = 0u; y < n; y = y + 1u) {
+        for (var x = 0u; x < n; x = x + 1u) {
+            let sx = (f32(x) + 0.5) / f32(n);
+            let sy = (f32(y) + 0.5) / f32(n);
+            let s = textureSample(hdr_tex, hdr_samp, vec2<f32>(sx, sy)).rgb;
+            let luma = max(dot(s, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-4);
+            let lg = log2(luma);
+            let t = clamp((lg - log_min) / log_range, 0.0, 0.9999);
+            let bin = u32(t * 64.0);
+            bins[bin] = bins[bin] + 1u;
+            total = total + 1u;
+        }
     }
-    let avg_luma = exp(log_sum * (1.0 / 16.0));
+
+    // Find the bin whose cumulative-below-count passes 50% of total.
+    let target_count = total / 2u;
+    var accum: u32 = 0u;
+    var median_bin: u32 = 32u;
+    for (var i = 0u; i < 64u; i = i + 1u) {
+        accum = accum + bins[i];
+        if (accum >= target_count) {
+            median_bin = i;
+            break;
+        }
+    }
+    let median_log = log_min + (f32(median_bin) + 0.5) / 64.0 * log_range;
+    let median_luma = exp2(median_log);
 
     let key = u.params.x;
     let rate = u.params.y;
     let min_e = u.params.z;
     let max_e = u.params.w;
 
-    let target_exp = clamp(key / max(avg_luma, 0.01), min_e, max_e);
+    let target_exp = clamp(key / max(median_luma, 0.01), min_e, max_e);
     let prev = textureSample(prev_exposure_tex, prev_exposure_samp, vec2<f32>(0.5, 0.5)).r;
-    // First frame the prev texture is cleared to 0 — in that case
-    // the mix would converge very slowly from 0. Detect that and
-    // snap to the target instead of blending from 0.
+    // First frame: prev is 0; snap to target instead of crawling up.
     var smoothed = mix(prev, target_exp, rate);
     if (prev < min_e * 0.5) {
         smoothed = target_exp;
