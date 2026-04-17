@@ -6713,7 +6713,14 @@ impl Renderer {
             ssgi_pipeline,
             ssgi_layout,
             ssgi_uniform_buffer,
-            ssgi_intensity: 0.5,
+            // 1.0 — stronger bounce than the earlier 0.5 default so
+            // shadowed regions pick up visible color from nearby lit
+            // surfaces (red awning tinting wall behind it, ground
+            // bounce warming shopfronts, sky fill cooling overhangs).
+            // Under-contribution was one of the reasons scenes read
+            // as 'flat grey shadows' rather than 'shadow lit by
+            // bounce'.
+            ssgi_intensity: 1.0,
             ssgi_radius: 20.0,
             ssgi_enabled: true,
             ssgi_history_textures,
