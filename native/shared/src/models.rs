@@ -1244,7 +1244,7 @@ fn load_gltf_with_textures(
             // authored (Lumberyard Bistro + many FBX exports).
             // Conversion matches the load_gltf_staged path — see
             // specgloss_to_metalrough for the algorithm.
-            let (base_color, metallic_factor, roughness_factor, tex_idx, mr_tex_idx) =
+            let (mut base_color, mut metallic_factor, mut roughness_factor, tex_idx, mr_tex_idx) =
                 if pbr.base_color_texture().is_none() {
                     if let Some(sg) = mat.pbr_specular_glossiness() {
                         let diffuse = sg.diffuse_factor();
@@ -1265,6 +1265,15 @@ fn load_gltf_with_textures(
                         .and_then(|info| tex_idx_of(info.texture().source().index()));
                     (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), tex, mr)
                 };
+
+            if let Some(t) = mat.transmission() {
+                apply_transmission_hack(
+                    t.transmission_factor(),
+                    &mut base_color,
+                    &mut metallic_factor,
+                    &mut roughness_factor,
+                );
+            }
 
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
@@ -1526,7 +1535,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
             // base_color between diffuse and specular weighted by
             // metallic² (metals tint their reflection, dielectrics
             // show their diffuse).
-            let (base_color, metallic_factor, roughness_factor, tex_idx, mr_tex_idx) =
+            let (mut base_color, mut metallic_factor, mut roughness_factor, tex_idx, mr_tex_idx) =
                 if pbr.base_color_texture().is_none() {
                     if let Some(sg) = mat.pbr_specular_glossiness() {
                         let diffuse = sg.diffuse_factor();
@@ -1547,6 +1556,15 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                         .and_then(|info| tex_idx_of(info.texture().source().index()));
                     (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), tex, mr)
                 };
+
+            if let Some(t) = mat.transmission() {
+                apply_transmission_hack(
+                    t.transmission_factor(),
+                    &mut base_color,
+                    &mut metallic_factor,
+                    &mut roughness_factor,
+                );
+            }
 
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
@@ -1717,6 +1735,37 @@ fn load_gltf(data: &[u8]) -> Option<ModelData> {
 /// specular color becomes their base_color; dielectrics carry their
 /// diffuse color through at metallic ≈ 0.
 ///
+/// Fake KHR_materials_transmission as a near-mirror dielectric.
+///
+/// We don't implement real refractive transmission (no back-buffer
+/// refraction pass, no thin-walled/volume distinction), so a
+/// transmission=0.9 glass pane loads as a plain diffuse white surface
+/// that drowns the 4% Fresnel specular in a bright diffuse term — the
+/// classic "painted white window" look.
+///
+/// As a stand-in we force heavy transmission materials to behave like
+/// chrome: metallic=1 so f0=base_color (not 0.04), roughness ≤ 0.05
+/// so reflections stay crisp, and a mild (0.85×) tint on base_color
+/// so pure-white glass doesn't read as perfectly reflective chrome.
+/// Not physically correct for glass — real glass only reflects 4% at
+/// normal incidence — but it matches how windows *read* in photos
+/// (reflecting sky/buildings) far better than a flat diffuse surface.
+fn apply_transmission_hack(
+    transmission: f32,
+    base_color: &mut [f32; 4],
+    metallic: &mut f32,
+    roughness: &mut f32,
+) {
+    if transmission > 0.5 {
+        *metallic = 1.0;
+        *roughness = roughness.min(0.05);
+        base_color[0] *= 0.85;
+        base_color[1] *= 0.85;
+        base_color[2] *= 0.85;
+        base_color[3] = 1.0;
+    }
+}
+
 /// Reference: Khronos glTF sample specGloss→metallicRoughness
 /// converter (https://github.com/KhronosGroup/glTF/pull/1355).
 fn specgloss_to_metalrough(diffuse: [f32; 4], specular: [f32; 3]) -> ([f32; 4], f32) {

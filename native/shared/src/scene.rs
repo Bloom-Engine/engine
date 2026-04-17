@@ -452,6 +452,7 @@ impl SceneGraph {
                     node.material.metalness,
                     node.material.roughness,
                     node.material.emissive,
+                    node.material.metallic_roughness_texture_idx != 0,
                 );
                 let bg = renderer.create_scene_material_bg(
                     node.material.texture_idx,

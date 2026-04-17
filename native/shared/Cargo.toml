@@ -18,7 +18,7 @@ bytemuck = { version = "1", features = ["derive"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga", "hdr"] }
 image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image"] }
-gltf = { version = "1", features = ["KHR_materials_pbrSpecularGlossiness"] }
+gltf = { version = "1", features = ["KHR_materials_pbrSpecularGlossiness", "KHR_materials_transmission"] }
 lewton = "0.10"
 minimp3 = { version = "0.5", optional = true }
 earcutr = "0.4"

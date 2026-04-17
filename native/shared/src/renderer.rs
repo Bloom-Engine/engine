@@ -41,16 +41,25 @@ struct Uniforms3D {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SceneMaterialUniforms {
-    /// x = metallic_factor, y = roughness_factor, z,w = padding
+    /// x = metallic_factor, y = roughness_factor,
+    /// z = has_mr_texture (1.0 = sample mr_tex and multiply, 0.0 = ignore
+    ///     mr_tex and use factors directly), w = padding.
+    ///
+    /// The `has_mr_texture` flag is needed because materials without a
+    /// metallic-roughness texture fall back to texture index 0 in the
+    /// binding, which is an arbitrary scene texture — multiplying our
+    /// factors by its random R/G channels produces garbage metallic and
+    /// roughness for any untextured material. The flag lets the shader
+    /// use material factors verbatim in that case.
     pub metal_rough: [f32; 4],
     /// rgb = emissive_factor, w = padding
     pub emissive: [f32; 4],
 }
 
 impl SceneMaterialUniforms {
-    pub fn new(metallic: f32, roughness: f32, emissive: [f32; 3]) -> Self {
+    pub fn new(metallic: f32, roughness: f32, emissive: [f32; 3], has_mr_texture: bool) -> Self {
         Self {
-            metal_rough: [metallic, roughness, 0.0, 0.0],
+            metal_rough: [metallic, roughness, if has_mr_texture { 1.0 } else { 0.0 }, 0.0],
             emissive: [emissive[0], emissive[1], emissive[2], 0.0],
         }
     }
@@ -801,9 +810,23 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let base_alpha = base_tex.a * in.color.a;
 
     // glTF metallicRoughnessTexture: G=roughness, B=metallic (linear).
+    // When the material has no MR texture (metal_rough.z == 0), the
+    // binding falls back to an arbitrary scene texture (whatever lives
+    // at index 0) — multiplying its random R/G/B into our factors
+    // produces incorrect material values. Use the factors directly in
+    // that case.
     let mr_tex_sample = textureSample(mr_tex, mr_samp, in.uv);
-    var roughness = clamp(mr_tex_sample.g * material.metal_rough.y, 0.045, 1.0);
-    let metallic  = clamp(mr_tex_sample.b * material.metal_rough.x, 0.0,   1.0);
+    let has_mr = material.metal_rough.z > 0.5;
+    var roughness = select(
+        clamp(material.metal_rough.y, 0.045, 1.0),
+        clamp(mr_tex_sample.g * material.metal_rough.y, 0.045, 1.0),
+        has_mr,
+    );
+    let metallic  = select(
+        clamp(material.metal_rough.x, 0.0, 1.0),
+        clamp(mr_tex_sample.b * material.metal_rough.x, 0.0, 1.0),
+        has_mr,
+    );
 
     // Specular antialiasing. Two sources of variance are folded into
     // GGX α² as additive corrections:
@@ -7470,9 +7493,10 @@ impl Renderer {
         metallic: f32,
         roughness: f32,
         emissive: [f32; 3],
+        has_mr_texture: bool,
     ) -> wgpu::Buffer {
         use wgpu::util::DeviceExt;
-        let uniforms = SceneMaterialUniforms::new(metallic, roughness, emissive);
+        let uniforms = SceneMaterialUniforms::new(metallic, roughness, emissive, has_mr_texture);
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_material_uniform"),
             contents: bytemuck::bytes_of(&uniforms),
@@ -9687,6 +9711,7 @@ impl Renderer {
                 mesh.metallic_factor,
                 mesh.roughness_factor,
                 mesh.emissive_factor,
+                mesh.metallic_roughness_texture_idx.is_some(),
             );
             let material_bg = self.create_scene_material_bg(
                 base_color_idx, normal_idx, mr_idx, em_idx, occ_idx, &material_uniform,
