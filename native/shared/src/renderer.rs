@@ -3550,8 +3550,11 @@ fn tonemap_select(hdr: vec3<f32>) -> vec3<f32> {
 fn agx_look_punchy(val: vec3<f32>) -> vec3<f32> {
     let slope = vec3<f32>(1.0);
     let offset = vec3<f32>(0.0);
-    let power = vec3<f32>(1.35);
-    let saturation = 1.4;
+    // Gentler than Filament's default 1.35 power + 1.4 saturation —
+    // full Punchy overshoots Cycles-AgX's natural muted look. 1.15 /
+    // 1.2 keeps reds/greens vibrant without going cartoonish.
+    let power = vec3<f32>(1.15);
+    let saturation = 1.2;
     // ASC-CDL-ish: (val * slope + offset) ^ power
     let toned = pow(max(val * slope + offset, vec3<f32>(0.0)), power);
     let luma = dot(toned, vec3<f32>(0.2126, 0.7152, 0.0722));

@@ -56,11 +56,11 @@ DEFAULT_OUT = "/tmp/bistro_cycles.png"
 DEFAULT_SAMPLES = 128
 DEFAULT_DEVICE = "METAL"   # macOS: METAL; fall back to CPU if unavailable
 RES_X = 3456
-RES_Y = 2168
+RES_Y = 1944   # 16:9, matches Bloom's default Bistro window aspect
 
 # Scene parameters — mirror examples/bistro/main.ts
 CAM_POS_BLOOM = (-26.43, 3.16, 11.17)   # Y-up, Bloom convention
-CAM_YAW       = -1.17                    # radians
+CAM_YAW       = -1.17                    # radians — synced with bistro/main.ts
 CAM_PITCH     = 0.0
 CAM_FOVY_DEG  = 60.0
 
@@ -288,6 +288,10 @@ def setup_camera():
 
     print(f"[cycles_reference] camera pos (Blender)   = {tuple(pos_b)}")
     print(f"[cycles_reference] camera target (Blender)= {tuple(tgt_b)}")
+    print(f"[cycles_reference] requested angle_y (deg)= {CAM_FOVY_DEG}")
+    print(f"[cycles_reference] actual  cam.angle_y (deg)= {math.degrees(cam_data.angle_y)}")
+    print(f"[cycles_reference] actual  cam.angle_x (deg)= {math.degrees(cam_data.angle_x)}")
+    print(f"[cycles_reference] sensor_fit={cam_data.sensor_fit} sensor_w={cam_data.sensor_width} sensor_h={cam_data.sensor_height} lens={cam_data.lens}")
 
 
 def setup_render(out_path, samples, device, view):
