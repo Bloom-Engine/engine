@@ -1020,7 +1020,17 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         vec4<f32>(hdr, base_alpha),
         vec2<f32>(metallic, roughness),
         vel,
-        vec4<f32>(base_color, 1.0),
+        // albedo.rgb: base color (SSGI bounce modulation).
+        // albedo.a:   1 - shadow_factor — how much of this pixel's
+        //             illumination is INDIRECT (IBL + bounce) vs
+        //             DIRECT (sun). The compose pass uses this to
+        //             apply SSAO only to indirect-dominated pixels
+        //             (shadowed corners, overhangs) and leave
+        //             sun-lit surfaces alone, which is the physically
+        //             correct behaviour for AO (occludes indirect
+        //             only). 1.0 where fully shadowed, 0.0 where
+        //             sunlit. Sky shader overrides with 0.0.
+        vec4<f32>(base_color, 1.0 - shadow_factor),
     );
 }
 ";
@@ -3084,7 +3094,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
     let ssr = textureSample(ssr_tex, ssr_samp, in.uv).rgb;
     let ssgi = textureSample(ssgi_tex, ssgi_samp, in.uv).rgb;
-    let albedo = textureSample(albedo_tex, albedo_samp, in.uv).rgb;
+    let albedo_sample = textureSample(albedo_tex, albedo_samp, in.uv);
+    let albedo = albedo_sample.rgb;
+    // albedo.a carries `1 - shadow_factor` from the scene pass — how
+    // much of this pixel's illumination is indirect (IBL + bounce) vs.
+    // direct (sun). Forwarded through the composed RT's alpha channel
+    // so the composite/tonemap pass can apply SSAO only to the
+    // indirect-dominated portion. Sky pixels carry 0 here so fog / AO
+    // don't touch them.
+    let indirect_weight = albedo_sample.a;
     let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
     var color = hdr + ssr + ssgi * albedo + bloom * u.misc.x;
 
@@ -3152,7 +3170,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = color + u.sun_shaft_color.rgb * norm * shaft_strength;
     }
 
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(color, indirect_weight);
 }
 ";
 
@@ -3213,7 +3231,13 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // composed_tex already carries HDR + SSR + SSGI*albedo + bloom +
     // fog + shafts — TAA only needs to reproject history and blend.
-    let current = textureSample(composed_tex, composed_samp, in.uv).rgb;
+    // Alpha carries `indirect_weight` (see scene_compose) which the
+    // composite pass reads to apply AO only to indirect-dominated
+    // pixels; pass it through blended with the colour so history
+    // stays consistent.
+    let current_sample = textureSample(composed_tex, composed_samp, in.uv);
+    let current = current_sample.rgb;
+    let current_w = current_sample.a;
 
     let depth = textureSample(depth_tex, depth_samp, in.uv);
     let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
@@ -3232,8 +3256,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     var history = current;
+    var history_w = current_w;
     if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 && prev_uv.y >= 0.0 && prev_uv.y <= 1.0) {
-        history = textureSample(history_tex, history_samp, prev_uv).rgb;
+        let h_sample = textureSample(history_tex, history_samp, prev_uv);
+        history = h_sample.rgb;
+        history_w = h_sample.a;
     }
 
     // 3×3 neighborhood clamp on the composed input.
@@ -3254,7 +3281,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     let alpha = u.params.x;
     let blended = mix(clamped_history, current, alpha);
-    return vec4<f32>(blended, 1.0);
+    let blended_w = mix(history_w, current_w, alpha);
+    return vec4<f32>(blended, blended_w);
 }
 ";
 
@@ -3513,25 +3541,38 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // is the worst-case UV offset at the corner.
     let ca_strength = u.filmic.x;
     var hdr_raw: vec3<f32>;
+    var indirect_weight: f32;
     if (ca_strength > 0.0) {
         let center = vec2<f32>(0.5, 0.5);
         let dir = sample_uv - center;
         let r = textureSample(hdr_tex, hdr_samp, sample_uv + dir * ca_strength).r;
-        let g = textureSample(hdr_tex, hdr_samp, sample_uv).g;
+        let g_sample = textureSample(hdr_tex, hdr_samp, sample_uv);
         let b = textureSample(hdr_tex, hdr_samp, sample_uv - dir * ca_strength).b;
-        hdr_raw = vec3<f32>(r, g, b);
+        hdr_raw = vec3<f32>(r, g_sample.g, b);
+        indirect_weight = g_sample.a;
     } else {
-        hdr_raw = textureSample(hdr_tex, hdr_samp, sample_uv).rgb;
+        let s = textureSample(hdr_tex, hdr_samp, sample_uv);
+        hdr_raw = s.rgb;
+        indirect_weight = s.a;
     }
 
-    // No per-effect folding needed here — both the TAA path and the
-    // TAA-off path feed a `composed_rt` source which already has
-    // SSR + SSGI*albedo + bloom + fog + shafts merged in.
     // SSAO RT packs AO in R and contact shadow in G — multiplying
     // both gives combined darkening. The AO channel is bilaterally
     // blurred; G is the raw pixel-accurate contact result.
+    //
+    // Apply AO only in proportion to how INDIRECT this pixel's light
+    // is. indirect_weight = 1 means fully shadowed (indirect lighting
+    // only — full AO applies), weight = 0 means fully sunlit (direct
+    // lighting dominates — AO shouldn't darken it). That's physically
+    // correct: AO models the fact that nearby geometry occludes
+    // ambient/bounce light, but it has nothing to say about a direct
+    // ray from the sun, which the shadow map already handles. Sky
+    // pixels get indirect_weight = 0 via the scene_compose pass (sky
+    // albedo = 0) so AO also leaves them alone.
     let ao_pair = textureSample(ssao_tex, ssao_samp, sample_uv).rg;
-    let hdr_ao = hdr_raw * ao_pair.r * ao_pair.g;
+    let ao_combined = ao_pair.r * ao_pair.g;
+    let ao_weighted = mix(1.0, ao_combined, indirect_weight);
+    let hdr_ao = hdr_raw * ao_weighted;
 
     // Exposure. Two modes:
     //   auto off → manual exposure multiplier (u.params.z).
@@ -3565,10 +3606,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let t = vec2<f32>(1.0 / dims.x, 1.0 / dims.y);
         let ox = vec2<f32>(t.x, 0.0);
         let oy = vec2<f32>(0.0, t.y);
-        let h_r = textureSample(hdr_tex, hdr_samp, sample_uv + ox).rgb * ao_pair.r * ao_pair.g * exposure;
-        let h_l = textureSample(hdr_tex, hdr_samp, sample_uv - ox).rgb * ao_pair.r * ao_pair.g * exposure;
-        let h_d = textureSample(hdr_tex, hdr_samp, sample_uv + oy).rgb * ao_pair.r * ao_pair.g * exposure;
-        let h_u = textureSample(hdr_tex, hdr_samp, sample_uv - oy).rgb * ao_pair.r * ao_pair.g * exposure;
+        let h_r = textureSample(hdr_tex, hdr_samp, sample_uv + ox).rgb * ao_weighted * exposure;
+        let h_l = textureSample(hdr_tex, hdr_samp, sample_uv - ox).rgb * ao_weighted * exposure;
+        let h_d = textureSample(hdr_tex, hdr_samp, sample_uv + oy).rgb * ao_weighted * exposure;
+        let h_u = textureSample(hdr_tex, hdr_samp, sample_uv - oy).rgb * ao_weighted * exposure;
         let avg = (tonemap_select(h_r) + tonemap_select(h_l)
                  + tonemap_select(h_d) + tonemap_select(h_u)) * 0.25;
         let detail = ldr - avg;
