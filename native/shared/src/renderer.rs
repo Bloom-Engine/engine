@@ -1008,15 +1008,13 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let ms_contribution = f_ms * ems;
     let ibl_spec = prefiltered_env * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
-    // Indirect-shadow attenuation. A shadowed surface sees only the
-    // portion of the sky hemisphere its normal faces, minus local
-    // occlusion — under an awning 10-20% of full IBL, in a wall
-    // corner maybe 5%. 0.25 floor pushes shadows deeper toward what
-    // Cycles' ground-truth renders show (near-black interior windows,
-    // properly dark under-awning), while keeping a hint of sky colour
-    // so shadows aren't jet-black. Combined with AO-on-indirect this
-    // gives photoreal dynamic range without crushing detail.
-    let indirect_shadow = mix(0.25, 1.0, shadow_factor);
+    // Indirect-shadow attenuation. 0.15 — deep enough that windows
+    // and under-awnings go nearly black (matching Cycles' reference),
+    // but with a 15% floor preserving a hint of sky colour so shadows
+    // don't crush to pure black in outdoor scenes. Shadow brightness
+    // measured against the Cycles reference was ~2.5× too bright at
+    // 0.25; 0.15 closes most of that gap.
+    let indirect_shadow = mix(0.15, 1.0, shadow_factor);
 
     // Multi-scatter also adds a diffuse-like term back from the
     // 'lost' energy, but it gets absorbed wherever there is no metal
@@ -3555,7 +3553,7 @@ fn agx_look_punchy(val: vec3<f32>) -> vec3<f32> {
     // essentially 'AgX + tiny correction for the polynomial under-
     // saturation', rather than Filament's Punchy which is a full
     // stylised look.
-    let power = vec3<f32>(1.05);
+    let power = vec3<f32>(1.1);
     let saturation = 1.1;
     // ASC-CDL-ish: (val * slope + offset) ^ power
     let toned = pow(max(val * slope + offset, vec3<f32>(0.0)), power);
