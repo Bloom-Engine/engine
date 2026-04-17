@@ -977,10 +977,16 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let ms_contribution = f_ms * ems;
     let ibl_spec = prefiltered_env * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
-    // Indirect-shadow attenuation — in shadow the sky hemisphere
-    // opposite the sun is still visible, so IBL should not drop
-    // too far. 85% floor keeps shadows coloured rather than black.
-    let indirect_shadow = mix(0.85, 1.0, shadow_factor);
+    // Indirect-shadow attenuation — a shadowed surface still sees
+    // part of the sky hemisphere, but nowhere near all of it. A point
+    // on flat ground in shadow of a wall sees ~half the dome; under
+    // an awning, 10-20%. The old 0.85 floor was way too generous —
+    // it lifted every shadow toward the daylight IBL level and left
+    // the scene feeling flat and overlit in a way that read as
+    // 'CGI'. 0.4 gives deep-enough shadows to establish dynamic
+    // range while still picking up sky colour so shadows don't go
+    // pure black in outdoor scenes.
+    let indirect_shadow = mix(0.4, 1.0, shadow_factor);
 
     // Multi-scatter also adds a diffuse-like term back from the
     // 'lost' energy, but it gets absorbed wherever there is no metal
