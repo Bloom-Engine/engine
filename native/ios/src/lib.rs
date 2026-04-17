@@ -342,7 +342,7 @@ unsafe extern "C" fn scene_will_connect(
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(device, queue, surface, surface_config);
+    let renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
     let _ = ENGINE.set(EngineState::new(renderer));
 
     // Write debug info to app container tmp
@@ -481,7 +481,7 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(device, queue, surface, surface_config);
+    let renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
     let _ = ENGINE.set(EngineState::new(renderer));
 }
 
@@ -621,7 +621,7 @@ pub extern "C" fn bloom_begin_drawing() {
             if pw > 0 && ph > 0 && (pw != eng.renderer.width() || ph != eng.renderer.height()) {
                 let ds = CGSize { width: pw as f64, height: ph as f64 };
                 let _: () = msg_send![&*layer, setDrawableSize: ds];
-                eng.renderer.resize(pw, ph);
+                eng.renderer.resize(pw, ph, pw, ph);
             } else {
                 eng.begin_frame();
                 return;

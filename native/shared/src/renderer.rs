@@ -3722,6 +3722,13 @@ pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
     pub surface_config: wgpu::SurfaceConfiguration,
 
+    // Logical (points / CSS px) size — what user code addresses via
+    // `screenWidth`/HUD coords. Physical render target size is stored
+    // in `surface_config` and is `logical * scale_factor`. On non-HiDPI
+    // platforms the two are identical.
+    pub logical_width: u32,
+    pub logical_height: u32,
+
     // Pipelines
     pipeline_2d: wgpu::RenderPipeline,
     pipeline_3d: wgpu::RenderPipeline,
@@ -4134,6 +4141,8 @@ impl Renderer {
         queue: wgpu::Queue,
         surface: wgpu::Surface<'static>,
         surface_config: wgpu::SurfaceConfiguration,
+        logical_width: u32,
+        logical_height: u32,
     ) -> Self {
         // --- Shaders ---
         let shader_2d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -4197,8 +4206,11 @@ impl Renderer {
         });
 
         // --- Pre-allocate uniform buffers ---
+        // 2D uses logical (points) dimensions so user HUD coords stay
+        // consistent on HiDPI displays — the rasterizer upsamples to
+        // the physical render target automatically.
         let initial_uniforms = Uniforms2D {
-            screen_size: [surface_config.width as f32, surface_config.height as f32],
+            screen_size: [logical_width as f32, logical_height as f32],
             _pad: [0.0; 2],
             view_proj: IDENTITY_MAT4,
         };
@@ -6493,6 +6505,8 @@ impl Renderer {
             queue,
             surface,
             surface_config,
+            logical_width,
+            logical_height,
             pipeline_2d,
             pipeline_3d,
             uniform_buffers,
@@ -6770,10 +6784,17 @@ impl Renderer {
     // Lifecycle
     // ============================================================
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    /// Resize the swapchain and all post-process render targets.
+    /// `width`/`height` are PHYSICAL pixels (the actual GPU surface).
+    /// `logical_width`/`logical_height` are the points size reported to
+    /// user code via `screenWidth`/HUD — on non-HiDPI platforms they
+    /// match the physical size.
+    pub fn resize(&mut self, width: u32, height: u32, logical_width: u32, logical_height: u32) {
         if width > 0 && height > 0 {
             self.surface_config.width = width;
             self.surface_config.height = height;
+            self.logical_width = logical_width.max(1);
+            self.logical_height = logical_height.max(1);
             self.surface.configure(&self.device, &self.surface_config);
 
             let (dt, dv) = create_depth_texture(&self.device, width, height);
@@ -7511,9 +7532,10 @@ impl Renderer {
         self.uniform_slot_count = 0;
         self.render_mode = RenderMode::ScreenSpace;
 
-        // Write identity uniforms to slot 0
-        let w = self.surface_config.width as f32;
-        let h = self.surface_config.height as f32;
+        // Write identity uniforms to slot 0 (2D uses logical points,
+        // not physical pixels — see Renderer::new).
+        let w = self.logical_width as f32;
+        let h = self.logical_height as f32;
         let uniforms = Uniforms2D {
             screen_size: [w, h],
             _pad: [0.0; 2],
@@ -9387,8 +9409,8 @@ impl Renderer {
              0.0, 1.0],
         ];
 
-        let w = self.surface_config.width as f32;
-        let h = self.surface_config.height as f32;
+        let w = self.logical_width as f32;
+        let h = self.logical_height as f32;
         let uniforms = Uniforms2D { screen_size: [w, h], _pad: [0.0; 2], view_proj };
         self.queue.write_buffer(
             &self.uniform_buffers[self.current_uniform_idx as usize],
@@ -10041,11 +10063,26 @@ impl Renderer {
     // Queries
     // ============================================================
 
+    /// Logical (points / CSS px) width — what user code sees via
+    /// `screenWidth` and what 2D HUD coordinates are expressed in.
+    /// On HiDPI displays the underlying render target is larger (see
+    /// `physical_width`).
     pub fn width(&self) -> u32 {
-        self.surface_config.width
+        self.logical_width
     }
 
     pub fn height(&self) -> u32 {
+        self.logical_height
+    }
+
+    /// Physical pixel dimensions of the swapchain and post-process
+    /// render targets. Always equal to `width`/`height` on non-HiDPI
+    /// platforms; `logical * scale_factor` on Retina/Web.
+    pub fn physical_width(&self) -> u32 {
+        self.surface_config.width
+    }
+
+    pub fn physical_height(&self) -> u32 {
         self.surface_config.height
     }
 

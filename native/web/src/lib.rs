@@ -93,7 +93,7 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = Renderer::new(device, queue, surface, surface_config);
+        let renderer = Renderer::new(device, queue, surface, surface_config, w, h);
         let engine_state = EngineState::new(renderer);
 
         unsafe {

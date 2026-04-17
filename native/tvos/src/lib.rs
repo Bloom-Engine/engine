@@ -754,7 +754,7 @@ unsafe extern "C" fn scene_will_connect(
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(device, queue, surface, surface_config);
+    let renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
     let _ = ENGINE.set(EngineState::new(renderer));
     std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] ENGINE created on main thread\n").ok();
 }
@@ -1026,7 +1026,7 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(device, queue, surface, surface_config);
+    let renderer = Renderer::new(device, queue, surface, surface_config, pixel_width, pixel_height);
     let _ = ENGINE.set(EngineState::new(renderer));
     let _ = std::fs::write("/tmp/bloom_tvos_debug.txt", format!("ENGINE created\nformat={:?}\nsize={}x{}\n", format, pixel_width, pixel_height));
 }

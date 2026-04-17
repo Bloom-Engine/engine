@@ -309,11 +309,24 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         .copied()
         .unwrap_or(surface_caps.formats[0]);
 
+    // Retina/HiDPI: AppKit reports window dimensions in points, but
+    // CAMetalLayer's drawable needs to be sized in physical pixels or
+    // AppKit will bilinearly upscale a low-res image to the display.
+    // `backingScaleFactor` is typically 2.0 on Retina Macs, 1.0
+    // otherwise; on mixed-DPI setups it tracks whichever screen the
+    // window is on.
+    let scale: f64 = unsafe { msg_send![&*window, backingScaleFactor] };
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let logical_w = width as u32;
+    let logical_h = height as u32;
+    let physical_w = ((width * scale) as u32).max(1);
+    let physical_h = ((height * scale) as u32).max(1);
+
     let surface_config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         format,
-        width: width as u32,
-        height: height as u32,
+        width: physical_w,
+        height: physical_h,
         present_mode: wgpu::PresentMode::Fifo,
         alpha_mode: surface_caps.alpha_modes[0],
         view_formats: vec![],
@@ -321,7 +334,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(device, queue, surface, surface_config);
+    let renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
     let engine_state = EngineState::new(renderer);
 
     unsafe {
@@ -438,15 +451,25 @@ pub extern "C" fn bloom_begin_drawing() {
         engine().should_close = true;
     }
 
-    // Handle window resize
+    // Handle window resize — track physical (backing) size for the
+    // swapchain while keeping the logical (points) size for user code.
     if let Some(window) = unsafe { &WINDOW } {
         if let Some(content_view) = window.contentView() {
             let frame = content_view.frame();
-            let new_w = frame.size.width as u32;
-            let new_h = frame.size.height as u32;
+            let logical_w = frame.size.width as u32;
+            let logical_h = frame.size.height as u32;
+            let scale: f64 = unsafe { msg_send![&*window, backingScaleFactor] };
+            let scale = if scale > 0.0 { scale } else { 1.0 };
+            let physical_w = ((frame.size.width * scale) as u32).max(1);
+            let physical_h = ((frame.size.height * scale) as u32).max(1);
             let eng = engine();
-            if new_w > 0 && new_h > 0 && (new_w != eng.renderer.width() || new_h != eng.renderer.height()) {
-                eng.renderer.resize(new_w, new_h);
+            if logical_w > 0 && logical_h > 0
+                && (physical_w != eng.renderer.physical_width()
+                    || physical_h != eng.renderer.physical_height()
+                    || logical_w != eng.renderer.width()
+                    || logical_h != eng.renderer.height())
+            {
+                eng.renderer.resize(physical_w, physical_h, logical_w, logical_h);
             }
         }
     }

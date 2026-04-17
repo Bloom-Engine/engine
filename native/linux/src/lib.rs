@@ -201,7 +201,7 @@ mod x11_impl {
                         if new_w > 0 && new_h > 0 {
                             let eng = engine();
                             if new_w != eng.renderer.width() || new_h != eng.renderer.height() {
-                                eng.renderer.resize(new_w, new_h);
+                                eng.renderer.resize(new_w, new_h, new_w, new_h);
                             }
                         }
                     }
@@ -267,7 +267,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = Renderer::new(device, queue, surface, surface_config);
+        let renderer = Renderer::new(device, queue, surface, surface_config, width as u32, height as u32);
         unsafe { let _ = ENGINE.set(EngineState::new(renderer)); }
 
         if fullscreen != 0.0 {

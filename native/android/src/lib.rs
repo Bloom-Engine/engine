@@ -182,7 +182,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         surface.configure(&device, &surface_config);
 
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: surface configured\0".as_ptr());
-        let renderer = Renderer::new(device, queue, surface, surface_config);
+        let renderer = Renderer::new(device, queue, surface, surface_config, pixel_w, pixel_h);
         let _ = ENGINE.set(EngineState::new(renderer));
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: engine initialized\0".as_ptr());
     }
