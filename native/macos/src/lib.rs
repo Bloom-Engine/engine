@@ -1043,6 +1043,21 @@ pub extern "C" fn bloom_set_env_intensity(intensity: f64) {
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_set_ssgi_enabled(enabled: f64) {
+    engine().renderer.set_ssgi_enabled(enabled != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_intensity(intensity: f64) {
+    engine().renderer.set_ssgi_intensity(intensity as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_radius(radius: f64) {
+    engine().renderer.set_ssgi_radius(radius as f32);
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_set_dof(enabled: f64, focus_distance: f64, aperture: f64) {
     let r = &mut engine().renderer;
     r.set_dof_enabled(enabled != 0.0);

@@ -23,6 +23,9 @@ declare function bloom_set_auto_exposure(on: number): void;
 declare function bloom_set_taa_enabled(on: number): void;
 declare function bloom_set_manual_exposure(value: number): void;
 declare function bloom_set_env_intensity(intensity: number): void;
+declare function bloom_set_ssgi_enabled(on: number): void;
+declare function bloom_set_ssgi_intensity(intensity: number): void;
+declare function bloom_set_ssgi_radius(radius: number): void;
 declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): void;
 declare function bloom_set_target_fps(fps: number): void;
 declare function bloom_get_delta_time(): number;
@@ -186,6 +189,21 @@ export function setManualExposure(value: number): void {
 /** Env-map intensity multiplier for IBL + sky pass. 1.0 = reference, 0.2–0.5 typical for bright outdoor HDRs. */
 export function setEnvIntensity(intensity: number): void {
   bloom_set_env_intensity(intensity);
+}
+
+/** Toggle screen-space global illumination (single-bounce indirect diffuse). Default on. */
+export function setSsgiEnabled(on: boolean): void {
+  bloom_set_ssgi_enabled(on ? 1 : 0);
+}
+
+/** SSGI intensity multiplier. 0 = off, 0.5 = default, 1+ = strong. */
+export function setSsgiIntensity(intensity: number): void {
+  bloom_set_ssgi_intensity(intensity);
+}
+
+/** SSGI max view-space march distance in meters. Default 20. Tune to scene scale. */
+export function setSsgiRadius(radius: number): void {
+  bloom_set_ssgi_radius(radius);
 }
 
 /** Depth of field. focusDistance = view-space distance in world units. aperture = blur strength (0 = off, 0.03 = subtle, 0.1 = heavy). */

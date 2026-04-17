@@ -3772,6 +3772,8 @@ pub struct Renderer {
     pub ssgi_uniform_buffer: wgpu::Buffer,
     /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
     pub ssgi_intensity: f32,
+    /// SSGI max march distance in view-space meters.
+    pub ssgi_radius: f32,
     /// SSGI master switch. Default true (temporal denoiser keeps it clean).
     pub ssgi_enabled: bool,
 
@@ -6304,6 +6306,7 @@ impl Renderer {
             ssgi_layout,
             ssgi_uniform_buffer,
             ssgi_intensity: 0.5,
+            ssgi_radius: 20.0,
             ssgi_enabled: true,
             ssgi_history_textures,
             ssgi_history_views,
@@ -6592,6 +6595,13 @@ impl Renderer {
     /// Controls the brightness of indirect bounce light.
     pub fn set_ssgi_intensity(&mut self, intensity: f32) {
         self.ssgi_intensity = intensity.max(0.0);
+    }
+
+    /// SSGI max march distance in view-space meters (default 20).
+    /// Tune to the scene scale: small for tight rooms, large for
+    /// open-world interiors.
+    pub fn set_ssgi_radius(&mut self, radius: f32) {
+        self.ssgi_radius = radius.max(0.1);
     }
 
     /// Toggle depth of field on/off. Off (default) = no DoF pass,
@@ -7841,7 +7851,7 @@ impl Renderer {
             let sp = SsgiParams {
                 inv_proj,
                 proj: self.current_proj_matrix,
-                params: [self.ssgi_intensity, 20.0, 8.0, self.taa_frame_index as f32],
+                params: [self.ssgi_intensity, self.ssgi_radius, 8.0, self.taa_frame_index as f32],
             };
             self.queue.write_buffer(&self.ssgi_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
