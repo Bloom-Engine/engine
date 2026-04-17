@@ -151,10 +151,14 @@ while (!windowShouldClose()) {
 
   setAmbientLight({ r: 150, g: 160, b: 180, a: 255 }, 0.3);
   // Parisian afternoon sun — warm, angled slightly from the side.
+  // 3.0 intensity gives a stronger sun-to-ambient ratio, matching
+  // the Cycles reference's dominant directional light (Cycles uses
+  // ~5 W/m² sun vs 1.2× HDR env — our ratio was previously too
+  // flat, leaving sunlit and shaded surfaces in a narrow tonal band).
   setDirectionalLight(
     { x: -0.5, y: 0.75, z: 0.4 },
     { r: 255, g: 240, b: 220, a: 255 },
-    1.8,
+    3.0,
   );
   // Tiny fill from below — same trick as Sponza, keeps overhangs
   // and awnings from bottoming out when SSGI misses them.
