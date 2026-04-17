@@ -4386,6 +4386,15 @@ impl Renderer {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Linear,
+            // 16x anisotropic filtering. Without this, surfaces viewed
+            // at oblique angles (long streets of facades, floor
+            // receding toward the horizon) pick an over-blurred mip to
+            // avoid aliasing, producing a 'watercolor' look on distant
+            // walls. Anisotropy samples along the actual footprint so
+            // texture detail is preserved along the sharp axis. wgpu
+            // clamps to the device max — Metal/Vulkan/DX12 all support
+            // 16x; lower-end GLES hardware may clamp to 4x or 8x.
+            anisotropy_clamp: 16,
             ..Default::default()
         });
 
