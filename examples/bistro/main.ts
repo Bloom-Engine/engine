@@ -151,7 +151,7 @@ while (!windowShouldClose()) {
   setAmbientLight({ r: 150, g: 160, b: 180, a: 255 }, 0.3);
   // Parisian afternoon sun — warm, angled slightly from the side.
   setDirectionalLight(
-    { x: 0.5, y: 0.75, z: 0.4 },
+    { x: -0.5, y: 0.75, z: 0.4 },
     { r: 255, g: 240, b: 220, a: 255 },
     1.8,
   );
