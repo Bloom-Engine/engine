@@ -1368,6 +1368,28 @@ fn create_albedo_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Te
     (texture, view)
 }
 
+/// Create the composed HDR render target. Scene HDR + SSR + SSGI *
+/// albedo + bloom + fog + sun shafts all merged into one texture by
+/// the `scene_compose` pass. Both the TAA-on path (TAA consumes this
+/// as its "current frame" input) and the TAA-off path (composite
+/// reads it directly) read from the same buffer, so fog / shafts /
+/// post-effects stay visible regardless of TAA state.
+fn create_composed_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("composed_rt"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Create the velocity render target (Rg16Float, surface size).
 /// Per-pixel screen-space velocity for motion blur and TAA.
 fn create_velocity_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
@@ -2942,64 +2964,47 @@ struct SsrParams {
     params: [f32; 4],
 }
 
-/// TAA shader. Combines current-frame HDR + SSAO + bloom into a
-/// single linear-HDR value per fragment, then blends against the
-/// reprojected history with a fixed feedback factor. For static
-/// scenes (no motion vectors) the blend converges in ~10 frames to
-/// a fully sub-pixel-resolved image. Neighborhood color clamp
-/// reduces ghosting if the camera moves slowly.
-const TAA_SHADER_WGSL: &str = "
-struct TaaParams {
-    /// x = blend factor for current-frame contribution (0 = pure
-    /// history, 1 = pure current). 0.1 = 10% new, 90% history;
-    /// converges in ~10 frames. First frame should pass 1.0 so the
-    /// history initializes from the actual scene rather than zeros.
-    /// y = bloom intensity, zw padding.
-    params: vec4<f32>,
-    /// Inverse of the current-frame view-projection matrix —
-    /// reconstructs world-space position from depth + NDC.
+/// Scene-compose shader. Merges direct scene HDR with every
+/// screen-space post effect (SSR, albedo-modulated SSGI, bloom) and
+/// then applies volumetric fog + sun shafts. The output is a single
+/// "composed HDR" texture that downstream passes consume:
+///
+///   - TAA-on: the TAA pass reads composed_rt as its current frame
+///     and only performs temporal reprojection + neighborhood clamp.
+///   - TAA-off: the composite pass reads composed_rt directly.
+///
+/// This keeps fog / shafts consistent across both TAA states and
+/// removes the need for TAA / composite to re-compose the same
+/// ingredients separately.
+const SCENE_COMPOSE_SHADER_WGSL: &str = "
+struct SceneComposeParams {
+    /// x = bloom intensity; y/z/w padding.
+    misc: vec4<f32>,
+    /// Inverse of the current-frame view-projection (world-pos reconstruction).
     inv_vp: mat4x4<f32>,
-    /// Previous-frame view-projection — projects the reconstructed
-    /// world-space pos into the history-frame's clip space so we
-    /// can sample the history texture at the right UV.
-    prev_vp: mat4x4<f32>,
-    /// Fog color (rgb) + density (w). Density 0 = fog disabled
-    /// (exp(-0) = 1, fog factor = 0, mix stays at scene color).
+    /// Fog tint (rgb) + density (w).
     fog_color_density: vec4<f32>,
-    /// Fog falloff parameters: x = height at which density is 1×
-    /// (above this, density drops exponentially), y = falloff rate
-    /// per world-space Y unit, zw padding.
+    /// Fog: x = height_ref, y = falloff rate, zw padding.
     fog_params: vec4<f32>,
-    /// Sun-shafts (god rays) state.
-    /// xy = sun's screen-space UV (precomputed CPU-side from
-    /// camera VP and sun direction; clipped to ±2 so the march
-    /// can step beyond the screen edge cleanly)
-    /// z  = strength (0 = effect off)
-    /// w  = per-sample decay (0..1, controls shaft length)
+    /// Sun shafts: xy = projected sun UV, z = strength, w = decay.
     sun_shaft_uv_strength: vec4<f32>,
-    /// xyz = sun shaft tint color, w = padding.
+    /// Sun shaft tint (rgb, w padding).
     sun_shaft_color: vec4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> u: TaaParams;
+@group(0) @binding(0) var<uniform> u: SceneComposeParams;
 @group(0) @binding(1) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(2) var hdr_samp: sampler;
-@group(0) @binding(3) var bloom_tex: texture_2d<f32>;
-@group(0) @binding(4) var bloom_samp: sampler;
-@group(0) @binding(5) var ssao_tex: texture_2d<f32>;
-@group(0) @binding(6) var ssao_samp: sampler;
-@group(0) @binding(7) var history_tex: texture_2d<f32>;
-@group(0) @binding(8) var history_samp: sampler;
-@group(0) @binding(9) var depth_tex: texture_depth_2d;
-@group(0) @binding(10) var depth_samp: sampler;
-@group(0) @binding(11) var ssr_tex: texture_2d<f32>;
-@group(0) @binding(12) var ssr_samp: sampler;
-@group(0) @binding(13) var ssgi_tex: texture_2d<f32>;
-@group(0) @binding(14) var ssgi_samp: sampler;
-@group(0) @binding(15) var velocity_tex: texture_2d<f32>;
-@group(0) @binding(16) var velocity_samp: sampler;
-@group(0) @binding(17) var albedo_tex: texture_2d<f32>;
-@group(0) @binding(18) var albedo_samp: sampler;
+@group(0) @binding(3) var ssr_tex: texture_2d<f32>;
+@group(0) @binding(4) var ssr_samp: sampler;
+@group(0) @binding(5) var ssgi_tex: texture_2d<f32>;
+@group(0) @binding(6) var ssgi_samp: sampler;
+@group(0) @binding(7) var bloom_tex: texture_2d<f32>;
+@group(0) @binding(8) var bloom_samp: sampler;
+@group(0) @binding(9) var albedo_tex: texture_2d<f32>;
+@group(0) @binding(10) var albedo_samp: sampler;
+@group(0) @binding(11) var depth_tex: texture_depth_2d;
+@group(0) @binding(12) var depth_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -3018,96 +3023,26 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Combine current-frame post-effects exactly as the composite
-    // shader did before TAA was inserted. Result is pre-tonemap HDR.
-    // SSAO is applied in the composite pass (not here) so it stays
-    // consistent regardless of whether TAA is on.
+    // Pre-tonemap HDR composition. SSR is already Fresnel/edge faded
+    // at its pass; SSGI is raw indirect radiance, multiplied here by
+    // the receiver albedo so dark materials absorb correctly. Bloom
+    // is scaled by the user-tuned intensity.
     let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
-    let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
     let ssr = textureSample(ssr_tex, ssr_samp, in.uv).rgb;
     let ssgi = textureSample(ssgi_tex, ssgi_samp, in.uv).rgb;
     let albedo = textureSample(albedo_tex, albedo_samp, in.uv).rgb;
-    // SSR is added on top of HDR (pre-tonemap) — already strength-
-    // and edge-faded by the SSR pass, so a flat add here is fine.
-    // SSGI is indirect diffuse bounce: radiance arriving at this
-    // surface that we multiply by the receiver's albedo so dark
-    // materials absorb bounce light correctly (a black wall should
-    // stay black under indirect illumination).
-    let current = hdr + ssr + ssgi * albedo + bloom * u.params.y;
+    let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
+    var color = hdr + ssr + ssgi * albedo + bloom * u.misc.x;
 
-    // Reconstruct world-space position from depth — needed for both
-    // TAA reprojection fallback and volumetric fog ray marching.
+    // World-space position from depth for fog ray march.
     let depth = textureSample(depth_tex, depth_samp, in.uv);
     let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
     let world_h = u.inv_vp * ndc;
     let world = world_h.xyz / world_h.w;
 
-    // Reproject history using per-pixel velocity when available,
-    // falling back to depth-based camera-only reprojection. The
-    // velocity buffer encodes (curr_ndc - prev_ndc) * 0.5 in UV
-    // space, so prev_uv = curr_uv - velocity (with Y flip for
-    // the NDC→UV conversion).
-    let vel = textureSample(velocity_tex, velocity_samp, in.uv).rg;
-    let vel_len = length(vel);
-    var prev_uv: vec2<f32>;
-    if (vel_len > 0.00001) {
-        // Per-pixel velocity available (animated mesh or camera motion
-        // baked into the velocity buffer by the vertex shader).
-        prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
-    } else {
-        // Fallback: depth + inverse VP reprojection for static geometry.
-        let prev_clip = u.prev_vp * vec4<f32>(world, 1.0);
-        let prev_ndc = prev_clip.xyz / prev_clip.w;
-        prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 1.0 - (prev_ndc.y * 0.5 + 0.5));
-    }
-
-    // If the prev_uv falls off-screen, fall back to current — no
-    // history available. Otherwise sample the reprojected position.
-    var history = current;
-    if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 && prev_uv.y >= 0.0 && prev_uv.y <= 1.0) {
-        history = textureSample(history_tex, history_samp, prev_uv).rgb;
-    }
-
-    // Neighborhood color clamp keeps the history from drifting too
-    // far from what the current frame plausibly contains. Sample a
-    // 3x3 neighborhood of the current frame to derive the clamp
-    // range. Reduces flickering bright-pixel ghosts to within the
-    // local minmax envelope.
-    let texel = vec2<f32>(1.0 / f32(textureDimensions(hdr_tex).x),
-                          1.0 / f32(textureDimensions(hdr_tex).y));
-    var nmin = current;
-    var nmax = current;
-    for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
-            if (x == 0 && y == 0) { continue; }
-            let s_uv = in.uv + vec2<f32>(f32(x), f32(y)) * texel;
-            let s_hdr = textureSample(hdr_tex, hdr_samp, s_uv).rgb;
-            let s_bloom = textureSample(bloom_tex, bloom_samp, s_uv).rgb;
-            let s_ssr = textureSample(ssr_tex, ssr_samp, s_uv).rgb;
-            let s_ssgi = textureSample(ssgi_tex, ssgi_samp, s_uv).rgb;
-            let s_albedo = textureSample(albedo_tex, albedo_samp, s_uv).rgb;
-            let s = s_hdr + s_ssr + s_ssgi * s_albedo + s_bloom * u.params.y;
-            nmin = min(nmin, s);
-            nmax = max(nmax, s);
-        }
-    }
-    let clamped_history = clamp(history, nmin, nmax);
-
-    let alpha = u.params.x;
-    var blended = mix(clamped_history, current, alpha);
-
-    // Volumetric fog via screen-space ray march. For each pixel we
-    // march 16 steps from the camera toward the world-space surface,
-    // evaluating height-based density at each sample and accumulating
-    // extinction (Beer-Lambert) and in-scattered fog color. This
-    // produces proper depth-varying fog with correct height falloff
-    // along the entire ray — a significant visual upgrade over the
-    // previous single-sample exponential which only evaluated density
-    // at the surface point.
-    //
-    // Density at a point P is: fog_density * exp(-falloff * max(P.y - height_ref, 0))
-    // Extinction per step: exp(-local_density * step_size)
-    // In-scatter per step: fog_color * local_density * step_size * transmittance
+    // Volumetric fog: 16-step Beer-Lambert march with height-based
+    // density falloff. Density 0 = disabled (the mul collapses to
+    // unity; an early-out avoids the loop entirely).
     let fog_density = u.fog_color_density.w;
     if (fog_density > 0.0) {
         let height_ref = u.fog_params.x;
@@ -3125,40 +3060,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let step_size = dist / f32(n_steps);
         var transmittance = 1.0;
         var in_scatter = vec3<f32>(0.0);
-
         for (var i = 0u; i < n_steps; i = i + 1u) {
             let t = (f32(i) + 0.5) * step_size;
             let p = cam_pos + ray_dir * t;
-
-            // Height-based density: full density at/below height_ref,
-            // exponential falloff above.
             let height_fade = exp(-height_falloff * max(p.y - height_ref, 0.0));
             let local_density = fog_density * height_fade;
-
-            // Beer-Lambert extinction for this step.
             let step_extinction = exp(-local_density * step_size);
-
-            // Isotropic in-scattering: fog color weighted by density,
-            // step length, and how much light still reaches this point
-            // (transmittance). This naturally darkens distant fog
-            // behind thick foreground fog.
             in_scatter += u.fog_color_density.rgb * local_density * step_size * transmittance;
             transmittance *= step_extinction;
         }
-
-        // Apply: scene color attenuated by total extinction, plus
-        // accumulated in-scattered fog light.
-        blended = blended * transmittance + in_scatter;
+        color = color * transmittance + in_scatter;
     }
 
-    // Sun shafts (god rays). March a fixed number of taps from the
-    // pixel toward the projected sun position, sampling depth at
-    // each tap. Where depth ≥ ~1 (sky), the sun is visible — add
-    // its tinted contribution (decayed by distance from the pixel)
-    // back into the image. Defers the visibility test to the depth
-    // buffer so any geometry occluding the sun naturally cuts the
-    // shaft. Strength 0 = effect off; the early-out keeps the
-    // 32-tap loop from running.
+    // Sun shafts: 32-tap march from the pixel toward the projected
+    // sun UV, accumulating sky-visibility with per-sample decay.
+    // Strength 0 disables.
     let shaft_strength = u.sun_shaft_uv_strength.z;
     if (shaft_strength > 0.0) {
         let sun_uv = u.sun_shaft_uv_strength.xy;
@@ -3170,22 +3086,120 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         var accum = 0.0;
         for (var i: i32 = 0; i < n_samples; i = i + 1) {
             pos = pos + delta;
-            // Skip taps that walk off-screen.
             if (pos.x < 0.0 || pos.x > 1.0 || pos.y < 0.0 || pos.y > 1.0) {
                 continue;
             }
             let d = textureSample(depth_tex, depth_samp, pos);
-            // Sky pixels (d ≈ 1) contribute; surfaces (d < 1) shadow.
-            // Soft step around 0.999 avoids hard banding.
             let sky = smoothstep(0.998, 1.0, d);
             accum = accum + sky * weight;
             weight = weight * decay;
         }
-        // Normalize so a fully unobstructed shaft maps to 1.
         let norm = accum / f32(n_samples);
-        blended = blended + u.sun_shaft_color.rgb * norm * shaft_strength;
+        color = color + u.sun_shaft_color.rgb * norm * shaft_strength;
     }
 
+    return vec4<f32>(color, 1.0);
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SceneComposeParams {
+    misc: [f32; 4],
+    inv_vp: [[f32; 4]; 4],
+    fog_color_density: [f32; 4],
+    fog_params: [f32; 4],
+    sun_shaft_uv_strength: [f32; 4],
+    sun_shaft_color: [f32; 4],
+}
+
+/// TAA shader. Reads `composed_rt` (scene HDR + post-effects + fog +
+/// shafts already merged upstream) and performs only temporal
+/// reprojection with neighborhood clamp, blending against the
+/// history RT. For static scenes the blend converges in ~10 frames
+/// to a fully sub-pixel-resolved image.
+const TAA_SHADER_WGSL: &str = "
+struct TaaParams {
+    /// x = blend factor (current-frame weight), yzw padding.
+    params: vec4<f32>,
+    /// Inverse of the current-frame view-projection matrix —
+    /// reconstructs world-space position for history reprojection.
+    inv_vp: mat4x4<f32>,
+    /// Previous-frame view-projection — projects world pos into
+    /// history UV.
+    prev_vp: mat4x4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: TaaParams;
+@group(0) @binding(1) var composed_tex: texture_2d<f32>;
+@group(0) @binding(2) var composed_samp: sampler;
+@group(0) @binding(3) var history_tex: texture_2d<f32>;
+@group(0) @binding(4) var history_samp: sampler;
+@group(0) @binding(5) var depth_tex: texture_depth_2d;
+@group(0) @binding(6) var depth_samp: sampler;
+@group(0) @binding(7) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(8) var velocity_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // composed_tex already carries HDR + SSR + SSGI*albedo + bloom +
+    // fog + shafts — TAA only needs to reproject history and blend.
+    let current = textureSample(composed_tex, composed_samp, in.uv).rgb;
+
+    let depth = textureSample(depth_tex, depth_samp, in.uv);
+    let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
+    let world_h = u.inv_vp * ndc;
+    let world = world_h.xyz / world_h.w;
+
+    let vel = textureSample(velocity_tex, velocity_samp, in.uv).rg;
+    let vel_len = length(vel);
+    var prev_uv: vec2<f32>;
+    if (vel_len > 0.00001) {
+        prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
+    } else {
+        let prev_clip = u.prev_vp * vec4<f32>(world, 1.0);
+        let prev_ndc = prev_clip.xyz / prev_clip.w;
+        prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 1.0 - (prev_ndc.y * 0.5 + 0.5));
+    }
+
+    var history = current;
+    if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 && prev_uv.y >= 0.0 && prev_uv.y <= 1.0) {
+        history = textureSample(history_tex, history_samp, prev_uv).rgb;
+    }
+
+    // 3×3 neighborhood clamp on the composed input.
+    let texel = vec2<f32>(1.0 / f32(textureDimensions(composed_tex).x),
+                          1.0 / f32(textureDimensions(composed_tex).y));
+    var nmin = current;
+    var nmax = current;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            if (x == 0 && y == 0) { continue; }
+            let s_uv = in.uv + vec2<f32>(f32(x), f32(y)) * texel;
+            let s = textureSample(composed_tex, composed_samp, s_uv).rgb;
+            nmin = min(nmin, s);
+            nmax = max(nmax, s);
+        }
+    }
+    let clamped_history = clamp(history, nmin, nmax);
+
+    let alpha = u.params.x;
+    let blended = mix(clamped_history, current, alpha);
     return vec4<f32>(blended, 1.0);
 }
 ";
@@ -3193,24 +3207,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct TaaParams {
-    /// x = blend factor (current-frame weight),
-    /// y = bloom intensity, zw padding.
+    /// x = blend factor (current-frame weight), yzw padding.
     params: [f32; 4],
-    /// Inverse of the current frame's VP (reconstructs world pos
-    /// from depth + NDC).
     inv_vp: [[f32; 4]; 4],
-    /// Previous frame's VP (reprojects world pos into history UVs).
     prev_vp: [[f32; 4]; 4],
-    /// Fog color (rgb) + density (w).
-    fog_color_density: [f32; 4],
-    /// Fog falloff: x = height reference, y = falloff rate,
-    /// zw padding.
-    fog_params: [f32; 4],
-    /// Sun shaft state: xy = sun screen-space UV, z = strength,
-    /// w = decay.
-    sun_shaft_uv_strength: [f32; 4],
-    /// Sun shaft tint (rgb) + padding.
-    sun_shaft_color: [f32; 4],
 }
 
 /// Auto-exposure update shader. Runs at 1×1 viewport → single
@@ -3330,12 +3330,8 @@ struct CompositeParams {
     /// z = vignette softness (0..1, smaller = harder edge)
     /// w = film grain strength (0..~0.1 amplitude added to luma)
     filmic: vec4<f32>,
-    /// x = grain seed (frame index, randomizes the noise per frame).
-    /// y = composite mode: 1.0 = TAA-on (post-effects already merged by
-    ///     the TAA pass), 0.0 = TAA-off (composite must fold in SSR +
-    ///     SSGI + bloom itself).
-    /// z = bloom intensity (only read when y = 0).
-    /// w = padding.
+    /// x = grain seed (frame index, randomizes the noise per frame);
+    /// yzw padding.
     misc: vec4<f32>,
 };
 
@@ -3346,14 +3342,6 @@ struct CompositeParams {
 @group(0) @binding(4) var exposure_samp: sampler;
 @group(0) @binding(5) var ssao_tex: texture_2d<f32>;
 @group(0) @binding(6) var ssao_samp: sampler;
-@group(0) @binding(7) var ssr_tex: texture_2d<f32>;
-@group(0) @binding(8) var ssr_samp: sampler;
-@group(0) @binding(9) var ssgi_tex: texture_2d<f32>;
-@group(0) @binding(10) var ssgi_samp: sampler;
-@group(0) @binding(11) var bloom_tex: texture_2d<f32>;
-@group(0) @binding(12) var bloom_samp: sampler;
-@group(0) @binding(13) var albedo_tex: texture_2d<f32>;
-@group(0) @binding(14) var albedo_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -3466,18 +3454,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         hdr_raw = textureSample(hdr_tex, hdr_samp, sample_uv).rgb;
     }
 
-    // When TAA is off, the HDR source is the raw scene buffer which
-    // does not include post-process passes. Fold SSR + SSGI + bloom
-    // in here so the feature set matches the TAA-on path. SSGI is
-    // albedo-modulated so dark materials absorb indirect light.
-    if (u.misc.y < 0.5) {
-        let ssr    = textureSample(ssr_tex,    ssr_samp,    sample_uv).rgb;
-        let ssgi   = textureSample(ssgi_tex,   ssgi_samp,   sample_uv).rgb;
-        let bl     = textureSample(bloom_tex,  bloom_samp,  sample_uv).rgb;
-        let albedo = textureSample(albedo_tex, albedo_samp, sample_uv).rgb;
-        hdr_raw = hdr_raw + ssr + ssgi * albedo + bl * u.misc.z;
-    }
-
+    // No per-effect folding needed here — both the TAA path and the
+    // TAA-off path feed a `composed_rt` source which already has
+    // SSR + SSGI*albedo + bloom + fog + shafts merged in.
     let ao = textureSample(ssao_tex, ssao_samp, sample_uv).r;
     let hdr_ao = hdr_raw * ao;
 
@@ -3787,6 +3766,15 @@ pub struct Renderer {
     /// so dark materials absorb indirect light correctly.
     pub albedo_rt_texture: wgpu::Texture,
     pub albedo_rt_view: wgpu::TextureView,
+    /// Composed HDR target — scene + SSR + SSGI*albedo + bloom + fog
+    /// + shafts all merged by the `scene_compose` pass. Feeds both
+    /// TAA (as the current-frame input) and composite (as the
+    /// TAA-off source) so atmospherics stay consistent across paths.
+    pub composed_rt_texture: wgpu::Texture,
+    pub composed_rt_view: wgpu::TextureView,
+    pub scene_compose_pipeline: wgpu::RenderPipeline,
+    pub scene_compose_layout: wgpu::BindGroupLayout,
+    pub scene_compose_uniform_buffer: wgpu::Buffer,
     /// Composite-tonemap pipeline + bind group layout. Single full-
     /// screen draw that samples hdr_rt and writes ACES-tonemapped
     /// linear-rgb (sRGB hardware encode handles the transfer fn).
@@ -4543,6 +4531,7 @@ impl Renderer {
         let (hdr_rt_texture, hdr_rt_view) = create_hdr_rt(&device, surface_config.width, surface_config.height);
         let (material_rt_texture, material_rt_view) = create_material_rt(&device, surface_config.width, surface_config.height);
         let (albedo_rt_texture, albedo_rt_view) = create_albedo_rt(&device, surface_config.width, surface_config.height);
+        let (composed_rt_texture, composed_rt_view) = create_composed_rt(&device, surface_config.width, surface_config.height);
         let (bloom_chain_textures, bloom_mip_views, bloom_full_view) = create_bloom_chain(
             &device,
             surface_config.width,
@@ -5243,70 +5232,6 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 8,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 10,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 11,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 12,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 13,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 14,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
             ],
         });
         let composite_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -5674,7 +5599,7 @@ impl Renderer {
                         has_dynamic_offset: false, min_binding_size: None,
                     }, count: None,
                 },
-                // hdr / bloom / ssao / history each: tex + sampler.
+                // composed_rt (tex + sampler)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
@@ -5687,6 +5612,7 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // history (tex + sampler)
                 wgpu::BindGroupLayoutEntry {
                     binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
@@ -5699,18 +5625,20 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // depth (tex + sampler)
                 wgpu::BindGroupLayoutEntry {
                     binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        sample_type: wgpu::TextureSampleType::Depth,
                         view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
                     }, count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 6, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
+                // velocity (tex + sampler)
                 wgpu::BindGroupLayoutEntry {
                     binding: 7, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
@@ -5720,66 +5648,6 @@ impl Renderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 8, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-                    }, count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 10, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 11, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-                    }, count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 12, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 13, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-                    }, count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 14, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 15, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-                    }, count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 16, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 17, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-                    }, count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 18, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
@@ -6091,6 +5959,138 @@ impl Renderer {
         let ssgi_temporal_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssgi_temporal_uniform_buffer"),
             size: std::mem::size_of::<SsgiTemporalParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // --- Scene-compose pipeline ---
+        // Merges HDR + SSR + SSGI*albedo + bloom + fog + shafts into
+        // composed_rt. Both TAA and composite downstream read from
+        // this single output so atmospherics behave identically
+        // whether TAA is on or off.
+        let scene_compose_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_compose_shader"),
+            source: wgpu::ShaderSource::Wgsl(SCENE_COMPOSE_SHADER_WGSL.into()),
+        });
+        let scene_compose_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene_compose_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                // hdr, ssr, ssgi, bloom, albedo each: tex + sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // depth (tex + sampler)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+        let scene_compose_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scene_compose_pl_layout"),
+            bind_group_layouts: &[&scene_compose_layout],
+            push_constant_ranges: &[],
+        });
+        let scene_compose_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_compose_pipeline"),
+            layout: Some(&scene_compose_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_compose_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_compose_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT, blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false, conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+        let scene_compose_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene_compose_uniform_buffer"),
+            size: std::mem::size_of::<SceneComposeParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -6512,6 +6512,11 @@ impl Renderer {
             material_rt_view,
             albedo_rt_texture,
             albedo_rt_view,
+            composed_rt_texture,
+            composed_rt_view,
+            scene_compose_pipeline,
+            scene_compose_layout,
+            scene_compose_uniform_buffer,
             composite_pipeline,
             composite_layout,
             composite_sampler,
@@ -6773,6 +6778,9 @@ impl Renderer {
             self.material_rt_texture = mat_t;
             self.material_rt_view = mat_v;
             let (alb_t, alb_v) = create_albedo_rt(&self.device, width, height);
+            let (cmp_t, cmp_v) = create_composed_rt(&self.device, width, height);
+            self.composed_rt_texture = cmp_t;
+            self.composed_rt_view = cmp_v;
             self.albedo_rt_texture = alb_t;
             self.albedo_rt_view = alb_v;
             let (bt, bm, bf) = create_bloom_chain(&self.device, width, height, BLOOM_MIP_COUNT);
@@ -8417,64 +8425,100 @@ impl Renderer {
 
 
         // ============================================================
-        // TAA pass: combine current-frame HDR + bloom + SSAO with the
-        // history texture, write to the OTHER ping-pong slot. Skipped
-        // when TAA is off — composite reads hdr_rt directly and the
-        // SSAO is applied in the composite shader instead.
+        // Scene-compose pass: merge HDR + SSR + SSGI*albedo + bloom
+        // + fog + sun shafts into composed_rt. Runs unconditionally
+        // so both the TAA-on path (TAA consumes this) and the
+        // TAA-off path (composite consumes this) get the same
+        // atmospherics + post-effects.
+        // ============================================================
+        let inv_vp_current = mat4_invert(self.current_vp_matrix);
+        // Sun shaft screen-space position. Project a point far along
+        // the sun direction through the current VP. If behind the
+        // camera (clip.w ≤ 0), the sun is off-screen → disable.
+        let sun_dir = self.lighting_uniforms.light_dir;
+        let sun_world = [sun_dir[0] * 1000.0, sun_dir[1] * 1000.0, sun_dir[2] * 1000.0, 1.0];
+        let clip = mat4_mul_vec4(&self.current_vp_matrix, &sun_world);
+        let (sun_uv, shaft_strength_eff) = if clip[3] > 0.0 {
+            let ndc_x = clip[0] / clip[3];
+            let ndc_y = clip[1] / clip[3];
+            let u = ndc_x * 0.5 + 0.5;
+            let v = 1.0 - (ndc_y * 0.5 + 0.5);
+            // Allow off-screen suns to still cast shafts that streak
+            // in from the edge — clamp to a small margin beyond ±[0,1]
+            // rather than disabling outright.
+            let off = u < -1.0 || u > 2.0 || v < -1.0 || v > 2.0;
+            if off { ([0.0, 0.0], 0.0) } else { ([u, v], self.sun_shaft_strength) }
+        } else {
+            ([0.0, 0.0], 0.0)
+        };
+        let cp = SceneComposeParams {
+            misc: [self.bloom_intensity, 0.0, 0.0, 0.0],
+            inv_vp: inv_vp_current,
+            fog_color_density: [
+                self.fog_color[0], self.fog_color[1], self.fog_color[2], self.fog_density,
+            ],
+            fog_params: [self.fog_height_ref, self.fog_height_falloff, 0.0, 0.0],
+            sun_shaft_uv_strength: [
+                sun_uv[0], sun_uv[1], shaft_strength_eff, self.sun_shaft_decay,
+            ],
+            sun_shaft_color: [
+                self.sun_shaft_color[0], self.sun_shaft_color[1], self.sun_shaft_color[2], 0.0,
+            ],
+        };
+        self.queue.write_buffer(&self.scene_compose_uniform_buffer, 0, bytemuck::bytes_of(&cp));
+        {
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scene_compose_bg"),
+                layout: &self.scene_compose_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.scene_compose_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(ssgi_composite_view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene_compose_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.composed_rt_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.scene_compose_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ============================================================
+        // TAA pass: reprojection + neighborhood clamp on composed_rt.
+        // Skipped when TAA is off — composite reads composed_rt
+        // directly and gets the same composed / fog / shafts output.
         // ============================================================
         let taa_dst_idx = self.taa_current_idx;
         let taa_src_idx = 1 - self.taa_current_idx;
 
         if self.taa_enabled {
             let alpha = if self.taa_frame_index < 4 { 1.0 } else { 0.1 };
-            // Inverse of current VP for world-pos reconstruction.
-            // Use the unjittered version when feasible — for now we
-            // pass the actual jittered current_vp_matrix; the jitter
-            // is sub-pixel so reprojection error is negligible.
-            let inv_vp = mat4_invert(self.current_vp_matrix);
-            // Sun shaft screen-space position. Project a point far
-            // along the sun direction through the current VP. If it
-            // ends up behind the camera (clip.w ≤ 0) the sun is
-            // off-screen — disable shafts this frame.
-            let sun_dir = self.lighting_uniforms.light_dir;
-            let sun_world = [sun_dir[0] * 1000.0, sun_dir[1] * 1000.0, sun_dir[2] * 1000.0, 1.0];
-            let clip = mat4_mul_vec4(&self.current_vp_matrix, &sun_world);
-            let (sun_uv, shaft_strength_eff) = if clip[3] > 0.0 {
-                let ndc_x = clip[0] / clip[3];
-                let ndc_y = clip[1] / clip[3];
-                let u = ndc_x * 0.5 + 0.5;
-                let v = 1.0 - (ndc_y * 0.5 + 0.5);
-                // Allow off-screen suns to still cast shafts that
-                // streak in from the edge — clamp to a small margin
-                // beyond ±[0,1] rather than disabling outright.
-                let off = u < -1.0 || u > 2.0 || v < -1.0 || v > 2.0;
-                if off { ([0.0, 0.0], 0.0) } else { ([u, v], self.sun_shaft_strength) }
-            } else {
-                ([0.0, 0.0], 0.0)
-            };
-
             let tp = TaaParams {
-                params: [alpha, self.bloom_intensity, 0.0, 0.0],
-                inv_vp,
+                params: [alpha, 0.0, 0.0, 0.0],
+                inv_vp: inv_vp_current,
                 prev_vp: self.prev_vp_matrix,
-                fog_color_density: [
-                    self.fog_color[0],
-                    self.fog_color[1],
-                    self.fog_color[2],
-                    self.fog_density,
-                ],
-                fog_params: [self.fog_height_ref, self.fog_height_falloff, 0.0, 0.0],
-                sun_shaft_uv_strength: [
-                    sun_uv[0], sun_uv[1],
-                    shaft_strength_eff,
-                    self.sun_shaft_decay,
-                ],
-                sun_shaft_color: [
-                    self.sun_shaft_color[0],
-                    self.sun_shaft_color[1],
-                    self.sun_shaft_color[2],
-                    0.0,
-                ],
             };
             self.queue.write_buffer(&self.taa_uniform_buffer, 0, bytemuck::bytes_of(&tp));
 
@@ -8483,24 +8527,14 @@ impl Renderer {
                 layout: &self.taa_layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: self.taa_uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.composed_rt_view) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.taa_views[taa_src_idx]) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.ssao_blur_rt_view) },
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.taa_views[taa_src_idx]) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
                     wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
-                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
-                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(ssgi_composite_view) },
-                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
-                    wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
-                    wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 ],
             });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -8682,7 +8716,11 @@ impl Renderer {
         } else if self.taa_enabled {
             &self.taa_views[taa_dst_idx]
         } else {
-            &self.hdr_rt_view
+            // TAA off: read the composed buffer directly so SSR /
+            // SSGI / bloom / fog / shafts still land in the final
+            // image. Before the scene-compose split this branch
+            // read raw hdr_rt and silently dropped those effects.
+            &self.composed_rt_view
         };
 
         // ============================================================
@@ -8756,12 +8794,7 @@ impl Renderer {
                 self.vignette_softness,
                 self.grain_strength,
             ],
-            misc: [
-                self.taa_frame_index as f32,
-                if self.taa_enabled { 1.0 } else { 0.0 },
-                self.bloom_intensity,
-                0.0,
-            ],
+            misc: [self.taa_frame_index as f32, 0.0, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.composite_uniform_buffer, 0, bytemuck::bytes_of(&cp));
 
@@ -8776,14 +8809,6 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.ssao_blur_rt_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(ssgi_composite_view) },
-                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
-                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],
         });
         {
