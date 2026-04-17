@@ -2784,7 +2784,7 @@ struct SsrParams {
     /// x = SSR strength (0 = off, 1 = full)
     /// y = max march distance in view-space units
     /// z = number of march steps
-    /// w = padding
+    /// w = frame index (for per-frame march jitter)
     params: vec4<f32>,
 };
 
@@ -2795,6 +2795,8 @@ struct SsrParams {
 @group(0) @binding(4) var hdr_samp: sampler;
 @group(0) @binding(5) var mat_tex: texture_2d<f32>;
 @group(0) @binding(6) var mat_samp: sampler;
+@group(0) @binding(7) var albedo_tex: texture_2d<f32>;
+@group(0) @binding(8) var albedo_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -2817,55 +2819,67 @@ fn view_pos_from_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     return view_h.xyz / view_h.w;
 }
 
+/// Interleaved gradient noise — per-pixel pseudo-random in [0, 1).
+/// Varies with frame so TAA downstream accumulates the per-frame
+/// march jitter into smooth reflections instead of a single-sample
+/// step pattern.
+fn ign_jitter(frag_coord: vec2<f32>, frame: f32) -> f32 {
+    let shifted = frag_coord + vec2<f32>(frame * 5.588238, frame * 3.127137);
+    return fract(52.9829189 * fract(0.06711056 * shifted.x + 0.00583715 * shifted.y));
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let depth = textureSample(depth_tex, depth_samp, in.uv);
-    if (depth >= 0.9999) {
-        // Sky — no reflections.
-        return vec4<f32>(0.0);
-    }
+    if (depth >= 0.9999) { return vec4<f32>(0.0); } // sky
 
-    // Read per-pixel material info. Reflectivity is concentrated in
-    // smooth metals: weight = metallic * (1 - roughness)². Skip
-    // shading when the surface is too rough or non-metal to matter.
+    // Material + albedo for proper Fresnel. f0 = mix(0.04, albedo,
+    // metallic) so dielectrics get a 4% grazing reflection and metals
+    // reflect their tinted base colour. Fade out past roughness 0.75
+    // where screen-space reflections become unreliable; by that point
+    // the IBL prefiltered specular handles the result.
     let mat = textureSample(mat_tex, mat_samp, in.uv).rg;
     let metallic = mat.r;
     let roughness = mat.g;
-    let reflectivity = metallic * (1.0 - roughness) * (1.0 - roughness);
-    if (reflectivity < 0.02) {
-        return vec4<f32>(0.0);
-    }
+    let albedo = textureSample(albedo_tex, albedo_samp, in.uv).rgb;
+    let roughness_fade = 1.0 - smoothstep(0.5, 0.85, roughness);
+    if (roughness_fade <= 0.001) { return vec4<f32>(0.0); }
 
     let view_pos = view_pos_from_depth(in.uv, depth);
-    // Reconstruct view-space normal from screen-space derivatives.
     let dx = dpdx(view_pos);
     let dy = dpdy(view_pos);
     let n = normalize(cross(dx, dy));
-
-    // V points from surface to camera (camera is at origin in view
-    // space, so V = -view_pos / length).
     let v = normalize(-view_pos);
-    // Reflection direction.
     let r = reflect(-v, n);
 
-    // Skip rays heading toward the camera — those would walk back
-    // into the surface and never find a real hit.
-    if (r.z > 0.0) {
-        return vec4<f32>(0.0);
-    }
+    // Ray walking back toward camera can't find an on-screen hit —
+    // nothing in front of the camera to reflect. Bail out.
+    if (r.z > 0.0) { return vec4<f32>(0.0); }
+
+    // Schlick Fresnel — this is the physically-correct reflection
+    // weight per-channel. f0 = 0.04 for dielectrics, albedo for metals.
+    let n_dot_v = max(dot(n, v), 0.0);
+    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - n_dot_v, 5.0);
 
     let max_dist = u.params.y;
-    let n_steps = u.params.z;
-    let step_size = max_dist / n_steps;
+    let n_steps_f = u.params.z;
+    let n_steps = u32(n_steps_f);
+    let step_size = max_dist / n_steps_f;
+
+    // Per-pixel march jitter — offset the starting t by a noise-derived
+    // fraction of the step. TAA accumulates rays at different offsets
+    // into a smooth reflection trace instead of banded step artifacts.
+    let jitter = ign_jitter(in.clip_pos.xy, u.params.w);
+    var t = step_size * (0.5 + jitter);
 
     var hit_uv = vec2<f32>(-1.0);
     var hit_found = false;
-    var t = step_size; // skip the first step to avoid self-intersection
-    for (var i = 0u; i < u32(n_steps); i = i + 1u) {
+    var prev_t = 0.0;
+    for (var i = 0u; i < n_steps; i = i + 1u) {
         let ray_view = view_pos + r * t;
         let ray_clip = u.proj * vec4<f32>(ray_view, 1.0);
         let ray_ndc = ray_clip.xyz / ray_clip.w;
-        // Off-screen ray — no hit possible.
         if (ray_ndc.x < -1.0 || ray_ndc.x > 1.0 ||
             ray_ndc.y < -1.0 || ray_ndc.y > 1.0 ||
             ray_ndc.z < 0.0 || ray_ndc.z > 1.0) {
@@ -2873,32 +2887,49 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         let ray_uv = vec2<f32>(ray_ndc.x * 0.5 + 0.5, 1.0 - (ray_ndc.y * 0.5 + 0.5));
         let scene_depth = textureSample(depth_tex, depth_samp, ray_uv);
-        // Ray has gone past the surface — record the hit.
+
         if (ray_ndc.z >= scene_depth) {
-            hit_uv = ray_uv;
-            hit_found = true;
+            // Thickness rejection: an occluder closer to the light
+            // than the scene point isn't really blocking our ray unless
+            // it's near the ray's current depth. Tolerance scales with
+            // the step so coarse steps accept more drift.
+            let hit_view = view_pos_from_depth(ray_uv, scene_depth);
+            let thickness = abs(ray_view.z - hit_view.z);
+            let step_world = t - prev_t;
+            if (thickness < step_world * 2.0 + 0.1) {
+                hit_uv = ray_uv;
+                hit_found = true;
+            }
             break;
         }
+        prev_t = t;
         t = t + step_size;
     }
+    if (!hit_found) { return vec4<f32>(0.0); }
 
-    if (!hit_found) {
-        return vec4<f32>(0.0);
-    }
-
-    // Edge fade — pull hits near the screen border to zero so the
-    // reflection doesn't pop in/out as the camera moves. 0.1 of the
-    // screen on each side gets feathered.
+    // Edge fade — pull reflections near the screen border to zero so
+    // camera motion doesn't pop them in/out.
     let edge_fade = min(
         min(hit_uv.x, 1.0 - hit_uv.x),
         min(hit_uv.y, 1.0 - hit_uv.y),
     ) * 10.0;
     let fade = clamp(edge_fade, 0.0, 1.0);
 
-    let reflected = textureSample(hdr_tex, hdr_samp, hit_uv).rgb;
-    // Modulate by reflectivity (material-aware) AND user strength
-    // AND screen-edge fade.
-    return vec4<f32>(reflected * reflectivity * u.params.x * fade, fade);
+    // Roughness-aware 5-tap Gaussian at the hit. Rough surfaces
+    // scatter reflected light over a wider cone; without a prefiltered
+    // HDR chain, blurring per-pixel at lookup time is the cheap
+    // approximation. Tap spread scales with roughness so mirror-smooth
+    // metals get the sharp center tap and mid-roughness surfaces get a
+    // mild blur. Fade-out above roughness 0.5 keeps results sane.
+    let blur_radius = roughness * 0.015;
+    let c = textureSample(hdr_tex, hdr_samp, hit_uv).rgb * 0.4;
+    let s1 = textureSample(hdr_tex, hdr_samp, hit_uv + vec2<f32>( blur_radius, 0.0)).rgb * 0.15;
+    let s2 = textureSample(hdr_tex, hdr_samp, hit_uv + vec2<f32>(-blur_radius, 0.0)).rgb * 0.15;
+    let s3 = textureSample(hdr_tex, hdr_samp, hit_uv + vec2<f32>(0.0,  blur_radius)).rgb * 0.15;
+    let s4 = textureSample(hdr_tex, hdr_samp, hit_uv + vec2<f32>(0.0, -blur_radius)).rgb * 0.15;
+    let reflected = c + s1 + s2 + s3 + s4;
+
+    return vec4<f32>(reflected * fresnel * roughness_fade * u.params.x * fade, fade);
 }
 ";
 
@@ -5842,6 +5873,18 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let ssr_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -8075,7 +8118,7 @@ impl Renderer {
             let sp = SsrParams {
                 inv_proj,
                 proj: self.current_proj_matrix,
-                params: [self.ssr_strength, 8.0, 32.0, 0.0],
+                params: [self.ssr_strength, 8.0, 32.0, self.taa_frame_index as f32],
             };
             self.queue.write_buffer(&self.ssr_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
@@ -8090,6 +8133,8 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.material_rt_view) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 ],
             });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
