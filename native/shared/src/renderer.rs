@@ -1262,7 +1262,10 @@ const BLOOM_MIP_COUNT: u32 = 5;
 /// SSAO render target format. R8Unorm gives 256 occlusion levels
 /// (plenty for AO) at 1 byte/pixel — half-res keeps the cost in
 /// the noise on modern GPUs.
-const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// SSAO RT layout: R = GTAO occlusion (bilaterally blurred),
+/// G = contact-shadow factor (passed through blur unchanged so the
+/// fine-detail ray-march result survives).
+const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
 
 /// Material G-buffer format. Rg8Unorm: R = metallic, G = roughness.
 /// Written as a second color attachment in the HDR pass; SSR (and
@@ -2012,19 +2015,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ao_floored = max(ao_contrasted, 0.3);
     let final_ao = mix(1.0, ao_floored, strength);
 
-    // Combine contact shadows with AO so the composite's
-    // hdr * ao multiplier darkens both together. The contact
-    // shadow acts as a fine-detail darkener in tight gaps
-    // that GTAO's horizon march can't resolve — crease at
-    // column bases, object-to-object seams, thin casters.
-    // mix(1, contact, cs_strength) keeps contact=1 (no shadow)
-    // a no-op; contact=0 drops brightness to (1 - cs_strength).
-    // Multiplicative combine so contact=0 can fully shadow even
-    // through the AO floor. mix(0.3, 1.0, contact) bounds contact's
-    // darkening so a shadowed fragment drops to 30% rather than 0.
+    // Write AO into R, contact shadow into G. Separate channels so
+    // the downstream blur can smooth AO (which is inherently noisy
+    // from the horizon march) without smearing contact shadows,
+    // which are a sharp binary ray-march result that only reads
+    // right with pixel-accurate edges.
+    // mix(0.3, 1.0, contact) bounds contact's darkening to 30% so a
+    // fully-shadowed fragment never drops below what the AO floor
+    // would otherwise permit.
     let contact_scaled = mix(0.3, 1.0, contact);
-    let combined = final_ao * contact_scaled;
-    return vec4<f32>(saturate(combined));
+    return vec4<f32>(saturate(final_ao), saturate(contact_scaled), 0.0, 1.0);
 }
 ";
 
@@ -2098,15 +2098,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     let center_depth = textureSample(depth_tex, depth_samp, in.uv);
 
-    // Sky pixels get AO = 1 (fully unoccluded) — no need to blur.
+    // Sky pixels: no occlusion, no contact shadow.
     if (center_depth >= 0.9999) {
-        return vec4<f32>(1.0);
+        return vec4<f32>(1.0, 1.0, 0.0, 1.0);
     }
 
     var ao_sum     = 0.0;
     var weight_sum = 0.0;
 
-    // 5×5 separable-style bilateral gather.
+    // 5×5 separable-style bilateral gather on the AO (R) channel
+    // only. Contact shadows (G) pass through from the center tap
+    // untouched — they're a sharp binary ray-march result and any
+    // smoothing here erases the fine-detail shadows the pass is
+    // there to capture.
     for (var dy: i32 = -2; dy <= 2; dy = dy + 1) {
         for (var dx: i32 = -2; dx <= 2; dx = dx + 1) {
             let offset = vec2<f32>(f32(dx), f32(dy)) * texel;
@@ -2115,12 +2119,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let s_ao    = textureSample(ao_tex, ao_samp, s_uv).r;
             let s_depth = textureSample(depth_tex, depth_samp, s_uv);
 
-            // Spatial weight: product of 1-D Gaussian weights for x and y.
             let gx = GAUSS5[dx + 2];
             let gy = GAUSS5[dy + 2];
             let spatial = gx * gy;
 
-            // Depth edge-stop: exponential falloff with depth difference.
             let depth_diff = abs(center_depth - s_depth);
             let range_w = exp(-depth_diff / d_sigma);
 
@@ -2130,12 +2132,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    let result = select(
-        textureSample(ao_tex, ao_samp, in.uv).r,
-        ao_sum / weight_sum,
-        weight_sum > 0.0001
-    );
-    return vec4<f32>(result, result, result, 1.0);
+    let center = textureSample(ao_tex, ao_samp, in.uv);
+    let ao_blurred = select(center.r, ao_sum / weight_sum, weight_sum > 0.0001);
+    return vec4<f32>(ao_blurred, center.g, 0.0, 1.0);
 }
 ";
 
@@ -3457,8 +3456,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // No per-effect folding needed here — both the TAA path and the
     // TAA-off path feed a `composed_rt` source which already has
     // SSR + SSGI*albedo + bloom + fog + shafts merged in.
-    let ao = textureSample(ssao_tex, ssao_samp, sample_uv).r;
-    let hdr_ao = hdr_raw * ao;
+    // SSAO RT packs AO in R and contact shadow in G — multiplying
+    // both gives combined darkening. The AO channel is bilaterally
+    // blurred; G is the raw pixel-accurate contact result.
+    let ao_pair = textureSample(ssao_tex, ssao_samp, sample_uv).rg;
+    let hdr_ao = hdr_raw * ao_pair.r * ao_pair.g;
 
     // Exposure. Two modes:
     //   auto off → manual exposure multiplier (u.params.z).
