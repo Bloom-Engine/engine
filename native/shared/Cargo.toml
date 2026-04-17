@@ -17,7 +17,8 @@ libc = "0.2"
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga", "hdr"] }
-gltf = "1"
+image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image"] }
+gltf = { version = "1", features = ["KHR_materials_pbrSpecularGlossiness"] }
 lewton = "0.10"
 minimp3 = { version = "0.5", optional = true }
 earcutr = "0.4"

@@ -1,0 +1,7 @@
+{
+  "name": "bloom-bistro",
+  "version": "0.1.0",
+  "dependencies": {
+    "bloom": "file:../../"
+  }
+}

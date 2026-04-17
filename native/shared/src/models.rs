@@ -1082,23 +1082,36 @@ fn load_gltf_with_textures(
             gltf::image::Source::Uri { uri, .. } => {
                 // External image file (loose glTF). Resolve relative to
                 // the .gltf file's directory.
-                let decoded_bytes = if let Some(encoded) = uri.strip_prefix("data:") {
-                    // data:... URI (rare for images, but possible)
-                    encoded.find(";base64,").map(|pos| {
-                        let b64 = &encoded[pos + 8..];
-                        let mut out = Vec::new();
-                        let _ = base64_decode(b64, &mut out);
-                        out
-                    })
-                } else if let Some(dir) = base_dir {
-                    std::fs::read(dir.join(uri)).ok()
-                } else {
-                    None
-                };
-                match decoded_bytes.and_then(|b| image::load_from_memory(&b).ok()) {
-                    Some(img) => {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = (rgba.width(), rgba.height());
+                let (bytes, effective_uri): (Option<Vec<u8>>, String) =
+                    if let Some(encoded) = uri.strip_prefix("data:") {
+                        let decoded = encoded.find(";base64,").map(|pos| {
+                            let b64 = &encoded[pos + 8..];
+                            let mut out = Vec::new();
+                            let _ = base64_decode(b64, &mut out);
+                            out
+                        });
+                        (decoded, uri.to_string())
+                    } else if let Some(dir) = base_dir {
+                        let primary = dir.join(uri);
+                        if let Ok(b) = std::fs::read(&primary) {
+                            (Some(b), uri.to_string())
+                        } else {
+                            // Asset packs sometimes ship DDS-only while the
+                            // glTF still references a .png URI (Lumberyard
+                            // Bistro does this). Retry with a .dds
+                            // sibling before giving up.
+                            let swapped = swap_extension(uri, "dds");
+                            let alt = dir.join(&swapped);
+                            match std::fs::read(&alt) {
+                                Ok(b) => (Some(b), swapped),
+                                Err(_) => (None, uri.to_string()),
+                            }
+                        }
+                    } else {
+                        (None, uri.to_string())
+                    };
+                match bytes.and_then(|b| decode_texture_bytes(&b, &effective_uri)) {
+                    Some((rgba, w, h)) => {
                         texture_indices.push(renderer.register_texture(w, h, &rgba));
                     }
                     None => texture_indices.push(0),
@@ -1471,26 +1484,49 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
 
             let mat = primitive.material();
             let pbr = mat.pbr_metallic_roughness();
-            let base_color = pbr.base_color_factor();
-            let metallic_factor = pbr.metallic_factor();
-            let roughness_factor = pbr.roughness_factor();
             let emissive_factor = mat.emissive_factor();
 
             let tex_idx_of = |img_idx: usize| -> Option<u32> {
                 texture_indices.get(img_idx).copied()
             };
 
-            // texture_idx stores a 1-based index into staged_textures (remapped on commit)
-            let tex_idx = pbr.base_color_texture()
-                .and_then(|info| tex_idx_of(info.texture().source().index()));
             let normal_tex_idx = mat.normal_texture()
-                .and_then(|info| tex_idx_of(info.texture().source().index()));
-            let mr_tex_idx = pbr.metallic_roughness_texture()
                 .and_then(|info| tex_idx_of(info.texture().source().index()));
             let emissive_tex_idx = mat.emissive_texture()
                 .and_then(|info| tex_idx_of(info.texture().source().index()));
             let occlusion_tex_idx = mat.occlusion_texture()
                 .and_then(|info| tex_idx_of(info.texture().source().index()));
+
+            // Prefer the glTF 2.0 metallic-roughness model. Fall back
+            // to KHR_materials_pbrSpecularGlossiness when the material
+            // only ships the legacy spec-gloss extension (Lumberyard
+            // Bistro and many FBX-exported scenes do). Conversion:
+            //   base_color = diffuse
+            //   roughness  = 1 - glossiness
+            //   metallic   = max(specular.rgb) (crude but acceptable
+            //     — dielectrics have small specular ≈ 0.04, metals
+            //     have specular ≈ albedo; the luminance proxy maps
+            //     the former to metallic≈0 and the latter toward 1).
+            let (base_color, metallic_factor, roughness_factor, tex_idx, mr_tex_idx) =
+                if pbr.base_color_texture().is_none() {
+                    if let Some(sg) = mat.pbr_specular_glossiness() {
+                        let diffuse = sg.diffuse_factor();
+                        let gloss = sg.glossiness_factor();
+                        let spec = sg.specular_factor();
+                        let metallic = spec[0].max(spec[1]).max(spec[2]);
+                        let diffuse_tex = sg.diffuse_texture()
+                            .and_then(|info| tex_idx_of(info.texture().source().index()));
+                        (diffuse, metallic, 1.0 - gloss, diffuse_tex, None)
+                    } else {
+                        (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), None, None)
+                    }
+                } else {
+                    let tex = pbr.base_color_texture()
+                        .and_then(|info| tex_idx_of(info.texture().source().index()));
+                    let mr = pbr.metallic_roughness_texture()
+                        .and_then(|info| tex_idx_of(info.texture().source().index()));
+                    (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), tex, mr)
+                };
 
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
@@ -1646,6 +1682,45 @@ fn load_gltf(data: &[u8]) -> Option<ModelData> {
 
     if meshes.is_empty() { return None; }
     Some(ModelData { meshes, bbox_min, bbox_max })
+}
+
+/// Replace the extension on a URI (keeps directories / query strings
+/// untouched). Used to fall back from `foo.png` → `foo.dds` when a
+/// glTF references a PNG URI that isn't on disk but the DDS sibling is.
+fn swap_extension(uri: &str, new_ext: &str) -> String {
+    let q = uri.find('?').unwrap_or(uri.len());
+    let (path, query) = uri.split_at(q);
+    let new_path = match path.rfind('.') {
+        Some(dot) if dot > path.rfind('/').unwrap_or(0) => {
+            format!("{}.{}", &path[..dot], new_ext)
+        }
+        _ => format!("{}.{}", path, new_ext),
+    };
+    format!("{}{}", new_path, query)
+}
+
+/// Decode a texture byte slice into RGBA8 pixels + dimensions. Tries
+/// DDS first when the URI extension suggests it (for asset packs like
+/// Lumberyard Bistro that ship BC-compressed textures), falling back
+/// to the `image` crate for PNG/JPEG/etc. Returns None on failure.
+fn decode_texture_bytes(bytes: &[u8], uri: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let is_dds = uri.to_ascii_lowercase().ends_with(".dds")
+        || bytes.len() >= 4 && &bytes[..4] == b"DDS ";
+    if is_dds {
+        if let Ok(dds) = image_dds::ddsfile::Dds::read(bytes) {
+            // Decode mip 0 → RGBA8. image_from_dds handles the common
+            // BC1–BC7 formats; anything it can't decode falls through
+            // to the image crate which will almost certainly fail too.
+            if let Ok(rgba) = image_dds::image_from_dds(&dds, 0) {
+                let (w, h) = (rgba.width(), rgba.height());
+                return Some((rgba.into_raw(), w, h));
+            }
+        }
+    }
+    let img = image::load_from_memory(bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    Some((rgba.into_raw(), w, h))
 }
 
 fn base64_decode(input: &str, output: &mut Vec<u8>) {
