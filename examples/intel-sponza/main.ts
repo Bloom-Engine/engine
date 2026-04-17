@@ -16,7 +16,7 @@ import {
   getMouseDeltaX, getMouseDeltaY,
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
-  setFog, setVignette, setChromaticAberration,
+  setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
 } from "bloom/core";
 import { Key } from "bloom/core";
@@ -76,8 +76,15 @@ setEnvIntensity(1.5);
 setAutoExposure(true);
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
-// Fog disabled — was causing brightness variation in corridors
-// setFog(0.7, 0.75, 0.82, 0.008, 0.0, 0.1);
+// Subtle warm atmospheric haze — dust in the air catches the sun
+// coming through the atrium. Density low enough to preserve scene
+// contrast; height falloff thins it above head-height so the
+// upper walls stay clean.
+setFog(0.86, 0.82, 0.72, 0.010, 0.0, 0.12);
+// Sun shafts from the open atrium. Warm tint matches the outdoor HDR
+// environment; high decay gives long streaks that fade gently with
+// distance from the sun's projected screen position.
+setSunShafts(0.35, 0.97, 1.0, 0.92, 0.78);
 setVignette(0.25, 0.25);
 setChromaticAberration(0.001);
 

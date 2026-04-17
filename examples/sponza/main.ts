@@ -13,7 +13,7 @@ import {
   getMouseDeltaX, getMouseDeltaY,
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
-  setFog, setVignette, setChromaticAberration,
+  setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
 } from "bloom/core";
 import { Key } from "bloom/core";
@@ -67,8 +67,10 @@ setEnvIntensity(1.5);
 setAutoExposure(true);
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
-// Fog disabled — was causing brightness variation in corridors
-// setFog(0.7, 0.75, 0.82, 0.008, 0.0, 0.1);
+// Warm indoor haze catches the atrium light. Density kept low so
+// corridors don't wash out; height falloff keeps upper-wall detail.
+setFog(0.86, 0.82, 0.72, 0.010, 0.0, 0.12);
+setSunShafts(0.35, 0.97, 1.0, 0.92, 0.78);
 setVignette(0.25, 0.25);
 setChromaticAberration(0.001);
 
