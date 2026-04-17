@@ -626,7 +626,13 @@ fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
         dims = textureDimensions(shadow_tex_2);
     }
     let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
-    let radius = 2.0;
+    // Tighter PCF radius (1.0 vs. prior 2.0). Softer was safer against
+    // shadow acne / swim but produced a ~4-texel penumbra on every
+    // shadow — for outdoor sun at this map resolution that translates
+    // to 2-3m of fuzz, which reads as 'painted' rather than 'cast'.
+    // The sun's real angular size gives a ~1m penumbra at typical
+    // scene distances; r=1.0 roughly matches that.
+    let radius = 1.0;
     var sum = 0.0;
     let poisson = array<vec2<f32>, 16>(
         vec2<f32>(-0.94201624, -0.39906216),
