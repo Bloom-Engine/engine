@@ -343,6 +343,7 @@ struct Fs3DOut {
     @location(0) color: vec4<f32>,
     @location(1) material: vec2<f32>,
     @location(2) velocity: vec2<f32>,
+    @location(3) albedo: vec4<f32>,
 };
 
 @fragment
@@ -393,6 +394,7 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
         vec4<f32>(0.0, 1.0, 0.0, 1.0), // DEBUG: green if pipeline_3d renders this
         vec2<f32>(0.0, 1.0),
         vel,
+        vec4<f32>(0.0),
     );
 }
 ";
@@ -750,6 +752,11 @@ struct SceneOut {
     @location(0) color: vec4<f32>,
     @location(1) material: vec2<f32>,
     @location(2) velocity: vec2<f32>,
+    /// Diffuse albedo (gamma-encoded base color). Used by post-passes
+    /// (SSGI, SSR) to modulate bounce light correctly — indirect
+    /// diffuse arriving at a surface is albedo × irradiance, not raw
+    /// radiance. Rgba8Unorm is enough precision here.
+    @location(3) albedo: vec4<f32>,
 };
 
 @fragment
@@ -952,6 +959,7 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         vec4<f32>(hdr, base_alpha),
         vec2<f32>(metallic, roughness),
         vel,
+        vec4<f32>(base_color, 1.0),
     );
 }
 ";
@@ -1168,6 +1176,7 @@ struct SkyOut {
     @location(0) color: vec4<f32>,
     @location(1) material: vec2<f32>,
     @location(2) velocity: vec2<f32>,
+    @location(3) albedo: vec4<f32>,
 };
 
 @fragment
@@ -1201,7 +1210,11 @@ fn sky_fs(in: VsOut) -> SkyOut {
     // reflects, never gets reflected from (well, it gets sampled by
     // SSR via the HDR RT, but that's expected behavior).
     // Sky is at infinity — zero velocity (stationary background).
-    return SkyOut(vec4<f32>(radiance, 1.0), vec2<f32>(0.0, 1.0), vec2<f32>(0.0, 0.0));
+    // Sky albedo is zero — sky is the indirect-light source itself,
+    // so SSGI rays landing on sky pixels must not multiply by anything
+    // (otherwise the bounce would be tinted by background radiance,
+    // which is wrong for a directional distant light).
+    return SkyOut(vec4<f32>(radiance, 1.0), vec2<f32>(0.0, 1.0), vec2<f32>(0.0, 0.0), vec4<f32>(0.0));
 }
 ";
 
@@ -1317,6 +1330,25 @@ fn create_material_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: MATERIAL_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Create the albedo G-buffer (Rgba8Unorm, surface size). Written by
+/// the scene pass so post-passes can modulate bounce light by the
+/// receiving surface's diffuse albedo (SSGI etc.).
+fn create_albedo_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("albedo_rt"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
              | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
@@ -2911,6 +2943,8 @@ struct TaaParams {
 @group(0) @binding(14) var ssgi_samp: sampler;
 @group(0) @binding(15) var velocity_tex: texture_2d<f32>;
 @group(0) @binding(16) var velocity_samp: sampler;
+@group(0) @binding(17) var albedo_tex: texture_2d<f32>;
+@group(0) @binding(18) var albedo_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -2937,11 +2971,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
     let ssr = textureSample(ssr_tex, ssr_samp, in.uv).rgb;
     let ssgi = textureSample(ssgi_tex, ssgi_samp, in.uv).rgb;
+    let albedo = textureSample(albedo_tex, albedo_samp, in.uv).rgb;
     // SSR is added on top of HDR (pre-tonemap) — already strength-
     // and edge-faded by the SSR pass, so a flat add here is fine.
-    // SSGI adds indirect diffuse bounce light — pre-multiplied by
-    // intensity in the SSGI pass, so a flat add here works.
-    let current = hdr + ssr + ssgi + bloom * u.params.y;
+    // SSGI is indirect diffuse bounce: radiance arriving at this
+    // surface that we multiply by the receiver's albedo so dark
+    // materials absorb bounce light correctly (a black wall should
+    // stay black under indirect illumination).
+    let current = hdr + ssr + ssgi * albedo + bloom * u.params.y;
 
     // Reconstruct world-space position from depth — needed for both
     // TAA reprojection fallback and volumetric fog ray marching.
@@ -2993,7 +3030,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let s_bloom = textureSample(bloom_tex, bloom_samp, s_uv).rgb;
             let s_ssr = textureSample(ssr_tex, ssr_samp, s_uv).rgb;
             let s_ssgi = textureSample(ssgi_tex, ssgi_samp, s_uv).rgb;
-            let s = s_hdr + s_ssr + s_ssgi + s_bloom * u.params.y;
+            let s_albedo = textureSample(albedo_tex, albedo_samp, s_uv).rgb;
+            let s = s_hdr + s_ssr + s_ssgi * s_albedo + s_bloom * u.params.y;
             nmin = min(nmin, s);
             nmax = max(nmax, s);
         }
@@ -3259,6 +3297,8 @@ struct CompositeParams {
 @group(0) @binding(10) var ssgi_samp: sampler;
 @group(0) @binding(11) var bloom_tex: texture_2d<f32>;
 @group(0) @binding(12) var bloom_samp: sampler;
+@group(0) @binding(13) var albedo_tex: texture_2d<f32>;
+@group(0) @binding(14) var albedo_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -3373,12 +3413,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // When TAA is off, the HDR source is the raw scene buffer which
     // does not include post-process passes. Fold SSR + SSGI + bloom
-    // in here so the feature set matches the TAA-on path.
+    // in here so the feature set matches the TAA-on path. SSGI is
+    // albedo-modulated so dark materials absorb indirect light.
     if (u.misc.y < 0.5) {
-        let ssr  = textureSample(ssr_tex,  ssr_samp,  sample_uv).rgb;
-        let ssgi = textureSample(ssgi_tex, ssgi_samp, sample_uv).rgb;
-        let bl   = textureSample(bloom_tex, bloom_samp, sample_uv).rgb;
-        hdr_raw = hdr_raw + ssr + ssgi + bl * u.misc.z;
+        let ssr    = textureSample(ssr_tex,    ssr_samp,    sample_uv).rgb;
+        let ssgi   = textureSample(ssgi_tex,   ssgi_samp,   sample_uv).rgb;
+        let bl     = textureSample(bloom_tex,  bloom_samp,  sample_uv).rgb;
+        let albedo = textureSample(albedo_tex, albedo_samp, sample_uv).rgb;
+        hdr_raw = hdr_raw + ssr + ssgi * albedo + bl * u.misc.z;
     }
 
     let ao = textureSample(ssao_tex, ssao_samp, sample_uv).r;
@@ -3685,6 +3727,11 @@ pub struct Renderer {
     /// surfaces fade to zero.
     pub material_rt_texture: wgpu::Texture,
     pub material_rt_view: wgpu::TextureView,
+    /// Albedo G-buffer (Rgba8Unorm). Fourth color attachment in the
+    /// HDR pass. Post-passes (SSGI) multiply bounce radiance by this
+    /// so dark materials absorb indirect light correctly.
+    pub albedo_rt_texture: wgpu::Texture,
+    pub albedo_rt_view: wgpu::TextureView,
     /// Composite-tonemap pipeline + bind group layout. Single full-
     /// screen draw that samples hdr_rt and writes ACES-tonemapped
     /// linear-rgb (sRGB hardware encode handles the transfer fn).
@@ -4440,6 +4487,7 @@ impl Renderer {
         let (depth_texture, depth_view) = create_depth_texture(&device, surface_config.width, surface_config.height);
         let (hdr_rt_texture, hdr_rt_view) = create_hdr_rt(&device, surface_config.width, surface_config.height);
         let (material_rt_texture, material_rt_view) = create_material_rt(&device, surface_config.width, surface_config.height);
+        let (albedo_rt_texture, albedo_rt_view) = create_albedo_rt(&device, surface_config.width, surface_config.height);
         let (bloom_chain_textures, bloom_mip_views, bloom_full_view) = create_bloom_chain(
             &device,
             surface_config.width,
@@ -4635,6 +4683,11 @@ impl Renderer {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
                 ],
                 compilation_options: Default::default(),
             }),
@@ -4768,6 +4821,11 @@ impl Renderer {
                     }),
                     Some(wgpu::ColorTargetState {
                         format: VELOCITY_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -5004,6 +5062,11 @@ impl Renderer {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
                 ],
                 compilation_options: Default::default(),
             }),
@@ -5169,6 +5232,22 @@ impl Renderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -5634,6 +5713,18 @@ impl Renderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 16, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 17, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 18, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
@@ -6352,6 +6443,8 @@ impl Renderer {
             hdr_rt_view,
             material_rt_texture,
             material_rt_view,
+            albedo_rt_texture,
+            albedo_rt_view,
             composite_pipeline,
             composite_layout,
             composite_sampler,
@@ -6612,6 +6705,9 @@ impl Renderer {
             let (mat_t, mat_v) = create_material_rt(&self.device, width, height);
             self.material_rt_texture = mat_t;
             self.material_rt_view = mat_v;
+            let (alb_t, alb_v) = create_albedo_rt(&self.device, width, height);
+            self.albedo_rt_texture = alb_t;
+            self.albedo_rt_view = alb_v;
             let (bt, bm, bf) = create_bloom_chain(&self.device, width, height, BLOOM_MIP_COUNT);
             self.bloom_chain_textures = bt;
             self.bloom_mip_views = bm;
@@ -7752,6 +7848,19 @@ impl Renderer {
                             store: wgpu::StoreOp::Store,
                         },
                     }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.albedo_rt_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // Clear to zero albedo — pixels the scene
+                            // doesn't cover (before sky writes) absorb
+                            // indirect light fully. Sky then writes 0
+                            // too so SSGI rays landing on sky don't
+                            // re-tint bounce by background radiance.
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
@@ -8321,6 +8430,8 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
                     wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
+                    wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 ],
             });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -8602,6 +8713,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]) },
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
+                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],
         });
         {
