@@ -81,10 +81,10 @@ setAutoExposure(true);
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
 
-// Cool Parisian haze — pale blue-white, slightly denser than the
-// interior Sponza case because exterior sight lines are longer and
-// benefit more from aerial perspective.
-setFog(0.80, 0.84, 0.90, 0.014, 0.0, 0.08);
+// Warm Parisian haze — cream-white with a slight yellow shift.
+// Lower density than the first attempt so distant buildings still
+// register texture and colour rather than fading into flat blue fog.
+setFog(0.92, 0.90, 0.84, 0.006, 0.0, 0.05);
 // Subtle shafts — exterior scene so the sun is usually off-frame or
 // clipped by buildings. Lower strength than Sponza's atrium.
 setSunShafts(0.25, 0.96, 1.0, 0.94, 0.82);
