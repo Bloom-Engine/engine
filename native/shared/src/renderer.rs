@@ -3379,7 +3379,8 @@ struct CompositeParams {
     /// w = film grain strength (0..~0.1 amplitude added to luma)
     filmic: vec4<f32>,
     /// x = grain seed (frame index, randomizes the noise per frame);
-    /// yzw padding.
+    /// y = sharpen strength (0 = off, ~0.25 subtle, ~0.5 punchy);
+    /// zw padding.
     misc: vec4<f32>,
 };
 
@@ -3468,6 +3469,21 @@ fn agx_eotf(val_in: vec3<f32>) -> vec3<f32> {
     return agx_mat_inv * val_in;
 }
 
+// Tonemap — branches on u.params.x (0 = ACES, 1 = AgX). Extracted
+// so the sharpen pass can tonemap neighbour HDR samples through the
+// same path as the center pixel.
+fn tonemap_select(hdr: vec3<f32>) -> vec3<f32> {
+    if (u.params.x < 0.5) {
+        return aces_tone(hdr);
+    }
+    let hdr_safe = max(hdr, vec3<f32>(0.0));
+    let agx_display = clamp(agx_eotf(agx_tone(hdr_safe)), vec3<f32>(0.0), vec3<f32>(1.0));
+    let cutoff = vec3<f32>(0.04045);
+    let lo = agx_display / 12.92;
+    let hi = pow((agx_display + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, agx_display <= cutoff);
+}
+
 // Hash-based pseudo-random in [0, 1). Cheap noise function for grain;
 // not great for cryptography or stratified sampling, but visually
 // indistinguishable from white noise at film-grain strengths.
@@ -3526,24 +3542,31 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Branch between ACES and AgX via the uniform. Costs one
     // compare per fragment; the dead branch gets DCE'd per-draw
     // since the uniform is constant across the frame.
-    var ldr: vec3<f32>;
-    if (u.params.x < 0.5) {
-        ldr = aces_tone(hdr);
-    } else {
-        // AgX returns a *display-encoded* (sRGB-gamma) value — that's
-        // how Troy Sobotka's DRT was originally designed to feed a
-        // non-sRGB framebuffer. But our surface is Bgra8Unorm_sRGB,
-        // so hardware applies linear→sRGB on write. Without undoing
-        // the gamma here we double-encode and the whole image washes
-        // out. Apply the sRGB EOTF (decode) so hardware's encode on
-        // write cancels it back to the display-encoded value AgX
-        // produced.
-        let hdr_safe = max(hdr, vec3<f32>(0.0));
-        let agx_display = clamp(agx_eotf(agx_tone(hdr_safe)), vec3<f32>(0.0), vec3<f32>(1.0));
-        let cutoff = vec3<f32>(0.04045);
-        let lo = agx_display / 12.92;
-        let hi = pow((agx_display + 0.055) / 1.055, vec3<f32>(2.4));
-        ldr = select(hi, lo, agx_display <= cutoff);
+    var ldr = tonemap_select(hdr);
+
+    // --- Sharpen (post-tonemap unsharp mask) ---
+    // Subtle lens-like crispening. Samples 4 neighbour HDR values,
+    // applies the same AO + exposure + tonemap path as the centre,
+    // averages them in LDR, and adds the (centre - avg) difference
+    // back scaled by `sharpen_strength`. Operating in LDR post-tonemap
+    // avoids the classic problem of HDR sharpen blowing out highlights
+    // (the unsharp of a bright pixel against a dark one gets amplified
+    // into an ugly rim). The cost is 4 extra tonemap calls, which on
+    // Metal is trivially cheap.
+    let sharpen_strength = u.misc.y;
+    if (sharpen_strength > 0.0) {
+        let dims = vec2<f32>(textureDimensions(hdr_tex));
+        let t = vec2<f32>(1.0 / dims.x, 1.0 / dims.y);
+        let ox = vec2<f32>(t.x, 0.0);
+        let oy = vec2<f32>(0.0, t.y);
+        let h_r = textureSample(hdr_tex, hdr_samp, sample_uv + ox).rgb * ao_pair.r * ao_pair.g * exposure;
+        let h_l = textureSample(hdr_tex, hdr_samp, sample_uv - ox).rgb * ao_pair.r * ao_pair.g * exposure;
+        let h_d = textureSample(hdr_tex, hdr_samp, sample_uv + oy).rgb * ao_pair.r * ao_pair.g * exposure;
+        let h_u = textureSample(hdr_tex, hdr_samp, sample_uv - oy).rgb * ao_pair.r * ao_pair.g * exposure;
+        let avg = (tonemap_select(h_r) + tonemap_select(h_l)
+                 + tonemap_select(h_d) + tonemap_select(h_u)) * 0.25;
+        let detail = ldr - avg;
+        ldr = clamp(ldr + detail * sharpen_strength, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
     // --- Vignette (post-tonemap) ---
@@ -3593,7 +3616,8 @@ struct CompositeParams {
     /// x = chromatic-aberration strength, y = vignette strength,
     /// z = vignette softness, w = grain strength.
     filmic: [f32; 4],
-    /// x = grain seed (frame index, animates the noise), yzw padding.
+    /// x = grain seed (frame index, animates the noise),
+    /// y = sharpen strength, zw padding.
     misc: [f32; 4],
 }
 
@@ -3875,6 +3899,10 @@ pub struct Renderer {
     pub vignette_strength: f32,
     pub vignette_softness: f32,
     pub grain_strength: f32,
+    /// Post-tonemap unsharp-mask strength (0 = off, ~0.25 subtle,
+    /// ~0.5 punchy). Cheap lens-like crispening applied in LDR to
+    /// avoid the highlight blowout that HDR-space sharpen causes.
+    pub sharpen_strength: f32,
     /// Ping-pong 1×1 R16Float textures holding the smoothed
     /// exposure value. Composite reads the "current" slot; the
     /// exposure update pass reads "prev" and writes to "current".
@@ -6624,6 +6652,7 @@ impl Renderer {
             vignette_strength: 0.0,
             vignette_softness: 0.25,
             grain_strength: 0.0,
+            sharpen_strength: 0.25,
             exposure_textures,
             exposure_views,
             exposure_current_idx: 0,
@@ -8894,7 +8923,7 @@ impl Renderer {
                 self.vignette_softness,
                 self.grain_strength,
             ],
-            misc: [self.taa_frame_index as f32, 0.0, 0.0, 0.0],
+            misc: [self.taa_frame_index as f32, self.sharpen_strength, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.composite_uniform_buffer, 0, bytemuck::bytes_of(&cp));
 
