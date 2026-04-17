@@ -2520,24 +2520,29 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(cross(dx, dy));
 
     let intensity = u.params.x;
-    let radius = u.params.y;
+    let max_radius = u.params.y;      // max view-space march distance
     let n_samples_f = u.params.z;
     let n_samples = i32(n_samples_f);
 
     let tbn = build_tbn(n);
 
     var accum = vec3<f32>(0.0);
-    var valid_samples = 0.0;
 
     // Per-pixel noise seed from fragment position.
     let noise_base = ign(in.clip_pos.xy);
 
-    let march_steps = 4;
-    let step_size = radius / f32(march_steps);
+    // Logarithmic march: start fine (0.05m) and grow geometrically up
+    // to max_radius. 14 steps × growth factor = reach max_radius.
+    // For max_radius=20, start=0.05: growth ≈ (20/0.05)^(1/14) ≈ 1.52.
+    // Steps: 0.05, 0.08, 0.12, 0.18, 0.27, 0.41, 0.62, 0.95, 1.44,
+    //        2.19, 3.33, 5.06, 7.69, 11.70, 17.79.
+    let march_steps = 14;
+    let start_t = 0.05;
+    let growth = pow(max_radius / start_t, 1.0 / f32(march_steps));
 
-    for (var i = 0; i < n_samples; i = i + 1) {
+    for (var si = 0; si < n_samples; si = si + 1) {
         // Two pseudo-random values per sample using golden ratio offsets.
-        let fi = f32(i);
+        let fi = f32(si);
         let u1 = fract(noise_base + fi * 0.6180339887);
         let u2 = fract(noise_base * 1.3247179572 + fi * 0.7548776662);
 
@@ -2546,23 +2551,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let local_dir = cosine_hemisphere(u1, u2);
         let dir = normalize(tbn * local_dir);
 
-        // NdotL is implicitly the cosine weight from the hemisphere
-        // sampling — cosine-weighted samples already include it.
-        let ndotl = max(dot(dir, n), 0.0);
-
-        // March along the direction in view space.
-        var hit_found = false;
+        // March along the direction in view space with growing step.
         var hit_color = vec3<f32>(0.0);
+        var prev_t = 0.0;
+        var t = start_t;
 
-        // Start slightly offset to avoid self-intersection.
-        var t = step_size;
         for (var s = 0; s < march_steps; s = s + 1) {
             let ray_view = view_pos + dir * t;
-            // Project to clip space.
             let ray_clip = u.proj * vec4<f32>(ray_view, 1.0);
             let ray_ndc = ray_clip.xyz / ray_clip.w;
 
-            // Off-screen — stop marching.
+            // Off-screen — stop marching (no hit possible beyond).
             if (ray_ndc.x < -1.0 || ray_ndc.x > 1.0 ||
                 ray_ndc.y < -1.0 || ray_ndc.y > 1.0 ||
                 ray_ndc.z < 0.0 || ray_ndc.z > 1.0) {
@@ -2574,34 +2573,37 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
             // Ray has gone past the surface — hit.
             if (ray_ndc.z >= scene_depth && scene_depth < 0.9999) {
-                // Thickness check: reject hits where the ray is far
-                // behind the surface (likely a back face or thin wall).
+                // Thickness check: tolerance scales with step size, so
+                // coarse late-march steps accept wider surface tolerance
+                // (otherwise we'd reject everything at long range).
                 let hit_view = view_pos_from_depth_ssgi(ray_uv, scene_depth);
                 let thickness = abs(ray_view.z - hit_view.z);
-                if (thickness < radius * 0.5) {
-                    hit_color = textureSample(hdr_tex, hdr_samp, ray_uv).rgb;
-                    hit_found = true;
+                let step_size = t - prev_t;
+                if (thickness < step_size * 2.0 + 0.1) {
+                    // Distance falloff — fade hits near max_radius
+                    // so the march boundary is smooth. Also compensates
+                    // for the missing solid-angle information of distant
+                    // screen-space surfaces.
+                    let tn = t / max_radius;
+                    let falloff = 1.0 - tn * tn;
+                    hit_color = textureSample(hdr_tex, hdr_samp, ray_uv).rgb * max(falloff, 0.0);
                 }
                 break;
             }
-            t = t + step_size;
+            prev_t = t;
+            t = t * growth;
         }
 
-        if (hit_found) {
-            // Cosine-weighted hemisphere sampling means the PDF already
-            // includes the cos(theta) / pi term, so just accumulate
-            // the radiance directly.
-            accum += hit_color;
-            valid_samples += 1.0;
-        }
+        // Accumulate every sample. Misses contribute zero radiance,
+        // which is physically reasonable for cosine-weighted hemisphere
+        // sampling when the missing directions point off-screen or to
+        // sky. Dividing by n_samples (not valid_samples) keeps the
+        // estimator unbiased — no artificial brightening when few
+        // rays find geometry.
+        accum = accum + hit_color;
     }
 
-    // Average the valid hits.
-    var result = vec3<f32>(0.0);
-    if (valid_samples > 0.0) {
-        result = accum / valid_samples * intensity;
-    }
-
+    let result = (accum / n_samples_f) * intensity;
     return vec4<f32>(result, 1.0);
 }
 ";
@@ -6301,7 +6303,7 @@ impl Renderer {
             ssgi_pipeline,
             ssgi_layout,
             ssgi_uniform_buffer,
-            ssgi_intensity: 0.25,
+            ssgi_intensity: 0.5,
             ssgi_enabled: true,
             ssgi_history_textures,
             ssgi_history_views,
@@ -7839,7 +7841,7 @@ impl Renderer {
             let sp = SsgiParams {
                 inv_proj,
                 proj: self.current_proj_matrix,
-                params: [self.ssgi_intensity, 4.0, 8.0, self.taa_frame_index as f32],
+                params: [self.ssgi_intensity, 20.0, 8.0, self.taa_frame_index as f32],
             };
             self.queue.write_buffer(&self.ssgi_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
