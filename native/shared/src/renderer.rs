@@ -848,7 +848,15 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let nm_dx = dpdx(n);
     let nm_dy = dpdy(n);
     let curvature_sq = dot(nm_dx, nm_dx) + dot(nm_dy, nm_dy);
-    let kernel_alpha = min(0.25 * curvature_sq, 0.2);
+    // Kaplanyan 2016 screen-space kernel. 0.5 / cap 0.4 is more
+    // aggressive than the older 0.25 / 0.2 tuning — low-roughness
+    // dielectrics like white stucco still sparkle under direct sun
+    // at the weaker value because the GGX lobe is narrow enough that
+    // per-pixel normal variation (from mipped normal maps + small
+    // geometric detail) reads as noise. Doubling the coefficient
+    // widens the lobe just enough to integrate that variance out
+    // before it hits the tonemap.
+    let kernel_alpha = min(0.5 * curvature_sq, 0.4);
     alpha2 = min(alpha2 + kernel_alpha, 1.0);
     roughness = sqrt(alpha2);
 
