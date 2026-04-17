@@ -6742,7 +6742,7 @@ impl Renderer {
             vignette_strength: 0.0,
             vignette_softness: 0.25,
             grain_strength: 0.0,
-            sharpen_strength: 0.25,
+            sharpen_strength: 0.4,
             exposure_textures,
             exposure_views,
             exposure_current_idx: 0,
