@@ -3545,14 +3545,16 @@ fn tonemap_select(hdr: vec3<f32>) -> vec3<f32> {
 }
 
 fn agx_look_punchy(val: vec3<f32>) -> vec3<f32> {
-    let slope = vec3<f32>(1.0);
+    // Per-channel slope (gain): subtle warm white-balance toward the
+    // 'golden hour' feel of Cycles-AgX renders — +3% red, -2% blue.
+    // The Bistro outdoor.hdr leans cool; without this, the shadows
+    // and IBL fill pull the overall image toward blue-grey vs.
+    // Cycles's warmer midtone neutral.
+    let slope = vec3<f32>(1.03, 1.00, 0.98);
     let offset = vec3<f32>(0.0);
     // A whisker above neutral — Cycles-AgX with its LUT-based DRT
     // preserves enough chroma on its own that our polynomial fit only
-    // needs a gentle post-boost to catch up. 1.05 power + 1.1 sat is
-    // essentially 'AgX + tiny correction for the polynomial under-
-    // saturation', rather than Filament's Punchy which is a full
-    // stylised look.
+    // needs a gentle post-boost to catch up.
     let power = vec3<f32>(1.1);
     let saturation = 1.1;
     // ASC-CDL-ish: (val * slope + offset) ^ power
@@ -6742,7 +6744,7 @@ impl Renderer {
             vignette_strength: 0.0,
             vignette_softness: 0.25,
             grain_strength: 0.0,
-            sharpen_strength: 0.4,
+            sharpen_strength: 0.55,
             exposure_textures,
             exposure_views,
             exposure_current_idx: 0,

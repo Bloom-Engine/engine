@@ -62,7 +62,15 @@ RES_Y = 1944   # 16:9, matches Bloom's default Bistro window aspect
 CAM_POS_BLOOM = (-26.43, 3.16, 11.17)   # Y-up, Bloom convention
 CAM_YAW       = -1.17                    # radians — synced with bistro/main.ts
 CAM_PITCH     = 0.0
-CAM_FOVY_DEG  = 60.0
+CAM_FOVY_DEG  = 50.0
+# ^ Empirically matches Bloom's fovy=60 framing. Bloom's perspective
+# matrix uses a straight vertical FOV; Blender's Cycles at
+# angle_y=60° with sensor_fit='VERTICAL' renders a visibly wider
+# effective vertical FOV despite the reported angle_y being 60° —
+# cause traced to Blender's glTF-import / sensor-model interaction
+# that we couldn't reverse-engineer cleanly. ~10° compensation here
+# brings the reference framing in line with Bloom's output so
+# side-by-side comparisons use the same world-space view cone.
 
 SUN_DIR_BLOOM   = (-0.5, 0.75, 0.4)      # Y-up, *toward* the light source
 SUN_COLOR       = (1.0, 240.0/255.0, 220.0/255.0)
