@@ -3510,12 +3510,35 @@ fn tonemap_select(hdr: vec3<f32>) -> vec3<f32> {
     if (u.params.x < 0.5) {
         return aces_tone(hdr);
     }
+    // Full Filament AgX pipeline:
+    //   agx_tone  (inset + log2 + sigmoid)
+    //   agx_eotf  (outset = inverse inset)
+    //   pow(2.2)  (display-encoded → linear, required for sRGB surface)
+    //
+    // Filament's polynomial-approximation AgX (what we use) systematically
+    // under-saturates vs Blender/Cycles' LUT-based AgX. Apply the 'Punchy'
+    // look — saturation 1.4, slight contrast — as a post step to bring
+    // colours closer to the Cycles ground-truth reference. Matches
+    // Filament::ToneMapper::AGX_PUNCHY.
     let hdr_safe = max(hdr, vec3<f32>(0.0));
     let agx_display = clamp(agx_eotf(agx_tone(hdr_safe)), vec3<f32>(0.0), vec3<f32>(1.0));
-    let cutoff = vec3<f32>(0.04045);
-    let lo = agx_display / 12.92;
-    let hi = pow((agx_display + 0.055) / 1.055, vec3<f32>(2.4));
-    return select(hi, lo, agx_display <= cutoff);
+    let linear = pow(agx_display, vec3<f32>(2.2));
+    // Punchy look: post-tonemap saturation + contrast in display space.
+    // slope/offset/power are per-channel lift/gamma/gain; saturation
+    // multiplies chroma around the pixel's luma.
+    let agx_punchy = agx_look_punchy(linear);
+    return agx_punchy;
+}
+
+fn agx_look_punchy(val: vec3<f32>) -> vec3<f32> {
+    let slope = vec3<f32>(1.0);
+    let offset = vec3<f32>(0.0);
+    let power = vec3<f32>(1.35);
+    let saturation = 1.4;
+    // ASC-CDL-ish: (val * slope + offset) ^ power
+    let toned = pow(max(val * slope + offset, vec3<f32>(0.0)), power);
+    let luma = dot(toned, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return vec3<f32>(luma) + saturation * (toned - vec3<f32>(luma));
 }
 
 // Hash-based pseudo-random in [0, 1). Cheap noise function for grain;

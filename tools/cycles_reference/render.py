@@ -82,6 +82,7 @@ def parse_args():
     out = DEFAULT_OUT
     samples = DEFAULT_SAMPLES
     device = DEFAULT_DEVICE
+    view = "Standard"
     if "--" in sys.argv:
         argv = sys.argv[sys.argv.index("--") + 1:]
     else:
@@ -95,8 +96,10 @@ def parse_args():
             samples = int(argv[i + 1]); i += 2; continue
         if a == "--device" and i + 1 < len(argv):
             device = argv[i + 1].upper(); i += 2; continue
+        if a == "--view" and i + 1 < len(argv):
+            view = argv[i + 1]; i += 2; continue
         i += 1
-    return out, samples, device
+    return out, samples, device, view
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +290,7 @@ def setup_camera():
     print(f"[cycles_reference] camera target (Blender)= {tuple(tgt_b)}")
 
 
-def setup_render(out_path, samples, device):
+def setup_render(out_path, samples, device, view):
     scene = bpy.context.scene
     scene.render.engine = 'CYCLES'
     scene.render.resolution_x = RES_X
@@ -305,8 +308,10 @@ def setup_render(out_path, samples, device):
     except Exception:
         pass
 
-    # Film / color management — sRGB view transform matches Bloom's output.
-    scene.view_settings.view_transform = 'Standard'
+    # Film / color management. 'Standard' = pass-through (clip to [0,1]),
+    # 'AgX' = Blender 4+ default DRT (soft sigmoid, preserves highlights).
+    # Pass --view AgX to compare against Bloom's AgX tonemap.
+    scene.view_settings.view_transform = view
 
     # GPU if requested and available
     if device != "CPU":
@@ -330,8 +335,8 @@ def setup_render(out_path, samples, device):
 # ---------------------------------------------------------------------------
 
 def main():
-    out_path, samples, device = parse_args()
-    print(f"[cycles_reference] out={out_path} samples={samples} device={device}")
+    out_path, samples, device, view = parse_args()
+    print(f"[cycles_reference] out={out_path} samples={samples} device={device} view={view}")
 
     clear_scene()
     import_bistro()
@@ -339,7 +344,7 @@ def main():
     setup_camera()
     add_sun("Sun_Key",  SUN_DIR_BLOOM,  SUN_COLOR,  SUN_STRENGTH)
     add_sun("Sun_Fill", FILL_DIR_BLOOM, FILL_COLOR, FILL_STRENGTH)
-    setup_render(out_path, samples, device)
+    setup_render(out_path, samples, device, view)
 
     print("[cycles_reference] rendering…")
     bpy.ops.render.render(write_still=True)

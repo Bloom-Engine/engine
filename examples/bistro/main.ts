@@ -77,7 +77,8 @@ enableShadows();
 // env intensity gives colourful ambient reflection without washing
 // out direct sunlight.
 setEnvIntensity(1.2);
-setAutoExposure(true);
+setAutoExposure(false);
+setManualExposure(1.0);
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
 
