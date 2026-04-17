@@ -1226,26 +1226,45 @@ fn load_gltf_with_textures(
 
             let mat = primitive.material();
             let pbr = mat.pbr_metallic_roughness();
-            let base_color = pbr.base_color_factor();
-            let metallic_factor = pbr.metallic_factor();
-            let roughness_factor = pbr.roughness_factor();
             let emissive_factor = mat.emissive_factor();
 
             let tex_idx_of = |img_idx: usize| -> Option<u32> {
                 texture_indices.get(img_idx).copied()
             };
 
-            // Material textures (all optional)
-            let tex_idx = pbr.base_color_texture()
-                .and_then(|info| tex_idx_of(info.texture().source().index()));
             let normal_tex_idx = mat.normal_texture()
-                .and_then(|info| tex_idx_of(info.texture().source().index()));
-            let mr_tex_idx = pbr.metallic_roughness_texture()
                 .and_then(|info| tex_idx_of(info.texture().source().index()));
             let emissive_tex_idx = mat.emissive_texture()
                 .and_then(|info| tex_idx_of(info.texture().source().index()));
             let occlusion_tex_idx = mat.occlusion_texture()
                 .and_then(|info| tex_idx_of(info.texture().source().index()));
+
+            // Metallic-roughness first; fall back to
+            // KHR_materials_pbrSpecularGlossiness when only that's
+            // authored (Lumberyard Bistro + many FBX exports).
+            // Conversion matches the load_gltf_staged path — see
+            // specgloss_to_metalrough for the algorithm.
+            let (base_color, metallic_factor, roughness_factor, tex_idx, mr_tex_idx) =
+                if pbr.base_color_texture().is_none() {
+                    if let Some(sg) = mat.pbr_specular_glossiness() {
+                        let diffuse = sg.diffuse_factor();
+                        let spec = sg.specular_factor();
+                        let (base_color, metallic) =
+                            specgloss_to_metalrough(diffuse, spec);
+                        let roughness = 1.0 - sg.glossiness_factor();
+                        let diffuse_tex = sg.diffuse_texture()
+                            .and_then(|info| tex_idx_of(info.texture().source().index()));
+                        (base_color, metallic, roughness, diffuse_tex, None)
+                    } else {
+                        (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), None, None)
+                    }
+                } else {
+                    let tex = pbr.base_color_texture()
+                        .and_then(|info| tex_idx_of(info.texture().source().index()));
+                    let mr = pbr.metallic_roughness_texture()
+                        .and_then(|info| tex_idx_of(info.texture().source().index()));
+                    (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), tex, mr)
+                };
 
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
@@ -1500,23 +1519,24 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
             // Prefer the glTF 2.0 metallic-roughness model. Fall back
             // to KHR_materials_pbrSpecularGlossiness when the material
             // only ships the legacy spec-gloss extension (Lumberyard
-            // Bistro and many FBX-exported scenes do). Conversion:
-            //   base_color = diffuse
-            //   roughness  = 1 - glossiness
-            //   metallic   = max(specular.rgb) (crude but acceptable
-            //     — dielectrics have small specular ≈ 0.04, metals
-            //     have specular ≈ albedo; the luminance proxy maps
-            //     the former to metallic≈0 and the latter toward 1).
+            // Bistro and many FBX-exported scenes do). Conversion
+            // follows the reference Khronos algorithm: pick metallic
+            // that best explains the diffuse/specular split under the
+            // assumption of a 0.04 dielectric baseline, then blend
+            // base_color between diffuse and specular weighted by
+            // metallic² (metals tint their reflection, dielectrics
+            // show their diffuse).
             let (base_color, metallic_factor, roughness_factor, tex_idx, mr_tex_idx) =
                 if pbr.base_color_texture().is_none() {
                     if let Some(sg) = mat.pbr_specular_glossiness() {
                         let diffuse = sg.diffuse_factor();
-                        let gloss = sg.glossiness_factor();
                         let spec = sg.specular_factor();
-                        let metallic = spec[0].max(spec[1]).max(spec[2]);
+                        let (base_color, metallic) =
+                            specgloss_to_metalrough(diffuse, spec);
+                        let roughness = 1.0 - sg.glossiness_factor();
                         let diffuse_tex = sg.diffuse_texture()
                             .and_then(|info| tex_idx_of(info.texture().source().index()));
-                        (diffuse, metallic, 1.0 - gloss, diffuse_tex, None)
+                        (base_color, metallic, roughness, diffuse_tex, None)
                     } else {
                         (pbr.base_color_factor(), pbr.metallic_factor(), pbr.roughness_factor(), None, None)
                     }
@@ -1682,6 +1702,56 @@ fn load_gltf(data: &[u8]) -> Option<ModelData> {
 
     if meshes.is_empty() { return None; }
     Some(ModelData { meshes, bbox_min, bbox_max })
+}
+
+/// Convert a KHR_materials_pbrSpecularGlossiness (diffuse + specular
+/// + glossiness) material to the metallic-roughness model. Uses the
+/// reference Khronos two-path formula so materials authored in
+/// Substance/3ds Max/FBX pipelines (Lumberyard Bistro, many ORCA
+/// assets) render correctly on a metal-rough pipeline.
+///
+/// High-level idea: assume a 0.04 dielectric reflectance baseline,
+/// solve for the metallic factor that best reconciles the authored
+/// diffuse and specular colors, then blend base_color between the
+/// two weighted by metallic². Metals have specular ≈ albedo, so the
+/// specular color becomes their base_color; dielectrics carry their
+/// diffuse color through at metallic ≈ 0.
+///
+/// Reference: Khronos glTF sample specGloss→metallicRoughness
+/// converter (https://github.com/KhronosGroup/glTF/pull/1355).
+fn specgloss_to_metalrough(diffuse: [f32; 4], specular: [f32; 3]) -> ([f32; 4], f32) {
+    let dielectric_specular = 0.04_f32;
+    let epsilon = 1e-6_f32;
+
+    let one_minus_dielectric = 1.0 - dielectric_specular;
+    let diffuse_max = diffuse[0].max(diffuse[1]).max(diffuse[2]);
+    let specular_max = specular[0].max(specular[1]).max(specular[2]);
+
+    // Solve a quadratic for metallic. Coefficients from the Khronos
+    // reference: mapping perceived brightness split between diffuse
+    // and specular back to a single metallic parameter.
+    let a = dielectric_specular;
+    let b = diffuse_max * one_minus_dielectric / dielectric_specular.max(epsilon)
+          + specular_max
+          - 2.0 * dielectric_specular;
+    let c = dielectric_specular - specular_max;
+    let discriminant = (b * b - 4.0 * a * c).max(0.0);
+    let metallic = if specular_max < dielectric_specular {
+        0.0
+    } else {
+        (((-b + discriminant.sqrt()) / (2.0 * a)).clamp(0.0, 1.0)).min(1.0)
+    };
+
+    // base_color = mix(diffuse, specular, metallic²) with the diffuse
+    // branch scaled to undo the dielectric energy split.
+    let diffuse_branch_scale = one_minus_dielectric
+        / (1.0 - metallic * dielectric_specular).max(epsilon);
+    let metal_weight = metallic * metallic;
+    let lerp = |a: f32, b: f32, t: f32| a * (1.0 - t) + b * t;
+    let r = lerp(diffuse[0] * diffuse_branch_scale, specular[0], metal_weight);
+    let g = lerp(diffuse[1] * diffuse_branch_scale, specular[1], metal_weight);
+    let bl = lerp(diffuse[2] * diffuse_branch_scale, specular[2], metal_weight);
+    ([r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), bl.clamp(0.0, 1.0), diffuse[3]], metallic)
 }
 
 /// Replace the extension on a URI (keeps directories / query strings
