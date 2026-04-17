@@ -477,6 +477,7 @@ struct VertexOutputScene {
 @group(1) @binding(6) var shadow_tex_1: texture_depth_2d;
 @group(1) @binding(7) var shadow_tex_2: texture_depth_2d;
 @group(1) @binding(8) var shadow_samp: sampler_comparison;
+@group(1) @binding(9) var env_diffuse_tex: texture_2d<f32>;
 @group(2) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(2) @binding(1) var base_color_samp: sampler;
 @group(2) @binding(2) var normal_tex: texture_2d<f32>;
@@ -793,7 +794,13 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let nm_dx = dpdx(n);
     let nm_dy = dpdy(n);
     let curvature_sq = dot(nm_dx, nm_dx) + dot(nm_dy, nm_dy);
-    let kernel_alpha = min(0.25 * curvature_sq, 0.18);
+    // Previously clamped to 0.18 which works for slightly-rough metals
+    // but isn't enough for IBL specular on the *full* mip chain —
+    // dedicated diffuse texture freed the smallest mip for specular,
+    // so reflective materials hit much sharper mips and alias badly
+    // without a wider roughness boost. 0.5 kernel cap tames the
+    // sparkle on polished stone without blurring out legitimate detail.
+    let kernel_alpha = min(0.25 * curvature_sq, 0.5);
     let alpha_base = roughness * roughness;
     roughness = sqrt(min(alpha_base + kernel_alpha, 1.0));
 
@@ -869,12 +876,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let n_dot_v_ibl = max(dot(n, v), 0.0);
     let f0 = mix(vec3<f32>(0.04), base_color, metallic);
 
-    // Diffuse irradiance: smallest mip is reserved for a proper
-    // cosine-weighted irradiance convolution (run once at env load).
-    // textureNumLevels gives us the actual mip count of the bound
-    // env texture (1 for the default 1×1 gray, ≤7 for HDR loads).
+    // Diffuse irradiance: dedicated cosine-convolved texture populated
+    // at env load. Sampling it directly (mip 0) at the fragment normal
+    // gives proper Lambertian diffuse — no mip-steal hack on the
+    // specular chain, so specular can use every mip for GGX prefilter.
     let mips = f32(textureNumLevels(env_tex));
-    let irradiance = env_sample_lod(n, mips - 1.0);
+    let irr_uv = seamless_equirect_uv(dir_to_equirect_uv(n));
+    let irradiance = textureSampleLevel(env_diffuse_tex, env_samp, irr_uv, 0.0).rgb
+                   * lighting.camera_pos.w;
 
     // For diffuse IBL, the Schlick-with-roughness approximation
     // (Lazarov 2013) handles the average kS factor at grazing angles.
@@ -883,12 +892,12 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let kd = (vec3<f32>(1.0) - f_ibl) * (1.0 - metallic);
     let ibl_diffuse = irradiance * base_color * kd * occlusion;
 
-    // Pre-filtered specular sample at mip = roughness * (mips - 2).
-    // Cap one below the diffuse mip — that mip is the irradiance
-    // map, no longer a GGX-prefiltered sample. With mips=7 the
-    // specular range becomes 0..5 (mirror to roughest-still-specular).
+    // Pre-filtered specular sample at mip = roughness * (mips - 1).
+    // All env_tex mips are GGX-prefiltered now that diffuse lives in
+    // its own dedicated texture — roughness = 1 samples the smallest,
+    // most-blurred mip, and roughness = 0 samples mip 0 (mirror).
     let r = reflect(-v, n);
-    let max_spec_mip = max(mips - 2.0, 0.0);
+    let max_spec_mip = max(mips - 1.0, 0.0);
     let prefiltered_env = env_sample_lod(r, roughness * max_spec_mip);
 
     // BRDF LUT lookup — (NdotV, roughness) → (scale, bias) such that
@@ -3941,6 +3950,13 @@ pub struct Renderer {
     sky_pipeline: wgpu::RenderPipeline,
     sky_bind_group_layout: wgpu::BindGroupLayout,
     sky_sampler: wgpu::Sampler,
+    /// Dedicated cosine-convolved diffuse irradiance texture. Separate
+    /// from the GGX-prefiltered specular chain so both can use their
+    /// full resolution range. Single mip at 128×64 equirect — ample
+    /// for a low-frequency irradiance signal. `None` until an HDR is
+    /// loaded; bind group falls back to `scene_env_default_view` (1×1
+    /// gray) while empty.
+    env_diffuse_texture: Option<wgpu::Texture>,
 
     // Scene pipeline (retained scene graph rendering with normal
     // mapping). Distinct from pipeline_3d so immediate-mode draws
@@ -4186,6 +4202,16 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let lighting_uniforms = LightingUniforms::defaults();
@@ -4344,6 +4370,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[1]) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[2]) },
                 wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&shadow_map.sampler) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&scene_env_default_view) },
             ],
         });
 
@@ -6455,6 +6482,7 @@ impl Renderer {
             sky_pipeline,
             sky_bind_group_layout,
             sky_sampler,
+            env_diffuse_texture: None,
             scene_pipeline,
             scene_material_layout,
             _scene_env_default_texture: scene_env_default_texture,
@@ -6951,25 +6979,17 @@ impl Renderer {
             ],
         });
 
-        // GGX-prefilter mips 1..N-1 with roughness scaling. The
-        // smallest mip (level N-1) instead gets a cosine-weighted
-        // diffuse irradiance convolution so the scene shader's IBL
-        // diffuse sample is properly Lambertian — that mip is
-        // dedicated to diffuse, while specular reads at fractional
-        // mips ≤ (N-2) for normal roughness values.
-        let last_mip = mip_count - 1;
+        // GGX-prefilter every mip 1..N-1 with roughness scaling. Mip 0
+        // is the unmodified mirror radiance (copied above); higher mips
+        // are progressively rougher. Diffuse irradiance now lives in a
+        // separate dedicated texture, so the specular chain uses every
+        // available mip — roughness = 1 samples the smallest mip for
+        // the widest GGX lobe, with no mip stolen for diffuse use.
         for level in 1..mip_count {
             let mip_w = (width >> level).max(1);
             let mip_h = (height >> level).max(1);
-            let is_diffuse = level == last_mip;
             let roughness = level as f32 / (mip_count - 1) as f32;
-            let sample_count = if is_diffuse {
-                // 1024 cosine samples gives a smooth irradiance map
-                // even for high-contrast HDRs.
-                1024.0
-            } else {
-                (128.0 + 384.0 * roughness).round()
-            };
+            let sample_count = (128.0 + 384.0 * roughness).round();
 
             let uniforms = PrefilterUniforms {
                 params: [roughness, sample_count, mip_w as f32, mip_h as f32],
@@ -6999,12 +7019,47 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            let pl = if is_diffuse {
-                &self.prefilter_diffuse_pipeline
-            } else {
-                &self.prefilter_pipeline
-            };
-            pass.set_pipeline(pl);
+            pass.set_pipeline(&self.prefilter_pipeline);
+            pass.set_bind_group(0, &prefilter_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Dedicated diffuse irradiance texture — 128×64 equirect with
+        // cosine-convolved radiance. 1024 samples / texel, one-shot.
+        let diffuse_w: u32 = 128;
+        let diffuse_h: u32 = 64;
+        let diffuse_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky_env_diffuse_texture"),
+            size: wgpu::Extent3d { width: diffuse_w, height: diffuse_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let diffuse_uniforms = PrefilterUniforms {
+            params: [1.0, 1024.0, diffuse_w as f32, diffuse_h as f32],
+        };
+        self.queue.write_buffer(&self.prefilter_uniform_buffer, 0, bytemuck::bytes_of(&diffuse_uniforms));
+        let diffuse_view_rt = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("prefilter_diffuse_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &diffuse_view_rt,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.prefilter_diffuse_pipeline);
             pass.set_bind_group(0, &prefilter_bg, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -7033,7 +7088,9 @@ impl Renderer {
         // Rebuild lighting_bind_group so the scene shader's group 1
         // binding points at this env texture (for IBL ambient and
         // specular reflections). The lighting uniform buffer + BRDF
-        // LUT bindings stay put — only env tex/sampler change.
+        // LUT bindings stay put — only env tex/sampler + diffuse view
+        // change.
+        let diffuse_view_bg = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let new_lighting_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lighting_bg"),
             layout: &self.lighting_layout,
@@ -7047,11 +7104,13 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
                 wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&diffuse_view_bg) },
             ],
         });
 
         self.sky_texture = Some(texture);
         self.sky_bind_group = Some(bg);
+        self.env_diffuse_texture = Some(diffuse_texture);
         self.lighting_bind_group = new_lighting_bg;
     }
 
