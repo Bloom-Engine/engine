@@ -2009,22 +2009,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // Gentle contrast + floor. Without the floor, dense near-field
-    // views (facing a close wall / curtain / carving) saturate the
-    // horizon-angle integral for every sample direction, dragging
-    // raw AO down to ~0.3 across the WHOLE screen — which then
-    // multiplied as a uniform darkening. The floor lets us keep
-    // selective crevice AO in open views while preventing whole-
-    // screen brownout in dense views.
-    // Stronger crevice AO. The 0.6 floor was a conservative response
-    // to dense-view brown-out on Khronos Sponza, but on higher-detail
-    // scenes (Intel Sponza) it was neutering the pronounced arch /
-    // column-base AO that gives photogrammetric scenes their depth.
-    // 0.3 allows real architectural crevices to read as dark while
-    // still protecting against the pathological case of every march
-    // ray hitting nearby geometry in tight corridors.
-    let ao_contrasted = pow(ao, 1.5);
-    let ao_floored = max(ao_contrasted, 0.3);
+    // Contrast + floor. The floor prevents whole-screen brown-out in
+    // dense near-field views (facing a close wall / carving) where
+    // every horizon sample hits geometry and drags raw AO down
+    // uniformly. Floor 0.15 + pow(2.0) lets real architectural
+    // crevices read as properly dark (grounding contact shadows
+    // under awnings, at wall-to-ground joints, around scene objects)
+    // while still protecting against the pathological
+    // everything-is-occluded case.
+    //
+    // Previous 0.3 floor / pow(1.5) was tuned for Sponza-family
+    // interiors where dense-view brownout was the dominant failure
+    // mode — on outdoor scenes like Bistro it left AO too shy to
+    // give objects proper weight.
+    let ao_contrasted = pow(ao, 2.0);
+    let ao_floored = max(ao_contrasted, 0.15);
     let final_ao = mix(1.0, ao_floored, strength);
 
     // Write AO into R, contact shadow into G. Separate channels so
@@ -2032,10 +2031,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // from the horizon march) without smearing contact shadows,
     // which are a sharp binary ray-march result that only reads
     // right with pixel-accurate edges.
-    // mix(0.3, 1.0, contact) bounds contact's darkening to 30% so a
-    // fully-shadowed fragment never drops below what the AO floor
-    // would otherwise permit.
-    let contact_scaled = mix(0.3, 1.0, contact);
+    // mix(0.2, 1.0, contact): bounds contact darkening to 80% so
+    // shadow-map-shadowed pixels can still get additional grounding
+    // from the contact march (awning-to-wall seams, Vespa under-
+    // shadow, cobblestone mortar lines) without fully blacking out.
+    let contact_scaled = mix(0.2, 1.0, contact);
     return vec4<f32>(saturate(final_ao), saturate(contact_scaled), 0.0, 1.0);
 }
 ";
