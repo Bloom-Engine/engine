@@ -75,7 +75,7 @@ enableShadows();
 
 // Open-air street scene: the sky is the dominant IBL source. 1.2×
 // env intensity gives colourful ambient reflection without washing
-// out direct sunlight.
+// out direct sunlight (now at 3.0 below).
 setEnvIntensity(1.2);
 setAutoExposure(false);
 setManualExposure(1.0);
@@ -89,8 +89,8 @@ setFog(0.92, 0.90, 0.84, 0.006, 0.0, 0.05);
 // Subtle shafts — exterior scene so the sun is usually off-frame or
 // clipped by buildings. Lower strength than Sponza's atrium.
 setSunShafts(0.25, 0.96, 1.0, 0.94, 0.82);
-setVignette(0.20, 0.25);
-setChromaticAberration(0.001);
+setVignette(0.10, 0.30);
+setChromaticAberration(0.0005);
 
 // ---- Load Bistro into scene graph ----
 // `bistro.gltf` = exterior street corner. Swap to `bistrox.gltf`
