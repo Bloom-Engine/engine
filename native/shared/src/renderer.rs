@@ -762,7 +762,31 @@ fn shade_pbr(
     let d = d_ggx(n_dot_h, alpha2);
     let vis = v_smith_ggx_correlated(n_dot_l, n_dot_v, alpha2);
 
-    let specular = d * vis * f;
+    let specular_raw = d * vis * f;
+
+    // Dielectric direct-specular attenuation. A polished marble column
+    // lit by the sun produces a narrow GGX highlight peak that pathtracers
+    // average over hemisphere-sized light sources; our point sun spikes
+    // D_GGX to 1000+ at the peak and survives tonemap as a bright stripe
+    // even after Fresnel (Intel Sponza column vs Cycles was the test).
+    // Same smoothstep-by-roughness treatment as the IBL path, applied
+    // only to the specular lobe — diffuse stays physically correct.
+    let dielectric_direct_amp = smoothstep(0.0, 1.0, roughness);
+    let dielectric_factor = 1.0 - metallic;
+    let direct_spec_scale = mix(1.0, dielectric_direct_amp, dielectric_factor);
+    // Universal roughness damping on direct specular too — same
+    // reasoning as the IBL path; a smooth marble column lit by a
+    // point sun spikes D_GGX past any tonemap cap. Metals stay at
+    // full direct spec for roughness > ~0.75.
+    // Universal luma cap on direct specular too. A smooth marble
+    // cylinder hit by the sun spikes D_GGX past any reasonable
+    // tonemap; clamp to the same 0.3 luma ceiling as IBL before the
+    // tonemap eats it.
+    let direct_luma = dot(specular_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let direct_cap = min(1.0, 0.3 / max(direct_luma, 0.0001));
+    let universal_damp = smoothstep(0.05, 0.75, roughness);
+    let specular = specular_raw * direct_spec_scale * universal_damp * direct_cap;
+
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     let diffuse = kd * base_color / PI;
 
@@ -1047,14 +1071,39 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let luma_cap = 0.5;
     let cap_scale = select(1.0, luma_cap / max(spec_luma, 0.0001),
                            spec_luma > luma_cap);
-    // Roughness attenuation curve for dielectrics: 0.0 at roughness
-    // 0 (fully polished, no spec — IBL can't possibly know visibility),
-    // ramp up to 1.0 by roughness 0.8 where the prefiltered blur is
-    // broad enough that a wrong sample averages out with neighbours.
-    let dielectric_spec_amp = smoothstep(0.0, 0.8, roughness);
+    // Roughness attenuation curve for dielectrics: fully off on
+    // polished surfaces, on-ramp all the way to roughness 1.0 where
+    // the prefiltered blur covers a full hemisphere so a wrong sample
+    // is guaranteed to average with its occluded neighbours. This
+    // nearly wipes the column stripe without killing specular on
+    // rough natural stone — matter with roughness 0.7 still gets
+    // ~50% of the IBL spec contribution.
+    let dielectric_spec_amp = smoothstep(0.0, 1.0, roughness);
     let dielectric_scale = mix(1.0, cap_scale * dielectric_spec_amp,
                                dielectric_factor);
-    let ibl_spec = ibl_spec_raw * dielectric_scale * spec_occ;
+    // Universal roughness-based spec attenuation. A smooth curved
+    // surface with ANY material (even metal) needs visibility-aware
+    // specular to avoid bright stripes where the reflection vector
+    // happens to sweep across a hot HDR sample. We don't have
+    // visibility, so we dial down specular for smooth surfaces
+    // regardless of metalness. Roughness 0.15 floor (applied upstream
+    // to dielectrics) plus this smoothstep leaves roughness 1.0
+    // surfaces untouched and mid-rough surfaces (0.3-0.5) at
+    // significant but reduced strength. Metals still get the
+    // dielectric_scale (via the metallic-weighted mix), so the
+    // combined effect is conservative for both.
+    // Universal luma cap: whatever the metallicity or the roughness,
+    // the IBL specular contribution for a single fragment can't exceed
+    // a hard luma ceiling. Marble / stone columns get their mirror-
+    // of-a-bright-sky-strip reflection clipped to something that
+    // couldn't survive a path-tracer's visibility integral,
+    // and brightly-polished metals lose a little punch (they compensate
+    // via direct specular which still uses Fresnel at full strength).
+    let cap2_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let cap2 = min(1.0, 0.3 / max(cap2_luma, 0.0001));
+    let roughness_amp = smoothstep(0.05, 0.75, roughness);
+    let ibl_spec = ibl_spec_raw
+        * dielectric_scale * spec_occ * roughness_amp * cap2;
 
     // Indirect-shadow attenuation. 0.15 — deep enough that windows
     // and under-awnings go nearly black (matching Cycles' reference),
