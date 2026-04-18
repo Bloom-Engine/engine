@@ -44,50 +44,93 @@ from mathutils import Vector, Matrix
 # ---------------------------------------------------------------------------
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BISTRO_GLTF = os.path.abspath(os.path.join(
-    HERE, "..", "..", "examples", "bistro", "assets", "bistro.gltf"
-))
-OUTDOOR_HDR = os.path.abspath(os.path.join(
-    HERE, "..", "..", "examples", "bistro", "assets", "outdoor.hdr"
-))
 
-# Defaults (tune via CLI args after `--`)
-DEFAULT_OUT = "/tmp/bistro_cycles.png"
+# Scene presets. Each dict mirrors its corresponding examples/<scene>/main.ts.
+# Select via CLI: --scene sponza (default) or --scene bistro.
+SCENES = {
+    "bistro": {
+        "gltf": os.path.abspath(os.path.join(
+            HERE, "..", "..", "examples", "bistro", "assets", "bistro.gltf")),
+        "hdr":  os.path.abspath(os.path.join(
+            HERE, "..", "..", "examples", "bistro", "assets", "outdoor.hdr")),
+        "default_out": "/tmp/bistro_cycles.png",
+        "cam_pos_bloom": (-26.43, 3.16, 11.17),
+        "cam_yaw":       -1.17,
+        "cam_pitch":     0.0,
+        # 50° compensates for Blender glTF-import / sensor-model quirk; matches
+        # Bloom's fovy=60 framing. See note in setup_camera above.
+        "cam_fovy_deg":  50.0,
+        "sun_dir_bloom": (-0.5, 0.75, 0.4),
+        "sun_color":     (1.0, 240.0/255.0, 220.0/255.0),
+        "sun_strength":  5.0,
+        "fill_dir_bloom": (0.0, -1.0, 0.0),
+        "fill_color":     (0.55, 0.55, 0.7),
+        "fill_strength":  1.2,
+        "env_intensity":  1.2,
+        "exposure_ev":    0.0,
+        "needs_dds_sanitize": True,
+    },
+    "sponza": {
+        "gltf": os.path.abspath(os.path.join(
+            HERE, "..", "..", "examples", "intel-sponza", "assets",
+            "NewSponza_Main_glTF_003.gltf")),
+        "hdr":  os.path.abspath(os.path.join(
+            HERE, "..", "..", "examples", "intel-sponza", "assets", "outdoor.hdr")),
+        "default_out": "/tmp/sponza_cycles.png",
+        "cam_pos_bloom": (0.0, 2.0, 0.0),
+        "cam_yaw":       0.0,
+        "cam_pitch":     0.0,
+        # Same 10° compensation vs Bloom's fovy=60 for the sensor-model quirk.
+        "cam_fovy_deg":  50.0,
+        "sun_dir_bloom": (0.6, 0.8, 0.3),
+        "sun_color":     (1.0, 245.0/255.0, 230.0/255.0),
+        # Bistro's 5.0 is for an open-air scene. Sponza is enclosed; Bloom /
+        # Unity cheat this with auto-exposure + ambient lift. Cycles is
+        # physically honest — bump sun + env so the interior reads similar
+        # to the real-time renders without cranking view-settings exposure.
+        "sun_strength":  25.0,
+        "fill_dir_bloom": (0.0, -1.0, 0.0),
+        "fill_color":     (0.55, 0.65, 0.5),
+        "fill_strength":  3.0,
+        "env_intensity":  3.0,
+        # Cycles view-settings EV bias to approximate Bloom's auto-exposure
+        # lift on this enclosed atrium. +3 EV ≈ 8× brightness — matches
+        # what an auto-exposure metering loop settles on when pointed into
+        # a shadowed interior.
+        "exposure_ev":   3.0,
+        "needs_dds_sanitize": False,
+    },
+}
+
+DEFAULT_SCENE = "sponza"
 DEFAULT_SAMPLES = 128
-DEFAULT_DEVICE = "METAL"   # macOS: METAL; fall back to CPU if unavailable
+DEFAULT_DEVICE = "METAL"
 RES_X = 3456
-RES_Y = 1944   # 16:9, matches Bloom's default Bistro window aspect
+RES_Y = 1944
 
-# Scene parameters — mirror examples/bistro/main.ts
-CAM_POS_BLOOM = (-26.43, 3.16, 11.17)   # Y-up, Bloom convention
-CAM_YAW       = -1.17                    # radians — synced with bistro/main.ts
-CAM_PITCH     = 0.0
-CAM_FOVY_DEG  = 50.0
-# ^ Empirically matches Bloom's fovy=60 framing. Bloom's perspective
-# matrix uses a straight vertical FOV; Blender's Cycles at
-# angle_y=60° with sensor_fit='VERTICAL' renders a visibly wider
-# effective vertical FOV despite the reported angle_y being 60° —
-# cause traced to Blender's glTF-import / sensor-model interaction
-# that we couldn't reverse-engineer cleanly. ~10° compensation here
-# brings the reference framing in line with Bloom's output so
-# side-by-side comparisons use the same world-space view cone.
-
-SUN_DIR_BLOOM   = (-0.5, 0.75, 0.4)      # Y-up, *toward* the light source
-SUN_COLOR       = (1.0, 240.0/255.0, 220.0/255.0)
-SUN_STRENGTH    = 5.0                     # Cycles W/m^2 — roughly matches Bloom intensity 1.8
-
-FILL_DIR_BLOOM  = (0.0, -1.0, 0.0)
-FILL_COLOR      = (0.55, 0.55, 0.7)
-FILL_STRENGTH   = 1.2
-
-ENV_INTENSITY   = 1.2                     # matches setEnvIntensity(1.2)
+# These get populated from the selected scene in main().
+CAM_POS_BLOOM = None
+CAM_YAW = None
+CAM_PITCH = None
+CAM_FOVY_DEG = None
+SUN_DIR_BLOOM = None
+SUN_COLOR = None
+SUN_STRENGTH = None
+FILL_DIR_BLOOM = None
+FILL_COLOR = None
+FILL_STRENGTH = None
+ENV_INTENSITY = None
+SCENE_GLTF = None
+OUTDOOR_HDR = None
+NEEDS_DDS_SANITIZE = False
 
 # ---------------------------------------------------------------------------
 # Arg parsing (Blender drops anything after `--` into argv; scan manually)
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    out = DEFAULT_OUT
+    scene = DEFAULT_SCENE
+    out = None
     samples = DEFAULT_SAMPLES
     device = DEFAULT_DEVICE
     view = "Standard"
@@ -98,6 +141,8 @@ def parse_args():
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a == "--scene" and i + 1 < len(argv):
+            scene = argv[i + 1]; i += 2; continue
         if a == "--out" and i + 1 < len(argv):
             out = argv[i + 1]; i += 2; continue
         if a == "--samples" and i + 1 < len(argv):
@@ -107,7 +152,11 @@ def parse_args():
         if a == "--view" and i + 1 < len(argv):
             view = argv[i + 1]; i += 2; continue
         i += 1
-    return out, samples, device, view
+    if scene not in SCENES:
+        raise ValueError(f"Unknown --scene {scene!r}; valid: {list(SCENES.keys())}")
+    if out is None:
+        out = SCENES[scene]["default_out"]
+    return scene, out, samples, device, view
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +240,10 @@ def sanitize_gltf_for_blender(src_path):
     return out_path
 
 
-def import_bistro():
-    if not os.path.isfile(BISTRO_GLTF):
-        raise FileNotFoundError(f"bistro.gltf not found at {BISTRO_GLTF}")
-    path = sanitize_gltf_for_blender(BISTRO_GLTF)
+def import_scene_gltf():
+    if not os.path.isfile(SCENE_GLTF):
+        raise FileNotFoundError(f"glTF not found at {SCENE_GLTF}")
+    path = sanitize_gltf_for_blender(SCENE_GLTF) if NEEDS_DDS_SANITIZE else SCENE_GLTF
     # Import glTF. The Blender importer re-maps +Y -> +Z by default; we
     # *want* that because we'll convert our own camera/sun vectors into
     # Blender's Z-up space below, and everything stays consistent.
@@ -302,7 +351,7 @@ def setup_camera():
     print(f"[cycles_reference] sensor_fit={cam_data.sensor_fit} sensor_w={cam_data.sensor_width} sensor_h={cam_data.sensor_height} lens={cam_data.lens}")
 
 
-def setup_render(out_path, samples, device, view):
+def setup_render(out_path, samples, device, view, exposure_ev=0.0):
     scene = bpy.context.scene
     scene.render.engine = 'CYCLES'
     scene.render.resolution_x = RES_X
@@ -324,6 +373,7 @@ def setup_render(out_path, samples, device, view):
     # 'AgX' = Blender 4+ default DRT (soft sigmoid, preserves highlights).
     # Pass --view AgX to compare against Bloom's AgX tonemap.
     scene.view_settings.view_transform = view
+    scene.view_settings.exposure = exposure_ev
 
     # GPU if requested and available
     if device != "CPU":
@@ -347,16 +397,38 @@ def setup_render(out_path, samples, device, view):
 # ---------------------------------------------------------------------------
 
 def main():
-    out_path, samples, device, view = parse_args()
-    print(f"[cycles_reference] out={out_path} samples={samples} device={device} view={view}")
+    global CAM_POS_BLOOM, CAM_YAW, CAM_PITCH, CAM_FOVY_DEG
+    global SUN_DIR_BLOOM, SUN_COLOR, SUN_STRENGTH
+    global FILL_DIR_BLOOM, FILL_COLOR, FILL_STRENGTH
+    global ENV_INTENSITY, SCENE_GLTF, OUTDOOR_HDR, NEEDS_DDS_SANITIZE
+
+    scene, out_path, samples, device, view = parse_args()
+    s = SCENES[scene]
+    CAM_POS_BLOOM   = s["cam_pos_bloom"]
+    CAM_YAW         = s["cam_yaw"]
+    CAM_PITCH       = s["cam_pitch"]
+    CAM_FOVY_DEG    = s["cam_fovy_deg"]
+    SUN_DIR_BLOOM   = s["sun_dir_bloom"]
+    SUN_COLOR       = s["sun_color"]
+    SUN_STRENGTH    = s["sun_strength"]
+    FILL_DIR_BLOOM  = s["fill_dir_bloom"]
+    FILL_COLOR      = s["fill_color"]
+    FILL_STRENGTH   = s["fill_strength"]
+    ENV_INTENSITY   = s["env_intensity"]
+    SCENE_GLTF      = s["gltf"]
+    OUTDOOR_HDR     = s["hdr"]
+    NEEDS_DDS_SANITIZE = s["needs_dds_sanitize"]
+
+    print(f"[cycles_reference] scene={scene} out={out_path} samples={samples} device={device} view={view}")
 
     clear_scene()
-    import_bistro()
+    import_scene_gltf()
     setup_world_hdr()
     setup_camera()
     add_sun("Sun_Key",  SUN_DIR_BLOOM,  SUN_COLOR,  SUN_STRENGTH)
     add_sun("Sun_Fill", FILL_DIR_BLOOM, FILL_COLOR, FILL_STRENGTH)
-    setup_render(out_path, samples, device, view)
+    setup_render(out_path, samples, device, view,
+                 exposure_ev=s.get("exposure_ev", 0.0))
 
     print("[cycles_reference] rendering…")
     bpy.ops.render.render(write_still=True)
