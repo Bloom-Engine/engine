@@ -2091,7 +2091,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let light_vs = normalize(u.light_dir_vs.xyz);
     var contact = 1.0; // 1 = lit, 0 = in contact shadow
     let cs_steps = 12u;
-    let cs_max_dist = 0.5; // max view-space march distance (world units)
+    // Shorter march distance: 0.2 world units gives ~1.7 cm per step at
+    // 12 steps, fine enough to resolve mortar lines and sub-brick
+    // detail on Intel Sponza where 4 cm steps were smoothing them out.
+    // Wider-range occlusion (lamp-under shadows, awning-to-wall seams)
+    // is still covered by GTAO's horizon scan + the shadow map.
+    let cs_max_dist = 0.2;
     let cs_step = cs_max_dist / f32(cs_steps);
     for (var i = 1u; i <= cs_steps; i = i + 1u) {
         let march_pos = P + light_vs * cs_step * f32(i);
@@ -2146,11 +2151,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // from the horizon march) without smearing contact shadows,
     // which are a sharp binary ray-march result that only reads
     // right with pixel-accurate edges.
-    // mix(0.2, 1.0, contact): bounds contact darkening to 80% so
+    // mix(0.1, 1.0, contact): bounds contact darkening to 90% so
     // shadow-map-shadowed pixels can still get additional grounding
     // from the contact march (awning-to-wall seams, Vespa under-
     // shadow, cobblestone mortar lines) without fully blacking out.
-    let contact_scaled = mix(0.2, 1.0, contact);
+    // Previous 0.2 was too conservative for mortar-scale crevices
+    // which should read near-black.
+    let contact_scaled = mix(0.1, 1.0, contact);
     return vec4<f32>(saturate(final_ao), saturate(contact_scaled), 0.0, 1.0);
 }
 ";
