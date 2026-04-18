@@ -1033,17 +1033,27 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // Dielectric specular luma cap. Without a proper visibility-aware
     // specular integral, smooth non-metals like marble / varnished wood
     // end up reflecting the HDR's bright-sky region at full intensity
-    // even when occluded by intervening geometry (the column stripe on
-    // Sponza vs Cycles was the smoking gun). Path-tracers handle this
-    // via shadow rays; we approximate by clamping dielectric luma to a
-    // sane multiple of mid-grey, leaving metals alone so chrome and
-    // gold keep their full dynamic range.
+    // even when occluded by intervening geometry (the Intel Sponza
+    // column stripe vs Cycles was the smoking gun — proven by a
+    // roughness=1 test render where the stripe disappeared).
+    // Path-tracers handle this via shadow rays; we approximate by
+    // (1) hard luma cap at 0.8 mid-grey — barely visible — and
+    // (2) scaling the dielectric spec amplitude by roughness so the
+    // polished end of the scale (roughness 0.15-0.35) loses almost all
+    // of its IBL specular response. Metals are left alone so chrome
+    // and gold keep their full dynamic range.
     let spec_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
     let dielectric_factor = 1.0 - metallic;
-    let luma_cap = 2.5;
+    let luma_cap = 0.5;
     let cap_scale = select(1.0, luma_cap / max(spec_luma, 0.0001),
                            spec_luma > luma_cap);
-    let dielectric_scale = mix(1.0, cap_scale, dielectric_factor);
+    // Roughness attenuation curve for dielectrics: 0.0 at roughness
+    // 0 (fully polished, no spec — IBL can't possibly know visibility),
+    // ramp up to 1.0 by roughness 0.8 where the prefiltered blur is
+    // broad enough that a wrong sample averages out with neighbours.
+    let dielectric_spec_amp = smoothstep(0.0, 0.8, roughness);
+    let dielectric_scale = mix(1.0, cap_scale * dielectric_spec_amp,
+                               dielectric_factor);
     let ibl_spec = ibl_spec_raw * dielectric_scale * spec_occ;
 
     // Indirect-shadow attenuation. 0.15 — deep enough that windows
@@ -2973,20 +2983,24 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Material + albedo for proper Fresnel. f0 = mix(0.04, albedo,
     // metallic) so dielectrics get a 4% grazing reflection and metals
-    // reflect their tinted base colour. Fade the SSR contribution out
-    // aggressively for dielectrics: past roughness 0.35 their Fresnel
-    // is already small, so sharp SSR on mid-rough marble / wood /
-    // plaster produces a bright stripe that doesn't exist in path-
-    // traced references (caught on Intel Sponza column vs Cycles).
-    // Metals keep the longer fade — reflections ARE their primary
-    // shading response.
+    // reflect their tinted base colour.
+    //
+    // Metals-only SSR: sharp on-surface mirror reflections on smooth
+    // dielectrics (marble, varnished wood, glass) produce vertical
+    // stripes where a bright highlight above the surface SSR-mirrors
+    // down the face — Intel Sponza's column vs Cycles was the
+    // unsolvable-by-Lagarde-spec-occ diagnostic. Cycles kills these
+    // via ray-traced visibility; we kill them by only giving SSR to
+    // metals, which need on-screen reflection for identity (chrome,
+    // gold). Dielectric specular is left entirely to the IBL chain,
+    // which is properly Fresnel-clamped and can't show geometry
+    // beyond the HDR cubemap's prefiltered average.
     let mat = textureSample(mat_tex, mat_samp, in.uv).rg;
     let metallic = mat.r;
     let roughness = mat.g;
+    if (metallic < 0.2) { return vec4<f32>(0.0); }
     let albedo = textureSample(albedo_tex, albedo_samp, in.uv).rgb;
-    let dielectric_fade = 1.0 - smoothstep(0.15, 0.45, roughness);
-    let metallic_fade   = 1.0 - smoothstep(0.5,  0.85, roughness);
-    let roughness_fade  = mix(dielectric_fade, metallic_fade, metallic);
+    let roughness_fade  = 1.0 - smoothstep(0.5, 0.85, roughness);
     if (roughness_fade <= 0.001) { return vec4<f32>(0.0); }
 
     let view_pos = view_pos_from_depth(in.uv, depth);
