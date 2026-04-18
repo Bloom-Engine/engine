@@ -6788,7 +6788,7 @@ impl Renderer {
             vignette_strength: 0.0,
             vignette_softness: 0.25,
             grain_strength: 0.0,
-            sharpen_strength: 0.55,
+            sharpen_strength: 0.8,
             exposure_textures,
             exposure_views,
             exposure_current_idx: 0,
@@ -6820,7 +6820,11 @@ impl Renderer {
             // World-space AO radius in meters. Sponza-scale arches
             // and columns span 3-5m, so 4m catches proper architectural
             // occlusion.
-            ssao_radius: 4.0,
+            // 2.0 view-space units — half the previous 4.0. Finer radius
+            // catches sub-brick mortar-line detail and carved capital
+            // grooves that 4.0 smoothed over; coarser occlusion already
+            // covered by GTAO's horizon scan + indirect_shadow floor.
+            ssao_radius: 2.0,
             taa_textures,
             taa_views,
             taa_current_idx: 0,
