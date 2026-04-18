@@ -160,17 +160,22 @@ while (!windowShouldClose()) {
   // ---- Rendering ----
   beginDrawing();
 
-  setAmbientLight({ r: 160, g: 165, b: 180, a: 255 }, 0.3);
+  // Ambient swung from cool blue-grey (160,165,180) toward warm
+  // stone-bounce (175,160,140). The cool tint was an artifact of the
+  // HDR sky alone; in reality the atrium floor of sunlit stone bounces
+  // amber-yellow back up into the shaded interior.
+  setAmbientLight({ r: 175, g: 160, b: 140, a: 255 }, 0.3);
   setDirectionalLight(
     { x: 0.6, y: 0.8, z: 0.3 },
     { r: 255, g: 245, b: 230, a: 255 },
     1.0,
   );
-  // Gentle fill from below — safety net for ceilings that SSGI
-  // bounce light might not fully reach. Kept very low (0.5) since
-  // SSGI now provides natural indirect diffuse bounce from the
-  // sunlit floor.
-  addDirectionalLight(0.0, -1.0, 0.0, 0.5, 0.55, 0.65, 0.5);
+  // Fill from above aimed at downward-facing surfaces (undersides of
+  // arches, lantern caps). Previously cool green-blue; flipped to
+  // amber since what actually hits a ceiling's underside is bounce
+  // light from the sun-lit stone floor, not sky. Matches Cycles'
+  // warmer undersoffit tone.
+  addDirectionalLight(0.0, -1.0, 0.0, 0.6, 0.5, 0.4, 0.5);
 
   beginMode3D({
     position: { x: camX, y: camY, z: camZ },
