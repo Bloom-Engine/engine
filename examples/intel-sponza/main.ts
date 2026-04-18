@@ -72,19 +72,34 @@ enableShadows();
 
 // Sponza ceilings face down = dark IBL. High env_intensity
 // compensates for lack of GI bounce.
-setEnvIntensity(1.5);
-setAutoExposure(true);
+// Env 1.5 was overdriving the marble column's IBL specular response,
+// producing a bright vertical stripe Cycles doesn't show. 1.2 matches
+// the Bistro preset and keeps indirect-diffuse reasonable.
+setEnvIntensity(1.2);
+// Manual exposure for apples-to-apples with Unity/Cycles comparisons;
+// auto-exposure was hiding a blowout on the column at this pose by
+// pulling the whole image up, which then clipped the sunlit stone to
+// pure white.
+setAutoExposure(false);
+setManualExposure(1.0);
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
 // Subtle warm atmospheric haze — dust in the air catches the sun
 // coming through the atrium. Density low enough to preserve scene
 // contrast; height falloff thins it above head-height so the
 // upper walls stay clean.
-setFog(0.86, 0.82, 0.72, 0.010, 0.0, 0.12);
+// Fog density reduced from 0.010 — at the atrium pose it was washing
+// out the back wall and flattening mid-ground contrast vs the Cycles
+// reference. 0.003 keeps the sun-shaft volumetric feel without muting
+// textures.
+setFog(0.86, 0.82, 0.72, 0.003, 0.0, 0.12);
 // Sun shafts from the open atrium. Warm tint matches the outdoor HDR
 // environment; high decay gives long streaks that fade gently with
 // distance from the sun's projected screen position.
-setSunShafts(0.35, 0.97, 1.0, 0.92, 0.78);
+// Sun shafts were producing a bright vertical stripe through the column
+// (the sun's screen-space radial-blur streak didn't respect depth).
+// Turned off for now; can re-enable with a depth-aware variant later.
+setSunShafts(0.0, 0.97, 1.0, 0.92, 0.78);
 setVignette(0.25, 0.25);
 setChromaticAberration(0.001);
 
@@ -149,7 +164,7 @@ while (!windowShouldClose()) {
   setDirectionalLight(
     { x: 0.6, y: 0.8, z: 0.3 },
     { r: 255, g: 245, b: 230, a: 255 },
-    1.5,
+    1.0,
   );
   // Gentle fill from below — safety net for ceilings that SSGI
   // bounce light might not fully reach. Kept very low (0.5) since

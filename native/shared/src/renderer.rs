@@ -840,16 +840,25 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // that case.
     let mr_tex_sample = textureSample(mr_tex, mr_samp, in.uv);
     let has_mr = material.metal_rough.z > 0.5;
-    var roughness = select(
+    var roughness_raw = select(
         clamp(material.metal_rough.y, 0.045, 1.0),
         clamp(mr_tex_sample.g * material.metal_rough.y, 0.045, 1.0),
         has_mr,
     );
-    let metallic  = select(
+    // Dielectric roughness floor. Real-world stone, wood, plaster etc.
+    // rarely get below ~0.15; when FBX2glTF or similar exporters drop
+    // them to 0.05, we get a mirror-like highlight strip on marble
+    // columns that Cycles doesn't produce (Sponza column was the tell).
+    // Metals keep the original low floor so chrome / gold stay sharp.
+    let metallic_raw = select(
         clamp(material.metal_rough.x, 0.0, 1.0),
         clamp(mr_tex_sample.b * material.metal_rough.x, 0.0, 1.0),
         has_mr,
     );
+    let metallic = metallic_raw;
+    let dielectric_floor = 0.15;
+    var roughness = max(roughness_raw,
+                        dielectric_floor * (1.0 - metallic));
 
     // Specular antialiasing. Two sources of variance are folded into
     // GGX α² as additive corrections:
@@ -1006,7 +1015,36 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let f_avg = f0 + (vec3<f32>(1.0) - f0) * (1.0 / 21.0);
     let f_ms = f_avg * ess / (vec3<f32>(1.0) - f_avg * ems);
     let ms_contribution = f_ms * ems;
-    let ibl_spec = prefiltered_env * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
+
+    // Specular occlusion (Lagarde 2014, Moving Frostbite to PBR):
+    // attenuate IBL specular by a roughness-weighted blend of the glTF
+    // AO term and NdotV so smooth dielectrics in enclosed/shadowed
+    // cavities stop reflecting bright sky patches that no path-tracer
+    // would let through the occluders. For metals and mirrors this is
+    // near-identity; for rough surfaces it approaches the AO value.
+    let spec_occ = clamp(
+        pow(n_dot_v_ibl + occlusion, exp2(-16.0 * roughness - 1.0))
+            - 1.0 + occlusion,
+        0.0, 1.0,
+    );
+    let ibl_spec_raw = prefiltered_env
+        * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
+
+    // Dielectric specular luma cap. Without a proper visibility-aware
+    // specular integral, smooth non-metals like marble / varnished wood
+    // end up reflecting the HDR's bright-sky region at full intensity
+    // even when occluded by intervening geometry (the column stripe on
+    // Sponza vs Cycles was the smoking gun). Path-tracers handle this
+    // via shadow rays; we approximate by clamping dielectric luma to a
+    // sane multiple of mid-grey, leaving metals alone so chrome and
+    // gold keep their full dynamic range.
+    let spec_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let dielectric_factor = 1.0 - metallic;
+    let luma_cap = 2.5;
+    let cap_scale = select(1.0, luma_cap / max(spec_luma, 0.0001),
+                           spec_luma > luma_cap);
+    let dielectric_scale = mix(1.0, cap_scale, dielectric_factor);
+    let ibl_spec = ibl_spec_raw * dielectric_scale * spec_occ;
 
     // Indirect-shadow attenuation. 0.15 — deep enough that windows
     // and under-awnings go nearly black (matching Cycles' reference),
@@ -2935,14 +2973,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Material + albedo for proper Fresnel. f0 = mix(0.04, albedo,
     // metallic) so dielectrics get a 4% grazing reflection and metals
-    // reflect their tinted base colour. Fade out past roughness 0.75
-    // where screen-space reflections become unreliable; by that point
-    // the IBL prefiltered specular handles the result.
+    // reflect their tinted base colour. Fade the SSR contribution out
+    // aggressively for dielectrics: past roughness 0.35 their Fresnel
+    // is already small, so sharp SSR on mid-rough marble / wood /
+    // plaster produces a bright stripe that doesn't exist in path-
+    // traced references (caught on Intel Sponza column vs Cycles).
+    // Metals keep the longer fade — reflections ARE their primary
+    // shading response.
     let mat = textureSample(mat_tex, mat_samp, in.uv).rg;
     let metallic = mat.r;
     let roughness = mat.g;
     let albedo = textureSample(albedo_tex, albedo_samp, in.uv).rgb;
-    let roughness_fade = 1.0 - smoothstep(0.5, 0.85, roughness);
+    let dielectric_fade = 1.0 - smoothstep(0.15, 0.45, roughness);
+    let metallic_fade   = 1.0 - smoothstep(0.5,  0.85, roughness);
+    let roughness_fade  = mix(dielectric_fade, metallic_fade, metallic);
     if (roughness_fade <= 0.001) { return vec4<f32>(0.0); }
 
     let view_pos = view_pos_from_depth(in.uv, depth);
