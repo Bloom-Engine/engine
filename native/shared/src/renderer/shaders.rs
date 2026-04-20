@@ -520,7 +520,19 @@ fn shade_pbr(
         return vec3<f32>(0.0);
     }
     let n_dot_v = max(dot(n, v), 1e-4);
-    let h = normalize(l_dir + v);
+    // `normalize(0)` is NaN. At grazing-back angles (view roughly
+    // anti-parallel to the light direction on a near-flat surface)
+    // l + v can reach a vector indistinguishable from zero in f32,
+    // and a single NaN here survives the rest of the BRDF +
+    // tonemap chain as a pink speck. Skip the specular lobe when
+    // the half-vector is degenerate — diffuse still contributes.
+    let h_raw = l_dir + v;
+    let h_len2 = dot(h_raw, h_raw);
+    if (h_len2 <= 1e-12) {
+        let kd0 = (vec3<f32>(1.0) - mix(vec3<f32>(0.04), base_color, metallic)) * (1.0 - metallic);
+        return kd0 * base_color / PI * light_color * intensity * n_dot_l;
+    }
+    let h = h_raw * inverseSqrt(h_len2);
     let n_dot_h = clamp(dot(n, h), 0.0, 1.0);
     let v_dot_h = clamp(dot(v, h), 0.0, 1.0);
 
@@ -917,7 +929,37 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // since dielectrics already account for it via the (1 - kS)
     // diffuse term. The compensation above handles the metal case;
     // dielectric path is unchanged.
-    let hdr = lit + (ibl_diffuse + ibl_spec) * indirect_shadow + emissive;
+    let hdr_raw = lit + (ibl_diffuse + ibl_spec) * indirect_shadow + emissive;
+
+    // Final HDR scrub. Two things the rest of the chain can't
+    // recover from:
+    //
+    // 1. NaN/Inf anywhere upstream (unguarded GGX at α→0 +
+    //    n_dot_h→1, multi-scatter `1 / (1 - F_avg·E_ms)` at
+    //    grazing smooth metals, env-sample weirdness at UV seams)
+    //    — a single poisoned pixel survives TAA's neighborhood
+    //    clamp on Metal (clamp(NaN,a,b) is impl-defined) and
+    //    tonemaps to pink. Self-compare kills it at source.
+    //
+    // 2. Specular fireflies from sub-pixel normal-map variance.
+    //    The LEADR baked σ² already widens the GGX lobe by the
+    //    accumulated mip footprint, but there are still isolated
+    //    texels where D_GGX + IBL prefilter spike an order of
+    //    magnitude above neighbours. Bloom then amplifies each
+    //    spike into a coloured halo, and the composite CA (on at
+    //    0.002 for the default quality preset) splits the halo
+    //    across R/G/B offsets — producing exactly the per-pixel
+    //    magenta/green speckle we see on Sponza's floor. A
+    //    hue-preserving luma cap at 10 matches the one SSGI uses
+    //    internally and truncates outliers before bloom / CA ever
+    //    see them. Sun/sky samples sit in the 1-5 range after
+    //    manual exposure = 1.0, so 10 leaves legitimate bright
+    //    highlights alone.
+    let hdr_clean = select(vec3<f32>(0.0), hdr_raw, hdr_raw == hdr_raw);
+    let luma = dot(hdr_clean, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let firefly_cap = 20.0;
+    let luma_scale = select(1.0, firefly_cap / luma, luma > firefly_cap);
+    let hdr = hdr_clean * luma_scale;
 
     // Per-pixel velocity: difference between current and previous NDC,
     // scaled by 0.5 so the result is in UV-space units. Used by the
@@ -3280,26 +3322,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // and the optional filmic-look layer (CA / vignette / grain).
     var sample_uv = in.uv;
 
-    // --- Chromatic aberration ---
-    // Radial offset of the R/B channels away from the screen center
-    // — gives a subtle 'cinema lens' fringe at the edges. Strength
-    // is the worst-case UV offset at the corner.
-    let ca_strength = u.filmic.x;
-    var hdr_raw: vec3<f32>;
-    var indirect_weight: f32;
-    if (ca_strength > 0.0) {
-        let center = vec2<f32>(0.5, 0.5);
-        let dir = sample_uv - center;
-        let r = textureSample(hdr_tex, hdr_samp, sample_uv + dir * ca_strength).r;
-        let g_sample = textureSample(hdr_tex, hdr_samp, sample_uv);
-        let b = textureSample(hdr_tex, hdr_samp, sample_uv - dir * ca_strength).b;
-        hdr_raw = vec3<f32>(r, g_sample.g, b);
-        indirect_weight = g_sample.a;
-    } else {
-        let s = textureSample(hdr_tex, hdr_samp, sample_uv);
-        hdr_raw = s.rgb;
-        indirect_weight = s.a;
-    }
+    // Sample the composed HDR at the centre pixel. Chromatic
+    // aberration used to sample here at 3 offsets and take R/G/B
+    // from different UVs, but doing that on pre-tonemap HDR
+    // (values 1-20) turns any sub-pixel specular highlight into
+    // a magenta/green speckle: the R tap lands on a bright pixel,
+    // the B tap on a dark one, and the colour ratio survives
+    // tonemap as visible noise all over the frame. CA was moved
+    // after tonemap below, where the values are bounded to [0,1]
+    // and the offset reads a colour difference of a few percent
+    // instead of a 10× ratio.
+    let centre_sample = textureSample(hdr_tex, hdr_samp, sample_uv);
+    let indirect_weight = centre_sample.a;
+
+    // Last-chance NaN/Inf scrub before tonemap. The main HDR pass
+    // already self-compares its output, but compose mixes SSR + SSGI
+    // + bloom + fog, any of which can introduce a non-finite value
+    // (degenerate view rays, env UV pole, multi-scatter fresnel
+    // divide). With TAA off, no neighborhood clamp exists upstream
+    // to catch it — and tonemap(NaN) on Metal produces pink.
+    let hdr_raw = select(vec3<f32>(0.0), centre_sample.rgb, centre_sample.rgb == centre_sample.rgb);
 
     // SSAO RT packs AO in R and contact shadow in G — multiplying
     // both gives combined darkening. The AO channel is bilaterally
@@ -3335,6 +3377,32 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // compare per fragment; the dead branch gets DCE'd per-draw
     // since the uniform is constant across the frame.
     var ldr = tonemap_select(hdr);
+
+    // --- Chromatic aberration (post-tonemap) ---
+    // Sample HDR at two radial offsets, push each through the same
+    // AO + exposure + tonemap path, and take R from the +offset
+    // tap and B from the -offset tap. Done in LDR space where each
+    // channel is bounded to [0,1] — the offset then reads a
+    // small colour-gradient difference instead of the unbounded
+    // HDR ratio that produced the pre-tonemap speckle.
+    let ca_strength = u.filmic.x;
+    if (ca_strength > 0.0) {
+        let center = vec2<f32>(0.5, 0.5);
+        let dir = sample_uv - center;
+        let uv_r = sample_uv + dir * ca_strength;
+        let uv_b = sample_uv - dir * ca_strength;
+        let s_r = textureSample(hdr_tex, hdr_samp, uv_r);
+        let s_b = textureSample(hdr_tex, hdr_samp, uv_b);
+        let clean_r = select(vec3<f32>(0.0), s_r.rgb, s_r.rgb == s_r.rgb);
+        let clean_b = select(vec3<f32>(0.0), s_b.rgb, s_b.rgb == s_b.rgb);
+        let ao_r_pair = textureSample(ssao_tex, ssao_samp, uv_r).rg;
+        let ao_b_pair = textureSample(ssao_tex, ssao_samp, uv_b).rg;
+        let ao_r = mix(1.0, ao_r_pair.r * ao_r_pair.g, s_r.a);
+        let ao_b = mix(1.0, ao_b_pair.r * ao_b_pair.g, s_b.a);
+        let ldr_r_full = tonemap_select(clean_r * ao_r * exposure);
+        let ldr_b_full = tonemap_select(clean_b * ao_b * exposure);
+        ldr = vec3<f32>(ldr_r_full.r, ldr.g, ldr_b_full.b);
+    }
 
     // --- Sharpen (post-tonemap unsharp mask) ---
     // Subtle lens-like crispening. Samples 4 neighbour HDR values,
