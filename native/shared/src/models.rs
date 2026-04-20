@@ -1082,9 +1082,20 @@ fn load_gltf_with_textures(
         }
     }
 
+    // Pre-walk materials to identify which image indices are normal
+    // maps. They need LEADR-style vector-space mip generation and per-
+    // mip variance baked into alpha; see register_texture_kind.
+    let mut normal_image_set: std::collections::HashSet<usize> = Default::default();
+    for mat in gltf.materials() {
+        if let Some(nt) = mat.normal_texture() {
+            normal_image_set.insert(nt.texture().source().index());
+        }
+    }
+
     // Extract and register textures
     let mut texture_indices: Vec<u32> = Vec::new(); // maps glTF image index -> renderer texture index
-    for image in gltf.images() {
+    for (image_idx, image) in gltf.images().enumerate() {
+        let is_normal = normal_image_set.contains(&image_idx);
         match image.source() {
             gltf::image::Source::View { view, .. } => {
                 let buf_idx = view.buffer().index();
@@ -1097,7 +1108,7 @@ fn load_gltf_with_textures(
                         if let Ok(img) = image::load_from_memory(img_data) {
                             let rgba = img.to_rgba8();
                             let (w, h) = (rgba.width(), rgba.height());
-                            let tex_idx = renderer.register_texture(w, h, &rgba);
+                            let tex_idx = renderer.register_texture_kind(w, h, &rgba, is_normal);
                             texture_indices.push(tex_idx);
                         } else {
                             texture_indices.push(0); // fallback to white
@@ -1142,7 +1153,7 @@ fn load_gltf_with_textures(
                     };
                 match bytes.and_then(|b| decode_texture_bytes(&b, &effective_uri)) {
                     Some((rgba, w, h)) => {
-                        texture_indices.push(renderer.register_texture(w, h, &rgba));
+                        texture_indices.push(renderer.register_texture_kind(w, h, &rgba, is_normal));
                     }
                     None => texture_indices.push(0),
                 }

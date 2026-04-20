@@ -812,21 +812,23 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     var n = normalize(in.normal);
 
     // --- Normal mapping (tangent-space) ---
-    // Raw sample with linear mip + bilinear filtering. In regions with
-    // fine normal-map detail the hardware averaging shortens the vector
-    // — that shortening IS the Toksvig factor used for specular
-    // antialiasing below. Clamped denom so default (0, 0, 1) and any
-    // pathological mipmap still produce a valid unit direction.
-    // +1 mip bias on the normal map sample. The coarser mip is a true
-    // vector-average of its 2x-bigger footprint, so the sampled vector
-    // has length < 1 wherever the finer mip had disagreement. This is
-    // the key LEADR insight: sample at a coarser LOD to *measure* the
-    // normal variance, then let Toksvig turn that into added alpha^2.
-    // Sharp detail is still there for near-perpendicular viewing;
-    // grazing angles (where the GGX lobe would spike on high-frequency
-    // normal perturbations — the sparkle case) sample broader and get
-    // the variance into the BRDF instead of into visual noise.
-    let nm_raw = textureSampleBias(normal_tex, normal_samp, in.uv, 1.0).xyz * 2.0 - 1.0;
+    // LEADR-lite normal map sample. The texture uploader bakes
+    // per-mip normal-direction variance into the alpha channel
+    // (see register_texture_kind). RGB holds the vector-averaged
+    // unit normal at each mip, so sampling any LOD gives a proper
+    // direction for shading; the alpha contains the accumulated
+    // (1 - |avg|²) disagreement across the footprint. The shader
+    // uses that alpha as an additional σ² term added to GGX α²,
+    // widening the lobe by exactly enough to integrate over sub-
+    // pixel normal variance before it hits the BRDF as sparkle.
+    //
+    // We still sample at +1 LOD bias so the hardware picks a mip
+    // with more accumulated variance than strictly minimal; the
+    // tradeoff is a hair of softness at near-perpendicular views
+    // in exchange for path-tracer-like integration at grazing.
+    let nm_sample4 = textureSampleBias(normal_tex, normal_samp, in.uv, 1.0);
+    let nm_raw = nm_sample4.xyz * 2.0 - 1.0;
+    let baked_variance = nm_sample4.w;
     let toksvig_len2 = clamp(dot(nm_raw, nm_raw), 0.01, 1.0);
     let nm_sample = nm_raw * inverseSqrt(toksvig_len2);
     let tlen2 = dot(in.tangent.xyz, in.tangent.xyz);
@@ -911,7 +913,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     //      pre-Toksvig version because Toksvig already handles the
     //      texture case; this term now only covers sharp geometric
     //      edges and tessellation that Toksvig can't see.
-    let sigma2 = (1.0 - toksvig_len2) / toksvig_len2;
+    // Toksvig formula from the hardware-bilinear/aniso vector-length
+    // shortening, PLUS the per-mip variance baked into alpha during
+    // normal-map upload. The baked term is the clean directional-
+    // variance estimate; Toksvig adds whatever extra shortening the
+    // sampler's bilinear blend produces on top.
+    let sigma2_toksvig = (1.0 - toksvig_len2) / toksvig_len2;
+    let sigma2_baked = baked_variance / max(1.0 - baked_variance, 0.001);
+    let sigma2 = sigma2_toksvig + sigma2_baked;
     var alpha2 = roughness * roughness + sigma2;
     let nm_dx = dpdx(n);
     let nm_dy = dpdy(n);
@@ -9346,12 +9355,47 @@ impl Renderer {
     // block so it can be reused by other capture paths if needed.)
 
     pub fn register_texture(&mut self, width: u32, height: u32, data: &[u8]) -> u32 {
+        self.register_texture_kind(width, height, data, false)
+    }
+
+    /// Register a texture with optional normal-map preprocessing.
+    ///
+    /// For normal maps (is_normal_map=true), mip chain is built with
+    /// vector-space averaging instead of scalar RGB averaging, and
+    /// per-mip variance (1 - |vector_avg|²) is baked into the alpha
+    /// channel. The shader reads alpha as a Toksvig-style σ² addition
+    /// that accumulates normal-direction disagreement across the
+    /// footprint the sampler ends up integrating — the simplified
+    /// scalar LEADR/LEAN filter. Alpha is unused by glTF normal maps
+    /// (they carry (x,y,z) in RGB) so we can safely repurpose it.
+    pub fn register_texture_kind(
+        &mut self,
+        width: u32,
+        height: u32,
+        data: &[u8],
+        is_normal_map: bool,
+    ) -> u32 {
         let max_dim = if width > height { width } else { height };
         let mip_count = (max_dim as f32).log2().floor() as u32 + 1;
 
-        // Generate mip chain data (box filter downsampling)
+        // Generate mip chain data
         let mut mip_data = Vec::with_capacity(data.len() * 2); // overallocate
-        mip_data.extend_from_slice(data); // level 0
+        if is_normal_map {
+            // Level 0: normalize input RGB and clear alpha to 0 (no
+            // variance at the finest level — each texel is assumed unit).
+            mip_data.reserve(data.len());
+            for i in 0..(width as usize * height as usize) {
+                let r = data[i * 4];
+                let g = data[i * 4 + 1];
+                let b = data[i * 4 + 2];
+                mip_data.push(r);
+                mip_data.push(g);
+                mip_data.push(b);
+                mip_data.push(0);
+            }
+        } else {
+            mip_data.extend_from_slice(data);
+        }
         let mut mip_offsets = vec![0usize]; // byte offset of each mip level
         let mut mw = width;
         let mut mh = height;
@@ -9368,12 +9412,57 @@ impl Renderer {
                     let sy = y * 2;
                     let sx1 = (sx + 1).min(pw - 1);
                     let sy1 = (sy + 1).min(ph - 1);
-                    for c in 0..4usize {
-                        let p00 = mip_data[prev_offset + (sy * pw + sx) * 4 + c] as u32;
-                        let p10 = mip_data[prev_offset + (sy * pw + sx1) * 4 + c] as u32;
-                        let p01 = mip_data[prev_offset + (sy1 * pw + sx) * 4 + c] as u32;
-                        let p11 = mip_data[prev_offset + (sy1 * pw + sx1) * 4 + c] as u32;
-                        mip_data.push(((p00 + p10 + p01 + p11 + 2) / 4) as u8);
+                    if is_normal_map {
+                        // Decode 4 children to signed [-1, 1] vectors
+                        let dec = |r: u8, g: u8, b: u8| -> [f32; 3] {
+                            [
+                                r as f32 * (2.0 / 255.0) - 1.0,
+                                g as f32 * (2.0 / 255.0) - 1.0,
+                                b as f32 * (2.0 / 255.0) - 1.0,
+                            ]
+                        };
+                        let idx = |sx: usize, sy: usize| -> usize {
+                            prev_offset + (sy * pw + sx) * 4
+                        };
+                        let n00 = dec(mip_data[idx(sx, sy)], mip_data[idx(sx, sy) + 1], mip_data[idx(sx, sy) + 2]);
+                        let n10 = dec(mip_data[idx(sx1, sy)], mip_data[idx(sx1, sy) + 1], mip_data[idx(sx1, sy) + 2]);
+                        let n01 = dec(mip_data[idx(sx, sy1)], mip_data[idx(sx, sy1) + 1], mip_data[idx(sx, sy1) + 2]);
+                        let n11 = dec(mip_data[idx(sx1, sy1)], mip_data[idx(sx1, sy1) + 1], mip_data[idx(sx1, sy1) + 2]);
+                        // Previous-mip baked variances
+                        let v00 = mip_data[idx(sx, sy) + 3] as f32 / 255.0;
+                        let v10 = mip_data[idx(sx1, sy) + 3] as f32 / 255.0;
+                        let v01 = mip_data[idx(sx, sy1) + 3] as f32 / 255.0;
+                        let v11 = mip_data[idx(sx1, sy1) + 3] as f32 / 255.0;
+                        // Average the vectors
+                        let avg_x = (n00[0] + n10[0] + n01[0] + n11[0]) * 0.25;
+                        let avg_y = (n00[1] + n10[1] + n01[1] + n11[1]) * 0.25;
+                        let avg_z = (n00[2] + n10[2] + n01[2] + n11[2]) * 0.25;
+                        let len_sq = avg_x * avg_x + avg_y * avg_y + avg_z * avg_z;
+                        let len = len_sq.sqrt().max(1e-6);
+                        // Normalize direction (what the shader reads as
+                        // the shading normal). Re-encode to [0, 255].
+                        let encode = |v: f32| -> u8 {
+                            ((v * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+                        };
+                        mip_data.push(encode(avg_x / len));
+                        mip_data.push(encode(avg_y / len));
+                        mip_data.push(encode(avg_z / len));
+                        // Variance at this mip = disagreement among the
+                        // 4 children (1 - |avg|²) PLUS the weighted mean
+                        // of the children's own variances. Both live in
+                        // [0, 1]; combined variance clamped.
+                        let v_children_avg = (v00 + v10 + v01 + v11) * 0.25;
+                        let v_local = (1.0 - len_sq).max(0.0);
+                        let v_out = (v_local + v_children_avg).min(1.0);
+                        mip_data.push((v_out * 255.0).round().clamp(0.0, 255.0) as u8);
+                    } else {
+                        for c in 0..4usize {
+                            let p00 = mip_data[prev_offset + (sy * pw + sx) * 4 + c] as u32;
+                            let p10 = mip_data[prev_offset + (sy * pw + sx1) * 4 + c] as u32;
+                            let p01 = mip_data[prev_offset + (sy1 * pw + sx) * 4 + c] as u32;
+                            let p11 = mip_data[prev_offset + (sy1 * pw + sx1) * 4 + c] as u32;
+                            mip_data.push(((p00 + p10 + p01 + p11 + 2) / 4) as u8);
+                        }
                     }
                 }
             }
