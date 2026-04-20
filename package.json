@@ -125,6 +125,17 @@
         { "name": "bloom_set_ssgi_intensity",      "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_ssgi_radius",         "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_dof",                 "params": ["f64", "f64", "f64"],                                    "returns": "void" },
+        { "name": "bloom_set_quality_preset",      "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_shadows_enabled",     "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_bloom_enabled",       "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_ssao_enabled",        "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_ssr_enabled",         "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_motion_blur_enabled", "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_sss_enabled",         "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_profiler_enabled",    "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_get_profiler_frame_cpu_us","params": [],                                                       "returns": "f64"  },
+        { "name": "bloom_get_profiler_frame_gpu_us","params": [],                                                       "returns": "f64"  },
+        { "name": "bloom_print_profiler_summary",  "params": [],                                                        "returns": "void" },
         { "name": "bloom_get_model_mesh_count",    "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_get_model_material_count","params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_inject_key_down",         "params": ["f64"],                                                   "returns": "void" },
@@ -322,6 +333,11 @@
           "frameworks": ["Metal", "QuartzCore", "UIKit", "CoreGraphics", "CoreText",
                           "CoreFoundation", "CoreAudio", "AudioToolbox", "AVFoundation",
                           "GameController"]
+        },
+        "watchos": {
+          "crate": "native/watchos/",
+          "lib": "libbloom_watchos.a",
+          "frameworks": ["WatchKit", "Foundation", "CoreGraphics", "QuartzCore"]
         },
         "windows": {
           "crate": "native/windows/",

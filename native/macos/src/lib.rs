@@ -295,9 +295,18 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         ..Default::default()
     })).expect("No adapter found");
 
+    // Request TIMESTAMP_QUERY when the adapter supports it so the profiler
+    // can collect GPU timings. It's optional — profiler falls back to CPU
+    // only when the feature isn't available.
+    let supported = adapter.features();
+    let mut required_features = wgpu::Features::empty();
+    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
+        required_features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
     let (device, queue) = pollster_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("bloom_device"),
+            required_features,
             ..Default::default()
         },
         None,
@@ -1086,6 +1095,61 @@ pub extern "C" fn bloom_set_dof(enabled: f64, focus_distance: f64, aperture: f64
     r.set_dof_enabled(enabled != 0.0);
     r.set_dof_focus_distance(focus_distance as f32);
     r.set_dof_aperture(aperture as f32);
+}
+
+// ============================================================
+// Render quality toggles (individual + preset)
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_set_quality_preset(preset: f64) {
+    engine().renderer.apply_quality_preset(preset as u32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_shadows_enabled(on: f64) {
+    engine().renderer.set_shadows_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_bloom_enabled(on: f64) {
+    engine().renderer.set_bloom_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_ssao_enabled(on: f64) {
+    engine().renderer.set_ssao_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_ssr_enabled(on: f64) {
+    engine().renderer.set_ssr_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_motion_blur_enabled(on: f64) {
+    engine().renderer.set_motion_blur_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_sss_enabled(on: f64) {
+    engine().renderer.set_sss_enabled(on != 0.0);
+}
+
+// ============================================================
+// Profiler — CPU phase timings (always available) + GPU timestamps
+// (when the adapter supports TIMESTAMP_QUERY). Disabled by default.
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_set_profiler_enabled(on: f64) {
+    engine().profiler.set_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_profiler_frame_cpu_us() -> f64 {
+    engine().profiler.avg_frame_cpu_us()
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 {
+    engine().profiler.avg_frame_gpu_us()
+}
+#[no_mangle]
+pub extern "C" fn bloom_print_profiler_summary() {
+    print!("{}", engine().profiler.summary());
 }
 
 // ============================================================
@@ -2373,7 +2437,7 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
         eng.renderer.uniform_3d_layout(),
     );
     eng.scene.prepare_materials(&eng.renderer);
-    eng.renderer.end_frame_with_scene(&eng.scene);
+    eng.renderer.end_frame_with_scene(&eng.scene, &mut eng.profiler);
 
     match eng.renderer.screenshot_data.take() {
         Some((width, height, rgba)) => {

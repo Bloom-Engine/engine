@@ -7,6 +7,7 @@ use crate::models::ModelManager;
 use crate::scene::SceneGraph;
 use crate::frame_callbacks::FrameCallbackSystem;
 use crate::postfx::PostFxPipeline;
+use crate::profiler::Profiler;
 #[cfg(feature = "physics")]
 use crate::physics::PhysicsWorld;
 
@@ -25,6 +26,7 @@ pub struct EngineState {
     pub scene: SceneGraph,
     pub frame_callbacks: FrameCallbackSystem,
     pub postfx: Option<PostFxPipeline>,
+    pub profiler: Profiler,
     pub screenshot_pending: bool,
 
     // Timing
@@ -46,6 +48,8 @@ pub struct EngineState {
 impl EngineState {
     pub fn new(renderer: Renderer) -> Self {
         let now = Instant::now();
+        let mut profiler = Profiler::new();
+        profiler.init_gpu(&renderer.device, &renderer.queue);
         Self {
             renderer,
             text: TextRenderer::new(),
@@ -56,6 +60,7 @@ impl EngineState {
             scene: SceneGraph::new(),
             frame_callbacks: FrameCallbackSystem::new(),
             postfx: None,
+            profiler,
             screenshot_pending: false,
             target_fps: 60.0,
             delta_time: 0.0,
@@ -89,11 +94,13 @@ impl EngineState {
         self.frame_count += 1;
 
         // Run frame callbacks after begin_frame (matching R3F's useFrame timing)
+        self.profiler.begin("frame_callbacks");
         self.frame_callbacks.run_all(self.delta_time);
+        self.profiler.end("frame_callbacks");
     }
 
     pub fn end_frame(&mut self) {
-        // Prepare and render with scene graph
+        self.profiler.begin("scene_prepare");
         self.scene.prepare(
             &self.renderer.device,
             &self.renderer.queue,
@@ -102,7 +109,13 @@ impl EngineState {
             self.renderer.uniform_3d_layout(),
         );
         self.scene.prepare_materials(&self.renderer);
-        self.renderer.end_frame_with_scene(&self.scene);
+        self.profiler.end("scene_prepare");
+
+        self.profiler.begin("render_total");
+        self.renderer.end_frame_with_scene(&self.scene, &mut self.profiler);
+        self.profiler.end("render_total");
+
+        self.profiler.frame_end(&self.renderer.device);
         self.input.end_frame();
 
         // Vsync (PresentMode::Fifo, the wgpu default) already caps frame rate.

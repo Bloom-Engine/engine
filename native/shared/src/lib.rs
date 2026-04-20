@@ -14,6 +14,7 @@ pub mod shadows;
 pub mod postfx;
 pub mod custom_shaders;
 pub mod staging;
+pub mod profiler;
 #[cfg(feature = "physics")]
 pub mod physics;
 pub mod engine;

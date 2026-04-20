@@ -27,6 +27,17 @@ declare function bloom_set_ssgi_enabled(on: number): void;
 declare function bloom_set_ssgi_intensity(intensity: number): void;
 declare function bloom_set_ssgi_radius(radius: number): void;
 declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): void;
+declare function bloom_set_quality_preset(preset: number): void;
+declare function bloom_set_shadows_enabled(on: number): void;
+declare function bloom_set_bloom_enabled(on: number): void;
+declare function bloom_set_ssao_enabled(on: number): void;
+declare function bloom_set_ssr_enabled(on: number): void;
+declare function bloom_set_motion_blur_enabled(on: number): void;
+declare function bloom_set_sss_enabled(on: number): void;
+declare function bloom_set_profiler_enabled(on: number): void;
+declare function bloom_get_profiler_frame_cpu_us(): number;
+declare function bloom_get_profiler_frame_gpu_us(): number;
+declare function bloom_print_profiler_summary(): void;
 declare function bloom_set_target_fps(fps: number): void;
 declare function bloom_get_delta_time(): number;
 declare function bloom_get_fps(): number;
@@ -210,6 +221,85 @@ export function setSsgiRadius(radius: number): void {
 /** Depth of field. focusDistance = view-space distance in world units. aperture = blur strength (0 = off, 0.03 = subtle, 0.1 = heavy). */
 export function setDepthOfField(focusDistance: number, aperture: number): void {
   bloom_set_dof(aperture > 0 ? 1 : 0, focusDistance, aperture);
+}
+
+// ============================================================
+// Render quality — let games pick a preset for the target device
+// or toggle individual effects. Presets apply a known-good set of
+// flags; individual setters can override afterward.
+// ============================================================
+
+export enum QualityPreset {
+  /** Bare minimum — no shadows, no SSAO, no bloom, no TAA, no SSR/SSGI/DoF/MB/SSS. */
+  Off = 0,
+  /** Base pipeline only: HDR tonemap + bloom. No shadows/SSAO/TAA. */
+  Low = 1,
+  /** Balanced default: shadows + SSAO + bloom + TAA. No SSR/SSGI/cinematic FX. */
+  Medium = 2,
+  /** + SSR, SSGI, subtle chromatic aberration. */
+  High = 3,
+  /** Everything on (plus DoF if aperture > 0). */
+  Ultra = 4,
+}
+
+/** Apply a quality preset in one call. Call individual setters after for fine-tuning. */
+export function setQualityPreset(preset: QualityPreset): void {
+  bloom_set_quality_preset(preset);
+}
+
+/** Toggle cascaded shadow maps. Default on. Disable on low-end GPUs — biggest single win. */
+export function setShadowsEnabled(on: boolean): void {
+  bloom_set_shadows_enabled(on ? 1 : 0);
+}
+
+/** Toggle the bloom down/upsample chain (~10 passes). Default on. */
+export function setBloomEnabled(on: boolean): void {
+  bloom_set_bloom_enabled(on ? 1 : 0);
+}
+
+/** Toggle screen-space ambient occlusion + its bilateral blur. Default on. */
+export function setSsaoEnabled(on: boolean): void {
+  bloom_set_ssao_enabled(on ? 1 : 0);
+}
+
+/** Toggle screen-space reflections. Default on. */
+export function setSsrEnabled(on: boolean): void {
+  bloom_set_ssr_enabled(on ? 1 : 0);
+}
+
+/** Toggle per-object motion blur. Default off. */
+export function setMotionBlurEnabled(on: boolean): void {
+  bloom_set_motion_blur_enabled(on ? 1 : 0);
+}
+
+/** Toggle subsurface scattering (for skin/wax materials). Default off. */
+export function setSssEnabled(on: boolean): void {
+  bloom_set_sss_enabled(on ? 1 : 0);
+}
+
+// ============================================================
+// Profiler — measure CPU phase timings and (on supported GPUs)
+// per-pass GPU times. Off by default; enable at runtime.
+// ============================================================
+
+/** Enable/disable the frame profiler. When off, it has zero per-frame cost. */
+export function setProfilerEnabled(on: boolean): void {
+  bloom_set_profiler_enabled(on ? 1 : 0);
+}
+
+/** Average total CPU frame time (sum of all phases) over the rolling window, in microseconds. */
+export function getProfilerFrameCpuUs(): number {
+  return bloom_get_profiler_frame_cpu_us();
+}
+
+/** Average total GPU frame time over the rolling window, in microseconds. 0 if GPU timing unavailable. */
+export function getProfilerFrameGpuUs(): number {
+  return bloom_get_profiler_frame_gpu_us();
+}
+
+/** Print a per-phase CPU/GPU timing table to stdout. Useful for quick diagnostics. */
+export function printProfilerSummary(): void {
+  bloom_print_profiler_summary();
 }
 
 // Timing

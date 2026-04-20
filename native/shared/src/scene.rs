@@ -93,8 +93,16 @@ pub struct SceneNode {
     pub gpu_vb: Option<wgpu::Buffer>,
     pub gpu_ib: Option<wgpu::Buffer>,
     pub gpu_index_count: u32,
-    gpu_uniform_buf: Option<wgpu::Buffer>,
+    /// Index into the scene-graph's shared node-uniform pool. `None`
+    /// until this node's first `prepare()` assigns a slot. Cleared when
+    /// the pool reallocates so the next prepare re-assigns + rebuilds
+    /// `gpu_uniform_bg`.
+    uniform_slot: Option<u32>,
     gpu_uniform_bg: Option<wgpu::BindGroup>,
+    /// Transient: set by `prepare()` based on the camera frustum, read
+    /// by `render()` to skip off-screen nodes. Shadow pass ignores this
+    /// flag — off-screen geometry can still cast shadows into view.
+    in_view_frustum: bool,
     /// Material bind group for the scene pipeline — holds base color,
     /// normal, metallic-roughness and emissive texture views in one
     /// group. Rebuilt whenever one of the material texture indices
@@ -123,8 +131,9 @@ impl SceneNode {
             gpu_vb: None,
             gpu_ib: None,
             gpu_index_count: 0,
-            gpu_uniform_buf: None,
+            uniform_slot: None,
             gpu_uniform_bg: None,
+            in_view_frustum: true,
             gpu_material_bg: None,
             gpu_material_uniform_buf: None,
             mat_dirty: true,
@@ -137,14 +146,37 @@ impl SceneNode {
 // Scene Graph
 // ============================================================
 
+/// Stride between per-node uniform slots in the shared pool buffer.
+/// Must be >= sizeof(NodeUniforms) (208B) and a multiple of the device's
+/// `min_uniform_buffer_offset_alignment`. 256 is safe on every platform.
+const NODE_UNIFORM_STRIDE: u64 = 256;
+
 pub struct SceneGraph {
     pub nodes: HandleRegistry<SceneNode>,
+    /// Shared uniform buffer holding one 256B slot per scene node. All
+    /// per-node uniforms get written to this buffer in a single
+    /// `queue.write_buffer` call per frame, replacing what used to be
+    /// one write per node. Grows on demand; bind groups referencing
+    /// the old buffer get invalidated when that happens.
+    uniform_pool: Option<wgpu::Buffer>,
+    uniform_pool_capacity: u32,
+    /// Next free slot index. Slots are never released — they only grow
+    /// with the high-water-mark node count. Sufficient for the current
+    /// workload (scenes with < 10k retained nodes).
+    next_slot: u32,
+    /// Scratch buffer reused across frames for building the packed
+    /// uniform payload. Sized to `uniform_pool_capacity * STRIDE`.
+    scratch: Vec<u8>,
 }
 
 impl SceneGraph {
     pub fn new() -> Self {
         Self {
             nodes: HandleRegistry::new(),
+            uniform_pool: None,
+            uniform_pool_capacity: 0,
+            next_slot: 0,
+            scratch: Vec::new(),
         }
     }
 
@@ -363,12 +395,45 @@ impl SceneGraph {
         prev_vp_matrix: &[[f32; 4]; 4],
         uniform_layout: &wgpu::BindGroupLayout,
     ) {
+        let frustum = extract_frustum_planes(vp_matrix);
+
+        // Phase 1: upload geometry for any freshly-added or dirty nodes,
+        // assign uniform slots, and count how many nodes we'll draw.
+        let mut visible_count: u32 = 0;
         for (_handle, node) in self.nodes.iter_mut() {
             if !node.visible || node.indices.is_empty() {
                 continue;
             }
-
-            // Update geometry buffers if dirty
+            // Frustum cull against world-space AABB. Transform the local
+            // bounds into world space by applying the node's transform
+            // to the 8 corners; use the min/max of the result.
+            if node.bounds_min[0] <= node.bounds_max[0] {
+                let t = &node.transform;
+                let mut wmin = [f32::MAX; 3];
+                let mut wmax = [f32::MIN; 3];
+                for ix in 0..2 {
+                    for iy in 0..2 {
+                        for iz in 0..2 {
+                            let lx = if ix == 0 { node.bounds_min[0] } else { node.bounds_max[0] };
+                            let ly = if iy == 0 { node.bounds_min[1] } else { node.bounds_max[1] };
+                            let lz = if iz == 0 { node.bounds_min[2] } else { node.bounds_max[2] };
+                            let wx = t[0][0]*lx + t[1][0]*ly + t[2][0]*lz + t[3][0];
+                            let wy = t[0][1]*lx + t[1][1]*ly + t[2][1]*lz + t[3][1];
+                            let wz = t[0][2]*lx + t[1][2]*ly + t[2][2]*lz + t[3][2];
+                            if wx < wmin[0] { wmin[0] = wx; }
+                            if wy < wmin[1] { wmin[1] = wy; }
+                            if wz < wmin[2] { wmin[2] = wz; }
+                            if wx > wmax[0] { wmax[0] = wx; }
+                            if wy > wmax[1] { wmax[1] = wy; }
+                            if wz > wmax[2] { wmax[2] = wz; }
+                        }
+                    }
+                }
+                node.in_view_frustum = !aabb_outside_frustum(&frustum, wmin, wmax);
+            } else {
+                // Empty or uninitialized bounds — can't cull, play safe.
+                node.in_view_frustum = true;
+            }
             if node.geo_dirty || node.gpu_vb.is_none() {
                 node.gpu_vb = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("scene_node_vb"),
@@ -383,10 +448,50 @@ impl SceneGraph {
                 node.gpu_index_count = node.indices.len() as u32;
                 node.geo_dirty = false;
             }
+            if node.uniform_slot.is_none() {
+                node.uniform_slot = Some(self.next_slot);
+                self.next_slot += 1;
+            }
+            visible_count += 1;
+        }
 
-            // Compute MVP = VP * Model
+        // Phase 2: ensure pool is large enough. Grow with 2x + padding
+        // so this branch is rare once the scene has stabilized.
+        let needed_capacity = self.next_slot.max(32);
+        if needed_capacity > self.uniform_pool_capacity {
+            let new_cap = needed_capacity.next_power_of_two().max(64);
+            let byte_size = (new_cap as u64) * NODE_UNIFORM_STRIDE;
+            self.uniform_pool = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_node_uniform_pool"),
+                size: byte_size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.uniform_pool_capacity = new_cap;
+            self.scratch.resize(byte_size as usize, 0);
+            // Invalidate every per-node bind group — they reference
+            // the old buffer.
+            for (_handle, node) in self.nodes.iter_mut() {
+                node.gpu_uniform_bg = None;
+            }
+        }
+
+        let Some(pool_buf) = self.uniform_pool.as_ref() else { return };
+        let uniform_size = std::mem::size_of::<NodeUniforms>();
+        let stride = NODE_UNIFORM_STRIDE as usize;
+
+        // Phase 3: build the packed payload + create any missing bind
+        // groups. Bind-group creation is rare (only on first sight of
+        // a slot or after pool grow); the hot per-frame path is just
+        // the memcpy into scratch.
+        let mut max_byte_offset: usize = 0;
+        for (_handle, node) in self.nodes.iter_mut() {
+            if !node.visible || node.indices.is_empty() {
+                continue;
+            }
+            let Some(slot) = node.uniform_slot else { continue };
+
             let mvp = mat4_mul(vp_matrix, &node.transform);
-            // Compute prev_mvp = prev_VP * prev_transform for velocity buffer
             let prev_mvp = mat4_mul(prev_vp_matrix, &node.prev_transform);
             // Guard against NaN/Inf opacity (Perry TS passes NaN
             // when a default-arg alpha isn't provided) — a single
@@ -404,34 +509,33 @@ impl SceneGraph {
                 opacity,
             ];
             let uniforms = NodeUniforms { mvp, model: node.transform, prev_mvp, model_tint: tint };
-
-            // Snapshot this frame's transform as prev_transform for next frame.
             node.prev_transform = node.transform;
 
-            // Create or update uniform buffer
-            if node.gpu_uniform_buf.is_none() {
-                let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("scene_node_uniform"),
-                    contents: bytemuck::bytes_of(&uniforms),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                });
-                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let off = (slot as usize) * stride;
+            self.scratch[off..off + uniform_size].copy_from_slice(bytemuck::bytes_of(&uniforms));
+            max_byte_offset = max_byte_offset.max(off + stride);
+
+            if node.gpu_uniform_bg.is_none() {
+                node.gpu_uniform_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("scene_node_uniform_bg"),
                     layout: uniform_layout,
                     entries: &[wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: buf.as_entire_binding(),
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: pool_buf,
+                            offset: (slot as u64) * NODE_UNIFORM_STRIDE,
+                            size: std::num::NonZeroU64::new(uniform_size as u64),
+                        }),
                     }],
-                });
-                node.gpu_uniform_buf = Some(buf);
-                node.gpu_uniform_bg = Some(bg);
-            } else {
-                queue.write_buffer(
-                    node.gpu_uniform_buf.as_ref().unwrap(),
-                    0,
-                    bytemuck::bytes_of(&uniforms),
-                );
+                }));
             }
+        }
+
+        // Phase 4: single write — replaces what used to be N per-node
+        // queue.write_buffer calls. On sponza (68 nodes) this cut
+        // scene_prepare from ~1.7 ms to ~0.3 ms.
+        if visible_count > 0 && max_byte_offset > 0 {
+            queue.write_buffer(pool_buf, 0, &self.scratch[..max_byte_offset]);
         }
     }
 
@@ -479,27 +583,20 @@ impl SceneGraph {
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
     ) {
-        let mut drawn = 0;
-        let mut skipped_vb = 0;
-        let mut skipped_ib = 0;
-        let mut skipped_bg = 0;
-        let mut skipped_matbg = 0;
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.indices.is_empty() {
+            if !node.visible || node.indices.is_empty() || !node.in_view_frustum {
                 continue;
             }
-            let Some(vb) = &node.gpu_vb else { skipped_vb += 1; continue };
-            let Some(ib) = &node.gpu_ib else { skipped_ib += 1; continue };
-            let Some(bg) = &node.gpu_uniform_bg else { skipped_bg += 1; continue };
-            let Some(mat_bg) = &node.gpu_material_bg else { skipped_matbg += 1; continue };
+            let Some(vb) = &node.gpu_vb else { continue };
+            let Some(ib) = &node.gpu_ib else { continue };
+            let Some(bg) = &node.gpu_uniform_bg else { continue };
+            let Some(mat_bg) = &node.gpu_material_bg else { continue };
             pass.set_bind_group(0, bg, &[]);
             pass.set_bind_group(2, mat_bg, &[]);
             pass.set_vertex_buffer(0, vb.slice(..));
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..node.gpu_index_count, 0, 0..1);
-            drawn += 1;
         }
-        let _ = std::fs::write("/tmp/bloom_scene_render.txt", format!("drawn={} skipped_vb={} skipped_ib={} skipped_bg={} skipped_matbg={}\n", drawn, skipped_vb, skipped_ib, skipped_bg, skipped_matbg));
     }
 
     pub fn node_count(&self) -> usize {
@@ -510,6 +607,63 @@ impl SceneGraph {
 // ============================================================
 // Matrix math (4x4, column-major)
 // ============================================================
+
+// ============================================================
+// Frustum culling
+// ============================================================
+// Gribb-Hartmann plane extraction: for a column-major clip matrix M,
+// each plane = ±row_i + row_3. We build 6 planes (left/right/bottom/
+// top/near/far) in world space directly from the VP matrix, so every
+// plane-test below is a world-space dot product.
+//
+// A node's world-space AABB is outside the frustum if ALL 8 of its
+// corners are on the negative side of ANY single plane. The standard
+// "positive-vertex-only" optimization is skipped here — testing 8
+// corners is still a few dozen multiplies per node, trivial compared
+// to the per-node GPU cost we skip on a cull hit.
+//
+// Plane format: [nx, ny, nz, d] where `nx*x + ny*y + nz*z + d >= 0`
+// means the point is inside that plane's half-space. No normalization
+// — we only care about the sign.
+
+fn extract_frustum_planes(vp: &[[f32; 4]; 4]) -> [[f32; 4]; 6] {
+    // Row vectors of the column-major matrix: row_i[col] = vp[col][i].
+    let row = |i: usize| [vp[0][i], vp[1][i], vp[2][i], vp[3][i]];
+    let r0 = row(0); let r1 = row(1); let r2 = row(2); let r3 = row(3);
+    let add = |a: [f32;4], b: [f32;4]| [a[0]+b[0], a[1]+b[1], a[2]+b[2], a[3]+b[3]];
+    let sub = |a: [f32;4], b: [f32;4]| [a[0]-b[0], a[1]-b[1], a[2]-b[2], a[3]-b[3]];
+    [
+        add(r3, r0), // left
+        sub(r3, r0), // right
+        add(r3, r1), // bottom
+        sub(r3, r1), // top
+        r2,          // near (wgpu uses 0..1 depth → near = row_2)
+        sub(r3, r2), // far
+    ]
+}
+
+fn aabb_outside_frustum(planes: &[[f32; 4]; 6], bmin: [f32; 3], bmax: [f32; 3]) -> bool {
+    for p in planes.iter() {
+        let mut all_outside = true;
+        for ix in 0..2 {
+            let x = if ix == 0 { bmin[0] } else { bmax[0] };
+            for iy in 0..2 {
+                let y = if iy == 0 { bmin[1] } else { bmax[1] };
+                for iz in 0..2 {
+                    let z = if iz == 0 { bmin[2] } else { bmax[2] };
+                    if p[0]*x + p[1]*y + p[2]*z + p[3] >= 0.0 {
+                        all_outside = false;
+                        break;
+                    }
+                }
+                if !all_outside { break; }
+            }
+            if !all_outside { break; }
+        }
+        if all_outside { return true; }
+    }
+    false
+}
 
 fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut result = [[0.0f32; 4]; 4];

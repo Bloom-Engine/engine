@@ -18,6 +18,10 @@ import {
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
+  setProfilerEnabled, printProfilerSummary,
+  getProfilerFrameCpuUs, getProfilerFrameGpuUs,
+  setQualityPreset, QualityPreset,
+  setShadowsEnabled, setSsaoEnabled,
 } from "bloom/core";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
@@ -47,6 +51,11 @@ let initYaw = 0.0;
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
 let dumpShadowFrames = 0;
 let dumpShadowPath = "";
+let profileFrames = 0;
+let fpsOnlyFrames = 0;
+let qualityPreset = -1;
+let forceShadows = -1;
+let forceSsao = -1;
 for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -61,6 +70,29 @@ for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--dump-shadow" && i + 2 < argv.length) {
     dumpShadowFrames = Math.floor(parseFloat(argv[i + 1]));
     dumpShadowPath = argv[i + 2];
+  }
+  if (argv[i] === "--profile" && i + 1 < argv.length) {
+    profileFrames = Math.floor(parseFloat(argv[i + 1]));
+  }
+  // --fps-only runs the same auto-camera loop as --profile but WITHOUT
+  // turning the profiler on, so there's no readback stall polluting
+  // the FPS number.
+  if (argv[i] === "--fps-only" && i + 1 < argv.length) {
+    fpsOnlyFrames = Math.floor(parseFloat(argv[i + 1]));
+  }
+  // --quality N applies a preset (0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra).
+  if (argv[i] === "--quality" && i + 1 < argv.length) {
+    qualityPreset = Math.floor(parseFloat(argv[i + 1]));
+  }
+  // Individual effect overrides — applied AFTER --quality so they win.
+  if (argv[i] === "--shadows" && i + 1 < argv.length) {
+    forceShadows = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--ssao" && i + 1 < argv.length) {
+    forceSsao = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--taa" && i + 1 < argv.length) {
+    taaOverride = parseInt(argv[i + 1]);
   }
 }
 
@@ -105,6 +137,25 @@ setVignette(0.25, 0.25);
 // split on narrow highlights). Off for interior scenes — lens-
 // abberation feel is a bigger negative than a positive here.
 setChromaticAberration(0.0);
+
+// Profiler — enable once we've built up some rolling averages. Turned
+// on before the main loop so the first sampled frame doesn't include
+// one-shot setup costs.
+if (profileFrames > 0) {
+  setProfilerEnabled(true);
+}
+
+// Apply quality preset if requested on the CLI (overrides the per-FX
+// calls above since preset.apply() runs after them via FFI).
+if (qualityPreset >= 0) {
+  setQualityPreset(qualityPreset as QualityPreset);
+}
+// Individual overrides — these apply AFTER the preset so you can, e.g.,
+// `--quality 1 --shadows 1` to test "Low + only shadows".
+if (forceShadows >= 0) { setShadowsEnabled(forceShadows !== 0); }
+if (forceSsao >= 0) { setSsaoEnabled(forceSsao !== 0); }
+if (taaOverride === 0) { setTaaEnabled(false); }
+if (taaOverride === 1) { setTaaEnabled(true); }
 
 // ---- Load Sponza into scene graph ----
 // Intel Sponza ships as loose glTF + .bin + 68 textures. The
@@ -221,6 +272,40 @@ while (!windowShouldClose()) {
     if (frameCount === dumpShadowFrames) {
       endDrawing();
       dumpShadowMap(dumpShadowPath);
+      break;
+    }
+  }
+
+  // Profiler auto-run: run N frames, print summary, exit. Camera
+  // pans slightly so each frame exercises shadow recomputation.
+  if (profileFrames > 0) {
+    frameCount = frameCount + 1;
+    camYaw = camYaw + 0.005;
+    if (frameCount >= profileFrames) {
+      endDrawing();
+      const cpuUs = getProfilerFrameCpuUs();
+      const gpuUs = getProfilerFrameGpuUs();
+      const measuredFps = getFPS();
+      const measuredMs = measuredFps > 0 ? 1000 / measuredFps : 0;
+      console.log(`\n=== PROFILE (${frameCount} frames) ===`);
+      console.log(`FPS:       ${measuredFps.toFixed(1)} (${measuredMs.toFixed(2)} ms/frame)`);
+      console.log(`Total CPU: ${(cpuUs / 1000).toFixed(2)} ms`);
+      console.log(`Total GPU: ${(gpuUs / 1000).toFixed(2)} ms`);
+      printProfilerSummary();
+      break;
+    }
+  }
+
+  // FPS-only run: same camera pan, no profiler → pure FPS signal.
+  if (fpsOnlyFrames > 0) {
+    frameCount = frameCount + 1;
+    camYaw = camYaw + 0.005;
+    if (frameCount >= fpsOnlyFrames) {
+      endDrawing();
+      const measuredFps = getFPS();
+      const measuredMs = measuredFps > 0 ? 1000 / measuredFps : 0;
+      console.log(`\n=== FPS-ONLY (${frameCount} frames, no profiler) ===`);
+      console.log(`FPS: ${measuredFps.toFixed(1)} (${measuredMs.toFixed(2)} ms/frame)`);
       break;
     }
   }
