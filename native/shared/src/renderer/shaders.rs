@@ -1320,16 +1320,20 @@ fn downsample_13(uv: vec2<f32>, src_size: vec2<f32>, do_threshold: bool) -> vec3
         // First extract HDR brights via soft threshold, then Karis
         // weight to keep fireflies from poking through.
         //
-        // threshold = 1.5, knee = 0.3 (i.e. fade-in band 1.2..1.8).
-        // With auto-exposure normalising mid-gray to ~0.18, a sunlit
-        // white stucco wall ends up around 0.7..1.0 — still below
-        // the lower knee, so it does NOT bloom. Only genuinely
-        // overbright content (sky clipping, sun hotspots, emissive
-        // lights) crosses the threshold. Earlier defaults of 1.0/0.5
-        // caught sunlit diffuse and produced a soft halo around
-        // every bright edge.
-        let thr = 1.5;
-        let knee = 0.3;
+        // threshold = 8.0, knee = 2.0 (fade-in band 6..10). Bloom
+        // runs in raw HDR, so the threshold has to track the
+        // scene's un-tonemapped luminance — with manual exposure
+        // = 1.0 (Sponza, Bistro) sunlit diffuse stone sits at
+        // luma 2-6 and specular peaks on the same surfaces spike
+        // into 10+. The old 1.5 threshold caught every sunlit
+        // stone pixel as 'bloom source', which Karis-averaged
+        // every sub-pixel specular variation into a bright halo
+        // (the 'glitter on the floor' bug). 8.0 leaves diffuse
+        // sunlit content completely untouched and only bright
+        // specular / sky-clipping pixels cross — which is where
+        // bloom is actually physically motivated.
+        let thr = 8.0;
+        let knee = 2.0;
         for (var n = 0u; n < 5u; n = n + 1u) {
             let bright = extract_brights(groups[n].rgb, thr, knee);
             let weighted = karis_average(vec4<f32>(bright, 1.0));
