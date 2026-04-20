@@ -2852,6 +2852,26 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
+// RGB <-> YCoCg conversions. Reversible, linear, cheap (no matrix
+// multiply). Used by the TAA neighborhood clamp so we can bound
+// history's luma (Y) against the source neighborhood's statistical
+// range while leaving chroma (Co, Cg) alone — the per-channel RGB
+// clamp was causing chromatic sparkle on grazing-angle stone.
+fn rgb_to_ycocg(c: vec3<f32>) -> vec3<f32> {
+    let Co = c.r - c.b;
+    let tmp = c.b + Co * 0.5;
+    let Cg = c.g - tmp;
+    let Y  = tmp + Cg * 0.5;
+    return vec3<f32>(Y, Co, Cg);
+}
+fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
+    let tmp = c.x - c.z * 0.5;
+    let g   = c.z + tmp;
+    let b   = tmp - c.y * 0.5;
+    let r   = c.y + b;
+    return vec3<f32>(r, g, b);
+}
+
 // 5-tap Catmull-Rom upsample (Karis formulation). When the source
 // (composed_tex) is half-res relative to the destination, naive
 // bilinear loses sharpness; Catmull-Rom reconstructs a cubic-Hermite
@@ -2921,21 +2941,46 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         history_w = h_sample.a;
     }
 
-    // 3×3 neighborhood clamp on the composed input.
+    // Variance clamp in YCoCg (Karis 2014). Per-channel RGB min/max
+    // clamping was producing chromatic sparkle on the stone floor
+    // at grazing angles: high-frequency normal-map specular makes
+    // each jittered frame's Cg/Co vary significantly, and clamping
+    // each channel independently lets history's chroma get pinned
+    // to whatever the current frame's specific Cg/Co range was.
+    // Clamping only the *luma* axis (Y) preserves chroma stability
+    // across frames; the 1σ variance range is a statistical clamp
+    // that absorbs single-pixel outliers without collapsing to a
+    // hard min/max bound.
     let texel = vec2<f32>(1.0 / f32(textureDimensions(composed_tex).x),
                           1.0 / f32(textureDimensions(composed_tex).y));
-    var nmin = current;
-    var nmax = current;
+    let center_rgb = textureSample(composed_tex, composed_samp, in.uv).rgb;
+    var m1 = rgb_to_ycocg(center_rgb);
+    var m2 = m1 * m1;
+    let n_samples = 9.0;
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             if (x == 0 && y == 0) { continue; }
             let s_uv = in.uv + vec2<f32>(f32(x), f32(y)) * texel;
-            let s = textureSample(composed_tex, composed_samp, s_uv).rgb;
-            nmin = min(nmin, s);
-            nmax = max(nmax, s);
+            let s_rgb = textureSample(composed_tex, composed_samp, s_uv).rgb;
+            let s = rgb_to_ycocg(s_rgb);
+            m1 = m1 + s;
+            m2 = m2 + s * s;
         }
     }
-    let clamped_history = clamp(history, nmin, nmax);
+    let mean = m1 / n_samples;
+    let variance = max(m2 / n_samples - mean * mean, vec3<f32>(0.0));
+    let stddev = sqrt(variance);
+    // γ = 1.25 — Karis's value. Wider lets more history through
+    // (smoother), narrower clamps tighter to current (less ghost).
+    let gamma = 1.25;
+    let y_min = mean.x - gamma * stddev.x;
+    let y_max = mean.x + gamma * stddev.x;
+
+    let history_ycocg = rgb_to_ycocg(history);
+    // Clamp the history's luma only; let chroma pass through so the
+    // accumulator preserves its long-term chromatic average.
+    let history_y_clamped = clamp(history_ycocg.x, y_min, y_max);
+    let clamped_history = ycocg_to_rgb(vec3<f32>(history_y_clamped, history_ycocg.yz));
 
     let alpha = u.params.x;
     let blended = mix(clamped_history, current, alpha);
