@@ -817,7 +817,16 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // — that shortening IS the Toksvig factor used for specular
     // antialiasing below. Clamped denom so default (0, 0, 1) and any
     // pathological mipmap still produce a valid unit direction.
-    let nm_raw = textureSample(normal_tex, normal_samp, in.uv).xyz * 2.0 - 1.0;
+    // +1 mip bias on the normal map sample. The coarser mip is a true
+    // vector-average of its 2x-bigger footprint, so the sampled vector
+    // has length < 1 wherever the finer mip had disagreement. This is
+    // the key LEADR insight: sample at a coarser LOD to *measure* the
+    // normal variance, then let Toksvig turn that into added alpha^2.
+    // Sharp detail is still there for near-perpendicular viewing;
+    // grazing angles (where the GGX lobe would spike on high-frequency
+    // normal perturbations — the sparkle case) sample broader and get
+    // the variance into the BRDF instead of into visual noise.
+    let nm_raw = textureSampleBias(normal_tex, normal_samp, in.uv, 1.0).xyz * 2.0 - 1.0;
     let toksvig_len2 = clamp(dot(nm_raw, nm_raw), 0.01, 1.0);
     let nm_sample = nm_raw * inverseSqrt(toksvig_len2);
     let tlen2 = dot(in.tangent.xyz, in.tangent.xyz);
