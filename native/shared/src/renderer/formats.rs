@@ -191,11 +191,16 @@ pub(super) fn create_velocity_rt(device: &wgpu::Device, width: u32, height: u32)
     (texture, view)
 }
 
-/// Create the SSR render target (half-res HDR — reflections are
-/// low-frequency enough that half-res hides bilinear blur).
+/// Create the SSR render target (quarter-res HDR). Stochastic SSR
+/// traces one GGX-sampled ray per pixel per frame and relies on the
+/// temporal denoiser to converge the cone over 4–8 frames; pushing
+/// from half to quarter-res cuts the march + temporal-filter pixel
+/// counts 4× and the bilinear upsample in compose is imperceptible
+/// because the GGX cone + temporal blend is already wider than one
+/// quarter-res texel.
 pub(super) fn create_ssr_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
-    let w = (width / 2).max(1);
-    let h = (height / 2).max(1);
+    let w = (width / 4).max(1);
+    let h = (height / 4).max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssr_rt"),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -219,8 +224,8 @@ pub(super) fn create_ssr_rt(device: &wgpu::Device, width: u32, height: u32) -> (
 pub(super) fn create_ssr_history_textures(
     device: &wgpu::Device, width: u32, height: u32,
 ) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
-    let w = (width / 2).max(1);
-    let h = (height / 2).max(1);
+    let w = (width / 4).max(1);
+    let h = (height / 4).max(1);
     let make = || {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ssr_history"),

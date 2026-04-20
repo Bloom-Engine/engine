@@ -2473,10 +2473,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let off_screen = prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0;
     if (off_screen) { return current; }
 
-    let history = textureSample(history_tex, history_samp, prev_uv);
+    let history_raw = textureSample(history_tex, history_samp, prev_uv);
+    // Scrub NaN/Inf from the history read. Until a clean SSR frame
+    // finishes draining the ping-pong pair, any poisoned history
+    // pixel would otherwise survive the clamp (clamp(NaN, a, b) is
+    // implementation-defined on Metal — frequently NaN) and keep
+    // tonemapping to pink. Replace poisoned channels with the
+    // current-frame mean, which is the best available estimate.
+    let history = select(current, history_raw, history_raw == history_raw);
     let clamped_history = clamp(history, nmin, nmax);
     let alpha = u.params.x;
-    return mix(clamped_history, current, alpha);
+    let blended = mix(clamped_history, current, alpha);
+    return select(current, blended, blended == blended);
 }
 ";
 
@@ -2605,7 +2613,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // denoiser averages a dense roughness cone over 4–8 frames. This
     // replaces the 5-tap Gaussian blur at the hit: we pay one ray +
     // one hdr sample per frame, not 32 march steps + 5 blur taps.
-    let xi = hash2(in.clip_pos.xy, u.params.w);
+    //
+    // xi is clamped away from exact 0 and 1. At roughness → 0 the GGX
+    // denominator `1 + (α²-1)·xi.y` collapses to 0 when xi.y = 1, so
+    // cos_theta becomes sqrt(0/0) = NaN. That NaN then propagates into
+    // ssr_history and each 4× upsampled texel turns into a pink hot
+    // pixel after tonemapping. Sponza's mirror-smooth lamp fittings
+    // (roughness near 0) are exactly the worst case.
+    let xi = clamp(hash2(in.clip_pos.xy, u.params.w), vec2<f32>(1e-4), vec2<f32>(0.9999));
     let h = importance_sample_ggx(xi, n, roughness);
     let r = reflect(-v, h);
 
@@ -2659,8 +2674,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     ) * 10.0;
     let fade = clamp(edge_fade, 0.0, 1.0);
 
-    let reflected = textureSample(hdr_tex, hdr_samp, hit_uv).rgb;
-    return vec4<f32>(reflected * fresnel * roughness_fade * u.params.x * fade, fade);
+    // NaN scrubber: WGSL has no isnan(), but NaN == NaN is false for
+    // every compliant backend, so a componentwise self-compare gives us
+    // a vec3<bool> that is true iff each channel is finite. This nukes
+    // the one stray NaN/Inf pixel per few thousand rays that would
+    // otherwise ping-pong through ssr_history and tonemap to pink. Same
+    // self-compare is applied to the HDR tap in case upstream writes a
+    // bad sample (autoexposure ratios, rare shader ops on degenerate
+    // triangles, etc).
+    let raw = textureSample(hdr_tex, hdr_samp, hit_uv).rgb;
+    let reflected = select(vec3<f32>(0.0), raw, raw == raw);
+    let out = reflected * fresnel * roughness_fade * u.params.x * fade;
+    let out_safe = select(vec3<f32>(0.0), out, out == out);
+    return vec4<f32>(out_safe, fade);
 }
 ";
 
