@@ -21,7 +21,7 @@ import {
   setProfilerEnabled, printProfilerSummary,
   getProfilerFrameCpuUs, getProfilerFrameGpuUs,
   setQualityPreset, QualityPreset,
-  setShadowsEnabled, setSsaoEnabled,
+  setShadowsEnabled, setSsaoEnabled, setSsrEnabled, setSsgiEnabled,
 } from "bloom/core";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
@@ -56,6 +56,8 @@ let fpsOnlyFrames = 0;
 let qualityPreset = -1;
 let forceShadows = -1;
 let forceSsao = -1;
+let forceSsr = -1;
+let forceSsgi = -1;
 for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -90,6 +92,12 @@ for (let i = 2; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--ssao" && i + 1 < argv.length) {
     forceSsao = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--ssr" && i + 1 < argv.length) {
+    forceSsr = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--ssgi" && i + 1 < argv.length) {
+    forceSsgi = parseInt(argv[i + 1]);
   }
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
@@ -154,6 +162,8 @@ if (qualityPreset >= 0) {
 // `--quality 1 --shadows 1` to test "Low + only shadows".
 if (forceShadows >= 0) { setShadowsEnabled(forceShadows !== 0); }
 if (forceSsao >= 0) { setSsaoEnabled(forceSsao !== 0); }
+if (forceSsr >= 0) { setSsrEnabled(forceSsr !== 0); }
+if (forceSsgi >= 0) { setSsgiEnabled(forceSsgi !== 0); }
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
 

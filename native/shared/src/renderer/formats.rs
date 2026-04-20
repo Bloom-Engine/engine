@@ -211,6 +211,36 @@ pub(super) fn create_ssr_rt(device: &wgpu::Device, width: u32, height: u32) -> (
     (texture, view)
 }
 
+/// Create the SSR temporal history textures (ping-pong pair, same
+/// format/size as ssr_rt — half-res HDR). The temporal denoiser
+/// blends the noisy current-frame stochastic SSR into the
+/// reprojected previous-frame history so 4–8 frames of accumulation
+/// converge to a smooth reflection.
+pub(super) fn create_ssr_history_textures(
+    device: &wgpu::Device, width: u32, height: u32,
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+    let w = (width / 2).max(1);
+    let h = (height / 2).max(1);
+    let make = || {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ssr_history"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    };
+    let (t0, v0) = make();
+    let (t1, v1) = make();
+    ([t0, t1], [v0, v1])
+}
+
 /// Create the SSGI render target (half-res HDR — indirect diffuse bounce light).
 /// Same half-res HDR strategy as SSR: keeps the per-pixel ray march cheap
 /// while still providing enough color resolution for colored bounce light.

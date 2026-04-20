@@ -22,6 +22,7 @@ use formats::{
     HIZ_FORMAT, VELOCITY_FORMAT, BLOOM_MIP_COUNT, HIZ_MIP_COUNT,
     create_depth_texture, create_hdr_rt, create_material_rt,
     create_albedo_rt, create_velocity_rt, create_ssr_rt,
+    create_ssr_history_textures,
     create_ssgi_rt, create_ssgi_history_textures, create_taa_textures,
     create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
     create_exposure_textures, create_composed_rt, create_dof_rt,
@@ -218,6 +219,13 @@ struct SsgiParams {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct SsgiTemporalParams {
     /// x = blend_alpha (0.1), y = depth_reject_threshold, zw unused
+    params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsrTemporalParams {
+    /// x = blend_alpha (0.1), yzw unused
     params: [f32; 4],
 }
 
@@ -582,6 +590,18 @@ pub struct Renderer {
     /// like wet floors. Applies on top of the prefiltered IBL.
     pub ssr_strength: f32,
     pub ssr_enabled: bool,
+
+    /// SSR temporal denoiser: ping-pong history textures (same format/size
+    /// as ssr_rt). One GGX-importance-sampled ray per pixel per frame
+    /// converges over 4–8 frames of accumulation via velocity reprojection
+    /// + neighborhood clamp. Compose reads ssr_history[cur] instead of
+    /// ssr_rt when ssr_enabled.
+    pub ssr_history_textures: [wgpu::Texture; 2],
+    pub ssr_history_views: [wgpu::TextureView; 2],
+    pub ssr_history_idx: usize,
+    pub ssr_temporal_pipeline: wgpu::RenderPipeline,
+    pub ssr_temporal_layout: wgpu::BindGroupLayout,
+    pub ssr_temporal_uniform_buffer: wgpu::Buffer,
 
     /// SSGI (screen-space global illumination) pass output — half-res
     /// HDR holding the indirect diffuse bounce light for each fragment.
@@ -1243,6 +1263,9 @@ impl Renderer {
             &device, surface_config.width, surface_config.height,
         );
         let (ssr_rt_texture, ssr_rt_view) = create_ssr_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+        let (ssr_history_textures, ssr_history_views) = create_ssr_history_textures(
             &device, surface_config.width, surface_config.height,
         );
         let (ssgi_rt_texture, ssgi_rt_view) = create_ssgi_rt(
@@ -2652,6 +2675,99 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- SSR temporal denoiser pipeline ---
+        let ssr_temporal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ssr_temporal_shader"),
+            source: wgpu::ShaderSource::Wgsl(SSR_TEMPORAL_SHADER_WGSL.into()),
+        });
+        let ssr_temporal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ssr_temporal_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                // binding 1: current noisy SSR
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 3: history SSR (previous frame accumulated)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 5: velocity buffer (motion vectors)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ssr_temporal_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ssr_temporal_pl_layout"),
+            bind_group_layouts: &[&ssr_temporal_layout],
+            push_constant_ranges: &[],
+        });
+        let ssr_temporal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ssr_temporal_pipeline"),
+            layout: Some(&ssr_temporal_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &ssr_temporal_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ssr_temporal_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT, blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false, conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None, cache: None,
+        });
+        let ssr_temporal_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ssr_temporal_uniform_buffer"),
+            size: std::mem::size_of::<SsrTemporalParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- SSGI pipeline ---
         let ssgi_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ssgi_shader"),
@@ -3482,6 +3598,12 @@ impl Renderer {
             ssr_uniform_buffer,
             ssr_strength: 0.5,
             ssr_enabled: true,
+            ssr_history_textures,
+            ssr_history_views,
+            ssr_history_idx: 0,
+            ssr_temporal_pipeline,
+            ssr_temporal_layout,
+            ssr_temporal_uniform_buffer,
             ssgi_rt_texture,
             ssgi_rt_view,
             ssgi_pipeline,
@@ -3746,6 +3868,10 @@ impl Renderer {
             let (sr_t, sr_v) = create_ssr_rt(&self.device, width, height);
             self.ssr_rt_texture = sr_t;
             self.ssr_rt_view = sr_v;
+            let (ssr_ht, ssr_hv) = create_ssr_history_textures(&self.device, width, height);
+            self.ssr_history_textures = ssr_ht;
+            self.ssr_history_views = ssr_hv;
+            self.ssr_history_idx = 0;
             let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, width, height);
             self.ssgi_rt_texture = ssgi_t;
             self.ssgi_rt_view = ssgi_v;
@@ -5270,7 +5396,14 @@ impl Renderer {
             let sp = SsrParams {
                 inv_proj,
                 proj: self.current_proj_matrix,
-                params: [self.ssr_strength, 8.0, 32.0, self.taa_frame_index as f32],
+                // n_steps lowered from 32 → 8 for stochastic SSR: the
+                // GGX-sampled ray direction + jittered start offset +
+                // temporal accumulation over 4–8 frames fills in the
+                // gaps that any single-frame coarse march leaves behind.
+                // Thickness tolerance grows proportionally with
+                // step_size so the relative-error reject heuristic
+                // still works with the larger strides.
+                params: [self.ssr_strength, 8.0, 8.0, self.taa_frame_index as f32],
             };
             self.queue.write_buffer(&self.ssr_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
@@ -5330,6 +5463,67 @@ impl Renderer {
             });
             drop(pass);
         }
+
+        // ============================================================
+        // SSR temporal denoiser: blend the noisy single-ray SSR with
+        // the reprojected previous history so 4–8 frames of GGX-sampled
+        // rays converge to a smooth reflection. 3×3 pre-filter of the
+        // noisy current frame + neighborhood clamp of reprojected
+        // history. Compose then reads ssr_history[cur] instead of
+        // ssr_rt.
+        // ============================================================
+        if self.ssr_enabled {
+            let prev_idx = 1 - self.ssr_history_idx;
+            let cur_idx = self.ssr_history_idx;
+
+            // First frame: alpha=1 so we initialize history from the
+            // current noisy frame rather than blending with zeros.
+            let alpha = if self.taa_frame_index == 0 { 1.0_f32 } else { 0.1_f32 };
+            let tp = SsrTemporalParams {
+                params: [alpha, 0.0, 0.0, 0.0],
+            };
+            self.queue.write_buffer(&self.ssr_temporal_uniform_buffer, 0, bytemuck::bytes_of(&tp));
+
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ssr_temporal_bg"),
+                layout: &self.ssr_temporal_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ssr_temporal_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ssr_history_views[prev_idx]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssr_temporal_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssr_history_views[cur_idx],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.ssr_temporal_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // The compose pass reads denoised SSR from the current history
+        // texture when ssr_enabled; otherwise the raw ssr_rt (which was
+        // cleared to transparent above) so it contributes nothing.
+        let ssr_composite_view = if self.ssr_enabled {
+            &self.ssr_history_views[self.ssr_history_idx]
+        } else {
+            &self.ssr_rt_view
+        };
 
         // ============================================================
         // SSGI: screen-space global illumination (single-bounce indirect
@@ -5634,7 +5828,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 0, resource: self.scene_compose_uniform_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(ssr_composite_view) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(ssgi_composite_view) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
@@ -6154,6 +6348,10 @@ impl Renderer {
         // what we just wrote and writes to the other buffer.
         if self.ssgi_enabled {
             self.ssgi_history_idx = 1 - self.ssgi_history_idx;
+        }
+        // Same ping-pong for SSR temporal accumulation.
+        if self.ssr_enabled {
+            self.ssr_history_idx = 1 - self.ssr_history_idx;
         }
         // Swap exposure ping-pong so next frame's exposure pass
         // reads what we just wrote.
