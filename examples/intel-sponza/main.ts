@@ -101,7 +101,10 @@ setFog(0.86, 0.82, 0.72, 0.003, 0.0, 0.12);
 // Turned off for now; can re-enable with a depth-aware variant later.
 setSunShafts(0.0, 0.97, 1.0, 0.92, 0.78);
 setVignette(0.25, 0.25);
-setChromaticAberration(0.001);
+// CA was tinting every bright specular speck pink (R/B channels
+// split on narrow highlights). Off for interior scenes — lens-
+// abberation feel is a bigger negative than a positive here.
+setChromaticAberration(0.0);
 
 // ---- Load Sponza into scene graph ----
 // Intel Sponza ships as loose glTF + .bin + 68 textures. The

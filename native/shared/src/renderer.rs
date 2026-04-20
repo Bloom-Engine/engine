@@ -778,12 +778,15 @@ fn shade_pbr(
     // reasoning as the IBL path; a smooth marble column lit by a
     // point sun spikes D_GGX past any tonemap cap. Metals stay at
     // full direct spec for roughness > ~0.75.
-    // Universal luma cap on direct specular too. A smooth marble
+    // Universal soft luma cap on direct specular. A smooth marble
     // cylinder hit by the sun spikes D_GGX past any reasonable
-    // tonemap; clamp to the same 0.3 luma ceiling as IBL before the
-    // tonemap eats it.
+    // tonemap; Reinhard-compress the luma toward a 0.3 ceiling
+    // smoothly so adjacent pixels with slightly different GGX peaks
+    // scale by neighbouring cap values instead of ping-ponging
+    // across a hard min() discontinuity (the cause of the sparkle on
+    // Sponza's sunlit floor tiles).
     let direct_luma = dot(specular_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let direct_cap = min(1.0, 0.3 / max(direct_luma, 0.0001));
+    let direct_cap = 1.0 / (1.0 + direct_luma / 0.3);
     let universal_damp = smoothstep(0.05, 0.75, roughness);
     let specular = specular_raw * direct_spec_scale * universal_damp * direct_cap;
 
@@ -904,15 +907,15 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let nm_dx = dpdx(n);
     let nm_dy = dpdy(n);
     let curvature_sq = dot(nm_dx, nm_dx) + dot(nm_dy, nm_dy);
-    // Kaplanyan 2016 screen-space kernel. 0.5 / cap 0.4 is more
-    // aggressive than the older 0.25 / 0.2 tuning — low-roughness
-    // dielectrics like white stucco still sparkle under direct sun
-    // at the weaker value because the GGX lobe is narrow enough that
-    // per-pixel normal variation (from mipped normal maps + small
-    // geometric detail) reads as noise. Doubling the coefficient
-    // widens the lobe just enough to integrate that variance out
-    // before it hits the tonemap.
-    let kernel_alpha = min(0.5 * curvature_sq, 0.4);
+    // Kaplanyan 2016 screen-space kernel. Bumped aggressively: 2.0
+    // coefficient / cap 0.9 to kill sparkle on Intel Sponza's sunlit
+    // floor tiles where each tile edge has a high-frequency normal-
+    // map bump that D_GGX spikes on at a grazing view. Integrates
+    // normal variance across a larger screen-space footprint before
+    // the BRDF sees it. Tradeoff: subtly softer micro-specular on
+    // all surfaces, which matches the path-tracer's multi-ray
+    // average.
+    let kernel_alpha = min(2.0 * curvature_sq, 0.9);
     alpha2 = min(alpha2 + kernel_alpha, 1.0);
     roughness = sqrt(alpha2);
 
@@ -1099,8 +1102,12 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // couldn't survive a path-tracer's visibility integral,
     // and brightly-polished metals lose a little punch (they compensate
     // via direct specular which still uses Fresnel at full strength).
+    // Reinhard-style soft luma cap: same 0.3 ceiling as direct spec
+    // but smooth rolloff so adjacent pixels don't ping-pong across a
+    // hard discontinuity (speckle on sunlit floor tiles with
+    // per-pixel roughness / normal-map variation).
     let cap2_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let cap2 = min(1.0, 0.3 / max(cap2_luma, 0.0001));
+    let cap2 = 1.0 / (1.0 + cap2_luma / 0.3);
     let roughness_amp = smoothstep(0.05, 0.75, roughness);
     let ibl_spec = ibl_spec_raw
         * dielectric_scale * spec_occ * roughness_amp * cap2;
@@ -6995,7 +7002,7 @@ impl Renderer {
             debug_frame: 0,
             pending_joint_matrices: None,
             model_skin_scale: 1.0,
-            clear_color: wgpu::Color::RED,
+            clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
             shadow_map,
             screenshot_requested: false,
@@ -7879,11 +7886,6 @@ impl Renderer {
     }
 
     pub fn end_frame(&mut self) {
-        // DEBUG: Clear all 2D content - only clear color should render
-        self.vertices_2d.clear();
-        self.indices_2d.clear();
-        self.draw_calls_2d.clear();
-
         // Flush pending joint matrices to GPU right before rendering
         self.flush_joint_matrices();
 
@@ -7899,12 +7901,7 @@ impl Renderer {
         } else {
             match self.surface.get_current_texture() {
                 Ok(t) => Some(t),
-                Err(e) => {
-                    // Log the error to a file so we can diagnose tvOS rendering issues
-                    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        let _ = std::fs::write("/tmp/bloom_surface_err.txt", format!("get_current_texture failed: {:?}\n", e));
-                    }
+                Err(_) => {
                     self.surface.configure(&self.device, &self.surface_config);
                     // Restore RT views if they were set.
                     self.rt_color_view = rt_color;
@@ -9508,9 +9505,6 @@ impl Renderer {
     pub fn draw_rect(&mut self, x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64, a: f64) {
         self.ensure_draw_state(0);
         let color = Self::color_to_f32(r, g, b, a);
-        // DEBUG: skip actual geometry - only red clear should show
-        let _ = (x, y, w, h, color);
-        return;
         let base = self.vertices_2d.len() as u32;
         let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
 
