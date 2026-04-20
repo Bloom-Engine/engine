@@ -2430,8 +2430,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Read velocity at this pixel (velocity_rt is full-res, SSGI is half-res,
     // but UV mapping handles the difference transparently).
+    //
+    // Velocity is stored in NDC-delta units ((curr_ndc - prev_ndc) * 0.5);
+    // UV.y is flipped relative to NDC.y, so reprojection is `uv - vel.x`
+    // on X but `uv + vel.y` on Y. The earlier `uv - vel` on both axes
+    // reprojected SSGI history to the wrong row when the camera pitched
+    // or rotated, dragging stale indirect-light values across the frame
+    // as a scene-wide smear when turning (TAA + SSAO both already do
+    // this flip — this was SSGI's silent divergence).
     let vel = textureSample(velocity_tex, velocity_samp, in.uv).xy;
-    let prev_uv = in.uv - vel;
+    let prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
 
     // Disocclusion: if prev_uv is off-screen, snap to current frame.
     let off_screen = prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0;
@@ -2510,8 +2518,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let current = prefilt * (1.0 / 9.0);
 
     // Velocity is full-res; UV mapping handles the half-res delta.
+    // NDC-space velocity + UV Y-flip → `uv + vel.y` for the Y axis,
+    // matching TAA + SSAO + the sibling SSGI temporal pass.
     let vel = textureSample(velocity_tex, velocity_samp, in.uv).xy;
-    let prev_uv = in.uv - vel;
+    let prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
     let off_screen = prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0;
     if (off_screen) { return current; }
 
