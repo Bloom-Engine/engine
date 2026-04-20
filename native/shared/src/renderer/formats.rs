@@ -355,6 +355,39 @@ pub(super) fn create_ssao_rt(device: &wgpu::Device, width: u32, height: u32) -> 
     (texture, view)
 }
 
+/// Ping-pong half-res SSAO history textures (temporal accumulation).
+/// Same size/format as `ssao_rt`. The compute pass reads the previous
+/// frame's history via `TEXTURE_BINDING` and writes the blended
+/// current-frame result back via `STORAGE_BINDING`. Downstream the
+/// bilateral blur samples the current-frame ssao_rt as before —
+/// history is only used as an input to the GTAO compute.
+pub(super) fn create_ssao_history_textures(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+    let w = (width / 2).max(1);
+    let h = (height / 2).max(1);
+    let make = |label: &str| -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SSAO_FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    };
+    let (a, av) = make("ssao_history_a");
+    let (b, bv) = make("ssao_history_b");
+    ([a, b], [av, bv])
+}
+
 /// Create the SSAO bilateral-blur render target (same format/size as ssao_rt).
 pub(super) fn create_ssao_blur_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let w = (width / 2).max(1);

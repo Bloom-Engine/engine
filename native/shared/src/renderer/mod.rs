@@ -23,7 +23,7 @@ use formats::{
     create_depth_texture, create_hdr_rt, create_material_rt,
     create_albedo_rt, create_velocity_rt, create_ssr_rt,
     create_ssgi_rt, create_ssgi_history_textures, create_taa_textures,
-    create_ssao_rt, create_ssao_blur_rt, create_sss_rt,
+    create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
     create_exposure_textures, create_composed_rt, create_dof_rt,
     create_linear_depth_hiz_chain, create_bloom_chain, halton,
 };
@@ -132,8 +132,15 @@ struct SsaoParams {
     proj_z: [f32; 4],
     /// Light direction in view space (xyz, w unused). For contact shadows.
     light_dir_vs: [f32; 4],
-    /// xy = half-res width/height, zw = unused.
+    /// x = half-res width, y = half-res height, z = frame phase
+    /// (`frame_index % 4`), w = "force-refresh" flag (non-zero on
+    /// first few frames, resize, or any host-side history invalidation).
     size: [u32; 4],
+    /// x = temporal blend alpha (≈0.25 steady, 4-frame EMA).
+    /// y = per-frame Halton-5 rotation of the direction basis
+    /// (uncorrelated with TAA's Halton-2/3 pixel jitter).
+    /// zw unused.
+    temporal: [f32; 4],
 }
 
 // ============================================================
@@ -491,8 +498,26 @@ pub struct Renderer {
     /// views + uniform buffers) only change on resize. Invalidated
     /// (set to None) in `resize()` and rebuilt lazily on next use.
     /// Saves ~4 `create_bind_group` calls per frame (~15-20 µs on M1).
-    ssao_bg_cache: Option<wgpu::BindGroup>,
+    /// Cached bind groups for the SSAO compute pass. One per ping-pong
+    /// index because the history input/output textures swap every
+    /// frame — swapping views inside a cached BG is not allowed.
+    ssao_bg_cache: [Option<wgpu::BindGroup>; 2],
     ssao_blur_bg_cache: Option<wgpu::BindGroup>,
+    /// Half-res AO history ping-pong for temporal accumulation.
+    /// Each frame reads `[1 - ssao_history_idx]` as history input and
+    /// writes `[ssao_history_idx]` as the blended output. `ssao_rt`
+    /// still receives the contrasted/strength-modulated per-frame
+    /// result that the bilateral blur consumes; history stores the
+    /// pre-contrast linear AO so repeated applies of pow(ao, 2) don't
+    /// collapse the signal toward zero.
+    pub ssao_history_textures: [wgpu::Texture; 2],
+    pub ssao_history_views: [wgpu::TextureView; 2],
+    pub ssao_history_idx: usize,
+    /// Frames since the SSAO history was last invalidated. On 0..3
+    /// we force alpha=1 so the first frames seed the history from
+    /// the current frame instead of blending against an undefined
+    /// clear. Resets to 0 on resize and when SSAO toggles back on.
+    pub ssao_history_frame: u32,
     ssr_bg_cache: Option<wgpu::BindGroup>,
     ssgi_bg_cache: Option<wgpu::BindGroup>,
     /// TAA history ping-pong. Two HDR-format textures the same size
@@ -1209,6 +1234,9 @@ impl Renderer {
             BLOOM_MIP_COUNT,
         );
         let (ssao_rt_texture, ssao_rt_view) = create_ssao_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+        let (ssao_history_textures, ssao_history_views) = create_ssao_history_textures(
             &device, surface_config.width, surface_config.height,
         );
         let (taa_textures, taa_views) = create_taa_textures(
@@ -2247,6 +2275,39 @@ impl Renderer {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
+                    }, count: None,
+                },
+                // velocity_tex
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                // history_in (ping-pong read)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                // filt_samp (history bilinear reprojection)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // history_out (ping-pong write)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: SSAO_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
                     }, count: None,
                 },
             ],
@@ -3381,8 +3442,12 @@ impl Renderer {
             ssao_strength: 1.0,
             ssao_enabled: true,
             bloom_enabled: true,
-            ssao_bg_cache: None,
+            ssao_bg_cache: [None, None],
             ssao_blur_bg_cache: None,
+            ssao_history_textures,
+            ssao_history_views,
+            ssao_history_idx: 0,
+            ssao_history_frame: 0,
             ssr_bg_cache: None,
             ssgi_bg_cache: None,
             // World-space AO radius in meters. Sponza-scale arches
@@ -3663,6 +3728,11 @@ impl Renderer {
             let (st, sv) = create_ssao_rt(&self.device, width, height);
             self.ssao_rt_texture = st;
             self.ssao_rt_view = sv;
+            let (sht, shv) = create_ssao_history_textures(&self.device, width, height);
+            self.ssao_history_textures = sht;
+            self.ssao_history_views = shv;
+            self.ssao_history_idx = 0;
+            self.ssao_history_frame = 0;
             let (sbt, sbv) = create_ssao_blur_rt(&self.device, width, height);
             self.ssao_blur_rt_texture = sbt;
             self.ssao_blur_rt_view = sbv;
@@ -3700,7 +3770,7 @@ impl Renderer {
 
             // Invalidate bind-group caches that reference any of the
             // RT views we just recreated.
-            self.ssao_bg_cache = None;
+            self.ssao_bg_cache = [None, None];
             self.ssao_blur_bg_cache = None;
             self.ssr_bg_cache = None;
             self.ssgi_bg_cache = None;
@@ -3977,7 +4047,15 @@ impl Renderer {
         if on { self.shadow_map.enable(); } else { self.shadow_map.disable(); }
     }
     pub fn set_bloom_enabled(&mut self, on: bool) { self.bloom_enabled = on; }
-    pub fn set_ssao_enabled(&mut self, on: bool) { self.ssao_enabled = on; }
+    pub fn set_ssao_enabled(&mut self, on: bool) {
+        if on && !self.ssao_enabled {
+            // History was frozen while SSAO was off; reset the counter
+            // so the first few frames after re-enabling seed fresh
+            // instead of reusing stale accumulated AO.
+            self.ssao_history_frame = 0;
+        }
+        self.ssao_enabled = on;
+    }
 
     /// Batch-configure every quality flag based on a preset level.
     /// Presets:
@@ -5053,6 +5131,20 @@ impl Renderer {
                 v[0][2]*ld[0] + v[1][2]*ld[1] + v[2][2]*ld[2],
                 0.0,
             ];
+            // Temporal accumulation: ping-pong history textures.
+            // `write_idx` is the current-frame output; `read_idx` the
+            // previous frame's result. First 4 frames force alpha=1
+            // so the initial clear never contaminates the signal.
+            let write_idx = self.ssao_history_idx;
+            let read_idx = 1 - write_idx;
+            let frame_phase = self.ssao_history_frame % 4;
+            let force_refresh = if self.ssao_history_frame < 4 { 1u32 } else { 0u32 };
+            // 4-frame EMA: alpha = 1/4 = 0.25 gives equal weight to
+            // each of the 4 phases at steady state.
+            let alpha = 0.25_f32;
+            // Halton-5 rotation: uncorrelated with TAA's base-2/3 jitter
+            // so the two noise patterns don't resonate.
+            let halton5 = halton(self.ssao_history_frame + 1, 5);
             let sp = SsaoParams {
                 params: [
                     1.0 / half_w as f32,
@@ -5063,12 +5155,13 @@ impl Renderer {
                 proj_row01: [p00, p11, p20, p21],
                 proj_z: [p22, p32, 1.0 / p00, 1.0 / p11],
                 light_dir_vs,
-                size: [half_w, half_h, 0, 0],
+                size: [half_w, half_h, frame_phase, force_refresh],
+                temporal: [alpha, halton5, 0.0, 0.0],
             };
             self.queue.write_buffer(&self.ssao_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
-            if self.ssao_bg_cache.is_none() {
-                self.ssao_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            if self.ssao_bg_cache[write_idx].is_none() {
+                self.ssao_bg_cache[write_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("ssao_bg"),
                     layout: &self.ssao_layout,
                     entries: &[
@@ -5080,10 +5173,14 @@ impl Renderer {
                         wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.hiz_views[2]) },
                         wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.hiz_views[3]) },
                         wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.hiz_views[4]) },
+                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
+                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.ssao_history_views[read_idx]) },
+                        wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                        wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.ssao_history_views[write_idx]) },
                     ],
                 }));
             }
-            let bg = self.ssao_bg_cache.as_ref().unwrap();
+            let bg = self.ssao_bg_cache[write_idx].as_ref().unwrap();
 
             let ssao_ts = profiler.compute_pass_timestamp_writes("ssao_pass");
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -5093,6 +5190,10 @@ impl Renderer {
             pass.set_pipeline(&self.ssao_pipeline);
             pass.set_bind_group(0, bg, &[]);
             pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
+
+            // Flip ping-pong indices for the next frame.
+            self.ssao_history_idx = read_idx;
+            self.ssao_history_frame = self.ssao_history_frame.wrapping_add(1);
         }
 
         // ============================================================

@@ -1444,7 +1444,15 @@ struct SsaoParams {
     /// z = 1/proj[0][0], w = 1/proj[1][1] (contact-shadow NDC->UV).
     proj_z: vec4<f32>,
     light_dir_vs: vec4<f32>,
+    /// x = half_w, y = half_h, z = frame_phase (0..3), w = first_frames
+    /// flag (non-zero → force alpha=1 so history seeds from the current
+    /// frame instead of a stale clear).
     size: vec4<u32>,
+    /// x = temporal blend alpha (steady state, 4-frame EMA ≈ 0.25);
+    /// y = per-frame Halton-5 rotation offset for direction basis
+    /// (uncorrelated with TAA's Halton-2/3 pixel jitter so the two
+    /// patterns don't resonate); zw unused.
+    temporal: vec4<f32>,
 };
 
 const HIZ_SKY_Z: f32 = 10000.0;
@@ -1457,11 +1465,22 @@ const HIZ_SKY_Z: f32 = 10000.0;
 @group(0) @binding(5) var hiz2: texture_2d<f32>;
 @group(0) @binding(6) var hiz3: texture_2d<f32>;
 @group(0) @binding(7) var hiz4: texture_2d<f32>;
+@group(0) @binding(8) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(9) var history_in: texture_2d<f32>;
+@group(0) @binding(10) var filt_samp: sampler;
+@group(0) @binding(11) var history_out: texture_storage_2d<rgba8unorm, write>;
 
-const N_DIRS: u32 = 8u;
+// Temporal accumulation fan-out: every frame scans 2 of 8 directions;
+// 4 frames rotate through all 8. The 4-frame EMA folded in history
+// reconstructs the full 8-dir × 8-step signal at steady state for a
+// nominal 4× perf win on the GTAO pass itself.
+const N_DIRS_TOTAL: u32 = 8u;
+const N_DIRS_PER_FRAME: u32 = 2u;
+const N_PHASES: u32 = 4u;
 const N_STEPS: u32 = 8u;
 const PI: f32 = 3.14159265;
 const HIZ_MAX_MIP: i32 = 4;
+
 
 fn hiz_sample(uv: vec2<f32>, mip: i32) -> f32 {
     switch (clamp(mip, 0, HIZ_MAX_MIP)) {
@@ -1489,19 +1508,25 @@ fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32) -> vec3<f32> {
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = gid.xy;
-    if (px.x >= u.size.x || px.y >= u.size.y) { return; }
+    let in_bounds = px.x < u.size.x && px.y < u.size.y;
 
     let inv_sz = u.params.xy;
     let uv = (vec2<f32>(px) + vec2<f32>(0.5)) * inv_sz;
 
+    if (!in_bounds) { return; }
+
     let center_z = hiz_sample(uv, 0);
+    // Sky early-out: write full visibility (no AO, no shadow) both
+    // to the bilateral-blur input and to history. Seeding history
+    // with 1.0 keeps next-frame's 4-tap cross clamp well-behaved
+    // where sky neighbours geometry.
     if (center_z >= HIZ_SKY_Z * 0.5) {
         textureStore(ao_out, vec2<i32>(px), vec4<f32>(1.0, 1.0, 0.0, 1.0));
+        textureStore(history_out, vec2<i32>(px), vec4<f32>(1.0, 1.0, 0.0, 1.0));
         return;
     }
 
     let P = view_pos_from_linear(uv, center_z);
-
     let uv_r = uv + vec2<f32>(inv_sz.x, 0.0);
     let uv_u = uv + vec2<f32>(0.0, -inv_sz.y);
     let P_r = view_pos_from_linear(uv_r, hiz_sample(uv_r, 0));
@@ -1510,7 +1535,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let coord = vec2<f32>(px);
     let ign = fract(52.9829189 * fract(0.06711056 * coord.x + 0.00583715 * coord.y));
-    let jitter_angle = ign * PI;
+    // Per-pixel IGN rotation plus a per-frame Halton-5 rotation of
+    // the direction basis. Halton base 5 is uncorrelated with TAA's
+    // Halton 2/3 pixel jitter so the two noise patterns don't
+    // resonate into a visible crawling artefact.
+    let jitter_angle = ign * PI + u.temporal.y * PI;
 
     let radius_ws = u.params.z;
     let strength = u.params.w;
@@ -1533,8 +1562,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         mip_per_step[s] = clamp(i32(floor(log2(max(d_px, 1.0)))), 0, HIZ_MAX_MIP);
     }
 
-    for (var d = 0u; d < N_DIRS; d = d + 1u) {
-        let angle = (f32(d) / f32(N_DIRS)) * PI + jitter_angle;
+    // Split the 8-direction scan across 4 frames. Frame `phase = k`
+    // samples directions { phase, phase + 4 } — complementary angles
+    // in the 0..π range so every frame covers roughly the full
+    // horizon and history doesn't bias toward one hemisphere between
+    // refreshes. Over 4 frames the full 8-direction set is sampled.
+    let phase = u.size.z;
+    for (var k = 0u; k < N_DIRS_PER_FRAME; k = k + 1u) {
+        let d = phase + k * N_PHASES;
+        let angle = (f32(d) / f32(N_DIRS_TOTAL)) * PI + jitter_angle;
         let dir = vec2<f32>(cos(angle), sin(angle));
 
         var max_horizon_pos = -1.0;
@@ -1588,11 +1624,17 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         ao_sum = ao_sum + (vis_pos + vis_neg) * 0.5;
     }
 
-    let ao = ao_sum / f32(N_DIRS);
+    // Per-frame partial AO: normalise by the N_DIRS_PER_FRAME we
+    // actually scanned. Temporal blend below reconstructs the full
+    // 8-direction signal via the 4-frame EMA.
+    let ao_raw = ao_sum / f32(N_DIRS_PER_FRAME);
 
     // --- Screen-space contact shadows ---
     // Gate on surface/light orientation — a back-facing pixel has no
     // contact shadow to find, skip the 12-step march entirely.
+    // Contact shadow runs at its full 12-step count every frame (no
+    // temporal accumulation) because the directional light can change
+    // between frames and stale history here would trail behind.
     let light_vs = normalize(u.light_dir_vs.xyz);
     var contact = 1.0;
     let n_dot_l = dot(N, light_vs);
@@ -1620,16 +1662,52 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
+    // --- Temporal accumulation ---
+    // Reproject previous-frame history via the velocity buffer. Use
+    // `textureLoad` on velocity (nearest-neighbour, no sampler) — the
+    // velocity buffer is stored full-res and we sample at the central
+    // pixel of the SSAO half-res texel, which maps to px*2.
+    let vel_px = vec2<i32>(i32(px.x) * 2, i32(px.y) * 2);
+    let vel = textureLoad(velocity_tex, vel_px, 0).rg;
+    let prev_uv = vec2<f32>(uv.x - vel.x, uv.y + vel.y);
+    let reproj_oob = prev_uv.x < 0.0 || prev_uv.x > 1.0
+                  || prev_uv.y < 0.0 || prev_uv.y > 1.0;
+
+    var history_ao = ao_raw;
+    if (!reproj_oob) {
+        history_ao = textureSampleLevel(history_in, filt_samp, prev_uv, 0.0).r;
+    }
+
+    // Disocclusion protection via AO delta: if the reprojected
+    // history deviates from the current raw sample by more than
+    // 0.35 we treat it as a hard break and refresh to `ao_raw`.
+    // Cheaper than a spatial neighborhood clamp and sufficient
+    // given the 4-frame EMA absorbs short-term drift.
+    let ao_delta = abs(ao_raw - history_ao);
+    let force_refresh = reproj_oob || u.size.w != 0u || ao_delta > 0.35;
+    let alpha = select(u.temporal.x, 1.0, force_refresh);
+    let ao = mix(history_ao, ao_raw, alpha);
+
     // Contrast + floor (exact curve preserved).
     let ao_contrasted = pow(ao, 2.0);
     let ao_floored = max(ao_contrasted, 0.15);
     let final_ao = mix(1.0, ao_floored, strength);
-
     let contact_scaled = mix(0.1, 1.0, contact);
+
+    // Write the blended *pre-contrast* AO to history so next frame's
+    // blend stays in linear AO space (otherwise `pow(pow(x,2),2)` on
+    // every frame collapses toward black). The bilateral-blur input
+    // (ao_out) gets the contrasted + strength-modulated value so the
+    // composite pass stays visually identical to pre-temporal SSAO.
     textureStore(
         ao_out,
         vec2<i32>(px),
         vec4<f32>(saturate(final_ao), saturate(contact_scaled), 0.0, 1.0),
+    );
+    textureStore(
+        history_out,
+        vec2<i32>(px),
+        vec4<f32>(saturate(ao), saturate(contact_scaled), 0.0, 1.0),
     );
 }
 ";

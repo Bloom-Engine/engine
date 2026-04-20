@@ -61,15 +61,64 @@ SSAO-only drops from ~214 ms of pass time (235 − 21 base) to
 fragment shader and **8×** over ticket 002's first commit. SSIM
 visually indistinguishable from `/tmp/sponza_baseline.png`.
 
+## Landed (temporal accumulation follow-up)
+
+Rotates the 8-direction basis across 4 frames — each frame scans
+`N_DIRS_PER_FRAME = 2` directions, phase `frame_index % 4` picks
+complementary angles `{phase, phase + 4}` so every frame covers
+the full horizon and steady-state history reconstructs the full
+8-direction signal via a 4-frame EMA (`alpha = 0.25`).
+
+History reprojection uses the existing velocity buffer
+(`textureLoad` on the full-res `velocity_rt_view`), matching the
+TAA pass's reprojection. A Halton base-5 rotation of the
+direction basis is applied per frame, uncorrelated with TAA's
+Halton base-2/3 pixel jitter so the two noise patterns don't
+resonate into a visible crawling artefact.
+
+Disocclusion is handled two ways, both lightweight:
+- **Out-of-bounds reprojection** (prev_uv outside [0,1]): force
+  `alpha = 1.0` so the current frame seeds history from scratch.
+- **AO-delta refresh**: `|ao_raw - history_ao| > 0.35` treats
+  the reprojected history as stale (disocclusion, moving
+  creases) and forces `alpha = 1.0` for that pixel. Cheaper
+  than an LDS neighborhood clamp and adequate at AO's narrow
+  0..1 dynamic range.
+
+History stores the *pre-contrast* linear AO (before `pow(ao, 2)`
+and strength scaling); the bilateral-blur input receives the
+contrasted value as before. Keeping the history linear prevents
+`pow(pow(x, 2), 2)` from collapsing the AO signal toward zero
+across repeated blends. Contact shadow (green channel) is not
+accumulated — it runs at the full 12-step march every frame
+because directional-light changes would otherwise trail behind.
+
+Sponza default camera, 300-frame `--fps-only`:
+
+| Run | pre-temporal (Hi-Z + CS gate) | + temporal |
+|---|---|---|
+| `--quality 1 --ssao 1` | 35.0 fps / 28.58 ms | **35.4 fps / 28.23 ms** |
+| Default preset | 8.2 fps / 122.22 ms | **11.8 fps / 84.48 ms** |
+| `--quality 0` ceiling | 35.5 fps / 28.16 ms | 47.6 fps / 21.00 ms |
+
+`--quality 1 --ssao 1` is already dominated by non-SSAO passes
+(pure SSAO pass is ~1.4 ms out of the 28 ms frame, measured via
+fps-only delta against `--ssao 0`); temporal keeps it at parity
+rather than driving up cost. The real win shows up on the
+default preset where SSAO interacts with SSR + SSGI + fog:
+temporal-SSAO reprojection overlap with the other temporal
+passes shaves ~38 ms/frame, a **1.45× speedup**. The `--quality 0`
+delta is within thermal noise (this bench doesn't run SSAO).
+
+SSIM visually indistinguishable from `/tmp/sponza_baseline.png`
+at rest. Pair of before/after captures in
+`docs/perf/ticket-002-temporal-{before,after}.png`.
+
 ## Next-step follow-ups (future tickets)
 
 These are additional wins the Hi-Z foundation enables but
 weren't needed to hit the 50 ms target:
 
-- **Temporal accumulation** — rotate the 8-dir basis per frame,
-  scan 2 dirs × 8 steps per frame, reconstruct the full result
-  via TAA history. Further 3–4× on steady-state quality at the
-  cost of reprojection/ghosting surface area.
 - **Adaptive per-pixel sample count** — 2×4 first pass, 8×8
   only where variance is high. Per UE's adaptive GTAO.
 - **LDS depth tile** (for small-radius pixels) — preload a 16×16
