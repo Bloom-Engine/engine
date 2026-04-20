@@ -187,6 +187,17 @@ impl Profiler {
         })
     }
 
+    /// Same as `pass_timestamp_writes` but for a compute pass descriptor.
+    pub fn compute_pass_timestamp_writes(&mut self, label: &'static str) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        let (b, e) = self.reserve_gpu_pair(label)?;
+        let qs = self.query_set.as_ref()?;
+        Some(wgpu::ComputePassTimestampWrites {
+            query_set: qs,
+            beginning_of_pass_write_index: Some(b),
+            end_of_pass_write_index: Some(e),
+        })
+    }
+
     /// Resolve any pending GPU queries into the readback buffer. Call once
     /// per frame, after all passes are encoded and before submit.
     pub fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder) {

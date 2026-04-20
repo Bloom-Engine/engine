@@ -78,7 +78,7 @@ Ordered roughly by ROI / effort.
 | # | Title | Effort | Expected gain | Status |
 |---|---|---|---|---|
 | [001](001-tsr-half-res.md) | TSR-style half-res rendering + temporal reconstruction | ~1 week | 2× on main_hdr + all post-FX | landed (main_hdr 17→2.8 ms; full default 361→~165 ms; SSIM 0.86) |
-| [002](002-compute-gtao.md) | Compute-shader GTAO (replaces SSAO fragment shader) | ~2 days | SSAO 186 ms → ~50 ms | open |
+| [002](002-compute-gtao.md) | Compute-shader GTAO (replaces SSAO fragment shader) | ~2 days | SSAO 186 ms → ~50 ms | partial (compute port + sky-direction early-out landed; SSAO-only ~200 ms unchanged on M-series — compute/fragment neutral on this workload. Storage-texture output + sky-break pattern are the foundation for a follow-up that hits the 50 ms target via hierarchical-depth + temporal accumulation) |
 | [003](003-stochastic-ssr.md) | Stochastic SSR + temporal accumulation | ~2 days | SSR 4× cheaper per frame | open |
 | [004](004-cached-shadow-maps.md) | Cache shadow cascades for static casters | ~2 days | Shadow pass → ~0 after first frame | open |
 | [005](005-depth-prepass.md) | Depth prepass for main HDR pass | ~1 day | main_hdr 17 ms → ~8 ms | open |

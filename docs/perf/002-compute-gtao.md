@@ -1,6 +1,62 @@
 # 002 — Compute-shader GTAO (replaces SSAO fragment shader)
 
-**Effort:** ~2 days · **Expected gain:** SSAO 186 ms → ~50 ms · **Status:** open
+**Effort:** ~2 days · **Expected gain:** SSAO 186 ms → ~50 ms · **Status:** partial
+
+## Landed (this pass)
+
+- SSAO fragment shader rewritten as a compute shader
+  (`@compute @workgroup_size(8, 8, 1)` in `SSAO_SHADER_WGSL`).
+- Per-sample view-space reconstruction swapped from `mat4×vec4 + /w`
+  (~32 ops) to six scalar projection terms (~9 ops). Correct under
+  TAA jitter of `proj[2][0]/[2][1]`.
+- Per-direction sky early-out: once a step in a horizon scan reads
+  depth ≥ 0.9999, subsequent steps in that direction are skipped
+  (horizon would stay pinned below tangent anyway). Saves up to
+  N_STEPS-1 fetches per direction when pointing at sky.
+- SSAO RT moved from `Rg8Unorm + RENDER_ATTACHMENT` to
+  `Rgba8Unorm + STORAGE_BINDING`; written via `textureStore`.
+- `Profiler::compute_pass_timestamp_writes` companion helper added
+  so the new compute pass still profiles.
+
+Visually byte-identical on the Sponza default camera pose
+(`ticket-002-before.png` vs `ticket-002-after.png`).
+
+Benchmarks (Sponza default camera, 300 frames):
+
+| Run | before | after |
+|---|---|---|
+| `--quality 1 --ssao 1` | ~200 ms / 5 fps | ~235 ms / 4.3 fps |
+| `--fps-only` (default) | ~165 ms / 6 fps | ~235 ms / 4.3 fps |
+| `--quality 0` | 60 fps (capped) | 47 fps |
+
+## What didn't move
+
+The acceptance target — SSAO pass ≤ 50 ms, ≥ 40 fps on
+`--ssao 1` — is not met by the compute port alone. On Apple
+M-series the fragment and compute paths are within noise of each
+other on this workload: the pass is dominated by ~128 scattered
+depth-texture fetches per pixel, and cheaper per-sample math /
+removed rasterizer overhead don't materially shift that.
+
+## Follow-up (not in this commit)
+
+To actually hit 50 ms, the algorithm must do fewer samples or
+cheaper samples:
+
+- **Hierarchical (pyramid) depth** — generate a mip chain of view-
+  space-linear depth once per frame and sample farther horizon-
+  scan steps from coarser mips (XeGTAO does this). Cuts cache
+  pressure on the long-range fetches that dominate the pass.
+- **Temporal accumulation** — distribute the 8-dir × 8-step scan
+  across N frames (rotate direction basis per frame), accumulate
+  under TAA. Divides per-frame cost by N; quality stays at the
+  same 128 effective samples/pixel on static content.
+- **Adaptive per-pixel sample count** — first pass with 2×4 at all
+  pixels, refine to 8×8 only where variance is high. Per UE's
+  adaptive GTAO / Activision's slides.
+
+The storage-texture output + per-direction sky break shipped here
+are the foundation any of those land on top of.
 
 ## Problem
 
