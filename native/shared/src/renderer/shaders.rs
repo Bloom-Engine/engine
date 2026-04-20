@@ -2283,7 +2283,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                     // screen-space surfaces.
                     let tn = t / max_radius;
                     let falloff = 1.0 - tn * tn;
-                    hit_color = textureSample(hdr_tex, hdr_samp, ray_uv).rgb * max(falloff, 0.0);
+                    var raw = textureSample(hdr_tex, hdr_samp, ray_uv).rgb * max(falloff, 0.0);
+                    // Firefly rejection: cap per-sample luminance.
+                    // The HDR source contains direct sun + specular
+                    // highlights that can peak above 100 nit; one
+                    // such hit in the 8-sample mean dominates the
+                    // estimator and shows up as a sparkle until the
+                    // 10-frame temporal denoiser averages it out.
+                    // Clamping at 10 keeps bright bounces legible
+                    // while killing the outliers at source — a
+                    // standard Monte-Carlo bias-variance trade.
+                    let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+                    let firefly_cap = 10.0;
+                    if (luma > firefly_cap) {
+                        raw = raw * (firefly_cap / luma);
+                    }
+                    hit_color = raw;
                 }
                 break;
             }
@@ -2341,7 +2356,29 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let current = textureSample(current_tex, current_samp, in.uv);
+    let current_raw = textureSample(current_tex, current_samp, in.uv);
+
+    // 3×3 box pre-filter of the current frame. We're already going
+    // to walk the 3×3 neighborhood below to compute the history-clamp
+    // min/max; accumulating the mean in the same loop adds no texture
+    // fetches. Pre-filtering the current frame before the temporal
+    // blend smears single-pixel SSGI fireflies across ~9 pixels which
+    // temporal then averages out in 1 frame instead of the 10 frames
+    // the 0.1 alpha would otherwise take — this is what makes the
+    // raindrop-looking sparkles on glossy floors disappear.
+    let texel = vec2<f32>(1.0) / vec2<f32>(textureDimensions(current_tex));
+    var nmin = current_raw;
+    var nmax = current_raw;
+    var prefilt = vec4<f32>(0.0);
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let s = textureSample(current_tex, current_samp, in.uv + vec2<f32>(f32(x), f32(y)) * texel);
+            nmin = min(nmin, s);
+            nmax = max(nmax, s);
+            prefilt = prefilt + s;
+        }
+    }
+    let current = prefilt * (1.0 / 9.0);
 
     // Read velocity at this pixel (velocity_rt is full-res, SSGI is half-res,
     // but UV mapping handles the difference transparently).
@@ -2358,17 +2395,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let history = textureSample(history_tex, history_samp, prev_uv);
 
     // Neighborhood clamp: prevent ghosting by clamping history to
-    // the min/max of a 3x3 neighborhood of current-frame samples.
-    let texel = vec2<f32>(1.0) / vec2<f32>(textureDimensions(current_tex));
-    var nmin = current;
-    var nmax = current;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            let s = textureSample(current_tex, current_samp, in.uv + vec2<f32>(f32(x), f32(y)) * texel);
-            nmin = min(nmin, s);
-            nmax = max(nmax, s);
-        }
-    }
+    // the min/max of the 3x3 neighborhood computed above.
     let clamped_history = clamp(history, nmin, nmax);
 
     let alpha = u.params.x;  // 0.1 = 10% new, 90% history
