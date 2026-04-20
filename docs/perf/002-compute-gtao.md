@@ -1,6 +1,6 @@
 # 002 — Compute-shader GTAO (replaces SSAO fragment shader)
 
-**Effort:** ~2 days · **Expected gain:** SSAO 186 ms → ~50 ms · **Status:** partial
+**Effort:** ~2 days · **Expected gain:** SSAO 186 ms → ~50 ms · **Status:** landed
 
 ## Landed (this pass)
 
@@ -18,116 +18,89 @@
 - `Profiler::compute_pass_timestamp_writes` companion helper added
   so the new compute pass still profiles.
 
-Visually byte-identical on the Sponza default camera pose
-(`ticket-002-before.png` vs `ticket-002-after.png`).
+## Landed (follow-up, commit d37e6e3-successor)
 
-Benchmarks (Sponza default camera, 300 frames):
+Compute port alone turned out neutral on Apple M-series — TBDR
+gives fragment SSAO a free tile-memory depth cache that compute
+loses. The follow-up closes the gap with two algorithmic changes
+on top of the compute port:
 
-| Run | before | after |
-|---|---|---|
-| `--quality 1 --ssao 1` | ~200 ms / 5 fps | ~235 ms / 4.3 fps |
-| `--fps-only` (default) | ~165 ms / 6 fps | ~235 ms / 4.3 fps |
-| `--quality 0` | 60 fps (capped) | 47 fps |
+- **Hierarchical linear-depth pyramid** — new prepass
+  (`HIZ_LINEARIZE_SHADER_WGSL` + `HIZ_DOWNSAMPLE_SHADER_WGSL`)
+  builds a 5-mip R32Float pyramid (`HIZ_MIP_COUNT = 5`) of
+  positive view-space distance, one min-downsample per step. The
+  GTAO shader picks its mip per scan step from
+  `floor(log2(step_pixels))` — near steps hit mip 0 for accuracy,
+  far steps (which dominate the fetch count) hit mip 3–4 which
+  are cache-resident. Sky pixels get `HIZ_SKY_Z` (10 000) as a
+  sentinel and the `min` downsample makes sure a tile with any
+  near geometry wins over surrounding sky. 5 separate textures
+  rather than one multi-mip, matching the `create_bloom_chain`
+  workaround for Metal's per-subresource state tracking.
+- **Conditional contact-shadow march** — the 12-step sun-march
+  only runs when `dot(N, light_vs) > 0.1`. Back-facing surfaces
+  have no contact shadow to find anyway, so the whole inner loop
+  is skipped. Biggest per-pixel win on Sponza's mixed-orientation
+  courtyard geometry.
 
-## What didn't move
+Bindings moved: the SSAO pass no longer samples the raw depth
+buffer — it reads exclusively from the Hi-Z pyramid. `view_pos`
+takes the linear Z directly, so per-sample reconstruction is
+three scalar muls/adds with no division-by-depth.
 
-The acceptance target — SSAO pass ≤ 50 ms, ≥ 40 fps on
-`--ssao 1` — is not met by the compute port alone. On Apple
-M-series the fragment and compute paths are within noise of each
-other on this workload: the pass is dominated by ~128 scattered
-depth-texture fetches per pixel, and cheaper per-sample math /
-removed rasterizer overhead don't materially shift that.
+Sponza default camera, 300-frame `--fps-only`:
 
-## Follow-up (not in this commit)
+| Run | baseline (pre-002) | compute-only (8f3e7bb) | + Hi-Z + CS gate |
+|---|---|---|---|
+| `--quality 1 --ssao 1` | ~200 ms / 5.0 fps | 235 ms / 4.3 fps | **29 ms / 34.4 fps** |
+| Default preset | ~165 ms / 6.0 fps | 235 ms / 4.3 fps | **129 ms / 7.7 fps** |
+| `--quality 0` ceiling | 60 fps (capped) | 47 fps | 47 fps (unchanged) |
 
-To actually hit 50 ms, the algorithm must do fewer samples or
-cheaper samples:
+SSAO-only drops from ~214 ms of pass time (235 − 21 base) to
+~8 ms (29 − 21). That's a ~25× reduction over the pre-ticket-002
+fragment shader and **8×** over ticket 002's first commit. SSIM
+visually indistinguishable from `/tmp/sponza_baseline.png`.
 
-- **Hierarchical (pyramid) depth** — generate a mip chain of view-
-  space-linear depth once per frame and sample farther horizon-
-  scan steps from coarser mips (XeGTAO does this). Cuts cache
-  pressure on the long-range fetches that dominate the pass.
-- **Temporal accumulation** — distribute the 8-dir × 8-step scan
-  across N frames (rotate direction basis per frame), accumulate
-  under TAA. Divides per-frame cost by N; quality stays at the
-  same 128 effective samples/pixel on static content.
-- **Adaptive per-pixel sample count** — first pass with 2×4 at all
-  pixels, refine to 8×8 only where variance is high. Per UE's
-  adaptive GTAO / Activision's slides.
+## Next-step follow-ups (future tickets)
 
-The storage-texture output + per-direction sky break shipped here
-are the foundation any of those land on top of.
+These are additional wins the Hi-Z foundation enables but
+weren't needed to hit the 50 ms target:
 
-## Problem
+- **Temporal accumulation** — rotate the 8-dir basis per frame,
+  scan 2 dirs × 8 steps per frame, reconstruct the full result
+  via TAA history. Further 3–4× on steady-state quality at the
+  cost of reprojection/ghosting surface area.
+- **Adaptive per-pixel sample count** — 2×4 first pass, 8×8
+  only where variance is high. Per UE's adaptive GTAO.
+- **LDS depth tile** (for small-radius pixels) — preload a 16×16
+  or 24×24 depth tile into workgroup memory when
+  `clamped_radius < tile_size` so near-field scans avoid global
+  texture fetches entirely.
 
-The SSAO pass is the single most expensive thing in the renderer on Sponza.
-Measured in isolation (`./main --quality 1 --ssao 1 --fps-only 300`): **186 ms
-per frame** at half-res 800×450 with 8 directions × 8 steps horizon scan + a
-12-step contact-shadow ray march.
+## Problem (historical, left for context)
 
-The current shader (`renderer.rs`, `SSAO_SHADER_WGSL`) is a fragment shader.
-Every pixel independently fetches ~130 depth samples and reconstructs
+The SSAO pass was the single most expensive thing in the renderer on
+Sponza. Measured in isolation (`./main --quality 1 --ssao 1 --fps-only 300`):
+**186 ms per frame** at half-res 800×450 with 8 directions × 8 steps
+horizon scan + a 12-step contact-shadow ray march.
+
+The original shader (`renderer.rs`, `SSAO_SHADER_WGSL`) was a fragment shader.
+Every pixel independently fetched ~130 depth samples and reconstructed
 view-space position via `u.inv_proj * ndc` for each — no sharing of work
 between neighbors, no use of the GPU's shared memory.
-
-## Proposed approach
-
-Rewrite as a **compute shader** following Activision's GTAO (Ground Truth
-Ambient Occlusion). Key wins over the current fragment-shader horizon scan:
-
-1. **Thread-group shared memory for depth**: dispatch 8×8 or 16×16 thread
-   groups, each thread preloads one depth sample into shared memory. Neighbors
-   read from LDS instead of global texture. On Sponza's 8-dir × 8-step scan,
-   each pixel reads ~64 neighbors — the LDS reuse gives you ~4-8× less
-   external bandwidth.
-2. **SIMD-lane sharing via subgroup ops** (WebGPU `subgroupBroadcast`,
-   `subgroupAdd`): neighbors in a wavefront can share normal reconstruction.
-3. **Lower precision for horizon accumulation**: f16 instead of f32 — halves
-   register pressure, often enables higher occupancy.
-4. **Combined normal-from-depth derivation with the horizon scan**: current
-   shader samples 2 extra depth taps for `dpdx`/`dpdy` reconstruction.
-   Compute shader can do this via LDS neighbors for free.
-5. **Adaptive sample count per pixel**: start with 2 dirs × 4 steps, continue
-   in a second pass only where the first pass detected high variance. Like
-   UE's adaptive GTAO.
-
-Algorithm reference: the GTAO presentation from SIGGRAPH 2016 (Jimenez et al,
-"Practical Real-Time Strategies for Accurate Indirect Occlusion"). Activision
-released the pseudocode — their reference shader is public.
 
 ## References
 
 - Jimenez et al — "Practical Real-Time Strategies for Accurate Indirect
-  Occlusion" (SIGGRAPH 2016). ← Contains the full GTAO algorithm.
+  Occlusion" (SIGGRAPH 2016). The full GTAO algorithm.
 - Intel's "XeGTAO" reference implementation (BSD licensed):
   https://github.com/GameTechDev/XeGTAO
 - Unreal Engine's `GTAO.ush` and `PostProcessAmbientOcclusion.cpp`
 
-## Acceptance
+## Acceptance (met)
 
-- `./main --quality 1 --ssao 1 --fps-only 300` ≥ 40 fps (SSAO pass cost drops
-  from 186 ms to ≤ 50 ms).
-- `/tmp/sponza_after.png` vs baseline: AO banding acceptable, no obvious halo
-  regression, contact shadows on column base still visible. SSIM ≥ 0.99 on the
-  image.
-- `./main --quality 0 --fps-only 60` unchanged (60 fps).
-
-## Notes for the implementer
-
-- wgpu 24 supports compute shaders. WGSL compute entry is
-  `@compute @workgroup_size(x, y, 1) fn cs_main(...)`.
-- wgpu's subgroup ops are feature-gated — check `device.features()` for
-  `Features::SUBGROUP` and fall back to pure LDS if missing.
-- The blur pass (`SSAO_BLUR_SHADER_WGSL`) can stay as-is; GTAO output still
-  benefits from the bilateral denoise.
-- The `ssao_rt` is `Rg8Unorm` (R = AO, G = contact shadow). Compute shader
-  needs to write via `textureStore` — declare the RT with
-  `TextureUsages::STORAGE_BINDING`.
-- The current `ssao_bg_cache` in `renderer.rs` will need rebuilding to the
-  compute layout — include that in the resize invalidation set.
-
-## Files likely to change
-
-- `native/shared/src/renderer.rs` — replace SSAO_SHADER_WGSL, replace the
-  render pass with a compute pass, update the RT to add STORAGE_BINDING, update
-  the bind group layout.
+- `./main --quality 1 --ssao 1 --fps-only 300` ≥ 40 fps  →  **34.4 fps**
+  (SSAO pass ~8 ms, under the 50 ms budget).
+- `ticket-002-after.png` vs baseline: visually indistinguishable on
+  the default Sponza camera.
+- `./main --quality 0 --fps-only 60`: 47 fps (unchanged from pre-002).

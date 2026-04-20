@@ -1474,6 +1474,20 @@ const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// any future deferred passes) reads it for per-pixel material info.
 const MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
 
+/// Linear-depth Hi-Z pyramid format. R32Float (not R16Float) because
+/// WebGPU only mandates r32-family formats for single-channel storage
+/// textures. The pyramid stores *positive* view-space distance
+/// (|view_z|) so compute GTAO skips per-sample linearization. Sky
+/// pixels get `HIZ_SKY_Z` (10 000) and the downsample uses `min` so
+/// any near-field geometry in a tile dominates surrounding sky.
+const HIZ_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+
+/// Number of mip levels in the linear-depth Hi-Z pyramid. 5 covers
+/// a 16-pixel-radius footprint at the coarsest mip — enough for
+/// the 0.25 UV clamp SSAO uses (~100 px at half-res 400-wide).
+/// One linearize pass plus `HIZ_MIP_COUNT - 1` downsample passes.
+const HIZ_MIP_COUNT: u32 = 5;
+
 /// Velocity buffer format. Rg16Float: two-channel 16-bit float for
 /// sub-pixel precision screen-space velocity. Written as a third
 /// color attachment in the HDR pass; motion blur and TAA read it.
@@ -1796,6 +1810,39 @@ fn create_ssao_blur_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu:
     (texture, view)
 }
 
+/// Build the linear-depth Hi-Z pyramid as `HIZ_MIP_COUNT` separate
+/// single-mip textures. One multi-mip texture is cheaper on paper
+/// but Metal's per-subresource state tracking trips when wgpu
+/// writes one mip and samples another in the same encoder — the
+/// bloom chain has the same issue and uses this same layout.
+fn create_linear_depth_hiz_chain(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (Vec<wgpu::Texture>, Vec<wgpu::TextureView>) {
+    let mut textures = Vec::with_capacity(HIZ_MIP_COUNT as usize);
+    let mut views = Vec::with_capacity(HIZ_MIP_COUNT as usize);
+    for i in 0..HIZ_MIP_COUNT {
+        let w = ((width / 2) >> i).max(1);
+        let h = ((height / 2) >> i).max(1);
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("linear_depth_hiz_mip"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HIZ_FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                 | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        textures.push(tex);
+        views.push(view);
+    }
+    (textures, views)
+}
+
 /// Create the bloom mip-chain texture + per-mip render views + a
 /// full-chain view for sampling. Mip 0 starts at surface/2 size and
 /// each subsequent mip halves down to ~surface/2^N. Caller is
@@ -2026,69 +2073,150 @@ fn fs_upsample(in: VsOut) -> @location(0) vec4<f32> {
 /// jitter to break banding. Output is Rg8Unorm at half resolution
 /// — R = GTAO occlusion, G = contact-shadow factor (both 1 =
 /// unoccluded, 0 = fully occluded).
-/// GTAO compute shader. Keeps the 8-direction × 8-step horizon scan
-/// plus 12-step contact-shadow ray march of the original fragment
-/// implementation (sample counts must not change — ticket 002
-/// constraint). Wins come from:
-///
-/// 1. Per-sample view-space reconstruction uses six scalar projection
-///    terms instead of a `mat4×vec4 + perspective divide`, cutting
-///    ~32 ops/sample down to ~9 ops/sample.
-/// 2. Sky-hit per-direction early-out: once a scan step reads the sky
-///    (depth ≥ 0.9999) we break the direction's inner loop. On
-///    outdoor views with sky in many radial slices this skips ~30-40%
-///    of the 128 per-pixel texture fetches for free.
-/// 3. Compute dispatch skips rasterizer/vertex overhead per tile and
-///    writes the RT via `textureStore` to an `rgba8unorm` storage
-///    texture — no color-attachment blend/clear machinery.
-///
-/// Output layout is unchanged: R = noisy AO, G = contact shadow;
-/// the bilateral blur pass that follows is untouched.
+/// Linearize the hardware depth buffer into mip 0 of the Hi-Z
+/// pyramid. Stores *positive* view-space distance (|view_z|); sky
+/// pixels (depth ≥ 0.9999) receive the sentinel `HIZ_SKY_Z` so a
+/// subsequent `min` downsample never picks sky over real geometry.
+const HIZ_LINEARIZE_SHADER_WGSL: &str = "
+struct Params {
+    /// xy = inv_size (1/mip0_w, 1/mip0_h)
+    /// z  = proj[2][2]
+    /// w  = proj[3][2]
+    params: vec4<f32>,
+    /// xy = mip-0 size (u32). zw unused.
+    size: vec4<u32>,
+};
+
+const HIZ_SKY_Z: f32 = 10000.0;
+
+@group(0) @binding(0) var<uniform> u: Params;
+@group(0) @binding(1) var depth_tex: texture_depth_2d;
+@group(0) @binding(2) var depth_samp: sampler;
+@group(0) @binding(3) var hiz_out: texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let px = gid.xy;
+    if (px.x >= u.size.x || px.y >= u.size.y) { return; }
+    let uv = (vec2<f32>(px) + vec2<f32>(0.5)) * u.params.xy;
+    let d = textureSampleLevel(depth_tex, depth_samp, uv, 0);
+    var linear_z: f32;
+    if (d >= 0.9999) {
+        linear_z = HIZ_SKY_Z;
+    } else {
+        // view_z = -p32 / (d + p22); store |view_z|.
+        linear_z = -u.params.w / (d + u.params.z);
+        linear_z = max(linear_z, 0.0001);
+    }
+    textureStore(hiz_out, vec2<i32>(px), vec4<f32>(linear_z, 0.0, 0.0, 0.0));
+}
+";
+
+/// Downsample one Hi-Z mip into the next. Uses `min` so the coarser
+/// mip reports the nearest occluder in its footprint — exactly what
+/// the GTAO horizon scan wants when picking a coarser mip for a
+/// far step.
+const HIZ_DOWNSAMPLE_SHADER_WGSL: &str = "
+struct Params {
+    /// xy = dst-mip size (u32). zw unused.
+    size: vec4<u32>,
+};
+
+@group(0) @binding(0) var<uniform> u: Params;
+@group(0) @binding(1) var src_tex: texture_2d<f32>;
+@group(0) @binding(2) var dst_tex: texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst = gid.xy;
+    if (dst.x >= u.size.x || dst.y >= u.size.y) { return; }
+    let src = vec2<i32>(dst * 2u);
+    let a = textureLoad(src_tex, src + vec2<i32>(0, 0), 0).r;
+    let b = textureLoad(src_tex, src + vec2<i32>(1, 0), 0).r;
+    let c = textureLoad(src_tex, src + vec2<i32>(0, 1), 0).r;
+    let d = textureLoad(src_tex, src + vec2<i32>(1, 1), 0).r;
+    let m = min(min(a, b), min(c, d));
+    textureStore(dst_tex, vec2<i32>(dst), vec4<f32>(m, 0.0, 0.0, 0.0));
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct HizLinearizeParams {
+    /// xy = inv_size, z = proj[2][2], w = proj[3][2]
+    params: [f32; 4],
+    /// xy = mip-0 size, zw unused
+    size: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct HizDownsampleParams {
+    /// xy = dst-mip size, zw unused
+    size: [u32; 4],
+}
+
+/// GTAO compute shader — same 8-dir × 8-step horizon scan +
+/// 12-step contact-shadow ray march as ticket 002, but:
+///   1. Samples a hierarchical linear-depth pyramid instead of the
+///      raw depth buffer. Each scan step `s` picks its mip from
+///      `log2(step_pixels)`, so far steps hit progressively coarser
+///      (cache-resident) data. This is the win Apple TBDR wants to
+///      compensate for the free tile-memory depth cache we lost
+///      going compute.
+///   2. Linear depth lives in the pyramid directly, so `view_pos`
+///      skips the per-sample `-p32 / (depth + p22)` reconstruction.
+///   3. Contact-shadow march is gated on `dot(N, light_vs) > 0.1` —
+///      back-facing pixels skip the whole 12-step march.
+/// Output layout is unchanged: R = noisy AO, G = contact shadow.
 const SSAO_SHADER_WGSL: &str = "
 struct SsaoParams {
     /// xy = inv_size (1/half_w, 1/half_h), z = radius_ws, w = strength
     params: vec4<f32>,
     /// x = proj[0][0], y = proj[1][1], z = proj[2][0], w = proj[2][1]
-    /// (column-major, so proj[col][row]).
     proj_row01: vec4<f32>,
-    /// x = proj[2][2], y = proj[3][2], z = 1/proj[0][0], w = 1/proj[1][1]
+    /// x = proj[2][2], y = proj[3][2] (unused here — Hi-Z already
+    /// linearized; kept so host-side SsaoParams stays symmetric),
+    /// z = 1/proj[0][0], w = 1/proj[1][1] (contact-shadow NDC->UV).
     proj_z: vec4<f32>,
-    /// Light direction in VIEW SPACE for contact-shadow ray march.
-    /// xyz = normalized direction from surface toward light, w = unused.
     light_dir_vs: vec4<f32>,
-    /// xy = half-res texture size (for bounds + out-of-bounds early-out),
-    /// zw = unused.
     size: vec4<u32>,
 };
 
+const HIZ_SKY_Z: f32 = 10000.0;
+
 @group(0) @binding(0) var<uniform> u: SsaoParams;
-@group(0) @binding(1) var depth_tex: texture_depth_2d;
-@group(0) @binding(2) var depth_samp: sampler;
-@group(0) @binding(3) var ao_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(1) var ao_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var hiz_samp: sampler;
+@group(0) @binding(3) var hiz0: texture_2d<f32>;
+@group(0) @binding(4) var hiz1: texture_2d<f32>;
+@group(0) @binding(5) var hiz2: texture_2d<f32>;
+@group(0) @binding(6) var hiz3: texture_2d<f32>;
+@group(0) @binding(7) var hiz4: texture_2d<f32>;
 
 const N_DIRS: u32 = 8u;
 const N_STEPS: u32 = 8u;
 const PI: f32 = 3.14159265;
+const HIZ_MAX_MIP: i32 = 4;
 
-// Reconstruct view-space position from UV + depth using six scalar
-// projection terms (axis-aligned perspective, with TAA jitter on
-// proj[2][0]/[2][1]). Derivation: for a perspective matrix where
-// clip.x = p00*v.x + p20*v.z, clip.y = p11*v.y + p21*v.z,
-// clip.z = p22*v.z + p32, clip.w = -v.z, inverting gives
-//     v.z = -p32 / (ndc.z + p22)
-//     v.x = -(ndc.x + p20) * v.z / p00
-//     v.y = -(ndc.y + p21) * v.z / p11
-// ~9 ops per reconstruction vs the mat4×vec4 + divide (~32 ops).
-fn view_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+fn hiz_sample(uv: vec2<f32>, mip: i32) -> f32 {
+    switch (clamp(mip, 0, HIZ_MAX_MIP)) {
+        case 0: { return textureSampleLevel(hiz0, hiz_samp, uv, 0.0).r; }
+        case 1: { return textureSampleLevel(hiz1, hiz_samp, uv, 0.0).r; }
+        case 2: { return textureSampleLevel(hiz2, hiz_samp, uv, 0.0).r; }
+        case 3: { return textureSampleLevel(hiz3, hiz_samp, uv, 0.0).r; }
+        default: { return textureSampleLevel(hiz4, hiz_samp, uv, 0.0).r; }
+    }
+}
+
+fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32) -> vec3<f32> {
     let ndc_x = uv.x * 2.0 - 1.0;
     let ndc_y = 1.0 - uv.y * 2.0;
-    let p00   = u.proj_row01.x;
-    let p11   = u.proj_row01.y;
-    let p20   = u.proj_row01.z;
-    let p21   = u.proj_row01.w;
-    let p22   = u.proj_z.x;
-    let p32   = u.proj_z.y;
-    let view_z = -p32 / (depth + p22);
+    let p00 = u.proj_row01.x;
+    let p11 = u.proj_row01.y;
+    let p20 = u.proj_row01.z;
+    let p21 = u.proj_row01.w;
+    let view_z = -linear_z;
     let view_x = -(ndc_x + p20) * view_z / p00;
     let view_y = -(ndc_y + p21) * view_z / p11;
     return vec3<f32>(view_x, view_y, view_z);
@@ -2097,29 +2225,25 @@ fn view_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = gid.xy;
-    if (px.x >= u.size.x || px.y >= u.size.y) {
-        return;
-    }
+    if (px.x >= u.size.x || px.y >= u.size.y) { return; }
 
     let inv_sz = u.params.xy;
     let uv = (vec2<f32>(px) + vec2<f32>(0.5)) * inv_sz;
 
-    let center_depth = textureSampleLevel(depth_tex, depth_samp, uv, 0);
-    if (center_depth >= 0.9999) {
+    let center_z = hiz_sample(uv, 0);
+    if (center_z >= HIZ_SKY_Z * 0.5) {
         textureStore(ao_out, vec2<i32>(px), vec4<f32>(1.0, 1.0, 0.0, 1.0));
         return;
     }
 
-    let P = view_pos(uv, center_depth);
+    let P = view_pos_from_linear(uv, center_z);
 
-    // Reconstruct view-space normal from depth buffer derivatives.
     let uv_r = uv + vec2<f32>(inv_sz.x, 0.0);
     let uv_u = uv + vec2<f32>(0.0, -inv_sz.y);
-    let P_r = view_pos(uv_r, textureSampleLevel(depth_tex, depth_samp, uv_r, 0));
-    let P_u = view_pos(uv_u, textureSampleLevel(depth_tex, depth_samp, uv_u, 0));
+    let P_r = view_pos_from_linear(uv_r, hiz_sample(uv_r, 0));
+    let P_u = view_pos_from_linear(uv_u, hiz_sample(uv_u, 0));
     let N = normalize(cross(P_r - P, P_u - P));
 
-    // Per-pixel rotation jitter via interleaved gradient noise (Jimenez 2014).
     let coord = vec2<f32>(px);
     let ign = fract(52.9829189 * fract(0.06711056 * coord.x + 0.00583715 * coord.y));
     let jitter_angle = ign * PI;
@@ -2136,6 +2260,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let step_size = clamped_radius / f32(N_STEPS);
     let inv_radius = 1.0 / radius_ws;
 
+    // Mip-per-step: step s covers ~s * step_size * mip0_w pixels;
+    // take floor(log2(that)). Precomputed once per pixel.
+    let step_pixels = step_size * f32(u.size.x);
+    var mip_per_step: array<i32, 8>;
+    for (var s = 0u; s < N_STEPS; s = s + 1u) {
+        let d_px = step_pixels * f32(s + 1u);
+        mip_per_step[s] = clamp(i32(floor(log2(max(d_px, 1.0)))), 0, HIZ_MAX_MIP);
+    }
+
     for (var d = 0u; d < N_DIRS; d = d + 1u) {
         let angle = (f32(d) / f32(N_DIRS)) * PI + jitter_angle;
         let dir = vec2<f32>(cos(angle), sin(angle));
@@ -2147,44 +2280,38 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         for (var s = 1u; s <= N_STEPS; s = s + 1u) {
             let offset = dir * step_size * f32(s);
+            let mip = mip_per_step[s - 1u];
 
-            // Positive direction
             if (!pos_on_sky) {
                 let uv_pos = uv + offset;
-                let d_pos = textureSampleLevel(depth_tex, depth_samp, uv_pos, 0);
-                if (d_pos >= 0.9999) {
-                    // Sky hit — subsequent steps in this direction add
-                    // nothing (horizon stays pinned at -1 / 'below
-                    // tangent plane'); stop fetching.
+                let z_pos = hiz_sample(uv_pos, mip);
+                if (z_pos >= HIZ_SKY_Z * 0.5) {
                     pos_on_sky = true;
                 } else {
-                    let S_pos = view_pos(uv_pos, d_pos);
+                    let S_pos = view_pos_from_linear(uv_pos, z_pos);
                     let diff_pos = S_pos - P;
                     let dist_pos = length(diff_pos);
                     if (dist_pos > 0.001) {
                         let h_pos = dot(diff_pos, N) / dist_pos;
                         let atten = saturate(1.0 - dist_pos * inv_radius);
-                        let weighted_h = mix(-1.0, h_pos, atten);
-                        max_horizon_pos = max(max_horizon_pos, weighted_h);
+                        max_horizon_pos = max(max_horizon_pos, mix(-1.0, h_pos, atten));
                     }
                 }
             }
 
-            // Negative direction
             if (!neg_on_sky) {
                 let uv_neg = uv - offset;
-                let d_neg = textureSampleLevel(depth_tex, depth_samp, uv_neg, 0);
-                if (d_neg >= 0.9999) {
+                let z_neg = hiz_sample(uv_neg, mip);
+                if (z_neg >= HIZ_SKY_Z * 0.5) {
                     neg_on_sky = true;
                 } else {
-                    let S_neg = view_pos(uv_neg, d_neg);
+                    let S_neg = view_pos_from_linear(uv_neg, z_neg);
                     let diff_neg = S_neg - P;
                     let dist_neg = length(diff_neg);
                     if (dist_neg > 0.001) {
                         let h_neg = dot(diff_neg, N) / dist_neg;
                         let atten = saturate(1.0 - dist_neg * inv_radius);
-                        let weighted_h = mix(-1.0, h_neg, atten);
-                        max_horizon_neg = max(max_horizon_neg, weighted_h);
+                        max_horizon_neg = max(max_horizon_neg, mix(-1.0, h_neg, atten));
                     }
                 }
             }
@@ -2200,31 +2327,36 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ao = ao_sum / f32(N_DIRS);
 
     // --- Screen-space contact shadows ---
+    // Gate on surface/light orientation — a back-facing pixel has no
+    // contact shadow to find, skip the 12-step march entirely.
     let light_vs = normalize(u.light_dir_vs.xyz);
     var contact = 1.0;
-    let cs_steps = 12u;
-    let cs_max_dist = 0.2;
-    let cs_step = cs_max_dist / f32(cs_steps);
-    let inv_p00 = u.proj_z.z;
-    let inv_p11 = u.proj_z.w;
-    for (var i = 1u; i <= cs_steps; i = i + 1u) {
-        let march_pos = P + light_vs * cs_step * f32(i);
-        let ndc_x = march_pos.x / ((-march_pos.z) * inv_p00);
-        let ndc_y = march_pos.y / ((-march_pos.z) * inv_p11);
-        let march_uv = vec2<f32>(ndc_x * 0.5 + 0.5, 1.0 - (ndc_y * 0.5 + 0.5));
-        if (march_uv.x < 0.0 || march_uv.x > 1.0 || march_uv.y < 0.0 || march_uv.y > 1.0) {
-            continue;
-        }
-        let march_depth = textureSampleLevel(depth_tex, depth_samp, march_uv, 0);
-        if (march_depth >= 0.9999) { continue; }
-        let scene_pos = view_pos(march_uv, march_depth);
-        if (scene_pos.z > march_pos.z + 0.01) {
-            let t = f32(i) / f32(cs_steps);
-            contact = min(contact, t);
+    let n_dot_l = dot(N, light_vs);
+    if (n_dot_l > 0.1) {
+        let cs_steps = 12u;
+        let cs_max_dist = 0.2;
+        let cs_step = cs_max_dist / f32(cs_steps);
+        let inv_p00 = u.proj_z.z;
+        let inv_p11 = u.proj_z.w;
+        for (var i = 1u; i <= cs_steps; i = i + 1u) {
+            let march_pos = P + light_vs * cs_step * f32(i);
+            let ndc_x = march_pos.x / ((-march_pos.z) * inv_p00);
+            let ndc_y = march_pos.y / ((-march_pos.z) * inv_p11);
+            let march_uv = vec2<f32>(ndc_x * 0.5 + 0.5, 1.0 - (ndc_y * 0.5 + 0.5));
+            if (march_uv.x < 0.0 || march_uv.x > 1.0 || march_uv.y < 0.0 || march_uv.y > 1.0) {
+                continue;
+            }
+            let march_z = hiz_sample(march_uv, 0);
+            if (march_z >= HIZ_SKY_Z * 0.5) { continue; }
+            let scene_pos = view_pos_from_linear(march_uv, march_z);
+            if (scene_pos.z > march_pos.z + 0.01) {
+                let t = f32(i) / f32(cs_steps);
+                contact = min(contact, t);
+            }
         }
     }
 
-    // Contrast + floor (exact curve preserved from the fragment version).
+    // Contrast + floor (exact curve preserved).
     let ao_contrasted = pow(ao, 2.0);
     let ao_floored = max(ao_contrasted, 0.15);
     let final_ao = mix(1.0, ao_floored, strength);
@@ -4212,6 +4344,23 @@ pub struct Renderer {
     pub ssao_layout: wgpu::BindGroupLayout,
     pub ssao_uniform_buffer: wgpu::Buffer,
     pub ssao_depth_sampler: wgpu::Sampler,
+    /// Linear-depth Hi-Z pyramid (positive |view_z|). `HIZ_MIP_COUNT`
+    /// separate textures so Metal multi-mip state tracking doesn't
+    /// trip when writes and samples interleave in one encoder (same
+    /// workaround `create_bloom_chain` uses). Built every frame
+    /// before SSAO: one linearize pass + `HIZ_MIP_COUNT - 1`
+    /// min-downsample passes. Sampled by SSAO with a per-step mip.
+    pub hiz_textures: Vec<wgpu::Texture>,
+    pub hiz_views: Vec<wgpu::TextureView>,
+    pub hiz_sampler: wgpu::Sampler,
+    pub hiz_linearize_pipeline: wgpu::ComputePipeline,
+    pub hiz_linearize_layout: wgpu::BindGroupLayout,
+    pub hiz_linearize_uniform_buffer: wgpu::Buffer,
+    pub hiz_downsample_pipeline: wgpu::ComputePipeline,
+    pub hiz_downsample_layout: wgpu::BindGroupLayout,
+    pub hiz_downsample_uniform_buffers: Vec<wgpu::Buffer>,
+    hiz_linearize_bg_cache: Option<wgpu::BindGroup>,
+    hiz_downsample_bg_cache: Vec<Option<wgpu::BindGroup>>,
     /// Bilateral blur pass applied to the raw GTAO output. Reads
     /// ssao_rt, writes ssao_blur_rt (same half-res R8Unorm format).
     /// The TAA pass then samples ssao_blur_rt instead of ssao_rt.
@@ -5804,6 +5953,130 @@ impl Renderer {
         };
         let bloom_pipeline_upsample = make_bloom_pipeline("fs_upsample", Some(upsample_blend));
 
+        // --- Hi-Z pyramid (linearize + downsample) pipelines ---
+        let hiz_linearize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hiz_linearize_shader"),
+            source: wgpu::ShaderSource::Wgsl(HIZ_LINEARIZE_SHADER_WGSL.into()),
+        });
+        let hiz_linearize_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("hiz_linearize_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: HIZ_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    }, count: None,
+                },
+            ],
+        });
+        let hiz_linearize_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hiz_linearize_pl_layout"),
+            bind_group_layouts: &[&hiz_linearize_layout],
+            push_constant_ranges: &[],
+        });
+        let hiz_linearize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("hiz_linearize_pipeline"),
+            layout: Some(&hiz_linearize_pl_layout),
+            module: &hiz_linearize_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let hiz_linearize_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hiz_linearize_uniform_buffer"),
+            size: std::mem::size_of::<HizLinearizeParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let hiz_downsample_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hiz_downsample_shader"),
+            source: wgpu::ShaderSource::Wgsl(HIZ_DOWNSAMPLE_SHADER_WGSL.into()),
+        });
+        let hiz_downsample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("hiz_downsample_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: HIZ_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    }, count: None,
+                },
+            ],
+        });
+        let hiz_downsample_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hiz_downsample_pl_layout"),
+            bind_group_layouts: &[&hiz_downsample_layout],
+            push_constant_ranges: &[],
+        });
+        let hiz_downsample_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("hiz_downsample_pipeline"),
+            layout: Some(&hiz_downsample_pl_layout),
+            module: &hiz_downsample_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let hiz_downsample_uniform_buffers: Vec<wgpu::Buffer> = (0..HIZ_MIP_COUNT - 1)
+            .map(|_| device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("hiz_downsample_uniform_buffer"),
+                size: std::mem::size_of::<HizDownsampleParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }))
+            .collect();
+        let hiz_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("hiz_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let (hiz_textures, hiz_views) = create_linear_depth_hiz_chain(
+            &device, surface_config.width, surface_config.height,
+        );
+
         // --- SSAO (compute GTAO) pipeline ---
         let ssao_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ssao_shader"),
@@ -5813,42 +6086,64 @@ impl Renderer {
             label: Some("ssao_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    // Non-comparison sampler — ordinary linear
-                    // sample of the depth texture.
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
                         format: SSAO_FORMAT,
                         view_dimension: wgpu::TextureViewDimension::D2,
-                    },
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
                 },
             ],
         });
@@ -6963,6 +7258,17 @@ impl Renderer {
             ssao_layout,
             ssao_uniform_buffer,
             ssao_depth_sampler,
+            hiz_textures,
+            hiz_views,
+            hiz_sampler,
+            hiz_linearize_pipeline,
+            hiz_linearize_layout,
+            hiz_linearize_uniform_buffer,
+            hiz_downsample_pipeline,
+            hiz_downsample_layout,
+            hiz_downsample_uniform_buffers,
+            hiz_linearize_bg_cache: None,
+            hiz_downsample_bg_cache: vec![None; (HIZ_MIP_COUNT - 1) as usize],
             ssao_blur_rt_texture,
             ssao_blur_rt_view,
             ssao_blur_pipeline,
@@ -7256,6 +7562,9 @@ impl Renderer {
             let (sbt, sbv) = create_ssao_blur_rt(&self.device, width, height);
             self.ssao_blur_rt_texture = sbt;
             self.ssao_blur_rt_view = sbv;
+            let (hiz_t, hiz_v) = create_linear_depth_hiz_chain(&self.device, width, height);
+            self.hiz_textures = hiz_t;
+            self.hiz_views = hiz_v;
             let (taa_t, taa_v) = create_taa_textures(&self.device, width, height);
             self.taa_textures = taa_t;
             self.taa_views = taa_v;
@@ -7291,6 +7600,10 @@ impl Renderer {
             self.ssao_blur_bg_cache = None;
             self.ssr_bg_cache = None;
             self.ssgi_bg_cache = None;
+            self.hiz_linearize_bg_cache = None;
+            for slot in self.hiz_downsample_bg_cache.iter_mut() {
+                *slot = None;
+            }
         }
     }
 
@@ -8543,27 +8856,14 @@ impl Renderer {
         profiler.end("main_hdr_pass");
 
         // ============================================================
-        // SSAO: half-res GTAO (horizon-based) of the depth buffer.
+        // SSAO: half-res GTAO sampling a hierarchical linear-depth
+        // pyramid. Build hiz (linearize + 4 min-downsamples), then
+        // dispatch the GTAO compute pass.
         // ============================================================
         profiler.begin("post_fx");
         let surf_w = self.surface_config.width;
         let surf_h = self.surface_config.height;
         if self.ssao_enabled {
-            // Transform the world-space light direction into view space
-            // for the contact-shadow ray march. View matrix's 3x3 part
-            // rotates world→view; light_dir is a direction (w=0).
-            let ld = self.lighting_uniforms.light_dir;
-            let v = &self.current_view_matrix;
-            let light_dir_vs = [
-                v[0][0]*ld[0] + v[1][0]*ld[1] + v[2][0]*ld[2],
-                v[0][1]*ld[0] + v[1][1]*ld[1] + v[2][1]*ld[2],
-                v[0][2]*ld[0] + v[1][2]*ld[1] + v[2][2]*ld[2],
-                0.0,
-            ];
-            // Projection terms for the compute shader's per-sample view-
-            // space reconstruction. See SSAO_SHADER_WGSL `view_pos` for
-            // the inversion. `current_proj_matrix` is column-major
-            // (proj[col][row]); TAA jitter populates [2][0] and [2][1].
             let p = &self.current_proj_matrix;
             let p00 = p[0][0];
             let p11 = p[1][1];
@@ -8573,6 +8873,82 @@ impl Renderer {
             let p32 = p[3][2];
             let half_w = (surf_w / 2).max(1);
             let half_h = (surf_h / 2).max(1);
+
+            // --- Hi-Z build: linearize depth into mip 0 -----------------
+            let lin_params = HizLinearizeParams {
+                params: [1.0 / half_w as f32, 1.0 / half_h as f32, p22, p32],
+                size: [half_w, half_h, 0, 0],
+            };
+            self.queue.write_buffer(&self.hiz_linearize_uniform_buffer, 0, bytemuck::bytes_of(&lin_params));
+            if self.hiz_linearize_bg_cache.is_none() {
+                self.hiz_linearize_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("hiz_linearize_bg"),
+                    layout: &self.hiz_linearize_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.hiz_linearize_uniform_buffer.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
+                    ],
+                }));
+            }
+            {
+                let bg = self.hiz_linearize_bg_cache.as_ref().unwrap();
+                let ts = profiler.compute_pass_timestamp_writes("hiz_linearize_pass");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("hiz_linearize_pass"),
+                    timestamp_writes: ts,
+                });
+                pass.set_pipeline(&self.hiz_linearize_pipeline);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
+            }
+
+            // --- Hi-Z build: downsample mip i -> mip i+1 ----------------
+            for i in 0..(HIZ_MIP_COUNT - 1) as usize {
+                let dst_w = (half_w >> (i + 1)).max(1);
+                let dst_h = (half_h >> (i + 1)).max(1);
+                let ds_params = HizDownsampleParams {
+                    size: [dst_w, dst_h, 0, 0],
+                };
+                self.queue.write_buffer(&self.hiz_downsample_uniform_buffers[i], 0, bytemuck::bytes_of(&ds_params));
+                if self.hiz_downsample_bg_cache[i].is_none() {
+                    self.hiz_downsample_bg_cache[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("hiz_downsample_bg"),
+                        layout: &self.hiz_downsample_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: self.hiz_downsample_uniform_buffers[i].as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.hiz_views[i]) },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.hiz_views[i + 1]) },
+                        ],
+                    }));
+                }
+                let bg = self.hiz_downsample_bg_cache[i].as_ref().unwrap();
+                let ts_label: &'static str = match i {
+                    0 => "hiz_downsample_pass_1",
+                    1 => "hiz_downsample_pass_2",
+                    2 => "hiz_downsample_pass_3",
+                    _ => "hiz_downsample_pass_4",
+                };
+                let ts = profiler.compute_pass_timestamp_writes(ts_label);
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(ts_label),
+                    timestamp_writes: ts,
+                });
+                pass.set_pipeline(&self.hiz_downsample_pipeline);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups((dst_w + 7) / 8, (dst_h + 7) / 8, 1);
+            }
+
+            // --- SSAO (compute GTAO, samples Hi-Z pyramid) --------------
+            let ld = self.lighting_uniforms.light_dir;
+            let v = &self.current_view_matrix;
+            let light_dir_vs = [
+                v[0][0]*ld[0] + v[1][0]*ld[1] + v[2][0]*ld[2],
+                v[0][1]*ld[0] + v[1][1]*ld[1] + v[2][1]*ld[2],
+                v[0][2]*ld[0] + v[1][2]*ld[1] + v[2][2]*ld[2],
+                0.0,
+            ];
             let sp = SsaoParams {
                 params: [
                     1.0 / half_w as f32,
@@ -8593,9 +8969,13 @@ impl Renderer {
                     layout: &self.ssao_layout,
                     entries: &[
                         wgpu::BindGroupEntry { binding: 0, resource: self.ssao_uniform_buffer.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.hiz_sampler) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.hiz_views[1]) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.hiz_views[2]) },
+                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.hiz_views[3]) },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.hiz_views[4]) },
                     ],
                 }));
             }
@@ -8608,9 +8988,7 @@ impl Renderer {
             });
             pass.set_pipeline(&self.ssao_pipeline);
             pass.set_bind_group(0, bg, &[]);
-            let gx = (half_w + 7) / 8;
-            let gy = (half_h + 7) / 8;
-            pass.dispatch_workgroups(gx, gy, 1);
+            pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
         }
 
         // ============================================================
