@@ -1664,11 +1664,17 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // --- Temporal accumulation ---
     // Reproject previous-frame history via the velocity buffer. Use
-    // `textureLoad` on velocity (nearest-neighbour, no sampler) — the
-    // velocity buffer is stored full-res and we sample at the central
-    // pixel of the SSAO half-res texel, which maps to px*2.
-    let vel_px = vec2<i32>(i32(px.x) * 2, i32(px.y) * 2);
-    let vel = textureLoad(velocity_tex, vel_px, 0).rg;
+    // `textureLoad` (nearest, no sampler — velocity's bind-group
+    // entry is filterable:false). With TSR on (the default since
+    // ticket 001), the velocity RT is created at `render_extent()`
+    // = half-res, matching the SSAO pass dimensions 1:1 — so the
+    // integer coord is just `px`, NOT `px*2`. The earlier `px*2`
+    // read velocity at 2× offset, which sent 75% of SSAO pixels
+    // out of bounds (returns zero → history reprojected from the
+    // same screen pixel even during camera motion → stale geometry
+    // blended in over 4 frames → scene-wide darkening while
+    // turning + per-pixel floor sparkle from stale-history noise).
+    let vel = textureLoad(velocity_tex, vec2<i32>(px), 0).rg;
     let prev_uv = vec2<f32>(uv.x - vel.x, uv.y + vel.y);
     let reproj_oob = prev_uv.x < 0.0 || prev_uv.x > 1.0
                   || prev_uv.y < 0.0 || prev_uv.y > 1.0;
@@ -2403,6 +2409,77 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 ";
 
+/// SSR temporal denoiser. Same shape as the SSGI temporal pass:
+/// reprojects the previous history through the motion vectors,
+/// clamps against the 3×3 neighborhood of the noisy current frame,
+/// and blends with a low alpha so 4–8 frames of random GGX rays
+/// converge to a smooth reflection. Also pre-filters the noisy
+/// current frame by the 3×3 mean, which kills single-pixel
+/// glossy-ray sparkles in one frame instead of 10.
+pub(super) const SSR_TEMPORAL_SHADER_WGSL: &str = "
+struct SsrTemporalParams {
+    /// x = blend_alpha (0.1), yzw unused
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: SsrTemporalParams;
+@group(0) @binding(1) var current_tex: texture_2d<f32>;
+@group(0) @binding(2) var current_samp: sampler;
+@group(0) @binding(3) var history_tex: texture_2d<f32>;
+@group(0) @binding(4) var history_samp: sampler;
+@group(0) @binding(5) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(6) var velocity_samp: sampler;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let current_raw = textureSample(current_tex, current_samp, in.uv);
+
+    // 3×3 box pre-filter + neighborhood min/max. One texel spread
+    // across 9 samples hides single-pixel glossy-ray sparkles in a
+    // single frame; the min/max bounds the history so disocclusion
+    // and material transitions clamp rather than ghost.
+    let texel = vec2<f32>(1.0) / vec2<f32>(textureDimensions(current_tex));
+    var nmin = current_raw;
+    var nmax = current_raw;
+    var prefilt = vec4<f32>(0.0);
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let s = textureSample(current_tex, current_samp, in.uv + vec2<f32>(f32(x), f32(y)) * texel);
+            nmin = min(nmin, s);
+            nmax = max(nmax, s);
+            prefilt = prefilt + s;
+        }
+    }
+    let current = prefilt * (1.0 / 9.0);
+
+    // Velocity is full-res; UV mapping handles the half-res delta.
+    let vel = textureSample(velocity_tex, velocity_samp, in.uv).xy;
+    let prev_uv = in.uv - vel;
+    let off_screen = prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0;
+    if (off_screen) { return current; }
+
+    let history = textureSample(history_tex, history_samp, prev_uv);
+    let clamped_history = clamp(history, nmin, nmax);
+    let alpha = u.params.x;
+    return mix(clamped_history, current, alpha);
+}
+";
+
 /// SSR (screen-space reflections) shader. View-space ray march:
 ///
 /// 1. Reconstruct view-space position from the depth buffer.
@@ -2427,7 +2504,7 @@ struct SsrParams {
     /// x = SSR strength (0 = off, 1 = full)
     /// y = max march distance in view-space units
     /// z = number of march steps
-    /// w = frame index (for per-frame march jitter)
+    /// w = frame index (Hammersley rotation + march jitter)
     params: vec4<f32>,
 };
 
@@ -2440,6 +2517,8 @@ struct SsrParams {
 @group(0) @binding(6) var mat_samp: sampler;
 @group(0) @binding(7) var albedo_tex: texture_2d<f32>;
 @group(0) @binding(8) var albedo_samp: sampler;
+
+const PI: f32 = 3.14159265;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -2463,12 +2542,37 @@ fn view_pos_from_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
 }
 
 /// Interleaved gradient noise — per-pixel pseudo-random in [0, 1).
-/// Varies with frame so TAA downstream accumulates the per-frame
-/// march jitter into smooth reflections instead of a single-sample
-/// step pattern.
+/// Varies with frame so the temporal accumulator averages over
+/// different march offsets each frame.
 fn ign_jitter(frag_coord: vec2<f32>, frame: f32) -> f32 {
     let shifted = frag_coord + vec2<f32>(frame * 5.588238, frame * 3.127137);
     return fract(52.9829189 * fract(0.06711056 * shifted.x + 0.00583715 * shifted.y));
+}
+
+/// Cheap 2D hash → two independent low-discrepancy values in [0,1)².
+/// Used as GGX microfacet-sample coordinates; the frame index rotates
+/// the hash so each pixel draws a different sample every frame and
+/// the temporal denoiser averages over the GGX lobe.
+fn hash2(frag_coord: vec2<f32>, frame: f32) -> vec2<f32> {
+    let p1 = frag_coord + vec2<f32>(frame * 11.13, frame * 7.77);
+    let p2 = frag_coord + vec2<f32>(frame * 3.17,  frame * 5.29);
+    let a = fract(sin(dot(p1, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    let b = fract(sin(dot(p2, vec2<f32>(37.7191, 17.1123))) * 28471.1713);
+    return vec2<f32>(a, b);
+}
+
+/// GGX importance-sampled microfacet half-vector in tangent space
+/// aligned to the surface normal. Isotropic GGX — α = roughness².
+fn importance_sample_ggx(xi: vec2<f32>, n: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let a = roughness * roughness;
+    let phi = 2.0 * PI * xi.x;
+    let cos_theta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
+    let sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
+    let h_local = vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+    let up = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(n.z) < 0.999);
+    let t = normalize(cross(up, n));
+    let b = cross(n, t);
+    return normalize(t * h_local.x + b * h_local.y + n * h_local.z);
 }
 
 @fragment
@@ -2476,26 +2580,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let depth = textureSample(depth_tex, depth_samp, in.uv);
     if (depth >= 0.9999) { return vec4<f32>(0.0); } // sky
 
-    // Material + albedo for proper Fresnel. f0 = mix(0.04, albedo,
-    // metallic) so dielectrics get a 4% grazing reflection and metals
-    // reflect their tinted base colour.
-    //
-    // Metals-only SSR: sharp on-surface mirror reflections on smooth
-    // dielectrics (marble, varnished wood, glass) produce vertical
-    // stripes where a bright highlight above the surface SSR-mirrors
-    // down the face — Intel Sponza's column vs Cycles was the
-    // unsolvable-by-Lagarde-spec-occ diagnostic. Cycles kills these
-    // via ray-traced visibility; we kill them by only giving SSR to
-    // metals, which need on-screen reflection for identity (chrome,
-    // gold). Dielectric specular is left entirely to the IBL chain,
-    // which is properly Fresnel-clamped and can't show geometry
-    // beyond the HDR cubemap's prefiltered average.
+    // Metals-only SSR (see pre-stochastic history for the rationale).
+    // The metallic and low-roughness gates are kept: dielectric
+    // specular stays with the prefiltered IBL chain, and very rough
+    // metals fade out to the IBL cubemap where SSR noise would
+    // dominate even after temporal accumulation.
     let mat = textureSample(mat_tex, mat_samp, in.uv).rg;
     let metallic = mat.r;
     let roughness = mat.g;
     if (metallic < 0.2) { return vec4<f32>(0.0); }
     let albedo = textureSample(albedo_tex, albedo_samp, in.uv).rgb;
-    let roughness_fade  = 1.0 - smoothstep(0.5, 0.85, roughness);
+    let roughness_fade = 1.0 - smoothstep(0.5, 0.85, roughness);
     if (roughness_fade <= 0.001) { return vec4<f32>(0.0); }
 
     let view_pos = view_pos_from_depth(in.uv, depth);
@@ -2503,14 +2598,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dy = dpdy(view_pos);
     let n = normalize(cross(dx, dy));
     let v = normalize(-view_pos);
-    let r = reflect(-v, n);
 
-    // Ray walking back toward camera can't find an on-screen hit —
-    // nothing in front of the camera to reflect. Bail out.
+    // Stochastic SSR — cast one GGX-importance-sampled ray per pixel
+    // per frame. Different frames draw from different points on the
+    // GGX lobe (rotated by frame index) so the downstream temporal
+    // denoiser averages a dense roughness cone over 4–8 frames. This
+    // replaces the 5-tap Gaussian blur at the hit: we pay one ray +
+    // one hdr sample per frame, not 32 march steps + 5 blur taps.
+    let xi = hash2(in.clip_pos.xy, u.params.w);
+    let h = importance_sample_ggx(xi, n, roughness);
+    let r = reflect(-v, h);
+
     if (r.z > 0.0) { return vec4<f32>(0.0); }
 
-    // Schlick Fresnel — this is the physically-correct reflection
-    // weight per-channel. f0 = 0.04 for dielectrics, albedo for metals.
     let n_dot_v = max(dot(n, v), 0.0);
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
     let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - n_dot_v, 5.0);
@@ -2520,9 +2620,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n_steps = u32(n_steps_f);
     let step_size = max_dist / n_steps_f;
 
-    // Per-pixel march jitter — offset the starting t by a noise-derived
-    // fraction of the step. TAA accumulates rays at different offsets
-    // into a smooth reflection trace instead of banded step artifacts.
     let jitter = ign_jitter(in.clip_pos.xy, u.params.w);
     var t = step_size * (0.5 + jitter);
 
@@ -2542,10 +2639,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let scene_depth = textureSample(depth_tex, depth_samp, ray_uv);
 
         if (ray_ndc.z >= scene_depth) {
-            // Thickness rejection: an occluder closer to the light
-            // than the scene point isn't really blocking our ray unless
-            // it's near the ray's current depth. Tolerance scales with
-            // the step so coarse steps accept more drift.
             let hit_view = view_pos_from_depth(ray_uv, scene_depth);
             let thickness = abs(ray_view.z - hit_view.z);
             let step_world = t - prev_t;
@@ -2560,28 +2653,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     if (!hit_found) { return vec4<f32>(0.0); }
 
-    // Edge fade — pull reflections near the screen border to zero so
-    // camera motion doesn't pop them in/out.
     let edge_fade = min(
         min(hit_uv.x, 1.0 - hit_uv.x),
         min(hit_uv.y, 1.0 - hit_uv.y),
     ) * 10.0;
     let fade = clamp(edge_fade, 0.0, 1.0);
 
-    // Roughness-aware 5-tap Gaussian at the hit. Rough surfaces
-    // scatter reflected light over a wider cone; without a prefiltered
-    // HDR chain, blurring per-pixel at lookup time is the cheap
-    // approximation. Tap spread scales with roughness so mirror-smooth
-    // metals get the sharp center tap and mid-roughness surfaces get a
-    // mild blur. Fade-out above roughness 0.5 keeps results sane.
-    let blur_radius = roughness * 0.015;
-    let c = textureSample(hdr_tex, hdr_samp, hit_uv).rgb * 0.4;
-    let s1 = textureSample(hdr_tex, hdr_samp, hit_uv + vec2<f32>( blur_radius, 0.0)).rgb * 0.15;
-    let s2 = textureSample(hdr_tex, hdr_samp, hit_uv + vec2<f32>(-blur_radius, 0.0)).rgb * 0.15;
-    let s3 = textureSample(hdr_tex, hdr_samp, hit_uv + vec2<f32>(0.0,  blur_radius)).rgb * 0.15;
-    let s4 = textureSample(hdr_tex, hdr_samp, hit_uv + vec2<f32>(0.0, -blur_radius)).rgb * 0.15;
-    let reflected = c + s1 + s2 + s3 + s4;
-
+    let reflected = textureSample(hdr_tex, hdr_samp, hit_uv).rgb;
     return vec4<f32>(reflected * fresnel * roughness_fade * u.params.x * fade, fade);
 }
 ";
