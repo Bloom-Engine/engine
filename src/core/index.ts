@@ -68,6 +68,7 @@ declare function bloom_inject_gamepad_button_down(button: number): void;
 declare function bloom_inject_gamepad_button_up(button: number): void;
 declare function bloom_get_platform(): number;
 declare function bloom_is_any_input_pressed(): number;
+declare function bloom_get_crown_rotation(): number;
 
 // Utility FFI
 declare function bloom_toggle_fullscreen(): void;
@@ -485,7 +486,7 @@ export function injectGamepadButtonUp(button: number): void { bloom_inject_gamep
 
 // Platform detection
 
-export const Platform = { UNKNOWN: 0, MACOS: 1, IOS: 2, WINDOWS: 3, LINUX: 4, ANDROID: 5, TVOS: 6, WEB: 7 } as const;
+export const Platform = { UNKNOWN: 0, MACOS: 1, IOS: 2, WINDOWS: 3, LINUX: 4, ANDROID: 5, TVOS: 6, WEB: 7, WATCHOS: 8 } as const;
 
 export function getPlatform(): number { return bloom_get_platform(); }
 
@@ -496,6 +497,19 @@ export function isMobile(): boolean {
 
 export function isTV(): boolean {
   return bloom_get_platform() === 6;
+}
+
+export function isWatch(): boolean {
+  return bloom_get_platform() === 8;
+}
+
+/**
+ * Digital Crown rotation accumulated since the last call, in radians.
+ * Positive values = clockwise (scrolling away from the user).
+ * Returns 0 on platforms without a crown. Reading consumes the accumulator.
+ */
+export function getCrownRotation(): number {
+  return bloom_get_crown_rotation();
 }
 
 export function isAnyInputPressed(): boolean {

@@ -1438,6 +1438,11 @@ pub fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
 }
 
+#[wasm_bindgen]
+pub fn bloom_get_crown_rotation() -> f64 {
+    engine().input.consume_crown_rotation()
+}
+
 // ============================================================
 // Physics (Rapier 3D)
 // ============================================================

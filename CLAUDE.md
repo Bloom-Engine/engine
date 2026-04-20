@@ -47,6 +47,7 @@ native/               Rust implementations (one crate per platform)
   linux/              Vulkan/OpenGL + X11 + PulseAudio
   android/            Vulkan/OpenGL ES + NativeActivity + AAudio
   web/                WebGPU/WebGL + Canvas + Web Audio API (WASM via wasm-pack)
+  watchos/            Planned — README only, blocked on Perry watchOS target support
 ```
 
 ## FFI Pattern

@@ -134,6 +134,7 @@
         { "name": "bloom_inject_gamepad_button_up","params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_get_platform",            "params": [],                                                        "returns": "f64"  },
         { "name": "bloom_is_any_input_pressed",    "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_get_crown_rotation",      "params": [],                                                        "returns": "f64"  },
 
         { "name": "bloom_load_music",               "params": ["i64"],                                                   "returns": "f64"  },
         { "name": "bloom_play_music",               "params": ["f64"],                                                   "returns": "void" },

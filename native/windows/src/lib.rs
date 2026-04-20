@@ -1174,6 +1174,10 @@ pub extern "C" fn bloom_get_platform() -> f64 { 3.0 }
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
 }
+#[no_mangle]
+pub extern "C" fn bloom_get_crown_rotation() -> f64 {
+    engine().input.consume_crown_rotation()
+}
 
 // ============================================================
 // Thread-safe staging (for async asset loading via Perry threads)

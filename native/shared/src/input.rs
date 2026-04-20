@@ -30,6 +30,10 @@ pub struct InputState {
     /// when a scroll event arrives; games/editors call `consume_mouse_wheel` once
     /// per frame to read the total delta (and reset it to 0).
     mouse_wheel_y: f64,
+    /// Digital Crown rotation accumulator (watchOS). Platforms push rotation
+    /// deltas via `accumulate_crown_rotation`; games call `consume_crown_rotation`
+    /// once per frame. Units are radians, positive = clockwise (away from user).
+    crown_rotation: f64,
     /// Character input ring buffer for text-entry support (E3b). Platform
     /// event loops push Unicode codepoints here on key-down; editors pop them
     /// one at a time via `pop_char`.
@@ -77,6 +81,7 @@ impl InputState {
             raw_delta_x: 0.0,
             raw_delta_y: 0.0,
             mouse_wheel_y: 0.0,
+            crown_rotation: 0.0,
             char_queue: [0; 32],
             char_queue_head: 0,
             char_queue_tail: 0,
@@ -219,6 +224,14 @@ impl InputState {
         if index < MAX_TOUCH_POINTS { self.touch_points[index].y } else { 0.0 }
     }
     pub fn get_touch_count(&self) -> usize { self.touch_count }
+
+    // Digital Crown (watchOS)
+    pub fn accumulate_crown_rotation(&mut self, delta: f64) { self.crown_rotation += delta; }
+    pub fn consume_crown_rotation(&mut self) -> f64 {
+        let v = self.crown_rotation;
+        self.crown_rotation = 0.0;
+        v
+    }
 
     // Any input
     pub fn is_any_input_pressed(&self) -> bool {
