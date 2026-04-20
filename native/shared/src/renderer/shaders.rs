@@ -3378,19 +3378,46 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // since the uniform is constant across the frame.
     var ldr = tonemap_select(hdr);
 
-    // --- Chromatic aberration (post-tonemap) ---
-    // Sample HDR at two radial offsets, push each through the same
-    // AO + exposure + tonemap path, and take R from the +offset
-    // tap and B from the -offset tap. Done in LDR space where each
-    // channel is bounded to [0,1] — the offset then reads a
-    // small colour-gradient difference instead of the unbounded
-    // HDR ratio that produced the pre-tonemap speckle.
+    // --- Chromatic aberration (UE5 formula, post-tonemap) ---
+    // Port of the CA block in UE5's PostProcessTonemap.usf lines
+    // 320-342. Three pieces we take directly from Epic's shader:
+    //
+    //   1. LensUV-space (-1..+1) per-axis formula with a StartOffset
+    //      dead-zone around the centre: shift = sign(lens) *
+    //      saturate(|lens| - start) * scale. Inside the dead-zone
+    //      the centre of the frame stays perfectly sharp; only the
+    //      edges pick up the fringe, matching the way a real
+    //      photographic lens disperses light at the periphery.
+    //
+    //   2. Separate R and B scales for wavelength dispersion.
+    //      Red refracts less than blue in a real lens, so the B
+    //      shift is ~1.5× the R shift (matches the typical default
+    //      that ships in UE5's post-process volume).
+    //
+    //   3. Green is sampled at the centre UV (no shift). Only R and
+    //      B fringe outward.
+    //
+    // We diverge from UE5 in one spot: UE5 samples HDR pre-tonemap
+    // and relies on TAA's neighborhood clamp to bound the HDR
+    // ratios. With TAA optional here, we run the offset samples
+    // through the same AO + exposure + tonemap path and compose R
+    // and B from the LDR results — so a bright specular firefly
+    // can't ride the HDR ratio and survive tonemap as a magenta /
+    // green speck across the whole frame.
     let ca_strength = u.filmic.x;
     if (ca_strength > 0.0) {
-        let center = vec2<f32>(0.5, 0.5);
-        let dir = sample_uv - center;
-        let uv_r = sample_uv + dir * ca_strength;
-        let uv_b = sample_uv - dir * ca_strength;
+        let ca_r_scale = ca_strength;
+        let ca_b_scale = ca_strength * 1.5;
+        let start_offset = 0.25;
+
+        let lens_uv = sample_uv * 2.0 - 1.0;
+        let beyond = max(abs(lens_uv) - vec2<f32>(start_offset), vec2<f32>(0.0));
+        let sign_lens = sign(lens_uv);
+        let uv_r_lens = lens_uv - sign_lens * beyond * ca_r_scale;
+        let uv_b_lens = lens_uv - sign_lens * beyond * ca_b_scale;
+        let uv_r = uv_r_lens * 0.5 + 0.5;
+        let uv_b = uv_b_lens * 0.5 + 0.5;
+
         let s_r = textureSample(hdr_tex, hdr_samp, uv_r);
         let s_b = textureSample(hdr_tex, hdr_samp, uv_b);
         let clean_r = select(vec3<f32>(0.0), s_r.rgb, s_r.rgb == s_r.rgb);
