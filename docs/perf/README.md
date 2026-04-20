@@ -77,7 +77,7 @@ Ordered roughly by ROI / effort.
 
 | # | Title | Effort | Expected gain | Status |
 |---|---|---|---|---|
-| [001](001-tsr-half-res.md) | TSR-style half-res rendering + temporal reconstruction | ~1 week | 2× on main_hdr + all post-FX | open |
+| [001](001-tsr-half-res.md) | TSR-style half-res rendering + temporal reconstruction | ~1 week | 2× on main_hdr + all post-FX | landed (main_hdr 17→2.8 ms; full default 361→~165 ms; SSIM 0.86) |
 | [002](002-compute-gtao.md) | Compute-shader GTAO (replaces SSAO fragment shader) | ~2 days | SSAO 186 ms → ~50 ms | open |
 | [003](003-stochastic-ssr.md) | Stochastic SSR + temporal accumulation | ~2 days | SSR 4× cheaper per frame | open |
 | [004](004-cached-shadow-maps.md) | Cache shadow cascades for static casters | ~2 days | Shadow pass → ~0 after first frame | open |

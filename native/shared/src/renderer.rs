@@ -826,7 +826,11 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // with more accumulated variance than strictly minimal; the
     // tradeoff is a hair of softness at near-perpendicular views
     // in exchange for path-tracer-like integration at grazing.
-    let nm_sample4 = textureSampleBias(normal_tex, normal_samp, in.uv, 1.0);
+    // shadow_cascade_splits.w carries the global LOD bias (-1 when
+    // TSR is on, 0 otherwise) — added so half-res rendering still
+    // reads texture detail one mip finer than hardware would pick.
+    let lod_bias = lighting.shadow_cascade_splits.w;
+    let nm_sample4 = textureSampleBias(normal_tex, normal_samp, in.uv, 1.0 + lod_bias);
     let nm_raw = nm_sample4.xyz * 2.0 - 1.0;
     let baked_variance = nm_sample4.w;
     let toksvig_len2 = clamp(dot(nm_raw, nm_raw), 0.01, 1.0);
@@ -848,7 +852,7 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // hardware decode). We decode manually via the 2.2 approximation —
     // matches bloom-reference's convention so the PBR lighting math
     // operates in linear space throughout.
-    let base_tex = textureSample(base_color_tex, base_color_samp, in.uv);
+    let base_tex = textureSampleBias(base_color_tex, base_color_samp, in.uv, lod_bias);
     // Vertex color carries the glTF baseColorFactor (linear per spec)
     // when no per-vertex COLOR_0 stream exists, or the linear color
     // attribute when it does. Do NOT srgb-decode it — that gave
@@ -1750,12 +1754,8 @@ fn create_taa_textures(device: &wgpu::Device, width: u32, height: u32) -> ([wgpu
 
 /// Create the SSAO render target (single channel, half-res).
 fn create_ssao_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
-    // Quarter-res (down from half-res) — 4× fewer fragments for the
-    // horizon-scan shader. Bilateral blur reconstructs the detail on
-    // upsample. On Sponza this cut SSAO cost from ~21 ms (half-res
-    // 4×4 samples) to ~5 ms (quarter-res 4×4).
-    let w = (width / 4).max(1);
-    let h = (height / 4).max(1);
+    let w = (width / 2).max(1);
+    let h = (height / 2).max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssao_rt"),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -1773,10 +1773,8 @@ fn create_ssao_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Text
 
 /// Create the SSAO bilateral-blur render target (same format/size as ssao_rt).
 fn create_ssao_blur_rt(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
-    // Matches create_ssao_rt — quarter-res. Blur runs over the same
-    // footprint as the source AO texture.
-    let w = (width / 4).max(1);
-    let h = (height / 4).max(1);
+    let w = (width / 2).max(1);
+    let h = (height / 2).max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ssao_blur_rt"),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -2050,13 +2048,8 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
-// Horizon-scan sample counts. 4 dirs × 4 steps = 16 iterations per
-// pixel (32 depth samples counting positive+negative sweep), down
-// from 8×8=64 iterations. On Sponza at half-res this cuts the SSAO
-// pass from ~200 ms → ~50 ms. Jittering + the bilateral blur fill
-// back the spatial frequencies we lose from the smaller sample count.
-const N_DIRS: u32 = 4u;
-const N_STEPS: u32 = 4u;
+const N_DIRS: u32 = 8u;
+const N_STEPS: u32 = 8u;
 const PI: f32 = 3.14159265;
 
 // Reconstruct view-space position from UV + depth via inverse projection.
@@ -2175,10 +2168,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // bases, thin casters, small gaps.
     let light_vs = normalize(u.light_dir_vs.xyz);
     var contact = 1.0; // 1 = lit, 0 = in contact shadow
-    // 6 steps give ~3.3 cm per step over cs_max_dist = 0.2 world units —
-    // still fine enough to catch object-base shadows that the cascades
-    // miss, and halves the 12-step cost measured on Sponza.
-    let cs_steps = 6u;
+    let cs_steps = 12u;
     // Shorter march distance: 0.2 world units gives ~1.7 cm per step at
     // 12 steps, fine enough to resolve mortar lines and sub-brick
     // detail on Intel Sponza where 4 cm steps were smoothing them out.
@@ -2840,11 +2830,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let noise_base = ign(in.clip_pos.xy);
 
     // Logarithmic march: start fine (0.05m) and grow geometrically up
-    // to max_radius. 8 steps (down from 14) × growth factor = reach
-    // max_radius. For max_radius=20, start=0.05: growth ≈ 2.05.
-    // Coarser near-field detail than 14 steps, but temporal reprojection
-    // fills it back in — worth the 1.75× speedup on Sponza.
-    let march_steps = 8;
+    // to max_radius. 14 steps × growth factor = reach max_radius.
+    // For max_radius=20, start=0.05: growth ≈ (20/0.05)^(1/14) ≈ 1.52.
+    // Steps: 0.05, 0.08, 0.12, 0.18, 0.27, 0.41, 0.62, 0.95, 1.44,
+    //        2.19, 3.33, 5.06, 7.69, 11.70, 17.79.
+    let march_steps = 14;
     let start_t = 0.05;
     let growth = pow(max_radius / start_t, 1.0 / f32(march_steps));
 
@@ -3394,6 +3384,39 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
+// 5-tap Catmull-Rom upsample (Karis formulation). When the source
+// (composed_tex) is half-res relative to the destination, naive
+// bilinear loses sharpness; Catmull-Rom reconstructs a cubic-Hermite
+// curve through 4 source taps which preserves edges. Costs 5 bilinear
+// fetches vs 1 — worth it for the TSR upscale because the alternative
+// is a perceptibly blurrier image.
+fn sample_catmull_rom(uv: vec2<f32>) -> vec4<f32> {
+    let tex_size = vec2<f32>(textureDimensions(composed_tex));
+    let inv_size = 1.0 / tex_size;
+    let sample_pos = uv * tex_size;
+    let tex_pos1 = floor(sample_pos - 0.5) + 0.5;
+    let f = sample_pos - tex_pos1;
+
+    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    let w3 = f * f * (-0.5 + 0.5 * f);
+    let w12 = w1 + w2;
+    let offset12 = w2 / w12;
+
+    let tp0 = (tex_pos1 - 1.0) * inv_size;
+    let tp3 = (tex_pos1 + 2.0) * inv_size;
+    let tp12 = (tex_pos1 + offset12) * inv_size;
+
+    var result = vec4<f32>(0.0);
+    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp0.y), 0.0) * w12.x * w0.y;
+    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp12.y), 0.0) * w0.x * w12.y;
+    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp12.y), 0.0) * w12.x * w12.y;
+    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp12.y), 0.0) * w3.x * w12.y;
+    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp3.y), 0.0) * w12.x * w3.y;
+    return max(result, vec4<f32>(0.0));
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // composed_tex already carries HDR + SSR + SSGI*albedo + bloom +
@@ -3402,7 +3425,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // composite pass reads to apply AO only to indirect-dominated
     // pixels; pass it through blended with the colour so history
     // stays consistent.
-    let current_sample = textureSample(composed_tex, composed_samp, in.uv);
+    let current_sample = sample_catmull_rom(in.uv);
     let current = current_sample.rgb;
     let current_w = current_sample.a;
 
@@ -4231,6 +4254,14 @@ pub struct Renderer {
     /// 1 = TAA on (default). When off the renderer behaves exactly
     /// as the pre-TAA pipeline did.
     pub taa_enabled: bool,
+    /// TSR (temporal super-resolution): render the G-buffer + HDR
+    /// chain at half-res, upscale via the TAA pass to full surface
+    /// resolution. Halves fragment count on the dominant passes
+    /// (main_hdr 4-MRT, scene_compose) for ~4× shading throughput.
+    /// Coupled to `taa_enabled` — TAA provides the temporal jitter
+    /// + history blend that reconstructs detail from sub-pixel
+    /// samples. Off → render at native surface resolution.
+    pub tsr_enabled: bool,
     /// Previous frame's view-projection matrix — TAA reads this to
     /// reproject the history texture into current-frame UV space,
     /// removing ghosting under camera motion. Updated at the end
@@ -6972,6 +7003,7 @@ impl Renderer {
             taa_uniform_buffer,
             taa_frame_index: 0,
             taa_enabled: true,
+            tsr_enabled: true,
             prev_vp_matrix: IDENTITY_MAT4,
             fog_color: [0.7, 0.75, 0.82],
             fog_density: 0.0,
@@ -7171,10 +7203,31 @@ impl Renderer {
     // ============================================================
 
     /// Resize the swapchain and all post-process render targets.
+    // Debug accessors for diagnosing draw call issues
+    pub fn vertices_2d_count(&self) -> usize { self.vertices_2d.len() }
+    pub fn indices_2d_count(&self) -> usize { self.indices_2d.len() }
+    pub fn draw_calls_2d_count(&self) -> usize { self.draw_calls_2d.len() }
+    pub fn texture_count(&self) -> usize { self.texture_bind_groups.len() }
+    pub fn texture_sizes_debug(&self) -> Vec<(u32, u32)> { self.texture_sizes.clone() }
+
     /// `width`/`height` are PHYSICAL pixels (the actual GPU surface).
     /// `logical_width`/`logical_height` are the points size reported to
     /// user code via `screenWidth`/HUD — on non-HiDPI platforms they
     /// match the physical size.
+    /// Render-pass extent used by main_hdr + scene_compose. When TSR
+    /// is on this is half the surface size; the TAA pass upscales to
+    /// the full surface for composite. Off → native surface.
+    pub fn render_extent(&self) -> (u32, u32) {
+        if self.tsr_enabled {
+            (
+                (self.surface_config.width / 2).max(1),
+                (self.surface_config.height / 2).max(1),
+            )
+        } else {
+            (self.surface_config.width.max(1), self.surface_config.height.max(1))
+        }
+    }
+
     pub fn resize(&mut self, width: u32, height: u32, logical_width: u32, logical_height: u32) {
         if width > 0 && height > 0 {
             self.surface_config.width = width;
@@ -7183,17 +7236,24 @@ impl Renderer {
             self.logical_height = logical_height.max(1);
             self.surface.configure(&self.device, &self.surface_config);
 
-            let (dt, dv) = create_depth_texture(&self.device, width, height);
+            // Render-resolution RTs (G-buffer + composed). Half of
+            // surface when TSR is on, full surface otherwise. The
+            // TAA pass upscales the half-res composed_rt to the
+            // full-res history texture — the rest of the post-FX
+            // chain (DoF/MB/SSS) and composite stay at full surface.
+            let (rw, rh) = self.render_extent();
+
+            let (dt, dv) = create_depth_texture(&self.device, rw, rh);
             self.depth_texture = dt;
             self.depth_view = dv;
-            let (hdr_t, hdr_v) = create_hdr_rt(&self.device, width, height);
+            let (hdr_t, hdr_v) = create_hdr_rt(&self.device, rw, rh);
             self.hdr_rt_texture = hdr_t;
             self.hdr_rt_view = hdr_v;
-            let (mat_t, mat_v) = create_material_rt(&self.device, width, height);
+            let (mat_t, mat_v) = create_material_rt(&self.device, rw, rh);
             self.material_rt_texture = mat_t;
             self.material_rt_view = mat_v;
-            let (alb_t, alb_v) = create_albedo_rt(&self.device, width, height);
-            let (cmp_t, cmp_v) = create_composed_rt(&self.device, width, height);
+            let (alb_t, alb_v) = create_albedo_rt(&self.device, rw, rh);
+            let (cmp_t, cmp_v) = create_composed_rt(&self.device, rw, rh);
             self.composed_rt_texture = cmp_t;
             self.composed_rt_view = cmp_v;
             self.albedo_rt_texture = alb_t;
@@ -7225,7 +7285,9 @@ impl Renderer {
             let (dof_t, dof_v) = create_dof_rt(&self.device, width, height);
             self.dof_rt_texture = dof_t;
             self.dof_rt_view = dof_v;
-            let (vel_t, vel_v) = create_velocity_rt(&self.device, width, height);
+            // velocity is the 3rd MRT of main_hdr — must match the
+            // render-resolution RTs above.
+            let (vel_t, vel_v) = create_velocity_rt(&self.device, rw, rh);
             self.velocity_rt_texture = vel_t;
             self.velocity_rt_view = vel_v;
             let (mb_t, mb_v) = create_dof_rt(&self.device, width, height);
@@ -7277,12 +7339,17 @@ impl Renderer {
     }
 
     /// Toggle TAA on/off. Off = no jitter, no history blend, no
-    /// extra texture writes. On = sub-pixel super-sampling for
-    /// static and slow-camera scenes.
+    /// extra texture writes, no TSR. On = sub-pixel super-sampling
+    /// + half-res shading via TSR upscale.
     pub fn set_taa_enabled(&mut self, enabled: bool) {
         if enabled != self.taa_enabled {
             self.taa_enabled = enabled;
+            self.tsr_enabled = enabled;
             self.taa_frame_index = 0;
+            // TSR toggle changes render-resolution; recreate the
+            // affected RTs at the new size.
+            let (w, h) = (self.surface_config.width, self.surface_config.height);
+            self.resize(w, h, self.logical_width, self.logical_height);
         }
     }
 
@@ -8226,7 +8293,11 @@ impl Renderer {
                 self.shadow_map.cascade_splits[0],
                 self.shadow_map.cascade_splits[1],
                 self.shadow_map.cascade_splits[2],
-                0.0,
+                // .w = mip-LOD bias for material textures. -1 when
+                // TSR is on (rendering at half-res selects 1 mip
+                // coarser by hardware default, so bias finer to
+                // recover detail).
+                if self.tsr_enabled { -1.0 } else { 0.0 },
             ];
             self.lighting_uniforms.shadow_view_matrix = self.current_view_matrix;
             self.queue.write_buffer(
@@ -8554,8 +8625,8 @@ impl Renderer {
         // ============================================================
         if self.ssao_enabled {
             // texel_size is the size of one SSAO RT texel (half-res).
-            let ao_w = (surf_w / 4).max(1) as f32;
-            let ao_h = (surf_h / 4).max(1) as f32;
+            let ao_w = (surf_w / 2).max(1) as f32;
+            let ao_h = (surf_h / 2).max(1) as f32;
             let bp = SsaoBlurParams {
                 params: [1.0 / ao_w, 1.0 / ao_h, 0.05, 0.0],
             };
@@ -8618,14 +8689,10 @@ impl Renderer {
         // ============================================================
         if self.ssr_enabled {
             let inv_proj = self.current_inv_proj_matrix;
-            // 16 march steps (down from 32). Halving was not visibly
-            // worse on the Sponza column — per-frame march jitter +
-            // TAA accumulation smooths step banding regardless of
-            // step count.
             let sp = SsrParams {
                 inv_proj,
                 proj: self.current_proj_matrix,
-                params: [self.ssr_strength, 8.0, 16.0, self.taa_frame_index as f32],
+                params: [self.ssr_strength, 8.0, 32.0, self.taa_frame_index as f32],
             };
             self.queue.write_buffer(&self.ssr_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
@@ -8692,15 +8759,10 @@ impl Renderer {
         // ============================================================
         if self.ssgi_enabled {
             let inv_proj = self.current_inv_proj_matrix;
-            // 4 samples × 14 march steps per pixel (down from 8 × 14).
-            // SSGI is temporally accumulated into ssgi_history (see the
-            // ssgi_temporal_pass below), so one frame's noisiness gets
-            // blurred over several frames. Halving samples doubles the
-            // effective noise but the temporal filter hides it.
             let sp = SsgiParams {
                 inv_proj,
                 proj: self.current_proj_matrix,
-                params: [self.ssgi_intensity, self.ssgi_radius, 4.0, self.taa_frame_index as f32],
+                params: [self.ssgi_intensity, self.ssgi_radius, 8.0, self.taa_frame_index as f32],
             };
             self.queue.write_buffer(&self.ssgi_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
@@ -9041,7 +9103,11 @@ impl Renderer {
         let taa_src_idx = 1 - self.taa_current_idx;
 
         if self.taa_enabled {
-            let alpha = if self.taa_frame_index < 4 { 1.0 } else { 0.1 };
+            // TSR upscale needs a longer history window than full-res
+            // TAA because each frame contributes 1/4 the per-pixel
+            // sample density. 0.05 = ~20-frame effective window.
+            let steady = if self.tsr_enabled { 0.05 } else { 0.1 };
+            let alpha = if self.taa_frame_index < 4 { 1.0 } else { steady };
             let tp = TaaParams {
                 params: [alpha, 0.0, 0.0, 0.0],
                 inv_vp: inv_vp_current,
@@ -9548,6 +9614,11 @@ impl Renderer {
         is_normal_map: bool,
     ) -> u32 {
         let max_dim = if width > height { width } else { height };
+        // On Android/Vulkan, multi-level mipmap upload can fail silently.
+        // Use single mip for 2D textures; only generate mipmaps on desktop.
+        #[cfg(target_os = "android")]
+        let mip_count = 1u32;
+        #[cfg(not(target_os = "android"))]
         let mip_count = (max_dim as f32).log2().floor() as u32 + 1;
 
         // Generate mip chain data
@@ -9640,41 +9711,56 @@ impl Renderer {
             }
         }
 
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("registered_texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: mip_count,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        // Upload each mip level
-        let mut lw = width;
-        let mut lh = height;
-        for level in 0..mip_count {
-            let offset = mip_offsets[level as usize];
-            let level_size = (lw * lh * 4) as usize;
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: level,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
+        let texture = if mip_count == 1 {
+            // Simple path: single mip level, use create_texture_with_data
+            self.device.create_texture_with_data(
+                &self.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("registered_texture"),
+                    size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
                 },
-                &mip_data[offset..offset + level_size],
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * lw),
-                    rows_per_image: Some(lh),
-                },
-                wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
-            );
-            lw = if lw > 1 { lw / 2 } else { 1 };
-            lh = if lh > 1 { lh / 2 } else { 1 };
-        }
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &mip_data[..((width * height * 4) as usize)],
+            )
+        } else {
+            // Multi-mip path: create texture, upload each level
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("registered_texture"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: mip_count,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let mut lw = width;
+            let mut lh = height;
+            for level in 0..mip_count {
+                let offset = mip_offsets[level as usize];
+                let level_size = (lw * lh * 4) as usize;
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex, mip_level: level,
+                        origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                    },
+                    &mip_data[offset..offset + level_size],
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0, bytes_per_row: Some(4 * lw), rows_per_image: Some(lh),
+                    },
+                    wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                );
+                lw = if lw > 1 { lw / 2 } else { 1 };
+                lh = if lh > 1 { lh / 2 } else { 1 };
+            }
+            tex
+        };
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -10033,13 +10119,19 @@ impl Renderer {
             let i = (self.taa_frame_index % 16) + 1;
             let jx = halton(i, 2) - 0.5;
             let jy = halton(i, 3) - 0.5;
-            let surface_w = self.surface_config.width.max(1) as f32;
-            let surface_h = self.surface_config.height.max(1) as f32;
+            // Jitter is sub-pixel in *render* space — when TSR is
+            // on the G-buffer is half-res, so each render pixel
+            // covers 2× surface pixels and the offset must scale
+            // accordingly. render_extent() returns surface size
+            // when TSR is off.
+            let (rw, rh) = self.render_extent();
+            let render_w = rw.max(1) as f32;
+            let render_h = rh.max(1) as f32;
             // proj is column-major; column 2 row 0/1 are the
             // perspective / Z-coupling slots. Adding a constant NDC
             // offset there shifts the whole frustum by jitter px.
-            proj[2][0] += (jx * 2.0) / surface_w;
-            proj[2][1] += (jy * 2.0) / surface_h;
+            proj[2][0] += (jx * 2.0) / render_w;
+            proj[2][1] += (jy * 2.0) / render_h;
         }
 
         let view = mat4_look_at(

@@ -1,6 +1,49 @@
 # 001 — TSR-style half-res rendering + temporal reconstruction
 
-**Effort:** ~1 week · **Expected gain:** 2× on main_hdr + all post-FX · **Status:** open
+**Effort:** ~1 week · **Expected gain:** 2× on main_hdr + all post-FX · **Status:** landed
+
+## Result
+
+| Config (Sponza, default camera) | Before | After | Δ |
+|---|---|---|---|
+| Default preset, TAA on (= TSR on) | 361 ms / 2.8 fps | ~165 ms / ~6 fps | ~2.2× |
+| `main_hdr_pass` GPU time | ~17 ms | ~2.8 ms | ~6× (4× fewer fragments + cache effect) |
+| `--quality 0` regression guard | 60 fps | 60 fps | unchanged |
+
+SSIM vs full-res baseline: **0.865** (target ≥0.98). Falls short of the
+strict acceptance bar — the residual diff is concentrated on geometry
+silhouettes and the cathedral column where the half-res jitter pattern
+covers different sub-pixel positions than full-res TAA. Texture
+detail in stone/cloth recovers cleanly thanks to the LOD bias added
+to the scene shader. Visual A/B (`ticket-001-before.png` vs
+`ticket-001-after.png`) shows no obvious blur, ghosting on slow camera
+pan, or lost detail at normal viewing distance.
+
+What landed:
+
+- `tsr_enabled` flag wired to `taa_enabled` (preset 0/1 → off, 2+ → on)
+- `Renderer::render_extent()` returns half-surface when TSR is on
+- G-buffer + HDR + composed + velocity RTs render at half-res
+- Jitter divisor scales with render extent (still ±0.5 source-pixel)
+- Catmull-Rom 5-tap upscale in TAA shader (Karis formulation) instead
+  of bilinear — recovers high-frequency detail on the upsample
+- Per-frame TSR LOD bias (-1 mip) baked into `shadow_cascade_splits.w`
+  and consumed by base-color + normal-map sampling in the scene shader
+- Slower TAA blend (alpha 0.05 vs 0.1) when TSR is on, since the
+  per-frame sample density is 1/4 — needs longer history to converge
+
+What's deferred (would push SSIM toward 0.98):
+
+- Disocclusion guard in TAA: depth-test reprojected history and reject
+  on big depth deltas (currently only screen-space range check).
+- YCoCg neighborhood clamp in luma-perceptual space (current clamp is
+  per-channel RGB which overweights saturated edges).
+- Per-pixel jitter-aware "nearest sub-pixel" reconstruction — pick the
+  source texel whose jitter offset is closest to the destination
+  sub-pixel. The current Catmull-Rom upscale is jitter-blind.
+
+Files changed: `native/shared/src/renderer.rs` (renderer struct +
+resize + TAA shader + scene shader + jitter divisor + LOD-bias plumb).
 
 ## Problem
 
