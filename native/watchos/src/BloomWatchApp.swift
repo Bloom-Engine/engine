@@ -37,6 +37,20 @@ import SceneKit
 @_silgen_name("bloom_watchos_scene_copy_lights") func bloom_watchos_scene_copy_lights(_ dst: UnsafeMutablePointer<SceneLight>, _ max: Int64) -> Int64
 @_silgen_name("bloom_watchos_scene_geometry") func bloom_watchos_scene_geometry(_ handle: UInt32, _ out: UnsafeMutablePointer<SceneGeometryPtrs>)
 
+// Post-FX state
+@_silgen_name("bloom_watchos_postfx_state") func bloom_watchos_postfx_state(_ out: UnsafeMutablePointer<PostFxState>)
+
+struct PostFxState {
+    var enabled: UInt32 = 1
+    var autoExposure: UInt32 = 0
+    var vignetteStrength: Float = 0
+    var vignetteSoftness: Float = 0
+    var chromaticAberration: Float = 0
+    var filmGrain: Float = 0
+    var exposure: Float = 1
+    var _pad: Float = 0
+}
+
 // SceneNodeInfo — must match Rust's #[repr(C)] struct in scene.rs.
 struct SceneNodeInfo {
     var handle: UInt32 = 0
@@ -207,6 +221,7 @@ struct BloomRootView: View {
         p.initialize(repeating: DrawCmd(), count: 4096)
         return UnsafeMutableBufferPointer(start: p, count: 4096)
     }()
+    @State private var fx: PostFxState = PostFxState()
 
     let refresh = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
@@ -280,7 +295,35 @@ struct BloomRootView: View {
             }
             .onReceive(refresh) { _ in
                 let f = bloom_watchos_frame_count()
-                if f != frameTick { frameTick = f }
+                if f != frameTick {
+                    frameTick = f
+                    withUnsafeMutablePointer(to: &fx) { bloom_watchos_postfx_state($0) }
+                }
+            }
+            // Post-FX modifiers — applied only when fx.enabled is set. Each
+            // effect also checks its own strength before costing anything.
+            .brightness(fx.enabled != 0 && fx.autoExposure == 0 ? Double(fx.exposure - 1.0) : 0)
+            .overlay {
+                if fx.enabled != 0 && fx.vignetteStrength > 0.001 {
+                    // Vignette via a radial gradient: transparent in the
+                    // middle, black at the edges. Strength scales the outer
+                    // alpha; softness shifts the gradient's transition point.
+                    let soft = max(0.0, min(0.95, Double(fx.vignetteSoftness)))
+                    let str = min(1.0, Double(fx.vignetteStrength))
+                    Canvas { ctx, size in
+                        let c = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
+                        let r = max(size.width, size.height) * 0.75
+                        let g = Gradient(stops: [
+                            .init(color: .black.opacity(0), location: soft),
+                            .init(color: .black.opacity(str), location: 1.0),
+                        ])
+                        ctx.fill(
+                            Path(CGRect(origin: .zero, size: size)),
+                            with: .radialGradient(g, center: c, startRadius: 0, endRadius: r)
+                        )
+                    }
+                    .allowsHitTesting(false)
+                }
             }
         }
         .ignoresSafeArea()

@@ -20,11 +20,15 @@ declare function bloom_add_directional_light(
   intensity: number,
 ): void;
 declare function bloom_scene_attach_model(node: number, model: number, meshIdx: number): void;
+declare function bloom_set_vignette(strength: number, softness: number): void;
+declare function bloom_enable_postfx(): void;
 
 initWindow(800, 600, "Bloom glTF Watch");
 setTargetFPS(30);
 
 bloom_add_directional_light(-0.5, -0.8, -0.3, 1, 1, 1, 1.2);
+bloom_enable_postfx();
+bloom_set_vignette(0.7, 0.25);  // strength 0.7, 25% soft center
 
 const helmet = loadModel("assets/DamagedHelmet.glb");
 

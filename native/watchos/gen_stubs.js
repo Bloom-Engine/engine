@@ -60,6 +60,10 @@ const OVERRIDES = new Set([
   'bloom_add_directional_light', 'bloom_add_point_light',
   // Models
   'bloom_load_model', 'bloom_gen_mesh_cube', 'bloom_scene_attach_model',
+  // Post-FX
+  'bloom_enable_postfx', 'bloom_disable_postfx',
+  'bloom_set_vignette', 'bloom_set_chromatic_aberration', 'bloom_set_film_grain',
+  'bloom_set_manual_exposure', 'bloom_set_auto_exposure', 'bloom_set_sun_shafts',
 ]);
 
 const rustType = (p) => {

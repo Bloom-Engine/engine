@@ -75,19 +75,7 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_fog(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_set_chromatic_aberration(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_vignette(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_film_grain(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_sun_shafts(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_auto_exposure(_p0: f64) {
-}
 #[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_manual_exposure(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_env_intensity(_p0: f64) {
 }
@@ -253,10 +241,6 @@
 #[no_mangle] pub extern "C" fn bloom_disable_shadows() {
 }
 #[no_mangle] pub extern "C" fn bloom_dump_shadow_map(_p0: i64) {
-}
-#[no_mangle] pub extern "C" fn bloom_enable_postfx() {
-}
-#[no_mangle] pub extern "C" fn bloom_disable_postfx() {
 }
 #[no_mangle] pub extern "C" fn bloom_postfx_set_selected(_p0: f64) {
 }

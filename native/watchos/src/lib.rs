@@ -15,6 +15,7 @@ mod textures;
 mod audio;
 mod scene;
 mod models;
+mod postfx;
 
 /// Perry StringHeader layout — mirrors bloom-shared's copy. Inlined here
 /// because we don't depend on bloom-shared (keeps the watchos crate
@@ -798,6 +799,36 @@ pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, 
     // Also apply the model's baseColor + PBR factors as the node material.
     scene::set_color(node_handle as u32, model.color);
     scene::set_pbr(node_handle as u32, model.roughness, model.metallic);
+}
+
+// ============================================================
+// Post-processing — stored for Swift to translate into SwiftUI modifiers
+// ============================================================
+
+#[no_mangle] pub extern "C" fn bloom_enable_postfx() { postfx::set_enabled(true); }
+#[no_mangle] pub extern "C" fn bloom_disable_postfx() { postfx::set_enabled(false); }
+#[no_mangle] pub extern "C" fn bloom_set_vignette(strength: f64, softness: f64) {
+    postfx::set_vignette(strength, softness);
+}
+#[no_mangle] pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) {
+    postfx::set_chromatic_aberration(strength);
+}
+#[no_mangle] pub extern "C" fn bloom_set_film_grain(strength: f64) {
+    postfx::set_film_grain(strength);
+}
+#[no_mangle] pub extern "C" fn bloom_set_manual_exposure(v: f64) { postfx::set_exposure(v); }
+#[no_mangle] pub extern "C" fn bloom_set_auto_exposure(on: f64) {
+    postfx::set_auto_exposure(on > 0.5);
+}
+#[no_mangle] pub extern "C" fn bloom_set_sun_shafts(
+    _strength: f64, _decay: f64, _r: f64, _g: f64, _b: f64,
+) {
+    // Needs a Metal post-pass — deferred. State discarded for now.
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_postfx_state(out: *mut postfx::PostFxState) {
+    postfx::snapshot(out);
 }
 
 #[no_mangle] pub extern "C" fn bloom_add_directional_light(
