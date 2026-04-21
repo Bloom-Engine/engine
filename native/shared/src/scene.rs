@@ -167,6 +167,14 @@ pub struct SceneGraph {
     /// Scratch buffer reused across frames for building the packed
     /// uniform payload. Sized to `uniform_pool_capacity * STRIDE`.
     scratch: Vec<u8>,
+    /// Monotonic counter bumped whenever a change lands that affects
+    /// what gets drawn into the directional shadow map — transform,
+    /// cast_shadow toggle, visibility (of a caster), geometry update,
+    /// or destruction of a visible caster. The renderer's shadow-map
+    /// cache compares this against its last-rendered version to decide
+    /// if it can reuse the cached cascades. Writes that can't affect
+    /// shadows (materials, user_data, etc.) deliberately don't bump it.
+    pub shadow_version: u64,
 }
 
 impl SceneGraph {
@@ -177,31 +185,57 @@ impl SceneGraph {
             uniform_pool_capacity: 0,
             next_slot: 0,
             scratch: Vec::new(),
+            // Start at 1 so the shadow-cache's initial 0 always differs
+            // on the first frame and forces an initial render.
+            shadow_version: 1,
         }
     }
 
     pub fn create_node(&mut self) -> f64 {
+        // New nodes default to `cast_shadow = true`, so the first
+        // `set_transform` + `update_geometry` will dirty shadows
+        // anyway. Bumping here too costs nothing and keeps the
+        // invalidation story simple.
+        self.shadow_version = self.shadow_version.wrapping_add(1);
         self.nodes.alloc(SceneNode::new())
     }
 
     pub fn destroy_node(&mut self, handle: f64) {
+        if let Some(node) = self.nodes.get(handle) {
+            if node.visible && node.cast_shadow {
+                self.shadow_version = self.shadow_version.wrapping_add(1);
+            }
+        }
         self.nodes.free(handle);
     }
 
     pub fn set_transform(&mut self, handle: f64, matrix: [[f32; 4]; 4]) {
         if let Some(node) = self.nodes.get_mut(handle) {
+            // Only dirty shadows when the transform actually changed on
+            // a shadow-casting node. Skeletal animation leaves the node
+            // transform untouched (joints drive the mesh), so static
+            // scenes with animated characters still cache well.
+            if node.cast_shadow && node.visible && node.transform != matrix {
+                self.shadow_version = self.shadow_version.wrapping_add(1);
+            }
             node.transform = matrix;
         }
     }
 
     pub fn set_visible(&mut self, handle: f64, visible: bool) {
         if let Some(node) = self.nodes.get_mut(handle) {
+            if node.cast_shadow && node.visible != visible {
+                self.shadow_version = self.shadow_version.wrapping_add(1);
+            }
             node.visible = visible;
         }
     }
 
     pub fn set_cast_shadow(&mut self, handle: f64, cast: bool) {
         if let Some(node) = self.nodes.get_mut(handle) {
+            if node.visible && node.cast_shadow != cast {
+                self.shadow_version = self.shadow_version.wrapping_add(1);
+            }
             node.cast_shadow = cast;
         }
     }
@@ -238,6 +272,9 @@ impl SceneGraph {
             node.vertices = vertices;
             node.indices = indices;
             node.geo_dirty = true;
+            if node.cast_shadow && node.visible {
+                self.shadow_version = self.shadow_version.wrapping_add(1);
+            }
         }
     }
 

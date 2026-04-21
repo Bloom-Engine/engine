@@ -1149,6 +1149,10 @@ pub extern "C" fn bloom_set_shadows_enabled(on: f64) {
     engine().renderer.set_shadows_enabled(on != 0.0);
 }
 #[no_mangle]
+pub extern "C" fn bloom_set_shadows_always_fresh(on: f64) {
+    engine().renderer.set_shadows_always_fresh(on != 0.0);
+}
+#[no_mangle]
 pub extern "C" fn bloom_set_bloom_enabled(on: f64) {
     engine().renderer.set_bloom_enabled(on != 0.0);
 }

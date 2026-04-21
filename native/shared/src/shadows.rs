@@ -74,6 +74,33 @@ pub struct ShadowMap {
     /// [cascade_splits[i-1], cascade_splits[i]]; cascade 0 starts at near.
     pub cascade_splits: [f32; NUM_CASCADES],
     pub enabled: bool,
+    /// Forces a shadow re-render next frame. Set by `invalidate()`
+    /// (on light direction change, `setShadowsEnabled(true)`, resize,
+    /// shadow-texture aliasing, etc.). Cleared after a render.
+    pub dirty: bool,
+    /// Escape hatch for games with continuously-changing light state
+    /// where the cache hit rate would be ~zero anyway. When true, every
+    /// frame renders shadows; the cache is bypassed.
+    pub always_fresh: bool,
+    /// Cascade VPs that correspond to the contents currently stored in
+    /// the depth textures. `None` before the first render. When the
+    /// freshly-computed VPs match this byte-for-byte AND nothing else
+    /// has invalidated, we can skip the render entirely and sample the
+    /// retained depth textures. Texel-snapping + radius quantization in
+    /// `compute_cascade_vps` means identical camera poses produce
+    /// identical VPs, so this check is robust.
+    pub rendered_light_vps: Option<[[[f32; 4]; 4]; NUM_CASCADES]>,
+    /// Light direction used for the current depth-texture contents.
+    /// Checked at the cache gate rather than on the setter because
+    /// `begin_frame` resets `lighting_uniforms` to defaults every
+    /// frame — comparing a setter's old-vs-new would always see the
+    /// default as the "old" value and invalidate every frame.
+    pub rendered_light_dir: Option<[f32; 3]>,
+    /// Scene-graph version counter sampled at the last shadow render.
+    /// `SceneGraph::shadow_version` increments whenever a shadow-casting
+    /// node's transform / cast_shadow / visibility / geometry changes;
+    /// a mismatch here forces a re-render.
+    pub rendered_scene_version: u64,
 }
 
 impl ShadowMap {
@@ -281,7 +308,21 @@ impl ShadowMap {
             light_vps: [IDENTITY_MAT4; NUM_CASCADES],
             cascade_splits: [8.0, 25.0, 80.0],
             enabled: false,
+            dirty: true,
+            always_fresh: false,
+            rendered_light_vps: None,
+            rendered_light_dir: None,
+            rendered_scene_version: 0,
         }
+    }
+
+    /// Force the next shadow pass to re-render the depth textures.
+    /// Called on `setShadowsEnabled(true)`, swap-chain resize, or any
+    /// other event that invalidates the cached cascade contents.
+    pub fn invalidate(&mut self) {
+        self.dirty = true;
+        self.rendered_light_vps = None;
+        self.rendered_light_dir = None;
     }
 
     /// Compute cascade view-projection matrices by splitting the camera
@@ -484,6 +525,9 @@ impl ShadowMap {
 
     /// Enable shadow mapping.
     pub fn enable(&mut self) {
+        if !self.enabled {
+            self.invalidate();
+        }
         self.enabled = true;
     }
 

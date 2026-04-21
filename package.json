@@ -127,6 +127,7 @@
         { "name": "bloom_set_dof",                 "params": ["f64", "f64", "f64"],                                    "returns": "void" },
         { "name": "bloom_set_quality_preset",      "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_shadows_enabled",     "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_shadows_always_fresh", "params": ["f64"],                                                  "returns": "void" },
         { "name": "bloom_set_bloom_enabled",       "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_ssao_enabled",        "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_ssr_enabled",         "params": ["f64"],                                                   "returns": "void" },

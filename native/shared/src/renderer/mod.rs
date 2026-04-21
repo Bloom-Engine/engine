@@ -720,6 +720,10 @@ pub struct Renderer {
     current_vp_matrix: [[f32; 4]; 4],
     current_view_matrix: [[f32; 4]; 4],
     current_proj_matrix: [[f32; 4]; 4],
+    /// Projection matrix before the TAA sub-pixel jitter is applied.
+    /// Used for shadow cascade fitting — the jitter would otherwise
+    /// nudge the cascade VPs every frame and defeat the shadow cache.
+    current_proj_matrix_unjittered: [[f32; 4]; 4],
     /// Cached inverses of the current projection and view-projection
     /// matrices, recomputed once per `begin_mode_3d` and reused by
     /// every post-FX pass (SSAO, SSR, SSGI, DoF, scene_compose).
@@ -3675,6 +3679,7 @@ impl Renderer {
             current_vp_matrix: IDENTITY_MAT4,
             current_view_matrix: IDENTITY_MAT4,
             current_proj_matrix: IDENTITY_MAT4,
+            current_proj_matrix_unjittered: IDENTITY_MAT4,
             current_inv_proj_matrix: IDENTITY_MAT4,
             current_inv_vp_matrix: IDENTITY_MAT4,
             current_camera_pos: [0.0, 0.0, 0.0],
@@ -3815,6 +3820,10 @@ impl Renderer {
 
     pub fn resize(&mut self, width: u32, height: u32, logical_width: u32, logical_height: u32) {
         if width > 0 && height > 0 {
+            // Cascade fit depends on the projection aspect ratio, so a
+            // resize can shift the VPs even with the camera stationary.
+            // Force a re-render next frame.
+            self.shadow_map.invalidate();
             self.surface_config.width = width;
             self.surface_config.height = height;
             self.logical_width = logical_width.max(1);
@@ -4171,6 +4180,18 @@ impl Renderer {
 
     pub fn set_shadows_enabled(&mut self, on: bool) {
         if on { self.shadow_map.enable(); } else { self.shadow_map.disable(); }
+    }
+
+    /// Disables the ticket-004 shadow-cache and re-renders cascades
+    /// every frame. Useful for games that mutate lighting state from
+    /// places the cache invalidation path doesn't cover (e.g. day/
+    /// night cycles driving light_dir from native code, per-frame
+    /// deformable casters).
+    pub fn set_shadows_always_fresh(&mut self, on: bool) {
+        self.shadow_map.always_fresh = on;
+        if on {
+            self.shadow_map.invalidate();
+        }
     }
     pub fn set_bloom_enabled(&mut self, on: bool) { self.bloom_enabled = on; }
     pub fn set_ssao_enabled(&mut self, on: bool) {
@@ -4873,6 +4894,12 @@ impl Renderer {
 
         // Shadow pass: render scene nodes from light's perspective into
         // cascaded shadow maps (3 cascades).
+        //
+        // Cache hit path (ticket 004): if no caster moved, the light
+        // didn't move, and the freshly-computed cascade VPs match the
+        // ones the cached depth textures were rendered with, we skip
+        // the whole pass. The depth textures retain their content and
+        // the main pass samples from them as if we had redrawn.
         profiler.begin("shadow_pass");
         if self.shadow_map.enabled {
             // Compute cascade VPs from the primary directional light and camera.
@@ -4890,13 +4917,20 @@ impl Renderer {
                 light_dir,
                 self.current_camera_pos,
                 self.current_view_matrix,
-                self.current_proj_matrix,
+                // Use the pre-jitter projection so the cascade VPs
+                // stay byte-stable when the camera is actually
+                // stationary (the shadow cache compares them exactly).
+                self.current_proj_matrix_unjittered,
                 0.5,   // near — start cascades slightly past the camera
                 80.0,  // far — shadow coverage range
                 scene_bounds,
             );
 
             // Re-upload lighting uniforms with cascade VPs and splits.
+            // Always write these — even on a cache hit the cascade
+            // split distances and view matrix track camera movement
+            // (they drive per-pixel cascade selection in the main
+            // shader), which is independent of shadow texture content.
             self.lighting_uniforms.shadow_cascade_vps = self.shadow_map.light_vps;
             self.lighting_uniforms.shadow_cascade_splits = [
                 self.shadow_map.cascade_splits[0],
@@ -4915,6 +4949,26 @@ impl Renderer {
                 bytemuck::bytes_of(&self.lighting_uniforms),
             );
 
+            // Cache gate. Skip if nothing that affects shadow-map
+            // content has changed since last render. Texel-snap +
+            // radius quantization in `compute_cascade_vps` makes this
+            // check exact: identical scenes + identical poses (within
+            // one cascade texel) produce byte-identical light_vps.
+            let scene_ver = scene.shadow_version;
+            let vps_changed = self.shadow_map.rendered_light_vps
+                .as_ref()
+                .map(|cached| *cached != self.shadow_map.light_vps)
+                .unwrap_or(true);
+            let light_changed = self.shadow_map.rendered_light_dir
+                .map(|cached| cached != light_dir)
+                .unwrap_or(true);
+            let should_render = self.shadow_map.always_fresh
+                || self.shadow_map.dirty
+                || vps_changed
+                || light_changed
+                || self.shadow_map.rendered_scene_version != scene_ver;
+
+            if should_render {
             // Build draw list once (shared across all cascades).
             // Collect per-node data before any render pass borrows the scene.
             struct ShadowDrawEntry {
@@ -5001,6 +5055,14 @@ impl Renderer {
                     }
                 }
             }
+
+            // Cache bookkeeping — next frame will short-circuit if the
+            // camera, scene, and light all stay put.
+            self.shadow_map.rendered_light_vps = Some(self.shadow_map.light_vps);
+            self.shadow_map.rendered_light_dir = Some(light_dir);
+            self.shadow_map.rendered_scene_version = scene_ver;
+            self.shadow_map.dirty = false;
+            } // end should_render
         }
 
         profiler.end("shadow_pass");
@@ -6945,6 +7007,10 @@ impl Renderer {
             let top = fovy / 2.0;
             mat4_ortho(-top * aspect, top * aspect, -top, top, 0.01, 1000.0)
         };
+        // Capture the pre-jitter projection for shadow cascade fitting.
+        // TAA's sub-pixel nudge would otherwise change the cascade VPs
+        // every frame and defeat the cache.
+        self.current_proj_matrix_unjittered = proj;
 
         // TAA jitter: nudge the projection by a sub-pixel Halton
         // offset every frame. The TAA pass blends accumulated frames,
@@ -7282,6 +7348,10 @@ impl Renderer {
     }
 
     pub fn set_directional_light(&mut self, dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
+        // Note: the shadow cache reads `lighting_uniforms.light_dir`
+        // directly at gate time, so no explicit invalidate is needed
+        // here. Doing it via a setter would miss light changes that
+        // happen through other paths (preset reset, etc.) anyway.
         self.lighting_uniforms.light_dir = [dx as f32, dy as f32, dz as f32, intensity as f32];
         self.lighting_uniforms.light_color = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, 0.0];
         self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&self.lighting_uniforms));

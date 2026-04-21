@@ -29,6 +29,7 @@ declare function bloom_set_ssgi_radius(radius: number): void;
 declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): void;
 declare function bloom_set_quality_preset(preset: number): void;
 declare function bloom_set_shadows_enabled(on: number): void;
+declare function bloom_set_shadows_always_fresh(on: number): void;
 declare function bloom_set_bloom_enabled(on: number): void;
 declare function bloom_set_ssao_enabled(on: number): void;
 declare function bloom_set_ssr_enabled(on: number): void;
@@ -250,6 +251,17 @@ export function setQualityPreset(preset: QualityPreset): void {
 /** Toggle cascaded shadow maps. Default on. Disable on low-end GPUs — biggest single win. */
 export function setShadowsEnabled(on: boolean): void {
   bloom_set_shadows_enabled(on ? 1 : 0);
+}
+
+/**
+ * Force cascaded shadow maps to re-render every frame, bypassing the
+ * static-caster cache (ticket 004). Default off. Turn on for games
+ * with continuously-changing light state (day/night cycles set from
+ * native code, heavily-deformable casters) where the cache hit rate
+ * would be ~zero anyway, so skipping the check saves a few µs.
+ */
+export function setShadowsAlwaysFresh(on: boolean): void {
+  bloom_set_shadows_always_fresh(on ? 1 : 0);
 }
 
 /** Toggle the bloom down/upsample chain (~10 passes). Default on. */

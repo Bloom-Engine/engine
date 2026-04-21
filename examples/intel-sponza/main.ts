@@ -69,6 +69,11 @@ let dumpPoseEveryFrame = false;
 // will show a dark 'ghost' sliding across the frame.
 let turnYaw = Number.NaN;
 let turnAt = 0;
+// `--no-pan` freezes the auto-camera during `--profile` / `--fps-only`.
+// Needed to measure the ticket-004 shadow cache — stationary camera is
+// the cache-hit path; the default 0.005 rad/frame pan invalidates the
+// cascade VPs every frame and forces a re-render.
+let noPan = false;
 for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -140,6 +145,9 @@ for (let i = 2; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--turn-at" && i + 1 < argv.length) {
     turnAt = Math.floor(parseFloat(argv[i + 1]));
+  }
+  if (argv[i] === "--no-pan") {
+    noPan = true;
   }
 }
 
@@ -360,7 +368,7 @@ while (!windowShouldClose()) {
   // pans slightly so each frame exercises shadow recomputation.
   if (profileFrames > 0) {
     frameCount = frameCount + 1;
-    camYaw = camYaw + 0.005;
+    if (!noPan) { camYaw = camYaw + 0.005; }
     if (frameCount >= profileFrames) {
       endDrawing();
       const cpuUs = getProfilerFrameCpuUs();
@@ -379,7 +387,7 @@ while (!windowShouldClose()) {
   // FPS-only run: same camera pan, no profiler → pure FPS signal.
   if (fpsOnlyFrames > 0) {
     frameCount = frameCount + 1;
-    camYaw = camYaw + 0.005;
+    if (!noPan) { camYaw = camYaw + 0.005; }
     if (frameCount >= fpsOnlyFrames) {
       endDrawing();
       const measuredFps = getFPS();
