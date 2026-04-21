@@ -240,13 +240,17 @@ struct ProbeTraceParams {
     /// w = firefly luma cap.
     params: [f32; 4],
     /// Ticket 007b HW path — sun direction in world space (xyz) +
-    /// intensity (w). Ignored by the SW shader.
+    /// intensity (w). Ignored by the SW-HiZ shader, consumed by HW + SDF.
     sun_dir: [f32; 4],
     /// Sun colour (xyz), reserved (w). Used for analytical NdotL at hit.
     sun_color: [f32; 4],
     /// Sky dome colour (xyz), reserved (w). Flat analytic sky for
     /// up-facing hits where the ray hits a surface with an up normal.
     sky_color: [f32; 4],
+    /// Ticket 014 V3 — clipmap origin (xyz) + full extent (w). Used
+    /// by the SDF sphere-trace variant to map world-space march
+    /// positions into clipmap sample UVs.
+    clipmap: [f32; 4],
 }
 
 #[repr(C)]
@@ -875,6 +879,13 @@ pub struct Renderer {
     pub probe_trace_hw_pipeline: Option<wgpu::ComputePipeline>,
     pub probe_trace_hw_layout: Option<wgpu::BindGroupLayout>,
     probe_trace_hw_bg_cache: Option<wgpu::BindGroup>,
+
+    /// Ticket 014 V3 — SW SDF sphere-trace pipeline + layout.
+    /// Active whenever the scene clipmap has been baked; chosen at
+    /// dispatch time over the Hi-Z SW fallback when available.
+    pub probe_trace_sdf_pipeline: wgpu::ComputePipeline,
+    pub probe_trace_sdf_layout: wgpu::BindGroupLayout,
+    probe_trace_sdf_bg_cache: Option<wgpu::BindGroup>,
 
     // --- Ticket 013: Mesh Cards (Surface Cache, V2 — 6-axis + per-frame lighting) ---
     /// Albedo atlas, baked once per mesh at model load.
@@ -3357,6 +3368,68 @@ impl Renderer {
             (None, None)
         };
 
+        // --- Ticket 014 V3: SW SDF sphere-trace pipeline ---
+        // Always built. At dispatch time we pick SDF over Hi-Z when
+        // `scene_sdf_clipmap_built` is true; HW (when available)
+        // still wins over both.
+        let sdf_trace_shader = probe_shader(
+            "probe_trace_sdf_shader",
+            SSGI_PROBE_TRACE_SDF_WGSL,
+        );
+        let probe_trace_sdf_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("probe_trace_sdf_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: HDR_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    }, count: None,
+                },
+            ],
+        });
+        let probe_trace_sdf_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("probe_trace_sdf_pl_layout"),
+            bind_group_layouts: &[Some(&probe_trace_sdf_layout)],
+            immediate_size: 0,
+        });
+        let probe_trace_sdf_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("probe_trace_sdf_pipeline"),
+            layout: Some(&probe_trace_sdf_pl_layout),
+            module: &sdf_trace_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- Probe temporal ---
         let probe_temporal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("probe_temporal_layout"),
@@ -4507,6 +4580,9 @@ impl Renderer {
             probe_trace_hw_pipeline,
             probe_trace_hw_layout,
             probe_trace_hw_bg_cache: None,
+            probe_trace_sdf_pipeline,
+            probe_trace_sdf_layout,
+            probe_trace_sdf_bg_cache: None,
             mesh_card_atlas,
             mesh_card_atlas_view,
             mesh_card_atlas_sampler,
@@ -5133,7 +5209,7 @@ impl Renderer {
         scene: &crate::scene::SceneGraph,
         encoder: &mut wgpu::CommandEncoder,
     ) {
-        if !self.hw_rt_enabled || self.scene_sdf_clipmap_built {
+        if self.scene_sdf_clipmap_built {
             return;
         }
         // Wait for all per-mesh queues to drain — builds the clipmap
@@ -7347,6 +7423,14 @@ impl Renderer {
                 sun_dir: sun_dir_ws,
                 sun_color,
                 sky_color,
+                // Ticket 014 V3 — clipmap origin xyz + full extent w.
+                // The SDF trace variant reads these; HW + Hi-Z ignore.
+                clipmap: [
+                    SCENE_SDF_CLIPMAP_ORIGIN[0],
+                    SCENE_SDF_CLIPMAP_ORIGIN[1],
+                    SCENE_SDF_CLIPMAP_ORIGIN[2],
+                    SCENE_SDF_CLIPMAP_EXTENT,
+                ],
             };
             self.queue.write_buffer(&self.probe_trace_uniform, 0, bytemuck::bytes_of(&trace_params));
             // Trace bind group is cache-stable (always writes into the
@@ -7371,13 +7455,20 @@ impl Renderer {
                 }));
             }
             // HW trace needs both the TLAS (at least one instance) and
-            // the instance-data buffer to exist. Fall back to SW when
-            // either is missing on an HW-enabled adapter (e.g. first
-            // frame before the scene has loaded any geometry).
+            // the instance-data buffer to exist. Fall back to SDF or
+            // Hi-Z when either is missing on an HW-enabled adapter
+            // (e.g. first frame before the scene has loaded any
+            // geometry).
             let use_hw = self.hw_rt_enabled
                 && self.probe_trace_hw_pipeline.is_some()
                 && self.tlas.is_some()
                 && self.tlas_instance_data_buffer.is_some();
+            // Ticket 014 V3 — pick SDF sphere-trace over Hi-Z when the
+            // scene clipmap has been baked. Lets SW-only adapters
+            // (web, older Android, Intel iGPU) pull off-screen bleed
+            // into the bounce instead of being limited to screen
+            // space.
+            let use_sdf = !use_hw && self.scene_sdf_clipmap_built;
 
             if use_hw {
                 // Build the HW bind group lazily; the TLAS view changes
@@ -7409,6 +7500,43 @@ impl Renderer {
                 });
                 pass.set_pipeline(self.probe_trace_hw_pipeline.as_ref().unwrap());
                 pass.set_bind_group(0, self.probe_trace_hw_bg_cache.as_ref().unwrap(), &[]);
+                pass.dispatch_workgroups(gw, gh, 1);
+            } else if use_sdf {
+                // Ticket 014 V3 — SW SDF sphere-trace path.
+                if self.probe_trace_sdf_bg_cache.is_none() {
+                    // Reuse the card-atlas filtering sampler? No —
+                    // the clipmap binding demands NonFiltering, so we
+                    // build a dedicated non-filtering sampler inline.
+                    // The sampler is cheap; keeping the binding local
+                    // avoids a Renderer-field just for this.
+                    let nf_samp = self.device.create_sampler(&wgpu::SamplerDescriptor {
+                        label: Some("clipmap_nonfiltering_sampler"),
+                        address_mode_u: wgpu::AddressMode::ClampToEdge,
+                        address_mode_v: wgpu::AddressMode::ClampToEdge,
+                        address_mode_w: wgpu::AddressMode::ClampToEdge,
+                        mag_filter: wgpu::FilterMode::Nearest,
+                        min_filter: wgpu::FilterMode::Nearest,
+                        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                        ..Default::default()
+                    });
+                    self.probe_trace_sdf_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("probe_trace_sdf_bg"),
+                        layout: &self.probe_trace_sdf_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: self.probe_trace_uniform.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: self.probe_header_buffer.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.scene_sdf_clipmap_view) },
+                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&nf_samp) },
+                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.probe_trace_view) },
+                        ],
+                    }));
+                }
+                let ts = profiler.compute_pass_timestamp_writes("probe_trace_sdf_pass");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("probe_trace_sdf_pass"), timestamp_writes: ts,
+                });
+                pass.set_pipeline(&self.probe_trace_sdf_pipeline);
+                pass.set_bind_group(0, self.probe_trace_sdf_bg_cache.as_ref().unwrap(), &[]);
                 pass.dispatch_workgroups(gw, gh, 1);
             } else {
                 let ts = profiler.compute_pass_timestamp_writes("probe_trace_pass");

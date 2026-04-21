@@ -2683,6 +2683,13 @@ struct TraceParams {
     size: vec4<u32>,
     // x = frame_index, y = intensity, z = max_march_t_world, w = firefly_cap
     params: vec4<f32>,
+    // Ticket 014 V3 — rest of the shared `ProbeTraceParams` layout.
+    // Ignored by Hi-Z; present only so the shader struct size matches
+    // the host uniform buffer.
+    sun_dir: vec4<f32>,
+    sun_color: vec4<f32>,
+    sky_color: vec4<f32>,
+    clipmap: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
@@ -2840,6 +2847,10 @@ struct TraceParams {
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
     sky_color: vec4<f32>,
+    // Ticket 014 V3 — clipmap origin xyz + extent w. Ignored here;
+    // present only so the struct size matches the host-side
+    // `ProbeTraceParams` uniform buffer layout.
+    clipmap: vec4<f32>,
 };
 
 struct InstanceGiData {
@@ -3015,6 +3026,156 @@ fn cs_main(
             if (luma > cap) { raw = raw * (cap / luma); }
             radiance = raw;
         }
+    }
+
+    let intensity = u.params.y;
+    textureStore(radiance_out, dst_coord, vec4<f32>(radiance * intensity * ndotd, 1.0));
+}
+";
+
+/// Ticket 014 V3 — probe trace, software SDF sphere-march path.
+///
+/// Third trace variant alongside the 007a Hi-Z screen-space and 007b
+/// HW ray-query paths. Same workgroup shape (8×8 = one workgroup per
+/// probe, each lane handles one octahedral texel). Only the per-ray
+/// inner loop differs: instead of marching screen-space depth or
+/// firing a `rayQuery`, each lane sphere-marches the scene-wide SDF
+/// clipmap baked by ticket 014 V2.
+///
+/// Hit shading is intentionally minimal for V3 — no mesh-card lookup
+/// (the clipmap is a merged SDF with no per-instance identity). At
+/// hit we estimate the surface normal by finite-differencing the SDF
+/// clipmap around the hit point, then apply analytic sun × NdotL +
+/// sky × NdotUp against a constant gray albedo. That gives SW-only
+/// adapters a working one-bounce indirect — lower quality than the
+/// 013 Mesh-Cards HW path but self-contained.
+///
+/// The clipmap is a single R32Float 3D texture covering a fixed world-
+/// space AABB defined at capture (see `SCENE_SDF_CLIPMAP_EXTENT` /
+/// `SCENE_SDF_CLIPMAP_ORIGIN` on the Rust side). Rays whose marched
+/// position leaves the AABB treat the miss as "open sky".
+pub(super) const SSGI_PROBE_TRACE_SDF_WGSL: &str = "
+struct TraceParams {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    inv_view: mat4x4<f32>,
+    proj_row01: vec4<f32>,
+    size: vec4<u32>,
+    // x = frame_index, y = intensity, z = max_march_t, w = firefly_cap
+    params: vec4<f32>,
+    sun_dir: vec4<f32>,
+    sun_color: vec4<f32>,
+    sky_color: vec4<f32>,
+    // xyz = clipmap origin, w = extent (full width, not half)
+    clipmap: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: TraceParams;
+@group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
+@group(0) @binding(2) var clipmap_tex: texture_3d<f32>;
+@group(0) @binding(3) var clipmap_samp: sampler;
+@group(0) @binding(4) var radiance_out: texture_storage_3d<rgba16float, write>;
+
+fn clipmap_uv(pos_ws: vec3<f32>) -> vec3<f32> {
+    let half_extent = u.clipmap.w * 0.5;
+    let origin = u.clipmap.xyz;
+    return (pos_ws - origin + vec3<f32>(half_extent)) / u.clipmap.w;
+}
+
+fn clipmap_sample(pos_ws: vec3<f32>) -> f32 {
+    let uv = clipmap_uv(pos_ws);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || uv.z < 0.0 || uv.z > 1.0) {
+        // Outside the clipmap — assume wide open (no hit possible).
+        return 1e4;
+    }
+    return textureSampleLevel(clipmap_tex, clipmap_samp, uv, 0.0).r;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let grid_w = u.size.z;
+    let grid_h = u.size.w;
+    if (wg.x >= grid_w || wg.y >= grid_h) { return; }
+    if (lid.x >= PROBE_OCT_SIZE || lid.y >= PROBE_OCT_SIZE) { return; }
+
+    let probe_idx = wg.y * grid_w + wg.x;
+    let header = probes[probe_idx];
+    let dst_coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
+
+    if (header.world_pos.w < 0.5) {
+        textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
+        return;
+    }
+
+    let dir_ws = octel_direction(lid.xy);
+    let n_ws = header.normal.xyz;
+    let ndotd = dot(dir_ws, n_ws);
+    if (ndotd <= 0.0) {
+        textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
+        return;
+    }
+
+    // 2 cm normal offset matches the SW Hi-Z + HW ray-query paths —
+    // keeps primary hits from self-intersecting the probe surface.
+    let origin_ws = header.world_pos.xyz + n_ws * 0.02;
+    let max_t = u.params.z;
+
+    // Sphere-trace. Step is the UDF value; convergence when within a
+    // voxel's worth of the surface or when we exhaust the budget.
+    let voxel_size = u.clipmap.w / 64.0;  // 64³ clipmap resolution
+    let hit_threshold = voxel_size * 1.5;
+    var t: f32 = 0.0;
+    var hit: bool = false;
+    for (var s: i32 = 0; s < 48; s = s + 1) {
+        let pos = origin_ws + dir_ws * t;
+        let d = clipmap_sample(pos);
+        if (d < hit_threshold) {
+            hit = true;
+            break;
+        }
+        t = t + max(d, voxel_size * 0.5);
+        if (t >= max_t) { break; }
+    }
+
+    var radiance = vec3<f32>(0.0);
+    if (hit) {
+        let hit_pos = origin_ws + dir_ws * t;
+        // Finite-difference SDF gradient → surface normal. The
+        // clipmap is a UDF so the gradient always points away from
+        // the surface; negate to get the surface normal pointing out.
+        let h = voxel_size;
+        let dx = clipmap_sample(hit_pos + vec3<f32>(h, 0.0, 0.0))
+               - clipmap_sample(hit_pos - vec3<f32>(h, 0.0, 0.0));
+        let dy = clipmap_sample(hit_pos + vec3<f32>(0.0, h, 0.0))
+               - clipmap_sample(hit_pos - vec3<f32>(0.0, h, 0.0));
+        let dz = clipmap_sample(hit_pos + vec3<f32>(0.0, 0.0, h))
+               - clipmap_sample(hit_pos - vec3<f32>(0.0, 0.0, h));
+        var grad = vec3<f32>(dx, dy, dz);
+        let glen = length(grad);
+        if (glen > 1e-4) { grad = grad / glen; }
+        // UDF gradient points away from surface — flip to face outward.
+        let hit_n = -grad;
+
+        let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
+        let direct = u.sun_color.xyz * ndotl;
+        let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+        let sky = u.sky_color.xyz * ndotup;
+
+        // Constant gray albedo — SW path has no per-hit material
+        // lookup in V3. V4 can layer in the Mesh-Cards radiance atlas
+        // via a broad-phase instance lookup at the hit point.
+        let albedo = vec3<f32>(0.55, 0.55, 0.55);
+
+        let tn = t / max_t;
+        let falloff = max(1.0 - tn * tn, 0.0);
+        var raw = albedo * (direct + sky) * falloff;
+        let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let cap = u.params.w;
+        if (luma > cap) { raw = raw * (cap / luma); }
+        radiance = raw;
     }
 
     let intensity = u.params.y;

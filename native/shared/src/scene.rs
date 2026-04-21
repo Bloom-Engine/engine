@@ -645,22 +645,26 @@ impl SceneGraph {
                 // the same buffer can back both the raster draw and
                 // the BLAS build. Cheap — no measurable cost when RT
                 // is off.
-                // Ticket 014: STORAGE lets the SDF bake compute read
-                // vertex / index buffers directly. Only added on RT
-                // adapters since non-RT paths don't need the bake.
+                // Ticket 014 V3 — STORAGE is unconditional now so the
+                // scene-wide SDF clipmap can be baked on SW-only
+                // adapters too (web, older Android, Intel iGPUs). The
+                // cost is a buffer-usage-flag bit — no runtime
+                // overhead on non-RT adapters that don't read it.
+                // BLAS_INPUT stays gated on `hw_rt` since it's wgpu-29
+                // ray-tracing-only.
                 let vb_usage = if hw_rt {
                     wgpu::BufferUsages::VERTEX
                         | wgpu::BufferUsages::BLAS_INPUT
                         | wgpu::BufferUsages::STORAGE
                 } else {
-                    wgpu::BufferUsages::VERTEX
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE
                 };
                 let ib_usage = if hw_rt {
                     wgpu::BufferUsages::INDEX
                         | wgpu::BufferUsages::BLAS_INPUT
                         | wgpu::BufferUsages::STORAGE
                 } else {
-                    wgpu::BufferUsages::INDEX
+                    wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE
                 };
                 node.gpu_vb = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("scene_node_vb"),
