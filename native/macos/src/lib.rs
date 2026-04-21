@@ -284,6 +284,24 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     let ns_title = NSString::from_str(title);
     window.setTitle(&ns_title);
 
+    // Don't persist window size/fullscreen state across launches.
+    // NSWindow restoration was resurrecting a prior fullscreen toggle on
+    // the 4K display, which silently rendered benchmarks at 4× the
+    // requested pixel count.
+    unsafe { let _: () = msg_send![&window, setRestorable: false]; }
+
+    // BLOOM_NO_FULLSCREEN=1 hard-disables fullscreen capability: the
+    // window cannot be entered into fullscreen via the green button,
+    // cmd-ctrl-F, or inheriting a fullscreen Space from the launching
+    // terminal. Intended for benchmark harnesses where the 4K-display
+    // fullscreen path would otherwise silently quadruple render cost.
+    let no_fullscreen = std::env::var("BLOOM_NO_FULLSCREEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if no_fullscreen {
+        window.setCollectionBehavior(objc2_app_kit::NSWindowCollectionBehavior::FullScreenNone);
+    }
+
     if headless {
         // Alpha 0 + off-screen origin + prohibited-activation app
         // policy = fully invisible window that still backs the
@@ -308,9 +326,9 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
     // Create wgpu surface and renderer
     // wgpu expects the NSView pointer (not NSWindow) for AppKit
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::METAL,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
 
     let surface = unsafe {
@@ -320,7 +338,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         );
         let raw = RawWindowHandle::AppKit(handle);
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: raw_window_handle::RawDisplayHandle::AppKit(raw_window_handle::AppKitDisplayHandle::new()),
+            raw_display_handle: Some(raw_window_handle::RawDisplayHandle::AppKit(raw_window_handle::AppKitDisplayHandle::new())),
             raw_window_handle: raw,
         }).expect("Failed to create surface")
     };
@@ -345,7 +363,6 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             required_features,
             ..Default::default()
         },
-        None,
     )).expect("Failed to create device");
 
     let surface_caps = surface.get_capabilities(&adapter);

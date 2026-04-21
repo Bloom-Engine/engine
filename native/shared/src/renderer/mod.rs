@@ -1057,7 +1057,7 @@ impl Renderer {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             // 16x anisotropic filtering. Without this, surfaces viewed
             // at oblique angles (long streets of facades, floor
             // receding toward the horizon) pick an over-blurred mip to
@@ -1075,7 +1075,7 @@ impl Renderer {
             label: Some("bloom_nearest_sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -1093,7 +1093,7 @@ impl Renderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -1186,7 +1186,7 @@ impl Renderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -1328,8 +1328,8 @@ impl Renderer {
         // --- 2D Pipeline ---
         let pipeline_layout_2d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline_layout_2d"),
-            bind_group_layouts: &[&uniform_2d_layout, &texture_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&uniform_2d_layout), Some(&texture_bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline_2d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1369,7 +1369,7 @@ impl Renderer {
             // — is a validation error.
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -1420,8 +1420,8 @@ impl Renderer {
         // --- 3D Pipeline ---
         let pipeline_layout_3d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline_layout_3d"),
-            bind_group_layouts: &[&uniform_3d_layout, &lighting_layout, &texture_bind_group_layout, &joint_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&uniform_3d_layout), Some(&lighting_layout), Some(&texture_bind_group_layout), Some(&joint_layout)],
+            immediate_size: 0,
         });
 
         let pipeline_3d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1471,13 +1471,13 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -1526,7 +1526,7 @@ impl Renderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
         let sky_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1562,8 +1562,8 @@ impl Renderer {
         });
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky_pl"),
-            bind_group_layouts: &[&sky_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&sky_bind_group_layout)],
+            immediate_size: 0,
         });
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky_pipeline"),
@@ -1612,13 +1612,13 @@ impl Renderer {
             // frame; the 3D opaque pass will overwrite where it draws.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -1715,8 +1715,8 @@ impl Renderer {
         });
         let prefilter_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("prefilter_pipeline_layout"),
-            bind_group_layouts: &[&prefilter_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&prefilter_layout)],
+            immediate_size: 0,
         });
         let prefilter_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("prefilter_pipeline"),
@@ -1748,7 +1748,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let prefilter_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1792,14 +1792,14 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
         let scene_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene_pipeline_layout"),
-            bind_group_layouts: &[&uniform_3d_layout, &lighting_layout, &scene_material_layout, &joint_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&uniform_3d_layout), Some(&lighting_layout), Some(&scene_material_layout), Some(&joint_layout)],
+            immediate_size: 0,
         });
         let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("scene_pipeline"),
@@ -1850,13 +1850,13 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -1961,8 +1961,8 @@ impl Renderer {
         });
         let composite_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("composite_pl_layout"),
-            bind_group_layouts: &[&composite_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&composite_layout)],
+            immediate_size: 0,
         });
         let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("composite_pipeline"),
@@ -1994,7 +1994,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -2004,7 +2004,7 @@ impl Renderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -2053,8 +2053,8 @@ impl Renderer {
         });
         let bloom_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("bloom_pl_layout"),
-            bind_group_layouts: &[&bloom_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bloom_layout)],
+            immediate_size: 0,
         });
         let bloom_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bloom_uniform_buffer"),
@@ -2094,7 +2094,7 @@ impl Renderer {
                 },
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             })
         };
@@ -2152,8 +2152,8 @@ impl Renderer {
         });
         let hiz_linearize_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("hiz_linearize_pl_layout"),
-            bind_group_layouts: &[&hiz_linearize_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&hiz_linearize_layout)],
+            immediate_size: 0,
         });
         let hiz_linearize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("hiz_linearize_pipeline"),
@@ -2203,8 +2203,8 @@ impl Renderer {
         });
         let hiz_downsample_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("hiz_downsample_pl_layout"),
-            bind_group_layouts: &[&hiz_downsample_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&hiz_downsample_layout)],
+            immediate_size: 0,
         });
         let hiz_downsample_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("hiz_downsample_pipeline"),
@@ -2229,7 +2229,7 @@ impl Renderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
         let (hiz_textures, hiz_views) = create_linear_depth_hiz_chain(
@@ -2341,8 +2341,8 @@ impl Renderer {
         });
         let ssao_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ssao_pl_layout"),
-            bind_group_layouts: &[&ssao_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&ssao_layout)],
+            immediate_size: 0,
         });
         let ssao_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("ssao_pipeline"),
@@ -2367,7 +2367,7 @@ impl Renderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -2425,8 +2425,8 @@ impl Renderer {
         });
         let ssao_blur_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ssao_blur_pl_layout"),
-            bind_group_layouts: &[&ssao_blur_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&ssao_blur_layout)],
+            immediate_size: 0,
         });
         let ssao_blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ssao_blur_pipeline"),
@@ -2458,7 +2458,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let ssao_blur_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2542,8 +2542,8 @@ impl Renderer {
         });
         let taa_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("taa_pl_layout"),
-            bind_group_layouts: &[&taa_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&taa_layout)],
+            immediate_size: 0,
         });
         let taa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("taa_pipeline"),
@@ -2568,7 +2568,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None, cache: None,
+            multiview_mask: None, cache: None,
         });
         let taa_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("taa_uniform_buffer"),
@@ -2644,8 +2644,8 @@ impl Renderer {
         });
         let ssr_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ssr_pl_layout"),
-            bind_group_layouts: &[&ssr_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&ssr_layout)],
+            immediate_size: 0,
         });
         let ssr_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ssr_pipeline"),
@@ -2670,7 +2670,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None, cache: None,
+            multiview_mask: None, cache: None,
         });
         let ssr_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssr_uniform_buffer"),
@@ -2737,8 +2737,8 @@ impl Renderer {
         });
         let ssr_temporal_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ssr_temporal_pl_layout"),
-            bind_group_layouts: &[&ssr_temporal_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&ssr_temporal_layout)],
+            immediate_size: 0,
         });
         let ssr_temporal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ssr_temporal_pipeline"),
@@ -2763,7 +2763,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None, cache: None,
+            multiview_mask: None, cache: None,
         });
         let ssr_temporal_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssr_temporal_uniform_buffer"),
@@ -2815,8 +2815,8 @@ impl Renderer {
         });
         let ssgi_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ssgi_pl_layout"),
-            bind_group_layouts: &[&ssgi_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&ssgi_layout)],
+            immediate_size: 0,
         });
         let ssgi_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ssgi_pipeline"),
@@ -2841,7 +2841,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None, cache: None,
+            multiview_mask: None, cache: None,
         });
         let ssgi_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssgi_uniform_buffer"),
@@ -2908,8 +2908,8 @@ impl Renderer {
         });
         let ssgi_temporal_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ssgi_temporal_pl_layout"),
-            bind_group_layouts: &[&ssgi_temporal_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&ssgi_temporal_layout)],
+            immediate_size: 0,
         });
         let ssgi_temporal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ssgi_temporal_pipeline"),
@@ -2934,7 +2934,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None, cache: None,
+            multiview_mask: None, cache: None,
         });
         let ssgi_temporal_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssgi_temporal_uniform_buffer"),
@@ -3040,8 +3040,8 @@ impl Renderer {
         });
         let scene_compose_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene_compose_pl_layout"),
-            bind_group_layouts: &[&scene_compose_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&scene_compose_layout)],
+            immediate_size: 0,
         });
         let scene_compose_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("scene_compose_pipeline"),
@@ -3066,7 +3066,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None, cache: None,
+            multiview_mask: None, cache: None,
         });
         let scene_compose_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene_compose_uniform_buffer"),
@@ -3134,8 +3134,8 @@ impl Renderer {
         });
         let dof_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("dof_pl_layout"),
-            bind_group_layouts: &[&dof_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&dof_layout)],
+            immediate_size: 0,
         });
         let dof_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("dof_pipeline"),
@@ -3167,7 +3167,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let dof_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -3236,8 +3236,8 @@ impl Renderer {
         });
         let motion_blur_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("motion_blur_pl_layout"),
-            bind_group_layouts: &[&motion_blur_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&motion_blur_layout)],
+            immediate_size: 0,
         });
         let motion_blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("motion_blur_pipeline"),
@@ -3269,7 +3269,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let motion_blur_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -3338,8 +3338,8 @@ impl Renderer {
         });
         let sss_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sss_pl_layout"),
-            bind_group_layouts: &[&sss_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&sss_layout)],
+            immediate_size: 0,
         });
         let sss_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sss_pipeline"),
@@ -3371,7 +3371,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let sss_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -3424,8 +3424,8 @@ impl Renderer {
         });
         let exposure_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("exposure_pl_layout"),
-            bind_group_layouts: &[&exposure_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&exposure_layout)],
+            immediate_size: 0,
         });
         let exposure_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("exposure_pipeline"),
@@ -3451,7 +3451,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None, cache: None,
+            multiview_mask: None, cache: None,
         });
         let exposure_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("exposure_uniform_buffer"),
@@ -4372,6 +4372,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &mip_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -4380,6 +4381,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.prefilter_pipeline);
             pass.set_bind_group(0, &prefilter_bg, &[]);
@@ -4412,6 +4414,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &diffuse_view_rt,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -4420,6 +4423,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.prefilter_diffuse_pipeline);
             pass.set_bind_group(0, &prefilter_bg, &[]);
@@ -4712,8 +4716,8 @@ impl Renderer {
             None
         } else {
             match self.surface.get_current_texture() {
-                Ok(t) => Some(t),
-                Err(_) => {
+                wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
+                _ => {
                     self.surface.configure(&self.device, &self.surface_config);
                     // Restore RT views if they were set.
                     self.rt_color_view = rt_color;
@@ -4768,6 +4772,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(self.clear_color),
                         store: wgpu::StoreOp::Store,
@@ -4783,6 +4788,7 @@ impl Renderer {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             // Draw 3D geometry first (with depth testing), batched by texture
@@ -4880,8 +4886,8 @@ impl Renderer {
         profiler.end("joint_flush");
 
         let output = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(_) => {
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            _ => {
                 self.surface.configure(&self.device, &self.surface_config);
                 return;
             }
@@ -5065,6 +5071,7 @@ impl Renderer {
                         }),
                         timestamp_writes: shadow_ts,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     shadow_pass.set_pipeline(&self.shadow_map.pipeline);
@@ -5133,6 +5140,7 @@ impl Renderer {
                     Some(wgpu::RenderPassColorAttachment {
                         view: &self.hdr_rt_view,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(self.clear_color),
                             store: wgpu::StoreOp::Store,
@@ -5141,6 +5149,7 @@ impl Renderer {
                     Some(wgpu::RenderPassColorAttachment {
                         view: &self.material_rt_view,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             // Default = (0, 1) = non-metal, fully
                             // rough — sky / 3D / blank pixels won't
@@ -5152,6 +5161,7 @@ impl Renderer {
                     Some(wgpu::RenderPassColorAttachment {
                         view: &self.velocity_rt_view,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             // Zero velocity = stationary pixel.
                             load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
@@ -5161,6 +5171,7 @@ impl Renderer {
                     Some(wgpu::RenderPassColorAttachment {
                         view: &self.albedo_rt_view,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             // Clear to zero albedo — pixels the scene
                             // doesn't cover (before sky writes) absorb
@@ -5182,6 +5193,7 @@ impl Renderer {
                 }),
                 timestamp_writes: hdr_ts,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             // Sky uses the same env_intensity as IBL so the background
@@ -5442,6 +5454,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssao_blur_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
                         store: wgpu::StoreOp::Store,
@@ -5450,6 +5463,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.ssao_blur_pipeline);
             pass.set_bind_group(0, bg, &[]);
@@ -5463,6 +5477,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssao_blur_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
                         store: wgpu::StoreOp::Store,
@@ -5471,6 +5486,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         }
 
@@ -5517,6 +5533,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssr_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -5525,6 +5542,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: ssr_ts,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.ssr_pipeline);
             pass.set_bind_group(0, bg, &[]);
@@ -5538,6 +5556,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssr_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -5546,6 +5565,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             drop(pass);
         }
@@ -5588,6 +5608,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssr_history_views[cur_idx],
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -5596,6 +5617,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.ssr_temporal_pipeline);
             pass.set_bind_group(0, &bg, &[]);
@@ -5644,6 +5666,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssgi_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -5652,6 +5675,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: ssgi_ts,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.ssgi_pipeline);
             pass.set_bind_group(0, bg, &[]);
@@ -5664,6 +5688,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssgi_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -5672,6 +5697,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             drop(pass);
         }
@@ -5712,6 +5738,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssgi_history_views[cur_idx],
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -5720,6 +5747,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.ssgi_temporal_pipeline);
             pass.set_bind_group(0, &bg, &[]);
@@ -5784,6 +5812,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.bloom_mip_views[i],
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -5792,6 +5821,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: bloom_ts,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             let pl = if threshold_pass {
                 &self.bloom_pipeline_threshold_downsample
@@ -5837,6 +5867,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.bloom_mip_views[i],
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         // Load — additive blend on top of what
                         // downsample wrote.
@@ -5847,6 +5878,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: bloom_up_ts,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.bloom_pipeline_upsample);
             // Same viewport fix as the downsample loop above — without
@@ -5937,6 +5969,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.composed_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -5945,6 +5978,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.scene_compose_pipeline);
             pass.set_bind_group(0, &bg, &[]);
@@ -5993,6 +6027,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.taa_views[taa_dst_idx],
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -6001,6 +6036,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: taa_ts,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.taa_pipeline);
             pass.set_bind_group(0, &bg, &[]);
@@ -6041,6 +6077,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.dof_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -6049,6 +6086,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.dof_pipeline);
             pass.set_bind_group(0, &bg, &[]);
@@ -6089,6 +6127,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.motion_blur_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -6097,6 +6136,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.motion_blur_pipeline);
             pass.set_bind_group(0, &bg, &[]);
@@ -6141,6 +6181,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.sss_rt_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -6149,6 +6190,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.sss_pipeline);
             pass.set_bind_group(0, &bg, &[]);
@@ -6213,6 +6255,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.exposure_views[exposure_dst_idx],
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -6221,6 +6264,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.exposure_pipeline);
             pass.set_bind_group(0, &bg, &[]);
@@ -6269,6 +6313,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         // Composite covers the full surface anyway,
                         // but Clear is safer than Load (cheaper too —
@@ -6280,6 +6325,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: final_composite_ts,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.composite_pipeline);
             pass.set_bind_group(0, &composite_bg, &[]);
@@ -6297,6 +6343,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -6305,6 +6352,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.pipeline_2d);
             pass.set_vertex_buffer(0, self.persistent_vb_2d.slice(..));
@@ -6376,7 +6424,7 @@ impl Renderer {
             let slice = staging.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
             slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-            self.device.poll(wgpu::Maintain::Wait);
+            let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
             if let Ok(Ok(())) = rx.recv() {
                 let data = slice.get_mapped_range();
@@ -7710,7 +7758,10 @@ impl Renderer {
         let buffer_size = (padded_bytes_per_row * height) as u64;
 
         // Render one frame to a texture we can copy from
-        let output = self.surface.get_current_texture().ok()?;
+        let output = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            _ => return None,
+        };
         let texture = &output.texture;
 
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -7750,7 +7801,7 @@ impl Renderer {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         if rx.recv().ok()?.is_err() {
             return None;
@@ -7822,7 +7873,7 @@ impl Renderer {
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         if let Ok(Ok(())) = rx.recv() {
             let data = slice.get_mapped_range();
@@ -7878,8 +7929,8 @@ impl Renderer {
         });
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("custom_pipeline_layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -7909,13 +7960,13 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 

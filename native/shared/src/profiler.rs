@@ -227,7 +227,7 @@ impl Profiler {
                 let byte_count = (self.next_query as u64) * 8;
                 let slice = readback.slice(0..byte_count);
                 slice.map_async(wgpu::MapMode::Read, |_| {});
-                let _ = device.poll(wgpu::Maintain::Wait);
+                let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                 let data = slice.get_mapped_range().to_vec();
                 readback.unmap();
                 let period = self.timestamp_period_ns as f64;

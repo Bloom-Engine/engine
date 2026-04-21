@@ -233,9 +233,9 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     {
         let hwnd = win32::create_window(width, height, title);
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let surface = unsafe {
@@ -259,7 +259,6 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
         let (device, queue) = pollster_block_on(adapter.request_device(
             &wgpu::DeviceDescriptor::default(),
-            None,
         )).expect("Failed to create device");
 
         let surface_caps = surface.get_capabilities(&adapter);

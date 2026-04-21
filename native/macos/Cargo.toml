@@ -15,7 +15,7 @@ objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSStri
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSEvent", "NSApplication", "NSScreen", "NSGraphicsContext", "NSRunningApplication", "NSResponder"] }
 objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
 raw-window-handle = "0.6"
-wgpu = "24"
+wgpu = "29"
 libc = "0.2"
 rfd = "0.15"
 arboard = "3"

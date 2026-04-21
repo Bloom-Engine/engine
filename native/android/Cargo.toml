@@ -10,7 +10,7 @@ crate-type = ["staticlib", "cdylib"]
 [dependencies]
 bloom-shared = { path = "../shared" }
 raw-window-handle = "0.6"
-wgpu = "24"
+wgpu = "29"
 libc = "0.2"
 ndk = "0.9"
 oboe = "0.6"

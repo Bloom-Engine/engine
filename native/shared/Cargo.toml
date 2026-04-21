@@ -10,7 +10,7 @@ physics = ["dep:rapier3d"]
 web = ["dep:web-time"]
 
 [dependencies]
-wgpu = "24"
+wgpu = "29"
 raw-window-handle = "0.6"
 fontdue = "0.9"
 libc = "0.2"

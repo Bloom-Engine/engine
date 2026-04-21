@@ -273,8 +273,8 @@ impl PostFxPipeline {
 
         let outline_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("outline_pipeline_layout"),
-            bind_group_layouts: &[&outline_bg_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&outline_bg_layout)],
+            immediate_size: 0,
         });
 
         let outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -302,7 +302,7 @@ impl PostFxPipeline {
             },
             depth_stencil: None,
             multisample: Default::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 

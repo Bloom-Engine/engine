@@ -299,9 +299,9 @@ unsafe extern "C" fn scene_will_connect(
     UI_WINDOW = Some(window);
 
     // Create wgpu surface
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::METAL,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
 
     let view_ptr = Retained::as_ptr(&view) as *mut c_void;
@@ -310,7 +310,7 @@ unsafe extern "C" fn scene_will_connect(
     );
     let raw = RawWindowHandle::UiKit(handle);
     let surface = instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-        raw_display_handle: RawDisplayHandle::UiKit(UiKitDisplayHandle::new()),
+        raw_display_handle: Some(RawDisplayHandle::UiKit(UiKitDisplayHandle::new())),
         raw_window_handle: raw,
     }).expect("Failed to create wgpu surface");
 
@@ -322,7 +322,6 @@ unsafe extern "C" fn scene_will_connect(
 
     let (device, queue) = pollster_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
-        None,
     )).expect("Failed to create device");
 
     let surface_caps = surface.get_capabilities(&adapter);
@@ -438,9 +437,9 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
     UI_WINDOW = Some(window);
 
     // Create wgpu surface and engine
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::METAL,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
 
     let view_ptr = Retained::as_ptr(&view) as *mut c_void;
@@ -449,7 +448,7 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
     );
     let raw = RawWindowHandle::UiKit(handle);
     let surface = instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-        raw_display_handle: RawDisplayHandle::UiKit(UiKitDisplayHandle::new()),
+        raw_display_handle: Some(RawDisplayHandle::UiKit(UiKitDisplayHandle::new())),
         raw_window_handle: raw,
     }).expect("Failed to create wgpu surface");
 
@@ -461,7 +460,6 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
 
     let (device, queue) = pollster_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
-        None,
     )).expect("Failed to create device");
 
     let surface_caps = surface.get_capabilities(&adapter);

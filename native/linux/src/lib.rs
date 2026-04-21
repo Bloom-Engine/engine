@@ -223,9 +223,9 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     {
         x11_impl::create_window(width, height, title);
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let surface = unsafe {

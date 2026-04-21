@@ -98,11 +98,18 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         } else {
             (width as u32, height as u32)
         };
+        // Logical size is half of physical: the game UI (fonts, layout constants)
+        // was sized for ~1170×540 landscape (iPhone-sized); on Android's 2340×1080
+        // panel we'd otherwise render at native pixel size and everything looks
+        // half-scale. wgpu still renders to the full physical surface; only the
+        // `screen_width`/`screen_height` the game sees are halved.
+        let logical_w = (pixel_w / 2).max(1);
+        let logical_h = (pixel_h / 2).max(1);
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
             flags: wgpu::InstanceFlags::default(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         // Create surface from ANativeWindow
@@ -117,9 +124,9 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         );
         let raw = raw_window_handle::RawWindowHandle::AndroidNdk(handle);
         let surface = instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: raw_window_handle::RawDisplayHandle::Android(
+            raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Android(
                 raw_window_handle::AndroidDisplayHandle::new()
-            ),
+            )),
             raw_window_handle: raw,
         }).expect("Failed to create surface");
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: surface created\0".as_ptr());
@@ -130,15 +137,15 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             ..Default::default()
         }));
         let adapter = match adapter {
-            Some(a) => a,
-            None => {
+            Ok(a) => a,
+            Err(_) => {
                 // Try again without surface compatibility requirement
                 match pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     ..Default::default()
                 })) {
-                    Some(a) => a,
-                    None => panic!("No GPU adapter found"),
+                    Ok(a) => a,
+                    Err(_) => panic!("No GPU adapter found"),
                 }
             }
         };
@@ -147,11 +154,10 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         let (device, queue) = pollster_block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("bloom_device"),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                required_limits: wgpu::Limits::downlevel_defaults()
                     .using_resolution(adapter.limits()),
                 ..Default::default()
             },
-            None,
         )).expect("Failed to create device");
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: device created\0".as_ptr());
 
@@ -182,7 +188,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         surface.configure(&device, &surface_config);
 
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: surface configured\0".as_ptr());
-        let renderer = Renderer::new(device, queue, surface, surface_config, pixel_w, pixel_h);
+        let renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
         let _ = ENGINE.set(EngineState::new(renderer));
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: engine initialized\0".as_ptr());
     }
@@ -212,8 +218,18 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
 pub extern "C" fn bloom_android_on_touch(action: i32, x: f64, y: f64, pointer_index: i32) {
     unsafe {
         if let Some(eng) = ENGINE.get_mut() {
-            eng.input.set_mouse_position(x, y);
-            eng.input.set_touch(pointer_index as usize, x, y, action != 1); // 1 = ACTION_UP
+            let sw = eng.screen_width();
+            let sh = eng.screen_height();
+            let lx = x * 0.5;
+            let ly = y * 0.5;
+            let msg = std::ffi::CString::new(format!("touch a={} raw=({},{}) scaled=({},{}) sw={} sh={}", action, x, y, lx, ly, sw, sh)).unwrap();
+            __android_log_print(3, b"BloomTouch\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
+            eng.input.set_mouse_position(lx, ly);
+            if action == 1 || action == 3 {
+                eng.input.release_touch(pointer_index as usize, lx, ly); // UP / CANCEL
+            } else {
+                eng.input.set_touch(pointer_index as usize, lx, ly, true); // DOWN / MOVE
+            }
             match action {
                 0 => eng.input.set_mouse_button_down(0),  // ACTION_DOWN
                 1 => eng.input.set_mouse_button_up(0),    // ACTION_UP
@@ -1577,3 +1593,32 @@ pub extern "C" fn bloom_physics_destroy_joint(handle: f64) {
     #[cfg(feature = "physics")]
     if let Some(phys) = engine().physics.as_mut() { phys.destroy_joint(handle); }
 }
+
+#[no_mangle] pub extern "C" fn bloom_take_screenshot(_path_ptr: *const u8) {}
+#[no_mangle] pub extern "C" fn bloom_set_env_clear_from_hdr(_path_ptr: *const u8) {}
+#[no_mangle] pub extern "C" fn bloom_set_fog(_r: f64, _g: f64, _b: f64, _density: f64, _height_ref: f64, _height_falloff: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_chromatic_aberration(_strength: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_vignette(_strength: f64, _softness: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_film_grain(_strength: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_sun_shafts(_strength: f64, _decay: f64, _r: f64, _g: f64, _b: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_auto_exposure(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_manual_exposure(_value: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_env_intensity(_intensity: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_ssgi_enabled(_enabled: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_ssgi_intensity(_intensity: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_ssgi_radius(_radius: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_dof(_enabled: f64, _focus_distance: f64, _aperture: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_quality_preset(_preset: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_shadows_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_shadows_always_fresh(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_bloom_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_early_z_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_ssao_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_motion_blur_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_sss_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_profiler_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_get_profiler_frame_cpu_us() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_print_profiler_summary() {}

@@ -44,9 +44,9 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
         canvas.set_width(w);
         canvas.set_height(h);
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let surface = instance
@@ -68,7 +68,6 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
                     label: Some("bloom_device"),
                     ..Default::default()
                 },
-                None,
             )
             .await
             .expect("Failed to create device");

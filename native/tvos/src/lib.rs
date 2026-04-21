@@ -700,9 +700,9 @@ unsafe extern "C" fn scene_will_connect(
     UI_WINDOW = Some(window);
 
     // Create wgpu surface and engine on the main thread (like iOS)
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::METAL,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
 
     let view_ptr = Retained::as_ptr(&view) as *mut c_void;
@@ -712,7 +712,7 @@ unsafe extern "C" fn scene_will_connect(
     let raw = RawWindowHandle::UiKit(handle);
     std::io::Write::write_all(&mut std::io::stderr(), b"[bloom-tvos] creating wgpu surface\n").ok();
     let surface = match instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-        raw_display_handle: RawDisplayHandle::UiKit(UiKitDisplayHandle::new()),
+        raw_display_handle: Some(RawDisplayHandle::UiKit(UiKitDisplayHandle::new())),
         raw_window_handle: raw,
     }) {
         Ok(s) => s,
@@ -724,13 +724,12 @@ unsafe extern "C" fn scene_will_connect(
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
     })) {
-        Some(a) => a,
-        None => panic!("[bloom-tvos] No GPU adapter found"),
+        Ok(a) => a,
+        Err(_) => panic!("[bloom-tvos] No GPU adapter found"),
     };
 
     let (device, queue) = match pollster_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
-        None,
     )) {
         Ok(dq) => dq,
         Err(e) => panic!("[bloom-tvos] Failed to create device: {e}"),
@@ -988,9 +987,9 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
     let _: () = msg_send![&*window, addSubview: &*lbl];
 
     // Create wgpu engine using CAMetalLayer
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::METAL,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
 
     let layer_ptr = Retained::as_ptr(&layer) as *mut c_void;
@@ -1006,7 +1005,6 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
 
     let (device, queue) = pollster_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
-        None,
     )).expect("[bloom-tvos] Failed to create device");
 
     let surface_caps = surface.get_capabilities(&adapter);

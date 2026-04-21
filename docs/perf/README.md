@@ -97,7 +97,7 @@ is on the critical path.
 
 | # | Title | Effort | Expected gain | Status |
 |---|---|---|---|---|
-| [007-prep](007-prep-wgpu-upgrade.md) | Bump wgpu 24 → Metal-RT release | 2-3 days | Enabler for HW path | open, serial prereq |
+| [007-prep](007-prep-wgpu-upgrade.md) | Bump wgpu 24 → Metal-RT release | 2-3 days | Enabler for HW path | landed (wgpu 24 → 29; ~140 API-migration sites across renderer/shadows/postfx/profiler + macos surface/device setup; `BLOOM_NO_FULLSCREEN=1` env var for bench-friendly windowed mode; Metal ray-query now available via `Features::EXPERIMENTAL_RAY_QUERY`. All 7 quality paths vsync-capped at 800×450 logical; visual diff within noise vs baseline) |
 | [007a](007a-lumen-screen-probes-sw.md) | Lumen screen probes — SW trace (Hi-Z) | 2-3 days | SSGI 2×+ faster | open |
 | [007b](007b-lumen-screen-probes-hw.md) | Lumen screen probes — HW trace (BLAS/TLAS + ray-query) | 1-2 weeks | Off-screen occlusion + bleed | open |
 | [013](013-lumen-surface-cache.md) | Surface Cache — Mesh Cards + per-frame card lighting | 1-2 weeks | HW bounce full quality | open |
