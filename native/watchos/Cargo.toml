@@ -1,0 +1,11 @@
+[package]
+name = "bloom-watchos"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bloom_watchos"
+crate-type = ["staticlib"]
+
+[dependencies]
+libc = "0.2"
