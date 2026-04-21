@@ -12,6 +12,7 @@
 mod ffi_stubs;
 mod draw_list;
 mod textures;
+mod audio;
 
 /// Perry StringHeader layout — mirrors bloom-shared's copy. Inlined here
 /// because we don't depend on bloom-shared (keeps the watchos crate
@@ -651,6 +652,46 @@ pub extern "C" fn bloom_draw_plane(x: f64, y: f64, z: f64, w: f64, h: f64,
     c.w = w; c.h = h;
     c.r = r; c.g = g; c.b = b; c.a = a;
     draw_list::push(c);
+}
+
+// ============================================================
+// Audio (forwards to Swift BloomAudioManager)
+// ============================================================
+
+#[no_mangle] pub extern "C" fn bloom_init_audio() { audio::init_audio(); }
+#[no_mangle] pub extern "C" fn bloom_close_audio() { audio::close_audio(); }
+
+#[no_mangle]
+pub extern "C" fn bloom_load_sound(path: i64) -> f64 {
+    audio::load_sound(perry_str(path)) as f64
+}
+#[no_mangle] pub extern "C" fn bloom_play_sound(handle: f64) { audio::play_sound(handle as u32); }
+#[no_mangle] pub extern "C" fn bloom_stop_sound(handle: f64) { audio::stop_sound(handle as u32); }
+#[no_mangle] pub extern "C" fn bloom_set_sound_volume(handle: f64, v: f64) {
+    audio::set_sound_volume(handle as u32, v as f32);
+}
+#[no_mangle] pub extern "C" fn bloom_set_master_volume(v: f64) {
+    audio::set_master_volume(v as f32);
+}
+#[no_mangle] pub extern "C" fn bloom_play_sound_3d(handle: f64, _x: f64, _y: f64, _z: f64) {
+    // No spatial audio on watch — play at full 2D volume.
+    audio::play_sound(handle as u32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_music(path: i64) -> f64 {
+    audio::load_music(perry_str(path)) as f64
+}
+#[no_mangle] pub extern "C" fn bloom_play_music(handle: f64) { audio::play_music(handle as u32); }
+#[no_mangle] pub extern "C" fn bloom_stop_music(handle: f64) { audio::stop_music(handle as u32); }
+#[no_mangle] pub extern "C" fn bloom_set_music_volume(handle: f64, v: f64) {
+    audio::set_music_volume(handle as u32, v as f32);
+}
+#[no_mangle] pub extern "C" fn bloom_is_music_playing(handle: f64) -> f64 {
+    if audio::is_music_playing(handle as u32) { 1.0 } else { 0.0 }
+}
+#[no_mangle] pub extern "C" fn bloom_update_music_stream(_handle: f64) {
+    // AVAudioPlayer owns stream pumping internally — no per-frame poke needed.
 }
 
 #[no_mangle]

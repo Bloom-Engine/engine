@@ -45,6 +45,12 @@ const OVERRIDES = new Set([
   'bloom_draw_cube', 'bloom_draw_cube_wires',
   'bloom_draw_sphere', 'bloom_draw_sphere_wires',
   'bloom_draw_cylinder', 'bloom_draw_plane', 'bloom_draw_grid',
+  // Audio
+  'bloom_init_audio', 'bloom_close_audio',
+  'bloom_load_sound', 'bloom_play_sound', 'bloom_stop_sound',
+  'bloom_set_sound_volume', 'bloom_set_master_volume', 'bloom_play_sound_3d',
+  'bloom_load_music', 'bloom_play_music', 'bloom_stop_music',
+  'bloom_update_music_stream', 'bloom_set_music_volume', 'bloom_is_music_playing',
 ]);
 
 const rustType = (p) => {

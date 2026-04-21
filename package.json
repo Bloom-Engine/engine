@@ -337,8 +337,8 @@
         "watchos": {
           "crate": "native/watchos/",
           "lib": "libbloom_watchos.a",
-          "frameworks": ["WatchKit", "Foundation", "CoreGraphics", "QuartzCore", "SwiftUI", "SceneKit"],
-          "swift_sources": ["native/watchos/src/BloomWatchApp.swift"]
+          "frameworks": ["WatchKit", "Foundation", "CoreGraphics", "QuartzCore", "SwiftUI", "SceneKit", "AVFoundation"],
+          "swift_sources": ["native/watchos/src/BloomWatchApp.swift", "native/watchos/src/BloomWatchAudio.swift"]
         },
         "windows": {
           "crate": "native/windows/",
