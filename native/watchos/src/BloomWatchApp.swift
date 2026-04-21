@@ -32,6 +32,52 @@ import SceneKit
 @_silgen_name("bloom_watchos_camera_state") func bloom_watchos_camera_state(_ out: UnsafeMutablePointer<Double>)
 @_silgen_name("bloom_watchos_has_3d") func bloom_watchos_has_3d() -> Double
 
+// Retained scene graph accessors
+@_silgen_name("bloom_watchos_scene_copy_nodes") func bloom_watchos_scene_copy_nodes(_ dst: UnsafeMutablePointer<SceneNodeInfo>, _ max: Int64) -> Int64
+@_silgen_name("bloom_watchos_scene_copy_lights") func bloom_watchos_scene_copy_lights(_ dst: UnsafeMutablePointer<SceneLight>, _ max: Int64) -> Int64
+@_silgen_name("bloom_watchos_scene_geometry") func bloom_watchos_scene_geometry(_ handle: UInt32, _ out: UnsafeMutablePointer<SceneGeometryPtrs>)
+
+// SceneNodeInfo — must match Rust's #[repr(C)] struct in scene.rs.
+struct SceneNodeInfo {
+    var handle: UInt32 = 0
+    var parent: UInt32 = 0
+    var visible: UInt32 = 0
+    var geometryVersion: UInt32 = 0
+
+    var color: (Float, Float, Float, Float) = (1, 1, 1, 1)
+    var roughness: Float = 0
+    var metalness: Float = 0
+    var texture: UInt32 = 0
+    var hasGeometry: UInt32 = 0
+
+    var transform: (
+        Float, Float, Float, Float,
+        Float, Float, Float, Float,
+        Float, Float, Float, Float,
+        Float, Float, Float, Float
+    ) = (1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)
+}
+
+struct SceneLight {
+    var kind: UInt32 = 0
+    var _pad: UInt32 = 0
+    var posOrDir: (Float, Float, Float) = (0, 0, 0)
+    var range: Float = 0
+    var color: (Float, Float, Float) = (1, 1, 1)
+    var intensity: Float = 0
+}
+
+struct SceneGeometryPtrs {
+    var positions: UnsafePointer<Float>? = nil
+    var positionCount: UInt32 = 0
+    var normals: UnsafePointer<Float>? = nil
+    var normalCount: UInt32 = 0
+    var uvs: UnsafePointer<Float>? = nil
+    var uvCount: UInt32 = 0
+    var indices: UnsafePointer<UInt32>? = nil
+    var indexCount: UInt32 = 0
+}
+
 // MARK: - DrawCmd mirror (must match draw_list.rs #[repr(C)])
 
 let TEXT_CAP = 256
@@ -253,8 +299,27 @@ struct BloomSceneView: View {
     let drawBuf: UnsafeMutableBufferPointer<DrawCmd>
 
     @State private var scene: SCNScene = makeBaseScene()
-    @State private var contentRoot: SCNNode = SCNNode()
+    @State private var contentRoot: SCNNode = SCNNode()   // immediate-mode per-frame draws
+    @State private var retainedRoot: SCNNode = SCNNode()  // bloom_scene_* retained nodes
+    @State private var lightsRoot: SCNNode = SCNNode()    // bloom_add_*_light instances
     @State private var cameraNode: SCNNode = SCNNode()
+
+    /// Cache of SCNNodes for retained scene graph, keyed by bloom handle.
+    @State private var retainedNodes: [UInt32: SCNNode] = [:]
+    /// Geometry cache keyed by (handle, geometryVersion) so unchanged meshes
+    /// aren't rebuilt each frame.
+    @State private var retainedGeomVersions: [UInt32: UInt32] = [:]
+
+    @State private var nodeBuf: UnsafeMutableBufferPointer<SceneNodeInfo> = {
+        let p = UnsafeMutablePointer<SceneNodeInfo>.allocate(capacity: 1024)
+        p.initialize(repeating: SceneNodeInfo(), count: 1024)
+        return UnsafeMutableBufferPointer(start: p, count: 1024)
+    }()
+    @State private var lightBuf: UnsafeMutableBufferPointer<SceneLight> = {
+        let p = UnsafeMutablePointer<SceneLight>.allocate(capacity: 64)
+        p.initialize(repeating: SceneLight(), count: 64)
+        return UnsafeMutableBufferPointer(start: p, count: 64)
+    }()
 
     var body: some View {
         SceneView(
@@ -267,6 +332,12 @@ struct BloomSceneView: View {
         .onAppear {
             if contentRoot.parent == nil {
                 scene.rootNode.addChildNode(contentRoot)
+            }
+            if retainedRoot.parent == nil {
+                scene.rootNode.addChildNode(retainedRoot)
+            }
+            if lightsRoot.parent == nil {
+                scene.rootNode.addChildNode(lightsRoot)
             }
             if cameraNode.parent == nil {
                 cameraNode.camera = SCNCamera()
@@ -329,7 +400,196 @@ struct BloomSceneView: View {
                 contentRoot.addChildNode(node)
             }
         }
+
+        // Retained scene graph — delta-sync against the cached handle→SCNNode map.
+        syncRetainedNodes()
+        syncLights()
     }
+
+    private func syncRetainedNodes() {
+        let count = Int(bloom_watchos_scene_copy_nodes(nodeBuf.baseAddress!, 1024))
+        var seen: Set<UInt32> = []
+        seen.reserveCapacity(count)
+
+        // Pass 1: ensure a SCNNode exists for every live handle and update its
+        // transform + material. Geometry is versioned so we only rebuild when
+        // it actually changes.
+        for i in 0..<count {
+            let info = nodeBuf[i]
+            seen.insert(info.handle)
+
+            let node: SCNNode
+            if let existing = retainedNodes[info.handle] {
+                node = existing
+            } else {
+                node = SCNNode()
+                retainedNodes[info.handle] = node
+                retainedRoot.addChildNode(node)
+            }
+
+            node.isHidden = info.visible == 0
+            node.transform = scnMatrix4(from: info.transform)
+
+            let cached = retainedGeomVersions[info.handle] ?? .max
+            if info.hasGeometry != 0 && cached != info.geometryVersion {
+                node.geometry = buildGeometry(handle: info.handle)
+                retainedGeomVersions[info.handle] = info.geometryVersion
+            }
+
+            if let g = node.geometry {
+                let m = g.firstMaterial ?? SCNMaterial()
+                m.lightingModel = .physicallyBased
+                m.diffuse.contents = UIColor(
+                    red: CGFloat(info.color.0),
+                    green: CGFloat(info.color.1),
+                    blue: CGFloat(info.color.2),
+                    alpha: CGFloat(info.color.3)
+                )
+                m.roughness.contents = NSNumber(value: info.roughness)
+                m.metalness.contents = NSNumber(value: info.metalness)
+                if info.texture != 0,
+                   let cpath = bloom_watchos_texture_path(info.texture) {
+                    let p = String(cString: cpath)
+                    if let img = TextureCache.shared.image(for: info.texture) {
+                        m.diffuse.contents = img
+                    } else {
+                        m.diffuse.contents = p
+                    }
+                }
+                g.materials = [m]
+            }
+        }
+
+        // Pass 2: retire SCNNodes whose handle no longer appears in the
+        // snapshot (bloom_scene_destroy_node).
+        for (h, node) in retainedNodes where !seen.contains(h) {
+            node.removeFromParentNode()
+            retainedNodes.removeValue(forKey: h)
+            retainedGeomVersions.removeValue(forKey: h)
+        }
+
+        // Pass 3: fix up parent-child — done after all nodes exist so
+        // bloom_scene_set_parent to a not-yet-created node doesn't matter.
+        for i in 0..<count {
+            let info = nodeBuf[i]
+            guard let node = retainedNodes[info.handle] else { continue }
+            let desiredParent: SCNNode = info.parent == 0 ? retainedRoot
+                : (retainedNodes[info.parent] ?? retainedRoot)
+            if node.parent !== desiredParent {
+                node.removeFromParentNode()
+                desiredParent.addChildNode(node)
+            }
+        }
+    }
+
+    private func buildGeometry(handle: UInt32) -> SCNGeometry? {
+        var ptrs = SceneGeometryPtrs()
+        withUnsafeMutablePointer(to: &ptrs) { bloom_watchos_scene_geometry(handle, $0) }
+        guard let pos = ptrs.positions, let idx = ptrs.indices,
+              ptrs.positionCount > 0, ptrs.indexCount > 0 else { return nil }
+
+        let vcount = Int(ptrs.positionCount) / 3
+        let posData = Data(bytes: pos, count: Int(ptrs.positionCount) * MemoryLayout<Float>.size)
+        let posSrc = SCNGeometrySource(
+            data: posData,
+            semantic: .vertex,
+            vectorCount: vcount,
+            usesFloatComponents: true,
+            componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0,
+            dataStride: 3 * MemoryLayout<Float>.size
+        )
+
+        var sources: [SCNGeometrySource] = [posSrc]
+        if let nrm = ptrs.normals, ptrs.normalCount >= ptrs.positionCount {
+            let nrmData = Data(bytes: nrm, count: Int(ptrs.normalCount) * MemoryLayout<Float>.size)
+            sources.append(SCNGeometrySource(
+                data: nrmData,
+                semantic: .normal,
+                vectorCount: vcount,
+                usesFloatComponents: true,
+                componentsPerVector: 3,
+                bytesPerComponent: MemoryLayout<Float>.size,
+                dataOffset: 0,
+                dataStride: 3 * MemoryLayout<Float>.size
+            ))
+        }
+        if let uv = ptrs.uvs, ptrs.uvCount >= UInt32(vcount * 2) {
+            let uvData = Data(bytes: uv, count: Int(ptrs.uvCount) * MemoryLayout<Float>.size)
+            sources.append(SCNGeometrySource(
+                data: uvData,
+                semantic: .texcoord,
+                vectorCount: vcount,
+                usesFloatComponents: true,
+                componentsPerVector: 2,
+                bytesPerComponent: MemoryLayout<Float>.size,
+                dataOffset: 0,
+                dataStride: 2 * MemoryLayout<Float>.size
+            ))
+        }
+
+        let idxData = Data(bytes: idx, count: Int(ptrs.indexCount) * MemoryLayout<UInt32>.size)
+        let element = SCNGeometryElement(
+            data: idxData,
+            primitiveType: .triangles,
+            primitiveCount: Int(ptrs.indexCount) / 3,
+            bytesPerIndex: MemoryLayout<UInt32>.size
+        )
+
+        return SCNGeometry(sources: sources, elements: [element])
+    }
+
+    private func syncLights() {
+        let n = Int(bloom_watchos_scene_copy_lights(lightBuf.baseAddress!, 64))
+        // Simpler than delta sync for lights — there are few of them and
+        // bloom's intended use is setting them once on scene init. Rebuild
+        // each frame.
+        lightsRoot.childNodes.forEach { $0.removeFromParentNode() }
+        for i in 0..<n {
+            let l = lightBuf[i]
+            let node = SCNNode()
+            let light = SCNLight()
+            light.color = UIColor(
+                red: CGFloat(l.color.0),
+                green: CGFloat(l.color.1),
+                blue: CGFloat(l.color.2),
+                alpha: 1.0
+            )
+            light.intensity = CGFloat(l.intensity * 1000.0)  // bloom's 0..1 → SceneKit lumens
+            if l.kind == 1 {
+                light.type = .directional
+                // Point light forward along `pos_or_dir`.
+                node.look(at: SCNVector3(
+                    x: node.position.x + l.posOrDir.0,
+                    y: node.position.y + l.posOrDir.1,
+                    z: node.position.z + l.posOrDir.2
+                ))
+            } else if l.kind == 2 {
+                light.type = .omni
+                light.attenuationEndDistance = CGFloat(l.range)
+                node.position = SCNVector3(x: l.posOrDir.0, y: l.posOrDir.1, z: l.posOrDir.2)
+            }
+            node.light = light
+            lightsRoot.addChildNode(node)
+        }
+    }
+}
+
+/// Convert a column-major flat 16-float transform (bloom's layout) into an
+/// SCNMatrix4. SCNMatrix4 is column-major too, so it's a direct mapping.
+private func scnMatrix4(from m: (
+    Float, Float, Float, Float,
+    Float, Float, Float, Float,
+    Float, Float, Float, Float,
+    Float, Float, Float, Float
+)) -> SCNMatrix4 {
+    return SCNMatrix4(
+        m11: m.0,  m12: m.1,  m13: m.2,  m14: m.3,
+        m21: m.4,  m22: m.5,  m23: m.6,  m24: m.7,
+        m31: m.8,  m32: m.9,  m33: m.10, m34: m.11,
+        m41: m.12, m42: m.13, m43: m.14, m44: m.15
+    )
 }
 
 private func makeBaseScene() -> SCNScene {

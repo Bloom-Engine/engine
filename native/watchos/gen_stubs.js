@@ -51,6 +51,13 @@ const OVERRIDES = new Set([
   'bloom_set_sound_volume', 'bloom_set_master_volume', 'bloom_play_sound_3d',
   'bloom_load_music', 'bloom_play_music', 'bloom_stop_music',
   'bloom_update_music_stream', 'bloom_set_music_volume', 'bloom_is_music_playing',
+  // Retained scene graph
+  'bloom_scene_create_node', 'bloom_scene_destroy_node',
+  'bloom_scene_set_visible', 'bloom_scene_set_cast_shadow', 'bloom_scene_set_receive_shadow',
+  'bloom_scene_set_parent', 'bloom_scene_set_transform', 'bloom_scene_update_geometry',
+  'bloom_scene_set_material_color', 'bloom_scene_set_material_pbr', 'bloom_scene_set_material_texture',
+  'bloom_scene_node_count', 'bloom_scene_get_transform',
+  'bloom_add_directional_light', 'bloom_add_point_light',
 ]);
 
 const rustType = (p) => {

@@ -13,6 +13,7 @@ mod ffi_stubs;
 mod draw_list;
 mod textures;
 mod audio;
+mod scene;
 
 /// Perry StringHeader layout — mirrors bloom-shared's copy. Inlined here
 /// because we don't depend on bloom-shared (keeps the watchos crate
@@ -692,6 +693,110 @@ pub extern "C" fn bloom_load_music(path: i64) -> f64 {
 }
 #[no_mangle] pub extern "C" fn bloom_update_music_stream(_handle: f64) {
     // AVAudioPlayer owns stream pumping internally — no per-frame poke needed.
+}
+
+// ============================================================
+// Retained scene graph (bloom_scene_*) — synced to SCNNodes in Swift
+// ============================================================
+
+#[no_mangle] pub extern "C" fn bloom_scene_create_node() -> f64 { scene::create() as f64 }
+#[no_mangle] pub extern "C" fn bloom_scene_destroy_node(h: f64) { scene::destroy(h as u32); }
+#[no_mangle] pub extern "C" fn bloom_scene_set_visible(h: f64, v: f64) {
+    scene::set_visible(h as u32, v > 0.5);
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_cast_shadow(_h: f64, _v: f64) {
+    // SceneKit manages shadow casting via per-node + light config; deferred.
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_receive_shadow(_h: f64, _v: f64) {}
+#[no_mangle] pub extern "C" fn bloom_scene_set_parent(h: f64, parent: f64) {
+    scene::set_parent(h as u32, parent as u32);
+}
+
+/// Transform is a raw pointer to 16 column-major f64s (128 bytes). No
+/// StringHeader wrapping — bloom's TS side passes a `number[]` which Perry
+/// forwards as a pointer to the Float64 data.
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_transform(handle: f64, matrix_ptr: i64) {
+    if matrix_ptr == 0 { return; }
+    let src = unsafe { std::slice::from_raw_parts(matrix_ptr as *const f64, 16) };
+    let mut arr = [0.0f32; 16];
+    for i in 0..16 { arr[i] = src[i] as f32; }
+    scene::set_transform(handle as u32, arr);
+}
+
+/// Geometry: vert_ptr points to `vertex_count * 12` f64s (12 floats per
+/// vertex: xyz, nx ny nz, rgba, uv). idx_ptr points to `index_count` f64s
+/// (each integer index boxed as f64 — matches bloom's TS `number[]` calls).
+#[no_mangle]
+pub extern "C" fn bloom_scene_update_geometry(
+    handle: f64, verts_ptr: i64, vertex_count: f64,
+    idx_ptr: i64, index_count: f64,
+) {
+    if verts_ptr == 0 || idx_ptr == 0 { return; }
+    let vcount = vertex_count as usize;
+    let icount = index_count as usize;
+    let verts = unsafe { std::slice::from_raw_parts(verts_ptr as *const f64, vcount * 12) };
+    let idx_f64 = unsafe { std::slice::from_raw_parts(idx_ptr as *const f64, icount) };
+    scene::update_geometry_f64(handle as u32, verts, idx_f64);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_color(h: f64, r: f64, g: f64, b: f64, a: f64) {
+    scene::set_color(h as u32, [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]);
+}
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_pbr(h: f64, roughness: f64, metalness: f64) {
+    scene::set_pbr(h as u32, roughness as f32, metalness as f32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_texture(h: f64, tex: f64) {
+    scene::set_texture(h as u32, tex as u32);
+}
+#[no_mangle] pub extern "C" fn bloom_scene_node_count() -> f64 { scene::node_count() as f64 }
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_transform(handle: f64, out: f64) -> f64 {
+    // `out` is a pointer to 16 f32s the caller has allocated. Write them.
+    if out == 0.0 { return 0.0; }
+    let t = scene::get_transform(handle as u32);
+    unsafe {
+        std::ptr::copy_nonoverlapping(t.as_ptr(), out as usize as *mut f32, 16);
+    }
+    1.0
+}
+
+#[no_mangle] pub extern "C" fn bloom_add_directional_light(
+    dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64,
+) {
+    scene::add_directional_light(dx as f32, dy as f32, dz as f32,
+                                 r as f32, g as f32, b as f32, intensity as f32);
+}
+
+#[no_mangle] pub extern "C" fn bloom_add_point_light(
+    x: f64, y: f64, z: f64, range: f64, r: f64, g: f64, b: f64, intensity: f64,
+) {
+    scene::add_point_light(x as f32, y as f32, z as f32, range as f32,
+                           r as f32, g as f32, b as f32, intensity as f32);
+}
+
+// ============================================================
+// Scene snapshot accessors for Swift
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_scene_copy_nodes(dst: *mut scene::SceneNodeInfo, max: i64) -> i64 {
+    scene::copy_nodes(dst, max)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_scene_copy_lights(dst: *mut scene::Light, max: i64) -> i64 {
+    scene::copy_lights(dst, max)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_scene_geometry(handle: u32, out: *mut scene::GeometryPtrs) {
+    if out.is_null() { return; }
+    unsafe { *out = scene::geometry_ptrs(handle); }
 }
 
 #[no_mangle]

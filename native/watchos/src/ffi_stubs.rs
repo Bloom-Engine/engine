@@ -109,6 +109,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_shadows_enabled(_p0: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_shadows_always_fresh(_p0: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_set_bloom_enabled(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssao_enabled(_p0: f64) {
@@ -180,36 +182,6 @@
 }
 #[no_mangle] pub extern "C" fn bloom_unregister_frame_callback(_p0: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_add_directional_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_add_point_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_create_node() -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_scene_destroy_node(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_set_visible(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_set_cast_shadow(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_set_receive_shadow(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_set_parent(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_set_transform(_p0: f64, _p1: i64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_update_geometry(_p0: f64, _p1: i64, _p2: f64, _p3: i64, _p4: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_set_material_color(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_set_material_pbr(_p0: f64, _p1: f64, _p2: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_set_material_texture(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_node_count() -> f64 {
-    0.0
-}
 #[no_mangle] pub extern "C" fn bloom_scene_node_vertex_count(_p0: f64) -> f64 {
     0.0
 }
@@ -253,9 +225,6 @@
 #[no_mangle] pub extern "C" fn bloom_end_texture_mode() {
 }
 #[no_mangle] pub extern "C" fn bloom_get_render_texture_texture(_p0: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_scene_get_transform(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_scene_get_bounds_min_x(_p0: f64) -> f64 {
