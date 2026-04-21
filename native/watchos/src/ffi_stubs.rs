@@ -64,24 +64,6 @@
 }
 #[no_mangle] pub extern "C" fn bloom_end_mode_2d() {
 }
-#[no_mangle] pub extern "C" fn bloom_begin_mode_3d(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_end_mode_3d() {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_cube(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_cube_wires(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_sphere(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_sphere_wires(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_cylinder(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_plane(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_grid(_p0: f64, _p1: f64) {
-}
 #[no_mangle] pub extern "C" fn bloom_draw_ray(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_load_model(_p0: i64) -> f64 {

@@ -29,6 +29,15 @@ pub mod kind {
     pub const TEXTURE_REC: i32 = 8;  // source rect → dest rect, no rotation
     pub const TEXTURE_PRO: i32 = 9;  // full: source, dest, origin, rotation
     pub const TEXT: i32 = 10;
+
+    // 3D immediate-mode primitives (pos = x,y,z; w,h = scale; src_x,y,z = secondary).
+    pub const CUBE: i32 = 20;         // pos (x,y,z), size (w,h,size=depth)
+    pub const CUBE_WIRES: i32 = 21;
+    pub const SPHERE: i32 = 22;       // pos (x,y,z), radius (w)
+    pub const SPHERE_WIRES: i32 = 23;
+    pub const CYLINDER: i32 = 24;     // pos (x,y,z), radius (w), height (h)
+    pub const PLANE: i32 = 25;        // pos (x,y,z), size (w,h)
+    pub const GRID: i32 = 26;         // slices (w), spacing (h)
 }
 
 #[repr(C)]
@@ -121,6 +130,16 @@ static CLEAR: [AtomicU64; 4] = [
     AtomicU64::new(255f64.to_bits()),
 ];
 
+/// 3D camera state — pos (xyz), target (xyz), up (xyz), fovy, proj (0=ortho, 1=persp).
+/// Written by bloom_begin_mode_3d, read once per frame by the Swift SceneView.
+static CAMERA: [AtomicU64; 11] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; 11]
+};
+/// Non-zero when a 3D section has ever been opened — tells the Swift shell
+/// it needs to host a SceneView, not just a Canvas.
+static HAS_3D: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn begin() {
     let mut g = INNER.lock().unwrap();
     g.building.clear();
@@ -160,6 +179,30 @@ pub fn clear_rgba() -> [f64; 4] {
 
 pub fn frame() -> u64 {
     FRAME.load(Ordering::Acquire)
+}
+
+pub fn set_camera(px: f64, py: f64, pz: f64,
+                  tx: f64, ty: f64, tz: f64,
+                  ux: f64, uy: f64, uz: f64,
+                  fovy: f64, proj: f64) {
+    let vals = [px, py, pz, tx, ty, tz, ux, uy, uz, fovy, proj];
+    for (i, v) in vals.iter().enumerate() {
+        CAMERA[i].store(v.to_bits(), Ordering::Relaxed);
+    }
+    HAS_3D.store(true, std::sync::atomic::Ordering::Release);
+}
+
+pub fn camera_snapshot(out: *mut f64) {
+    if out.is_null() { return; }
+    unsafe {
+        for i in 0..11 {
+            *out.add(i) = f64::from_bits(CAMERA[i].load(Ordering::Relaxed));
+        }
+    }
+}
+
+pub fn has_3d() -> bool {
+    HAS_3D.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Bulk-copy the ready list into a Swift-supplied buffer. Returns the number

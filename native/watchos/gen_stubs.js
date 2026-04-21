@@ -40,6 +40,11 @@ const OVERRIDES = new Set([
   'bloom_load_font', 'bloom_unload_font',
   // File I/O
   'bloom_file_exists', 'bloom_read_file', 'bloom_write_file',
+  // 3D immediate-mode
+  'bloom_begin_mode_3d', 'bloom_end_mode_3d',
+  'bloom_draw_cube', 'bloom_draw_cube_wires',
+  'bloom_draw_sphere', 'bloom_draw_sphere_wires',
+  'bloom_draw_cylinder', 'bloom_draw_plane', 'bloom_draw_grid',
 ]);
 
 const rustType = (p) => {

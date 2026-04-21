@@ -165,6 +165,20 @@ pub extern "C" fn bloom_watchos_texture_path(handle: u32) -> *const c_char {
     textures::path_ptr(handle)
 }
 
+/// Copy camera state [px,py,pz, tx,ty,tz, ux,uy,uz, fovy, proj] into a
+/// Swift-supplied 11-element f64 buffer. Called by the Swift SceneView.
+#[no_mangle]
+pub extern "C" fn bloom_watchos_camera_state(out: *mut f64) {
+    draw_list::camera_snapshot(out);
+}
+
+/// 1 if the game has ever opened a 3D mode section — hints to the Swift
+/// shell that it should host a SceneView layer underneath the Canvas.
+#[no_mangle]
+pub extern "C" fn bloom_watchos_has_3d() -> f64 {
+    if draw_list::has_3d() { 1.0 } else { 0.0 }
+}
+
 // ============================================================
 // Perry game-loop handshake.
 // ============================================================
@@ -543,4 +557,109 @@ pub extern "C" fn bloom_read_file(path: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn bloom_write_file(_path: i64, _data: i64) -> f64 {
     0.0 // watchOS app sandbox — defer real write support.
+}
+
+// ============================================================
+// 3D immediate-mode primitives
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_begin_mode_3d(
+    px: f64, py: f64, pz: f64,
+    tx: f64, ty: f64, tz: f64,
+    ux: f64, uy: f64, uz: f64,
+    fovy: f64, proj: f64,
+) {
+    draw_list::set_camera(px, py, pz, tx, ty, tz, ux, uy, uz, fovy, proj);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_end_mode_3d() {
+    // No-op: 3D commands are already in the list; the camera stays set until
+    // the next begin_mode_3d. Swift's SceneView draws 3D cmds under the
+    // Canvas layer each frame.
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_cube(x: f64, y: f64, z: f64, w: f64, h: f64, d: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::CUBE;
+    c.x = x; c.y = y; c.src_x = z; // src_x doubles as z on 3D cmds
+    c.w = w; c.h = h; c.size = d;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_cube_wires(x: f64, y: f64, z: f64, w: f64, h: f64, d: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::CUBE_WIRES;
+    c.x = x; c.y = y; c.src_x = z; // src_x doubles as z on 3D cmds
+    c.w = w; c.h = h; c.size = d;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_sphere(x: f64, y: f64, z: f64, radius: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::SPHERE;
+    c.x = x; c.y = y; c.src_x = z; // src_x doubles as z on 3D cmds
+    c.w = radius;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_sphere_wires(x: f64, y: f64, z: f64, radius: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::SPHERE_WIRES;
+    c.x = x; c.y = y; c.src_x = z; // src_x doubles as z on 3D cmds
+    c.w = radius;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_cylinder(x: f64, y: f64, z: f64,
+    radius_top: f64, _radius_bottom: f64, height: f64, _slices: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::CYLINDER;
+    c.x = x; c.y = y; c.src_x = z; // src_x doubles as z on 3D cmds
+    c.w = radius_top; c.h = height;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_plane(x: f64, y: f64, z: f64, w: f64, h: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::PLANE;
+    c.x = x; c.y = y; c.src_x = z; // src_x doubles as z on 3D cmds
+    c.w = w; c.h = h;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_grid(slices: f64, spacing: f64) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::GRID;
+    c.w = slices;
+    c.h = spacing;
+    // Grid color — light gray, matches bloom's default.
+    c.r = 200.0; c.g = 200.0; c.b = 200.0; c.a = 255.0;
+    draw_list::push(c);
 }

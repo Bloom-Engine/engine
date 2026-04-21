@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Foundation
+import SceneKit
 
 // MARK: - FFI into the Rust side
 
@@ -26,6 +27,10 @@ import Foundation
 @_silgen_name("bloom_watchos_copy_draw_list") func bloom_watchos_copy_draw_list(_ dst: UnsafeMutablePointer<DrawCmd>, _ max: Int64) -> Int64
 @_silgen_name("bloom_watchos_clear_color") func bloom_watchos_clear_color(_ out: UnsafeMutablePointer<Double>)
 @_silgen_name("bloom_watchos_texture_path") func bloom_watchos_texture_path(_ handle: UInt32) -> UnsafePointer<CChar>?
+
+// 3D camera + gate
+@_silgen_name("bloom_watchos_camera_state") func bloom_watchos_camera_state(_ out: UnsafeMutablePointer<Double>)
+@_silgen_name("bloom_watchos_has_3d") func bloom_watchos_has_3d() -> Double
 
 // MARK: - DrawCmd mirror (must match draw_list.rs #[repr(C)])
 
@@ -64,6 +69,15 @@ let K_TEXTURE: Int32 = 7
 let K_TEXTURE_REC: Int32 = 8
 let K_TEXTURE_PRO: Int32 = 9
 let K_TEXT: Int32 = 10
+
+// 3D primitives
+let K_CUBE: Int32 = 20
+let K_CUBE_WIRES: Int32 = 21
+let K_SPHERE: Int32 = 22
+let K_SPHERE_WIRES: Int32 = 23
+let K_CYLINDER: Int32 = 24
+let K_PLANE: Int32 = 25
+let K_GRID: Int32 = 26
 
 /// Decode the inline UTF-8 bytes at the struct's text region into a String.
 /// Takes a pointer into the underlying draw-list buffer so we read the real
@@ -152,28 +166,46 @@ struct BloomRootView: View {
 
     var body: some View {
         GeometryReader { geo in
-            Canvas { ctx, size in
-                // Re-reading frameTick as the primary invalidation signal.
-                _ = frameTick
+            ZStack {
+                // 3D layer — SceneView is always present so the first
+                // bloom_begin_mode_3d call can light it up without view
+                // reconstruction. The scene is empty (transparent) until a
+                // 3D command arrives.
+                BloomSceneView(frameTick: frameTick, drawBuf: drawBuf)
+                    .ignoresSafeArea()
 
-                // Clear with bloom's requested background.
-                var cc = [Double](repeating: 0, count: 4)
-                cc.withUnsafeMutableBufferPointer { buf in
-                    bloom_watchos_clear_color(buf.baseAddress!)
-                }
-                ctx.fill(
-                    Path(CGRect(origin: .zero, size: size)),
-                    with: .color(Color(.sRGB,
-                        red: cc[0] / 255.0,
-                        green: cc[1] / 255.0,
-                        blue: cc[2] / 255.0,
-                        opacity: cc[3] / 255.0))
-                )
+                // 2D overlay — Canvas drives drawing from the snapshot and
+                // owns input because Canvas is the topmost responder.
+                Canvas { ctx, size in
+                    _ = frameTick
 
-                // Pull this frame's commands.
-                let n = Int(bloom_watchos_copy_draw_list(drawBuf.baseAddress!, 4096))
-                for i in 0..<n {
-                    drawOne(ctx: ctx, cmdPtr: drawBuf.baseAddress!.advanced(by: i))
+                    // Clear (only when there's no 3D layer — otherwise the
+                    // SceneView's clear owns the background and this would
+                    // paint over it).
+                    if bloom_watchos_has_3d() < 0.5 {
+                        var cc = [Double](repeating: 0, count: 4)
+                        cc.withUnsafeMutableBufferPointer { buf in
+                            bloom_watchos_clear_color(buf.baseAddress!)
+                        }
+                        ctx.fill(
+                            Path(CGRect(origin: .zero, size: size)),
+                            with: .color(Color(.sRGB,
+                                red: cc[0] / 255.0,
+                                green: cc[1] / 255.0,
+                                blue: cc[2] / 255.0,
+                                opacity: cc[3] / 255.0))
+                        )
+                    }
+
+                    // Pull this frame's commands. 2D draws render here; 3D
+                    // commands are filtered by BloomSceneView.
+                    let n = Int(bloom_watchos_copy_draw_list(drawBuf.baseAddress!, 4096))
+                    for i in 0..<n {
+                        let ptr = drawBuf.baseAddress!.advanced(by: i)
+                        let k = ptr.pointee.kind
+                        if k >= 20 && k <= 29 { continue }  // 3D — handled by SceneView
+                        drawOne(ctx: ctx, cmdPtr: ptr)
+                    }
                 }
             }
             .onAppear {
@@ -208,6 +240,191 @@ struct BloomRootView: View {
         .ignoresSafeArea()
         .background(Color.black)
     }
+}
+
+// MARK: - 3D layer (SceneKit)
+
+/// SceneView wrapper that rebuilds the SCNScene each frame from bloom's
+/// immediate-mode 3D draw commands. Retained-mode scene graph (bloom_scene_*)
+/// would use a delta-sync path — deferred until the retained API lands for
+/// watchOS.
+struct BloomSceneView: View {
+    let frameTick: UInt64
+    let drawBuf: UnsafeMutableBufferPointer<DrawCmd>
+
+    @State private var scene: SCNScene = makeBaseScene()
+    @State private var contentRoot: SCNNode = SCNNode()
+    @State private var cameraNode: SCNNode = SCNNode()
+
+    var body: some View {
+        SceneView(
+            scene: scene,
+            pointOfView: cameraNode,
+            options: [.rendersContinuously],
+            preferredFramesPerSecond: 30,
+            antialiasingMode: .none
+        )
+        .onAppear {
+            if contentRoot.parent == nil {
+                scene.rootNode.addChildNode(contentRoot)
+            }
+            if cameraNode.parent == nil {
+                cameraNode.camera = SCNCamera()
+                scene.rootNode.addChildNode(cameraNode)
+            }
+            rebuild()
+        }
+        .onChange(of: frameTick) { _, _ in rebuild() }
+    }
+
+    private func rebuild() {
+        // If the game hasn't opened a 3D section, hide the scene entirely.
+        if bloom_watchos_has_3d() < 0.5 {
+            contentRoot.isHidden = true
+            return
+        }
+        contentRoot.isHidden = false
+
+        // Clear previous frame's primitives. Reusing the same contentRoot
+        // avoids churn at the SCNScene.rootNode level.
+        contentRoot.childNodes.forEach { $0.removeFromParentNode() }
+
+        // Camera.
+        var camS = [Double](repeating: 0, count: 11)
+        camS.withUnsafeMutableBufferPointer { buf in bloom_watchos_camera_state(buf.baseAddress!) }
+        let px = camS[0], py = camS[1], pz = camS[2]
+        let tx = camS[3], ty = camS[4], tz = camS[5]
+        let fovy = camS[9], proj = camS[10]
+        cameraNode.position = SCNVector3(x: Float(px), y: Float(py), z: Float(pz))
+        // Guard against look(at: self.position) which produces a NaN orientation.
+        if abs(px - tx) < 1e-6 && abs(py - ty) < 1e-6 && abs(pz - tz) < 1e-6 {
+            // No explicit target — point down -Z like a default game camera.
+            cameraNode.eulerAngles = SCNVector3(0, 0, 0)
+        } else {
+            cameraNode.look(at: SCNVector3(x: Float(tx), y: Float(ty), z: Float(tz)))
+        }
+        if let cam = cameraNode.camera {
+            cam.fieldOfView = CGFloat(fovy)
+            cam.usesOrthographicProjection = proj < 0.5
+            cam.zNear = 0.01
+            cam.zFar = 10000
+        }
+
+        // Clear color for SceneKit background.
+        var cc = [Double](repeating: 0, count: 4)
+        cc.withUnsafeMutableBufferPointer { buf in bloom_watchos_clear_color(buf.baseAddress!) }
+        scene.background.contents = UIColor(
+            red: CGFloat(cc[0] / 255.0),
+            green: CGFloat(cc[1] / 255.0),
+            blue: CGFloat(cc[2] / 255.0),
+            alpha: CGFloat(cc[3] / 255.0)
+        )
+
+        // Walk the draw list for 3D commands only.
+        let n = Int(bloom_watchos_copy_draw_list(drawBuf.baseAddress!, 4096))
+        for i in 0..<n {
+            let cmd = drawBuf[i]
+            if cmd.kind < 20 || cmd.kind > 29 { continue }
+            if let node = makeSceneNode(for: cmd) {
+                contentRoot.addChildNode(node)
+            }
+        }
+    }
+}
+
+private func makeBaseScene() -> SCNScene {
+    let s = SCNScene()
+    // Minimal default lighting so objects aren't pitch black before the game
+    // adds its own lights.
+    let ambient = SCNNode()
+    ambient.light = SCNLight()
+    ambient.light?.type = .ambient
+    ambient.light?.intensity = 300
+    s.rootNode.addChildNode(ambient)
+
+    let dir = SCNNode()
+    dir.light = SCNLight()
+    dir.light?.type = .directional
+    dir.light?.intensity = 800
+    dir.eulerAngles = SCNVector3(-Float.pi / 3, Float.pi / 6, 0)
+    s.rootNode.addChildNode(dir)
+    return s
+}
+
+private func makeSceneNode(for cmd: DrawCmd) -> SCNNode? {
+    let pos = SCNVector3(Float(cmd.x), Float(cmd.y), Float(cmd.srcX))
+    let color = UIColor(
+        red: CGFloat(cmd.r / 255.0),
+        green: CGFloat(cmd.g / 255.0),
+        blue: CGFloat(cmd.b / 255.0),
+        alpha: CGFloat(cmd.a / 255.0)
+    )
+
+    let geo: SCNGeometry?
+    switch cmd.kind {
+    case K_CUBE, K_CUBE_WIRES:
+        geo = SCNBox(width: CGFloat(cmd.w), height: CGFloat(cmd.h),
+                     length: CGFloat(cmd.size), chamferRadius: 0)
+    case K_SPHERE, K_SPHERE_WIRES:
+        geo = SCNSphere(radius: CGFloat(cmd.w))
+    case K_CYLINDER:
+        geo = SCNCylinder(radius: CGFloat(cmd.w), height: CGFloat(cmd.h))
+    case K_PLANE:
+        geo = SCNPlane(width: CGFloat(cmd.w), height: CGFloat(cmd.h))
+    case K_GRID:
+        return makeGridNode(slices: Int(cmd.w), spacing: Float(cmd.h),
+                            color: color)
+    default:
+        return nil
+    }
+    guard let g = geo else { return nil }
+    let m = SCNMaterial()
+    m.lightingModel = .physicallyBased
+    m.diffuse.contents = color
+    m.roughness.contents = 0.6
+    m.metalness.contents = 0.0
+    if cmd.kind == K_CUBE_WIRES || cmd.kind == K_SPHERE_WIRES {
+        m.fillMode = .lines
+    }
+    g.materials = [m]
+
+    let node = SCNNode(geometry: g)
+    node.position = pos
+    return node
+}
+
+/// Build a grid as line segments — SceneKit doesn't have a built-in grid,
+/// so we construct two sets of parallel SCNGeometry lines.
+private func makeGridNode(slices: Int, spacing: Float, color: UIColor) -> SCNNode {
+    let root = SCNNode()
+    let s = slices < 1 ? 10 : slices
+    let half = Float(s) * spacing / 2.0
+
+    var verts: [SCNVector3] = []
+    var indices: [Int32] = []
+    var idx: Int32 = 0
+    for i in 0...s {
+        let p = -half + Float(i) * spacing
+        verts.append(SCNVector3(p, 0, -half))
+        verts.append(SCNVector3(p, 0,  half))
+        indices.append(idx); indices.append(idx + 1); idx += 2
+        verts.append(SCNVector3(-half, 0, p))
+        verts.append(SCNVector3( half, 0, p))
+        indices.append(idx); indices.append(idx + 1); idx += 2
+    }
+    let src = SCNGeometrySource(vertices: verts)
+    let data = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
+    let el = SCNGeometryElement(data: data, primitiveType: .line,
+                                primitiveCount: indices.count / 2,
+                                bytesPerIndex: MemoryLayout<Int32>.size)
+    let geom = SCNGeometry(sources: [src], elements: [el])
+    let mat = SCNMaterial()
+    mat.diffuse.contents = color
+    mat.isDoubleSided = true
+    mat.lightingModel = .constant
+    geom.materials = [mat]
+    root.geometry = geom
+    return root
 }
 
 // MARK: - Single-command draw
