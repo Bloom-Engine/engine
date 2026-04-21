@@ -313,15 +313,17 @@ pub(super) fn create_probe_trace_tex(
     create_probe_3d_tex(device, "probe_trace", gw, gh)
 }
 
-/// Ticket 014 V2 — scene-wide SDF clipmap. A single 3D texture holding
-/// the unsigned distance field for the entire scene, baked once when
-/// all per-mesh BLAS / card / SDF queues drain. 64³ R32Float covers
-/// `SCENE_SDF_CLIPMAP_EXTENT` metres around `SCENE_SDF_CLIPMAP_ORIGIN`
-/// — sized for Sponza (~40 m cube centred on origin, ~63 cm per
-/// voxel). The SW probe trace will later sphere-march this volume.
+/// Ticket 014 V2/V5 — scene-wide SDF clipmap. 64³ R32Float covering
+/// `SCENE_SDF_CLIPMAP_EXTENT` metres around the camera (V5). The
+/// initial origin is the first-frame camera position, voxel-snapped.
+/// Re-bakes when the camera has moved past
+/// `SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD` of the extent.
 pub(super) const SCENE_SDF_CLIPMAP_RES: u32 = 64;
 pub(super) const SCENE_SDF_CLIPMAP_EXTENT: f32 = 40.0;
-pub(super) const SCENE_SDF_CLIPMAP_ORIGIN: [f32; 3] = [0.0, 10.0, 0.0];
+/// V5 — voxel-size invalidation threshold, expressed as a fraction
+/// of the full extent. 0.25 = rebake when the camera has moved more
+/// than 10 m from the clipmap centre on a 40 m clipmap.
+pub(super) const SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD: f32 = 0.25;
 
 pub(super) fn create_scene_sdf_clipmap(
     device: &wgpu::Device,

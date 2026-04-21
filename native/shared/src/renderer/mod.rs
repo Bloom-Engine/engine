@@ -30,7 +30,7 @@ use formats::{
     CARD_ATLAS_SIZE, CARD_SLOT_SIZE, CARD_SLOTS_PER_ROW, CARD_MAX_SLOTS,
     CARD_AXES_PER_MESH, create_mesh_sdf_texture, MESH_SDF_RES,
     create_scene_sdf_clipmap, SCENE_SDF_CLIPMAP_RES,
-    SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_ORIGIN,
+    SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD,
     create_taa_textures,
     create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
     create_exposure_textures, create_composed_rt, create_dof_rt,
@@ -925,9 +925,14 @@ pub struct Renderer {
     // --- Ticket 014 V2: scene-wide SDF clipmap ---
     pub scene_sdf_clipmap_tex: wgpu::Texture,
     pub scene_sdf_clipmap_view: wgpu::TextureView,
-    /// Set once when the scene clipmap has been baked. Prevents re-bake
-    /// on subsequent frames in the static-scene case.
+    /// Set once when the scene clipmap has been baked. V5 clears this
+    /// flag when the camera wanders past the rebake threshold, so the
+    /// bake path fires again to re-centre the clipmap.
     pub scene_sdf_clipmap_built: bool,
+    /// Ticket 014 V5 — current clipmap origin in world space (voxel-
+    /// snapped camera position at last bake). Read every frame by the
+    /// trace uniform; updated at bake time.
+    pub scene_sdf_clipmap_origin: [f32; 3],
 
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
@@ -4629,6 +4634,7 @@ impl Renderer {
             scene_sdf_clipmap_tex,
             scene_sdf_clipmap_view,
             scene_sdf_clipmap_built: false,
+            scene_sdf_clipmap_origin: [0.0, 0.0, 0.0],
             probe_temporal_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
@@ -5226,6 +5232,34 @@ impl Renderer {
     /// count = expensive one-shot (~100-200 ms on Sponza), but
     /// happens after a visible frame and never repeats for static
     /// scenes.
+    /// Ticket 014 V5 — camera world-space position. Uses
+    /// `current_camera_pos`, which `begin_mode_3d` writes every frame
+    /// from the user-supplied camera position (cheaper than inverting
+    /// the view matrix and always in sync with what the game sees).
+    fn current_camera_world_pos(&self) -> [f32; 3] {
+        self.current_camera_pos
+    }
+
+    /// Ticket 014 V5 — invalidate the SDF clipmap if the camera has
+    /// moved past the rebake threshold from the current clipmap
+    /// centre. Called at the top of every frame before the bake
+    /// check, so a moving camera triggers exactly one re-bake per
+    /// `threshold × extent` chunk of travel.
+    fn maybe_invalidate_sdf_clipmap(&mut self) {
+        if !self.scene_sdf_clipmap_built {
+            return;
+        }
+        let cam = self.current_camera_world_pos();
+        let dx = cam[0] - self.scene_sdf_clipmap_origin[0];
+        let dy = cam[1] - self.scene_sdf_clipmap_origin[1];
+        let dz = cam[2] - self.scene_sdf_clipmap_origin[2];
+        let dist_sq = dx * dx + dy * dy + dz * dz;
+        let threshold = SCENE_SDF_CLIPMAP_EXTENT * SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD;
+        if dist_sq > threshold * threshold {
+            self.scene_sdf_clipmap_built = false;
+        }
+    }
+
     fn bake_scene_sdf_clipmap(
         &mut self,
         scene: &crate::scene::SceneGraph,
@@ -5265,8 +5299,18 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
+        // V5 — centre the clipmap on the current camera position,
+        // voxel-snapped for sampling stability (sub-voxel shifts
+        // would change which voxel each sphere-trace step reads).
         let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
-        let origin = SCENE_SDF_CLIPMAP_ORIGIN;
+        let voxel = SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_RES as f32;
+        let cam = self.current_camera_world_pos();
+        let origin = [
+            (cam[0] / voxel).round() * voxel,
+            (cam[1] / voxel).round() * voxel,
+            (cam[2] / voxel).round() * voxel,
+        ];
+        self.scene_sdf_clipmap_origin = origin;
         let aabb_min = [origin[0] - half, origin[1] - half, origin[2] - half, 0.0];
         let aabb_max = [origin[0] + half, origin[1] + half, origin[2] + half, 0.0];
         let params = SdfBakeParams {
@@ -6616,10 +6660,16 @@ impl Renderer {
         self.bake_pending_sdfs(scene, &mut encoder);
         profiler.end("sdf_bake");
 
-        // Ticket 014 V2: once all per-mesh queues are empty, bake
-        // the scene-wide SDF clipmap for the SW probe trace to march
-        // against (trace consumer lands in a follow-up). Runs exactly
-        // once on a static scene.
+        // Ticket 014 V5: check if the camera has wandered past the
+        // rebake threshold from the current clipmap centre; if so,
+        // clear the `built` flag so the bake below fires again with
+        // a re-centred origin. SDF trace falls back to Hi-Z for the
+        // single frame between invalidation and re-bake completion.
+        self.maybe_invalidate_sdf_clipmap();
+
+        // Ticket 014 V2: bake the scene-wide SDF clipmap when it's
+        // not already built. First frame after startup, and any
+        // frame after V5 invalidation.
         profiler.begin("scene_sdf_clipmap");
         self.bake_scene_sdf_clipmap(scene, &mut encoder);
         profiler.end("scene_sdf_clipmap");
@@ -7469,9 +7519,9 @@ impl Renderer {
                 // Ticket 014 V3 — clipmap origin xyz + full extent w.
                 // The SDF trace variant reads these; HW + Hi-Z ignore.
                 clipmap: [
-                    SCENE_SDF_CLIPMAP_ORIGIN[0],
-                    SCENE_SDF_CLIPMAP_ORIGIN[1],
-                    SCENE_SDF_CLIPMAP_ORIGIN[2],
+                    self.scene_sdf_clipmap_origin[0],
+                    self.scene_sdf_clipmap_origin[1],
+                    self.scene_sdf_clipmap_origin[2],
                     SCENE_SDF_CLIPMAP_EXTENT,
                 ],
             };
