@@ -313,6 +313,41 @@ pub(super) fn create_probe_trace_tex(
     create_probe_3d_tex(device, "probe_trace", gw, gh)
 }
 
+/// Ticket 013 — Mesh Cards. Shared 2D albedo atlas that the HW probe
+/// trace samples at hit. V1 uses a single dominant-axis card per mesh,
+/// 128×128 RGBA8 sRGB. Capacity is 32×32 = 1024 slots at 4096² atlas.
+/// Sponza fits comfortably; larger scenes can bump `CARD_ATLAS_SIZE`
+/// without touching anything else.
+pub(super) const CARD_ATLAS_SIZE: u32 = 4096;
+pub(super) const CARD_SLOT_SIZE: u32 = 128;
+pub(super) const CARD_SLOTS_PER_ROW: u32 = CARD_ATLAS_SIZE / CARD_SLOT_SIZE;
+pub(super) const CARD_MAX_SLOTS: u32 = CARD_SLOTS_PER_ROW * CARD_SLOTS_PER_ROW;
+
+/// Create the mesh-card atlas texture. `RENDER_ATTACHMENT` so the
+/// card-capture pass can draw into it at model load, `TEXTURE_BINDING`
+/// so the HW trace shader can sample it at hit.
+pub(super) fn create_mesh_card_atlas(
+    device: &wgpu::Device,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh_card_atlas"),
+        size: wgpu::Extent3d {
+            width: CARD_ATLAS_SIZE,
+            height: CARD_ATLAS_SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Ping-pong probe-radiance history. Each frame the temporal pass
 /// reads `[prev_idx]` (last frame's blended history), blends it with
 /// the fresh trace, and writes to `[write_idx]`. The resolve pass then

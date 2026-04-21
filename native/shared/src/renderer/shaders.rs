@@ -2203,6 +2203,63 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 ";
 
 
+/// Ticket 013 — Mesh-Cards V1 albedo-capture shader.
+///
+/// Rasterises a mesh orthographically along its dominant object-space
+/// AABB axis into a 128×128 card slot inside the shared atlas. The
+/// viewport is set per-capture to the slot's pixel rect so the
+/// fragment output lands only in that region. Fragment shader reads
+/// the mesh's albedo texture at the vertex's existing UV (the same
+/// UV the main scene shader uses) and multiplies by the material's
+/// `base_color_factor`. When the mesh has no texture, a 1×1 white
+/// fallback is bound and the output is just `base_color_factor`.
+pub(super) const CARD_CAPTURE_WGSL: &str = "
+struct CaptureParams {
+    // Orthographic projection mapping object-space AABB extents to
+    // [-1, +1] clip space along the dominant axis. Host-side picks
+    // the axis and builds the matrix.
+    ortho_vp: mat4x4<f32>,
+    // Mesh's base_color_factor (xyz) + `has_texture` flag (w; 1.0 = use texture).
+    base_color: vec4<f32>,
+};
+
+struct VertexIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) joints: vec4<f32>,
+    @location(5) weights: vec4<f32>,
+};
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: CaptureParams;
+@group(1) @binding(0) var albedo_tex: texture_2d<f32>;
+@group(1) @binding(1) var albedo_samp: sampler;
+
+@vertex
+fn vs_main(v: VertexIn) -> VsOut {
+    var out: VsOut;
+    out.clip_pos = u.ortho_vp * vec4<f32>(v.position, 1.0);
+    out.uv = v.uv;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    var c = u.base_color.rgb;
+    if (u.base_color.w > 0.5) {
+        let tex = textureSample(albedo_tex, albedo_samp, in.uv);
+        c = c * tex.rgb;
+    }
+    return vec4<f32>(c, 1.0);
+}
+";
+
 // ============================================================================
 // Ticket 007a — Lumen-style screen-probe SSGI (software Hi-Z trace)
 //
@@ -2534,14 +2591,23 @@ struct InstanceGiData {
     albedo: vec3<f32>,
     emissive_luma: f32,
     normal_ws: vec3<f32>,
-    _pad: f32,
+    _pad0: f32,
+    // Ticket 013: xyz = (slot_x, slot_y, dominant_axis), w = has_card flag.
+    card_slot: vec4<f32>,
+    // Object-space AABB min (xyz) / max (xyz).
+    card_aabb_min: vec4<f32>,
+    card_aabb_max: vec4<f32>,
 };
+
+const CARD_SLOTS_PER_ROW: f32 = 32.0;
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
 @group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
 @group(0) @binding(2) var accel: acceleration_structure;
 @group(0) @binding(3) var<storage, read> instance_data: array<InstanceGiData>;
 @group(0) @binding(4) var radiance_out: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(5) var card_atlas: texture_2d<f32>;
+@group(0) @binding(6) var card_samp: sampler;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(
@@ -2595,6 +2661,51 @@ fn cs_main(
         let inst = instance_data[hit.instance_custom_data];
         let hit_n = inst.normal_ws;
 
+        // Ticket 013 — look up the mesh's card if one was captured.
+        // Project the hit's object-space position onto the card
+        // plane orthogonal to the dominant axis, remap to atlas UV,
+        // sample. Fall back to the flat per-instance albedo when the
+        // mesh has no card (capture skipped / not yet landed).
+        var albedo = inst.albedo;
+        if (inst.card_slot.w > 0.5) {
+            let hit_world = origin_ws + dir_ws * hit.t;
+            let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
+            let bmin = inst.card_aabb_min.xyz;
+            let bmax = inst.card_aabb_max.xyz;
+            let extent = max(bmax - bmin, vec3<f32>(1e-4));
+            let axis = u32(inst.card_slot.z);
+            var u_os: f32;
+            var v_os: f32;
+            var u_lo: f32;
+            var u_hi: f32;
+            var v_lo: f32;
+            var v_hi: f32;
+            if (axis == 0u) {
+                u_os = hit_os.y; v_os = hit_os.z;
+                u_lo = bmin.y; u_hi = bmax.y; v_lo = bmin.z; v_hi = bmax.z;
+            } else if (axis == 2u) {
+                u_os = hit_os.x; v_os = hit_os.y;
+                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.y; v_hi = bmax.y;
+            } else {
+                u_os = hit_os.x; v_os = hit_os.z;
+                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.z; v_hi = bmax.z;
+            }
+            let u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
+            let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
+            // Inset 1 texel into the slot to avoid sampling a
+            // neighbouring slot when UV lands on a slot boundary.
+            let slot_size_uv = 1.0 / CARD_SLOTS_PER_ROW;
+            let texel_in_slot = slot_size_uv / 128.0;
+            let slot_u0 = inst.card_slot.x * slot_size_uv + texel_in_slot;
+            let slot_v0 = inst.card_slot.y * slot_size_uv + texel_in_slot;
+            let slot_span = slot_size_uv - 2.0 * texel_in_slot;
+            let atlas_uv = vec2<f32>(
+                slot_u0 + u_norm * slot_span,
+                slot_v0 + v_norm * slot_span,
+            );
+            albedo = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
+        }
+
         let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
         let direct = u.sun_color.xyz * ndotl;
         let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
@@ -2602,8 +2713,8 @@ fn cs_main(
 
         let tn = hit.t / max_t;
         let falloff = max(1.0 - tn * tn, 0.0);
-        var raw = inst.albedo * (direct + sky) * falloff
-                + inst.albedo * inst.emissive_luma;
+        var raw = albedo * (direct + sky) * falloff
+                + albedo * inst.emissive_luma;
         let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
         let cap = u.params.w;
         if (luma > cap) { raw = raw * (cap / luma); }
