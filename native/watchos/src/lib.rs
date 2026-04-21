@@ -784,18 +784,79 @@ pub extern "C" fn bloom_gen_mesh_cube(w: f64, h: f64, d: f64) -> f64 {
     models::gen_cube_mesh(w as f32, h as f32, d as f32) as f64
 }
 
+/// Attach a loaded model to a scene node. If the model has a glTF scene
+/// hierarchy, the full subtree is spawned as bloom scene-node descendants of
+/// `node_handle` with each glTF node's TRS transform baked in. For
+/// single-node models this collapses to the pre-#15 behavior (the target
+/// node gets the one mesh's first primitive, sibling primitives become its
+/// children).
+///
+/// The `mesh_idx` parameter is only honored when the model has no scene
+/// hierarchy — it picks which mesh to instantiate into `node_handle`.
 #[no_mangle]
-pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, _mesh_idx: f64) {
+pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_idx: f64) {
     let Some(model) = models::get(model_handle as u32) else { return; };
-    let node = node_handle as u32;
-    scene::set_geometry(node,
-        model.positions.clone(), model.normals.clone(),
-        model.uvs.clone(), model.indices.clone());
-    scene::set_color(node, model.color);
-    scene::set_pbr(node, model.roughness, model.metallic);
-    scene::set_pbr_textures(node,
-        model.tex_base_color, model.tex_normal,
-        model.tex_metallic_roughness, model.tex_emissive, model.tex_occlusion);
+    let root = node_handle as u32;
+
+    // If the model has a scene graph with non-trivial hierarchy (>1 node or a
+    // transform on the root), walk it. Otherwise fall back to single-mesh
+    // mode so mesh_idx still picks which mesh to attach.
+    let single_mesh = model.nodes.len() <= 1
+        && model.scene_roots.len() <= 1
+        && model.nodes.first().map(|n| n.matrix.is_none()
+            && n.translation == [0.0; 3]
+            && n.rotation == [0.0, 0.0, 0.0, 1.0]
+            && n.scale == [1.0; 3]).unwrap_or(true);
+
+    if single_mesh {
+        let mesh_i = mesh_idx as usize;
+        let Some(mesh) = model.meshes.get(mesh_i) else { return; };
+        attach_mesh(root, mesh);
+        return;
+    }
+
+    // Scene-hierarchy path: one bloom scene node per glTF node. The attach
+    // target `root` itself doesn't gain geometry — it's the hierarchy's
+    // anchor. Children materialize via scene::create + scene::set_parent.
+    for scene_root in &model.scene_roots {
+        spawn_node_subtree(&model, *scene_root, root);
+    }
+}
+
+fn attach_mesh(handle: u32, mesh: &models::Mesh) {
+    if mesh.primitives.is_empty() { return; }
+    apply_primitive(handle, &mesh.primitives[0]);
+    for prim in mesh.primitives.iter().skip(1) {
+        let child = scene::create();
+        scene::set_parent(child, handle);
+        apply_primitive(child, prim);
+    }
+}
+
+fn spawn_node_subtree(model: &models::Model, node_idx: usize, parent: u32) {
+    let Some(gltf_node) = model.nodes.get(node_idx) else { return; };
+    let bloom_node = scene::create();
+    scene::set_parent(bloom_node, parent);
+    scene::set_transform(bloom_node, gltf_node.local_transform());
+    if let Some(mi) = gltf_node.mesh {
+        if let Some(mesh) = model.meshes.get(mi) {
+            attach_mesh(bloom_node, mesh);
+        }
+    }
+    for &child_idx in &gltf_node.children {
+        spawn_node_subtree(model, child_idx, bloom_node);
+    }
+}
+
+fn apply_primitive(handle: u32, prim: &models::Primitive) {
+    scene::set_geometry(handle,
+        prim.positions.clone(), prim.normals.clone(),
+        prim.uvs.clone(), prim.indices.clone());
+    scene::set_color(handle, prim.color);
+    scene::set_pbr(handle, prim.roughness, prim.metallic);
+    scene::set_pbr_textures(handle,
+        prim.tex_base_color, prim.tex_normal,
+        prim.tex_metallic_roughness, prim.tex_emissive, prim.tex_occlusion);
 }
 
 // ============================================================

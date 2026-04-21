@@ -14,8 +14,77 @@ use std::sync::{Arc, Mutex};
 
 // ---------- Model registry ----------
 
+/// A Model mirrors glTF's layout: a list of Meshes (each with Primitives),
+/// a list of Nodes (transform + optional mesh reference + children), and
+/// scene roots (node indices the scene starts from). bloom_scene_attach_model
+/// walks the node tree and spawns one bloom scene node per glTF node, with
+/// the glTF node's transform baked in.
 pub struct Model {
-    pub positions: Vec<f32>,  // xyz interleaved
+    pub meshes: Vec<Mesh>,
+    pub nodes: Vec<Node>,
+    pub scene_roots: Vec<usize>,
+}
+
+/// One node in the glTF scene graph. Translation/rotation/scale compose into
+/// the local transform; if `matrix` is set it wins outright (glTF spec).
+pub struct Node {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],  // quaternion xyzw
+    pub scale: [f32; 3],
+    pub matrix: Option<[f32; 16]>,  // column-major if present
+    pub mesh: Option<usize>,
+    pub children: Vec<usize>,
+}
+
+impl Node {
+    pub fn identity() -> Self {
+        Self {
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+            matrix: None,
+            mesh: None,
+            children: Vec::new(),
+        }
+    }
+
+    /// Compose TRS into a column-major 4x4 matrix, or return `matrix` if set.
+    pub fn local_transform(&self) -> [f32; 16] {
+        if let Some(m) = self.matrix { return m; }
+        let [tx, ty, tz] = self.translation;
+        let [qx, qy, qz, qw] = self.rotation;
+        let [sx, sy, sz] = self.scale;
+        // Rotation matrix from quaternion.
+        let xx = qx * qx; let yy = qy * qy; let zz = qz * qz;
+        let xy = qx * qy; let xz = qx * qz; let yz = qy * qz;
+        let wx = qw * qx; let wy = qw * qy; let wz = qw * qz;
+        [
+            (1.0 - 2.0 * (yy + zz)) * sx,
+            (2.0 * (xy + wz)) * sx,
+            (2.0 * (xz - wy)) * sx,
+            0.0,
+
+            (2.0 * (xy - wz)) * sy,
+            (1.0 - 2.0 * (xx + zz)) * sy,
+            (2.0 * (yz + wx)) * sy,
+            0.0,
+
+            (2.0 * (xz + wy)) * sz,
+            (2.0 * (yz - wx)) * sz,
+            (1.0 - 2.0 * (xx + yy)) * sz,
+            0.0,
+
+            tx, ty, tz, 1.0,
+        ]
+    }
+}
+
+pub struct Mesh {
+    pub primitives: Vec<Primitive>,
+}
+
+pub struct Primitive {
+    pub positions: Vec<f32>,
     pub normals: Vec<f32>,
     pub uvs: Vec<f32>,
     pub indices: Vec<u32>,
@@ -82,18 +151,107 @@ fn parse_glb(bytes: &[u8]) -> Option<Model> {
     let json = std::str::from_utf8(json_bytes).ok()?;
     let root = json_parse(json)?;
 
-    let mesh = root.get("meshes")?.arr()?.first()?;
-    let prim = mesh.get("primitives")?.arr()?.first()?;
-    let attrs = prim.get("attributes")?;
+    let meshes_js = root.get("meshes")?.arr()?;
+    let accessors = root.get("accessors")?.arr()?;
+    let buf_views = root.get("bufferViews")?.arr()?;
 
+    let mut meshes: Vec<Mesh> = Vec::with_capacity(meshes_js.len());
+    for mesh_js in meshes_js {
+        let prims_js = match mesh_js.get("primitives").and_then(|v| v.arr()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let mut primitives: Vec<Primitive> = Vec::with_capacity(prims_js.len());
+        for prim in prims_js {
+            if let Some(p) = parse_primitive(prim, &root, accessors, buf_views, bin_bytes) {
+                primitives.push(p);
+            }
+        }
+        meshes.push(Mesh { primitives });
+    }
+    if meshes.is_empty() { return None; }
+
+    // Parse nodes + scenes (glTF hierarchy).
+    let mut nodes: Vec<Node> = Vec::new();
+    if let Some(nodes_js) = root.get("nodes").and_then(|v| v.arr()) {
+        nodes.reserve(nodes_js.len());
+        for n in nodes_js {
+            nodes.push(parse_node(n));
+        }
+    }
+    let mut scene_roots: Vec<usize> = Vec::new();
+    if let Some(scenes_js) = root.get("scenes").and_then(|v| v.arr()) {
+        // Pick the default scene (glTF's "scene" field) or scene 0.
+        let default_idx = root.get("scene").and_then(|v| v.num()).unwrap_or(0.0) as usize;
+        if let Some(scene) = scenes_js.get(default_idx).or_else(|| scenes_js.first()) {
+            if let Some(arr) = scene.get("nodes").and_then(|v| v.arr()) {
+                for n in arr {
+                    if let Some(i) = n.num() { scene_roots.push(i as usize); }
+                }
+            }
+        }
+    }
+    // Fallback: if the file has no scenes/ but has nodes, treat node 0 as root.
+    if scene_roots.is_empty() && !nodes.is_empty() {
+        scene_roots.push(0);
+    }
+    // Fallback: if no nodes at all but meshes exist, synthesize a single root
+    // node pointing at mesh 0 so older callers still get a valid hierarchy.
+    if nodes.is_empty() && !meshes.is_empty() {
+        let mut n = Node::identity();
+        n.mesh = Some(0);
+        nodes.push(n);
+        scene_roots.push(0);
+    }
+
+    Some(Model { meshes, nodes, scene_roots })
+}
+
+fn parse_node(n: &JVal) -> Node {
+    let mut node = Node::identity();
+    if let Some(t) = n.get("translation").and_then(|v| v.arr()) {
+        for (i, v) in t.iter().take(3).enumerate() {
+            if let Some(f) = v.num() { node.translation[i] = f as f32; }
+        }
+    }
+    if let Some(r) = n.get("rotation").and_then(|v| v.arr()) {
+        for (i, v) in r.iter().take(4).enumerate() {
+            if let Some(f) = v.num() { node.rotation[i] = f as f32; }
+        }
+    }
+    if let Some(s) = n.get("scale").and_then(|v| v.arr()) {
+        for (i, v) in s.iter().take(3).enumerate() {
+            if let Some(f) = v.num() { node.scale[i] = f as f32; }
+        }
+    }
+    if let Some(m) = n.get("matrix").and_then(|v| v.arr()) {
+        let mut arr = [0.0f32; 16];
+        for (i, v) in m.iter().take(16).enumerate() {
+            if let Some(f) = v.num() { arr[i] = f as f32; }
+        }
+        node.matrix = Some(arr);
+    }
+    if let Some(mi) = n.get("mesh").and_then(|v| v.num()) {
+        node.mesh = Some(mi as usize);
+    }
+    if let Some(kids) = n.get("children").and_then(|v| v.arr()) {
+        for v in kids {
+            if let Some(i) = v.num() { node.children.push(i as usize); }
+        }
+    }
+    node
+}
+
+fn parse_primitive(
+    prim: &JVal, root: &JVal,
+    accessors: &[JVal], buf_views: &[JVal], bin_bytes: &[u8],
+) -> Option<Primitive> {
+    let attrs = prim.get("attributes")?;
     let pos_acc = attrs.get("POSITION")?.num()? as usize;
     let nrm_acc = attrs.get("NORMAL").and_then(|v| v.num().map(|n| n as usize));
     let uv_acc = attrs.get("TEXCOORD_0").and_then(|v| v.num().map(|n| n as usize));
     let idx_acc = prim.get("indices")?.num()? as usize;
     let mat_idx = prim.get("material").and_then(|v| v.num().map(|n| n as usize));
-
-    let accessors = root.get("accessors")?.arr()?;
-    let buf_views = root.get("bufferViews")?.arr()?;
 
     let positions = read_f32_vec(accessors, buf_views, bin_bytes, pos_acc, 3)?;
     let normals = nrm_acc
@@ -104,9 +262,8 @@ fn parse_glb(bytes: &[u8]) -> Option<Model> {
         .unwrap_or_default();
     let indices = read_index_vec(accessors, buf_views, bin_bytes, idx_acc)?;
 
-    // Material: default white if not referenced.
     let mut color = [1.0f32; 4];
-    let mut metallic = 1.0f32;    // glTF spec default when factor not given
+    let mut metallic = 1.0f32;
     let mut roughness = 1.0f32;
     let mut tex_base_color = 0u32;
     let mut tex_normal = 0u32;
@@ -117,7 +274,6 @@ fn parse_glb(bytes: &[u8]) -> Option<Model> {
     if let Some(mi) = mat_idx {
         if let Some(mats) = root.get("materials").and_then(|v| v.arr()) {
             if let Some(mat) = mats.get(mi) {
-                // pbrMetallicRoughness block
                 if let Some(pbr) = mat.get("pbrMetallicRoughness") {
                     if let Some(bc) = pbr.get("baseColorFactor").and_then(|v| v.arr()) {
                         for (i, n) in bc.iter().take(4).enumerate() {
@@ -130,17 +286,17 @@ fn parse_glb(bytes: &[u8]) -> Option<Model> {
                     if let Some(r) = pbr.get("roughnessFactor").and_then(|v| v.num()) {
                         roughness = r as f32;
                     }
-                    tex_base_color = resolve_texture(&root, pbr, "baseColorTexture", bin_bytes);
-                    tex_metallic_roughness = resolve_texture(&root, pbr, "metallicRoughnessTexture", bin_bytes);
+                    tex_base_color = resolve_texture(root, pbr, "baseColorTexture", bin_bytes);
+                    tex_metallic_roughness = resolve_texture(root, pbr, "metallicRoughnessTexture", bin_bytes);
                 }
-                tex_normal = resolve_texture(&root, mat, "normalTexture", bin_bytes);
-                tex_emissive = resolve_texture(&root, mat, "emissiveTexture", bin_bytes);
-                tex_occlusion = resolve_texture(&root, mat, "occlusionTexture", bin_bytes);
+                tex_normal = resolve_texture(root, mat, "normalTexture", bin_bytes);
+                tex_emissive = resolve_texture(root, mat, "emissiveTexture", bin_bytes);
+                tex_occlusion = resolve_texture(root, mat, "occlusionTexture", bin_bytes);
             }
         }
     }
 
-    Some(Model {
+    Some(Primitive {
         positions, normals, uvs, indices,
         color, metallic, roughness,
         tex_base_color, tex_normal, tex_metallic_roughness, tex_emissive, tex_occlusion,
@@ -400,12 +556,18 @@ pub fn gen_cube_mesh(w: f32, h: f32, d: f32) -> u32 {
 
     let mut reg = MODELS.lock().unwrap();
     if reg.is_empty() { reg.push(None); }
+    let mut root = Node::identity();
+    root.mesh = Some(0);
     reg.push(Some(Arc::new(Model {
-        positions, normals, uvs, indices,
-        color: [1.0, 1.0, 1.0, 1.0],
-        metallic: 0.0, roughness: 0.6,
-        tex_base_color: 0, tex_normal: 0, tex_metallic_roughness: 0,
-        tex_emissive: 0, tex_occlusion: 0,
+        meshes: vec![Mesh { primitives: vec![Primitive {
+            positions, normals, uvs, indices,
+            color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0, roughness: 0.6,
+            tex_base_color: 0, tex_normal: 0, tex_metallic_roughness: 0,
+            tex_emissive: 0, tex_occlusion: 0,
+        }] }],
+        nodes: vec![root],
+        scene_roots: vec![0],
     })));
     (reg.len() - 1) as u32
 }

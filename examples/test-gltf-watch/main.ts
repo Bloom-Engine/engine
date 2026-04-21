@@ -1,6 +1,5 @@
-// glTF loader test for watchOS — loads DamagedHelmet.glb from the app
-// bundle, attaches it to a scene node, rotates it, and renders through
-// the SceneKit bridge.
+// glTF loader test for watchOS — exercises the multi-primitive + scene-
+// hierarchy path via Buggy.glb (205 nodes, 34 multi-primitive meshes).
 
 import {
   initWindow, windowShouldClose, beginDrawing, endDrawing,
@@ -28,33 +27,34 @@ setTargetFPS(30);
 
 bloom_add_directional_light(-0.5, -0.8, -0.3, 1, 1, 1, 1.2);
 bloom_enable_postfx();
-bloom_set_vignette(0.7, 0.25);  // strength 0.7, 25% soft center
+bloom_set_vignette(0.5, 0.3);
 
-const helmet = loadModel("assets/DamagedHelmet.glb");
+const buggy = loadModel("assets/Buggy.glb");
 
-const node = createSceneNode();
-bloom_scene_attach_model(node, helmet.handle, 0);
+const root = createSceneNode();
+bloom_scene_attach_model(root, buggy.handle, 0);
 
 let t = 0.0;
 
 while (!windowShouldClose()) {
   beginDrawing();
-  clearBackground({ r: 20, g: 22, b: 28, a: 255 });
+  clearBackground({ r: 20, g: 24, b: 32, a: 255 });
 
   t = t + getDeltaTime();
-  const c = Math.cos(t * 0.6);
-  const s = Math.sin(t * 0.6);
+  const c = Math.cos(t * 0.4);
+  const s = Math.sin(t * 0.4);
 
-  // Rotate helmet around Y.
-  setSceneNodeTransform(node, [
-     c, 0, s, 0,
-     0, 1, 0, 0,
-    -s, 0, c, 0,
-     0, 0, 0, 1,
+  // Small uniform scale so the whole buggy fits in view, rotate around Y.
+  const scl = 0.015;
+  setSceneNodeTransform(root, [
+     c * scl, 0,        s * scl, 0,
+     0,       scl,      0,       0,
+    -s * scl, 0,        c * scl, 0,
+     0,      -1.5,      0,       1,
   ]);
 
   beginMode3D({
-    position: { x: 0, y: 0, z: 3 },
+    position: { x: 0, y: 1, z: 4 },
     target: { x: 0, y: 0, z: 0 },
     up: { x: 0, y: 1, z: 0 },
     fovy: 50,
