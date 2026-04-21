@@ -83,12 +83,26 @@ Ordered roughly by ROI / effort.
 | [004](004-cached-shadow-maps.md) | Cache shadow cascades for static casters | ~2 days | Shadow pass → ~0 after first frame | landed (per-scene shadow_version + cascade VP equality gate + unjittered proj for cascade fit; `--no-pan` CLI flag for stationary measurement. Shadow pass 2907 µs → 67 µs GPU on stationary camera = **43×**; FPS 82→106. Cache-miss path (panning camera) unchanged. SSIM visually indistinguishable) |
 | [005](005-depth-prepass.md) | Depth prepass for main HDR pass | ~1 day | main_hdr 17 ms → ~8 ms | deprioritized (prototype failed — see ticket) |
 | [006](006-shadow-pass-culling.md) | Frustum cull casters in shadow pass | ~0.5 day | Shadow pass 14 → 7-10 ms | landed (per-cascade ortho-frustum cull against a world-AABB cached on SceneNode; shadow_pass GPU 3.1 → 2.0 ms on the panning-cache-miss path = **-34%**, CPU 648 → 489 µs = **-24%**. FPS at `--quality 2` 50.3 → 52.8 = +5%. Absolute headroom capped by 95da6af's earlier 2048 → 1024 cascade-map cut — proportional shape matches the ticket's intent. Sun-behind-camera pose (`--yaw π`) diffs within TAA noise floor — shadows of off-screen casters still land on-screen correctly) |
-| [007](007-lumen-style-ssgi.md) | Probe-based SSGI (replace per-pixel march) | ~1 week | SSGI 5× cheaper | open |
 | [008](008-visibility-buffer.md) | Visibility buffer replaces 4-MRT G-buffer | ~2 weeks | 75% less bandwidth | open |
 | [009](009-gpu-driven-rendering.md) | Indirect multi-draw for scene graph | ~1 week | Removes CPU draw loop | open |
 | [010](010-async-compute.md) | Overlap post-FX on compute queue | ~3 days | Hides ~20% of post-FX | open |
 | [011](011-cross-platform-ffi.md) | Port quality/profiler FFI to iOS/Win/Lin/Android/tvOS/web | ~1 day | Unblocks non-macOS use | open |
 | [012](012-remaining-bind-group-caches.md) | Cache the 5 remaining per-frame `create_bind_group` calls | ~0.5 day | ~15-30 µs CPU | open |
+
+### Lumen-style GI multi-phase (see [lumen-roadmap.md](lumen-roadmap.md))
+
+Phases 1a/1b develop in parallel after 007-prep lands. Phase 2 upgrades HW
+shading to full Lumen quality. Phase 3 (SDFs) is deprioritized now that HW-RT
+is on the critical path.
+
+| # | Title | Effort | Expected gain | Status |
+|---|---|---|---|---|
+| [007-prep](007-prep-wgpu-upgrade.md) | Bump wgpu 24 → Metal-RT release | 2-3 days | Enabler for HW path | open, serial prereq |
+| [007a](007a-lumen-screen-probes-sw.md) | Lumen screen probes — SW trace (Hi-Z) | 2-3 days | SSGI 2×+ faster | open |
+| [007b](007b-lumen-screen-probes-hw.md) | Lumen screen probes — HW trace (BLAS/TLAS + ray-query) | 1-2 weeks | Off-screen occlusion + bleed | open |
+| [013](013-lumen-surface-cache.md) | Surface Cache — Mesh Cards + per-frame card lighting | 1-2 weeks | HW bounce full quality | open |
+| [014](014-lumen-mesh-sdfs.md) | Per-mesh SDFs + global SDF clipmap + WSRC | 3-4 weeks | SW parity for Android / web | deprioritized |
+| [016](016-lumen-importance-sampling.md) | Importance sampling + hierarchical probe refinement | 3-5 days | 2× quality/ray | open |
 
 ## Rules of thumb
 
