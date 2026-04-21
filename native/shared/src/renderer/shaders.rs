@@ -3076,41 +3076,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let mean = m1 / n_samples;
     let variance = max(m2 / n_samples - mean * mean, vec3<f32>(0.0));
     let stddev = sqrt(variance);
-    // γ tightens with motion. At rest γ=1.25 (Karis) — a wide
-    // band so sub-pixel accumulation over jitter variation
-    // passes through. Under rotation we need the band tighter
-    // because the current-frame 3×3 neighborhood at a fragment
-    // on the edge of a real scene shadow (a column, a doorway)
-    // contains genuine dark pixels, stddev is wide, and stale
-    // history reprojected from a different world point slips
-    // through the clamp. γ=0.5 during motion forces reprojected
-    // history much closer to the neighborhood mean.
-    let motion_alpha = smoothstep(0.003, 0.03, vel_len);
-    let gamma = mix(1.25, 0.5, motion_alpha);
+
+    // Motion-aware γ + alpha. At rest γ=1.25 lets sub-pixel jitter
+    // history through for smooth accumulation. Under any camera
+    // motion γ collapses fast to 0.25 — forces reprojected
+    // history within a quarter-sigma of the neighborhood mean,
+    // which is tight enough to reject the 'dark column in
+    // history, bright wall in current' case that the wider band
+    // let slip. alpha ramps to 0.85 at the same time so remaining
+    // history contributes only 15 %.
+    let motion_alpha = smoothstep(0.0005, 0.008, vel_len);
+    let gamma = mix(1.25, 0.25, motion_alpha);
     let y_min = mean.x - gamma * stddev.x;
     let y_max = mean.x + gamma * stddev.x;
 
     let history_ycocg = rgb_to_ycocg(history);
-    // Clamp the history's luma only; let chroma pass through so the
-    // accumulator preserves its long-term chromatic average.
     let history_y_clamped = clamp(history_ycocg.x, y_min, y_max);
     let clamped_history = ycocg_to_rgb(vec3<f32>(history_y_clamped, history_ycocg.yz));
 
-    // Extra disocclusion check: if the (already-clamped) history
-    // luma is still far from the neighborhood mean, the
-    // reprojected sample is from a very different world point.
-    // Ramp alpha to 1 (drop history entirely) based on that
-    // distance so the ghost evaporates in a single frame
-    // instead of waiting for the 0.5 default to decay it over
-    // ~3 frames.
+    // Per-pixel disocclusion reject. If the history (already
+    // variance-clamped) still sits far from the current
+    // neighborhood's center, the reprojection sampled a very
+    // different world point and should be dropped. Absolute
+    // threshold keyed to stddev so tight-gradient regions
+    // reject aggressively; flat regions stay accumulating.
     let history_dist = abs(history_y_clamped - mean.x);
-    let disocclusion = smoothstep(stddev.x * 0.5, stddev.x * 2.0, history_dist);
+    let disocclusion = smoothstep(stddev.x * 0.25, stddev.x * 1.0, history_dist);
 
-    // Velocity-aware blend. At rest alpha ≈ 0.1 (default) —
-    // 9-to-1 history drives sub-pixel TSR. During any motion,
-    // alpha ramps toward 0.6 and the disocclusion term can push
-    // it all the way to 1 for reprojected stale samples.
-    let motion_ramped = mix(u.params.x, 0.6, motion_alpha);
+    let motion_ramped = mix(u.params.x, 0.85, motion_alpha);
     let alpha = max(motion_ramped, disocclusion);
     let blended = mix(clamped_history, current, alpha);
     let blended_w = mix(history_w, current_w, alpha);
