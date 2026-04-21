@@ -121,6 +121,13 @@ pub struct SceneNode {
     /// in sync with animated geometry. Off by default — static meshes
     /// pay the capture cost once and never again.
     pub card_dynamic: bool,
+    /// Ticket 014 — per-mesh unsigned distance field baked by a
+    /// compute pass at geo-upload time. 3D R16Float texture, fixed
+    /// resolution (`MESH_SDF_RES`³). Used later by the SW probe
+    /// trace for sphere-marching when the adapter lacks HW RT.
+    /// `None` on non-RT-capable adapters or until the bake lands.
+    pub mesh_sdf: Option<wgpu::Texture>,
+    pub mesh_sdf_view: Option<wgpu::TextureView>,
     /// Flat mesh-average world-space normal, cached on BLAS build so
     /// the per-instance GI data buffer can be populated without
     /// re-reading the vertex array. Rough heuristic — for walls and
@@ -176,6 +183,8 @@ impl SceneNode {
             blas: None,
             card_first_slot: None,
             card_dynamic: false,
+            mesh_sdf: None,
+            mesh_sdf_view: None,
             flat_normal_ws: [0.0, 1.0, 0.0],
             flat_albedo: [1.0, 1.0, 1.0],
             uniform_slot: None,
@@ -251,6 +260,11 @@ pub struct SceneGraph {
     /// reclaimed in V1 (Sponza fits comfortably in 1024 slots; loop
     /// back when scenes start exceeding capacity).
     pub next_card_slot: u32,
+    /// Ticket 014 — node handles whose per-mesh SDF still needs to
+    /// be baked. Populated alongside BLAS creation; renderer drains
+    /// in a per-frame budget via a compute pass. Static meshes
+    /// never re-bake once their SDF lands.
+    pub pending_sdf_bakes: Vec<f64>,
 }
 
 impl SceneGraph {
@@ -269,6 +283,7 @@ impl SceneGraph {
             pending_blas_builds: Vec::new(),
             pending_card_captures: Vec::new(),
             next_card_slot: 0,
+            pending_sdf_bakes: Vec::new(),
         }
     }
 
@@ -546,6 +561,7 @@ impl SceneGraph {
         let hw_rt = self.hw_rt_enabled;
         let pending_blas = &mut self.pending_blas_builds;
         let pending_cards = &mut self.pending_card_captures;
+        let pending_sdf = &mut self.pending_sdf_bakes;
         let next_card_slot = &mut self.next_card_slot;
         let mut visible_count: u32 = 0;
         for (handle, node) in self.nodes.iter_mut() {
@@ -591,13 +607,20 @@ impl SceneGraph {
                 // the same buffer can back both the raster draw and
                 // the BLAS build. Cheap — no measurable cost when RT
                 // is off.
+                // Ticket 014: STORAGE lets the SDF bake compute read
+                // vertex / index buffers directly. Only added on RT
+                // adapters since non-RT paths don't need the bake.
                 let vb_usage = if hw_rt {
-                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::BLAS_INPUT
+                    wgpu::BufferUsages::VERTEX
+                        | wgpu::BufferUsages::BLAS_INPUT
+                        | wgpu::BufferUsages::STORAGE
                 } else {
                     wgpu::BufferUsages::VERTEX
                 };
                 let ib_usage = if hw_rt {
-                    wgpu::BufferUsages::INDEX | wgpu::BufferUsages::BLAS_INPUT
+                    wgpu::BufferUsages::INDEX
+                        | wgpu::BufferUsages::BLAS_INPUT
+                        | wgpu::BufferUsages::STORAGE
                 } else {
                     wgpu::BufferUsages::INDEX
                 };
@@ -670,6 +693,25 @@ impl SceneGraph {
                         *next_card_slot += 6;
                         node.card_first_slot = Some(first);
                         pending_cards.push(handle);
+                    }
+
+                    // Ticket 014 — allocate the per-mesh SDF texture
+                    // once, and enqueue the bake for the compute pass.
+                    // Only when bounds are sensible (skip degenerate
+                    // meshes where min >= max on an axis, which would
+                    // produce a zero-volume sampling box).
+                    if node.mesh_sdf.is_none()
+                        && node.bounds_min[0] < node.bounds_max[0]
+                        && node.bounds_min[1] < node.bounds_max[1]
+                        && node.bounds_min[2] < node.bounds_max[2]
+                    {
+                        let (sdf_tex, sdf_view) = crate::renderer::create_mesh_sdf_texture_public(
+                            device,
+                            "scene_node_sdf",
+                        );
+                        node.mesh_sdf = Some(sdf_tex);
+                        node.mesh_sdf_view = Some(sdf_view);
+                        pending_sdf.push(handle);
                     }
                 }
             }

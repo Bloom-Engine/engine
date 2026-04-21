@@ -28,7 +28,8 @@ use formats::{
     create_mesh_card_atlas, create_mesh_card_emissive_atlas,
     create_mesh_card_radiance_atlas,
     CARD_ATLAS_SIZE, CARD_SLOT_SIZE, CARD_SLOTS_PER_ROW, CARD_MAX_SLOTS,
-    CARD_AXES_PER_MESH, create_taa_textures,
+    CARD_AXES_PER_MESH, create_mesh_sdf_texture, MESH_SDF_RES,
+    create_taa_textures,
     create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
     create_exposure_textures, create_composed_rt, create_dof_rt,
     create_linear_depth_hiz_chain, create_bloom_chain, halton,
@@ -342,6 +343,16 @@ fn build_card_ortho_v2(face_axis: u32, bmin: [f32; 3], bmax: [f32; 3]) -> [[f32;
             [cx/wx, -cy/wy, 0.0, 1.0],
         ],
     }
+}
+
+/// Ticket 014 — per-mesh SDF bake uniform.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SdfBakeParams {
+    aabb_min: [f32; 4],
+    aabb_max: [f32; 4],
+    /// x = triangle_count, y = sdf_resolution (32), zw unused
+    counts: [u32; 4],
 }
 
 /// Uniform struct for the card-lighting compute pass. Matches
@@ -893,6 +904,11 @@ pub struct Renderer {
     pub card_light_uniform: wgpu::Buffer,
     card_light_bg_cache: Option<wgpu::BindGroup>,
 
+    // --- Ticket 014: per-mesh UDF bake ---
+    pub sdf_bake_pipeline: wgpu::ComputePipeline,
+    pub sdf_bake_layout: wgpu::BindGroupLayout,
+    pub sdf_bake_uniform: wgpu::Buffer,
+
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
     pub probe_temporal_uniform: wgpu::Buffer,
@@ -1099,6 +1115,16 @@ pub struct Renderer {
     /// textures would silently point to this flat-blue normal map.
     _default_normal_texture: wgpu::Texture,
     pub default_normal_view: wgpu::TextureView,
+}
+
+/// Ticket 014 — re-exposed for `SceneGraph::prepare()` to allocate
+/// the per-mesh SDF texture alongside BLAS creation without needing
+/// `pub(super)` access to the renderer's format module.
+pub fn create_mesh_sdf_texture_public(
+    device: &wgpu::Device,
+    label: &'static str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    formats::create_mesh_sdf_texture(device, label)
 }
 
 impl Renderer {
@@ -3709,6 +3735,65 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- Ticket 014: per-mesh UDF bake compute pipeline ---
+        let sdf_bake_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sdf_bake_shader"),
+            source: wgpu::ShaderSource::Wgsl(SDF_BAKE_WGSL.into()),
+        });
+        let sdf_bake_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sdf_bake_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::R32Float,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    }, count: None,
+                },
+            ],
+        });
+        let sdf_bake_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sdf_bake_pl_layout"),
+            bind_group_layouts: &[Some(&sdf_bake_layout)],
+            immediate_size: 0,
+        });
+        let sdf_bake_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("sdf_bake_pipeline"),
+            layout: Some(&sdf_bake_pl_layout),
+            module: &sdf_bake_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let sdf_bake_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sdf_bake_uniform"),
+            size: std::mem::size_of::<SdfBakeParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- Scene-compose pipeline ---
         // Merges HDR + SSR + SSGI*albedo + bloom + fog + shafts into
         // composed_rt. Both TAA and composite downstream read from
@@ -4427,6 +4512,9 @@ impl Renderer {
             card_light_layout,
             card_light_uniform,
             card_light_bg_cache: None,
+            sdf_bake_pipeline,
+            sdf_bake_layout,
+            sdf_bake_uniform,
             probe_temporal_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
@@ -5012,6 +5100,72 @@ impl Renderer {
                 offset,
                 bytemuck::cast_slice(&[*meta]),
             );
+        }
+    }
+
+    /// Ticket 014 V1 — bake per-mesh unsigned distance fields via
+    /// the compute pipeline. Drains `scene.pending_sdf_bakes` with a
+    /// per-frame budget; expensive workload (O(voxels × triangles)
+    /// per mesh), so the rate-limit keeps first-frame stutter
+    /// bounded. Static scenes amortise and never re-bake.
+    fn bake_pending_sdfs(
+        &mut self,
+        scene: &mut crate::scene::SceneGraph,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if !self.hw_rt_enabled || scene.pending_sdf_bakes.is_empty() {
+            return;
+        }
+        const SDF_BAKE_MAX_PER_FRAME: usize = 8;
+        let take = scene.pending_sdf_bakes.len().min(SDF_BAKE_MAX_PER_FRAME);
+        let pending: Vec<f64> = scene.pending_sdf_bakes.drain(..take).collect();
+
+        for handle in pending {
+            let (sdf_view, vb_ptr, ib_ptr, bmin, bmax, index_count) = {
+                let Some(node) = scene.nodes.get(handle) else { continue; };
+                let Some(sdf_view) = node.mesh_sdf_view.as_ref() else { continue; };
+                let Some(vb) = node.gpu_vb.as_ref() else { continue; };
+                let Some(ib) = node.gpu_ib.as_ref() else { continue; };
+                (
+                    sdf_view.clone(),
+                    vb.clone(),
+                    ib.clone(),
+                    node.bounds_min,
+                    node.bounds_max,
+                    node.gpu_index_count,
+                )
+            };
+            if index_count == 0 {
+                continue;
+            }
+            let tri_count = index_count / 3;
+            let params = SdfBakeParams {
+                aabb_min: [bmin[0], bmin[1], bmin[2], 0.0],
+                aabb_max: [bmax[0], bmax[1], bmax[2], 0.0],
+                counts: [tri_count, MESH_SDF_RES, 0, 0],
+            };
+            self.queue.write_buffer(
+                &self.sdf_bake_uniform,
+                0,
+                bytemuck::bytes_of(&params),
+            );
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sdf_bake_bg"),
+                layout: &self.sdf_bake_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.sdf_bake_uniform.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: vb_ptr.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: ib_ptr.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&sdf_view) },
+                ],
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("sdf_bake_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.sdf_bake_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(MESH_SDF_RES / 4, MESH_SDF_RES / 4, MESH_SDF_RES / 4);
         }
     }
 
@@ -6229,6 +6383,13 @@ impl Renderer {
         profiler.begin("card_capture");
         self.capture_pending_mesh_cards(scene, &mut encoder);
         profiler.end("card_capture");
+
+        // Ticket 014 V1: bake per-mesh UDFs in the same frame encoder.
+        // Runs alongside card capture until the scene's pending queue
+        // is drained; no-op thereafter.
+        profiler.begin("sdf_bake");
+        self.bake_pending_sdfs(scene, &mut encoder);
+        profiler.end("sdf_bake");
 
         // Ticket 013 V2: re-light the card atlas every frame so the
         // HW probe trace can sample pre-lit radiance at hit instead

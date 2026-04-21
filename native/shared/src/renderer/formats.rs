@@ -313,6 +313,40 @@ pub(super) fn create_probe_trace_tex(
     create_probe_3d_tex(device, "probe_trace", gw, gh)
 }
 
+/// Ticket 014 — per-mesh unsigned distance field. V1 is a fixed 32³
+/// R32Float 3D texture per mesh (128 KB each). R32 instead of R16 so
+/// `WriteOnly` storage binding is accepted on the core wgpu feature
+/// set (R16Float storage-write would need an optional feature). Used
+/// later by the SW probe trace for sphere-marching when HW ray query
+/// isn't available. UDF (not SDF) — the march advances by the scalar
+/// distance regardless of sign, which side-steps the inside/outside
+/// problem on open-surface Sponza meshes (walls, banners, capitals).
+pub(super) const MESH_SDF_RES: u32 = 32;
+
+pub(super) fn create_mesh_sdf_texture(
+    device: &wgpu::Device,
+    label: &'static str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: MESH_SDF_RES,
+            height: MESH_SDF_RES,
+            depth_or_array_layers: MESH_SDF_RES,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+             | wgpu::TextureUsages::TEXTURE_BINDING
+             | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Ticket 013 — Mesh Cards. Shared 2D atlases sampled by the HW probe
 /// trace at hit. V2 stores 6 signed-axis slots per mesh (±X ±Y ±Z)
 /// at 64×64 each; 4096² atlas ⇒ 64×64 = 4096 slots ⇒ 682 meshes at
