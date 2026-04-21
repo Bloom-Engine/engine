@@ -24,6 +24,7 @@ pub struct Model {
     pub nodes: Vec<Node>,
     pub scene_roots: Vec<usize>,
     pub skins: Vec<Skin>,
+    pub animations: Vec<Animation>,
 }
 
 /// One node in the glTF scene graph. Translation/rotation/scale compose into
@@ -111,6 +112,26 @@ pub struct Primitive {
 pub struct Skin {
     pub joints: Vec<usize>,  // glTF node indices
     pub inverse_bind_matrices: Vec<[f32; 16]>,  // one per joint
+}
+
+/// One glTF animation — an ordered bundle of per-bone keyframe tracks.
+pub struct Animation {
+    pub name: String,
+    pub duration: f32,
+    pub channels: Vec<Channel>,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy)]
+pub enum ChannelPath { Translation = 0, Rotation = 1, Scale = 2 }
+
+pub struct Channel {
+    pub target_node: usize,   // glTF node index (will be resolved to bloom handle on attach)
+    pub path: ChannelPath,
+    /// Flat key/value arrays. For Translation/Scale: 3 floats per keyframe.
+    /// For Rotation (quaternion xyzw): 4 floats per keyframe.
+    pub times: Vec<f32>,
+    pub values: Vec<f32>,
 }
 
 static MODELS: Mutex<Vec<Option<Arc<Model>>>> = Mutex::new(Vec::new());
@@ -252,7 +273,51 @@ fn parse_glb(bytes: &[u8]) -> Option<Model> {
         }
     }
 
-    Some(Model { meshes, nodes, scene_roots, skins })
+    // Parse animations.
+    let mut animations: Vec<Animation> = Vec::new();
+    if let Some(anims_js) = root.get("animations").and_then(|v| v.arr()) {
+        for a in anims_js {
+            let name = a.get("name").and_then(|v| match v { JVal::Str(s) => Some(s.clone()), _ => None })
+                .unwrap_or_default();
+            let samplers = match a.get("samplers").and_then(|v| v.arr()) {
+                Some(s) => s,
+                None => continue,
+            };
+            let channels_js = match a.get("channels").and_then(|v| v.arr()) {
+                Some(c) => c,
+                None => continue,
+            };
+            let mut channels: Vec<Channel> = Vec::new();
+            let mut duration = 0.0f32;
+            for ch in channels_js {
+                let Some(smp_idx) = ch.get("sampler").and_then(|v| v.num()) else { continue };
+                let Some(tgt) = ch.get("target") else { continue };
+                let Some(tgt_node) = tgt.get("node").and_then(|v| v.num()) else { continue };
+                let path_str = tgt.get("path").and_then(|v| match v { JVal::Str(s) => Some(s.as_str()), _ => None });
+                let path = match path_str {
+                    Some("translation") => ChannelPath::Translation,
+                    Some("rotation") => ChannelPath::Rotation,
+                    Some("scale") => ChannelPath::Scale,
+                    _ => continue,  // 'weights' (morph targets) not supported yet
+                };
+                let Some(smp) = samplers.get(smp_idx as usize) else { continue };
+                let Some(input_idx) = smp.get("input").and_then(|v| v.num()) else { continue };
+                let Some(output_idx) = smp.get("output").and_then(|v| v.num()) else { continue };
+
+                let times = read_f32_vec(accessors, buf_views, bin_bytes, input_idx as usize, 1)
+                    .unwrap_or_default();
+                let comps = match path { ChannelPath::Rotation => 4, _ => 3 };
+                let values = read_f32_vec(accessors, buf_views, bin_bytes, output_idx as usize, comps)
+                    .unwrap_or_default();
+
+                if let Some(&t) = times.last() { if t > duration { duration = t; } }
+                channels.push(Channel { target_node: tgt_node as usize, path, times, values });
+            }
+            animations.push(Animation { name, duration, channels });
+        }
+    }
+
+    Some(Model { meshes, nodes, scene_roots, skins, animations })
 }
 
 fn parse_node(n: &JVal) -> Node {
@@ -675,6 +740,7 @@ pub fn gen_cube_mesh(w: f32, h: f32, d: f32) -> u32 {
         nodes: vec![root],
         scene_roots: vec![0],
         skins: Vec::new(),
+        animations: Vec::new(),
     })));
     (reg.len() - 1) as u32
 }

@@ -70,6 +70,18 @@ struct Node {
     skin_vertex_joints: Vec<u32>,       // 4 per vertex (as in glTF JOINTS_0)
     skin_vertex_weights: Vec<f32>,      // 4 per vertex (as in glTF WEIGHTS_0)
     skin_version: u32,
+
+    // Animation tracks attached to this skinned mesh. Each track targets a
+    // bone by bloom handle. Swift builds CAKeyframeAnimations from them when
+    // attaching the SCNSkinner. anim_version bumps alongside skin_version.
+    anim_tracks: Vec<AnimTrack>,
+}
+
+pub struct AnimTrack {
+    pub bone_handle: u32,
+    pub path: u32,       // 0 = translation, 1 = rotation, 2 = scale
+    pub times: Vec<f32>,
+    pub values: Vec<f32>,
 }
 
 impl Node {
@@ -96,6 +108,7 @@ impl Node {
             skin_vertex_joints: Vec::new(),
             skin_vertex_weights: Vec::new(),
             skin_version: 0,
+            anim_tracks: Vec::new(),
         }
     }
 }
@@ -198,6 +211,15 @@ pub fn set_skin(handle: u32,
         n.skin_inverse_bind = inverse_bind;
         n.skin_vertex_joints = vertex_joints;
         n.skin_vertex_weights = vertex_weights;
+        n.skin_version = n.skin_version.wrapping_add(1);
+    });
+}
+
+/// Replace the animation tracks on a skinned mesh node. Bumps skin_version
+/// so Swift re-picks them up alongside the skinner rebuild.
+pub fn set_anim_tracks(handle: u32, tracks: Vec<AnimTrack>) {
+    mutate(handle, |n| {
+        n.anim_tracks = tracks;
         n.skin_version = n.skin_version.wrapping_add(1);
     });
 }
@@ -347,6 +369,45 @@ pub struct SkinPtrs {
     pub vertex_joint_count: u32,    // total entries (= vertex_count * 4)
     pub vertex_weights: *const f32, // 4 per vertex
     pub vertex_weight_count: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AnimTrackInfo {
+    pub bone_handle: u32,
+    pub path: u32,           // 0 = translation, 1 = rotation, 2 = scale
+    pub key_count: u32,
+    pub _pad: u32,
+    pub times: *const f32,   // length = key_count
+    pub values: *const f32,  // length = key_count * (3 or 4)
+}
+
+pub fn anim_track_count(handle: u32) -> i64 {
+    with(|inner| {
+        if let Some(Some(n)) = inner.nodes.get(handle as usize) {
+            n.anim_tracks.len() as i64
+        } else { 0 }
+    })
+}
+
+pub fn anim_track_info(handle: u32, idx: i64, out: *mut AnimTrackInfo) {
+    if out.is_null() { return; }
+    with(|inner| {
+        if let Some(Some(n)) = inner.nodes.get(handle as usize) {
+            if let Some(t) = n.anim_tracks.get(idx as usize) {
+                unsafe {
+                    *out = AnimTrackInfo {
+                        bone_handle: t.bone_handle,
+                        path: t.path,
+                        key_count: t.times.len() as u32,
+                        _pad: 0,
+                        times: t.times.as_ptr(),
+                        values: t.values.as_ptr(),
+                    };
+                }
+            }
+        }
+    });
 }
 
 pub fn skin_ptrs(handle: u32) -> SkinPtrs {

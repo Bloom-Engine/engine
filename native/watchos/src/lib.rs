@@ -844,6 +844,26 @@ pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, 
             prim.joint_indices.clone(),
             prim.weights.clone(),
         );
+
+        // Animation tracks — resolve channel targets to bloom handles.
+        // Auto-select animation 0 for now (typically the idle/survey clip).
+        // Follow-up: bloom_update_model_animation to switch between them.
+        if let Some(anim) = model.animations.first() {
+            let mut tracks: Vec<scene::AnimTrack> = Vec::new();
+            for ch in &anim.channels {
+                let Some(&bone_h) = gltf_to_bloom.get(&ch.target_node) else { continue };
+                if bone_h == 0 { continue; }
+                tracks.push(scene::AnimTrack {
+                    bone_handle: bone_h,
+                    path: ch.path as u32,
+                    times: ch.times.clone(),
+                    values: ch.values.clone(),
+                });
+            }
+            if !tracks.is_empty() {
+                scene::set_anim_tracks(bloom_handle, tracks);
+            }
+        }
     }
 }
 
@@ -959,6 +979,16 @@ pub extern "C" fn bloom_watchos_scene_geometry(handle: u32, out: *mut scene::Geo
 pub extern "C" fn bloom_watchos_scene_skin(handle: u32, out: *mut scene::SkinPtrs) {
     if out.is_null() { return; }
     unsafe { *out = scene::skin_ptrs(handle); }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_scene_anim_track_count(handle: u32) -> i64 {
+    scene::anim_track_count(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_scene_anim_track_info(handle: u32, idx: i64, out: *mut scene::AnimTrackInfo) {
+    scene::anim_track_info(handle, idx, out);
 }
 
 #[no_mangle]

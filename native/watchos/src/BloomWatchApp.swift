@@ -38,6 +38,17 @@ import ImageIO
 @_silgen_name("bloom_watchos_scene_copy_lights") func bloom_watchos_scene_copy_lights(_ dst: UnsafeMutablePointer<SceneLight>, _ max: Int64) -> Int64
 @_silgen_name("bloom_watchos_scene_geometry") func bloom_watchos_scene_geometry(_ handle: UInt32, _ out: UnsafeMutablePointer<SceneGeometryPtrs>)
 @_silgen_name("bloom_watchos_scene_skin") func bloom_watchos_scene_skin(_ handle: UInt32, _ out: UnsafeMutablePointer<SceneSkinPtrs>)
+@_silgen_name("bloom_watchos_scene_anim_track_count") func bloom_watchos_scene_anim_track_count(_ handle: UInt32) -> Int64
+@_silgen_name("bloom_watchos_scene_anim_track_info") func bloom_watchos_scene_anim_track_info(_ handle: UInt32, _ idx: Int64, _ out: UnsafeMutablePointer<AnimTrackInfo>)
+
+struct AnimTrackInfo {
+    var boneHandle: UInt32 = 0
+    var path: UInt32 = 0     // 0 = translation, 1 = rotation, 2 = scale
+    var keyCount: UInt32 = 0
+    var _pad: UInt32 = 0
+    var times: UnsafePointer<Float>? = nil
+    var values: UnsafePointer<Float>? = nil
+}
 
 struct SceneSkinPtrs {
     var jointHandles: UnsafePointer<UInt32>? = nil
@@ -472,6 +483,7 @@ struct BloomSceneView: View {
         // Retained scene graph — delta-sync against the cached handle→SCNNode map.
         syncRetainedNodes()
         syncLights()
+        advanceAnimations()
     }
 
     private func syncRetainedNodes() {
@@ -513,6 +525,7 @@ struct BloomSceneView: View {
             if info.skinVersion != 0 && retainedSkinVersions[info.handle] != info.skinVersion {
                 if let skinner = buildSkinner(mesh: node, handle: info.handle) {
                     node.skinner = skinner
+                    attachAnimations(handle: info.handle)
                     retainedSkinVersions[info.handle] = info.skinVersion
                 }
             }
@@ -720,6 +733,110 @@ struct BloomSceneView: View {
         )
     }
 
+    /// Cache of per-skinned-mesh animation tracks. CAKeyframeAnimation
+    /// isn't available on watchOS, so we drive the skeleton by hand each
+    /// frame via setBoneTransforms — this cache avoids rebuilding from
+    /// FFI pointers every tick.
+    private struct CachedTrack {
+        let boneHandle: UInt32
+        let path: UInt32   // 0 translation, 1 rotation, 2 scale
+        let times: [Float]
+        let values: [Float]
+    }
+    @State private var cachedAnimTracks: [UInt32: [CachedTrack]] = [:]
+    @State private var cachedAnimDuration: [UInt32: Float] = [:]
+
+    /// Cache the animation tracks for a skinned mesh. Called once alongside
+    /// skinner build; the per-frame loop (advanceAnimations) then drives
+    /// playback against these cached arrays.
+    private func attachAnimations(handle: UInt32) {
+        let n = bloom_watchos_scene_anim_track_count(handle)
+        if n <= 0 {
+            cachedAnimTracks.removeValue(forKey: handle)
+            cachedAnimDuration.removeValue(forKey: handle)
+            return
+        }
+
+        var tracks: [CachedTrack] = []
+        tracks.reserveCapacity(Int(n))
+        var duration: Float = 0
+        for i in 0..<n {
+            var info = AnimTrackInfo()
+            withUnsafeMutablePointer(to: &info) { bloom_watchos_scene_anim_track_info(handle, i, $0) }
+            let keyCount = Int(info.keyCount)
+            guard keyCount > 0, let tp = info.times, let vp = info.values else { continue }
+            let times = Array(UnsafeBufferPointer(start: tp, count: keyCount))
+            let valueWidth = info.path == 1 ? 4 : 3
+            let values = Array(UnsafeBufferPointer(start: vp, count: keyCount * valueWidth))
+            if let last = times.last, last > duration { duration = last }
+            tracks.append(CachedTrack(boneHandle: info.boneHandle, path: info.path, times: times, values: values))
+        }
+        cachedAnimTracks[handle] = tracks
+        cachedAnimDuration[handle] = duration
+    }
+
+    /// Advance every cached animation by scene-time, interpolating each
+    /// track between the bracketing keyframes and writing the result into
+    /// the corresponding bone's SCNNode.
+    private func advanceAnimations() {
+        // CACurrentMediaTime isn't on watchOS — use a Foundation clock.
+        // Relative-since-process-start is enough since we modulo by duration.
+        let now = Float(ProcessInfo.processInfo.systemUptime)
+        for (meshHandle, tracks) in cachedAnimTracks {
+            guard let dur = cachedAnimDuration[meshHandle], dur > 0 else { continue }
+            // Wrap to duration — looping playback.
+            var t = now.truncatingRemainder(dividingBy: dur)
+            if t < 0 { t += dur }
+            for track in tracks {
+                guard let bone = retainedNodes[track.boneHandle] else { continue }
+                applyTrackAt(t: t, track: track, bone: bone)
+            }
+        }
+    }
+
+    private func applyTrackAt(t: Float, track: CachedTrack, bone: SCNNode) {
+        let count = track.times.count
+        if count == 0 { return }
+
+        // Find the keyframe segment [i, i+1] where times[i] <= t < times[i+1].
+        // Clamp at the ends.
+        var i = 0
+        if t <= track.times[0] {
+            i = 0
+        } else if t >= track.times[count - 1] {
+            i = count - 1
+        } else {
+            // Linear scan — fine for <100 keys per track (typical).
+            while i + 1 < count && track.times[i + 1] < t { i += 1 }
+        }
+
+        let width = track.path == 1 ? 4 : 3
+        let base0 = i * width
+        let base1 = (i + 1 < count ? i + 1 : i) * width
+
+        let t0 = track.times[i]
+        let t1 = i + 1 < count ? track.times[i + 1] : t0
+        let alpha: Float = t1 > t0 ? (t - t0) / (t1 - t0) : 0
+
+        switch track.path {
+        case 0:  // translation
+            let x = lerp(track.values[base0 + 0], track.values[base1 + 0], alpha)
+            let y = lerp(track.values[base0 + 1], track.values[base1 + 1], alpha)
+            let z = lerp(track.values[base0 + 2], track.values[base1 + 2], alpha)
+            bone.position = SCNVector3(x, y, z)
+        case 2:  // scale
+            let x = lerp(track.values[base0 + 0], track.values[base1 + 0], alpha)
+            let y = lerp(track.values[base0 + 1], track.values[base1 + 1], alpha)
+            let z = lerp(track.values[base0 + 2], track.values[base1 + 2], alpha)
+            bone.scale = SCNVector3(x, y, z)
+        default:  // rotation (quaternion xyzw) — slerp
+            let q0 = (track.values[base0 + 0], track.values[base0 + 1], track.values[base0 + 2], track.values[base0 + 3])
+            let q1 = (track.values[base1 + 0], track.values[base1 + 1], track.values[base1 + 2], track.values[base1 + 3])
+            let q = slerp(q0, q1, alpha)
+            bone.orientation = SCNQuaternion(q.0, q.1, q.2, q.3)
+        }
+    }
+
     private func syncLights() {
         let n = Int(bloom_watchos_scene_copy_lights(lightBuf.baseAddress!, 64))
         // Simpler than delta sync for lights — there are few of them and
@@ -770,6 +887,34 @@ private func scnMatrix4(from m: (
         m31: m.8,  m32: m.9,  m33: m.10, m34: m.11,
         m41: m.12, m42: m.13, m43: m.14, m44: m.15
     )
+}
+
+private func lerp(_ a: Float, _ b: Float, _ t: Float) -> Float { a + (b - a) * t }
+
+/// Spherical-linear interpolation between two quaternions (xyzw). Handles
+/// the double-cover sign flip so the short arc wins.
+private func slerp(_ q0: (Float, Float, Float, Float),
+                   _ q1: (Float, Float, Float, Float),
+                   _ t: Float) -> (Float, Float, Float, Float) {
+    var x1 = q1.0, y1 = q1.1, z1 = q1.2, w1 = q1.3
+    let dot = q0.0 * x1 + q0.1 * y1 + q0.2 * z1 + q0.3 * w1
+    var d = dot
+    if d < 0 {
+        x1 = -x1; y1 = -y1; z1 = -z1; w1 = -w1
+        d = -d
+    }
+    if d > 0.9995 {
+        // Nearly collinear — plain lerp avoids sin(0)/0.
+        let x = lerp(q0.0, x1, t); let y = lerp(q0.1, y1, t)
+        let z = lerp(q0.2, z1, t); let w = lerp(q0.3, w1, t)
+        let inv = 1.0 / (x * x + y * y + z * z + w * w).squareRoot()
+        return (x * inv, y * inv, z * inv, w * inv)
+    }
+    let theta = acos(d)
+    let sinTheta = sin(theta)
+    let a = sin((1 - t) * theta) / sinTheta
+    let b = sin(t * theta) / sinTheta
+    return (q0.0 * a + x1 * b, q0.1 * a + y1 * b, q0.2 * a + z1 * b, q0.3 * a + w1 * b)
 }
 
 private func makeBaseScene() -> SCNScene {
