@@ -58,6 +58,11 @@ let forceShadows = -1;
 let forceSsao = -1;
 let forceSsr = -1;
 let forceSsgi = -1;
+let initCamX: number | null = null;
+let initCamY: number | null = null;
+let initCamZ: number | null = null;
+let initPitch = 0.0;
+let dumpPoseEveryFrame = false;
 for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -101,6 +106,25 @@ for (let i = 2; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
+  }
+  // Camera pose overrides — lets the headless --capture path hit any
+  // view the interactive player can walk to. Pair with --yaw.
+  if (argv[i] === "--cam-x" && i + 1 < argv.length) {
+    initCamX = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--cam-y" && i + 1 < argv.length) {
+    initCamY = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--cam-z" && i + 1 < argv.length) {
+    initCamZ = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--pitch" && i + 1 < argv.length) {
+    initPitch = parseFloat(argv[i + 1]);
+  }
+  // Prints current cam pose every frame — use to capture your
+  // exact interactive view then replay via --cam-x/y/z --yaw --pitch.
+  if (argv[i] === "--dump-pose") {
+    dumpPoseEveryFrame = true;
   }
 }
 
@@ -180,12 +204,14 @@ for (let i = 0; i < sponza.meshCount; i = i + 1) {
 }
 
 // ---- Camera ----
-// Sponza courtyard center, looking down the main axis
-let camX = 0.0;
-let camY = 2.0;
-let camZ = 0.0;
+// Sponza courtyard center, looking down the main axis. CLI overrides
+// (--cam-x/y/z --yaw --pitch) replace the defaults so a headless
+// --capture can reproduce any player-visible pose.
+let camX = initCamX !== null ? initCamX : 0.0;
+let camY = initCamY !== null ? initCamY : 2.0;
+let camZ = initCamZ !== null ? initCamZ : 0.0;
 let camYaw = initYaw;
-let camPitch = 0.0;
+let camPitch = initPitch;
 let cursorLocked = false;
 
 // ---- Main loop ----
@@ -215,6 +241,19 @@ while (!windowShouldClose()) {
   if (isKeyPressed(Key.TAB)) {
     cursorLocked = !cursorLocked;
     if (cursorLocked) { disableCursor(); } else { enableCursor(); }
+  }
+
+  // Pose dump: press P to print the current camera pose — or run
+  // with --dump-pose to print every frame. Paste into a replay:
+  //   ./main --cam-x X --cam-y Y --cam-z Z --yaw YAW --pitch PITCH
+  if (isKeyPressed(Key.P) || dumpPoseEveryFrame) {
+    console.log(
+      "pose: --cam-x " + camX.toFixed(3) +
+      " --cam-y " + camY.toFixed(3) +
+      " --cam-z " + camZ.toFixed(3) +
+      " --yaw " + camYaw.toFixed(3) +
+      " --pitch " + camPitch.toFixed(3),
+    );
   }
 
   const lookX = camX + Math.cos(camPitch) * fwdX * 100;

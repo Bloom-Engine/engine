@@ -13,6 +13,11 @@ use std::sync::OnceLock;
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut WINDOW: Option<Retained<NSWindow>> = None;
+// Set by bloom_init_window when BLOOM_HEADLESS=1. Skips the
+// `!isVisible → should_close` shortcut (hidden windows aren't
+// 'closed', just invisible) so headless --capture can run to
+// completion.
+static mut HEADLESS: bool = false;
 static mut AUDIO_UNIT: Option<AudioUnitInstance> = None;
 
 fn engine() -> &'static mut EngineState {
@@ -239,10 +244,28 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     let title = str_from_header(title_ptr);
     let mtm = MainThreadMarker::from(unsafe { MainThreadMarker::new_unchecked() });
 
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // Headless mode: BLOOM_HEADLESS=1 keeps the NSWindow + CAMetalLayer
+    // alive (wgpu's Metal backend requires a CAMetalLayer-backed view)
+    // but hides the window and suppresses dock icon / focus. Needed
+    // so an agent can spin up the renderer in a batch loop without
+    // stealing the user's focus on every sample.
+    let headless = std::env::var("BLOOM_HEADLESS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    unsafe { HEADLESS = headless; }
 
-    let content_rect = NSRect::new(NSPoint::new(100.0, 100.0), NSSize::new(width, height));
+    let app = NSApplication::sharedApplication(mtm);
+    if headless {
+        // Prohibited = no dock icon, no menu bar, no activation.
+        app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+    } else {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    }
+
+    // Far-off-screen origin keeps the window out of every display
+    // even if the OS insists on showing something.
+    let origin_x = if headless { -20000.0 } else { 100.0 };
+    let content_rect = NSRect::new(NSPoint::new(origin_x, 100.0), NSSize::new(width, height));
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable
@@ -260,9 +283,22 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
     let ns_title = NSString::from_str(title);
     window.setTitle(&ns_title);
-    window.center();
-    window.makeKeyAndOrderFront(None);
-    unsafe { app.activateIgnoringOtherApps(true) };
+
+    if headless {
+        // Alpha 0 + off-screen origin + prohibited-activation app
+        // policy = fully invisible window that still backs the
+        // CAMetalLayer wgpu renders into. Don't call
+        // `makeKeyAndOrderFront` — that brings it to front.
+        unsafe {
+            let _: () = msg_send![&window, setAlphaValue: 0.0_f64];
+            let _: () = msg_send![&window, setIgnoresMouseEvents: true];
+            let _: () = msg_send![&window, orderOut: std::ptr::null::<objc2::runtime::AnyObject>()];
+        }
+    } else {
+        window.center();
+        window.makeKeyAndOrderFront(None);
+        unsafe { app.activateIgnoringOtherApps(true) };
+    }
 
     // Set up CAMetalLayer on the content view
     let content_view = window.contentView().expect("No content view");
@@ -455,8 +491,11 @@ pub extern "C" fn bloom_begin_drawing() {
         }
     }
 
-    // Check if window was closed
-    if unsafe { WINDOW.as_ref().map(|w| !w.isVisible()).unwrap_or(true) } {
+    // Check if window was closed. In headless mode the window is
+    // intentionally hidden — skip the isVisible check so --capture
+    // can actually run to completion without instant-exit.
+    let is_headless = unsafe { HEADLESS };
+    if !is_headless && unsafe { WINDOW.as_ref().map(|w| !w.isVisible()).unwrap_or(true) } {
         engine().should_close = true;
     }
 
