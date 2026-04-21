@@ -363,6 +363,44 @@ impl SceneGraph {
         }
     }
 
+    /// Ticket 014 V2 — gather every visible mesh's triangles into a
+    /// single world-space buffer so the scene-wide SDF clipmap bake
+    /// can treat them as one big mesh. Vertex layout matches the
+    /// shader's hard-coded 12-f32 Vertex3D stride; only position is
+    /// meaningful for the UDF (normals/colour/UV are left zero).
+    /// Returns (vertex_buf, index_buf, total_triangle_count).
+    pub fn build_world_triangles(&self) -> (Vec<f32>, Vec<u32>, u32) {
+        // 12 floats per vertex to match `Vertex3D` stride the bake
+        // shader indexes with. position + zero-padding.
+        const STRIDE: usize = 12;
+        let mut vbuf: Vec<f32> = Vec::new();
+        let mut ibuf: Vec<u32> = Vec::new();
+        let mut tri_count: u32 = 0;
+        for (_, node) in self.nodes.iter() {
+            if !node.visible || node.vertices.is_empty() || node.indices.is_empty() {
+                continue;
+            }
+            let base = (vbuf.len() / STRIDE) as u32;
+            let t = &node.transform;
+            for v in &node.vertices {
+                let px = v.position[0];
+                let py = v.position[1];
+                let pz = v.position[2];
+                let wx = t[0][0]*px + t[1][0]*py + t[2][0]*pz + t[3][0];
+                let wy = t[0][1]*px + t[1][1]*py + t[2][1]*pz + t[3][1];
+                let wz = t[0][2]*px + t[1][2]*py + t[2][2]*pz + t[3][2];
+                // Zero-pad the remaining 9 floats — only position is
+                // read by `SDF_BAKE_WGSL`.
+                vbuf.extend_from_slice(&[wx, wy, wz, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            }
+            for &idx in &node.indices {
+                ibuf.push(base + idx);
+            }
+            tri_count += (node.indices.len() / 3) as u32;
+        }
+        (vbuf, ibuf, tri_count)
+    }
+
     pub fn set_parent(&mut self, handle: f64, parent: f64) {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.parent = parent;

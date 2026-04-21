@@ -313,6 +313,38 @@ pub(super) fn create_probe_trace_tex(
     create_probe_3d_tex(device, "probe_trace", gw, gh)
 }
 
+/// Ticket 014 V2 — scene-wide SDF clipmap. A single 3D texture holding
+/// the unsigned distance field for the entire scene, baked once when
+/// all per-mesh BLAS / card / SDF queues drain. 64³ R32Float covers
+/// `SCENE_SDF_CLIPMAP_EXTENT` metres around `SCENE_SDF_CLIPMAP_ORIGIN`
+/// — sized for Sponza (~40 m cube centred on origin, ~63 cm per
+/// voxel). The SW probe trace will later sphere-march this volume.
+pub(super) const SCENE_SDF_CLIPMAP_RES: u32 = 64;
+pub(super) const SCENE_SDF_CLIPMAP_EXTENT: f32 = 40.0;
+pub(super) const SCENE_SDF_CLIPMAP_ORIGIN: [f32; 3] = [0.0, 10.0, 0.0];
+
+pub(super) fn create_scene_sdf_clipmap(
+    device: &wgpu::Device,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scene_sdf_clipmap"),
+        size: wgpu::Extent3d {
+            width: SCENE_SDF_CLIPMAP_RES,
+            height: SCENE_SDF_CLIPMAP_RES,
+            depth_or_array_layers: SCENE_SDF_CLIPMAP_RES,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Ticket 014 — per-mesh unsigned distance field. V1 is a fixed 32³
 /// R32Float 3D texture per mesh (128 KB each). R32 instead of R16 so
 /// `WriteOnly` storage binding is accepted on the core wgpu feature

@@ -29,6 +29,8 @@ use formats::{
     create_mesh_card_radiance_atlas,
     CARD_ATLAS_SIZE, CARD_SLOT_SIZE, CARD_SLOTS_PER_ROW, CARD_MAX_SLOTS,
     CARD_AXES_PER_MESH, create_mesh_sdf_texture, MESH_SDF_RES,
+    create_scene_sdf_clipmap, SCENE_SDF_CLIPMAP_RES,
+    SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_ORIGIN,
     create_taa_textures,
     create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
     create_exposure_textures, create_composed_rt, create_dof_rt,
@@ -908,6 +910,13 @@ pub struct Renderer {
     pub sdf_bake_pipeline: wgpu::ComputePipeline,
     pub sdf_bake_layout: wgpu::BindGroupLayout,
     pub sdf_bake_uniform: wgpu::Buffer,
+
+    // --- Ticket 014 V2: scene-wide SDF clipmap ---
+    pub scene_sdf_clipmap_tex: wgpu::Texture,
+    pub scene_sdf_clipmap_view: wgpu::TextureView,
+    /// Set once when the scene clipmap has been baked. Prevents re-bake
+    /// on subsequent frames in the static-scene case.
+    pub scene_sdf_clipmap_built: bool,
 
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
@@ -3794,6 +3803,10 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- Ticket 014 V2: scene clipmap ---
+        let (scene_sdf_clipmap_tex, scene_sdf_clipmap_view) =
+            create_scene_sdf_clipmap(&device);
+
         // --- Scene-compose pipeline ---
         // Merges HDR + SSR + SSGI*albedo + bloom + fog + shafts into
         // composed_rt. Both TAA and composite downstream read from
@@ -4515,6 +4528,9 @@ impl Renderer {
             sdf_bake_pipeline,
             sdf_bake_layout,
             sdf_bake_uniform,
+            scene_sdf_clipmap_tex,
+            scene_sdf_clipmap_view,
+            scene_sdf_clipmap_built: false,
             probe_temporal_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
@@ -5101,6 +5117,96 @@ impl Renderer {
                 bytemuck::cast_slice(&[*meta]),
             );
         }
+    }
+
+    /// Ticket 014 V2 — bake the scene-wide SDF clipmap once, on the
+    /// frame when all per-mesh queues (BLAS, cards, per-mesh SDFs)
+    /// have drained. Gathers every visible mesh's triangles into a
+    /// world-space buffer via `scene.build_world_triangles()` and
+    /// runs `SDF_BAKE_WGSL` against the unified data with the
+    /// clipmap's fixed world-space AABB. 64³ voxel × scene triangle
+    /// count = expensive one-shot (~100-200 ms on Sponza), but
+    /// happens after a visible frame and never repeats for static
+    /// scenes.
+    fn bake_scene_sdf_clipmap(
+        &mut self,
+        scene: &crate::scene::SceneGraph,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if !self.hw_rt_enabled || self.scene_sdf_clipmap_built {
+            return;
+        }
+        // Wait for all per-mesh queues to drain — builds the clipmap
+        // from a fully-loaded scene rather than a partial one, and
+        // keeps first-frame cost spread across the card/BLAS work
+        // already scheduled.
+        if !scene.pending_blas_builds.is_empty()
+            || !scene.pending_card_captures.is_empty()
+            || !scene.pending_sdf_bakes.is_empty()
+        {
+            return;
+        }
+
+        let (vertices, indices, tri_count) = scene.build_world_triangles();
+        if tri_count == 0 {
+            return;
+        }
+
+        // Upload the unified vertex + index buffers. STORAGE usage so
+        // the bake shader can bind them directly. These are transient
+        // — dropped at the end of this function once the dispatch is
+        // encoded. (The encoder keeps them alive until the submit.)
+        let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_sdf_bake_vbuf"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let ibuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_sdf_bake_ibuf"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
+        let origin = SCENE_SDF_CLIPMAP_ORIGIN;
+        let aabb_min = [origin[0] - half, origin[1] - half, origin[2] - half, 0.0];
+        let aabb_max = [origin[0] + half, origin[1] + half, origin[2] + half, 0.0];
+        let params = SdfBakeParams {
+            aabb_min,
+            aabb_max,
+            counts: [tri_count, SCENE_SDF_CLIPMAP_RES, 0, 0],
+        };
+        self.queue.write_buffer(
+            &self.sdf_bake_uniform,
+            0,
+            bytemuck::bytes_of(&params),
+        );
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene_sdf_clipmap_bake_bg"),
+            layout: &self.sdf_bake_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.sdf_bake_uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: vbuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: ibuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.scene_sdf_clipmap_view) },
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("scene_sdf_clipmap_bake"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.sdf_bake_pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        // 64³ voxels → 16³ workgroups at 4×4×4 threads each.
+        pass.dispatch_workgroups(
+            SCENE_SDF_CLIPMAP_RES / 4,
+            SCENE_SDF_CLIPMAP_RES / 4,
+            SCENE_SDF_CLIPMAP_RES / 4,
+        );
+        drop(pass);
+
+        self.scene_sdf_clipmap_built = true;
     }
 
     /// Ticket 014 V1 — bake per-mesh unsigned distance fields via
@@ -6390,6 +6496,14 @@ impl Renderer {
         profiler.begin("sdf_bake");
         self.bake_pending_sdfs(scene, &mut encoder);
         profiler.end("sdf_bake");
+
+        // Ticket 014 V2: once all per-mesh queues are empty, bake
+        // the scene-wide SDF clipmap for the SW probe trace to march
+        // against (trace consumer lands in a follow-up). Runs exactly
+        // once on a static scene.
+        profiler.begin("scene_sdf_clipmap");
+        self.bake_scene_sdf_clipmap(scene, &mut encoder);
+        profiler.end("scene_sdf_clipmap");
 
         // Ticket 013 V2: re-light the card atlas every frame so the
         // HW probe trace can sample pre-lit radiance at hit instead
