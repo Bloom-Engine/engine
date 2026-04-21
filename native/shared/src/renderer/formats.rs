@@ -356,6 +356,31 @@ pub(super) fn create_mesh_card_atlas(
     (texture, view)
 }
 
+/// Ticket 013 V3 — emissive atlas. Same shape as the albedo atlas but
+/// carries material emissive per card texel. Read by the card-lighting
+/// pass to add as-is to the radiance output.
+pub(super) fn create_mesh_card_emissive_atlas(
+    device: &wgpu::Device,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh_card_emissive_atlas"),
+        size: wgpu::Extent3d {
+            width: CARD_ATLAS_SIZE,
+            height: CARD_ATLAS_SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Create the mesh-card radiance atlas. Written every frame by the
 /// card-lighting compute pass; sampled at hit by the HW probe trace.
 /// Rgba16Float so we can carry multiplicatively-composed sun + sky

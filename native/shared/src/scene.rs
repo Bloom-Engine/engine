@@ -116,6 +116,11 @@ pub struct SceneNode {
     ///   +3 → -Y,       +4 → +Z, +5 → -Z.
     /// `None` until the capture pass has allocated the run.
     pub card_first_slot: Option<u32>,
+    /// Ticket 013 V3 — when true, the mesh is re-queued into
+    /// `pending_card_captures` every frame so the card atlas stays
+    /// in sync with animated geometry. Off by default — static meshes
+    /// pay the capture cost once and never again.
+    pub card_dynamic: bool,
     /// Flat mesh-average world-space normal, cached on BLAS build so
     /// the per-instance GI data buffer can be populated without
     /// re-reading the vertex array. Rough heuristic — for walls and
@@ -170,6 +175,7 @@ impl SceneNode {
             gpu_vertex_count: 0,
             blas: None,
             card_first_slot: None,
+            card_dynamic: false,
             flat_normal_ws: [0.0, 1.0, 0.0],
             flat_albedo: [1.0, 1.0, 1.0],
             uniform_slot: None,
@@ -329,6 +335,16 @@ impl SceneGraph {
     pub fn set_receive_shadow(&mut self, handle: f64, receive: bool) {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.receive_shadow = receive;
+        }
+    }
+
+    /// Ticket 013 V3 — mark a mesh as dynamic so its card atlas slots
+    /// get re-captured every frame. Off by default; call once per
+    /// skeletal / morph-target / procedurally-animated node so its
+    /// indirect-bounce contribution tracks the animation.
+    pub fn set_mesh_dynamic(&mut self, handle: f64, dynamic: bool) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.card_dynamic = dynamic;
         }
     }
 
@@ -661,6 +677,15 @@ impl SceneGraph {
                 node.uniform_slot = Some(self.next_slot);
                 self.next_slot += 1;
             }
+
+            // Ticket 013 V3 — re-queue dynamic meshes every frame so
+            // their card atlas slots get re-captured to track
+            // animated geometry. Static meshes (default) stay out of
+            // the queue after their one-shot first-frame capture.
+            if hw_rt && node.card_dynamic && node.card_first_slot.is_some() {
+                pending_cards.push(handle);
+            }
+
             visible_count += 1;
         }
 

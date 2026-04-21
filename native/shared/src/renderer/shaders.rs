@@ -2203,24 +2203,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 ";
 
 
-/// Ticket 013 — Mesh-Cards V1 albedo-capture shader.
+/// Ticket 013 V3 — Mesh-Cards capture shader with dual render targets.
 ///
-/// Rasterises a mesh orthographically along its dominant object-space
-/// AABB axis into a 128×128 card slot inside the shared atlas. The
-/// viewport is set per-capture to the slot's pixel rect so the
-/// fragment output lands only in that region. Fragment shader reads
-/// the mesh's albedo texture at the vertex's existing UV (the same
-/// UV the main scene shader uses) and multiplies by the material's
-/// `base_color_factor`. When the mesh has no texture, a 1×1 white
-/// fallback is bound and the output is just `base_color_factor`.
+/// Location 0 (albedo) + Location 1 (emissive). Rasterises a mesh
+/// orthographically along its assigned signed axis into the card slot,
+/// writing baked albedo and emissive into their respective atlases in
+/// one draw. Emissive reads the material's emissive texture (if any)
+/// and multiplies by the `emissive_factor`. Flat `base_color_factor` +
+/// a 1×1 white fallback texture cover the case where the mesh has
+/// only a scalar material.
 pub(super) const CARD_CAPTURE_WGSL: &str = "
 struct CaptureParams {
-    // Orthographic projection mapping object-space AABB extents to
-    // [-1, +1] clip space along the dominant axis. Host-side picks
-    // the axis and builds the matrix.
     ortho_vp: mat4x4<f32>,
-    // Mesh's base_color_factor (xyz) + `has_texture` flag (w; 1.0 = use texture).
+    // Mesh's base_color_factor (xyz) + `has_base_texture` flag (w).
     base_color: vec4<f32>,
+    // Mesh's emissive_factor (xyz) + `has_emissive_texture` flag (w).
+    emissive: vec4<f32>,
 };
 
 struct VertexIn {
@@ -2237,9 +2235,15 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
 };
 
+struct FsOut {
+    @location(0) albedo: vec4<f32>,
+    @location(1) emissive: vec4<f32>,
+};
+
 @group(0) @binding(0) var<uniform> u: CaptureParams;
 @group(1) @binding(0) var albedo_tex: texture_2d<f32>;
 @group(1) @binding(1) var albedo_samp: sampler;
+@group(1) @binding(2) var emissive_tex: texture_2d<f32>;
 
 @vertex
 fn vs_main(v: VertexIn) -> VsOut {
@@ -2250,37 +2254,90 @@ fn vs_main(v: VertexIn) -> VsOut {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    var c = u.base_color.rgb;
+fn fs_main(in: VsOut) -> FsOut {
+    var albedo = u.base_color.rgb;
     if (u.base_color.w > 0.5) {
-        let tex = textureSample(albedo_tex, albedo_samp, in.uv);
-        c = c * tex.rgb;
+        albedo = albedo * textureSample(albedo_tex, albedo_samp, in.uv).rgb;
     }
-    return vec4<f32>(c, 1.0);
+
+    var emissive = u.emissive.rgb;
+    if (u.emissive.w > 0.5) {
+        emissive = emissive * textureSample(emissive_tex, albedo_samp, in.uv).rgb;
+    }
+
+    var out: FsOut;
+    out.albedo = vec4<f32>(albedo, 1.0);
+    // Rgba8UnormSrgb clamps emissive at 1.0 per channel; that's fine
+    // for Sponza-scale lanterns. Pre-divide by EMISSIVE_SCALE at write
+    // and multiply back at sample if HDR emissive becomes necessary.
+    out.emissive = vec4<f32>(clamp(emissive, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    return out;
 }
 ";
 
-/// Ticket 013 V2 — per-frame card-lighting compute pass.
+/// Ticket 013 V3 — per-frame card-lighting compute pass with
+/// shadow-cascade sampling + emissive contribution.
 ///
-/// Dispatched once per frame before the HW probe trace. One invocation
-/// per atlas pixel: looks up the slot's world-space normal (baked at
-/// capture), samples the albedo atlas at the pixel's UV, computes
-/// `albedo × (NdotL × sun + NdotUp × sky)`, writes to the radiance
-/// atlas. Shadow-cascade integration deferred to V3.
+/// Per texel: reconstruct the world-space position of the card point
+/// (slot metadata's aabb + axis + mesh transform), sample the shadow
+/// cascade at that point, compute direct + sky + emissive. Writes to
+/// the radiance atlas. Shadow lookup makes indirect bounce meaningfully
+/// darker on sun-occluded card faces (arches, column undersides).
 pub(super) const CARD_LIGHT_WGSL: &str = "
+struct SlotMeta {
+    // xyz = world-space card-face normal, w = signed axis (0..6 as f32)
+    normal_ws: vec4<f32>,
+    aabb_min: vec4<f32>,
+    aabb_max: vec4<f32>,
+    transform: mat4x4<f32>,
+};
+
 struct CardLightParams {
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
     sky_color: vec4<f32>,
-    // x = atlas_size, y = slot_size, z = slots_per_row, w = active_slot_count
     atlas_info: vec4<u32>,
+    shadow_vps: array<mat4x4<f32>, 3>,
+    shadow_splits: vec4<f32>,
+    view_matrix: mat4x4<f32>,
+    flags: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: CardLightParams;
 @group(0) @binding(1) var albedo_atlas: texture_2d<f32>;
 @group(0) @binding(2) var atlas_samp: sampler;
-@group(0) @binding(3) var<storage, read> slot_meta: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> slot_meta: array<SlotMeta>;
 @group(0) @binding(4) var radiance_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var emissive_atlas: texture_2d<f32>;
+@group(0) @binding(6) var shadow_atlas_0: texture_depth_2d;
+@group(0) @binding(7) var shadow_atlas_1: texture_depth_2d;
+@group(0) @binding(8) var shadow_atlas_2: texture_depth_2d;
+@group(0) @binding(9) var shadow_samp: sampler_comparison;
+
+fn sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
+    var clip: vec4<f32>;
+    if (cascade == 0) {
+        clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
+    } else if (cascade == 1) {
+        clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0);
+    } else {
+        clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0);
+    }
+    let ndc = clip.xyz / clip.w;
+    // Outside the cascade frustum → treat as lit (no shadow).
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let ref_depth = ndc.z - bias;
+    if (cascade == 0) {
+        return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, shadow_uv, ref_depth);
+    } else if (cascade == 1) {
+        return textureSampleCompareLevel(shadow_atlas_1, shadow_samp, shadow_uv, ref_depth);
+    } else {
+        return textureSampleCompareLevel(shadow_atlas_2, shadow_samp, shadow_uv, ref_depth);
+    }
+}
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -2296,8 +2353,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let slot_y = px.y / slot_sz;
     let slot_idx = slot_y * slots_per_row + slot_x;
 
-    // Outside the active slot range — clear to zero so stale radiance
-    // from a previous frame's bigger-scene can't leak in.
     if (slot_idx >= active_count) {
         textureStore(radiance_out, vec2<i32>(px), vec4<f32>(0.0));
         return;
@@ -2305,14 +2360,59 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let uv = (vec2<f32>(px) + vec2<f32>(0.5)) / f32(atlas_sz);
     let albedo = textureSampleLevel(albedo_atlas, atlas_samp, uv, 0.0).rgb;
+    let emissive = textureSampleLevel(emissive_atlas, atlas_samp, uv, 0.0).rgb;
 
-    let n_ws = slot_meta[slot_idx].xyz;
+    let slot_m = slot_meta[slot_idx];
+    let n_ws = slot_m.normal_ws.xyz;
+    let axis = u32(slot_m.normal_ws.w);
+
+    // Local slot UV (0..1 inside this slot) → object-space card-plane
+    // position. Signed-axis-aware u-flip matches the capture pass's
+    // projection so the texel we light is the one the capture baked.
+    let sx = f32((px.x) % slot_sz);
+    let sy = f32((px.y) % slot_sz);
+    let sd = f32(slot_sz);
+    var u_norm = (sx + 0.5) / sd;
+    let v_norm = (sy + 0.5) / sd;
+    var pos_os = vec3<f32>(0.0);
+    if (axis == 0u || axis == 1u) {
+        // Card plane at x = bmax.x (+X) or bmin.x (-X); u=y, v=z.
+        if (axis == 1u) { u_norm = 1.0 - u_norm; }
+        pos_os.y = mix(slot_m.aabb_min.y, slot_m.aabb_max.y, u_norm);
+        pos_os.z = mix(slot_m.aabb_min.z, slot_m.aabb_max.z, v_norm);
+        if (axis == 0u) { pos_os.x = slot_m.aabb_max.x; } else { pos_os.x = slot_m.aabb_min.x; }
+    } else if (axis == 2u || axis == 3u) {
+        if (axis == 3u) { u_norm = 1.0 - u_norm; }
+        pos_os.x = mix(slot_m.aabb_min.x, slot_m.aabb_max.x, u_norm);
+        pos_os.z = mix(slot_m.aabb_min.z, slot_m.aabb_max.z, v_norm);
+        if (axis == 2u) { pos_os.y = slot_m.aabb_max.y; } else { pos_os.y = slot_m.aabb_min.y; }
+    } else {
+        if (axis == 5u) { u_norm = 1.0 - u_norm; }
+        pos_os.x = mix(slot_m.aabb_min.x, slot_m.aabb_max.x, u_norm);
+        pos_os.y = mix(slot_m.aabb_min.y, slot_m.aabb_max.y, v_norm);
+        if (axis == 4u) { pos_os.z = slot_m.aabb_max.z; } else { pos_os.z = slot_m.aabb_min.z; }
+    }
+    let pos_ws = (slot_m.transform * vec4<f32>(pos_os, 1.0)).xyz;
+
+    // Shadow. Cascade selection uses view-space Z against splits.
+    var shadow: f32 = 1.0;
+    if (u.flags.y > 0.5) {
+        let view_z = -(u.view_matrix * vec4<f32>(pos_ws, 1.0)).z;
+        var cascade: i32 = 2;
+        if (view_z <= u.shadow_splits.x) {
+            cascade = 0;
+        } else if (view_z <= u.shadow_splits.y) {
+            cascade = 1;
+        }
+        shadow = sample_cascade(cascade, pos_ws, u.flags.x);
+    }
+
     let ndotl = max(dot(n_ws, u.sun_dir.xyz), 0.0);
-    let direct = u.sun_color.xyz * ndotl;
+    let direct = u.sun_color.xyz * ndotl * shadow;
     let ndotup = max(dot(n_ws, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
     let sky = u.sky_color.xyz * ndotup;
 
-    let lit = albedo * (direct + sky);
+    let lit = albedo * (direct + sky) + emissive;
     textureStore(radiance_out, vec2<i32>(px), vec4<f32>(lit, 1.0));
 }
 ";
@@ -2790,10 +2890,12 @@ fn cs_main(
             );
             let pre_lit = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
 
+            // V3 — emissive is pre-added into the radiance atlas by the
+            // card-lighting pass, so the hit simply picks up the full
+            // pre-lit texel and applies distance falloff + firefly cap.
             let tn = hit.t / max_t;
             let falloff = max(1.0 - tn * tn, 0.0);
-            var raw = pre_lit * falloff
-                    + inst.albedo * inst.emissive_luma;
+            var raw = pre_lit * falloff;
             let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
             let cap = u.params.w;
             if (luma > cap) { raw = raw * (cap / luma); }

@@ -25,7 +25,8 @@ use formats::{
     create_ssr_history_textures,
     create_ssgi_rt, create_probe_trace_tex, create_probe_history_textures,
     probe_grid_dims, PROBE_TILE_SIZE, PROBE_OCT_SIZE, PROBE_OCT_TEXELS,
-    create_mesh_card_atlas, create_mesh_card_radiance_atlas,
+    create_mesh_card_atlas, create_mesh_card_emissive_atlas,
+    create_mesh_card_radiance_atlas,
     CARD_ATLAS_SIZE, CARD_SLOT_SIZE, CARD_SLOTS_PER_ROW, CARD_MAX_SLOTS,
     CARD_AXES_PER_MESH, create_taa_textures,
     create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
@@ -272,13 +273,14 @@ struct ProbeHeaderCpu {
     normal: [f32; 4],
 }
 
-/// Ticket 013 — CardCaptureParams. 80 bytes (we allocate 128 for
-/// uniform-alignment headroom). Matches CARD_CAPTURE_WGSL's uniform.
+/// Ticket 013 V3 — CardCaptureParams. ortho_vp + base_color + emissive.
+/// 96 bytes; we allocate 128 for uniform-alignment headroom.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CardCaptureParams {
     ortho_vp: [[f32; 4]; 4],
-    base_color: [f32; 4], // rgb = factor, w = has_texture (0 or 1)
+    base_color: [f32; 4],  // rgb = factor, w = has_base_texture (0/1)
+    emissive: [f32; 4],    // rgb = emissive_factor, w = has_emissive_texture (0/1)
 }
 
 /// Ticket 013 V2 — orthographic projection for the 6 signed axes.
@@ -352,6 +354,34 @@ struct CardLightParams {
     sky_color: [f32; 4],
     /// [atlas_size, slot_size, slots_per_row, active_slot_count]
     atlas_info: [u32; 4],
+    /// Shadow cascade VPs (3× mat4) — identity when shadows disabled.
+    shadow_vps: [[[f32; 4]; 4]; 3],
+    /// xyz = view-space split distances for cascades 0/1/2, w = 0.
+    shadow_splits: [f32; 4],
+    /// Camera view matrix — needed to convert card-texel world pos
+    /// into view-space Z for cascade selection.
+    view_matrix: [[f32; 4]; 4],
+    /// x = shadow bias, y = shadows_enabled (0/1), zw unused.
+    flags: [f32; 4],
+}
+
+/// Ticket 013 V3 — per-slot metadata consumed by `card_light_pass`.
+/// Baked at capture time; carries enough state for the lighting
+/// shader to reconstruct each texel's world-space position and query
+/// the shadow cascade at that point. 128 bytes per slot × 4096 slots
+/// = 512 KB — fits comfortably.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CardSlotMetaCpu {
+    /// xyz = world-space card-face normal, w = signed axis (0..6 as f32).
+    normal_ws: [f32; 4],
+    /// Object-space AABB min (xyz) + padding (w).
+    aabb_min: [f32; 4],
+    /// Object-space AABB max (xyz) + padding (w).
+    aabb_max: [f32; 4],
+    /// Mesh's world transform. Multiplied into the object-space
+    /// card-plane position to land in world space for shadow lookup.
+    transform: [[f32; 4]; 4],
 }
 
 /// Ticket 007b — per-TLAS-instance GI shading input. Indexed by the
@@ -838,6 +868,9 @@ pub struct Renderer {
     pub mesh_card_atlas: wgpu::Texture,
     pub mesh_card_atlas_view: wgpu::TextureView,
     pub mesh_card_atlas_sampler: wgpu::Sampler,
+    /// Ticket 013 V3 — emissive atlas, baked alongside albedo.
+    pub mesh_card_emissive_tex: wgpu::Texture,
+    pub mesh_card_emissive_view: wgpu::TextureView,
     /// Radiance atlas — lit each frame by the card-lighting compute
     /// pass, then sampled at hit by the HW probe trace. Same geometry
     /// as the albedo atlas.
@@ -3423,13 +3456,15 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // --- Ticket 013 V2: mesh-card atlases + capture + lighting ---
+        // --- Ticket 013 V3: mesh-card atlases + capture + lighting ---
         let (mesh_card_atlas, mesh_card_atlas_view) = create_mesh_card_atlas(&device);
+        let (mesh_card_emissive_tex, mesh_card_emissive_view) =
+            create_mesh_card_emissive_atlas(&device);
         let (mesh_card_radiance_tex, mesh_card_radiance_view) =
             create_mesh_card_radiance_atlas(&device);
         let card_slot_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("card_slot_meta_buffer"),
-            size: (CARD_MAX_SLOTS as u64) * std::mem::size_of::<[f32; 4]>() as u64,
+            size: (CARD_MAX_SLOTS as u64) * std::mem::size_of::<CardSlotMetaCpu>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -3481,6 +3516,17 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Ticket 013 V3 — emissive texture binding.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let card_capture_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3503,11 +3549,19 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &card_capture_shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                // Location 0 → albedo atlas, Location 1 → emissive atlas.
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -3597,6 +3651,41 @@ impl Renderer {
                         format: HDR_FORMAT,
                         view_dimension: wgpu::TextureViewDimension::D2,
                     }, count: None,
+                },
+                // V3 — emissive atlas.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                // V3 — three shadow cascade depth textures + comparison sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
                 },
             ],
         });
@@ -4323,6 +4412,8 @@ impl Renderer {
             mesh_card_atlas,
             mesh_card_atlas_view,
             mesh_card_atlas_sampler,
+            mesh_card_emissive_tex,
+            mesh_card_emissive_view,
             mesh_card_radiance_tex,
             mesh_card_radiance_view,
             card_slot_meta_buffer,
@@ -4735,7 +4826,7 @@ impl Renderer {
         // few hundred render passes (observed hang on Sponza's 405 ×
         // 6 = 2430-pass batch). Drain in chunks and let subsequent
         // frames continue the work — Sponza finishes in a few frames.
-        const CAPTURE_MAX_PER_FRAME: usize = 40;
+        const CAPTURE_MAX_PER_FRAME: usize = 20;
         let take = scene.pending_card_captures.len().min(CAPTURE_MAX_PER_FRAME);
         let pending: Vec<f64> = scene.pending_card_captures.drain(..take).collect();
 
@@ -4744,10 +4835,10 @@ impl Renderer {
         // carries the card face's world-space normal (xyz) + unused w.
         // Uploaded in one `queue.write_buffer` after the capture loop
         // so the card-lighting compute pass sees the populated slots.
-        let mut slot_meta_updates: Vec<(u32, [f32; 4])> = Vec::new();
+        let mut slot_meta_updates: Vec<(u32, CardSlotMetaCpu)> = Vec::new();
 
         for handle in pending {
-            let (first_slot, bmin, bmax, transform, has_tex, bc, tex_idx, vb_ptr, ib_ptr, index_count) = {
+            let (first_slot, bmin, bmax, transform, has_tex, bc, tex_idx, has_em, em_factor, em_idx, vb_ptr, ib_ptr, index_count) = {
                 let Some(node) = scene.nodes.get(handle) else { continue; };
                 let Some(first_slot) = node.card_first_slot else { continue; };
                 if first_slot + CARD_AXES_PER_MESH > CARD_MAX_SLOTS {
@@ -4756,6 +4847,8 @@ impl Renderer {
                 let Some(vb) = node.gpu_vb.as_ref() else { continue; };
                 let Some(ib) = node.gpu_ib.as_ref() else { continue; };
                 let has_tex = node.material.texture_idx != 0;
+                let em_idx = node.material.emissive_texture_idx;
+                let has_em = em_idx != 0;
                 (
                     first_slot,
                     node.bounds_min,
@@ -4764,6 +4857,9 @@ impl Renderer {
                     has_tex,
                     node.material.color,
                     node.material.texture_idx,
+                    has_em,
+                    node.material.emissive,
+                    em_idx,
                     vb.clone(),
                     ib.clone(),
                     node.gpu_index_count,
@@ -4781,6 +4877,12 @@ impl Renderer {
                 self.card_capture_fallback_tex
                     .create_view(&wgpu::TextureViewDescriptor::default())
             };
+            let em_view = if has_em && (em_idx as usize) < self.textures.len() {
+                self.textures[em_idx as usize].create_view(&wgpu::TextureViewDescriptor::default())
+            } else {
+                self.card_capture_fallback_tex
+                    .create_view(&wgpu::TextureViewDescriptor::default())
+            };
             let texture_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("card_capture_texture_bg"),
                 layout: &self.card_capture_texture_layout,
@@ -4793,6 +4895,10 @@ impl Renderer {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&em_view),
+                    },
                 ],
             });
 
@@ -4801,9 +4907,11 @@ impl Renderer {
 
                 let ortho_vp = build_card_ortho_v2(axis, bmin, bmax);
                 let bc_w = if has_tex { 1.0 } else { 0.0 };
+                let em_w = if has_em { 1.0 } else { 0.0 };
                 let params = CardCaptureParams {
                     ortho_vp,
                     base_color: [bc[0], bc[1], bc[2], bc_w],
+                    emissive: [em_factor[0], em_factor[1], em_factor[2], em_w],
                 };
                 self.queue.write_buffer(
                     &self.card_capture_uniform,
@@ -4827,15 +4935,26 @@ impl Renderer {
 
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("card_capture_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.mesh_card_atlas_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.mesh_card_atlas_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.mesh_card_emissive_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                    ],
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
@@ -4870,7 +4989,15 @@ impl Renderer {
                 let ny = t[0][1]*n_os[0] + t[1][1]*n_os[1] + t[2][1]*n_os[2];
                 let nz = t[0][2]*n_os[0] + t[1][2]*n_os[1] + t[2][2]*n_os[2];
                 let len = (nx*nx + ny*ny + nz*nz).sqrt().max(1e-4);
-                slot_meta_updates.push((slot, [nx/len, ny/len, nz/len, 0.0]));
+                slot_meta_updates.push((
+                    slot,
+                    CardSlotMetaCpu {
+                        normal_ws: [nx/len, ny/len, nz/len, axis as f32],
+                        aabb_min: [bmin[0], bmin[1], bmin[2], 0.0],
+                        aabb_max: [bmax[0], bmax[1], bmax[2], 0.0],
+                        transform,
+                    },
+                ));
             }
         }
 
@@ -4879,7 +5006,7 @@ impl Renderer {
         // V1 scatters them — `queue.write_buffer` with one range per
         // entry is fine for the first-frame bulk-populate cost.
         for (slot, meta) in &slot_meta_updates {
-            let offset = (*slot as u64) * std::mem::size_of::<[f32; 4]>() as u64;
+            let offset = (*slot as u64) * std::mem::size_of::<CardSlotMetaCpu>() as u64;
             self.queue.write_buffer(
                 &self.card_slot_meta_buffer,
                 offset,
@@ -4924,11 +5051,32 @@ impl Renderer {
             amb[2] * sky_intensity,
             0.0,
         ];
+        // V3 — shadow cascade VPs, splits, and view matrix for the
+        // per-texel shadow lookup. Cascades are stored on the
+        // ShadowMap; when shadows are disabled we pass identity VPs
+        // + flags.y = 0 so the shader skips the sample.
+        let shadows_enabled = self.shadow_map.enabled;
+        let shadow_vps: [[[f32; 4]; 4]; 3] = if shadows_enabled {
+            self.shadow_map.light_vps
+        } else {
+            [IDENTITY_MAT4; 3]
+        };
+        let shadow_splits = if shadows_enabled {
+            let s = self.shadow_map.cascade_splits;
+            [s[0], s[1], s[2], 0.0]
+        } else {
+            [f32::INFINITY, f32::INFINITY, f32::INFINITY, 0.0]
+        };
+
         let params = CardLightParams {
             sun_dir: sun_dir_ws,
             sun_color,
             sky_color,
             atlas_info: [CARD_ATLAS_SIZE, CARD_SLOT_SIZE, CARD_SLOTS_PER_ROW, scene.next_card_slot],
+            shadow_vps,
+            shadow_splits,
+            view_matrix: self.current_view_matrix,
+            flags: [0.002, if shadows_enabled { 1.0 } else { 0.0 }, 0.0, 0.0],
         };
         self.queue.write_buffer(
             &self.card_light_uniform,
@@ -4946,6 +5094,11 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
                     wgpu::BindGroupEntry { binding: 3, resource: self.card_slot_meta_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.mesh_card_emissive_view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
                 ],
             }));
         }
