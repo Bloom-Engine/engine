@@ -946,18 +946,15 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     //    accumulated mip footprint, but there are still isolated
     //    texels where D_GGX + IBL prefilter spike an order of
     //    magnitude above neighbours. Bloom then amplifies each
-    //    spike into a coloured halo — producing exactly the
-    //    per-pixel bright-white speckle visible on Sponza's
-    //    sunlit stone floor (UE5 / Unity / Cycles all render
-    //    it clean). A hue-preserving luma cap at 4 catches the
-    //    outliers (specular peaks on normal-mapped stone spike
-    //    into luma 5-15) while leaving diffuse sunlit content
-    //    (luma 1-4 with setManualExposure(1.0)) untouched.
-    //    Empirically verified: cap=10 let specs through, cap=2
-    //    killed them but darkened the scene, cap=4 is the knee.
+    //    spike into a coloured halo. The real root cause of the
+    //    stone-floor speckle was the irradiance convolution
+    //    shader sampling raw HDR (sun disc unclamped) — with
+    //    that fixed this cap only has to catch legitimate
+    //    specular outliers. 50 leaves all normal bright content
+    //    alone and trims only the rare aliased peak.
     let hdr_clean = select(vec3<f32>(0.0), hdr_raw, hdr_raw == hdr_raw);
     let luma = dot(hdr_clean, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let firefly_cap = 4.0;
+    let firefly_cap = 50.0;
     let luma_scale = select(1.0, firefly_cap / luma, luma > firefly_cap);
     let hdr = hdr_clean * luma_scale;
 
@@ -1103,7 +1100,25 @@ fn fs_diffuse(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> 
         let sin_theta = sqrt(xi.y);
         let l_local = vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
         let l = t * l_local.x + b * l_local.y + n * l_local.z;
-        color += textureSampleLevel(src_tex, src_samp, dir_to_uv(l), 0.0).rgb;
+        var sample = textureSampleLevel(src_tex, src_samp, dir_to_uv(l), 0.0).rgb;
+        // Firefly clamp per env sample. Raw outdoor.hdr has the sun
+        // disc at luma 1000+; at N samples per output texel the
+        // 1-in-N chance of a sample hitting the sun leaves a bright
+        // patch in the 'diffuse' irradiance map at every normal
+        // direction that aims near it. Capping each sample at luma
+        // 50 bounds the estimator's variance so the convolved output
+        // is actually smooth — which is what fs_main_scene expects
+        // when it multiplies by base_color for the IBL diffuse term.
+        // The Sponza floor's per-pixel normal-map variation was
+        // picking different 'bright spots' in the unsmoothed
+        // irradiance map, producing exactly the white speckle on
+        // the sunlit stone.
+        let sample_luma = dot(sample, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let cap = 50.0;
+        if (sample_luma > cap) {
+            sample = sample * (cap / sample_luma);
+        }
+        color += sample;
     }
     return vec4<f32>(color / f32(n_samples), 1.0);
 }
@@ -2888,16 +2903,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = color + u.sun_shaft_color.rgb * norm * shaft_strength;
     }
 
-    // Compose-wide firefly / NaN scrub. The main HDR pass already
-    // caps at luma 4 on its own output, but this compose step adds
-    // SSGI (its own halfres march with per-sample cap 10, can emit
-    // accumulated luma 5-8), SSR (fresnel-capped but not luma-capped)
-    // and bloom — any of which can push a composed pixel back above
-    // the aliasing-safe ceiling. A hue-preserving cap at 4 here
-    // catches the sum regardless of which contributor spiked.
+    // Compose-wide NaN scrub + defensive luma cap. The actual
+    // stone-floor speckle was fixed upstream at the irradiance
+    // convolution shader (sun disc was leaking into the 'diffuse'
+    // map); this cap stays as a safety net against future
+    // over-bright contributors (rare ssr/ssgi anomaly + bloom).
+    // 50 is high enough to never clip normal scene brightness.
     let color_clean = select(vec3<f32>(0.0), color, color == color);
     let color_luma = dot(color_clean, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let compose_cap = 4.0;
+    let compose_cap = 50.0;
     let color_scale = select(1.0, compose_cap / color_luma, color_luma > compose_cap);
     return vec4<f32>(color_clean * color_scale, indirect_weight);
 }
