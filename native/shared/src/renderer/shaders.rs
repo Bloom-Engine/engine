@@ -1200,11 +1200,25 @@ fn sky_fs(in: VsOut) -> SkyOut {
     //   v = theta / π                       → +Y at v=0
     // Earlier `phi/2π + 0.5` gave a 180° rotation that put cloud
     // patterns on the wrong side of the helmet vs the reference.
+    //
+    // Below-horizon clamp: most outdoor HDRIs (including
+    // assets/outdoor.hdr) only contain sky in the upper
+    // hemisphere — the lower half mirrors the upper because the
+    // photographer captured from a flat/reflective floor. Without
+    // a clamp, the sky-dome render shows the mirror when the
+    // camera looks below the horizon (e.g. standing on the
+    // Sponza roof, any pitch-down shot). Clamp v at 0.5 so
+    // below-horizon directions re-sample the horizon ring,
+    // smoothly fading to a 'hazy ground' appearance.
     let theta = acos(clamp(dir.y, -1.0, 1.0));
     let phi = atan2(dir.z, dir.x);
     let raw_u = phi / (2.0 * PI);
     let u_coord = raw_u - floor(raw_u); // fract(); WGSL has no rem_euclid
-    let v_coord = theta / PI;
+    let v_unclamped = theta / PI;
+    // Slightly below v=0.5 to sample the horizon ring and not
+    // clip to a single texel row; texture filter smooths over
+    // the last 2 % of vertical space.
+    let v_coord = min(v_unclamped, 0.5);
 
     // Clamp u to half-texel inside [0,1] so the bilinear filter
     // never reaches across the ±180° seam (u wraps 0↔1).
