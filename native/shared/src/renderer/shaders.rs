@@ -3076,9 +3076,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let mean = m1 / n_samples;
     let variance = max(m2 / n_samples - mean * mean, vec3<f32>(0.0));
     let stddev = sqrt(variance);
-    // γ = 1.25 — Karis's value. Wider lets more history through
-    // (smoother), narrower clamps tighter to current (less ghost).
-    let gamma = 1.25;
+    // γ tightens with motion. At rest γ=1.25 (Karis) — a wide
+    // band so sub-pixel accumulation over jitter variation
+    // passes through. Under rotation we need the band tighter
+    // because the current-frame 3×3 neighborhood at a fragment
+    // on the edge of a real scene shadow (a column, a doorway)
+    // contains genuine dark pixels, stddev is wide, and stale
+    // history reprojected from a different world point slips
+    // through the clamp. γ=0.5 during motion forces reprojected
+    // history much closer to the neighborhood mean.
+    let motion_alpha = smoothstep(0.003, 0.03, vel_len);
+    let gamma = mix(1.25, 0.5, motion_alpha);
     let y_min = mean.x - gamma * stddev.x;
     let y_max = mean.x + gamma * stddev.x;
 
@@ -3088,18 +3096,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let history_y_clamped = clamp(history_ycocg.x, y_min, y_max);
     let clamped_history = ycocg_to_rgb(vec3<f32>(history_y_clamped, history_ycocg.yz));
 
-    // Velocity-aware blend. The default alpha (~0.1) lets history
-    // dominate 9-to-1 for smooth sub-pixel accumulation at rest —
-    // but any camera motion disoccludes enough of the frame that
-    // the 10 %-current weight takes 10-20 frames to flush the old
-    // content, producing a dark ghost that drags across the screen
-    // during mouse-look. Ramping alpha hard once per-pixel velocity
-    // crosses 0.001 UV/frame (tiny — triggers on any rotation)
-    // and saturating at 0.012 UV/frame snaps to mostly-current
-    // throughout a drag. Tuned on sponza continuous rotation
-    // (~0.025 rad/frame mouse pace → ~0.012 UV/frame mid-frame).
-    let motion_alpha = smoothstep(0.001, 0.012, vel_len);
-    let alpha = mix(u.params.x, 0.7, motion_alpha);
+    // Extra disocclusion check: if the (already-clamped) history
+    // luma is still far from the neighborhood mean, the
+    // reprojected sample is from a very different world point.
+    // Ramp alpha to 1 (drop history entirely) based on that
+    // distance so the ghost evaporates in a single frame
+    // instead of waiting for the 0.5 default to decay it over
+    // ~3 frames.
+    let history_dist = abs(history_y_clamped - mean.x);
+    let disocclusion = smoothstep(stddev.x * 0.5, stddev.x * 2.0, history_dist);
+
+    // Velocity-aware blend. At rest alpha ≈ 0.1 (default) —
+    // 9-to-1 history drives sub-pixel TSR. During any motion,
+    // alpha ramps toward 0.6 and the disocclusion term can push
+    // it all the way to 1 for reprojected stale samples.
+    let motion_ramped = mix(u.params.x, 0.6, motion_alpha);
+    let alpha = max(motion_ramped, disocclusion);
     let blended = mix(clamped_history, current, alpha);
     let blended_w = mix(history_w, current_w, alpha);
     return vec4<f32>(blended, blended_w);
