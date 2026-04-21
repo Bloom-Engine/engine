@@ -3088,7 +3088,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let history_y_clamped = clamp(history_ycocg.x, y_min, y_max);
     let clamped_history = ycocg_to_rgb(vec3<f32>(history_y_clamped, history_ycocg.yz));
 
-    let alpha = u.params.x;
+    // Velocity-aware blend. The default alpha (~0.1) lets history
+    // dominate 9-to-1 for smooth sub-pixel accumulation at rest —
+    // but when the camera rotates fast, every pixel is effectively
+    // disoccluded and the 10 %-current weight takes 20+ frames to
+    // flush the old content, producing a dark ghost sliding across
+    // the frame. Ramping alpha up to 0.5 once per-pixel velocity
+    // exceeds ~0.01 UV/frame (≈ 1 % of the frame per step) snaps
+    // to current during rapid motion and returns to 0.1 once
+    // rotation slows. The variance clamp still does the heavy
+    // lifting on sub-pixel accumulation; this just rejects the
+    // large-displacement case where clamp alone isn't enough.
+    let motion_alpha = smoothstep(0.003, 0.03, vel_len);
+    let alpha = mix(u.params.x, 0.5, motion_alpha);
     let blended = mix(clamped_history, current, alpha);
     let blended_w = mix(history_w, current_w, alpha);
     return vec4<f32>(blended, blended_w);

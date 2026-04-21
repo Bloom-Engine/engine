@@ -63,6 +63,12 @@ let initCamY: number | null = null;
 let initCamZ: number | null = null;
 let initPitch = 0.0;
 let dumpPoseEveryFrame = false;
+// Shadow-drag repro: start at `initYaw`, let history accumulate for
+// `turnAt` frames, then snap to `turnYaw`. If a temporal pass is
+// reprojecting history wrong, the frames captured after the snap
+// will show a dark 'ghost' sliding across the frame.
+let turnYaw = Number.NaN;
+let turnAt = 0;
 for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -125,6 +131,15 @@ for (let i = 2; i < argv.length; i = i + 1) {
   // exact interactive view then replay via --cam-x/y/z --yaw --pitch.
   if (argv[i] === "--dump-pose") {
     dumpPoseEveryFrame = true;
+  }
+  // Shadow-drag repro: start at --yaw, let N frames accumulate,
+  // then snap to --turn-yaw. Capture with --capture frame where
+  // frame > turn-at to see the post-snap ghost.
+  if (argv[i] === "--turn-yaw" && i + 1 < argv.length) {
+    turnYaw = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--turn-at" && i + 1 < argv.length) {
+    turnAt = Math.floor(parseFloat(argv[i + 1]));
   }
 }
 
@@ -217,6 +232,16 @@ let cursorLocked = false;
 // ---- Main loop ----
 while (!windowShouldClose()) {
   const dt = getDeltaTime();
+
+  // Shadow-drag repro: at the configured frame, snap yaw to the
+  // target. The temporal passes have accumulated a full history
+  // at the original yaw; rotating now forces them to reproject
+  // that history, and any reprojection bug shows as a dark /
+  // bright ghost drifting across the frame over the next few
+  // captured frames.
+  if (!Number.isNaN(turnYaw) && frameCount === turnAt) {
+    camYaw = turnYaw;
+  }
 
   // Camera controls
   if (cursorLocked) {
