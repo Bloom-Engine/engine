@@ -3070,11 +3070,27 @@ struct TraceParams {
     clipmap: vec4<f32>,
 };
 
+struct SdfInstanceGiData {
+    albedo: vec3<f32>,
+    emissive_luma: f32,
+    normal_ws: vec3<f32>,
+    _pad0: f32,
+    card_slot: vec4<f32>,
+    card_aabb_min: vec4<f32>,
+    card_aabb_max: vec4<f32>,
+};
+
+const SDF_CARD_SLOTS_PER_ROW: f32 = 64.0;
+const SDF_CARD_SLOT_PX: u32 = 64u;
+
 @group(0) @binding(0) var<uniform> u: TraceParams;
 @group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
 @group(0) @binding(2) var clipmap_tex: texture_3d<f32>;
 @group(0) @binding(3) var clipmap_samp: sampler;
 @group(0) @binding(4) var radiance_out: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(5) var<storage, read> instance_data: array<SdfInstanceGiData>;
+@group(0) @binding(6) var card_atlas: texture_2d<f32>;
+@group(0) @binding(7) var card_samp: sampler;
 
 fn clipmap_uv(pos_ws: vec3<f32>) -> vec3<f32> {
     let half_extent = u.clipmap.w * 0.5;
@@ -3143,9 +3159,9 @@ fn cs_main(
     var radiance = vec3<f32>(0.0);
     if (hit) {
         let hit_pos = origin_ws + dir_ws * t;
-        // Finite-difference SDF gradient → surface normal. The
-        // clipmap is a UDF so the gradient always points away from
-        // the surface; negate to get the surface normal pointing out.
+
+        // UDF gradient → outward surface normal (flip since gradient
+        // points AWAY from the surface in an unsigned field).
         let h = voxel_size;
         let dx = clipmap_sample(hit_pos + vec3<f32>(h, 0.0, 0.0))
                - clipmap_sample(hit_pos - vec3<f32>(h, 0.0, 0.0));
@@ -3156,26 +3172,113 @@ fn cs_main(
         var grad = vec3<f32>(dx, dy, dz);
         let glen = length(grad);
         if (glen > 1e-4) { grad = grad / glen; }
-        // UDF gradient points away from surface — flip to face outward.
         let hit_n = -grad;
 
-        let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
-        let direct = u.sun_color.xyz * ndotl;
-        let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
-        let sky = u.sky_color.xyz * ndotup;
+        // Ticket 014 V4 — broad-phase lookup: walk `instance_data`,
+        // find the first AABB (slightly dilated) containing hit_pos.
+        // Pick the axis most aligned with the outward normal; project
+        // hit onto its card; sample the pre-lit radiance atlas. Falls
+        // back to analytic sun/sky × gray when no instance matches
+        // (clipmap sentinel voxels, hits inside unaccounted-for
+        // geometry, etc.).
+        let count = arrayLength(&instance_data);
+        var picked: i32 = -1;
+        for (var i: u32 = 0u; i < count; i = i + 1u) {
+            let ad = instance_data[i];
+            if (ad.card_slot.w < 0.5) { continue; }
+            let bmin = ad.card_aabb_min.xyz - vec3<f32>(0.05);
+            let bmax = ad.card_aabb_max.xyz + vec3<f32>(0.05);
+            if (hit_pos.x >= bmin.x && hit_pos.x <= bmax.x &&
+                hit_pos.y >= bmin.y && hit_pos.y <= bmax.y &&
+                hit_pos.z >= bmin.z && hit_pos.z <= bmax.z) {
+                picked = i32(i);
+                break;
+            }
+        }
 
-        // Constant gray albedo — SW path has no per-hit material
-        // lookup in V3. V4 can layer in the Mesh-Cards radiance atlas
-        // via a broad-phase instance lookup at the hit point.
-        let albedo = vec3<f32>(0.55, 0.55, 0.55);
+        if (picked >= 0) {
+            let ad = instance_data[u32(picked)];
+            // Pick signed axis from outward normal. Dominant component
+            // picks the axis; sign picks + or - face.
+            let abs_n = abs(hit_n);
+            var axis_idx: u32 = 0u;
+            if (abs_n.y >= abs_n.x && abs_n.y >= abs_n.z) {
+                axis_idx = 2u;
+            } else if (abs_n.z >= abs_n.x) {
+                axis_idx = 4u;
+            }
+            var signed_axis: u32 = axis_idx;
+            if (axis_idx == 0u && hit_n.x < 0.0) { signed_axis = 1u; }
+            else if (axis_idx == 2u && hit_n.y < 0.0) { signed_axis = 3u; }
+            else if (axis_idx == 4u && hit_n.z < 0.0) { signed_axis = 5u; }
 
-        let tn = t / max_t;
-        let falloff = max(1.0 - tn * tn, 0.0);
-        var raw = albedo * (direct + sky) * falloff;
-        let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-        let cap = u.params.w;
-        if (luma > cap) { raw = raw * (cap / luma); }
-        radiance = raw;
+            let first_slot = u32(ad.card_slot.x);
+            let slot = first_slot + signed_axis;
+            let slot_x = slot % 64u;
+            let slot_y = slot / 64u;
+
+            let bmin = ad.card_aabb_min.xyz;
+            let bmax = ad.card_aabb_max.xyz;
+            // Hit is in world space and Sponza meshes are in world
+            // space too (no per-instance transform beyond identity on
+            // the Sponza asset). For now use world-space hit directly;
+            // instances with a non-identity transform would need the
+            // transform stored on `instance_data` to round-trip.
+            var u_os: f32;
+            var v_os: f32;
+            var u_lo: f32; var u_hi: f32;
+            var v_lo: f32; var v_hi: f32;
+            var u_flip: f32 = 1.0;
+            if (signed_axis == 0u || signed_axis == 1u) {
+                u_os = hit_pos.y; v_os = hit_pos.z;
+                u_lo = bmin.y; u_hi = bmax.y; v_lo = bmin.z; v_hi = bmax.z;
+                if (signed_axis == 1u) { u_flip = -1.0; }
+            } else if (signed_axis == 2u || signed_axis == 3u) {
+                u_os = hit_pos.x; v_os = hit_pos.z;
+                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.z; v_hi = bmax.z;
+                if (signed_axis == 3u) { u_flip = -1.0; }
+            } else {
+                u_os = hit_pos.x; v_os = hit_pos.y;
+                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.y; v_hi = bmax.y;
+                if (signed_axis == 5u) { u_flip = -1.0; }
+            }
+            var u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
+            let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
+            if (u_flip < 0.0) { u_norm = 1.0 - u_norm; }
+            let slot_size_uv = 1.0 / SDF_CARD_SLOTS_PER_ROW;
+            let texel_in_slot = slot_size_uv / f32(SDF_CARD_SLOT_PX);
+            let slot_u0 = f32(slot_x) * slot_size_uv + texel_in_slot;
+            let slot_v0 = f32(slot_y) * slot_size_uv + texel_in_slot;
+            let slot_span = slot_size_uv - 2.0 * texel_in_slot;
+            let atlas_uv = vec2<f32>(
+                slot_u0 + u_norm * slot_span,
+                slot_v0 + v_norm * slot_span,
+            );
+            let pre_lit = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
+
+            let tn = t / max_t;
+            let falloff = max(1.0 - tn * tn, 0.0);
+            var raw = pre_lit * falloff;
+            let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let cap = u.params.w;
+            if (luma > cap) { raw = raw * (cap / luma); }
+            radiance = raw;
+        } else {
+            // Fallback — analytic sun/sky × gray albedo when no
+            // instance matches. Same shading as V3.
+            let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
+            let direct = u.sun_color.xyz * ndotl;
+            let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+            let sky = u.sky_color.xyz * ndotup;
+            let albedo = vec3<f32>(0.55, 0.55, 0.55);
+            let tn = t / max_t;
+            let falloff = max(1.0 - tn * tn, 0.0);
+            var raw = albedo * (direct + sky) * falloff;
+            let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let cap = u.params.w;
+            if (luma > cap) { raw = raw * (cap / luma); }
+            radiance = raw;
+        }
     }
 
     let intensity = u.params.y;

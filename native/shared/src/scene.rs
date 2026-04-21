@@ -680,11 +680,15 @@ impl SceneGraph {
                 node.gpu_vertex_count = node.vertices.len() as u32;
                 node.geo_dirty = false;
 
-                if hw_rt && !node.indices.is_empty() {
-                    // Cache flat normal + albedo while we still have the
-                    // CPU vertex array. Average of vertex normals into
-                    // world space via the node transform (rotation-only
-                    // part is fine for unit-length normalisation).
+                // Ticket 014 V4 — flat normal/albedo + card-slot
+                // allocation now happen regardless of `hw_rt`. The SW
+                // SDF sphere-trace's broad-phase hit uses these same
+                // per-instance fields to sample the card radiance
+                // atlas, so they need to be populated even when no
+                // BLAS / TLAS is built. BLAS + per-mesh SDF bake
+                // remain hw-rt-gated because only the HW trace reads
+                // those (and the per-mesh SDFs are currently dormant).
+                if !node.indices.is_empty() {
                     let mut n_sum = [0.0_f32; 3];
                     for v in &node.vertices {
                         n_sum[0] += v.normal[0];
@@ -704,32 +708,10 @@ impl SceneGraph {
                     }
                     node.flat_albedo = node.material.color;
 
-                    // Create the Blas object. Actual build happens in
-                    // the renderer's main encoder via
-                    // `build_acceleration_structures`.
-                    let size_desc = wgpu::BlasTriangleGeometrySizeDescriptor {
-                        vertex_format: wgpu::VertexFormat::Float32x3,
-                        vertex_count: node.gpu_vertex_count,
-                        index_format: Some(wgpu::IndexFormat::Uint32),
-                        index_count: Some(node.gpu_index_count),
-                        flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
-                    };
-                    node.blas = Some(device.create_blas(
-                        &wgpu::CreateBlasDescriptor {
-                            label: Some("scene_node_blas"),
-                            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
-                            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
-                        },
-                        wgpu::BlasGeometrySizeDescriptors::Triangles {
-                            descriptors: vec![size_desc],
-                        },
-                    ));
-                    pending_blas.push(handle);
-
-                    // Ticket 013 V2 — allocate 6 consecutive slots
-                    // (one per signed AABB axis) and schedule the
-                    // capture pass to bake all six albedo views at
-                    // next frame start.
+                    // Ticket 013 V2 — allocate 6 consecutive slots per
+                    // signed AABB axis and schedule the capture pass.
+                    // Runs on both HW and SW paths so the SDF trace's
+                    // broad-phase hit can sample textured radiance.
                     if node.card_first_slot.is_none() {
                         let first = *next_card_slot;
                         *next_card_slot += 6;
@@ -737,23 +719,43 @@ impl SceneGraph {
                         pending_cards.push(handle);
                     }
 
-                    // Ticket 014 — allocate the per-mesh SDF texture
-                    // once, and enqueue the bake for the compute pass.
-                    // Only when bounds are sensible (skip degenerate
-                    // meshes where min >= max on an axis, which would
-                    // produce a zero-volume sampling box).
-                    if node.mesh_sdf.is_none()
-                        && node.bounds_min[0] < node.bounds_max[0]
-                        && node.bounds_min[1] < node.bounds_max[1]
-                        && node.bounds_min[2] < node.bounds_max[2]
-                    {
-                        let (sdf_tex, sdf_view) = crate::renderer::create_mesh_sdf_texture_public(
-                            device,
-                            "scene_node_sdf",
-                        );
-                        node.mesh_sdf = Some(sdf_tex);
-                        node.mesh_sdf_view = Some(sdf_view);
-                        pending_sdf.push(handle);
+                    if hw_rt {
+                        // BLAS creation only on HW-RT adapters.
+                        let size_desc = wgpu::BlasTriangleGeometrySizeDescriptor {
+                            vertex_format: wgpu::VertexFormat::Float32x3,
+                            vertex_count: node.gpu_vertex_count,
+                            index_format: Some(wgpu::IndexFormat::Uint32),
+                            index_count: Some(node.gpu_index_count),
+                            flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+                        };
+                        node.blas = Some(device.create_blas(
+                            &wgpu::CreateBlasDescriptor {
+                                label: Some("scene_node_blas"),
+                                flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                                update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                            },
+                            wgpu::BlasGeometrySizeDescriptors::Triangles {
+                                descriptors: vec![size_desc],
+                            },
+                        ));
+                        pending_blas.push(handle);
+
+                        // Per-mesh SDF texture — currently dormant (V4
+                        // dynamic-scene merge will consume it), but
+                        // cheap to allocate alongside the BLAS.
+                        if node.mesh_sdf.is_none()
+                            && node.bounds_min[0] < node.bounds_max[0]
+                            && node.bounds_min[1] < node.bounds_max[1]
+                            && node.bounds_min[2] < node.bounds_max[2]
+                        {
+                            let (sdf_tex, sdf_view) = crate::renderer::create_mesh_sdf_texture_public(
+                                device,
+                                "scene_node_sdf",
+                            );
+                            node.mesh_sdf = Some(sdf_tex);
+                            node.mesh_sdf_view = Some(sdf_view);
+                            pending_sdf.push(handle);
+                        }
                     }
                 }
             }
@@ -766,7 +768,7 @@ impl SceneGraph {
             // their card atlas slots get re-captured to track
             // animated geometry. Static meshes (default) stay out of
             // the queue after their one-shot first-frame capture.
-            if hw_rt && node.card_dynamic && node.card_first_slot.is_some() {
+            if node.card_dynamic && node.card_first_slot.is_some() {
                 pending_cards.push(handle);
             }
 

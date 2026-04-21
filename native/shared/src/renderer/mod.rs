@@ -3414,6 +3414,28 @@ impl Renderer {
                         view_dimension: wgpu::TextureViewDimension::D3,
                     }, count: None,
                 },
+                // V4 — instance_data + card radiance atlas + sampler
+                // for the broad-phase textured hit lookup.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let probe_trace_sdf_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -5462,71 +5484,44 @@ impl Renderer {
     /// Encodes `build_acceleration_structures` into the caller's
     /// `encoder` so the builds are ordered ahead of the trace pass
     /// without a separate queue submit.
-    fn rebuild_acceleration_structures(
+    /// Ticket 014 V4 — rebuild the per-instance GI data buffer. Runs
+    /// regardless of `hw_rt_enabled` so the SW SDF trace can also
+    /// broad-phase this buffer at hit to sample the Mesh-Cards
+    /// radiance atlas. Instance ordering matches the TLAS rebuild
+    /// (nodes with a card slot, in scene order) so the `instance_count`
+    /// / `instance_custom_data` conventions stay consistent across
+    /// HW and SW trace paths.
+    fn rebuild_instance_data(
         &mut self,
-        scene: &mut crate::scene::SceneGraph,
-        encoder: &mut wgpu::CommandEncoder,
-    ) {
-        if !self.hw_rt_enabled {
-            return;
-        }
-        let pending = !scene.pending_blas_builds.is_empty();
-        let version_changed = scene.tlas_version != self.tlas_built_version;
-        if !pending && !version_changed {
-            return;
-        }
-
-        // Collect handles of visible nodes that have a BLAS. These are
-        // the TLAS instances this frame. Ordering stays consistent
-        // across frames while the scene is stable, so instance_custom_data
-        // (= slot index) can key into the instance_data storage buffer.
-        let mut instance_handles: Vec<f64> = Vec::new();
-        for (h, n) in scene.nodes.iter() {
-            if n.visible && n.blas.is_some() {
-                instance_handles.push(h);
-            }
-        }
+        scene: &crate::scene::SceneGraph,
+        instance_handles: &[f64],
+    ) -> (u32, bool) {
         let instance_count = instance_handles.len() as u32;
-        if instance_count == 0 && !pending {
-            // Nothing to do — leave tlas_built_version unchanged so a
-            // future scene change still triggers a rebuild.
-            return;
-        }
-
-        // Size / create the TLAS + instance-data buffer if this is the
-        // first build or we've outgrown capacity.
-        if self.tlas.is_none() || instance_count > self.tlas_max_instances {
-            let new_cap = instance_count.max(self.tlas_max_instances).max(64)
-                .next_power_of_two();
-            self.tlas = Some(self.device.create_tlas(&wgpu::CreateTlasDescriptor {
-                label: Some("bloom_tlas"),
-                max_instances: new_cap,
-                flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
-                update_mode: wgpu::AccelerationStructureUpdateMode::Build,
-            }));
-            self.tlas_max_instances = new_cap;
+        let mut resized = false;
+        let needed_cap = instance_count.max(self.tlas_max_instances).max(64);
+        if self.tlas_instance_data_buffer.is_none()
+            || needed_cap > self.tlas_max_instances
+        {
+            let new_cap = needed_cap.next_power_of_two();
             self.tlas_instance_data_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("tlas_instance_data"),
-                size: (new_cap as u64)
-                    * std::mem::size_of::<InstanceGiDataCpu>() as u64,
+                size: (new_cap as u64) * std::mem::size_of::<InstanceGiDataCpu>() as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
-            // Cached HW trace bind group references the TLAS + buffer
-            // we just replaced — invalidate.
+            self.tlas_max_instances = new_cap;
             self.probe_trace_hw_bg_cache = None;
+            // V4 — SDF bind group also references instance_data, so
+            // invalidate when the buffer is re-allocated.
+            self.probe_trace_sdf_bg_cache = None;
+            resized = true;
         }
 
-        // Write per-instance GI data (flat albedo + normal + emissive
-        // + ticket-013 card slot + AABB for object-space projection).
         let mut instance_data: Vec<InstanceGiDataCpu> =
             Vec::with_capacity(instance_count as usize);
-        for &h in &instance_handles {
+        for &h in instance_handles {
             let n = scene.nodes.get(h).unwrap();
             let e = n.material.emissive;
-            // Ticket 013 V2 — first-slot stored as a float; shader
-            // does `slot = first + axis` arithmetic and derives slot
-            // coords from that, so the xy/axis split of V1 is gone.
             let (first_slot, has_card) = match n.card_first_slot {
                 Some(s) => (s as f32, 1.0_f32),
                 None => (0.0, 0.0),
@@ -5547,6 +5542,54 @@ impl Renderer {
                 0,
                 bytemuck::cast_slice(&instance_data),
             );
+        }
+        (instance_count, resized)
+    }
+
+    fn rebuild_acceleration_structures(
+        &mut self,
+        scene: &mut crate::scene::SceneGraph,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        // V4 — SW path also needs a populated instance_data buffer
+        // for its broad-phase hit lookup. Collect instance handles
+        // (nodes with a card slot, stable scene order) first, then
+        // branch on `hw_rt_enabled` for TLAS/BLAS-specific work.
+        let pending_blas = !scene.pending_blas_builds.is_empty();
+        let version_changed = scene.tlas_version != self.tlas_built_version;
+        if !pending_blas && !version_changed {
+            return;
+        }
+
+        let mut instance_handles: Vec<f64> = Vec::new();
+        for (h, n) in scene.nodes.iter() {
+            if n.visible && n.card_first_slot.is_some() {
+                instance_handles.push(h);
+            }
+        }
+        let (instance_count, _resized) = self.rebuild_instance_data(scene, &instance_handles);
+
+        // Everything below this point is HW-ray-tracing-specific
+        // (TLAS build + BLAS batch). On SW adapters we're done.
+        if !self.hw_rt_enabled {
+            self.tlas_built_version = scene.tlas_version;
+            return;
+        }
+
+        let pending = pending_blas;
+        if instance_count == 0 && !pending {
+            return;
+        }
+
+        if self.tlas.is_none() || instance_count > self.tlas_max_instances {
+            let cap = self.tlas_max_instances.max(64);
+            self.tlas = Some(self.device.create_tlas(&wgpu::CreateTlasDescriptor {
+                label: Some("bloom_tlas"),
+                max_instances: cap,
+                flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+            }));
+            self.probe_trace_hw_bg_cache = None;
         }
 
         // Populate TLAS instance slots. Clear stale entries from prior
@@ -7463,12 +7506,14 @@ impl Renderer {
                 && self.probe_trace_hw_pipeline.is_some()
                 && self.tlas.is_some()
                 && self.tlas_instance_data_buffer.is_some();
-            // Ticket 014 V3 — pick SDF sphere-trace over Hi-Z when the
-            // scene clipmap has been baked. Lets SW-only adapters
-            // (web, older Android, Intel iGPU) pull off-screen bleed
-            // into the bounce instead of being limited to screen
-            // space.
-            let use_sdf = !use_hw && self.scene_sdf_clipmap_built;
+            // Ticket 014 V3/V4 — pick SDF sphere-trace over Hi-Z when
+            // the scene clipmap is baked AND the instance-data buffer
+            // is ready (needed for broad-phase textured hit sampling
+            // added in V4). Otherwise fall through to Hi-Z. HW still
+            // wins over both when the feature was granted.
+            let use_sdf = !use_hw
+                && self.scene_sdf_clipmap_built
+                && self.tlas_instance_data_buffer.is_some();
 
             if use_hw {
                 // Build the HW bind group lazily; the TLAS view changes
@@ -7504,11 +7549,6 @@ impl Renderer {
             } else if use_sdf {
                 // Ticket 014 V3 — SW SDF sphere-trace path.
                 if self.probe_trace_sdf_bg_cache.is_none() {
-                    // Reuse the card-atlas filtering sampler? No —
-                    // the clipmap binding demands NonFiltering, so we
-                    // build a dedicated non-filtering sampler inline.
-                    // The sampler is cheap; keeping the binding local
-                    // avoids a Renderer-field just for this.
                     let nf_samp = self.device.create_sampler(&wgpu::SamplerDescriptor {
                         label: Some("clipmap_nonfiltering_sampler"),
                         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -7519,6 +7559,8 @@ impl Renderer {
                         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
                         ..Default::default()
                     });
+                    let instance_buf = self.tlas_instance_data_buffer.as_ref()
+                        .expect("V4: instance_data buffer must exist before SDF dispatch");
                     self.probe_trace_sdf_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("probe_trace_sdf_bg"),
                         layout: &self.probe_trace_sdf_layout,
@@ -7528,6 +7570,9 @@ impl Renderer {
                             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.scene_sdf_clipmap_view) },
                             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&nf_samp) },
                             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.probe_trace_view) },
+                            wgpu::BindGroupEntry { binding: 5, resource: instance_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
+                            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
                         ],
                     }));
                 }
