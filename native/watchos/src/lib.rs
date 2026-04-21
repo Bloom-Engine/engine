@@ -787,18 +787,15 @@ pub extern "C" fn bloom_gen_mesh_cube(w: f64, h: f64, d: f64) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, _mesh_idx: f64) {
     let Some(model) = models::get(model_handle as u32) else { return; };
-    // Clone the model's mesh data into the node. Scene's geometry version
-    // bumps, Swift rebuilds the SCNGeometry on next frame.
-    scene::set_geometry(
-        node_handle as u32,
-        model.positions.clone(),
-        model.normals.clone(),
-        model.uvs.clone(),
-        model.indices.clone(),
-    );
-    // Also apply the model's baseColor + PBR factors as the node material.
-    scene::set_color(node_handle as u32, model.color);
-    scene::set_pbr(node_handle as u32, model.roughness, model.metallic);
+    let node = node_handle as u32;
+    scene::set_geometry(node,
+        model.positions.clone(), model.normals.clone(),
+        model.uvs.clone(), model.indices.clone());
+    scene::set_color(node, model.color);
+    scene::set_pbr(node, model.roughness, model.metallic);
+    scene::set_pbr_textures(node,
+        model.tex_base_color, model.tex_normal,
+        model.tex_metallic_roughness, model.tex_emissive, model.tex_occlusion);
 }
 
 // ============================================================

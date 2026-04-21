@@ -8,6 +8,7 @@
 import SwiftUI
 import Foundation
 import SceneKit
+import ImageIO
 
 // MARK: - FFI into the Rust side
 
@@ -70,6 +71,14 @@ struct SceneNodeInfo {
         Float, Float, Float, Float,
         Float, Float, Float, Float
     ) = (1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)
+
+    // PBR texture slots (0 = unset).
+    var texBaseColor: UInt32 = 0
+    var texNormal: UInt32 = 0
+    var texMetallicRoughness: UInt32 = 0
+    var texEmissive: UInt32 = 0
+    var texOcclusion: UInt32 = 0
+    var _pad: UInt32 = 0
 }
 
 struct SceneLight {
@@ -167,12 +176,11 @@ final class TextureCache {
         if let img = cache[handle] { return img }
         guard let cpath = bloom_watchos_texture_path(handle) else { return nil }
         let path = String(cString: cpath)
-        guard let url = URL(string: "file://" + path) ?? URL(fileURLWithPath: path) as URL?,
-              let provider = CGDataProvider(url: url as CFURL),
-              let img = CGImage(pngDataProviderSource: provider,
-                                decode: nil,
-                                shouldInterpolate: false,
-                                intent: .defaultIntent)
+        let url = URL(fileURLWithPath: path)
+        // Use CGImageSource so we transparently load PNG, JPEG, and anything
+        // else ImageIO understands — the glTF loader embeds JPEGs too.
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil)
         else { return nil }
         cache[handle] = img
         return img
@@ -482,23 +490,56 @@ struct BloomSceneView: View {
             if let g = node.geometry {
                 let m = g.firstMaterial ?? SCNMaterial()
                 m.lightingModel = .physicallyBased
-                m.diffuse.contents = UIColor(
-                    red: CGFloat(info.color.0),
-                    green: CGFloat(info.color.1),
-                    blue: CGFloat(info.color.2),
-                    alpha: CGFloat(info.color.3)
-                )
-                m.roughness.contents = NSNumber(value: info.roughness)
-                m.metalness.contents = NSNumber(value: info.metalness)
-                if info.texture != 0,
-                   let cpath = bloom_watchos_texture_path(info.texture) {
-                    let p = String(cString: cpath)
-                    if let img = TextureCache.shared.image(for: info.texture) {
-                        m.diffuse.contents = img
-                    } else {
-                        m.diffuse.contents = p
-                    }
+
+                // Base color: texture wins over factor when present.
+                let baseColorTex = info.texBaseColor != 0 ? info.texBaseColor : info.texture
+                if baseColorTex != 0, let img = TextureCache.shared.image(for: baseColorTex) {
+                    m.diffuse.contents = img
+                } else {
+                    m.diffuse.contents = UIColor(
+                        red: CGFloat(info.color.0),
+                        green: CGFloat(info.color.1),
+                        blue: CGFloat(info.color.2),
+                        alpha: CGFloat(info.color.3)
+                    )
                 }
+
+                // Normal map.
+                if info.texNormal != 0, let img = TextureCache.shared.image(for: info.texNormal) {
+                    m.normal.contents = img
+                } else {
+                    m.normal.contents = nil
+                }
+
+                // Metallic-roughness: glTF packs metalness in B, roughness in G
+                // into one texture. SceneKit's .metalness + .roughness channels
+                // pointing at the same image each sample the correct channel
+                // by convention when .textureComponents is set.
+                if info.texMetallicRoughness != 0,
+                   let img = TextureCache.shared.image(for: info.texMetallicRoughness) {
+                    m.metalness.contents = img
+                    m.metalness.textureComponents = .blue
+                    m.roughness.contents = img
+                    m.roughness.textureComponents = .green
+                } else {
+                    m.metalness.contents = NSNumber(value: info.metalness)
+                    m.roughness.contents = NSNumber(value: info.roughness)
+                }
+
+                // Emissive.
+                if info.texEmissive != 0, let img = TextureCache.shared.image(for: info.texEmissive) {
+                    m.emission.contents = img
+                } else {
+                    m.emission.contents = nil
+                }
+
+                // AO.
+                if info.texOcclusion != 0, let img = TextureCache.shared.image(for: info.texOcclusion) {
+                    m.ambientOcclusion.contents = img
+                } else {
+                    m.ambientOcclusion.contents = nil
+                }
+
                 g.materials = [m]
             }
         }

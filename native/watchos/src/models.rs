@@ -22,6 +22,12 @@ pub struct Model {
     pub color: [f32; 4],
     pub metallic: f32,
     pub roughness: f32,
+    /// PBR texture slots — texture registry handles (0 = none).
+    pub tex_base_color: u32,
+    pub tex_normal: u32,
+    pub tex_metallic_roughness: u32,
+    pub tex_emissive: u32,
+    pub tex_occlusion: u32,
 }
 
 static MODELS: Mutex<Vec<Option<Arc<Model>>>> = Mutex::new(Vec::new());
@@ -100,11 +106,18 @@ fn parse_glb(bytes: &[u8]) -> Option<Model> {
 
     // Material: default white if not referenced.
     let mut color = [1.0f32; 4];
-    let mut metallic = 0.0f32;
-    let mut roughness = 0.6f32;
+    let mut metallic = 1.0f32;    // glTF spec default when factor not given
+    let mut roughness = 1.0f32;
+    let mut tex_base_color = 0u32;
+    let mut tex_normal = 0u32;
+    let mut tex_metallic_roughness = 0u32;
+    let mut tex_emissive = 0u32;
+    let mut tex_occlusion = 0u32;
+
     if let Some(mi) = mat_idx {
         if let Some(mats) = root.get("materials").and_then(|v| v.arr()) {
             if let Some(mat) = mats.get(mi) {
+                // pbrMetallicRoughness block
                 if let Some(pbr) = mat.get("pbrMetallicRoughness") {
                     if let Some(bc) = pbr.get("baseColorFactor").and_then(|v| v.arr()) {
                         for (i, n) in bc.iter().take(4).enumerate() {
@@ -117,12 +130,42 @@ fn parse_glb(bytes: &[u8]) -> Option<Model> {
                     if let Some(r) = pbr.get("roughnessFactor").and_then(|v| v.num()) {
                         roughness = r as f32;
                     }
+                    tex_base_color = resolve_texture(&root, pbr, "baseColorTexture", bin_bytes);
+                    tex_metallic_roughness = resolve_texture(&root, pbr, "metallicRoughnessTexture", bin_bytes);
                 }
+                tex_normal = resolve_texture(&root, mat, "normalTexture", bin_bytes);
+                tex_emissive = resolve_texture(&root, mat, "emissiveTexture", bin_bytes);
+                tex_occlusion = resolve_texture(&root, mat, "occlusionTexture", bin_bytes);
             }
         }
     }
 
-    Some(Model { positions, normals, uvs, indices, color, metallic, roughness })
+    Some(Model {
+        positions, normals, uvs, indices,
+        color, metallic, roughness,
+        tex_base_color, tex_normal, tex_metallic_roughness, tex_emissive, tex_occlusion,
+    })
+}
+
+/// Chase a material.<slotName>.index → textures[i].source → images[j]
+/// → bufferViews[k] → BIN bytes, register via crate::textures. Returns the
+/// texture handle or 0 on any missing link.
+fn resolve_texture(root: &JVal, parent: &JVal, slot_name: &str, bin: &[u8]) -> u32 {
+    let Some(slot) = parent.get(slot_name) else { return 0 };
+    let Some(tex_idx) = slot.get("index").and_then(|v| v.num()) else { return 0 };
+    let Some(textures) = root.get("textures").and_then(|v| v.arr()) else { return 0 };
+    let Some(tex) = textures.get(tex_idx as usize) else { return 0 };
+    let Some(src_idx) = tex.get("source").and_then(|v| v.num()) else { return 0 };
+    let Some(images) = root.get("images").and_then(|v| v.arr()) else { return 0 };
+    let Some(img) = images.get(src_idx as usize) else { return 0 };
+    let Some(bv_idx) = img.get("bufferView").and_then(|v| v.num()) else { return 0 };
+    let Some(buf_views) = root.get("bufferViews").and_then(|v| v.arr()) else { return 0 };
+    let Some(bv) = buf_views.get(bv_idx as usize) else { return 0 };
+
+    let off = bv.get("byteOffset").and_then(|v| v.num()).unwrap_or(0.0) as usize;
+    let len = bv.get("byteLength").and_then(|v| v.num()).unwrap_or(0.0) as usize;
+    if off + len > bin.len() { return 0; }
+    crate::textures::register_bytes(&bin[off..off + len])
 }
 
 fn u32_le(b: &[u8], o: usize) -> u32 {
@@ -361,6 +404,8 @@ pub fn gen_cube_mesh(w: f32, h: f32, d: f32) -> u32 {
         positions, normals, uvs, indices,
         color: [1.0, 1.0, 1.0, 1.0],
         metallic: 0.0, roughness: 0.6,
+        tex_base_color: 0, tex_normal: 0, tex_metallic_roughness: 0,
+        tex_emissive: 0, tex_occlusion: 0,
     })));
     (reg.len() - 1) as u32
 }

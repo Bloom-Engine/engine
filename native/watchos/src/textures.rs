@@ -49,6 +49,71 @@ pub fn load(path: &str) -> u32 {
     reg.entries.len() as u32
 }
 
+/// Register in-memory image bytes (PNG or JPEG) by writing them to a temp
+/// file inside the app's sandbox and returning a handle. Used by the glTF
+/// loader for embedded textures. Returns 0 on failure.
+pub fn register_bytes(bytes: &[u8]) -> u32 {
+    if bytes.len() < 8 { return 0; }
+    let (ext, (w, h)) = detect_image(bytes);
+    if ext.is_empty() { return 0; }
+
+    // Write to a stable path inside the temp dir. We include a counter so
+    // distinct blobs don't collide.
+    let mut reg = REG.lock().unwrap();
+    let idx = reg.entries.len();
+    let dir = std::env::temp_dir().join("bloom_watchos_tex");
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join(format!("tex_{}.{}", idx, ext));
+    if std::fs::write(&file, bytes).is_err() { return 0; }
+
+    let path_str = file.to_string_lossy().to_string();
+    let Ok(cpath) = CString::new(path_str) else { return 0; };
+    reg.entries.push(TexEntry { path: cpath, width: w, height: h });
+    reg.entries.len() as u32
+}
+
+/// Detect PNG or JPEG by magic bytes, returning extension + (width, height).
+/// Both formats are common in glTF .glb embeds.
+fn detect_image(b: &[u8]) -> (&'static str, (u32, u32)) {
+    // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+    if b.len() >= 24 && b[0] == 0x89 && &b[1..4] == b"PNG" && &b[12..16] == b"IHDR" {
+        let w = u32::from_be_bytes([b[16], b[17], b[18], b[19]]);
+        let h = u32::from_be_bytes([b[20], b[21], b[22], b[23]]);
+        return ("png", (w, h));
+    }
+    // JPEG signature: FF D8 ... look for SOF0 / SOF2 marker for dimensions.
+    if b.len() >= 4 && b[0] == 0xFF && b[1] == 0xD8 {
+        if let Some(dims) = parse_jpeg_size(b) {
+            return ("jpg", dims);
+        }
+        return ("jpg", (0, 0));
+    }
+    ("", (0, 0))
+}
+
+/// Walk JPEG segments until a Start-Of-Frame marker, read (h, w).
+fn parse_jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
+    let mut i = 2;
+    while i + 9 < b.len() {
+        if b[i] != 0xFF { return None; }
+        let marker = b[i + 1];
+        i += 2;
+        // Standalone markers (no length field)
+        if marker == 0xD8 || marker == 0xD9 { continue; }
+        if i + 2 > b.len() { return None; }
+        let seg_len = u16::from_be_bytes([b[i], b[i+1]]) as usize;
+        // SOF0 (0xC0), SOF1 (0xC1), SOF2 (0xC2) — baseline + progressive.
+        if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
+            if i + 7 > b.len() { return None; }
+            let h = u16::from_be_bytes([b[i+3], b[i+4]]) as u32;
+            let w = u16::from_be_bytes([b[i+5], b[i+6]]) as u32;
+            return Some((w, h));
+        }
+        i += seg_len;
+    }
+    None
+}
+
 pub fn width(handle: u32) -> u32 {
     let reg = REG.lock().unwrap();
     if handle == 0 || handle as usize > reg.entries.len() {

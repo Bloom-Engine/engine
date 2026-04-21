@@ -23,10 +23,22 @@ pub struct SceneNodeInfo {
     pub color: [f32; 4],
     pub roughness: f32,
     pub metalness: f32,
+    /// Legacy single-slot texture handle (diffuse / base color). Kept for
+    /// bloom_scene_set_material_texture which predates the PBR slot set.
     pub texture: u32,
     pub has_geometry: u32,
 
     pub transform: [f32; 16],
+
+    /// PBR texture slots — set via bloom_scene_attach_model from a loaded
+    /// glTF material. 0 = not set (fall back to color / roughness /
+    /// metalness factors instead).
+    pub tex_base_color: u32,
+    pub tex_normal: u32,
+    pub tex_metallic_roughness: u32,
+    pub tex_emissive: u32,
+    pub tex_occlusion: u32,
+    pub _pad: u32,
 }
 
 struct Node {
@@ -37,7 +49,12 @@ struct Node {
     roughness: f32,
     metalness: f32,
     texture: u32,
-    positions: Vec<f32>,   // xyz interleaved, length = vcount * 3
+    tex_base_color: u32,
+    tex_normal: u32,
+    tex_metallic_roughness: u32,
+    tex_emissive: u32,
+    tex_occlusion: u32,
+    positions: Vec<f32>,
     normals: Vec<f32>,
     uvs: Vec<f32>,
     indices: Vec<u32>,
@@ -56,6 +73,8 @@ impl Node {
             roughness: 0.6,
             metalness: 0.0,
             texture: 0,
+            tex_base_color: 0, tex_normal: 0, tex_metallic_roughness: 0,
+            tex_emissive: 0, tex_occlusion: 0,
             positions: Vec::new(),
             normals: Vec::new(),
             uvs: Vec::new(),
@@ -140,6 +159,19 @@ pub fn set_pbr(handle: u32, rough: f32, metal: f32) {
     mutate(handle, |n| { n.roughness = rough; n.metalness = metal; });
 }
 pub fn set_texture(handle: u32, tex: u32) { mutate(handle, |n| n.texture = tex); }
+
+pub fn set_pbr_textures(handle: u32,
+    base_color: u32, normal: u32, metallic_roughness: u32,
+    emissive: u32, occlusion: u32,
+) {
+    mutate(handle, |n| {
+        n.tex_base_color = base_color;
+        n.tex_normal = normal;
+        n.tex_metallic_roughness = metallic_roughness;
+        n.tex_emissive = emissive;
+        n.tex_occlusion = occlusion;
+    });
+}
 
 /// TS → native FFI layout: 12 f64s per vertex — xyz, nx ny nz, rgba, uv.
 /// Color is ignored (material color wins via bloom_scene_set_material_color).
@@ -236,6 +268,12 @@ pub fn copy_nodes(dst: *mut SceneNodeInfo, max: i64) -> i64 {
                 texture: n.texture,
                 has_geometry: if n.indices.is_empty() { 0 } else { 1 },
                 transform: n.transform,
+                tex_base_color: n.tex_base_color,
+                tex_normal: n.tex_normal,
+                tex_metallic_roughness: n.tex_metallic_roughness,
+                tex_emissive: n.tex_emissive,
+                tex_occlusion: n.tex_occlusion,
+                _pad: 0,
             };
             unsafe { *dst.add(written as usize) = info; }
             written += 1;
