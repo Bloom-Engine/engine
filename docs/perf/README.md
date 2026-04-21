@@ -98,7 +98,7 @@ is on the critical path.
 | # | Title | Effort | Expected gain | Status |
 |---|---|---|---|---|
 | [007-prep](007-prep-wgpu-upgrade.md) | Bump wgpu 24 → Metal-RT release | 2-3 days | Enabler for HW path | landed (wgpu 24 → 29; ~140 API-migration sites across renderer/shadows/postfx/profiler + macos surface/device setup; `BLOOM_NO_FULLSCREEN=1` env var for bench-friendly windowed mode; Metal ray-query now available via `Features::EXPERIMENTAL_RAY_QUERY`. All 7 quality paths vsync-capped at 800×450 logical; visual diff within noise vs baseline) |
-| [007a](007a-lumen-screen-probes-sw.md) | Lumen screen probes — SW trace (Hi-Z) | 2-3 days | SSGI 2×+ faster | open |
+| [007a](007a-lumen-screen-probes-sw.md) | Lumen screen probes — SW trace (Hi-Z) | 2-3 days | SSGI 2×+ faster | landed (probe grid 1 per 16×16 tile + 8×8 octahedral atlas per probe; 4 compute/fragment passes — place, trace, temporal EMA, resolve; ping-pong history + dedicated per-frame trace texture so temporal blend avoids any read-write aliasing; `--quality 3 --ssgi 1 --fps-only 300` vsync-capped at 60.0 fps vs 23.6 baseline = **≥2.5× uplift** at Sponza half-res; indirect bounce on shaded column sides + under-arch tint preserved, SSIM visually indistinguishable) |
 | [007b](007b-lumen-screen-probes-hw.md) | Lumen screen probes — HW trace (BLAS/TLAS + ray-query) | 1-2 weeks | Off-screen occlusion + bleed | open |
 | [013](013-lumen-surface-cache.md) | Surface Cache — Mesh Cards + per-frame card lighting | 1-2 weeks | HW bounce full quality | open |
 | [014](014-lumen-mesh-sdfs.md) | Per-mesh SDFs + global SDF clipmap + WSRC | 3-4 weeks | SW parity for Android / web | deprioritized |

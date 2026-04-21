@@ -23,7 +23,9 @@ use formats::{
     create_depth_texture, create_hdr_rt, create_material_rt,
     create_albedo_rt, create_velocity_rt, create_ssr_rt,
     create_ssr_history_textures,
-    create_ssgi_rt, create_ssgi_history_textures, create_taa_textures,
+    create_ssgi_rt, create_probe_trace_tex, create_probe_history_textures,
+    probe_grid_dims, PROBE_TILE_SIZE, PROBE_OCT_SIZE, PROBE_OCT_TEXELS,
+    create_taa_textures,
     create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
     create_exposure_textures, create_composed_rt, create_dof_rt,
     create_linear_depth_hiz_chain, create_bloom_chain, halton,
@@ -206,20 +208,58 @@ struct SssParams {
 // SSGI (Screen-Space Global Illumination) post-process
 // ============================================================
 
+// Ticket 007a: per-pass uniform params for the screen-probe SSGI chain.
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SsgiParams {
-    inv_proj: [[f32; 4]; 4],
-    proj: [[f32; 4]; 4],
-    /// x = intensity, y = radius, z = n_samples, w = frame_index
+struct ProbePlaceParams {
+    inv_view: [[f32; 4]; 4],
+    /// x = proj[0][0], y = proj[1][1], z = proj[2][0], w = proj[2][1]
+    proj_row01: [f32; 4],
+    /// x = half_w, y = half_h, z = grid_w, w = grid_h
+    size: [u32; 4],
+    /// x = frame_index, y = tile_size (16.0), zw unused
     params: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SsgiTemporalParams {
-    /// x = blend_alpha (0.1), y = depth_reject_threshold, zw unused
+struct ProbeTraceParams {
+    view: [[f32; 4]; 4],
+    proj: [[f32; 4]; 4],
+    inv_view: [[f32; 4]; 4],
+    proj_row01: [f32; 4],
+    size: [u32; 4],
+    /// x = frame_index, y = intensity, z = max_march_t (world units),
+    /// w = firefly luma cap.
     params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ProbeTemporalParams {
+    /// x = alpha (EMA), y = force_refresh (1→alpha=1), z = grid_w (f32), w = grid_h (f32)
+    params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ProbeResolveParams {
+    inv_view: [[f32; 4]; 4],
+    proj_row01: [f32; 4],
+    /// x = half_w, y = half_h, z = grid_w, w = grid_h
+    size: [u32; 4],
+    /// x = tile_size (16.0), y = intensity, zw unused
+    params: [f32; 4],
+}
+
+/// On-GPU `ProbeHeader` layout (must match PROBE_HELPERS_WGSL's struct).
+/// 32 bytes per probe.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ProbeHeaderCpu {
+    world_pos: [f32; 4],
+    normal: [f32; 4],
 }
 
 #[repr(C)]
@@ -527,7 +567,6 @@ pub struct Renderer {
     /// clear. Resets to 0 on resize and when SSAO toggles back on.
     pub ssao_history_frame: u32,
     ssr_bg_cache: Option<wgpu::BindGroup>,
-    ssgi_bg_cache: Option<wgpu::BindGroup>,
     /// TAA history ping-pong. Two HDR-format textures the same size
     /// as the surface — each frame writes to one, reads the other as
     /// history. `taa_current_idx` flips after every frame.
@@ -605,27 +644,56 @@ pub struct Renderer {
 
     /// SSGI (screen-space global illumination) pass output — half-res
     /// HDR holding the indirect diffuse bounce light for each fragment.
-    /// Composited into the final image by the TAA pass.
+    /// Ticket 007a: written by the probe-resolve pass, composited by
+    /// the TAA pass. No other code path touches `ssgi_rt_view`.
     pub ssgi_rt_texture: wgpu::Texture,
     pub ssgi_rt_view: wgpu::TextureView,
-    pub ssgi_pipeline: wgpu::RenderPipeline,
-    pub ssgi_layout: wgpu::BindGroupLayout,
-    pub ssgi_uniform_buffer: wgpu::Buffer,
     /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
     pub ssgi_intensity: f32,
     /// SSGI max march distance in view-space meters.
     pub ssgi_radius: f32,
-    /// SSGI master switch. Default true (temporal denoiser keeps it clean).
+    /// SSGI master switch.
     pub ssgi_enabled: bool,
 
-    /// SSGI temporal denoiser: ping-pong history textures (same format/size
-    /// as ssgi_rt). Each frame blends noisy SSGI with reprojected history.
-    pub ssgi_history_textures: [wgpu::Texture; 2],
-    pub ssgi_history_views: [wgpu::TextureView; 2],
-    pub ssgi_history_idx: usize,
-    pub ssgi_temporal_pipeline: wgpu::RenderPipeline,
-    pub ssgi_temporal_layout: wgpu::BindGroupLayout,
-    pub ssgi_temporal_uniform_buffer: wgpu::Buffer,
+    // --- Ticket 007a: Lumen-style screen-probe SSGI ---
+
+    /// Current probe grid dimensions. Recomputed on resize.
+    pub probe_grid_w: u32,
+    pub probe_grid_h: u32,
+    /// Per-probe header buffer (`ProbeHeader`, 32 B each). `STORAGE |
+    /// COPY_DST`. Written by probe-place, read by trace + resolve.
+    pub probe_header_buffer: wgpu::Buffer,
+    /// Per-frame trace output — the compute trace pass writes
+    /// `textureStore` into this. The temporal pass reads it as the
+    /// "current" input.
+    pub probe_trace_tex: wgpu::Texture,
+    pub probe_trace_view: wgpu::TextureView,
+    /// Ping-pong 3D history textures (Rgba16Float, gw × gh × 64).
+    /// Temporal reads `[prev_idx]` + trace, writes to `[write_idx]`.
+    /// Resolve samples `[write_idx]`.
+    pub probe_history_textures: [wgpu::Texture; 2],
+    pub probe_history_views: [wgpu::TextureView; 2],
+    pub probe_history_idx: usize,
+
+    pub probe_place_pipeline: wgpu::ComputePipeline,
+    pub probe_place_layout: wgpu::BindGroupLayout,
+    pub probe_place_uniform: wgpu::Buffer,
+    probe_place_bg_cache: Option<wgpu::BindGroup>,
+
+    pub probe_trace_pipeline: wgpu::ComputePipeline,
+    pub probe_trace_layout: wgpu::BindGroupLayout,
+    pub probe_trace_uniform: wgpu::Buffer,
+    probe_trace_bg_cache: [Option<wgpu::BindGroup>; 2],
+
+    pub probe_temporal_pipeline: wgpu::ComputePipeline,
+    pub probe_temporal_layout: wgpu::BindGroupLayout,
+    pub probe_temporal_uniform: wgpu::Buffer,
+    probe_temporal_bg_cache: [Option<wgpu::BindGroup>; 2],
+
+    pub probe_resolve_pipeline: wgpu::RenderPipeline,
+    pub probe_resolve_layout: wgpu::BindGroupLayout,
+    pub probe_resolve_uniform: wgpu::Buffer,
+    probe_resolve_bg_cache: [Option<wgpu::BindGroup>; 2],
 
     /// Depth of field render target (full-res HDR). DoF pass reads
     /// TAA output + depth, writes variable-radius Poisson disc blur
@@ -1275,9 +1343,21 @@ impl Renderer {
         let (ssgi_rt_texture, ssgi_rt_view) = create_ssgi_rt(
             &device, surface_config.width, surface_config.height,
         );
-        let (ssgi_history_textures, ssgi_history_views) = create_ssgi_history_textures(
+        let (probe_grid_w, probe_grid_h) =
+            probe_grid_dims(surface_config.width, surface_config.height);
+        let (probe_trace_tex, probe_trace_view) = create_probe_trace_tex(
             &device, surface_config.width, surface_config.height,
         );
+        let (probe_history_textures, probe_history_views) = create_probe_history_textures(
+            &device, surface_config.width, surface_config.height,
+        );
+        let probe_header_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe_header_buffer"),
+            size: (probe_grid_w * probe_grid_h) as u64
+                * std::mem::size_of::<ProbeHeaderCpu>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let (dof_rt_texture, dof_rt_view) = create_dof_rt(
             &device, surface_config.width, surface_config.height,
         );
@@ -2772,91 +2852,228 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // --- SSGI pipeline ---
-        let ssgi_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ssgi_shader"),
-            source: wgpu::ShaderSource::Wgsl(SSGI_SHADER_WGSL.into()),
-        });
-        let ssgi_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ssgi_layout"),
+        // --- Ticket 007a: Lumen screen-probe SSGI pipelines ---
+        // One shader module per pass; each is prepended with
+        // PROBE_HELPERS_WGSL so oct_encode/decode, view-space
+        // reconstruction, and `ProbeHeader` are shared.
+        let probe_shader = |label: &'static str, body: &str| {
+            let source = format!("{}{}", PROBE_HELPERS_WGSL, body);
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        };
+
+        let probe_place_shader = probe_shader("probe_place_shader", SSGI_PROBE_PLACE_WGSL);
+        let probe_trace_shader = probe_shader("probe_trace_shader", SSGI_PROBE_TRACE_SW_WGSL);
+        let probe_temporal_shader = probe_shader("probe_temporal_shader", SSGI_PROBE_TEMPORAL_WGSL);
+        let probe_resolve_shader = probe_shader("probe_resolve_shader", SSGI_PROBE_RESOLVE_WGSL);
+
+        // --- Probe placement ---
+        let probe_place_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("probe_place_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false, min_binding_size: None,
                     }, count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
                     }, count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+            ],
+        });
+        let probe_place_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("probe_place_pl_layout"),
+            bind_group_layouts: &[Some(&probe_place_layout)],
+            immediate_size: 0,
+        });
+        let probe_place_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("probe_place_pipeline"),
+            layout: Some(&probe_place_pl_layout),
+            module: &probe_place_shader, entry_point: Some("cs_main"),
+            compilation_options: Default::default(), cache: None,
+        });
+        let probe_place_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe_place_uniform"),
+            size: std::mem::size_of::<ProbePlaceParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // --- Probe trace (SW Hi-Z) ---
+        let probe_trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("probe_trace_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                // Hi-Z pyramid (5 mips, separate views)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
                     }, count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                    binding: 9, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: HDR_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    }, count: None,
+                },
             ],
         });
-        let ssgi_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ssgi_pl_layout"),
-            bind_group_layouts: &[Some(&ssgi_layout)],
+        let probe_trace_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("probe_trace_pl_layout"),
+            bind_group_layouts: &[Some(&probe_trace_layout)],
             immediate_size: 0,
         });
-        let ssgi_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ssgi_pipeline"),
-            layout: Some(&ssgi_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &ssgi_shader, entry_point: Some("vs_main"),
-                buffers: &[], compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &ssgi_shader, entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT, blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false, conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None, cache: None,
+        let probe_trace_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("probe_trace_pipeline"),
+            layout: Some(&probe_trace_pl_layout),
+            module: &probe_trace_shader, entry_point: Some("cs_main"),
+            compilation_options: Default::default(), cache: None,
         });
-        let ssgi_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ssgi_uniform_buffer"),
-            size: std::mem::size_of::<SsgiParams>() as u64,
+        let probe_trace_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe_trace_uniform"),
+            size: std::mem::size_of::<ProbeTraceParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        // --- SSGI temporal denoiser pipeline ---
-        let ssgi_temporal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ssgi_temporal_shader"),
-            source: wgpu::ShaderSource::Wgsl(SSGI_TEMPORAL_SHADER_WGSL.into()),
+        // --- Probe temporal ---
+        let probe_temporal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("probe_temporal_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: HDR_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    }, count: None,
+                },
+            ],
         });
-        let ssgi_temporal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ssgi_temporal_layout"),
+        let probe_temporal_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("probe_temporal_pl_layout"),
+            bind_group_layouts: &[Some(&probe_temporal_layout)],
+            immediate_size: 0,
+        });
+        let probe_temporal_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("probe_temporal_pipeline"),
+            layout: Some(&probe_temporal_pl_layout),
+            module: &probe_temporal_shader, entry_point: Some("cs_main"),
+            compilation_options: Default::default(), cache: None,
+        });
+        let probe_temporal_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe_temporal_uniform"),
+            size: std::mem::size_of::<ProbeTemporalParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // --- Probe resolve (fragment → half-res ssgi_rt) ---
+        let probe_resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("probe_resolve_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
@@ -2865,61 +3082,53 @@ impl Renderer {
                         has_dynamic_offset: false, min_binding_size: None,
                     }, count: None,
                 },
-                // binding 1: current SSGI (noisy)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false, min_binding_size: None,
                     }, count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // binding 3: history SSGI (previous frame accumulated)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D3, multisampled: false,
                     }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // binding 5: velocity buffer (motion vectors)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
                     }, count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 6, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ],
         });
-        let ssgi_temporal_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ssgi_temporal_pl_layout"),
-            bind_group_layouts: &[Some(&ssgi_temporal_layout)],
+        let probe_resolve_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("probe_resolve_pl_layout"),
+            bind_group_layouts: &[Some(&probe_resolve_layout)],
             immediate_size: 0,
         });
-        let ssgi_temporal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ssgi_temporal_pipeline"),
-            layout: Some(&ssgi_temporal_pl_layout),
+        let probe_resolve_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("probe_resolve_pipeline"),
+            layout: Some(&probe_resolve_pl_layout),
             vertex: wgpu::VertexState {
-                module: &ssgi_temporal_shader, entry_point: Some("vs_main"),
+                module: &probe_resolve_shader, entry_point: Some("vs_main"),
                 buffers: &[], compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &ssgi_temporal_shader, entry_point: Some("fs_main"),
+                module: &probe_resolve_shader, entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: HDR_FORMAT, blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
@@ -2936,9 +3145,9 @@ impl Renderer {
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None, cache: None,
         });
-        let ssgi_temporal_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ssgi_temporal_uniform_buffer"),
-            size: std::mem::size_of::<SsgiTemporalParams>() as u64,
+        let probe_resolve_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe_resolve_uniform"),
+            size: std::mem::size_of::<ProbeResolveParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -3569,7 +3778,6 @@ impl Renderer {
             ssao_history_idx: 0,
             ssao_history_frame: 0,
             ssr_bg_cache: None,
-            ssgi_bg_cache: None,
             // World-space AO radius in meters. Sponza-scale arches
             // and columns span 3-5m, so 4m catches proper architectural
             // occlusion.
@@ -3610,9 +3818,6 @@ impl Renderer {
             ssr_temporal_uniform_buffer,
             ssgi_rt_texture,
             ssgi_rt_view,
-            ssgi_pipeline,
-            ssgi_layout,
-            ssgi_uniform_buffer,
             // 1.0 — stronger bounce than the earlier 0.5 default so
             // shadowed regions pick up visible color from nearby lit
             // surfaces (red awning tinting wall behind it, ground
@@ -3623,12 +3828,30 @@ impl Renderer {
             ssgi_intensity: 1.0,
             ssgi_radius: 20.0,
             ssgi_enabled: true,
-            ssgi_history_textures,
-            ssgi_history_views,
-            ssgi_history_idx: 0,
-            ssgi_temporal_pipeline,
-            ssgi_temporal_layout,
-            ssgi_temporal_uniform_buffer,
+            probe_grid_w,
+            probe_grid_h,
+            probe_header_buffer,
+            probe_trace_tex,
+            probe_trace_view,
+            probe_history_textures,
+            probe_history_views,
+            probe_history_idx: 0,
+            probe_place_pipeline,
+            probe_place_layout,
+            probe_place_uniform,
+            probe_place_bg_cache: None,
+            probe_trace_pipeline,
+            probe_trace_layout,
+            probe_trace_uniform,
+            probe_trace_bg_cache: [None, None],
+            probe_temporal_pipeline,
+            probe_temporal_layout,
+            probe_temporal_uniform,
+            probe_temporal_bg_cache: [None, None],
+            probe_resolve_pipeline,
+            probe_resolve_layout,
+            probe_resolve_uniform,
+            probe_resolve_bg_cache: [None, None],
             dof_rt_texture,
             dof_rt_view,
             dof_pipeline,
@@ -3884,10 +4107,26 @@ impl Renderer {
             let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, width, height);
             self.ssgi_rt_texture = ssgi_t;
             self.ssgi_rt_view = ssgi_v;
-            let (ssgi_ht, ssgi_hv) = create_ssgi_history_textures(&self.device, width, height);
-            self.ssgi_history_textures = ssgi_ht;
-            self.ssgi_history_views = ssgi_hv;
-            self.ssgi_history_idx = 0;
+            // Ticket 007a: rebuild the probe grid + 3D radiance textures
+            // whenever the surface size changes. Probe count scales with
+            // half-res resolution, so the header buffer is resized too.
+            let (pg_w, pg_h) = probe_grid_dims(width, height);
+            self.probe_grid_w = pg_w;
+            self.probe_grid_h = pg_h;
+            let (ptr, pvr) = create_probe_trace_tex(&self.device, width, height);
+            self.probe_trace_tex = ptr;
+            self.probe_trace_view = pvr;
+            let (pht, phv) = create_probe_history_textures(&self.device, width, height);
+            self.probe_history_textures = pht;
+            self.probe_history_views = phv;
+            self.probe_history_idx = 0;
+            self.probe_header_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("probe_header_buffer"),
+                size: (pg_w * pg_h) as u64
+                    * std::mem::size_of::<ProbeHeaderCpu>() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             let (dof_t, dof_v) = create_dof_rt(&self.device, width, height);
             self.dof_rt_texture = dof_t;
             self.dof_rt_view = dof_v;
@@ -3908,7 +4147,10 @@ impl Renderer {
             self.ssao_bg_cache = [None, None];
             self.ssao_blur_bg_cache = None;
             self.ssr_bg_cache = None;
-            self.ssgi_bg_cache = None;
+            self.probe_place_bg_cache = None;
+            self.probe_trace_bg_cache = [None, None];
+            self.probe_temporal_bg_cache = [None, None];
+            self.probe_resolve_bg_cache = [None, None];
             self.hiz_linearize_bg_cache = None;
             for slot in self.hiz_downsample_bg_cache.iter_mut() {
                 *slot = None;
@@ -5634,35 +5876,160 @@ impl Renderer {
         };
 
         // ============================================================
-        // SSGI: screen-space global illumination (single-bounce indirect
-        // diffuse). Half-res ray march similar to SSR but for diffuse.
+        // Ticket 007a: Lumen-style screen-probe SSGI.
+        // place → trace (SW Hi-Z) → temporal (EMA ping-pong) → resolve.
+        // Resolve writes `ssgi_rt_view` so downstream compositing is
+        // unchanged. When disabled we just clear `ssgi_rt_view` to
+        // transparent (same fallback shape as the old per-pixel path).
         // ============================================================
-        if self.ssgi_enabled {
-            let inv_proj = self.current_inv_proj_matrix;
-            let sp = SsgiParams {
-                inv_proj,
-                proj: self.current_proj_matrix,
-                params: [self.ssgi_intensity, self.ssgi_radius, 8.0, self.taa_frame_index as f32],
-            };
-            self.queue.write_buffer(&self.ssgi_uniform_buffer, 0, bytemuck::bytes_of(&sp));
+        let half_w = (surf_w / 2).max(1);
+        let half_h = (surf_h / 2).max(1);
+        let gw = self.probe_grid_w;
+        let gh = self.probe_grid_h;
+        let write_idx = self.probe_history_idx;
+        let prev_idx = 1 - write_idx;
 
-            if self.ssgi_bg_cache.is_none() {
-                self.ssgi_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("ssgi_bg"),
-                    layout: &self.ssgi_layout,
+        if self.ssgi_enabled {
+            let p00 = self.current_proj_matrix[0][0];
+            let p11 = self.current_proj_matrix[1][1];
+            let p20 = self.current_proj_matrix[2][0];
+            let p21 = self.current_proj_matrix[2][1];
+            let inv_view = mat4_invert(self.current_view_matrix);
+
+            // ---- place ----
+            let place_params = ProbePlaceParams {
+                inv_view,
+                proj_row01: [p00, p11, p20, p21],
+                size: [half_w, half_h, gw, gh],
+                params: [self.taa_frame_index as f32, PROBE_TILE_SIZE as f32, 0.0, 0.0],
+            };
+            self.queue.write_buffer(&self.probe_place_uniform, 0, bytemuck::bytes_of(&place_params));
+            if self.probe_place_bg_cache.is_none() {
+                self.probe_place_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("probe_place_bg"),
+                    layout: &self.probe_place_layout,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.ssgi_uniform_buffer.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
-                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                        wgpu::BindGroupEntry { binding: 0, resource: self.probe_place_uniform.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.hiz_sampler) },
+                        wgpu::BindGroupEntry { binding: 3, resource: self.probe_header_buffer.as_entire_binding() },
                     ],
                 }));
             }
-            let bg = self.ssgi_bg_cache.as_ref().unwrap();
-            let ssgi_ts = profiler.pass_timestamp_writes("ssgi_pass");
+            {
+                let ts = profiler.compute_pass_timestamp_writes("probe_place_pass");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("probe_place_pass"), timestamp_writes: ts,
+                });
+                pass.set_pipeline(&self.probe_place_pipeline);
+                pass.set_bind_group(0, self.probe_place_bg_cache.as_ref().unwrap(), &[]);
+                pass.dispatch_workgroups((gw + 7) / 8, (gh + 7) / 8, 1);
+            }
+
+            // ---- trace (SW Hi-Z) ----
+            let trace_params = ProbeTraceParams {
+                view: self.current_view_matrix,
+                proj: self.current_proj_matrix,
+                inv_view,
+                proj_row01: [p00, p11, p20, p21],
+                size: [half_w, half_h, gw, gh],
+                params: [
+                    self.taa_frame_index as f32,
+                    self.ssgi_intensity,
+                    self.ssgi_radius,
+                    10.0,  // firefly luma cap
+                ],
+            };
+            self.queue.write_buffer(&self.probe_trace_uniform, 0, bytemuck::bytes_of(&trace_params));
+            // Trace bind group is cache-stable (always writes into the
+            // single `probe_trace_view`) — only one slot needed.
+            if self.probe_trace_bg_cache[0].is_none() {
+                self.probe_trace_bg_cache[0] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("probe_trace_bg"),
+                    layout: &self.probe_trace_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.probe_trace_uniform.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.probe_header_buffer.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hiz_views[1]) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.hiz_views[2]) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.hiz_views[3]) },
+                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.hiz_views[4]) },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.hiz_sampler) },
+                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                        wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&self.probe_trace_view) },
+                    ],
+                }));
+            }
+            {
+                let ts = profiler.compute_pass_timestamp_writes("probe_trace_pass");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("probe_trace_pass"), timestamp_writes: ts,
+                });
+                pass.set_pipeline(&self.probe_trace_pipeline);
+                pass.set_bind_group(0, self.probe_trace_bg_cache[0].as_ref().unwrap(), &[]);
+                // One workgroup per probe; each workgroup's 64 lanes handle the 8×8 octahedral atlas.
+                pass.dispatch_workgroups(gw, gh, 1);
+            }
+
+            // ---- temporal (EMA) ----
+            // First frame forces alpha=1 so the history is seeded from
+            // the current trace rather than blending against a zero clear.
+            let force_refresh = if self.taa_frame_index == 0 { 1.0_f32 } else { 0.0_f32 };
+            let temporal_params = ProbeTemporalParams {
+                params: [0.25, force_refresh, gw as f32, gh as f32],
+            };
+            self.queue.write_buffer(&self.probe_temporal_uniform, 0, bytemuck::bytes_of(&temporal_params));
+            // Bind group indexed by write_idx: each direction of the
+            // ping-pong (read prev, write write) gets its own cached BG.
+            if self.probe_temporal_bg_cache[write_idx].is_none() {
+                self.probe_temporal_bg_cache[write_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("probe_temporal_bg"),
+                    layout: &self.probe_temporal_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.probe_temporal_uniform.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.probe_trace_view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.probe_history_views[prev_idx]) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.probe_history_views[write_idx]) },
+                    ],
+                }));
+            }
+            {
+                let ts = profiler.compute_pass_timestamp_writes("probe_temporal_pass");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("probe_temporal_pass"), timestamp_writes: ts,
+                });
+                pass.set_pipeline(&self.probe_temporal_pipeline);
+                pass.set_bind_group(0, self.probe_temporal_bg_cache[write_idx].as_ref().unwrap(), &[]);
+                pass.dispatch_workgroups(gw, gh, 1);
+            }
+
+            // ---- resolve ----
+            let resolve_params = ProbeResolveParams {
+                inv_view,
+                proj_row01: [p00, p11, p20, p21],
+                size: [half_w, half_h, gw, gh],
+                params: [PROBE_TILE_SIZE as f32, 1.0, 0.0, 0.0],
+            };
+            self.queue.write_buffer(&self.probe_resolve_uniform, 0, bytemuck::bytes_of(&resolve_params));
+            if self.probe_resolve_bg_cache[write_idx].is_none() {
+                self.probe_resolve_bg_cache[write_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("probe_resolve_bg"),
+                    layout: &self.probe_resolve_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.probe_resolve_uniform.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.probe_header_buffer.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.probe_history_views[write_idx]) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.hiz_sampler) },
+                    ],
+                }));
+            }
+            let ts = profiler.pass_timestamp_writes("probe_resolve_pass");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ssgi_pass"),
+                label: Some("probe_resolve_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssgi_rt_view,
                     resolve_target: None,
@@ -5673,16 +6040,16 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: ssgi_ts,
+                timestamp_writes: ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.ssgi_pipeline);
-            pass.set_bind_group(0, bg, &[]);
+            pass.set_pipeline(&self.probe_resolve_pipeline);
+            pass.set_bind_group(0, self.probe_resolve_bg_cache[write_idx].as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         } else {
-            // SSGI disabled — clear the RT so TAA's read returns 0
-            // (transparent black).
+            // SSGI disabled — clear the resolve target so downstream
+            // composite reads contribute zero.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ssgi_clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -5702,66 +6069,10 @@ impl Renderer {
             drop(pass);
         }
 
-        // ============================================================
-        // SSGI temporal denoiser: blend noisy SSGI with reprojected
-        // history. Reads ssgi_rt + ssgi_history[prev] + velocity_rt,
-        // writes ssgi_history[current]. TAA reads the denoised result.
-        // ============================================================
-        if self.ssgi_enabled {
-            let prev_idx = 1 - self.ssgi_history_idx;
-            let cur_idx = self.ssgi_history_idx;
-
-            // First frame (taa_frame_index == 0): use alpha=1.0 to
-            // initialize history from the current noisy frame rather
-            // than blending with uninitialized zeros.
-            let alpha = if self.taa_frame_index == 0 { 1.0_f32 } else { 0.1_f32 };
-            let tp = SsgiTemporalParams {
-                params: [alpha, 0.1, 0.0, 0.0],
-            };
-            self.queue.write_buffer(&self.ssgi_temporal_uniform_buffer, 0, bytemuck::bytes_of(&tp));
-
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ssgi_temporal_bg"),
-                layout: &self.ssgi_temporal_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.ssgi_temporal_uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssgi_rt_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ssgi_history_views[prev_idx]) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ssgi_temporal_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.ssgi_history_views[cur_idx],
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.ssgi_temporal_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        // The TAA pass (and composite, on the TAA-off path) reads the
-        // denoised SSGI from the current history texture, or raw
-        // ssgi_rt if SSGI is off.
-        let ssgi_composite_view = if self.ssgi_enabled {
-            &self.ssgi_history_views[self.ssgi_history_idx]
-        } else {
-            &self.ssgi_rt_view
-        };
+        // The resolve pass writes directly into `ssgi_rt_view`, so
+        // downstream composite + TAA reads are unchanged from the
+        // legacy path.
+        let ssgi_composite_view = &self.ssgi_rt_view;
 
         // ============================================================
         // Bloom: progressive downsample (Karis-thresholded first tap)
@@ -6478,10 +6789,11 @@ impl Renderer {
             self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
             self.prev_vp_matrix = self.current_vp_matrix;
         }
-        // Swap SSGI temporal history ping-pong so next frame reads
-        // what we just wrote and writes to the other buffer.
+        // Swap probe-history ping-pong so next frame reads what we
+        // just blended as the "previous" history and writes to the
+        // other buffer. Ticket 007a.
         if self.ssgi_enabled {
-            self.ssgi_history_idx = 1 - self.ssgi_history_idx;
+            self.probe_history_idx = 1 - self.probe_history_idx;
         }
         // Same ping-pong for SSR temporal accumulation.
         if self.ssr_enabled {

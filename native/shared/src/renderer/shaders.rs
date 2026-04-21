@@ -2202,226 +2202,370 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 ";
 
-/// SSGI shader. Single-bounce indirect diffuse lighting approximation.
-///
-/// For each pixel:
-/// 1. Reconstruct view-space position P and normal N from the depth buffer.
-/// 2. Generate N_SAMPLES cosine-weighted directions around N in view space.
-/// 3. For each direction, project to screen space and march a few steps
-///    (similar to SSR but for diffuse).
-/// 4. On hit, read hdr_rt at that UV — that's the incoming radiance from
-///    one bounce of indirect light.
-/// 5. Weight by NdotL (cosine of angle between normal and sample direction).
-/// 6. Average all samples → indirect diffuse color at half-res.
-///
-/// Output is half-res Rgba16Float (needs RGB for colored bounce light).
-/// The TAA pass adds it on top of the direct lighting.
-pub(super) const SSGI_SHADER_WGSL: &str = "
-struct SsgiParams {
-    inv_proj: mat4x4<f32>,
-    proj: mat4x4<f32>,
-    /// x = intensity, y = radius (view-space), z = n_samples, w = frame_index (for noise)
-    params: vec4<f32>,
+
+// ============================================================================
+// Ticket 007a — Lumen-style screen-probe SSGI (software Hi-Z trace)
+//
+// One probe per 16×16 half-res-pixel tile. Each probe stores 64 radiance
+// samples in an 8×8 octahedral atlas. Passes: place → trace → temporal →
+// resolve. The resolve pass writes the legacy `ssgi_rt` so downstream
+// compositing is untouched.
+// ============================================================================
+
+/// Shared helpers prepended to every probe compute/fragment shader.
+/// Contains octahedral encode/decode, view-space reconstruction, and
+/// the Hi-Z sample helper. Kept as a Rust &str so it can be prepended
+/// in the shader-module setup without a WGSL include mechanism.
+pub(super) const PROBE_HELPERS_WGSL: &str = "
+const PROBE_TILE_SIZE: u32 = 16u;
+const PROBE_OCT_SIZE: u32 = 8u;
+const PROBE_OCT_TEXELS: u32 = 64u;
+const HIZ_SKY_Z: f32 = 10000.0;
+const PI: f32 = 3.14159265;
+
+struct ProbeHeader {
+    // xyz = world-space probe position; w = valid (1.0 = on surface, 0.0 = sky/invalid)
+    world_pos: vec4<f32>,
+    // xyz = world-space normal at the probe surface; w = linear |view-z|
+    normal: vec4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> u: SsgiParams;
-@group(0) @binding(1) var depth_tex: texture_depth_2d;
-@group(0) @binding(2) var depth_samp: sampler;
-@group(0) @binding(3) var hdr_tex: texture_2d<f32>;
-@group(0) @binding(4) var hdr_samp: sampler;
-
-struct VsOut {
-    @builtin(position) clip_pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-    let x = f32((vid & 1u) * 4u) - 1.0;
-    let y = f32((vid >> 1u) * 4u) - 1.0;
-    var out: VsOut;
-    out.clip_pos = vec4<f32>(x, y, 0.0, 1.0);
-    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
-    return out;
+fn oct_wrap(v: vec2<f32>) -> vec2<f32> {
+    let s = vec2<f32>(
+        select(-1.0, 1.0, v.x >= 0.0),
+        select(-1.0, 1.0, v.y >= 0.0),
+    );
+    return (1.0 - abs(vec2<f32>(v.y, v.x))) * s;
 }
 
-fn view_pos_from_depth_ssgi(uv: vec2<f32>, depth: f32) -> vec3<f32> {
-    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
-    let view_h = u.inv_proj * ndc;
-    return view_h.xyz / view_h.w;
+fn oct_encode(n_in: vec3<f32>) -> vec2<f32> {
+    let n = n_in / (abs(n_in.x) + abs(n_in.y) + abs(n_in.z));
+    let xy = select(oct_wrap(n.xy), n.xy, n.z >= 0.0);
+    return xy * 0.5 + 0.5;
 }
 
-/// Interleaved gradient noise — per-pixel pseudo-random in [0,1).
-/// Varies by position and frame index for temporal variation.
-fn ign(frag_coord: vec2<f32>) -> f32 {
-    let frame = u.params.w;
-    let shifted = frag_coord + vec2<f32>(frame * 5.588238, frame * 3.127137);
-    return fract(52.9829189 * fract(0.06711056 * shifted.x + 0.00583715 * shifted.y));
+fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
+    let f = uv * 2.0 - 1.0;
+    var n = vec3<f32>(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    let t = max(-n.z, 0.0);
+    n.x = n.x + select(t, -t, n.x >= 0.0);
+    n.y = n.y + select(t, -t, n.y >= 0.0);
+    return normalize(n);
 }
 
-/// Build a rotation matrix that takes the +Y axis to the given normal N.
-/// Returns the 3 basis vectors as columns: tangent (T), normal (N), bitangent (B).
-fn build_tbn(n: vec3<f32>) -> mat3x3<f32> {
-    // Choose an up vector that isn't parallel to N.
-    var up = vec3<f32>(0.0, 1.0, 0.0);
-    if (abs(n.y) > 0.99) {
-        up = vec3<f32>(1.0, 0.0, 0.0);
-    }
-    let t = normalize(cross(up, n));
-    let b = cross(n, t);
-    // Columns: T, N, B so that (x, y, z) in hemisphere maps to
-    // x*T + y*N + z*B in view space (y = up = along normal).
-    return mat3x3<f32>(t, n, b);
+fn octel_direction(octel: vec2<u32>) -> vec3<f32> {
+    let uv = (vec2<f32>(octel) + vec2<f32>(0.5)) / f32(PROBE_OCT_SIZE);
+    return oct_decode(uv);
 }
 
-/// Cosine-weighted hemisphere sample from 2D random values (u1, u2 in [0,1)).
-/// Returns direction in hemisphere-local coords where Y is up (along normal).
-fn cosine_hemisphere(u1: f32, u2: f32) -> vec3<f32> {
-    let r = sqrt(u1);
-    let theta = 6.2831853 * u2;
-    let x = r * cos(theta);
-    let z = r * sin(theta);
-    let y = sqrt(max(1.0 - u1, 0.0)); // cosTheta = sqrt(1 - r^2)
-    return vec3<f32>(x, y, z);
+fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32,
+                        p00: f32, p11: f32, p20: f32, p21: f32) -> vec3<f32> {
+    let ndc_x = uv.x * 2.0 - 1.0;
+    let ndc_y = 1.0 - uv.y * 2.0;
+    let view_z = -linear_z;
+    let view_x = -(ndc_x + p20) * view_z / p00;
+    let view_y = -(ndc_y + p21) * view_z / p11;
+    return vec3<f32>(view_x, view_y, view_z);
 }
 
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let depth = textureSample(depth_tex, depth_samp, in.uv);
-    // Sky — no indirect lighting.
-    if (depth >= 0.9999) {
-        return vec4<f32>(0.0);
-    }
-
-    let view_pos = view_pos_from_depth_ssgi(in.uv, depth);
-
-    // Reconstruct view-space normal from screen-space derivatives.
-    let dx = dpdx(view_pos);
-    let dy = dpdy(view_pos);
-    let n = normalize(cross(dx, dy));
-
-    let intensity = u.params.x;
-    let max_radius = u.params.y;      // max view-space march distance
-    let n_samples_f = u.params.z;
-    let n_samples = i32(n_samples_f);
-
-    let tbn = build_tbn(n);
-
-    var accum = vec3<f32>(0.0);
-
-    // Per-pixel noise seed from fragment position.
-    let noise_base = ign(in.clip_pos.xy);
-
-    // Logarithmic march: start fine (0.05m) and grow geometrically up
-    // to max_radius. 14 steps × growth factor = reach max_radius.
-    // For max_radius=20, start=0.05: growth ≈ (20/0.05)^(1/14) ≈ 1.52.
-    // Steps: 0.05, 0.08, 0.12, 0.18, 0.27, 0.41, 0.62, 0.95, 1.44,
-    //        2.19, 3.33, 5.06, 7.69, 11.70, 17.79.
-    let march_steps = 14;
-    let start_t = 0.05;
-    let growth = pow(max_radius / start_t, 1.0 / f32(march_steps));
-
-    for (var si = 0; si < n_samples; si = si + 1) {
-        // Two pseudo-random values per sample using golden ratio offsets.
-        let fi = f32(si);
-        let u1 = fract(noise_base + fi * 0.6180339887);
-        let u2 = fract(noise_base * 1.3247179572 + fi * 0.7548776662);
-
-        // Cosine-weighted direction in hemisphere-local space, then
-        // rotate into view space via TBN.
-        let local_dir = cosine_hemisphere(u1, u2);
-        let dir = normalize(tbn * local_dir);
-
-        // March along the direction in view space with growing step.
-        var hit_color = vec3<f32>(0.0);
-        var prev_t = 0.0;
-        var t = start_t;
-
-        for (var s = 0; s < march_steps; s = s + 1) {
-            let ray_view = view_pos + dir * t;
-            let ray_clip = u.proj * vec4<f32>(ray_view, 1.0);
-            let ray_ndc = ray_clip.xyz / ray_clip.w;
-
-            // Off-screen — stop marching (no hit possible beyond).
-            if (ray_ndc.x < -1.0 || ray_ndc.x > 1.0 ||
-                ray_ndc.y < -1.0 || ray_ndc.y > 1.0 ||
-                ray_ndc.z < 0.0 || ray_ndc.z > 1.0) {
-                break;
-            }
-
-            let ray_uv = vec2<f32>(ray_ndc.x * 0.5 + 0.5, 1.0 - (ray_ndc.y * 0.5 + 0.5));
-            let scene_depth = textureSample(depth_tex, depth_samp, ray_uv);
-
-            // Ray has gone past the surface — hit.
-            if (ray_ndc.z >= scene_depth && scene_depth < 0.9999) {
-                // Thickness check: tolerance scales with step size, so
-                // coarse late-march steps accept wider surface tolerance
-                // (otherwise we'd reject everything at long range).
-                let hit_view = view_pos_from_depth_ssgi(ray_uv, scene_depth);
-                let thickness = abs(ray_view.z - hit_view.z);
-                let step_size = t - prev_t;
-                if (thickness < step_size * 2.0 + 0.1) {
-                    // Distance falloff — fade hits near max_radius
-                    // so the march boundary is smooth. Also compensates
-                    // for the missing solid-angle information of distant
-                    // screen-space surfaces.
-                    let tn = t / max_radius;
-                    let falloff = 1.0 - tn * tn;
-                    var raw = textureSample(hdr_tex, hdr_samp, ray_uv).rgb * max(falloff, 0.0);
-                    // Firefly rejection: cap per-sample luminance.
-                    // The HDR source contains direct sun + specular
-                    // highlights that can peak above 100 nit; one
-                    // such hit in the 8-sample mean dominates the
-                    // estimator and shows up as a sparkle until the
-                    // 10-frame temporal denoiser averages it out.
-                    // Clamping at 10 keeps bright bounces legible
-                    // while killing the outliers at source — a
-                    // standard Monte-Carlo bias-variance trade.
-                    let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-                    let firefly_cap = 10.0;
-                    if (luma > firefly_cap) {
-                        raw = raw * (firefly_cap / luma);
-                    }
-                    hit_color = raw;
-                }
-                break;
-            }
-            prev_t = t;
-            t = t * growth;
-        }
-
-        // Accumulate every sample. Misses contribute zero radiance,
-        // which is physically reasonable for cosine-weighted hemisphere
-        // sampling when the missing directions point off-screen or to
-        // sky. Dividing by n_samples (not valid_samples) keeps the
-        // estimator unbiased — no artificial brightening when few
-        // rays find geometry.
-        accum = accum + hit_color;
-    }
-
-    let result = (accum / n_samples_f) * intensity;
-    return vec4<f32>(result, 1.0);
+fn ign(p: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 ";
 
-/// SSGI temporal denoiser shader. Fullscreen pass that blends the
-/// current-frame noisy SSGI with the previous frame's accumulated
-/// result, reprojected via the velocity buffer. Neighborhood
-/// clamping (3x3 min/max) prevents ghosting on disoccluded regions.
-/// Alpha = 0.1 → 10% new, 90% history → ~10-frame convergence.
-pub(super) const SSGI_TEMPORAL_SHADER_WGSL: &str = "
-struct SsgiTemporalParams {
-    /// x = blend_alpha (0.1), y = depth_reject_threshold, zw unused
+/// Probe placement. One workgroup invocation per probe tile writes a
+/// ProbeHeader (world position + world normal + linear view-z). Sky
+/// probes are flagged invalid (world_pos.w = 0). Per-frame Halton-style
+/// jitter moves the probe within its 16×16 tile so adjacent frames
+/// cover slightly different surface points, widening effective
+/// coverage when combined with temporal accumulation.
+pub(super) const SSGI_PROBE_PLACE_WGSL: &str = "
+struct PlaceParams {
+    // Full inverse view matrix — used to lift view-space positions/normals
+    // back into world space so the trace can march across the scene.
+    inv_view: mat4x4<f32>,
+    // x = proj[0][0], y = proj[1][1], z = proj[2][0], w = proj[2][1]
+    proj_row01: vec4<f32>,
+    // x = half_w, y = half_h, z = grid_w, w = grid_h
+    size: vec4<u32>,
+    // x = frame_index (temporal jitter), y = tile_size_f (16.0), zw unused
     params: vec4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> u: SsgiTemporalParams;
-@group(0) @binding(1) var current_tex: texture_2d<f32>;
-@group(0) @binding(2) var current_samp: sampler;
-@group(0) @binding(3) var history_tex: texture_2d<f32>;
-@group(0) @binding(4) var history_samp: sampler;
-@group(0) @binding(5) var velocity_tex: texture_2d<f32>;
-@group(0) @binding(6) var velocity_samp: sampler;
+@group(0) @binding(0) var<uniform> u: PlaceParams;
+@group(0) @binding(1) var hiz0: texture_2d<f32>;
+@group(0) @binding(2) var hiz_samp: sampler;
+@group(0) @binding(3) var<storage, read_write> probes: array<ProbeHeader>;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let grid_w = u.size.z;
+    let grid_h = u.size.w;
+    if (gid.x >= grid_w || gid.y >= grid_h) { return; }
+
+    let probe_idx = gid.y * grid_w + gid.x;
+    let half_w = f32(u.size.x);
+    let half_h = f32(u.size.y);
+    let tile = u.params.y;
+    let frame = u.params.x;
+
+    // Jitter UV inside the tile — 50% of tile radius so probe stays
+    // comfortably away from tile borders. Golden-ratio offsets across
+    // frames decorrelate the jitter from TAA/SSAO patterns.
+    let jx = ign(vec2<f32>(f32(gid.x) + frame * 1.618, f32(gid.y)));
+    let jy = ign(vec2<f32>(f32(gid.x), f32(gid.y) + frame * 2.236));
+    let px_x = f32(gid.x) * tile + tile * 0.5 + (jx - 0.5) * tile * 0.5;
+    let px_y = f32(gid.y) * tile + tile * 0.5 + (jy - 0.5) * tile * 0.5;
+    let uv = vec2<f32>(px_x / half_w, px_y / half_h);
+
+    let linear_z = textureSampleLevel(hiz0, hiz_samp, uv, 0.0).r;
+
+    // Sky probe — mark invalid and bail.
+    if (linear_z >= HIZ_SKY_Z * 0.5) {
+        probes[probe_idx].world_pos = vec4<f32>(0.0);
+        probes[probe_idx].normal = vec4<f32>(0.0, 1.0, 0.0, 0.0);
+        return;
+    }
+
+    let p00 = u.proj_row01.x;
+    let p11 = u.proj_row01.y;
+    let p20 = u.proj_row01.z;
+    let p21 = u.proj_row01.w;
+    let P = view_pos_from_linear(uv, linear_z, p00, p11, p20, p21);
+
+    // Finite-difference normal from 3-tap view-pos cross product. One
+    // texel to the right and one up. Uses the same Hi-Z mip 0 the
+    // center tap read from.
+    let texel = vec2<f32>(1.0 / half_w, 1.0 / half_h);
+    let uv_r = uv + vec2<f32>(texel.x, 0.0);
+    let uv_u = uv + vec2<f32>(0.0, -texel.y);
+    let zr = textureSampleLevel(hiz0, hiz_samp, uv_r, 0.0).r;
+    let zu = textureSampleLevel(hiz0, hiz_samp, uv_u, 0.0).r;
+    let P_r = view_pos_from_linear(uv_r, zr, p00, p11, p20, p21);
+    let P_u = view_pos_from_linear(uv_u, zu, p00, p11, p20, p21);
+    let N_vs = normalize(cross(P_r - P, P_u - P));
+
+    let P_world = (u.inv_view * vec4<f32>(P, 1.0)).xyz;
+    let N_world = normalize((u.inv_view * vec4<f32>(N_vs, 0.0)).xyz);
+
+    probes[probe_idx].world_pos = vec4<f32>(P_world, 1.0);
+    probes[probe_idx].normal = vec4<f32>(N_world, linear_z);
+}
+";
+
+/// Probe trace, software (Hi-Z) path.
+///
+/// One workgroup per probe; each of the 64 lanes handles one octahedral
+/// texel = one ray direction. Hemisphere-cull: rays below the probe's
+/// tangent plane contribute zero (not visible from this surface
+/// orientation). Surviving rays march the Hi-Z depth pyramid in view
+/// space and sample the HDR buffer at hit. Misses contribute zero —
+/// sky/off-screen handling is the compose pass's job downstream.
+pub(super) const SSGI_PROBE_TRACE_SW_WGSL: &str = "
+struct TraceParams {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    inv_view: mat4x4<f32>,
+    proj_row01: vec4<f32>,
+    // x = half_w, y = half_h, z = grid_w, w = grid_h
+    size: vec4<u32>,
+    // x = frame_index, y = intensity, z = max_march_t_world, w = firefly_cap
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: TraceParams;
+@group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
+@group(0) @binding(2) var hiz0: texture_2d<f32>;
+@group(0) @binding(3) var hiz1: texture_2d<f32>;
+@group(0) @binding(4) var hiz2: texture_2d<f32>;
+@group(0) @binding(5) var hiz3: texture_2d<f32>;
+@group(0) @binding(6) var hiz4: texture_2d<f32>;
+@group(0) @binding(7) var hiz_samp: sampler;
+@group(0) @binding(8) var hdr_tex: texture_2d<f32>;
+@group(0) @binding(9) var hdr_samp: sampler;
+@group(0) @binding(10) var radiance_out: texture_storage_3d<rgba16float, write>;
+
+fn hiz_sample(uv: vec2<f32>, mip: i32) -> f32 {
+    switch (clamp(mip, 0, 4)) {
+        case 0: { return textureSampleLevel(hiz0, hiz_samp, uv, 0.0).r; }
+        case 1: { return textureSampleLevel(hiz1, hiz_samp, uv, 0.0).r; }
+        case 2: { return textureSampleLevel(hiz2, hiz_samp, uv, 0.0).r; }
+        case 3: { return textureSampleLevel(hiz3, hiz_samp, uv, 0.0).r; }
+        default: { return textureSampleLevel(hiz4, hiz_samp, uv, 0.0).r; }
+    }
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let grid_w = u.size.z;
+    let grid_h = u.size.w;
+    if (wg.x >= grid_w || wg.y >= grid_h) { return; }
+    if (lid.x >= PROBE_OCT_SIZE || lid.y >= PROBE_OCT_SIZE) { return; }
+
+    let probe_idx = wg.y * grid_w + wg.x;
+    let header = probes[probe_idx];
+
+    let dst_coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
+
+    // Invalid probe (sky tile) → contribute zero.
+    if (header.world_pos.w < 0.5) {
+        textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
+        return;
+    }
+
+    let dir_ws = octel_direction(lid.xy);
+    let n_ws = header.normal.xyz;
+
+    // Hemisphere cull — rays pointing below the surface carry no diffuse contribution.
+    let ndotd = dot(dir_ws, n_ws);
+    if (ndotd <= 0.0) {
+        textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
+        return;
+    }
+
+    // Trace in view space so the Hi-Z march lines up directly with the
+    // rasterized depth pyramid. Start origin at probe_pos + small normal
+    // offset to avoid self-intersection at shading point.
+    let origin_ws = header.world_pos.xyz + n_ws * 0.02;
+    let origin_vs = (u.view * vec4<f32>(origin_ws, 1.0)).xyz;
+    let dir_vs = normalize((u.view * vec4<f32>(dir_ws, 0.0)).xyz);
+
+    let p00 = u.proj_row01.x;
+    let p11 = u.proj_row01.y;
+    let p20 = u.proj_row01.z;
+    let p21 = u.proj_row01.w;
+
+    let max_t = u.params.z;
+    var t = 0.05;
+    let n_steps: i32 = 14;
+    let growth = pow(max_t / t, 1.0 / f32(n_steps));
+
+    var hit_color = vec3<f32>(0.0);
+    var prev_t = 0.0;
+
+    for (var s = 0; s < n_steps; s = s + 1) {
+        let pt_vs = origin_vs + dir_vs * t;
+        let clip = u.proj * vec4<f32>(pt_vs, 1.0);
+        let ndc = clip.xyz / clip.w;
+
+        // Off-screen — no hit possible, stop.
+        if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+            break;
+        }
+
+        let ray_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+
+        // Pick the mip such that step footprint ≈ one mip texel. Longer
+        // steps sample coarser mips so the early-out fires at coarse
+        // resolution; only the last few steps hit mip 0.
+        let step_size = t - prev_t;
+        let mip = clamp(i32(floor(log2(max(step_size / 0.05, 1.0)))), 0, 4);
+
+        let scene_z = hiz_sample(ray_uv, mip);
+        // Hi-Z stores positive |view-z|. ray view-z is negative.
+        let ray_abs_z = -pt_vs.z;
+
+        // Have we marched behind a surface? The step tolerance scales
+        // with step size: the final tolerance (step_size * 2 + 0.1)
+        // lets coarse steps accept wider thickness, which matches the
+        // existing SSGI behaviour closely enough for V1.
+        if (ray_abs_z >= scene_z && scene_z < HIZ_SKY_Z * 0.5) {
+            // Refine against mip 0 to reject far-off misses.
+            let refined_z = hiz_sample(ray_uv, 0);
+            let thickness = abs(ray_abs_z - refined_z);
+            if (thickness < step_size * 2.0 + 0.1) {
+                let tn = t / max_t;
+                let falloff = 1.0 - tn * tn;
+                var raw = textureSampleLevel(hdr_tex, hdr_samp, ray_uv, 0.0).rgb * max(falloff, 0.0);
+                // Firefly clamp (cap per-sample luma).
+                let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+                let cap = u.params.w;
+                if (luma > cap) { raw = raw * (cap / luma); }
+                hit_color = raw;
+            }
+            break;
+        }
+
+        prev_t = t;
+        t = t * growth;
+    }
+
+    let intensity = u.params.y;
+    textureStore(radiance_out, dst_coord, vec4<f32>(hit_color * intensity * ndotd, 1.0));
+}
+";
+
+/// Probe temporal accumulator. EMA in probe-octel space. No reprojection
+/// in V1 — since every frame traces all 64 octels, history only smooths
+/// firefly noise; per-probe world positions jitter by tile-fraction so
+/// camera motion eventually converges to a stable signal without explicit
+/// velocity. Disocclusion is handled implicitly: moving the camera
+/// changes which tile a surface falls into, replacing that probe's
+/// header, and the new probe's history blends from zero since the old
+/// probe at that grid coord pointed elsewhere.
+pub(super) const SSGI_PROBE_TEMPORAL_WGSL: &str = "
+struct TemporalParams {
+    // x = alpha (0.25 = 4-frame EMA at steady state),
+    // y = force_refresh (1 → alpha 1.0),
+    // z = grid_w, w = grid_h
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: TemporalParams;
+@group(0) @binding(1) var radiance_in: texture_3d<f32>;
+@group(0) @binding(2) var history_in: texture_3d<f32>;
+@group(0) @binding(3) var history_out: texture_storage_3d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let grid_w = u32(u.params.z);
+    let grid_h = u32(u.params.w);
+    if (wg.x >= grid_w || wg.y >= grid_h) { return; }
+
+    let coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
+    let curr = textureLoad(radiance_in, coord, 0).rgb;
+    let hist = textureLoad(history_in, coord, 0).rgb;
+
+    var alpha = u.params.x;
+    if (u.params.y > 0.5) { alpha = 1.0; }
+    let blended = mix(hist, curr, alpha);
+
+    textureStore(history_out, coord, vec4<f32>(blended, 1.0));
+}
+";
+
+/// Per-pixel probe-cache reconstruction. Writes the half-res ssgi_rt
+/// that the downstream compose / TAA passes already read.
+///
+/// Samples the 2×2 probes whose tiles enclose the pixel's tile. For
+/// each probe, evaluates the octahedral atlas along the pixel's
+/// world-space normal, then bilateral-weights the contribution by
+/// depth-match + normal-match with the pixel itself. Invalid probes
+/// (sky) are skipped. When all 4 probes reject (pixel depth/normal
+/// wildly off), fall back to a zero contribution — better than leaking
+/// a stale distant probe's radiance into a foreground surface.
+pub(super) const SSGI_PROBE_RESOLVE_WGSL: &str = "
+struct ResolveParams {
+    inv_view: mat4x4<f32>,
+    proj_row01: vec4<f32>,
+    // x = half_w, y = half_h, z = grid_w, w = grid_h
+    size: vec4<u32>,
+    // x = tile_size (16.0), y = intensity, zw unused
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: ResolveParams;
+@group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
+@group(0) @binding(2) var radiance_tex: texture_3d<f32>;
+@group(0) @binding(3) var radiance_samp: sampler;
+@group(0) @binding(4) var hiz0: texture_2d<f32>;
+@group(0) @binding(5) var hiz_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -2438,60 +2582,96 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
+// Sample a probe's octahedral atlas in a given world-space direction.
+// Uses trilinear sampling on the 3D texture so neighbouring octels
+// softly blend — some visible smear on the 8×8 atlas, at the cost of
+// a cheap reconstruction.
+fn sample_probe(probe_xy: vec2<i32>, dir_ws: vec3<f32>) -> vec3<f32> {
+    let oct_uv = oct_encode(dir_ws);
+    let u_tex = (f32(probe_xy.x) + 0.5) / f32(u.size.z);
+    let v_tex = (f32(probe_xy.y) + 0.5) / f32(u.size.w);
+    // z coordinate: octahedral texel index in [0, 64) normalized to [0, 1)
+    let oct_x = clamp(oct_uv.x * f32(PROBE_OCT_SIZE), 0.0, f32(PROBE_OCT_SIZE) - 1.0);
+    let oct_y = clamp(oct_uv.y * f32(PROBE_OCT_SIZE), 0.0, f32(PROBE_OCT_SIZE) - 1.0);
+    let z_idx = floor(oct_y) * f32(PROBE_OCT_SIZE) + floor(oct_x);
+    let z = (z_idx + 0.5) / f32(PROBE_OCT_TEXELS);
+    return textureSampleLevel(radiance_tex, radiance_samp, vec3<f32>(u_tex, v_tex, z), 0.0).rgb;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let current_raw = textureSample(current_tex, current_samp, in.uv);
+    let linear_z = textureSampleLevel(hiz0, hiz_samp, in.uv, 0.0).r;
+    if (linear_z >= HIZ_SKY_Z * 0.5) {
+        return vec4<f32>(0.0);
+    }
 
-    // 3×3 box pre-filter of the current frame. We're already going
-    // to walk the 3×3 neighborhood below to compute the history-clamp
-    // min/max; accumulating the mean in the same loop adds no texture
-    // fetches. Pre-filtering the current frame before the temporal
-    // blend smears single-pixel SSGI fireflies across ~9 pixels which
-    // temporal then averages out in 1 frame instead of the 10 frames
-    // the 0.1 alpha would otherwise take — this is what makes the
-    // raindrop-looking sparkles on glossy floors disappear.
-    let texel = vec2<f32>(1.0) / vec2<f32>(textureDimensions(current_tex));
-    var nmin = current_raw;
-    var nmax = current_raw;
-    var prefilt = vec4<f32>(0.0);
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            let s = textureSample(current_tex, current_samp, in.uv + vec2<f32>(f32(x), f32(y)) * texel);
-            nmin = min(nmin, s);
-            nmax = max(nmax, s);
-            prefilt = prefilt + s;
+    let half_w = f32(u.size.x);
+    let half_h = f32(u.size.y);
+    let tile = u.params.x;
+    let grid_w = i32(u.size.z);
+    let grid_h = i32(u.size.w);
+
+    let p00 = u.proj_row01.x;
+    let p11 = u.proj_row01.y;
+    let p20 = u.proj_row01.z;
+    let p21 = u.proj_row01.w;
+    let P_vs = view_pos_from_linear(in.uv, linear_z, p00, p11, p20, p21);
+
+    // Reconstruct pixel normal (same 3-tap trick as the placement pass).
+    let texel = vec2<f32>(1.0 / half_w, 1.0 / half_h);
+    let zr = textureSampleLevel(hiz0, hiz_samp, in.uv + vec2<f32>(texel.x, 0.0), 0.0).r;
+    let zu = textureSampleLevel(hiz0, hiz_samp, in.uv + vec2<f32>(0.0, -texel.y), 0.0).r;
+    let Pr = view_pos_from_linear(in.uv + vec2<f32>(texel.x, 0.0), zr, p00, p11, p20, p21);
+    let Pu = view_pos_from_linear(in.uv + vec2<f32>(0.0, -texel.y), zu, p00, p11, p20, p21);
+    let N_vs = normalize(cross(Pr - P_vs, Pu - P_vs));
+    let N_ws = normalize((u.inv_view * vec4<f32>(N_vs, 0.0)).xyz);
+
+    // Pixel's grid-space fractional position (which probes surround it?).
+    let px_x = in.uv.x * half_w;
+    let px_y = in.uv.y * half_h;
+    let fx = px_x / tile - 0.5;  // -0.5 aligns grid cells centred on tile centres
+    let fy = px_y / tile - 0.5;
+    let gx0 = i32(floor(fx));
+    let gy0 = i32(floor(fy));
+    let tx = fract(fx);
+    let ty = fract(fy);
+
+    var accum = vec3<f32>(0.0);
+    var wsum = 0.0;
+
+    for (var dy = 0; dy <= 1; dy = dy + 1) {
+        for (var dx = 0; dx <= 1; dx = dx + 1) {
+            let gx = clamp(gx0 + dx, 0, grid_w - 1);
+            let gy = clamp(gy0 + dy, 0, grid_h - 1);
+            let probe = probes[u32(gy * grid_w + gx)];
+            if (probe.world_pos.w < 0.5) { continue; }
+
+            // Bilinear corner weight
+            var w_corner = 1.0;
+            w_corner = w_corner * select(1.0 - tx, tx, dx == 1);
+            w_corner = w_corner * select(1.0 - ty, ty, dy == 1);
+
+            // Depth + normal bilateral weights — reject probes on very
+            // different surfaces from the pixel (foreground pixel vs
+            // probe on a far wall, or on an orthogonal facet).
+            let dz = abs(probe.normal.w - linear_z);
+            let w_depth = exp(-dz * dz * 8.0);
+            let ndotn = clamp(dot(probe.normal.xyz, N_ws), 0.0, 1.0);
+            let w_normal = pow(ndotn, 4.0);
+
+            let w = w_corner * w_depth * w_normal;
+            if (w <= 0.0001) { continue; }
+
+            let radiance = sample_probe(vec2<i32>(gx, gy), N_ws);
+            accum = accum + radiance * w;
+            wsum = wsum + w;
         }
     }
-    let current = prefilt * (1.0 / 9.0);
 
-    // Read velocity at this pixel (velocity_rt is full-res, SSGI is half-res,
-    // but UV mapping handles the difference transparently).
-    //
-    // Velocity is stored in NDC-delta units ((curr_ndc - prev_ndc) * 0.5);
-    // UV.y is flipped relative to NDC.y, so reprojection is `uv - vel.x`
-    // on X but `uv + vel.y` on Y. The earlier `uv - vel` on both axes
-    // reprojected SSGI history to the wrong row when the camera pitched
-    // or rotated, dragging stale indirect-light values across the frame
-    // as a scene-wide smear when turning (TAA + SSAO both already do
-    // this flip — this was SSGI's silent divergence).
-    let vel = textureSample(velocity_tex, velocity_samp, in.uv).xy;
-    let prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
-
-    // Disocclusion: if prev_uv is off-screen, snap to current frame.
-    let off_screen = prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0;
-
-    if (off_screen) {
-        return current;
+    if (wsum > 0.0001) {
+        accum = (accum / wsum) * u.params.y;
     }
-
-    let history = textureSample(history_tex, history_samp, prev_uv);
-
-    // Neighborhood clamp: prevent ghosting by clamping history to
-    // the min/max of the 3x3 neighborhood computed above.
-    let clamped_history = clamp(history, nmin, nmax);
-
-    let alpha = u.params.x;  // 0.1 = 10% new, 90% history
-    return mix(clamped_history, current, alpha);
+    return vec4<f32>(accum, 1.0);
 }
 ";
 

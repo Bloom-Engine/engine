@@ -267,31 +267,63 @@ pub(super) fn create_ssgi_rt(device: &wgpu::Device, width: u32, height: u32) -> 
     (texture, view)
 }
 
-/// Create the SSGI temporal history textures (ping-pong pair, same
-/// format/size as ssgi_rt — half-res HDR). Returns two textures and
-/// their views.
-pub(super) fn create_ssgi_history_textures(
+/// Probe grid = ceil(half_w / 16) × ceil(half_h / 16). 50×29 on a
+/// 800×450 half-res Sponza RT = 1450 probes, each holding an 8×8
+/// octahedral atlas = 64 radiance samples (ticket 007a).
+pub(super) const PROBE_TILE_SIZE: u32 = 16;
+pub(super) const PROBE_OCT_SIZE: u32 = 8;
+pub(super) const PROBE_OCT_TEXELS: u32 = PROBE_OCT_SIZE * PROBE_OCT_SIZE;
+
+pub(super) fn probe_grid_dims(width: u32, height: u32) -> (u32, u32) {
+    let half_w = (width / 2).max(1);
+    let half_h = (height / 2).max(1);
+    let gw = (half_w + PROBE_TILE_SIZE - 1) / PROBE_TILE_SIZE;
+    let gh = (half_h + PROBE_TILE_SIZE - 1) / PROBE_TILE_SIZE;
+    (gw.max(1), gh.max(1))
+}
+
+/// 3D Rgba16Float texture with dimensions `(probe_grid_w, probe_grid_h,
+/// 64)` — one voxel per probe × octahedral texel. Shared shape for the
+/// trace output and the ping-pong history textures.
+fn create_probe_3d_tex(
+    device: &wgpu::Device, label: &'static str, gw: u32, gh: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: gw, height: gh, depth_or_array_layers: PROBE_OCT_TEXELS },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Per-frame trace output. The trace pass writes into this, the temporal
+/// pass reads it as the "current" input. Not ping-pong because its
+/// contents are fully regenerated every frame.
+pub(super) fn create_probe_trace_tex(
+    device: &wgpu::Device, width: u32, height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let (gw, gh) = probe_grid_dims(width, height);
+    create_probe_3d_tex(device, "probe_trace", gw, gh)
+}
+
+/// Ping-pong probe-radiance history. Each frame the temporal pass
+/// reads `[prev_idx]` (last frame's blended history), blends it with
+/// the fresh trace, and writes to `[write_idx]`. The resolve pass then
+/// samples `[write_idx]`. Separate textures — the temporal pass cannot
+/// bind the same view as both sampled input and storage-write output.
+pub(super) fn create_probe_history_textures(
     device: &wgpu::Device, width: u32, height: u32,
 ) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
-    let w = (width / 2).max(1);
-    let h = (height / 2).max(1);
-    let make = || {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("ssgi_history"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                 | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        (texture, view)
-    };
-    let (t0, v0) = make();
-    let (t1, v1) = make();
+    let (gw, gh) = probe_grid_dims(width, height);
+    let (t0, v0) = create_probe_3d_tex(device, "probe_history_0", gw, gh);
+    let (t1, v1) = create_probe_3d_tex(device, "probe_history_1", gw, gh);
     ([t0, t1], [v0, v1])
 }
 
