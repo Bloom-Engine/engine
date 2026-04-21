@@ -2260,6 +2260,63 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 ";
 
+/// Ticket 013 V2 — per-frame card-lighting compute pass.
+///
+/// Dispatched once per frame before the HW probe trace. One invocation
+/// per atlas pixel: looks up the slot's world-space normal (baked at
+/// capture), samples the albedo atlas at the pixel's UV, computes
+/// `albedo × (NdotL × sun + NdotUp × sky)`, writes to the radiance
+/// atlas. Shadow-cascade integration deferred to V3.
+pub(super) const CARD_LIGHT_WGSL: &str = "
+struct CardLightParams {
+    sun_dir: vec4<f32>,
+    sun_color: vec4<f32>,
+    sky_color: vec4<f32>,
+    // x = atlas_size, y = slot_size, z = slots_per_row, w = active_slot_count
+    atlas_info: vec4<u32>,
+};
+
+@group(0) @binding(0) var<uniform> u: CardLightParams;
+@group(0) @binding(1) var albedo_atlas: texture_2d<f32>;
+@group(0) @binding(2) var atlas_samp: sampler;
+@group(0) @binding(3) var<storage, read> slot_meta: array<vec4<f32>>;
+@group(0) @binding(4) var radiance_out: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let px = gid.xy;
+    let atlas_sz = u.atlas_info.x;
+    if (px.x >= atlas_sz || px.y >= atlas_sz) { return; }
+
+    let slot_sz = u.atlas_info.y;
+    let slots_per_row = u.atlas_info.z;
+    let active_count = u.atlas_info.w;
+
+    let slot_x = px.x / slot_sz;
+    let slot_y = px.y / slot_sz;
+    let slot_idx = slot_y * slots_per_row + slot_x;
+
+    // Outside the active slot range — clear to zero so stale radiance
+    // from a previous frame's bigger-scene can't leak in.
+    if (slot_idx >= active_count) {
+        textureStore(radiance_out, vec2<i32>(px), vec4<f32>(0.0));
+        return;
+    }
+
+    let uv = (vec2<f32>(px) + vec2<f32>(0.5)) / f32(atlas_sz);
+    let albedo = textureSampleLevel(albedo_atlas, atlas_samp, uv, 0.0).rgb;
+
+    let n_ws = slot_meta[slot_idx].xyz;
+    let ndotl = max(dot(n_ws, u.sun_dir.xyz), 0.0);
+    let direct = u.sun_color.xyz * ndotl;
+    let ndotup = max(dot(n_ws, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+    let sky = u.sky_color.xyz * ndotup;
+
+    let lit = albedo * (direct + sky);
+    textureStore(radiance_out, vec2<i32>(px), vec4<f32>(lit, 1.0));
+}
+";
+
 // ============================================================================
 // Ticket 007a — Lumen-style screen-probe SSGI (software Hi-Z trace)
 //
@@ -2592,14 +2649,15 @@ struct InstanceGiData {
     emissive_luma: f32,
     normal_ws: vec3<f32>,
     _pad0: f32,
-    // Ticket 013: xyz = (slot_x, slot_y, dominant_axis), w = has_card flag.
+    // Ticket 013 V2: x = first_slot_index (first of 6 consecutive
+    // signed-axis slots), yz unused, w = has_card flag.
     card_slot: vec4<f32>,
     // Object-space AABB min (xyz) / max (xyz).
     card_aabb_min: vec4<f32>,
     card_aabb_max: vec4<f32>,
 };
 
-const CARD_SLOTS_PER_ROW: f32 = 32.0;
+const CARD_SLOTS_PER_ROW: f32 = 64.0;
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
 @group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
@@ -2659,66 +2717,104 @@ fn cs_main(
     var radiance = vec3<f32>(0.0);
     if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
         let inst = instance_data[hit.instance_custom_data];
-        let hit_n = inst.normal_ws;
 
-        // Ticket 013 — look up the mesh's card if one was captured.
-        // Project the hit's object-space position onto the card
-        // plane orthogonal to the dominant axis, remap to atlas UV,
-        // sample. Fall back to the flat per-instance albedo when the
-        // mesh has no card (capture skipped / not yet landed).
-        var albedo = inst.albedo;
+        // Ticket 013 V2 — pick the axis facing the incoming ray and
+        // sample the pre-lit radiance atlas. Each mesh has 6
+        // consecutive slots laid out by signed axis (see host-side
+        // capture loop). The card's world-space normal was baked at
+        // capture into `card_slot_meta`; lighting was applied once
+        // per frame by `card_light_pass`, so the sample IS the
+        // bounce contribution — no hit-time shading math.
         if (inst.card_slot.w > 0.5) {
             let hit_world = origin_ws + dir_ws * hit.t;
             let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
+            // Dominant component of the world-space ray direction
+            // picks the major axis; its sign selects the front/back
+            // face of that axis.
+            let abs_d = abs(dir_ws);
+            var axis_idx: u32 = 0u;
+            if (abs_d.y >= abs_d.x && abs_d.y >= abs_d.z) {
+                axis_idx = 2u;
+            } else if (abs_d.z >= abs_d.x) {
+                axis_idx = 4u;
+            }
+            // Sign: ray going -X (dir.x < 0) lands on +X face → axis + 0.
+            // ray going +X lands on -X face → axis + 1.
+            var signed_axis: u32 = axis_idx;
+            if (axis_idx == 0u && dir_ws.x > 0.0) { signed_axis = 1u; }
+            else if (axis_idx == 2u && dir_ws.y > 0.0) { signed_axis = 3u; }
+            else if (axis_idx == 4u && dir_ws.z > 0.0) { signed_axis = 5u; }
+
+            let first_slot = u32(inst.card_slot.x);
+            let slot = first_slot + signed_axis;
+            let slot_x = slot % 64u;
+            let slot_y = slot / 64u;
+
+            // Project hit_os onto the card plane — same math as V1 but
+            // with signed-axis-aware u sign flips so the ±pair cards
+            // pick up opposite views of the mesh.
             let bmin = inst.card_aabb_min.xyz;
             let bmax = inst.card_aabb_max.xyz;
-            let extent = max(bmax - bmin, vec3<f32>(1e-4));
-            let axis = u32(inst.card_slot.z);
             var u_os: f32;
             var v_os: f32;
             var u_lo: f32;
             var u_hi: f32;
             var v_lo: f32;
             var v_hi: f32;
-            if (axis == 0u) {
+            var u_flip: f32 = 1.0;
+            if (signed_axis == 0u || signed_axis == 1u) {
                 u_os = hit_os.y; v_os = hit_os.z;
                 u_lo = bmin.y; u_hi = bmax.y; v_lo = bmin.z; v_hi = bmax.z;
-            } else if (axis == 2u) {
-                u_os = hit_os.x; v_os = hit_os.y;
-                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.y; v_hi = bmax.y;
-            } else {
+                if (signed_axis == 1u) { u_flip = -1.0; }
+            } else if (signed_axis == 2u || signed_axis == 3u) {
                 u_os = hit_os.x; v_os = hit_os.z;
                 u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.z; v_hi = bmax.z;
+                if (signed_axis == 3u) { u_flip = -1.0; }
+            } else {
+                u_os = hit_os.x; v_os = hit_os.y;
+                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.y; v_hi = bmax.y;
+                if (signed_axis == 5u) { u_flip = -1.0; }
             }
-            let u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
+            var u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
             let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
-            // Inset 1 texel into the slot to avoid sampling a
-            // neighbouring slot when UV lands on a slot boundary.
+            if (u_flip < 0.0) { u_norm = 1.0 - u_norm; }
+
             let slot_size_uv = 1.0 / CARD_SLOTS_PER_ROW;
-            let texel_in_slot = slot_size_uv / 128.0;
-            let slot_u0 = inst.card_slot.x * slot_size_uv + texel_in_slot;
-            let slot_v0 = inst.card_slot.y * slot_size_uv + texel_in_slot;
+            let texel_in_slot = slot_size_uv / f32(64);  // 64×64 card
+            let slot_u0 = f32(slot_x) * slot_size_uv + texel_in_slot;
+            let slot_v0 = f32(slot_y) * slot_size_uv + texel_in_slot;
             let slot_span = slot_size_uv - 2.0 * texel_in_slot;
             let atlas_uv = vec2<f32>(
                 slot_u0 + u_norm * slot_span,
                 slot_v0 + v_norm * slot_span,
             );
-            albedo = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
+            let pre_lit = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
+
+            let tn = hit.t / max_t;
+            let falloff = max(1.0 - tn * tn, 0.0);
+            var raw = pre_lit * falloff
+                    + inst.albedo * inst.emissive_luma;
+            let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let cap = u.params.w;
+            if (luma > cap) { raw = raw * (cap / luma); }
+            radiance = raw;
+        } else {
+            // Fallback path — no card captured, use the flat
+            // instance albedo × hit-time lighting same as 007b.
+            let hit_n = inst.normal_ws;
+            let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
+            let direct = u.sun_color.xyz * ndotl;
+            let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+            let sky = u.sky_color.xyz * ndotup;
+            let tn = hit.t / max_t;
+            let falloff = max(1.0 - tn * tn, 0.0);
+            var raw = inst.albedo * (direct + sky) * falloff
+                    + inst.albedo * inst.emissive_luma;
+            let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let cap = u.params.w;
+            if (luma > cap) { raw = raw * (cap / luma); }
+            radiance = raw;
         }
-
-        let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
-        let direct = u.sun_color.xyz * ndotl;
-        let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
-        let sky = u.sky_color.xyz * ndotup;
-
-        let tn = hit.t / max_t;
-        let falloff = max(1.0 - tn * tn, 0.0);
-        var raw = albedo * (direct + sky) * falloff
-                + albedo * inst.emissive_luma;
-        let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-        let cap = u.params.w;
-        if (luma > cap) { raw = raw * (cap / luma); }
-        radiance = raw;
     }
 
     let intensity = u.params.y;

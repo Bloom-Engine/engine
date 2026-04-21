@@ -25,8 +25,9 @@ use formats::{
     create_ssr_history_textures,
     create_ssgi_rt, create_probe_trace_tex, create_probe_history_textures,
     probe_grid_dims, PROBE_TILE_SIZE, PROBE_OCT_SIZE, PROBE_OCT_TEXELS,
-    create_mesh_card_atlas, CARD_ATLAS_SIZE, CARD_SLOT_SIZE, CARD_SLOTS_PER_ROW,
-    CARD_MAX_SLOTS, create_taa_textures,
+    create_mesh_card_atlas, create_mesh_card_radiance_atlas,
+    CARD_ATLAS_SIZE, CARD_SLOT_SIZE, CARD_SLOTS_PER_ROW, CARD_MAX_SLOTS,
+    CARD_AXES_PER_MESH, create_taa_textures,
     create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
     create_exposure_textures, create_composed_rt, create_dof_rt,
     create_linear_depth_hiz_chain, create_bloom_chain, halton,
@@ -280,41 +281,77 @@ struct CardCaptureParams {
     base_color: [f32; 4], // rgb = factor, w = has_texture (0 or 1)
 }
 
-/// Ticket 013 — orthographic projection that maps the two AABB axes
-/// orthogonal to `dominant_axis` into clip-space [-1, +1]. The
-/// dominant axis is squashed to clip.z = 0 (depth test is off at
-/// capture). Column-major output matches Bloom's mat4 convention.
-fn build_card_ortho(dominant_axis: u32, bmin: [f32; 3], bmax: [f32; 3]) -> [[f32; 4]; 4] {
-    // Widths, clamped so degenerate AABBs don't divide by zero.
+/// Ticket 013 V2 — orthographic projection for the 6 signed axes.
+/// `face_axis` encoding:
+///   0 → +X, 1 → -X, 2 → +Y, 3 → -Y, 4 → +Z, 5 → -Z.
+/// For each face we pick the two orthogonal AABB axes and map them
+/// to clip-space [-1, +1]. The ±pair for each axis differ only in
+/// the sign of the "u" clip axis so that when the HW shader picks
+/// axis N at hit and projects the hit into card UV, the UV lines up
+/// with the mesh geometry as seen FROM that face.
+fn build_card_ortho_v2(face_axis: u32, bmin: [f32; 3], bmax: [f32; 3]) -> [[f32; 4]; 4] {
     let wx = (bmax[0] - bmin[0]).max(1e-4);
     let wy = (bmax[1] - bmin[1]).max(1e-4);
     let wz = (bmax[2] - bmin[2]).max(1e-4);
     let cx = bmin[0] + bmax[0];
     let cy = bmin[1] + bmax[1];
     let cz = bmin[2] + bmax[2];
-    match dominant_axis {
+    match face_axis {
+        // +X → project onto YZ; clip.x = y, clip.y = z.
         0 => [
-            // X dominant → project onto YZ. clip.x from y, clip.y from z.
             [0.0, 0.0, 0.0, 0.0],
-            [2.0 / wy, 0.0, 0.0, 0.0],
-            [0.0, 2.0 / wz, 0.0, 0.0],
-            [-cy / wy, -cz / wz, 0.0, 1.0],
+            [2.0/wy, 0.0, 0.0, 0.0],
+            [0.0, 2.0/wz, 0.0, 0.0],
+            [-cy/wy, -cz/wz, 0.0, 1.0],
         ],
+        // -X → flip u so the -X view is the mirror of +X. clip.x = -y, clip.y = z.
+        1 => [
+            [0.0, 0.0, 0.0, 0.0],
+            [-2.0/wy, 0.0, 0.0, 0.0],
+            [0.0, 2.0/wz, 0.0, 0.0],
+            [cy/wy, -cz/wz, 0.0, 1.0],
+        ],
+        // +Y → project onto XZ; clip.x = x, clip.y = z.
         2 => [
-            // Z dominant → project onto XY. clip.x from x, clip.y from y.
-            [2.0 / wx, 0.0, 0.0, 0.0],
-            [0.0, 2.0 / wy, 0.0, 0.0],
+            [2.0/wx, 0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 0.0],
-            [-cx / wx, -cy / wy, 0.0, 1.0],
+            [0.0, 2.0/wz, 0.0, 0.0],
+            [-cx/wx, -cz/wz, 0.0, 1.0],
         ],
-        _ => [
-            // Y dominant (default) → project onto XZ. clip.x from x, clip.y from z.
-            [2.0 / wx, 0.0, 0.0, 0.0],
+        // -Y → flip u; clip.x = -x, clip.y = z.
+        3 => [
+            [-2.0/wx, 0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 0.0],
-            [0.0, 2.0 / wz, 0.0, 0.0],
-            [-cx / wx, -cz / wz, 0.0, 1.0],
+            [0.0, 2.0/wz, 0.0, 0.0],
+            [cx/wx, -cz/wz, 0.0, 1.0],
+        ],
+        // +Z → project onto XY; clip.x = x, clip.y = y.
+        4 => [
+            [2.0/wx, 0.0, 0.0, 0.0],
+            [0.0, 2.0/wy, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [-cx/wx, -cy/wy, 0.0, 1.0],
+        ],
+        // -Z → flip u; clip.x = -x, clip.y = y.
+        _ => [
+            [-2.0/wx, 0.0, 0.0, 0.0],
+            [0.0, 2.0/wy, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [cx/wx, -cy/wy, 0.0, 1.0],
         ],
     }
+}
+
+/// Uniform struct for the card-lighting compute pass. Matches
+/// CARD_LIGHT_WGSL.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CardLightParams {
+    sun_dir: [f32; 4],
+    sun_color: [f32; 4],
+    sky_color: [f32; 4],
+    /// [atlas_size, slot_size, slots_per_row, active_slot_count]
+    atlas_info: [u32; 4],
 }
 
 /// Ticket 007b — per-TLAS-instance GI shading input. Indexed by the
@@ -796,24 +833,32 @@ pub struct Renderer {
     pub probe_trace_hw_layout: Option<wgpu::BindGroupLayout>,
     probe_trace_hw_bg_cache: Option<wgpu::BindGroup>,
 
-    // --- Ticket 013: Mesh Cards (Surface Cache, V1) ---
-    /// Shared albedo atlas — one card slot per scene-node mesh. Sampled
-    /// by the HW probe trace at hit to pick up textured bounce colour.
+    // --- Ticket 013: Mesh Cards (Surface Cache, V2 — 6-axis + per-frame lighting) ---
+    /// Albedo atlas, baked once per mesh at model load.
     pub mesh_card_atlas: wgpu::Texture,
     pub mesh_card_atlas_view: wgpu::TextureView,
     pub mesh_card_atlas_sampler: wgpu::Sampler,
-    /// Render pipeline + layouts for the card-capture pass. Each mesh
-    /// with an albedo texture is rasterised orthographically along its
-    /// dominant AABB axis into its assigned atlas slot at model load.
+    /// Radiance atlas — lit each frame by the card-lighting compute
+    /// pass, then sampled at hit by the HW probe trace. Same geometry
+    /// as the albedo atlas.
+    pub mesh_card_radiance_tex: wgpu::Texture,
+    pub mesh_card_radiance_view: wgpu::TextureView,
+    /// Per-slot metadata buffer: one vec4 per slot holding the card
+    /// face's world-space normal (xyz) + unused w. Populated as
+    /// captures land; consumed by the card-lighting pass for NdotL.
+    pub card_slot_meta_buffer: wgpu::Buffer,
+
     pub card_capture_pipeline: wgpu::RenderPipeline,
-    /// Fallback pipeline used when a mesh has no albedo texture — emits
-    /// a flat `base_color_factor` into the card slot instead of a
-    /// textured bake. Same layout with a dummy texture binding.
     pub card_capture_uniform_layout: wgpu::BindGroupLayout,
     pub card_capture_texture_layout: wgpu::BindGroupLayout,
     pub card_capture_uniform: wgpu::Buffer,
     pub card_capture_fallback_tex: wgpu::Texture,
     pub card_capture_fallback_view: wgpu::TextureView,
+
+    pub card_light_pipeline: wgpu::ComputePipeline,
+    pub card_light_layout: wgpu::BindGroupLayout,
+    pub card_light_uniform: wgpu::Buffer,
+    card_light_bg_cache: Option<wgpu::BindGroup>,
 
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
@@ -3378,8 +3423,16 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // --- Ticket 013: mesh-card atlas + capture pipeline ---
+        // --- Ticket 013 V2: mesh-card atlases + capture + lighting ---
         let (mesh_card_atlas, mesh_card_atlas_view) = create_mesh_card_atlas(&device);
+        let (mesh_card_radiance_tex, mesh_card_radiance_view) =
+            create_mesh_card_radiance_atlas(&device);
+        let card_slot_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("card_slot_meta_buffer"),
+            size: (CARD_MAX_SLOTS as u64) * std::mem::size_of::<[f32; 4]>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mesh_card_atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("mesh_card_atlas_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -3502,6 +3555,70 @@ impl Renderer {
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
         let card_capture_fallback_view = card_capture_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // --- Ticket 013 V2: card-lighting compute ---
+        let card_light_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("card_light_shader"),
+            source: wgpu::ShaderSource::Wgsl(CARD_LIGHT_WGSL.into()),
+        });
+        let card_light_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("card_light_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: HDR_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    }, count: None,
+                },
+            ],
+        });
+        let card_light_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("card_light_pl_layout"),
+            bind_group_layouts: &[Some(&card_light_layout)],
+            immediate_size: 0,
+        });
+        let card_light_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("card_light_pipeline"),
+            layout: Some(&card_light_pl_layout),
+            module: &card_light_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let card_light_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("card_light_uniform"),
+            size: std::mem::size_of::<CardLightParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         // --- Scene-compose pipeline ---
         // Merges HDR + SSR + SSGI*albedo + bloom + fog + shafts into
@@ -4206,12 +4323,19 @@ impl Renderer {
             mesh_card_atlas,
             mesh_card_atlas_view,
             mesh_card_atlas_sampler,
+            mesh_card_radiance_tex,
+            mesh_card_radiance_view,
+            card_slot_meta_buffer,
             card_capture_pipeline,
             card_capture_uniform_layout,
             card_capture_texture_layout,
             card_capture_uniform,
             card_capture_fallback_tex,
             card_capture_fallback_view,
+            card_light_pipeline,
+            card_light_layout,
+            card_light_uniform,
+            card_light_bg_cache: None,
             probe_temporal_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
@@ -4607,58 +4731,56 @@ impl Renderer {
         if scene.pending_card_captures.is_empty() {
             return;
         }
-        let pending: Vec<f64> = scene.pending_card_captures.drain(..).collect();
+        // Rate-limit: at 6 axes per mesh one encoder fills up after a
+        // few hundred render passes (observed hang on Sponza's 405 ×
+        // 6 = 2430-pass batch). Drain in chunks and let subsequent
+        // frames continue the work — Sponza finishes in a few frames.
+        const CAPTURE_MAX_PER_FRAME: usize = 40;
+        let take = scene.pending_card_captures.len().min(CAPTURE_MAX_PER_FRAME);
+        let pending: Vec<f64> = scene.pending_card_captures.drain(..take).collect();
+
+        // Pre-compute per-slot world-space normals for the whole batch.
+        // `slot_meta` is a Vec<[f32;4]> where entry `first_slot + axis`
+        // carries the card face's world-space normal (xyz) + unused w.
+        // Uploaded in one `queue.write_buffer` after the capture loop
+        // so the card-lighting compute pass sees the populated slots.
+        let mut slot_meta_updates: Vec<(u32, [f32; 4])> = Vec::new();
+
         for handle in pending {
-            let (slot, axis, bmin, bmax, has_tex, bc, tex_idx) = {
+            let (first_slot, bmin, bmax, transform, has_tex, bc, tex_idx, vb_ptr, ib_ptr, index_count) = {
                 let Some(node) = scene.nodes.get(handle) else { continue; };
-                let Some(slot) = node.card_slot else { continue; };
-                if slot >= CARD_MAX_SLOTS {
+                let Some(first_slot) = node.card_first_slot else { continue; };
+                if first_slot + CARD_AXES_PER_MESH > CARD_MAX_SLOTS {
                     continue;
                 }
+                let Some(vb) = node.gpu_vb.as_ref() else { continue; };
+                let Some(ib) = node.gpu_ib.as_ref() else { continue; };
                 let has_tex = node.material.texture_idx != 0;
                 (
-                    slot,
-                    node.card_dominant_axis,
+                    first_slot,
                     node.bounds_min,
                     node.bounds_max,
+                    node.transform,
                     has_tex,
                     node.material.color,
                     node.material.texture_idx,
+                    vb.clone(),
+                    ib.clone(),
+                    node.gpu_index_count,
                 )
             };
+            if index_count == 0 {
+                continue;
+            }
 
-            // Orthographic projection mapping the two non-dominant
-            // AABB axes onto clip-space [-1, +1]. Dominant axis is
-            // squashed to clip.z = 0; depth test is off so order
-            // doesn't matter. Column-major layout matches Bloom's
-            // matrix convention.
-            let ortho_vp = build_card_ortho(axis, bmin, bmax);
-            let bc_w = if has_tex { 1.0 } else { 0.0 };
-            let params = CardCaptureParams {
-                ortho_vp,
-                base_color: [bc[0], bc[1], bc[2], bc_w],
-            };
-            self.queue.write_buffer(
-                &self.card_capture_uniform,
-                0,
-                bytemuck::bytes_of(&params),
-            );
-
+            // Card textures + sampler binding stay the same across all
+            // 6 axes, so build the bind groups once per mesh.
             let tex_view = if has_tex && (tex_idx as usize) < self.textures.len() {
                 self.textures[tex_idx as usize].create_view(&wgpu::TextureViewDescriptor::default())
             } else {
                 self.card_capture_fallback_tex
                     .create_view(&wgpu::TextureViewDescriptor::default())
             };
-
-            let uniform_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("card_capture_uniform_bg"),
-                layout: &self.card_capture_uniform_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.card_capture_uniform.as_entire_binding(),
-                }],
-            });
             let texture_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("card_capture_texture_bg"),
                 layout: &self.card_capture_texture_layout,
@@ -4674,56 +4796,173 @@ impl Renderer {
                 ],
             });
 
-            // Pull VB/IB back out — `scene.nodes.get(handle)` a second
-            // time because the earlier immutable borrow ended when we
-            // built the owned data tuple above. (Can't hold `node`
-            // across the `queue.write_buffer` / `create_bind_group`
-            // calls because those take `&self` on the renderer, which
-            // borrows overlap the scene graph.)
-            let (vb_ptr, ib_ptr, index_count) = {
-                let Some(node) = scene.nodes.get(handle) else { continue; };
-                let Some(vb) = node.gpu_vb.as_ref() else { continue; };
-                let Some(ib) = node.gpu_ib.as_ref() else { continue; };
-                (vb.clone(), ib.clone(), node.gpu_index_count)
-            };
-            if index_count == 0 {
-                continue;
+            for axis in 0..CARD_AXES_PER_MESH {
+                let slot = first_slot + axis;
+
+                let ortho_vp = build_card_ortho_v2(axis, bmin, bmax);
+                let bc_w = if has_tex { 1.0 } else { 0.0 };
+                let params = CardCaptureParams {
+                    ortho_vp,
+                    base_color: [bc[0], bc[1], bc[2], bc_w],
+                };
+                self.queue.write_buffer(
+                    &self.card_capture_uniform,
+                    0,
+                    bytemuck::bytes_of(&params),
+                );
+                let uniform_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("card_capture_uniform_bg"),
+                    layout: &self.card_capture_uniform_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.card_capture_uniform.as_entire_binding(),
+                    }],
+                });
+
+                let slot_x = slot % CARD_SLOTS_PER_ROW;
+                let slot_y = slot / CARD_SLOTS_PER_ROW;
+                let vp_x = (slot_x * CARD_SLOT_SIZE) as f32;
+                let vp_y = (slot_y * CARD_SLOT_SIZE) as f32;
+                let vp_sz = CARD_SLOT_SIZE as f32;
+
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("card_capture_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.mesh_card_atlas_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_viewport(vp_x, vp_y, vp_sz, vp_sz, 0.0, 1.0);
+                pass.set_scissor_rect(vp_x as u32, vp_y as u32, CARD_SLOT_SIZE, CARD_SLOT_SIZE);
+                pass.set_pipeline(&self.card_capture_pipeline);
+                pass.set_bind_group(0, &uniform_bg, &[]);
+                pass.set_bind_group(1, &texture_bg, &[]);
+                pass.set_vertex_buffer(0, vb_ptr.slice(..));
+                pass.set_index_buffer(ib_ptr.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..index_count, 0, 0..1);
+
+                // Stash the world-space normal for the card-lighting
+                // pass. Object-space face normals are axis unit vectors
+                // signed by axis index:
+                //   0 → +X, 1 → -X, 2 → +Y, 3 → -Y, 4 → +Z, 5 → -Z.
+                // Transform by the upper-3×3 of the mesh transform to
+                // land in world space.
+                let mut n_os = [0.0_f32; 3];
+                match axis {
+                    0 => n_os[0] = 1.0,
+                    1 => n_os[0] = -1.0,
+                    2 => n_os[1] = 1.0,
+                    3 => n_os[1] = -1.0,
+                    4 => n_os[2] = 1.0,
+                    _ => n_os[2] = -1.0,
+                }
+                let t = &transform;
+                let nx = t[0][0]*n_os[0] + t[1][0]*n_os[1] + t[2][0]*n_os[2];
+                let ny = t[0][1]*n_os[0] + t[1][1]*n_os[1] + t[2][1]*n_os[2];
+                let nz = t[0][2]*n_os[0] + t[1][2]*n_os[1] + t[2][2]*n_os[2];
+                let len = (nx*nx + ny*ny + nz*nz).sqrt().max(1e-4);
+                slot_meta_updates.push((slot, [nx/len, ny/len, nz/len, 0.0]));
             }
-
-            let slot_x = slot % CARD_SLOTS_PER_ROW;
-            let slot_y = slot / CARD_SLOTS_PER_ROW;
-            let vp_x = (slot_x * CARD_SLOT_SIZE) as f32;
-            let vp_y = (slot_y * CARD_SLOT_SIZE) as f32;
-            let vp_sz = CARD_SLOT_SIZE as f32;
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("card_capture_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.mesh_card_atlas_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    // Load, not Clear — other slots in the atlas must
-                    // not be touched. Each capture is a scoped write
-                    // into a single slot via set_viewport + set_scissor.
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_viewport(vp_x, vp_y, vp_sz, vp_sz, 0.0, 1.0);
-            pass.set_scissor_rect(vp_x as u32, vp_y as u32, CARD_SLOT_SIZE, CARD_SLOT_SIZE);
-            pass.set_pipeline(&self.card_capture_pipeline);
-            pass.set_bind_group(0, &uniform_bg, &[]);
-            pass.set_bind_group(1, &texture_bg, &[]);
-            pass.set_vertex_buffer(0, vb_ptr.slice(..));
-            pass.set_index_buffer(ib_ptr.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..index_count, 0, 0..1);
         }
+
+        // Upload the new slot-meta entries in one contiguous batch.
+        // Sorting by slot index lets us coalesce adjacent writes, but
+        // V1 scatters them — `queue.write_buffer` with one range per
+        // entry is fine for the first-frame bulk-populate cost.
+        for (slot, meta) in &slot_meta_updates {
+            let offset = (*slot as u64) * std::mem::size_of::<[f32; 4]>() as u64;
+            self.queue.write_buffer(
+                &self.card_slot_meta_buffer,
+                offset,
+                bytemuck::cast_slice(&[*meta]),
+            );
+        }
+    }
+
+    /// Ticket 013 V2 — re-light every populated card texel from the
+    /// scene's directional sun + analytic sky. Runs once per frame
+    /// before the HW probe trace reads the radiance atlas. For each
+    /// atlas pixel the compute shader looks up its slot's world-space
+    /// normal (baked at capture time), reads the albedo texel, and
+    /// writes `albedo × (NdotL × sun + NdotUp × sky)` into the
+    /// radiance atlas. No shadow-cascade lookup in V2; that's a V3
+    /// ticket.
+    fn light_mesh_cards(
+        &mut self,
+        scene: &crate::scene::SceneGraph,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        // Skip entirely when no meshes have cards allocated.
+        if scene.next_card_slot == 0 {
+            return;
+        }
+        let ld = self.lighting_uniforms.light_dir;
+        let inv_len = 1.0 / (ld[0]*ld[0] + ld[1]*ld[1] + ld[2]*ld[2]).sqrt().max(1e-4);
+        let sun_dir_ws = [-ld[0]*inv_len, -ld[1]*inv_len, -ld[2]*inv_len, ld[3]];
+        let lc = self.lighting_uniforms.light_color;
+        let sun_intensity = ld[3].max(0.0);
+        let sun_color = [
+            lc[0] * sun_intensity,
+            lc[1] * sun_intensity,
+            lc[2] * sun_intensity,
+            0.0,
+        ];
+        let amb = self.lighting_uniforms.ambient;
+        let sky_intensity = amb[3].max(0.0);
+        let sky_color = [
+            amb[0] * sky_intensity,
+            amb[1] * sky_intensity,
+            amb[2] * sky_intensity,
+            0.0,
+        ];
+        let params = CardLightParams {
+            sun_dir: sun_dir_ws,
+            sun_color,
+            sky_color,
+            atlas_info: [CARD_ATLAS_SIZE, CARD_SLOT_SIZE, CARD_SLOTS_PER_ROW, scene.next_card_slot],
+        };
+        self.queue.write_buffer(
+            &self.card_light_uniform,
+            0,
+            bytemuck::bytes_of(&params),
+        );
+
+        if self.card_light_bg_cache.is_none() {
+            self.card_light_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("card_light_bg"),
+                layout: &self.card_light_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.card_light_uniform.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.mesh_card_atlas_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: self.card_slot_meta_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
+                ],
+            }));
+        }
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("card_light_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.card_light_pipeline);
+        pass.set_bind_group(0, self.card_light_bg_cache.as_ref().unwrap(), &[]);
+        // Dispatch over the populated slot range only. Each workgroup
+        // is 8×8 pixels, each slot is CARD_SLOT_SIZE² pixels.
+        let wg_per_slot = CARD_SLOT_SIZE / 8;
+        let total_wg_x = wg_per_slot * CARD_SLOTS_PER_ROW;
+        let total_wg_y =
+            wg_per_slot * ((scene.next_card_slot + CARD_SLOTS_PER_ROW - 1) / CARD_SLOTS_PER_ROW);
+        pass.dispatch_workgroups(total_wg_x, total_wg_y.max(1), 1);
     }
 
     /// Ticket 007b — build any pending BLASes and refresh the TLAS +
@@ -4796,19 +5035,19 @@ impl Renderer {
         for &h in &instance_handles {
             let n = scene.nodes.get(h).unwrap();
             let e = n.material.emissive;
-            let (card_xy, has_card) = match n.card_slot {
-                Some(s) => (
-                    [(s % CARD_SLOTS_PER_ROW) as f32, (s / CARD_SLOTS_PER_ROW) as f32],
-                    1.0_f32,
-                ),
-                None => ([0.0, 0.0], 0.0),
+            // Ticket 013 V2 — first-slot stored as a float; shader
+            // does `slot = first + axis` arithmetic and derives slot
+            // coords from that, so the xy/axis split of V1 is gone.
+            let (first_slot, has_card) = match n.card_first_slot {
+                Some(s) => (s as f32, 1.0_f32),
+                None => (0.0, 0.0),
             };
             instance_data.push(InstanceGiDataCpu {
                 albedo: n.flat_albedo,
                 emissive_luma: (e[0] + e[1] + e[2]) * (1.0 / 3.0),
                 normal_ws: n.flat_normal_ws,
                 _pad0: 0.0,
-                card_slot: [card_xy[0], card_xy[1], n.card_dominant_axis as f32, has_card],
+                card_slot: [first_slot, 0.0, 0.0, has_card],
                 card_aabb_min: [n.bounds_min[0], n.bounds_min[1], n.bounds_min[2], 0.0],
                 card_aabb_max: [n.bounds_max[0], n.bounds_max[1], n.bounds_max[2], 0.0],
             });
@@ -5838,6 +6077,13 @@ impl Renderer {
         self.capture_pending_mesh_cards(scene, &mut encoder);
         profiler.end("card_capture");
 
+        // Ticket 013 V2: re-light the card atlas every frame so the
+        // HW probe trace can sample pre-lit radiance at hit instead
+        // of running the sun/sky math per ray.
+        profiler.begin("card_light");
+        self.light_mesh_cards(scene, &mut encoder);
+        profiler.end("card_light");
+
         // Shadow pass: render scene nodes from light's perspective into
         // cascaded shadow maps (3 cascades).
         //
@@ -6721,7 +6967,10 @@ impl Renderer {
                             wgpu::BindGroupEntry { binding: 2, resource: tlas.as_binding() },
                             wgpu::BindGroupEntry { binding: 3, resource: self.tlas_instance_data_buffer.as_ref().unwrap().as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.probe_trace_view) },
-                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.mesh_card_atlas_view) },
+                            // Ticket 013 V2: the HW trace samples the
+                            // *radiance* atlas (pre-lit by card_light_pass)
+                            // at hit, not the raw albedo atlas.
+                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
                             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
                         ],
                     }));

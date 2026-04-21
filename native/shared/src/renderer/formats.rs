@@ -313,24 +313,32 @@ pub(super) fn create_probe_trace_tex(
     create_probe_3d_tex(device, "probe_trace", gw, gh)
 }
 
-/// Ticket 013 — Mesh Cards. Shared 2D albedo atlas that the HW probe
-/// trace samples at hit. V1 uses a single dominant-axis card per mesh,
-/// 128×128 RGBA8 sRGB. Capacity is 32×32 = 1024 slots at 4096² atlas.
-/// Sponza fits comfortably; larger scenes can bump `CARD_ATLAS_SIZE`
-/// without touching anything else.
+/// Ticket 013 — Mesh Cards. Shared 2D atlases sampled by the HW probe
+/// trace at hit. V2 stores 6 signed-axis slots per mesh (±X ±Y ±Z)
+/// at 64×64 each; 4096² atlas ⇒ 64×64 = 4096 slots ⇒ 682 meshes at
+/// full 6-axis capture (Sponza's ~405 fits comfortably).
+///
+/// Two atlases are kept in lockstep:
+///   - `mesh_card_albedo_atlas`   — baked once per mesh at load.
+///   - `mesh_card_radiance_atlas` — written every frame by the card-
+///     lighting compute pass (albedo × sun × NdotL + sky × NdotUp).
+/// The HW trace samples radiance directly at hit, amortising shading
+/// cost across all rays that land in the same card texel.
 pub(super) const CARD_ATLAS_SIZE: u32 = 4096;
-pub(super) const CARD_SLOT_SIZE: u32 = 128;
+pub(super) const CARD_SLOT_SIZE: u32 = 64;
 pub(super) const CARD_SLOTS_PER_ROW: u32 = CARD_ATLAS_SIZE / CARD_SLOT_SIZE;
 pub(super) const CARD_MAX_SLOTS: u32 = CARD_SLOTS_PER_ROW * CARD_SLOTS_PER_ROW;
+/// V2: 6 directed axes per mesh (+X, -X, +Y, -Y, +Z, -Z).
+pub(super) const CARD_AXES_PER_MESH: u32 = 6;
 
-/// Create the mesh-card atlas texture. `RENDER_ATTACHMENT` so the
-/// card-capture pass can draw into it at model load, `TEXTURE_BINDING`
-/// so the HW trace shader can sample it at hit.
+/// Create the mesh-card albedo atlas. `RENDER_ATTACHMENT` for capture,
+/// `TEXTURE_BINDING` for both the card-lighting compute input and a
+/// direct HW-trace fallback.
 pub(super) fn create_mesh_card_atlas(
     device: &wgpu::Device,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("mesh_card_atlas"),
+        label: Some("mesh_card_albedo_atlas"),
         size: wgpu::Extent3d {
             width: CARD_ATLAS_SIZE,
             height: CARD_ATLAS_SIZE,
@@ -341,6 +349,33 @@ pub(super) fn create_mesh_card_atlas(
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Create the mesh-card radiance atlas. Written every frame by the
+/// card-lighting compute pass; sampled at hit by the HW probe trace.
+/// Rgba16Float so we can carry multiplicatively-composed sun + sky
+/// without banding. `STORAGE_BINDING` for the compute write,
+/// `TEXTURE_BINDING` for the trace sample.
+pub(super) fn create_mesh_card_radiance_atlas(
+    device: &wgpu::Device,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh_card_radiance_atlas"),
+        size: wgpu::Extent3d {
+            width: CARD_ATLAS_SIZE,
+            height: CARD_ATLAS_SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
              | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });

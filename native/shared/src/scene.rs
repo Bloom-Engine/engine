@@ -110,14 +110,12 @@ pub struct SceneNode {
     /// by `prepare()`, committed to the GPU by the renderer's main
     /// encoder in `build_acceleration_structures`.
     pub blas: Option<wgpu::Blas>,
-    /// Ticket 013 — atlas slot index assigned at BLAS creation for
-    /// the Mesh-Cards V1 albedo capture. `None` until the renderer's
-    /// capture pass runs over the pending queue.
-    pub card_slot: Option<u32>,
-    /// Dominant AABB axis (0=X, 1=Y, 2=Z) picked at slot-assign time.
-    /// Drives both the capture orthographic projection and the
-    /// hit-shader's object-space projection back into card UV.
-    pub card_dominant_axis: u32,
+    /// Ticket 013 — first of 6 consecutive card-atlas slots assigned
+    /// at BLAS creation. Slots are laid out per axis:
+    ///   first_slot + 0 → +X, +1 → -X, +2 → +Y,
+    ///   +3 → -Y,       +4 → +Z, +5 → -Z.
+    /// `None` until the capture pass has allocated the run.
+    pub card_first_slot: Option<u32>,
     /// Flat mesh-average world-space normal, cached on BLAS build so
     /// the per-instance GI data buffer can be populated without
     /// re-reading the vertex array. Rough heuristic — for walls and
@@ -171,8 +169,7 @@ impl SceneNode {
             gpu_index_count: 0,
             gpu_vertex_count: 0,
             blas: None,
-            card_slot: None,
-            card_dominant_axis: 1,  // default: Y (floor/ceiling)
+            card_first_slot: None,
             flat_normal_ws: [0.0, 1.0, 0.0],
             flat_albedo: [1.0, 1.0, 1.0],
             uniform_slot: None,
@@ -648,26 +645,14 @@ impl SceneGraph {
                     ));
                     pending_blas.push(handle);
 
-                    // Ticket 013 — pick the dominant object-space AABB
-                    // axis (largest extent) and allocate a card slot.
-                    // The renderer's capture pass will rasterise the
-                    // mesh orthographically along that axis into the
-                    // atlas position on the next frame.
-                    if node.card_slot.is_none() {
-                        let dx = node.bounds_max[0] - node.bounds_min[0];
-                        let dy = node.bounds_max[1] - node.bounds_min[1];
-                        let dz = node.bounds_max[2] - node.bounds_min[2];
-                        let axis: u32 = if dy >= dx && dy >= dz {
-                            1
-                        } else if dx >= dz {
-                            0
-                        } else {
-                            2
-                        };
-                        node.card_dominant_axis = axis;
-                        let slot = *next_card_slot;
-                        *next_card_slot += 1;
-                        node.card_slot = Some(slot);
+                    // Ticket 013 V2 — allocate 6 consecutive slots
+                    // (one per signed AABB axis) and schedule the
+                    // capture pass to bake all six albedo views at
+                    // next frame start.
+                    if node.card_first_slot.is_none() {
+                        let first = *next_card_slot;
+                        *next_card_slot += 6;
+                        node.card_first_slot = Some(first);
                         pending_cards.push(handle);
                     }
                 }
