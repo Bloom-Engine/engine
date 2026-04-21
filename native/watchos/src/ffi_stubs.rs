@@ -49,15 +49,9 @@
 }
 #[no_mangle] pub extern "C" fn bloom_draw_ray(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_load_model(_p0: i64) -> f64 {
-    0.0
-}
 #[no_mangle] pub extern "C" fn bloom_draw_model(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_unload_model(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_gen_mesh_cube(_p0: f64, _p1: f64, _p2: f64) -> f64 {
-    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_gen_mesh_heightmap(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
     0.0
@@ -259,8 +253,6 @@
 #[no_mangle] pub extern "C" fn bloom_disable_shadows() {
 }
 #[no_mangle] pub extern "C" fn bloom_dump_shadow_map(_p0: i64) {
-}
-#[no_mangle] pub extern "C" fn bloom_scene_attach_model(_p0: f64, _p1: f64, _p2: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_enable_postfx() {
 }

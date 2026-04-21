@@ -14,6 +14,7 @@ mod draw_list;
 mod textures;
 mod audio;
 mod scene;
+mod models;
 
 /// Perry StringHeader layout — mirrors bloom-shared's copy. Inlined here
 /// because we don't depend on bloom-shared (keeps the watchos crate
@@ -763,6 +764,40 @@ pub extern "C" fn bloom_scene_get_transform(handle: f64, out: f64) -> f64 {
         std::ptr::copy_nonoverlapping(t.as_ptr(), out as usize as *mut f32, 16);
     }
     1.0
+}
+
+// ============================================================
+// Models — glTF (.glb) loading + scene attachment
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_load_model(path: i64) -> f64 {
+    let p = perry_str(path);
+    if p.is_empty() { return 0.0; }
+    let full = if p.starts_with('/') { p.to_string() } else { textures::resolve_bundle_path(p) };
+    models::load(&full) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_gen_mesh_cube(w: f64, h: f64, d: f64) -> f64 {
+    models::gen_cube_mesh(w as f32, h as f32, d as f32) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, _mesh_idx: f64) {
+    let Some(model) = models::get(model_handle as u32) else { return; };
+    // Clone the model's mesh data into the node. Scene's geometry version
+    // bumps, Swift rebuilds the SCNGeometry on next frame.
+    scene::set_geometry(
+        node_handle as u32,
+        model.positions.clone(),
+        model.normals.clone(),
+        model.uvs.clone(),
+        model.indices.clone(),
+    );
+    // Also apply the model's baseColor + PBR factors as the node material.
+    scene::set_color(node_handle as u32, model.color);
+    scene::set_pbr(node_handle as u32, model.roughness, model.metallic);
 }
 
 #[no_mangle] pub extern "C" fn bloom_add_directional_light(

@@ -143,6 +143,20 @@ pub fn set_texture(handle: u32, tex: u32) { mutate(handle, |n| n.texture = tex);
 
 /// TS → native FFI layout: 12 f64s per vertex — xyz, nx ny nz, rgba, uv.
 /// Color is ignored (material color wins via bloom_scene_set_material_color).
+/// Directly install pre-decoded geometry (from a loaded model) into a scene
+/// node, bypassing the 12-f64-per-vertex TS FFI layout.
+pub fn set_geometry(handle: u32,
+    positions: Vec<f32>, normals: Vec<f32>, uvs: Vec<f32>, indices: Vec<u32>,
+) {
+    mutate(handle, |n| {
+        n.positions = positions;
+        n.normals = normals;
+        n.uvs = uvs;
+        n.indices = indices;
+        n.geometry_version = n.geometry_version.wrapping_add(1);
+    });
+}
+
 pub fn update_geometry_f64(handle: u32, verts: &[f64], indices: &[f64]) {
     mutate(handle, |n| {
         let count = verts.len() / 12;

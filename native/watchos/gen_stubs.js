@@ -58,6 +58,8 @@ const OVERRIDES = new Set([
   'bloom_scene_set_material_color', 'bloom_scene_set_material_pbr', 'bloom_scene_set_material_texture',
   'bloom_scene_node_count', 'bloom_scene_get_transform',
   'bloom_add_directional_light', 'bloom_add_point_light',
+  // Models
+  'bloom_load_model', 'bloom_gen_mesh_cube', 'bloom_scene_attach_model',
 ]);
 
 const rustType = (p) => {
