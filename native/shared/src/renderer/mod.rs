@@ -6262,8 +6262,27 @@ impl Renderer {
                 -ld[2] * sun_inv_len,
                 ld[3],
             ];
-            // Ticket 007b — sun + sky inputs are ignored by the SW
-            // shader (same uniform layout, wider fields). HW uses them.
+            // Sun colour = light_color × light intensity (ld.w). Sky
+            // colour = ambient × ambient intensity (ambient.w) — a
+            // crude dome irradiance, good enough for a one-bounce
+            // shading estimate. Both fields are ignored by the SW
+            // shader which inherits the same uniform struct layout.
+            let lc = self.lighting_uniforms.light_color;
+            let sun_intensity = ld[3].max(0.0);
+            let sun_color = [
+                lc[0] * sun_intensity,
+                lc[1] * sun_intensity,
+                lc[2] * sun_intensity,
+                0.0,
+            ];
+            let amb = self.lighting_uniforms.ambient;
+            let sky_intensity = amb[3].max(0.0);
+            let sky_color = [
+                amb[0] * sky_intensity,
+                amb[1] * sky_intensity,
+                amb[2] * sky_intensity,
+                0.0,
+            ];
             let trace_params = ProbeTraceParams {
                 view: self.current_view_matrix,
                 proj: self.current_proj_matrix,
@@ -6277,8 +6296,8 @@ impl Renderer {
                     10.0,  // firefly luma cap
                 ],
                 sun_dir: sun_dir_ws,
-                sun_color: [3.0, 2.8, 2.5, 0.0],   // warm sunlight
-                sky_color: [0.35, 0.45, 0.6, 0.0], // cool sky dome
+                sun_color,
+                sky_color,
             };
             self.queue.write_buffer(&self.probe_trace_uniform, 0, bytemuck::bytes_of(&trace_params));
             // Trace bind group is cache-stable (always writes into the

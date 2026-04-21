@@ -320,8 +320,35 @@ unsafe extern "C" fn scene_will_connect(
         ..Default::default()
     })).expect("No GPU adapter found");
 
+    // Ticket 007b: opt into HW ray-query on RT-capable Apple Silicon
+    // devices. `BLOOM_FORCE_SW_GI=1` forces the SW path for bench parity.
+    let supported = adapter.features();
+    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+    let mut required_features = wgpu::Features::empty();
+    if !force_sw_gi && supported.contains(rt_mask) {
+        required_features |= rt_mask;
+    }
+    let experimental_features = if required_features.intersects(rt_mask) {
+        unsafe { wgpu::ExperimentalFeatures::enabled() }
+    } else {
+        wgpu::ExperimentalFeatures::disabled()
+    };
+    let mut required_limits = wgpu::Limits::default();
+    if required_features.intersects(rt_mask) {
+        required_limits = required_limits
+            .using_minimum_supported_acceleration_structure_values();
+    }
     let (device, queue) = pollster_block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
+        &wgpu::DeviceDescriptor {
+            label: Some("bloom_device"),
+            required_features,
+            required_limits,
+            experimental_features,
+            ..Default::default()
+        },
     )).expect("Failed to create device");
 
     let surface_caps = surface.get_capabilities(&adapter);
@@ -458,8 +485,35 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
         ..Default::default()
     })).expect("No GPU adapter found");
 
+    // Ticket 007b: opt into HW ray-query on RT-capable Apple Silicon
+    // devices. `BLOOM_FORCE_SW_GI=1` forces the SW path for bench parity.
+    let supported = adapter.features();
+    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+    let mut required_features = wgpu::Features::empty();
+    if !force_sw_gi && supported.contains(rt_mask) {
+        required_features |= rt_mask;
+    }
+    let experimental_features = if required_features.intersects(rt_mask) {
+        unsafe { wgpu::ExperimentalFeatures::enabled() }
+    } else {
+        wgpu::ExperimentalFeatures::disabled()
+    };
+    let mut required_limits = wgpu::Limits::default();
+    if required_features.intersects(rt_mask) {
+        required_limits = required_limits
+            .using_minimum_supported_acceleration_structure_values();
+    }
     let (device, queue) = pollster_block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor { label: Some("bloom_device"), ..Default::default() },
+        &wgpu::DeviceDescriptor {
+            label: Some("bloom_device"),
+            required_features,
+            required_limits,
+            experimental_features,
+            ..Default::default()
+        },
     )).expect("Failed to create device");
 
     let surface_caps = surface.get_capabilities(&adapter);

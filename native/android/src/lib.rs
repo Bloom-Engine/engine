@@ -151,11 +151,37 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         };
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: adapter found\0".as_ptr());
 
+        // Ticket 007b: most Android GPUs lack RT, but recent Adreno /
+        // Mali-Immortalis devices do — request the feature if advertised.
+        // Limits merge: start from downlevel (required for older Android
+        // adapters), then layer acceleration-structure minimums on top
+        // when RT was granted.
+        let supported = adapter.features();
+        let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        let mut required_features = wgpu::Features::empty();
+        if !force_sw_gi && supported.contains(rt_mask) {
+            required_features |= rt_mask;
+        }
+        let experimental_features = if required_features.intersects(rt_mask) {
+            unsafe { wgpu::ExperimentalFeatures::enabled() }
+        } else {
+            wgpu::ExperimentalFeatures::disabled()
+        };
+        let mut required_limits = wgpu::Limits::downlevel_defaults()
+            .using_resolution(adapter.limits());
+        if required_features.intersects(rt_mask) {
+            required_limits = required_limits
+                .using_minimum_supported_acceleration_structure_values();
+        }
         let (device, queue) = pollster_block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("bloom_device"),
-                required_limits: wgpu::Limits::downlevel_defaults()
-                    .using_resolution(adapter.limits()),
+                required_features,
+                required_limits,
+                experimental_features,
                 ..Default::default()
             },
         )).expect("Failed to create device");

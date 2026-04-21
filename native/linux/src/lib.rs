@@ -249,8 +249,36 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             ..Default::default()
         })).expect("No adapter found");
 
+        // Ticket 007b: HW ray-query via VK_KHR_ray_query on RT-capable
+        // desktop Linux GPUs. Older integrated GPUs will fall back to
+        // the SW path through this gate.
+        let supported = adapter.features();
+        let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        let mut required_features = wgpu::Features::empty();
+        if !force_sw_gi && supported.contains(rt_mask) {
+            required_features |= rt_mask;
+        }
+        let experimental_features = if required_features.intersects(rt_mask) {
+            unsafe { wgpu::ExperimentalFeatures::enabled() }
+        } else {
+            wgpu::ExperimentalFeatures::disabled()
+        };
+        let mut required_limits = wgpu::Limits::default();
+        if required_features.intersects(rt_mask) {
+            required_limits = required_limits
+                .using_minimum_supported_acceleration_structure_values();
+        }
         let (device, queue) = pollster_block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor::default(),
+            &wgpu::DeviceDescriptor {
+                label: Some("bloom_device"),
+                required_features,
+                required_limits,
+                experimental_features,
+                ..Default::default()
+            },
         )).expect("Failed to create device");
 
         let surface_caps = surface.get_capabilities(&adapter);
