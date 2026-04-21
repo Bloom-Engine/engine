@@ -25,35 +25,6 @@
 #[no_mangle] pub extern "C" fn bloom_is_mouse_button_released(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_draw_line(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_rect(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_rect_lines(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_circle(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_circle_lines(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_triangle(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_poly(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_text(_p0: i64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_measure_text(_p0: i64, _p1: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_load_font(_p0: i64, _p1: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_unload_font(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_text_ex(_p0: f64, _p1: i64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_measure_text_ex(_p0: f64, _p1: i64, _p2: f64, _p3: f64) -> f64 {
-    0.0
-}
 #[no_mangle] pub extern "C" fn bloom_init_audio() {
 }
 #[no_mangle] pub extern "C" fn bloom_close_audio() {
@@ -73,23 +44,6 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_listener_position(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_load_texture(_p0: i64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_unload_texture(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_texture(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_texture_rec(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_draw_texture_pro(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_get_texture_width(_p0: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_get_texture_height(_p0: f64) -> f64 {
-    0.0
-}
 #[no_mangle] pub extern "C" fn bloom_load_image(_p0: i64) -> f64 {
     0.0
 }
@@ -105,8 +59,6 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_gen_texture_mipmaps(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_texture_filter(_p0: f64, _p1: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_begin_mode_2d(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
 }
@@ -188,6 +140,30 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_dof(_p0: f64, _p1: f64, _p2: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_quality_preset(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_shadows_enabled(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_bloom_enabled(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_ssao_enabled(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_motion_blur_enabled(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_sss_enabled(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_profiler_enabled(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_get_profiler_frame_cpu_us() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_print_profiler_summary() {
+}
 #[no_mangle] pub extern "C" fn bloom_get_model_mesh_count(_p0: f64) -> f64 {
     0.0
 }
@@ -247,15 +223,6 @@
 }
 #[no_mangle] pub extern "C" fn bloom_get_model_bounds_max_z(_p0: f64) -> f64 {
     0.0
-}
-#[no_mangle] pub extern "C" fn bloom_write_file(_p0: i64, _p1: i64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_file_exists(_p0: i64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_read_file(_p0: i64) -> i64 {
-    0
 }
 #[no_mangle] pub extern "C" fn bloom_register_frame_callback(_p0: f64, _p1: i64) -> f64 {
     0.0

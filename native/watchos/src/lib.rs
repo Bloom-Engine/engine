@@ -1,62 +1,57 @@
-//! bloom-watchos: proof-of-life backend for the watchOS target.
+//! bloom-watchos: Canvas + (future) SceneKit backend for watchOS.
 //!
-//! This crate intentionally does not render. It provides every `bloom_*` FFI
-//! symbol Perry's manifest declares so that `perry compile --target
-//! watchos-simulator --features watchos-game-loop` can link a `.app`, launches
-//! on the watch simulator, runs the user's TS on Perry's game thread, and
-//! routes Digital Crown + touch input back through `getCrownRotation()` /
-//! `getTouchX/Y`. Drawing calls are no-ops — actual rendering waits on a
-//! `dlopen`-based Metal path since the watchOS SDK doesn't ship
-//! `Metal.framework` for static linking.
+//! The Swift shell (`BloomWatchApp.swift`, compiled by Perry via
+//! `--features watchos-swift-app`) owns `@main`. During init it spawns the
+//! game thread calling `_perry_user_main`. The root view is a SwiftUI
+//! `Canvas` that drains this crate's draw list each frame. Digital Crown
+//! rotation, taps, and layout dimensions come back in through the
+//! `bloom_watchos_*` inbound functions.
 
 #![allow(non_upper_case_globals)]
 
 mod ffi_stubs;
+mod draw_list;
+mod textures;
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use draw_list::{kind, DrawCmd};
+
 // ============================================================
-// Minimal input state (standalone — no bloom-shared dep to keep
-// this crate free of wgpu / Metal linkage for the first cut)
+// Minimal engine state (input + timing). Rendering state lives
+// in the draw_list and textures modules.
 // ============================================================
 
 const MAX_TOUCH: usize = 4;
 
 struct WatchState {
-    // Bit-packed keys (unused on watch but the FFI needs backing storage)
-    keys_down: [AtomicU64; 8],
-    // Crown accumulator — radians since last consume; i64 as f64::to_bits
-    crown_bits: AtomicU64,
-    // Touch state
-    touch_x: [AtomicU64; MAX_TOUCH], // f64 bits
-    touch_y: [AtomicU64; MAX_TOUCH], // f64 bits
-    touch_active: [AtomicU64; MAX_TOUCH], // 0 or 1
-    // Screen geometry
-    screen_w: AtomicU64,
-    screen_h: AtomicU64,
-    // Timing
+    crown_bits: AtomicU64, // f64 bits
+    touch_x: [AtomicU64; MAX_TOUCH],
+    touch_y: [AtomicU64; MAX_TOUCH],
+    touch_active: [AtomicU64; MAX_TOUCH],
+    screen_w: AtomicU64, // f64 bits
+    screen_h: AtomicU64, // f64 bits
     target_fps: AtomicI64,
     start: OnceLock<Instant>,
-    last_frame: AtomicU64, // nanoseconds since start
+    last_frame_ns: AtomicU64,
     frame_count: AtomicUsize,
 }
 
 fn state() -> &'static WatchState {
     static S: OnceLock<WatchState> = OnceLock::new();
     S.get_or_init(|| WatchState {
-        keys_down: std::array::from_fn(|_| AtomicU64::new(0)),
         crown_bits: AtomicU64::new(0),
         touch_x: std::array::from_fn(|_| AtomicU64::new(0)),
         touch_y: std::array::from_fn(|_| AtomicU64::new(0)),
         touch_active: std::array::from_fn(|_| AtomicU64::new(0)),
-        screen_w: AtomicU64::new(198f64.to_bits()), // 40mm Apple Watch default
+        screen_w: AtomicU64::new(198f64.to_bits()),
         screen_h: AtomicU64::new(242f64.to_bits()),
         target_fps: AtomicI64::new(30),
         start: OnceLock::new(),
-        last_frame: AtomicU64::new(0),
+        last_frame_ns: AtomicU64::new(0),
         frame_count: AtomicUsize::new(0),
     })
 }
@@ -67,8 +62,6 @@ fn now_nanos() -> u64 {
     start.elapsed().as_nanos() as u64
 }
 
-// Accumulate crown rotation (radians). Called from Swift via the
-// accumulate_crown export below.
 fn add_crown(delta: f64) {
     let s = state();
     loop {
@@ -90,17 +83,12 @@ fn consume_crown() -> f64 {
 }
 
 // ============================================================
-// Exports for the watchOS Swift shell (see PerryWatchGameLoop.swift
-// embedded as a literal in perry_scene_will_connect below)
+// Swift → Rust inbound hooks. Called from BloomWatchApp.swift.
 // ============================================================
 
-/// Called from Swift whenever the Digital Crown rotates.
 #[no_mangle]
-pub extern "C" fn bloom_watchos_crown_delta(delta: f64) {
-    add_crown(delta);
-}
+pub extern "C" fn bloom_watchos_crown_delta(delta: f64) { add_crown(delta); }
 
-/// Called from Swift on each touch event. active=0 on end.
 #[no_mangle]
 pub extern "C" fn bloom_watchos_touch(index: i64, x: f64, y: f64, active: i64) {
     let s = state();
@@ -112,7 +100,6 @@ pub extern "C" fn bloom_watchos_touch(index: i64, x: f64, y: f64, active: i64) {
     }
 }
 
-/// Called from Swift after the hosting controller lays out its view.
 #[no_mangle]
 pub extern "C" fn bloom_watchos_set_screen(w: f64, h: f64) {
     let s = state();
@@ -120,33 +107,57 @@ pub extern "C" fn bloom_watchos_set_screen(w: f64, h: f64) {
     s.screen_h.store(h.to_bits(), Ordering::Release);
 }
 
+#[no_mangle]
+pub extern "C" fn bloom_watchos_set_bundle_path(path: *const c_char) {
+    if path.is_null() { return; }
+    let s = unsafe { std::ffi::CStr::from_ptr(path) };
+    if let Ok(str) = s.to_str() {
+        textures::set_bundle_path(str);
+    }
+}
+
+// Draw-list snapshot accessors for Swift Canvas.
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_frame_count() -> u64 { draw_list::frame() }
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_copy_draw_list(dst: *mut DrawCmd, max: i64) -> i64 {
+    draw_list::copy_into(dst, max)
+}
+
+/// Returns [r,g,b,a] of the current clear color, 0-255 per channel, into a
+/// Swift-supplied 4-element f64 buffer.
+#[no_mangle]
+pub extern "C" fn bloom_watchos_clear_color(out: *mut f64) {
+    if out.is_null() { return; }
+    let c = draw_list::clear_rgba();
+    unsafe { std::ptr::copy_nonoverlapping(c.as_ptr(), out, 4); }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_texture_path(handle: u32) -> *const c_char {
+    textures::path_ptr(handle)
+}
+
 // ============================================================
-// Perry game-loop handshake
+// Perry game-loop handshake.
 // ============================================================
 //
-// Perry's watchos_game_loop.rs registers a fallback delegate whose
-// applicationDidFinishLaunching calls perry_scene_will_connect(NULL). We don't
-// need to override that delegate — the fallback is enough for proof-of-life.
-// We leave perry_register_native_classes as a no-op and let the fallback run.
+// With --features watchos-swift-app, Perry doesn't generate its own main() —
+// BloomWatchApp.swift is @main. Perry's watchos runtime still provides the
+// `perry_main_init` C symbol which does global TS init; the Swift App calls
+// it before spawning the game thread. We don't need to register any ObjC
+// classes from this crate.
 
 #[no_mangle]
-pub extern "C" fn perry_register_native_classes() {
-    // Intentionally empty. Perry's watchos_game_loop fallback delegate is
-    // sufficient to signal applicationDidFinishLaunching into the TS thread.
-    // A future revision will register a WKHostingController + Metal view here.
-}
+pub extern "C" fn perry_register_native_classes() {}
 
 #[no_mangle]
-pub extern "C" fn perry_scene_will_connect(_scene: *const c_void) {
-    // Proof-of-life: we don't attach a view in this cut. The game thread is
-    // already running the user's TS code (spawned by perry main() before
-    // WKApplicationMain was entered). Input will flow once a future Swift
-    // shell installs the WKCrownSequencer + touch handlers and calls the
-    // bloom_watchos_* inbound functions above.
-}
+pub extern "C" fn perry_scene_will_connect(_scene: *const c_void) {}
 
 // ============================================================
-// Overridden bloom_* FFI — the ones the stubs generator skipped
+// Platform / timing / input overrides
 // ============================================================
 
 #[no_mangle]
@@ -193,7 +204,7 @@ pub extern "C" fn bloom_get_touch_count() -> f64 {
 pub extern "C" fn bloom_get_delta_time() -> f64 {
     let s = state();
     let now = now_nanos();
-    let last = s.last_frame.swap(now, Ordering::AcqRel);
+    let last = s.last_frame_ns.swap(now, Ordering::AcqRel);
     if last == 0 { 1.0 / 30.0 } else { (now - last) as f64 / 1_000_000_000.0 }
 }
 
@@ -208,9 +219,12 @@ pub extern "C" fn bloom_get_fps() -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(_w: f64, _h: f64, _title: i64, _fullscreen: f64) {
-    // no-op — the Swift shell owns the window
+pub extern "C" fn bloom_set_target_fps(fps: f64) {
+    state().target_fps.store(fps as i64, Ordering::Release);
 }
+
+#[no_mangle]
+pub extern "C" fn bloom_init_window(_w: f64, _h: f64, _title: i64, _fullscreen: f64) {}
 
 #[no_mangle]
 pub extern "C" fn bloom_close_window() {}
@@ -218,31 +232,36 @@ pub extern "C" fn bloom_close_window() {}
 #[no_mangle]
 pub extern "C" fn bloom_window_should_close() -> f64 { 0.0 }
 
+// ============================================================
+// Drawing lifecycle
+// ============================================================
+
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
-    // Throttle to target fps. Without a Metal presentation step, the game
-    // loop would otherwise busy-spin. Sleep to roughly match target fps.
+    // Pace the game thread to target fps. Canvas refresh is driven by the
+    // frame counter change on the Swift side, so this sleep also controls
+    // apparent frame rate in the view.
     let fps = state().target_fps.load(Ordering::Acquire);
     if fps > 0 {
         let frame_ns = 1_000_000_000u64 / fps as u64;
         std::thread::sleep(std::time::Duration::from_nanos(frame_ns));
     }
+    draw_list::begin();
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_end_drawing() {
+    draw_list::end();
     state().frame_count.fetch_add(1, Ordering::Relaxed);
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_clear_background(_r: f64, _g: f64, _b: f64, _a: f64) {}
+pub extern "C" fn bloom_clear_background(r: f64, g: f64, b: f64, a: f64) {
+    draw_list::set_clear(r, g, b, a);
+}
 
 #[no_mangle]
-pub extern "C" fn bloom_run_game(_callback: f64) {
-    // No-op. runGame()'s native path blocks in a while loop calling
-    // beginDrawing/update/endDrawing — that's what Perry's game thread will
-    // actually execute. This symbol only exists to satisfy the FFI manifest.
-}
+pub extern "C" fn bloom_run_game(_callback: f64) {}
 
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
@@ -254,38 +273,258 @@ pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     0.0
 }
 
-#[no_mangle]
-pub extern "C" fn bloom_is_key_pressed(_key: f64) -> f64 { 0.0 }
-#[no_mangle]
-pub extern "C" fn bloom_is_key_down(_key: f64) -> f64 { 0.0 }
-#[no_mangle]
-pub extern "C" fn bloom_is_key_released(_key: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_is_key_pressed(_k: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_is_key_down(_k: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_is_key_released(_k: f64) -> f64 { 0.0 }
+
+#[no_mangle] pub extern "C" fn bloom_inject_key_down(_k: f64) {}
+#[no_mangle] pub extern "C" fn bloom_inject_key_up(_k: f64) {}
+#[no_mangle] pub extern "C" fn bloom_inject_gamepad_axis(_a: f64, _v: f64) {}
+#[no_mangle] pub extern "C" fn bloom_inject_gamepad_button_down(_b: f64) {}
+#[no_mangle] pub extern "C" fn bloom_inject_gamepad_button_up(_b: f64) {}
+
+#[no_mangle] pub extern "C" fn bloom_is_gamepad_available() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_get_gamepad_axis(_a: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_is_gamepad_button_pressed(_b: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_is_gamepad_button_down(_b: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_is_gamepad_button_released(_b: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_get_gamepad_axis_count() -> f64 { 0.0 }
+
+// ============================================================
+// 2D shape commands → draw list
+// ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_set_target_fps(fps: f64) {
-    state().target_fps.store(fps as i64, Ordering::Release);
+pub extern "C" fn bloom_draw_rect(x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64, a: f64) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::RECT;
+    c.x = x; c.y = y; c.w = w; c.h = h;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_inject_key_down(_key: f64) {}
-#[no_mangle]
-pub extern "C" fn bloom_inject_key_up(_key: f64) {}
-#[no_mangle]
-pub extern "C" fn bloom_inject_gamepad_axis(_axis: f64, _value: f64) {}
-#[no_mangle]
-pub extern "C" fn bloom_inject_gamepad_button_down(_btn: f64) {}
-#[no_mangle]
-pub extern "C" fn bloom_inject_gamepad_button_up(_btn: f64) {}
+pub extern "C" fn bloom_draw_rect_lines(x: f64, y: f64, w: f64, h: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::RECT_LINES;
+    c.x = x; c.y = y; c.w = w; c.h = h;
+    c.thickness = thickness;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
 
 #[no_mangle]
-pub extern "C" fn bloom_is_gamepad_available() -> f64 { 0.0 }
+pub extern "C" fn bloom_draw_circle(cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64, a: f64) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::CIRCLE;
+    c.x = cx; c.y = cy; c.w = rad; c.h = rad;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
 #[no_mangle]
-pub extern "C" fn bloom_get_gamepad_axis(_axis: f64) -> f64 { 0.0 }
+pub extern "C" fn bloom_draw_circle_lines(cx: f64, cy: f64, rad: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::CIRCLE_LINES;
+    c.x = cx; c.y = cy; c.w = rad; c.h = rad;
+    c.thickness = thickness;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
 #[no_mangle]
-pub extern "C" fn bloom_is_gamepad_button_pressed(_btn: f64) -> f64 { 0.0 }
+pub extern "C" fn bloom_draw_line(x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::LINE;
+    c.x = x1; c.y = y1;
+    c.src_x = x2; c.src_y = y2;
+    c.thickness = thickness;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
 #[no_mangle]
-pub extern "C" fn bloom_is_gamepad_button_down(_btn: f64) -> f64 { 0.0 }
+pub extern "C" fn bloom_draw_triangle(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64, r: f64, g: f64, b: f64, a: f64) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::TRIANGLE;
+    c.x = x1; c.y = y1;
+    c.src_x = x2; c.src_y = y2;
+    c.src_w = x3; c.src_h = y3;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
 #[no_mangle]
-pub extern "C" fn bloom_is_gamepad_button_released(_btn: f64) -> f64 { 0.0 }
+pub extern "C" fn bloom_draw_poly(_cx: f64, _cy: f64, _sides: f64, _radius: f64, _rot: f64, _r: f64, _g: f64, _b: f64, _a: f64) {
+    // Polygon fill — defer; Canvas handles via context.fill(Path.addArc).
+    // Will land with the rest of the Canvas geometry work.
+}
+
+// ============================================================
+// Texture commands
+// ============================================================
+
 #[no_mangle]
-pub extern "C" fn bloom_get_gamepad_axis_count() -> f64 { 0.0 }
+pub extern "C" fn bloom_load_texture(path: i64) -> f64 {
+    textures::load(path as *const c_char) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_unload_texture(_handle: f64) {
+    // Retain by handle — unload is a no-op on watch (reloading isn't common
+    // in Jump-class games; we keep cached CGImages on the Swift side for
+    // the life of the process).
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_texture_width(handle: f64) -> f64 {
+    textures::width(handle as u32) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_texture_height(handle: f64) -> f64 {
+    textures::height(handle as u32) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_texture(handle: f64, x: f64, y: f64, r: f64, g: f64, b: f64, a: f64) {
+    let h = handle as u32;
+    if h == 0 { return; }
+    let mut c = DrawCmd::zero();
+    c.kind = kind::TEXTURE;
+    c.tex = h;
+    c.x = x; c.y = y;
+    c.w = textures::width(h) as f64;
+    c.h = textures::height(h) as f64;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_texture_rec(handle: f64,
+    src_x: f64, src_y: f64, src_w: f64, src_h: f64,
+    dst_x: f64, dst_y: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let h = handle as u32;
+    if h == 0 { return; }
+    let mut c = DrawCmd::zero();
+    c.kind = kind::TEXTURE_REC;
+    c.tex = h;
+    c.x = dst_x; c.y = dst_y;
+    c.w = src_w; c.h = src_h;
+    c.src_x = src_x; c.src_y = src_y; c.src_w = src_w; c.src_h = src_h;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_texture_pro(handle: f64,
+    src_x: f64, src_y: f64, src_w: f64, src_h: f64,
+    dst_x: f64, dst_y: f64, dst_w: f64, dst_h: f64,
+    ox: f64, oy: f64, rot: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let h = handle as u32;
+    if h == 0 { return; }
+    let mut c = DrawCmd::zero();
+    c.kind = kind::TEXTURE_PRO;
+    c.tex = h;
+    c.x = dst_x; c.y = dst_y; c.w = dst_w; c.h = dst_h;
+    c.src_x = src_x; c.src_y = src_y; c.src_w = src_w; c.src_h = src_h;
+    c.ox = ox; c.oy = oy; c.rot = rot;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_texture_filter(_handle: f64, _mode: f64) {}
+
+// ============================================================
+// Text
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_text(text: i64, x: f64, y: f64, size: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    push_text(text as *const c_char, 0, x, y, size, r, g, b, a);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_text_ex(_font: f64, text: i64,
+    x: f64, y: f64, size: f64, _spacing: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    push_text(text as *const c_char, 0, x, y, size, r, g, b, a);
+}
+
+fn push_text(text_c: *const c_char, _font: u32,
+    x: f64, y: f64, size: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    if text_c.is_null() { return; }
+    let s = match unsafe { std::ffi::CStr::from_ptr(text_c) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut c = DrawCmd::zero();
+    c.kind = kind::TEXT;
+    c.x = x; c.y = y;
+    c.size = size;
+    c.r = r; c.g = g; c.b = b; c.a = a;
+    c.set_text(s);
+    draw_list::push(c);
+}
+
+/// Crude text width estimate — fontSize * 0.55 * char_count. Good enough for
+/// HUD layout; real glyph metrics would require calling back into Swift
+/// (CoreText) or bundling a font parser.
+#[no_mangle]
+pub extern "C" fn bloom_measure_text(text: i64, size: f64) -> f64 {
+    if text == 0 { return 0.0; }
+    let s = match unsafe { std::ffi::CStr::from_ptr(text as *const c_char) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0.0,
+    };
+    s.chars().count() as f64 * size * 0.55
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_measure_text_ex(_font: f64, text: i64, size: f64, _spacing: f64) -> f64 {
+    bloom_measure_text(text, size)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_font(_path: i64, _size: f64) -> f64 {
+    1.0 // All text uses the system font on watch; single sentinel handle.
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_unload_font(_handle: f64) {}
+
+// ============================================================
+// File I/O — minimal std::fs-backed implementations
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_file_exists(path: i64) -> f64 {
+    if path == 0 { return 0.0; }
+    let s = unsafe { std::ffi::CStr::from_ptr(path as *const c_char) };
+    let p = match s.to_str() { Ok(s) => s, Err(_) => return 0.0 };
+    if std::path::Path::new(p).exists() { 1.0 } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_read_file(path: i64) -> i64 {
+    // Perry's native FFI wraps string returns — returning 0 signals null
+    // from the watchOS side. Jump reads level files via this path; a later
+    // pass will resolve bundle-relative paths and hand back a StringHeader.
+    let _ = path;
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_write_file(_path: i64, _data: i64) -> f64 {
+    0.0 // watchOS app sandbox — defer real write support.
+}
