@@ -23,6 +23,7 @@ pub struct Model {
     pub meshes: Vec<Mesh>,
     pub nodes: Vec<Node>,
     pub scene_roots: Vec<usize>,
+    pub skins: Vec<Skin>,
 }
 
 /// One node in the glTF scene graph. Translation/rotation/scale compose into
@@ -33,6 +34,7 @@ pub struct Node {
     pub scale: [f32; 3],
     pub matrix: Option<[f32; 16]>,  // column-major if present
     pub mesh: Option<usize>,
+    pub skin: Option<usize>,
     pub children: Vec<usize>,
 }
 
@@ -44,6 +46,7 @@ impl Node {
             scale: [1.0; 3],
             matrix: None,
             mesh: None,
+            skin: None,
             children: Vec::new(),
         }
     }
@@ -97,6 +100,17 @@ pub struct Primitive {
     pub tex_metallic_roughness: u32,
     pub tex_emissive: u32,
     pub tex_occlusion: u32,
+    /// Per-vertex skinning attributes (glTF JOINTS_0 / WEIGHTS_0). 4 per
+    /// vertex; empty if the primitive isn't skinned.
+    pub joint_indices: Vec<u32>,
+    pub weights: Vec<f32>,
+}
+
+/// A glTF skin: list of bone node indices + inverse-bind matrices. Used
+/// alongside a skinned primitive to drive SCNSkinner.
+pub struct Skin {
+    pub joints: Vec<usize>,  // glTF node indices
+    pub inverse_bind_matrices: Vec<[f32; 16]>,  // one per joint
 }
 
 static MODELS: Mutex<Vec<Option<Arc<Model>>>> = Mutex::new(Vec::new());
@@ -204,7 +218,41 @@ fn parse_glb(bytes: &[u8]) -> Option<Model> {
         scene_roots.push(0);
     }
 
-    Some(Model { meshes, nodes, scene_roots })
+    // Parse skins: joints (node indices) + inverse-bind matrices.
+    let mut skins: Vec<Skin> = Vec::new();
+    if let Some(skins_js) = root.get("skins").and_then(|v| v.arr()) {
+        skins.reserve(skins_js.len());
+        for sk in skins_js {
+            let mut joints: Vec<usize> = Vec::new();
+            if let Some(j) = sk.get("joints").and_then(|v| v.arr()) {
+                for v in j {
+                    if let Some(n) = v.num() { joints.push(n as usize); }
+                }
+            }
+            let mut ibms: Vec<[f32; 16]> = Vec::new();
+            if let Some(ibm_acc_idx) = sk.get("inverseBindMatrices").and_then(|v| v.num()) {
+                let raw = read_f32_vec(accessors, buf_views, bin_bytes, ibm_acc_idx as usize, 16)
+                    .unwrap_or_default();
+                for chunk in raw.chunks(16) {
+                    if chunk.len() == 16 {
+                        let mut m = [0.0f32; 16];
+                        m.copy_from_slice(chunk);
+                        ibms.push(m);
+                    }
+                }
+            }
+            // If IBMs are missing, fall back to identity per joint (spec
+            // default). Happens rarely but keeps Swift's SCNSkinner happy.
+            if ibms.is_empty() {
+                let mut id = [0.0f32; 16];
+                id[0] = 1.0; id[5] = 1.0; id[10] = 1.0; id[15] = 1.0;
+                ibms = vec![id; joints.len()];
+            }
+            skins.push(Skin { joints, inverse_bind_matrices: ibms });
+        }
+    }
+
+    Some(Model { meshes, nodes, scene_roots, skins })
 }
 
 fn parse_node(n: &JVal) -> Node {
@@ -234,6 +282,9 @@ fn parse_node(n: &JVal) -> Node {
     if let Some(mi) = n.get("mesh").and_then(|v| v.num()) {
         node.mesh = Some(mi as usize);
     }
+    if let Some(si) = n.get("skin").and_then(|v| v.num()) {
+        node.skin = Some(si as usize);
+    }
     if let Some(kids) = n.get("children").and_then(|v| v.arr()) {
         for v in kids {
             if let Some(i) = v.num() { node.children.push(i as usize); }
@@ -250,7 +301,9 @@ fn parse_primitive(
     let pos_acc = attrs.get("POSITION")?.num()? as usize;
     let nrm_acc = attrs.get("NORMAL").and_then(|v| v.num().map(|n| n as usize));
     let uv_acc = attrs.get("TEXCOORD_0").and_then(|v| v.num().map(|n| n as usize));
-    let idx_acc = prim.get("indices")?.num()? as usize;
+    let j0_acc = attrs.get("JOINTS_0").and_then(|v| v.num().map(|n| n as usize));
+    let w0_acc = attrs.get("WEIGHTS_0").and_then(|v| v.num().map(|n| n as usize));
+    let idx_acc = prim.get("indices").and_then(|v| v.num().map(|n| n as usize));
     let mat_idx = prim.get("material").and_then(|v| v.num().map(|n| n as usize));
 
     let positions = read_f32_vec(accessors, buf_views, bin_bytes, pos_acc, 3)?;
@@ -260,7 +313,22 @@ fn parse_primitive(
     let uvs = uv_acc
         .and_then(|a| read_f32_vec(accessors, buf_views, bin_bytes, a, 2))
         .unwrap_or_default();
-    let indices = read_index_vec(accessors, buf_views, bin_bytes, idx_acc)?;
+    // Indexless primitives (POSITION-only triangle soups) — synthesize
+    // sequential indices so the SceneKit SCNGeometryElement path stays
+    // uniform. Fox.glb uses this layout.
+    let indices = match idx_acc {
+        Some(a) => read_index_vec(accessors, buf_views, bin_bytes, a)?,
+        None => (0..(positions.len() / 3) as u32).collect(),
+    };
+    // JOINTS_0 is typically unsigned byte or short vec4 per vertex.
+    let joint_indices = j0_acc
+        .and_then(|a| read_joint_indices(accessors, buf_views, bin_bytes, a))
+        .unwrap_or_default();
+    // WEIGHTS_0 is f32 vec4 per vertex (spec allows normalized u8/u16 but
+    // current Khronos samples use float; stick with float for v1).
+    let weights = w0_acc
+        .and_then(|a| read_f32_vec(accessors, buf_views, bin_bytes, a, 4))
+        .unwrap_or_default();
 
     let mut color = [1.0f32; 4];
     let mut metallic = 1.0f32;
@@ -300,7 +368,44 @@ fn parse_primitive(
         positions, normals, uvs, indices,
         color, metallic, roughness,
         tex_base_color, tex_normal, tex_metallic_roughness, tex_emissive, tex_occlusion,
+        joint_indices, weights,
     })
+}
+
+/// Read a JOINTS_0 accessor as u32 quads. Handles componentType 5121
+/// (UNSIGNED_BYTE) and 5123 (UNSIGNED_SHORT); returns empty for anything
+/// else.
+fn read_joint_indices(
+    accessors: &[JVal], buf_views: &[JVal], bin: &[u8], acc_idx: usize,
+) -> Option<Vec<u32>> {
+    let acc = accessors.get(acc_idx)?;
+    let comp_type = acc.get("componentType")?.num()? as u32;
+    let bv_idx = acc.get("bufferView")?.num()? as usize;
+    let count = acc.get("count")?.num()? as usize;
+    let byte_off_acc = acc.get("byteOffset").and_then(|v| v.num()).unwrap_or(0.0) as usize;
+    let bv = buf_views.get(bv_idx)?;
+    let byte_off_bv = bv.get("byteOffset").and_then(|v| v.num()).unwrap_or(0.0) as usize;
+    let base = byte_off_bv + byte_off_acc;
+
+    let stride_per_element = match comp_type {
+        5121 => 1,  // u8
+        5123 => 2,  // u16
+        _ => return None,
+    };
+    let total_bytes = count * 4 * stride_per_element;
+    if base + total_bytes > bin.len() { return None; }
+
+    let mut out = Vec::with_capacity(count * 4);
+    for i in 0..(count * 4) {
+        let o = base + i * stride_per_element;
+        let v = match comp_type {
+            5121 => bin[o] as u32,
+            5123 => u16::from_le_bytes([bin[o], bin[o + 1]]) as u32,
+            _ => return None,
+        };
+        out.push(v);
+    }
+    Some(out)
 }
 
 /// Chase a material.<slotName>.index → textures[i].source → images[j]
@@ -565,9 +670,11 @@ pub fn gen_cube_mesh(w: f32, h: f32, d: f32) -> u32 {
             metallic: 0.0, roughness: 0.6,
             tex_base_color: 0, tex_normal: 0, tex_metallic_roughness: 0,
             tex_emissive: 0, tex_occlusion: 0,
+            joint_indices: Vec::new(), weights: Vec::new(),
         }] }],
         nodes: vec![root],
         scene_roots: vec![0],
+        skins: Vec::new(),
     })));
     (reg.len() - 1) as u32
 }

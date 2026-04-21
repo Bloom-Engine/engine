@@ -37,6 +37,18 @@ import ImageIO
 @_silgen_name("bloom_watchos_scene_copy_nodes") func bloom_watchos_scene_copy_nodes(_ dst: UnsafeMutablePointer<SceneNodeInfo>, _ max: Int64) -> Int64
 @_silgen_name("bloom_watchos_scene_copy_lights") func bloom_watchos_scene_copy_lights(_ dst: UnsafeMutablePointer<SceneLight>, _ max: Int64) -> Int64
 @_silgen_name("bloom_watchos_scene_geometry") func bloom_watchos_scene_geometry(_ handle: UInt32, _ out: UnsafeMutablePointer<SceneGeometryPtrs>)
+@_silgen_name("bloom_watchos_scene_skin") func bloom_watchos_scene_skin(_ handle: UInt32, _ out: UnsafeMutablePointer<SceneSkinPtrs>)
+
+struct SceneSkinPtrs {
+    var jointHandles: UnsafePointer<UInt32>? = nil
+    var jointCount: UInt32 = 0
+    var inverseBind: UnsafePointer<Float>? = nil
+    var inverseBindMatrixCount: UInt32 = 0
+    var vertexJoints: UnsafePointer<UInt32>? = nil
+    var vertexJointCount: UInt32 = 0
+    var vertexWeights: UnsafePointer<Float>? = nil
+    var vertexWeightCount: UInt32 = 0
+}
 
 // Post-FX state
 @_silgen_name("bloom_watchos_postfx_state") func bloom_watchos_postfx_state(_ out: UnsafeMutablePointer<PostFxState>)
@@ -78,7 +90,8 @@ struct SceneNodeInfo {
     var texMetallicRoughness: UInt32 = 0
     var texEmissive: UInt32 = 0
     var texOcclusion: UInt32 = 0
-    var _pad: UInt32 = 0
+    // Bumps when bloom sets skin data on this node. 0 = not skinned.
+    var skinVersion: UInt32 = 0
 }
 
 struct SceneLight {
@@ -360,6 +373,10 @@ struct BloomSceneView: View {
     /// Geometry cache keyed by (handle, geometryVersion) so unchanged meshes
     /// aren't rebuilt each frame.
     @State private var retainedGeomVersions: [UInt32: UInt32] = [:]
+    /// Same pattern for skinning — we only rebuild SCNSkinner when the
+    /// bloom-side skin_version changes, since SCNSkinner carries GPU
+    /// resources and rebuilding every frame would churn them.
+    @State private var retainedSkinVersions: [UInt32: UInt32] = [:]
 
     @State private var nodeBuf: UnsafeMutableBufferPointer<SceneNodeInfo> = {
         let p = UnsafeMutablePointer<SceneNodeInfo>.allocate(capacity: 1024)
@@ -487,9 +504,27 @@ struct BloomSceneView: View {
                 retainedGeomVersions[info.handle] = info.geometryVersion
             }
 
+            // Skinning: rebuild SCNSkinner when skin_version changes. Needs
+            // all bone SCNNodes to exist first — the retained pass-1 loop
+            // creates them before we reach this point for any later-visited
+            // skinned mesh. For skinned meshes near the top of the scene
+            // walk order, bones may still be missing on frame 0; we retry
+            // the build on the next sync tick if any bone is still nil.
+            if info.skinVersion != 0 && retainedSkinVersions[info.handle] != info.skinVersion {
+                if let skinner = buildSkinner(mesh: node, handle: info.handle) {
+                    node.skinner = skinner
+                    retainedSkinVersions[info.handle] = info.skinVersion
+                }
+            }
+
             if let g = node.geometry {
                 let m = g.firstMaterial ?? SCNMaterial()
-                m.lightingModel = .physicallyBased
+                // PBR needs per-vertex normals. Some glTF exports (e.g. Fox)
+                // omit NORMAL entirely — fall back to constant lighting so
+                // the mesh still shows its base color / texture instead of
+                // rendering pitch black.
+                let hasNormals = g.sources(for: .normal).count > 0
+                m.lightingModel = hasNormals ? .physicallyBased : .constant
 
                 // Base color: texture wins over factor when present.
                 let baseColorTex = info.texBaseColor != 0 ? info.texBaseColor : info.texture
@@ -622,6 +657,67 @@ struct BloomSceneView: View {
         )
 
         return SCNGeometry(sources: sources, elements: [element])
+    }
+
+    private func buildSkinner(mesh: SCNNode, handle: UInt32) -> SCNSkinner? {
+        var ptrs = SceneSkinPtrs()
+        withUnsafeMutablePointer(to: &ptrs) { bloom_watchos_scene_skin(handle, $0) }
+        guard let jointsPtr = ptrs.jointHandles,
+              let ibmPtr = ptrs.inverseBind,
+              let vjPtr = ptrs.vertexJoints,
+              let vwPtr = ptrs.vertexWeights,
+              ptrs.jointCount > 0, ptrs.vertexJointCount > 0,
+              let geom = mesh.geometry
+        else { return nil }
+
+        // Resolve bone SCNNodes from bloom handles. Skip if any is missing
+        // — skinner without all bones would crash on draw.
+        var bones: [SCNNode] = []
+        bones.reserveCapacity(Int(ptrs.jointCount))
+        for i in 0..<Int(ptrs.jointCount) {
+            let h = jointsPtr[i]
+            guard let node = retainedNodes[h] else { return nil }
+            bones.append(node)
+        }
+
+        // Inverse-bind matrices wrapped as NSValue(SCNMatrix4).
+        var ibmValues: [NSValue] = []
+        ibmValues.reserveCapacity(Int(ptrs.inverseBindMatrixCount))
+        for i in 0..<Int(ptrs.inverseBindMatrixCount) {
+            let base = i * 16
+            let m = SCNMatrix4(
+                m11: ibmPtr[base+0],  m12: ibmPtr[base+1],  m13: ibmPtr[base+2],  m14: ibmPtr[base+3],
+                m21: ibmPtr[base+4],  m22: ibmPtr[base+5],  m23: ibmPtr[base+6],  m24: ibmPtr[base+7],
+                m31: ibmPtr[base+8],  m32: ibmPtr[base+9],  m33: ibmPtr[base+10], m34: ibmPtr[base+11],
+                m41: ibmPtr[base+12], m42: ibmPtr[base+13], m43: ibmPtr[base+14], m44: ibmPtr[base+15]
+            )
+            ibmValues.append(NSValue(scnMatrix4: m))
+        }
+
+        // Bone weights + indices as SCNGeometrySources. 4 per vertex.
+        let vertexCount = Int(ptrs.vertexWeightCount) / 4
+        let weightsData = Data(bytes: vwPtr, count: Int(ptrs.vertexWeightCount) * MemoryLayout<Float>.size)
+        let weightsSrc = SCNGeometrySource(
+            data: weightsData, semantic: .boneWeights, vectorCount: vertexCount,
+            usesFloatComponents: true, componentsPerVector: 4,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: 4 * MemoryLayout<Float>.size
+        )
+        let indicesData = Data(bytes: vjPtr, count: Int(ptrs.vertexJointCount) * MemoryLayout<UInt32>.size)
+        let indicesSrc = SCNGeometrySource(
+            data: indicesData, semantic: .boneIndices, vectorCount: vertexCount,
+            usesFloatComponents: false, componentsPerVector: 4,
+            bytesPerComponent: MemoryLayout<UInt32>.size, dataOffset: 0,
+            dataStride: 4 * MemoryLayout<UInt32>.size
+        )
+
+        return SCNSkinner(
+            baseGeometry: geom,
+            bones: bones,
+            boneInverseBindTransforms: ibmValues,
+            boneWeights: weightsSrc,
+            boneIndices: indicesSrc
+        )
     }
 
     private func syncLights() {

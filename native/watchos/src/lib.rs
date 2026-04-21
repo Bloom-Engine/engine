@@ -818,8 +818,32 @@ pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, 
     // Scene-hierarchy path: one bloom scene node per glTF node. The attach
     // target `root` itself doesn't gain geometry — it's the hierarchy's
     // anchor. Children materialize via scene::create + scene::set_parent.
+    // We build a gltf_node_idx → bloom_handle map during the walk, then
+    // resolve skin joint references once everyone's in place.
+    let mut gltf_to_bloom: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    let mut skinned_nodes: Vec<(u32, usize)> = Vec::new();  // (bloom_handle, gltf_node_idx)
     for scene_root in &model.scene_roots {
-        spawn_node_subtree(&model, *scene_root, root);
+        spawn_node_subtree(&model, *scene_root, root, &mut gltf_to_bloom, &mut skinned_nodes);
+    }
+    // Second pass: attach skin data to each skinned mesh-node. Joints are
+    // resolved to the bloom handles we just created.
+    for (bloom_handle, gltf_idx) in skinned_nodes {
+        let gltf_node = &model.nodes[gltf_idx];
+        let Some(skin_idx) = gltf_node.skin else { continue };
+        let Some(skin) = model.skins.get(skin_idx) else { continue };
+        let Some(mesh_idx) = gltf_node.mesh else { continue };
+        let Some(mesh) = model.meshes.get(mesh_idx) else { continue };
+        let Some(prim) = mesh.primitives.first() else { continue };
+
+        let joint_handles: Vec<u32> = skin.joints.iter()
+            .map(|&gi| *gltf_to_bloom.get(&gi).unwrap_or(&0))
+            .collect();
+        scene::set_skin(bloom_handle,
+            joint_handles,
+            skin.inverse_bind_matrices.clone(),
+            prim.joint_indices.clone(),
+            prim.weights.clone(),
+        );
     }
 }
 
@@ -833,18 +857,26 @@ fn attach_mesh(handle: u32, mesh: &models::Mesh) {
     }
 }
 
-fn spawn_node_subtree(model: &models::Model, node_idx: usize, parent: u32) {
+fn spawn_node_subtree(
+    model: &models::Model, node_idx: usize, parent: u32,
+    gltf_to_bloom: &mut std::collections::HashMap<usize, u32>,
+    skinned_nodes: &mut Vec<(u32, usize)>,
+) {
     let Some(gltf_node) = model.nodes.get(node_idx) else { return; };
     let bloom_node = scene::create();
+    gltf_to_bloom.insert(node_idx, bloom_node);
     scene::set_parent(bloom_node, parent);
     scene::set_transform(bloom_node, gltf_node.local_transform());
     if let Some(mi) = gltf_node.mesh {
         if let Some(mesh) = model.meshes.get(mi) {
             attach_mesh(bloom_node, mesh);
+            if gltf_node.skin.is_some() {
+                skinned_nodes.push((bloom_node, node_idx));
+            }
         }
     }
     for &child_idx in &gltf_node.children {
-        spawn_node_subtree(model, child_idx, bloom_node);
+        spawn_node_subtree(model, child_idx, bloom_node, gltf_to_bloom, skinned_nodes);
     }
 }
 
@@ -921,6 +953,12 @@ pub extern "C" fn bloom_watchos_scene_copy_lights(dst: *mut scene::Light, max: i
 pub extern "C" fn bloom_watchos_scene_geometry(handle: u32, out: *mut scene::GeometryPtrs) {
     if out.is_null() { return; }
     unsafe { *out = scene::geometry_ptrs(handle); }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_scene_skin(handle: u32, out: *mut scene::SkinPtrs) {
+    if out.is_null() { return; }
+    unsafe { *out = scene::skin_ptrs(handle); }
 }
 
 #[no_mangle]

@@ -38,7 +38,9 @@ pub struct SceneNodeInfo {
     pub tex_metallic_roughness: u32,
     pub tex_emissive: u32,
     pub tex_occlusion: u32,
-    pub _pad: u32,
+    /// Bumps whenever any skin_* data changes on this node. Swift rebuilds
+    /// the SCNSkinner when it sees a new version. 0 = no skin.
+    pub skin_version: u32,
 }
 
 struct Node {
@@ -59,6 +61,15 @@ struct Node {
     uvs: Vec<f32>,
     indices: Vec<u32>,
     geometry_version: u32,
+
+    // Skinning data (SCNSkinner). Present only on the mesh-carrying node of
+    // a skinned glTF primitive. skin_version bumps when any of the fields
+    // below change, signalling Swift to rebuild the skinner.
+    skin_joint_handles: Vec<u32>,       // bloom scene handles of the bones
+    skin_inverse_bind: Vec<[f32; 16]>,  // one per joint
+    skin_vertex_joints: Vec<u32>,       // 4 per vertex (as in glTF JOINTS_0)
+    skin_vertex_weights: Vec<f32>,      // 4 per vertex (as in glTF WEIGHTS_0)
+    skin_version: u32,
 }
 
 impl Node {
@@ -80,6 +91,11 @@ impl Node {
             uvs: Vec::new(),
             indices: Vec::new(),
             geometry_version: 0,
+            skin_joint_handles: Vec::new(),
+            skin_inverse_bind: Vec::new(),
+            skin_vertex_joints: Vec::new(),
+            skin_vertex_weights: Vec::new(),
+            skin_version: 0,
         }
     }
 }
@@ -170,6 +186,19 @@ pub fn set_pbr_textures(handle: u32,
         n.tex_metallic_roughness = metallic_roughness;
         n.tex_emissive = emissive;
         n.tex_occlusion = occlusion;
+    });
+}
+
+pub fn set_skin(handle: u32,
+    joint_handles: Vec<u32>, inverse_bind: Vec<[f32; 16]>,
+    vertex_joints: Vec<u32>, vertex_weights: Vec<f32>,
+) {
+    mutate(handle, |n| {
+        n.skin_joint_handles = joint_handles;
+        n.skin_inverse_bind = inverse_bind;
+        n.skin_vertex_joints = vertex_joints;
+        n.skin_vertex_weights = vertex_weights;
+        n.skin_version = n.skin_version.wrapping_add(1);
     });
 }
 
@@ -273,7 +302,7 @@ pub fn copy_nodes(dst: *mut SceneNodeInfo, max: i64) -> i64 {
                 tex_metallic_roughness: n.tex_metallic_roughness,
                 tex_emissive: n.tex_emissive,
                 tex_occlusion: n.tex_occlusion,
-                _pad: 0,
+                skin_version: n.skin_version,
             };
             unsafe { *dst.add(written as usize) = info; }
             written += 1;
@@ -305,6 +334,44 @@ pub struct GeometryPtrs {
     pub uv_count: u32,
     pub indices: *const u32,
     pub index_count: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SkinPtrs {
+    pub joint_handles: *const u32,
+    pub joint_count: u32,
+    pub inverse_bind: *const f32,  // flat 16-float matrices
+    pub inverse_bind_matrix_count: u32,
+    pub vertex_joints: *const u32,  // 4 per vertex
+    pub vertex_joint_count: u32,    // total entries (= vertex_count * 4)
+    pub vertex_weights: *const f32, // 4 per vertex
+    pub vertex_weight_count: u32,
+}
+
+pub fn skin_ptrs(handle: u32) -> SkinPtrs {
+    with(|inner| {
+        let empty = SkinPtrs {
+            joint_handles: std::ptr::null(), joint_count: 0,
+            inverse_bind: std::ptr::null(), inverse_bind_matrix_count: 0,
+            vertex_joints: std::ptr::null(), vertex_joint_count: 0,
+            vertex_weights: std::ptr::null(), vertex_weight_count: 0,
+        };
+        if let Some(Some(n)) = inner.nodes.get(handle as usize) {
+            SkinPtrs {
+                joint_handles: n.skin_joint_handles.as_ptr(),
+                joint_count: n.skin_joint_handles.len() as u32,
+                inverse_bind: n.skin_inverse_bind.as_ptr() as *const f32,
+                inverse_bind_matrix_count: n.skin_inverse_bind.len() as u32,
+                vertex_joints: n.skin_vertex_joints.as_ptr(),
+                vertex_joint_count: n.skin_vertex_joints.len() as u32,
+                vertex_weights: n.skin_vertex_weights.as_ptr(),
+                vertex_weight_count: n.skin_vertex_weights.len() as u32,
+            }
+        } else {
+            empty
+        }
+    })
 }
 
 pub fn geometry_ptrs(handle: u32) -> GeometryPtrs {

@@ -29,10 +29,10 @@ bloom_add_directional_light(-0.5, -0.8, -0.3, 1, 1, 1, 1.2);
 bloom_enable_postfx();
 bloom_set_vignette(0.5, 0.3);
 
-const buggy = loadModel("assets/Buggy.glb");
+const fox = loadModel("assets/Fox.glb");
 
 const root = createSceneNode();
-bloom_scene_attach_model(root, buggy.handle, 0);
+bloom_scene_attach_model(root, fox.handle, 0);
 
 let t = 0.0;
 
@@ -44,18 +44,18 @@ while (!windowShouldClose()) {
   const c = Math.cos(t * 0.4);
   const s = Math.sin(t * 0.4);
 
-  // Small uniform scale so the whole buggy fits in view, rotate around Y.
-  const scl = 0.015;
+  // Fox mesh: ~25×78×150 in original units. Scale down 100×, center.
+  const scl = 0.012;
   setSceneNodeTransform(root, [
      c * scl, 0,        s * scl, 0,
      0,       scl,      0,       0,
     -s * scl, 0,        c * scl, 0,
-     0,      -1.5,      0,       1,
+     0,       0,        0,       1,
   ]);
 
   beginMode3D({
-    position: { x: 0, y: 1, z: 4 },
-    target: { x: 0, y: 0, z: 0 },
+    position: { x: 0, y: 0.8, z: 2.5 },
+    target: { x: 0, y: 0.4, z: 0 },
     up: { x: 0, y: 1, z: 0 },
     fovy: 50,
     projection: "perspective",
