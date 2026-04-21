@@ -2498,6 +2498,123 @@ fn cs_main(
 }
 ";
 
+/// Probe trace, hardware (ray-query) path (ticket 007b).
+///
+/// Same workgroup shape as the SW shader — one workgroup per probe, 64
+/// lanes per probe, each handling one octahedral texel. The per-ray
+/// inner loop replaces Hi-Z screen-space marching with `rayQuery`
+/// against the TLAS, which pulls off-screen geometry into the bounce
+/// (the whole point of HW-RT here).
+///
+/// Hit shading is "hit-lighting-lite":
+///   - flat per-instance albedo + world-space normal from
+///     `instance_data[hit.instance_custom_data]`;
+///   - sun direct: NdotL × sun_color (no cascade shadow lookup in V1 —
+///     the bias is one bounce away and hidden by temporal averaging;
+///     re-add when shadow-aware hit shading becomes worth the cost);
+///   - sky: max(dot(N, up), 0) × sky_color for the upward hemisphere;
+///   - emissive: per-instance scalar × albedo;
+///   - distance falloff and firefly clamp match the SW path so the
+///     two trace variants are visually interchangeable where they
+///     both see on-screen geometry.
+pub(super) const SSGI_PROBE_TRACE_HW_WGSL: &str = "
+struct TraceParams {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    inv_view: mat4x4<f32>,
+    proj_row01: vec4<f32>,
+    size: vec4<u32>,
+    params: vec4<f32>,
+    sun_dir: vec4<f32>,
+    sun_color: vec4<f32>,
+    sky_color: vec4<f32>,
+};
+
+struct InstanceGiData {
+    albedo: vec3<f32>,
+    emissive_luma: f32,
+    normal_ws: vec3<f32>,
+    _pad: f32,
+};
+
+@group(0) @binding(0) var<uniform> u: TraceParams;
+@group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
+@group(0) @binding(2) var accel: acceleration_structure;
+@group(0) @binding(3) var<storage, read> instance_data: array<InstanceGiData>;
+@group(0) @binding(4) var radiance_out: texture_storage_3d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let grid_w = u.size.z;
+    let grid_h = u.size.w;
+    if (wg.x >= grid_w || wg.y >= grid_h) { return; }
+    if (lid.x >= PROBE_OCT_SIZE || lid.y >= PROBE_OCT_SIZE) { return; }
+
+    let probe_idx = wg.y * grid_w + wg.x;
+    let header = probes[probe_idx];
+
+    let dst_coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
+
+    if (header.world_pos.w < 0.5) {
+        textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
+        return;
+    }
+
+    let dir_ws = octel_direction(lid.xy);
+    let n_ws = header.normal.xyz;
+    let ndotd = dot(dir_ws, n_ws);
+    if (ndotd <= 0.0) {
+        textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
+        return;
+    }
+
+    // 2 cm normal offset — matches the SW start_t and keeps primary
+    // hits from self-intersecting the surface the probe sits on.
+    let origin_ws = header.world_pos.xyz + n_ws * 0.02;
+    let max_t = u.params.z;
+
+    var rq: ray_query;
+    rayQueryInitialize(&rq, accel, RayDesc(
+        0u,
+        0xFFu,
+        0.001,
+        max_t,
+        origin_ws,
+        dir_ws,
+    ));
+    loop {
+        if (!rayQueryProceed(&rq)) { break; }
+    }
+    let hit = rayQueryGetCommittedIntersection(&rq);
+
+    var radiance = vec3<f32>(0.0);
+    if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+        let inst = instance_data[hit.instance_custom_data];
+        let hit_n = inst.normal_ws;
+
+        let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
+        let direct = u.sun_color.xyz * ndotl;
+        let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+        let sky = u.sky_color.xyz * ndotup;
+
+        let tn = hit.t / max_t;
+        let falloff = max(1.0 - tn * tn, 0.0);
+        var raw = inst.albedo * (direct + sky) * falloff
+                + inst.albedo * inst.emissive_luma;
+        let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let cap = u.params.w;
+        if (luma > cap) { raw = raw * (cap / luma); }
+        radiance = raw;
+    }
+
+    let intensity = u.params.y;
+    textureStore(radiance_out, dst_coord, vec4<f32>(radiance * intensity * ndotd, 1.0));
+}
+";
+
 /// Probe temporal accumulator. EMA in probe-octel space. No reprojection
 /// in V1 — since every frame traces all 64 octels, history only smooths
 /// firefly noise; per-probe world positions jitter by tile-fraction so

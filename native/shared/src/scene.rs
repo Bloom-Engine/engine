@@ -101,6 +101,26 @@ pub struct SceneNode {
     pub gpu_vb: Option<wgpu::Buffer>,
     pub gpu_ib: Option<wgpu::Buffer>,
     pub gpu_index_count: u32,
+    /// Vertex count, cached at VB upload so the ray-tracing BLAS build
+    /// can reference it without re-reading the full `vertices` Vec.
+    pub gpu_vertex_count: u32,
+    /// Ticket 007b — bottom-level acceleration structure built at the
+    /// same geo_dirty flush that creates `gpu_vb`/`gpu_ib`. `None` on
+    /// non-RT adapters or until the first upload. Build is scheduled
+    /// by `prepare()`, committed to the GPU by the renderer's main
+    /// encoder in `build_acceleration_structures`.
+    pub blas: Option<wgpu::Blas>,
+    /// Flat mesh-average world-space normal, cached on BLAS build so
+    /// the per-instance GI data buffer can be populated without
+    /// re-reading the vertex array. Rough heuristic — for walls and
+    /// floors this tracks the surface closely; for radially-symmetric
+    /// meshes (columns) it averages to near-zero and the trace falls
+    /// back to a fixed up-vector. Phase-2 Mesh Cards (ticket 013)
+    /// upgrades this to textured per-hit normals.
+    pub flat_normal_ws: [f32; 3],
+    /// Mean world-space albedo cached alongside `flat_normal_ws`.
+    /// For the hit-lighting-lite path in 007b HW trace.
+    pub flat_albedo: [f32; 3],
     /// Index into the scene-graph's shared node-uniform pool. `None`
     /// until this node's first `prepare()` assigns a slot. Cleared when
     /// the pool reallocates so the next prepare re-assigns + rebuilds
@@ -141,6 +161,10 @@ impl SceneNode {
             gpu_vb: None,
             gpu_ib: None,
             gpu_index_count: 0,
+            gpu_vertex_count: 0,
+            blas: None,
+            flat_normal_ws: [0.0, 1.0, 0.0],
+            flat_albedo: [1.0, 1.0, 1.0],
             uniform_slot: None,
             gpu_uniform_bg: None,
             in_view_frustum: true,
@@ -185,6 +209,24 @@ pub struct SceneGraph {
     /// if it can reuse the cached cascades. Writes that can't affect
     /// shadows (materials, user_data, etc.) deliberately don't bump it.
     pub shadow_version: u64,
+
+    /// Ticket 007b — true when the host renderer's device was created
+    /// with `Features::EXPERIMENTAL_RAY_QUERY`. Controls whether the
+    /// scene bakes `BLAS_INPUT` buffer usage + a per-node BLAS at
+    /// `prepare()` time. Off on non-RT adapters (web, most Android,
+    /// Intel integrated GPUs) so the cost is never paid there.
+    pub hw_rt_enabled: bool,
+    /// Monotonic counter bumped when any change that would require a
+    /// TLAS rebuild lands — geometry upload, transform, visibility
+    /// toggle, node add/destroy. The renderer compares against its
+    /// cached `tlas_built_version` and rebuilds TLAS + instance-data
+    /// buffer when they differ. Mirror of `shadow_version`'s pattern.
+    pub tlas_version: u64,
+    /// Node handles whose BLAS was (re)created this frame and has not
+    /// been built yet. `prepare()` pushes entries; the renderer drains
+    /// this list and submits the builds in its main frame encoder via
+    /// `CommandEncoder::build_acceleration_structures`.
+    pub pending_blas_builds: Vec<f64>,
 }
 
 impl SceneGraph {
@@ -198,6 +240,9 @@ impl SceneGraph {
             // Start at 1 so the shadow-cache's initial 0 always differs
             // on the first frame and forces an initial render.
             shadow_version: 1,
+            hw_rt_enabled: false,
+            tlas_version: 1,
+            pending_blas_builds: Vec::new(),
         }
     }
 
@@ -207,6 +252,7 @@ impl SceneGraph {
         // anyway. Bumping here too costs nothing and keeps the
         // invalidation story simple.
         self.shadow_version = self.shadow_version.wrapping_add(1);
+        self.tlas_version = self.tlas_version.wrapping_add(1);
         self.nodes.alloc(SceneNode::new())
     }
 
@@ -214,6 +260,9 @@ impl SceneGraph {
         if let Some(node) = self.nodes.get(handle) {
             if node.visible && node.cast_shadow {
                 self.shadow_version = self.shadow_version.wrapping_add(1);
+            }
+            if node.visible {
+                self.tlas_version = self.tlas_version.wrapping_add(1);
             }
         }
         self.nodes.free(handle);
@@ -225,8 +274,12 @@ impl SceneGraph {
             // a shadow-casting node. Skeletal animation leaves the node
             // transform untouched (joints drive the mesh), so static
             // scenes with animated characters still cache well.
-            if node.cast_shadow && node.visible && node.transform != matrix {
+            let changed = node.transform != matrix;
+            if changed && node.cast_shadow && node.visible {
                 self.shadow_version = self.shadow_version.wrapping_add(1);
+            }
+            if changed && node.visible {
+                self.tlas_version = self.tlas_version.wrapping_add(1);
             }
             node.transform = matrix;
         }
@@ -234,6 +287,9 @@ impl SceneGraph {
 
     pub fn set_visible(&mut self, handle: f64, visible: bool) {
         if let Some(node) = self.nodes.get_mut(handle) {
+            if node.visible != visible {
+                self.tlas_version = self.tlas_version.wrapping_add(1);
+            }
             if node.cast_shadow && node.visible != visible {
                 self.shadow_version = self.shadow_version.wrapping_add(1);
             }
@@ -284,6 +340,9 @@ impl SceneGraph {
             node.geo_dirty = true;
             if node.cast_shadow && node.visible {
                 self.shadow_version = self.shadow_version.wrapping_add(1);
+            }
+            if node.visible {
+                self.tlas_version = self.tlas_version.wrapping_add(1);
             }
         }
     }
@@ -446,8 +505,12 @@ impl SceneGraph {
 
         // Phase 1: upload geometry for any freshly-added or dirty nodes,
         // assign uniform slots, and count how many nodes we'll draw.
+        // Borrow splits so we can push to `pending_blas_builds` while
+        // iterating `nodes` mutably.
+        let hw_rt = self.hw_rt_enabled;
+        let pending_blas = &mut self.pending_blas_builds;
         let mut visible_count: u32 = 0;
-        for (_handle, node) in self.nodes.iter_mut() {
+        for (handle, node) in self.nodes.iter_mut() {
             if !node.visible || node.indices.is_empty() {
                 continue;
             }
@@ -486,18 +549,80 @@ impl SceneGraph {
                 node.world_bounds_max = [f32::MIN; 3];
             }
             if node.geo_dirty || node.gpu_vb.is_none() {
+                // Ticket 007b: widen buffer usage when HW RT is on so
+                // the same buffer can back both the raster draw and
+                // the BLAS build. Cheap — no measurable cost when RT
+                // is off.
+                let vb_usage = if hw_rt {
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::BLAS_INPUT
+                } else {
+                    wgpu::BufferUsages::VERTEX
+                };
+                let ib_usage = if hw_rt {
+                    wgpu::BufferUsages::INDEX | wgpu::BufferUsages::BLAS_INPUT
+                } else {
+                    wgpu::BufferUsages::INDEX
+                };
                 node.gpu_vb = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("scene_node_vb"),
                     contents: bytemuck::cast_slice(&node.vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
+                    usage: vb_usage,
                 }));
                 node.gpu_ib = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("scene_node_ib"),
                     contents: bytemuck::cast_slice(&node.indices),
-                    usage: wgpu::BufferUsages::INDEX,
+                    usage: ib_usage,
                 }));
                 node.gpu_index_count = node.indices.len() as u32;
+                node.gpu_vertex_count = node.vertices.len() as u32;
                 node.geo_dirty = false;
+
+                if hw_rt && !node.indices.is_empty() {
+                    // Cache flat normal + albedo while we still have the
+                    // CPU vertex array. Average of vertex normals into
+                    // world space via the node transform (rotation-only
+                    // part is fine for unit-length normalisation).
+                    let mut n_sum = [0.0_f32; 3];
+                    for v in &node.vertices {
+                        n_sum[0] += v.normal[0];
+                        n_sum[1] += v.normal[1];
+                        n_sum[2] += v.normal[2];
+                    }
+                    let t = &node.transform;
+                    let nx = t[0][0]*n_sum[0] + t[1][0]*n_sum[1] + t[2][0]*n_sum[2];
+                    let ny = t[0][1]*n_sum[0] + t[1][1]*n_sum[1] + t[2][1]*n_sum[2];
+                    let nz = t[0][2]*n_sum[0] + t[1][2]*n_sum[1] + t[2][2]*n_sum[2];
+                    let len = (nx*nx + ny*ny + nz*nz).sqrt();
+                    if len > 1e-4 {
+                        node.flat_normal_ws = [nx / len, ny / len, nz / len];
+                    } else {
+                        // Radially symmetric — fall back to world-up.
+                        node.flat_normal_ws = [0.0, 1.0, 0.0];
+                    }
+                    node.flat_albedo = node.material.color;
+
+                    // Create the Blas object. Actual build happens in
+                    // the renderer's main encoder via
+                    // `build_acceleration_structures`.
+                    let size_desc = wgpu::BlasTriangleGeometrySizeDescriptor {
+                        vertex_format: wgpu::VertexFormat::Float32x3,
+                        vertex_count: node.gpu_vertex_count,
+                        index_format: Some(wgpu::IndexFormat::Uint32),
+                        index_count: Some(node.gpu_index_count),
+                        flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+                    };
+                    node.blas = Some(device.create_blas(
+                        &wgpu::CreateBlasDescriptor {
+                            label: Some("scene_node_blas"),
+                            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                        },
+                        wgpu::BlasGeometrySizeDescriptors::Triangles {
+                            descriptors: vec![size_desc],
+                        },
+                    ));
+                    pending_blas.push(handle);
+                }
             }
             if node.uniform_slot.is_none() {
                 node.uniform_slot = Some(self.next_slot);

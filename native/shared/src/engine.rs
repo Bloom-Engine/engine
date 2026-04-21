@@ -50,6 +50,11 @@ impl EngineState {
         let now = Instant::now();
         let mut profiler = Profiler::new();
         profiler.init_gpu(&renderer.device, &renderer.queue);
+        // Ticket 007b: tell the scene graph whether the device was
+        // created with HW ray-query so geometry upload pays the BLAS /
+        // BLAS_INPUT cost only when it can be used.
+        let mut scene = SceneGraph::new();
+        scene.hw_rt_enabled = renderer.hw_rt_enabled;
         Self {
             renderer,
             text: TextRenderer::new(),
@@ -57,7 +62,7 @@ impl EngineState {
             audio: AudioMixer::new(),
             textures: TextureManager::new(),
             models: ModelManager::new(),
-            scene: SceneGraph::new(),
+            scene,
             frame_callbacks: FrameCallbackSystem::new(),
             postfx: None,
             profiler,
@@ -112,7 +117,7 @@ impl EngineState {
         self.profiler.end("scene_prepare");
 
         self.profiler.begin("render_total");
-        self.renderer.end_frame_with_scene(&self.scene, &mut self.profiler);
+        self.renderer.end_frame_with_scene(&mut self.scene, &mut self.profiler);
         self.profiler.end("render_total");
 
         self.profiler.frame_end(&self.renderer.device);

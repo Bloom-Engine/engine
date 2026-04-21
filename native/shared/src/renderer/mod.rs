@@ -233,6 +233,14 @@ struct ProbeTraceParams {
     /// x = frame_index, y = intensity, z = max_march_t (world units),
     /// w = firefly luma cap.
     params: [f32; 4],
+    /// Ticket 007b HW path — sun direction in world space (xyz) +
+    /// intensity (w). Ignored by the SW shader.
+    sun_dir: [f32; 4],
+    /// Sun colour (xyz), reserved (w). Used for analytical NdotL at hit.
+    sun_color: [f32; 4],
+    /// Sky dome colour (xyz), reserved (w). Flat analytic sky for
+    /// up-facing hits where the ray hits a surface with an up normal.
+    sky_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -260,6 +268,23 @@ struct ProbeResolveParams {
 struct ProbeHeaderCpu {
     world_pos: [f32; 4],
     normal: [f32; 4],
+}
+
+/// Ticket 007b — per-TLAS-instance GI shading input. Indexed by the
+/// hit's `instance_custom_data` in the HW trace shader. Layout must
+/// match the `InstanceGIData` struct in SSGI_PROBE_TRACE_HW_WGSL.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceGiDataCpu {
+    /// Flat albedo (per-mesh, pre-baked from material base-color).
+    albedo: [f32; 3],
+    /// Scalar emissive luminance — multiplied by `albedo` at the hit.
+    emissive_luma: f32,
+    /// Flat world-space mesh normal. Rough — averaged over vertex
+    /// normals at BLAS build time. Phase 2 Mesh Cards replaces this
+    /// with a textured-at-hit lookup.
+    normal_ws: [f32; 3],
+    _pad: f32,
 }
 
 #[repr(C)]
@@ -675,6 +700,25 @@ pub struct Renderer {
     pub probe_history_views: [wgpu::TextureView; 2],
     pub probe_history_idx: usize,
 
+    /// Ticket 007b — true when the adapter granted
+    /// `Features::EXPERIMENTAL_RAY_QUERY` at device creation. Flips the
+    /// probe trace pass from the SW Hi-Z path (007a) to the HW ray-query
+    /// path. `BLOOM_FORCE_SW_GI=1` at platform init leaves this false.
+    pub hw_rt_enabled: bool,
+    /// Top-level acceleration structure. Lazy — allocated on the first
+    /// frame that finds at least one per-node BLAS ready. Capacity
+    /// rounded up to 1024 instances; resized only when exceeded.
+    pub tlas: Option<wgpu::Tlas>,
+    pub tlas_max_instances: u32,
+    /// `SceneGraph::tlas_version` the last time we rebuilt the TLAS +
+    /// instance-data buffer. Mismatch → rebuild. Mirrors `shadow_version`'s
+    /// cache pattern (ticket 004).
+    pub tlas_built_version: u64,
+    /// Per-instance GI data (flat albedo + flat normal_ws + emissive),
+    /// indexed by the TLAS instance's `custom_data`. Rebuilt alongside
+    /// the TLAS instance list.
+    pub tlas_instance_data_buffer: Option<wgpu::Buffer>,
+
     pub probe_place_pipeline: wgpu::ComputePipeline,
     pub probe_place_layout: wgpu::BindGroupLayout,
     pub probe_place_uniform: wgpu::Buffer,
@@ -684,6 +728,14 @@ pub struct Renderer {
     pub probe_trace_layout: wgpu::BindGroupLayout,
     pub probe_trace_uniform: wgpu::Buffer,
     probe_trace_bg_cache: [Option<wgpu::BindGroup>; 2],
+
+    /// Ticket 007b — HW-path trace pipeline and its distinct layout
+    /// (includes the TLAS + instance_data buffer bindings that the SW
+    /// layout doesn't carry). `Some` only when `hw_rt_enabled`; `None`
+    /// otherwise so the shader module isn't even compiled.
+    pub probe_trace_hw_pipeline: Option<wgpu::ComputePipeline>,
+    pub probe_trace_hw_layout: Option<wgpu::BindGroupLayout>,
+    probe_trace_hw_bg_cache: Option<wgpu::BindGroup>,
 
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
@@ -902,6 +954,14 @@ impl Renderer {
         logical_width: u32,
         logical_height: u32,
     ) -> Self {
+        // Ticket 007b: HW ray-tracing availability is a device-feature
+        // query, set by whichever platform crate constructed this
+        // device. Renderer internals branch on this flag when picking
+        // the probe-trace pipeline.
+        let hw_rt_enabled = device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+
         // --- Shaders ---
         let shader_2d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader_2d"),
@@ -3018,6 +3078,80 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- Probe trace HW (ticket 007b, ray-query variant) ---
+        // Built only when the device was created with EXPERIMENTAL_RAY_QUERY.
+        // Shares the same ProbeTraceParams uniform as the SW path (wider
+        // fields — sun/sky — are unused by SW but present in the layout).
+        let (probe_trace_hw_pipeline, probe_trace_hw_layout) = if hw_rt_enabled {
+            // `enable wgpu_ray_query;` must appear before any declaration,
+            // so we emit the ray-query enable directive ahead of the
+            // shared helpers rather than using the generic `probe_shader`
+            // builder (which prepends helpers first).
+            let hw_source = format!(
+                "enable wgpu_ray_query;\n{}{}",
+                PROBE_HELPERS_WGSL, SSGI_PROBE_TRACE_HW_WGSL,
+            );
+            let hw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("probe_trace_hw_shader"),
+                source: wgpu::ShaderSource::Wgsl(hw_source.into()),
+            });
+            let hw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("probe_trace_hw_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::AccelerationStructure {
+                            vertex_return: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: HDR_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        }, count: None,
+                    },
+                ],
+            });
+            let hw_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("probe_trace_hw_pl_layout"),
+                bind_group_layouts: &[Some(&hw_layout)],
+                immediate_size: 0,
+            });
+            let hw_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("probe_trace_hw_pipeline"),
+                layout: Some(&hw_pl_layout),
+                module: &hw_shader, entry_point: Some("cs_main"),
+                compilation_options: Default::default(), cache: None,
+            });
+            (Some(hw_pipeline), Some(hw_layout))
+        } else {
+            (None, None)
+        };
+
         // --- Probe temporal ---
         let probe_temporal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("probe_temporal_layout"),
@@ -3836,6 +3970,11 @@ impl Renderer {
             probe_history_textures,
             probe_history_views,
             probe_history_idx: 0,
+            hw_rt_enabled,
+            tlas: None,
+            tlas_max_instances: 1024,
+            tlas_built_version: 0,
+            tlas_instance_data_buffer: None,
             probe_place_pipeline,
             probe_place_layout,
             probe_place_uniform,
@@ -3844,6 +3983,9 @@ impl Renderer {
             probe_trace_layout,
             probe_trace_uniform,
             probe_trace_bg_cache: [None, None],
+            probe_trace_hw_pipeline,
+            probe_trace_hw_layout,
+            probe_trace_hw_bg_cache: None,
             probe_temporal_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
@@ -4225,6 +4367,180 @@ impl Renderer {
     /// indirect diffuse lighting via screen-space ray marching.
     pub fn set_ssgi_enabled(&mut self, on: bool) {
         self.ssgi_enabled = on;
+    }
+
+    /// Ticket 007b — build any pending BLASes and refresh the TLAS +
+    /// per-instance GI data. Called once per frame, before the SSGI
+    /// probe passes that sample the TLAS. No-op when HW RT is off or
+    /// when nothing has changed since the last rebuild.
+    ///
+    /// Encodes `build_acceleration_structures` into the caller's
+    /// `encoder` so the builds are ordered ahead of the trace pass
+    /// without a separate queue submit.
+    fn rebuild_acceleration_structures(
+        &mut self,
+        scene: &mut crate::scene::SceneGraph,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if !self.hw_rt_enabled {
+            return;
+        }
+        let pending = !scene.pending_blas_builds.is_empty();
+        let version_changed = scene.tlas_version != self.tlas_built_version;
+        if !pending && !version_changed {
+            return;
+        }
+
+        // Collect handles of visible nodes that have a BLAS. These are
+        // the TLAS instances this frame. Ordering stays consistent
+        // across frames while the scene is stable, so instance_custom_data
+        // (= slot index) can key into the instance_data storage buffer.
+        let mut instance_handles: Vec<f64> = Vec::new();
+        for (h, n) in scene.nodes.iter() {
+            if n.visible && n.blas.is_some() {
+                instance_handles.push(h);
+            }
+        }
+        let instance_count = instance_handles.len() as u32;
+        if instance_count == 0 && !pending {
+            // Nothing to do — leave tlas_built_version unchanged so a
+            // future scene change still triggers a rebuild.
+            return;
+        }
+
+        // Size / create the TLAS + instance-data buffer if this is the
+        // first build or we've outgrown capacity.
+        if self.tlas.is_none() || instance_count > self.tlas_max_instances {
+            let new_cap = instance_count.max(self.tlas_max_instances).max(64)
+                .next_power_of_two();
+            self.tlas = Some(self.device.create_tlas(&wgpu::CreateTlasDescriptor {
+                label: Some("bloom_tlas"),
+                max_instances: new_cap,
+                flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+            }));
+            self.tlas_max_instances = new_cap;
+            self.tlas_instance_data_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("tlas_instance_data"),
+                size: (new_cap as u64)
+                    * std::mem::size_of::<InstanceGiDataCpu>() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            // Cached HW trace bind group references the TLAS + buffer
+            // we just replaced — invalidate.
+            self.probe_trace_hw_bg_cache = None;
+        }
+
+        // Write per-instance GI data (flat albedo + normal + emissive).
+        let mut instance_data: Vec<InstanceGiDataCpu> =
+            Vec::with_capacity(instance_count as usize);
+        for &h in &instance_handles {
+            let n = scene.nodes.get(h).unwrap();
+            let e = n.material.emissive;
+            instance_data.push(InstanceGiDataCpu {
+                albedo: n.flat_albedo,
+                emissive_luma: (e[0] + e[1] + e[2]) * (1.0 / 3.0),
+                normal_ws: n.flat_normal_ws,
+                _pad: 0.0,
+            });
+        }
+        if !instance_data.is_empty() {
+            self.queue.write_buffer(
+                self.tlas_instance_data_buffer.as_ref().unwrap(),
+                0,
+                bytemuck::cast_slice(&instance_data),
+            );
+        }
+
+        // Populate TLAS instance slots. Clear stale entries from prior
+        // rebuilds by writing `None` over every slot up to the current
+        // instance count (extras beyond stay None from the initial vec).
+        {
+            let tlas = self.tlas.as_mut().unwrap();
+            for slot in 0..(instance_count as usize) {
+                let n = scene.nodes.get(instance_handles[slot]).unwrap();
+                let blas = n.blas.as_ref().unwrap();
+                let t = &n.transform;
+                // TlasInstance expects a row-major 3x4 affine transform
+                // (rows × columns), i.e. [m00, m01, m02, m03, m10, ...].
+                // Bloom stores column-major mat4 with translation in row 3.
+                let transform_3x4 = [
+                    t[0][0], t[1][0], t[2][0], t[3][0],
+                    t[0][1], t[1][1], t[2][1], t[3][1],
+                    t[0][2], t[1][2], t[2][2], t[3][2],
+                ];
+                tlas[slot] = Some(wgpu::TlasInstance::new(
+                    blas,
+                    transform_3x4,
+                    slot as u32,
+                    0xff,
+                ));
+            }
+            // Clear any slots beyond the current instance count left
+            // over from a previous rebuild that had more instances.
+            for slot in (instance_count as usize)..(self.tlas_max_instances as usize) {
+                if tlas[slot].is_some() {
+                    tlas[slot] = None;
+                }
+            }
+        }
+
+        // Build any freshly-created BLASes + the TLAS in one call.
+        // The BLAS size descriptors and geometry entries need to outlive
+        // the build call, so we stash them in a pair of Vecs indexed in
+        // parallel.
+        let pending_handles: Vec<f64> = scene.pending_blas_builds.drain(..).collect();
+        let size_descs: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = pending_handles
+            .iter()
+            .filter_map(|h| {
+                let n = scene.nodes.get(*h)?;
+                if n.blas.is_none() {
+                    return None;
+                }
+                Some(wgpu::BlasTriangleGeometrySizeDescriptor {
+                    vertex_format: wgpu::VertexFormat::Float32x3,
+                    vertex_count: n.gpu_vertex_count,
+                    index_format: Some(wgpu::IndexFormat::Uint32),
+                    index_count: Some(n.gpu_index_count),
+                    flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+                })
+            })
+            .collect();
+        let mut build_entries: Vec<wgpu::BlasBuildEntry> =
+            Vec::with_capacity(size_descs.len());
+        for (i, h) in pending_handles.iter().enumerate() {
+            let n = match scene.nodes.get(*h) {
+                Some(n) => n,
+                None => continue,
+            };
+            let blas = match n.blas.as_ref() { Some(b) => b, None => continue };
+            let vb = match n.gpu_vb.as_ref() { Some(b) => b, None => continue };
+            let ib = match n.gpu_ib.as_ref() { Some(b) => b, None => continue };
+            build_entries.push(wgpu::BlasBuildEntry {
+                blas,
+                geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
+                    wgpu::BlasTriangleGeometry {
+                        size: &size_descs[i],
+                        vertex_buffer: vb,
+                        first_vertex: 0,
+                        vertex_stride: std::mem::size_of::<Vertex3D>() as u64,
+                        index_buffer: Some(ib),
+                        first_index: Some(0),
+                        transform_buffer: None,
+                        transform_buffer_offset: None,
+                    },
+                ]),
+            });
+        }
+
+        let tlas_ref = self.tlas.as_ref().unwrap();
+        encoder.build_acceleration_structures(
+            build_entries.iter(),
+            std::iter::once(tlas_ref),
+        );
+
+        self.tlas_built_version = scene.tlas_version;
     }
 
     /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
@@ -5122,7 +5438,7 @@ impl Renderer {
     }
 
     /// Like end_frame, but also renders retained scene graph nodes.
-    pub fn end_frame_with_scene(&mut self, scene: &crate::scene::SceneGraph, profiler: &mut crate::profiler::Profiler) {
+    pub fn end_frame_with_scene(&mut self, scene: &mut crate::scene::SceneGraph, profiler: &mut crate::profiler::Profiler) {
         profiler.begin("joint_flush");
         self.flush_joint_matrices();
         profiler.end("joint_flush");
@@ -5139,6 +5455,13 @@ impl Renderer {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("bloom_encoder"),
         });
+
+        // Ticket 007b: build any freshly-created BLASes and refresh
+        // the TLAS before the SSGI probe trace pass can sample it.
+        // No-op when HW RT is off or when nothing has changed.
+        profiler.begin("accel_rebuild");
+        self.rebuild_acceleration_structures(scene, &mut encoder);
+        profiler.end("accel_rebuild");
 
         // Shadow pass: render scene nodes from light's perspective into
         // cascaded shadow maps (3 cascades).
@@ -5926,7 +6249,21 @@ impl Renderer {
                 pass.dispatch_workgroups((gw + 7) / 8, (gh + 7) / 8, 1);
             }
 
-            // ---- trace (SW Hi-Z) ----
+            // ---- trace ----
+            // Sun direction in world space — inverted because our
+            // `light_dir` points from light toward the scene, while the
+            // shader's NdotL expects the vector from the shading point
+            // toward the light. Normalised because the shader doesn't.
+            let ld = self.lighting_uniforms.light_dir;
+            let sun_inv_len = 1.0 / (ld[0]*ld[0] + ld[1]*ld[1] + ld[2]*ld[2]).sqrt().max(1e-4);
+            let sun_dir_ws = [
+                -ld[0] * sun_inv_len,
+                -ld[1] * sun_inv_len,
+                -ld[2] * sun_inv_len,
+                ld[3],
+            ];
+            // Ticket 007b — sun + sky inputs are ignored by the SW
+            // shader (same uniform layout, wider fields). HW uses them.
             let trace_params = ProbeTraceParams {
                 view: self.current_view_matrix,
                 proj: self.current_proj_matrix,
@@ -5939,6 +6276,9 @@ impl Renderer {
                     self.ssgi_radius,
                     10.0,  // firefly luma cap
                 ],
+                sun_dir: sun_dir_ws,
+                sun_color: [3.0, 2.8, 2.5, 0.0],   // warm sunlight
+                sky_color: [0.35, 0.45, 0.6, 0.0], // cool sky dome
             };
             self.queue.write_buffer(&self.probe_trace_uniform, 0, bytemuck::bytes_of(&trace_params));
             // Trace bind group is cache-stable (always writes into the
@@ -5962,14 +6302,48 @@ impl Renderer {
                     ],
                 }));
             }
-            {
+            // HW trace needs both the TLAS (at least one instance) and
+            // the instance-data buffer to exist. Fall back to SW when
+            // either is missing on an HW-enabled adapter (e.g. first
+            // frame before the scene has loaded any geometry).
+            let use_hw = self.hw_rt_enabled
+                && self.probe_trace_hw_pipeline.is_some()
+                && self.tlas.is_some()
+                && self.tlas_instance_data_buffer.is_some();
+
+            if use_hw {
+                // Build the HW bind group lazily; the TLAS view changes
+                // when the TLAS is recreated at a larger capacity so
+                // invalidation ties to `tlas_max_instances` via the
+                // rebuild path that clears `probe_trace_hw_bg_cache`.
+                if self.probe_trace_hw_bg_cache.is_none() {
+                    let tlas = self.tlas.as_ref().unwrap();
+                    self.probe_trace_hw_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("probe_trace_hw_bg"),
+                        layout: self.probe_trace_hw_layout.as_ref().unwrap(),
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: self.probe_trace_uniform.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: self.probe_header_buffer.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: tlas.as_binding() },
+                            wgpu::BindGroupEntry { binding: 3, resource: self.tlas_instance_data_buffer.as_ref().unwrap().as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.probe_trace_view) },
+                        ],
+                    }));
+                }
+                let ts = profiler.compute_pass_timestamp_writes("probe_trace_hw_pass");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("probe_trace_hw_pass"), timestamp_writes: ts,
+                });
+                pass.set_pipeline(self.probe_trace_hw_pipeline.as_ref().unwrap());
+                pass.set_bind_group(0, self.probe_trace_hw_bg_cache.as_ref().unwrap(), &[]);
+                pass.dispatch_workgroups(gw, gh, 1);
+            } else {
                 let ts = profiler.compute_pass_timestamp_writes("probe_trace_pass");
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("probe_trace_pass"), timestamp_writes: ts,
                 });
                 pass.set_pipeline(&self.probe_trace_pipeline);
                 pass.set_bind_group(0, self.probe_trace_bg_cache[0].as_ref().unwrap(), &[]);
-                // One workgroup per probe; each workgroup's 64 lanes handle the 8×8 octahedral atlas.
                 pass.dispatch_workgroups(gw, gh, 1);
             }
 

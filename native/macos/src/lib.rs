@@ -357,10 +357,45 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
         required_features |= wgpu::Features::TIMESTAMP_QUERY;
     }
+    // Ticket 007b: request ray-query + BLAS/TLAS where the adapter
+    // supports both (Apple Silicon Metal, DXR 1.1, VK_KHR_ray_query).
+    // `BLOOM_FORCE_SW_GI=1` forces the SW fallback for testing parity
+    // with non-RT adapters.
+    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    // wgpu 29 gates BLAS/TLAS creation + ray-query WGSL on a single
+    // feature bit; there's no separate "acceleration structure" flag.
+    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+    if !force_sw_gi && supported.contains(rt_mask) {
+        required_features |= rt_mask;
+    }
+    // wgpu 29 requires an explicit `ExperimentalFeatures::enabled()` token
+    // when requesting any `EXPERIMENTAL_*` feature (ray query in our case).
+    // The token is constructed through an `unsafe` API acknowledging that
+    // experimental paths may hit undefined behavior — Apple Silicon's Metal
+    // ray-query path has been stable in wgpu releases since v25 so we're
+    // willing to take that risk here.
+    let experimental_features = if required_features.intersects(rt_mask) {
+        unsafe { wgpu::ExperimentalFeatures::enabled() }
+    } else {
+        wgpu::ExperimentalFeatures::disabled()
+    };
+    // Acceleration-structure limits default to 0 when RT is disabled.
+    // `using_minimum_supported_acceleration_structure_values` bumps
+    // them to the spec minimums (2^24 BLAS geometries / TLAS instances,
+    // etc.) whenever ray query was granted.
+    let mut required_limits = wgpu::Limits::default();
+    if required_features.intersects(rt_mask) {
+        required_limits = required_limits
+            .using_minimum_supported_acceleration_structure_values();
+    }
     let (device, queue) = pollster_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("bloom_device"),
             required_features,
+            required_limits,
+            experimental_features,
             ..Default::default()
         },
     )).expect("Failed to create device");
@@ -2497,7 +2532,7 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
         eng.renderer.uniform_3d_layout(),
     );
     eng.scene.prepare_materials(&eng.renderer);
-    eng.renderer.end_frame_with_scene(&eng.scene, &mut eng.profiler);
+    eng.renderer.end_frame_with_scene(&mut eng.scene, &mut eng.profiler);
 
     match eng.renderer.screenshot_data.take() {
         Some((width, height, rgba)) => {
