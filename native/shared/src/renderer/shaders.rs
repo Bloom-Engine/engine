@@ -946,18 +946,18 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     //    accumulated mip footprint, but there are still isolated
     //    texels where D_GGX + IBL prefilter spike an order of
     //    magnitude above neighbours. Bloom then amplifies each
-    //    spike into a coloured halo, and the composite CA (on at
-    //    0.002 for the default quality preset) splits the halo
-    //    across R/G/B offsets — producing exactly the per-pixel
-    //    magenta/green speckle we see on Sponza's floor. A
-    //    hue-preserving luma cap at 10 matches the one SSGI uses
-    //    internally and truncates outliers before bloom / CA ever
-    //    see them. Sun/sky samples sit in the 1-5 range after
-    //    manual exposure = 1.0, so 10 leaves legitimate bright
-    //    highlights alone.
+    //    spike into a coloured halo — producing exactly the
+    //    per-pixel bright-white speckle visible on Sponza's
+    //    sunlit stone floor (UE5 / Unity / Cycles all render
+    //    it clean). A hue-preserving luma cap at 4 catches the
+    //    outliers (specular peaks on normal-mapped stone spike
+    //    into luma 5-15) while leaving diffuse sunlit content
+    //    (luma 1-4 with setManualExposure(1.0)) untouched.
+    //    Empirically verified: cap=10 let specs through, cap=2
+    //    killed them but darkened the scene, cap=4 is the knee.
     let hdr_clean = select(vec3<f32>(0.0), hdr_raw, hdr_raw == hdr_raw);
     let luma = dot(hdr_clean, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let firefly_cap = 20.0;
+    let firefly_cap = 4.0;
     let luma_scale = select(1.0, firefly_cap / luma, luma > firefly_cap);
     let hdr = hdr_clean * luma_scale;
 
