@@ -233,14 +233,20 @@ let cursorLocked = false;
 while (!windowShouldClose()) {
   const dt = getDeltaTime();
 
-  // Shadow-drag repro: at the configured frame, snap yaw to the
-  // target. The temporal passes have accumulated a full history
-  // at the original yaw; rotating now forces them to reproject
-  // that history, and any reprojection bug shows as a dark /
-  // bright ghost drifting across the frame over the next few
-  // captured frames.
-  if (!Number.isNaN(turnYaw) && frameCount === turnAt) {
-    camYaw = turnYaw;
+  // Shadow-drag repro: after `turnAt` frames at the initial yaw,
+  // start rotating continuously toward `turnYaw` at mouse-like
+  // speed. Simulates a real drag (continuous small velocities)
+  // rather than a single snap — important because temporal
+  // reprojection can behave differently at 1 UV/frame vs
+  // 0.01 UV/frame per pixel.
+  if (!Number.isNaN(turnYaw) && frameCount >= turnAt) {
+    const perFrameRate = 0.025; // radians/frame ≈ fast mouse drag
+    const delta = turnYaw - camYaw;
+    if (Math.abs(delta) > perFrameRate) {
+      camYaw = camYaw + Math.sign(delta) * perFrameRate;
+    } else {
+      camYaw = turnYaw;
+    }
   }
 
   // Camera controls

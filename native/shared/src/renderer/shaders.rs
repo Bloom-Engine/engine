@@ -3090,17 +3090,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Velocity-aware blend. The default alpha (~0.1) lets history
     // dominate 9-to-1 for smooth sub-pixel accumulation at rest —
-    // but when the camera rotates fast, every pixel is effectively
-    // disoccluded and the 10 %-current weight takes 20+ frames to
-    // flush the old content, producing a dark ghost sliding across
-    // the frame. Ramping alpha up to 0.5 once per-pixel velocity
-    // exceeds ~0.01 UV/frame (≈ 1 % of the frame per step) snaps
-    // to current during rapid motion and returns to 0.1 once
-    // rotation slows. The variance clamp still does the heavy
-    // lifting on sub-pixel accumulation; this just rejects the
-    // large-displacement case where clamp alone isn't enough.
-    let motion_alpha = smoothstep(0.003, 0.03, vel_len);
-    let alpha = mix(u.params.x, 0.5, motion_alpha);
+    // but any camera motion disoccludes enough of the frame that
+    // the 10 %-current weight takes 10-20 frames to flush the old
+    // content, producing a dark ghost that drags across the screen
+    // during mouse-look. Ramping alpha hard once per-pixel velocity
+    // crosses 0.001 UV/frame (tiny — triggers on any rotation)
+    // and saturating at 0.012 UV/frame snaps to mostly-current
+    // throughout a drag. Tuned on sponza continuous rotation
+    // (~0.025 rad/frame mouse pace → ~0.012 UV/frame mid-frame).
+    let motion_alpha = smoothstep(0.001, 0.012, vel_len);
+    let alpha = mix(u.params.x, 0.7, motion_alpha);
     let blended = mix(clamped_history, current, alpha);
     let blended_w = mix(history_w, current_w, alpha);
     return vec4<f32>(blended, blended_w);
