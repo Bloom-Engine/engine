@@ -2888,7 +2888,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = color + u.sun_shaft_color.rgb * norm * shaft_strength;
     }
 
-    return vec4<f32>(color, indirect_weight);
+    // Compose-wide firefly / NaN scrub. The main HDR pass already
+    // caps at luma 4 on its own output, but this compose step adds
+    // SSGI (its own halfres march with per-sample cap 10, can emit
+    // accumulated luma 5-8), SSR (fresnel-capped but not luma-capped)
+    // and bloom — any of which can push a composed pixel back above
+    // the aliasing-safe ceiling. A hue-preserving cap at 4 here
+    // catches the sum regardless of which contributor spiked.
+    let color_clean = select(vec3<f32>(0.0), color, color == color);
+    let color_luma = dot(color_clean, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let compose_cap = 4.0;
+    let color_scale = select(1.0, compose_cap / color_luma, color_luma > compose_cap);
+    return vec4<f32>(color_clean * color_scale, indirect_weight);
 }
 ";
 
