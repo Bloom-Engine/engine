@@ -65,20 +65,19 @@ let K_TEXTURE_REC: Int32 = 8
 let K_TEXTURE_PRO: Int32 = 9
 let K_TEXT: Int32 = 10
 
-extension DrawCmd {
-    /// Decode the inline UTF-8 bytes into a String. Safe even if textLen is
-    /// bogus (clamped to TEXT_CAP).
-    func textString() -> String {
-        let n = Int(min(textLen, UInt64(TEXT_CAP)))
-        if n == 0 { return "" }
-        var bytes = [UInt8](repeating: 0, count: n)
-        withUnsafePointer(to: t00) { basePtr in
-            basePtr.withMemoryRebound(to: UInt8.self, capacity: TEXT_CAP) { p in
-                for i in 0..<n { bytes[i] = p[i] }
-            }
+/// Decode the inline UTF-8 bytes at the struct's text region into a String.
+/// Takes a pointer into the underlying draw-list buffer so we read the real
+/// bytes, not a stack-copied value (Swift's withUnsafePointer(to:) on a let
+/// field gives a local copy, which truncates anything past 8 bytes).
+func cmdTextString(_ ptr: UnsafePointer<DrawCmd>) -> String {
+    let n = Int(min(ptr.pointee.textLen, UInt64(TEXT_CAP)))
+    if n == 0 { return "" }
+    return UnsafeRawPointer(ptr)
+        .advanced(by: MemoryLayout<DrawCmd>.offset(of: \.t00)!)
+        .withMemoryRebound(to: UInt8.self, capacity: n) { p in
+            let buf = UnsafeBufferPointer(start: p, count: n)
+            return String(decoding: buf, as: UTF8.self)
         }
-        return String(decoding: bytes, as: UTF8.self)
-    }
 }
 
 // MARK: - Texture cache (handle → CGImage)
@@ -174,7 +173,7 @@ struct BloomRootView: View {
                 // Pull this frame's commands.
                 let n = Int(bloom_watchos_copy_draw_list(drawBuf.baseAddress!, 4096))
                 for i in 0..<n {
-                    drawOne(ctx: ctx, cmd: drawBuf[i])
+                    drawOne(ctx: ctx, cmdPtr: drawBuf.baseAddress!.advanced(by: i))
                 }
             }
             .onAppear {
@@ -213,7 +212,8 @@ struct BloomRootView: View {
 
 // MARK: - Single-command draw
 
-private func drawOne(ctx: GraphicsContext, cmd: DrawCmd) {
+private func drawOne(ctx: GraphicsContext, cmdPtr: UnsafePointer<DrawCmd>) {
+    let cmd = cmdPtr.pointee
     let color = Color(.sRGB,
                       red: cmd.r / 255.0,
                       green: cmd.g / 255.0,
@@ -279,7 +279,7 @@ private func drawOne(ctx: GraphicsContext, cmd: DrawCmd) {
         }
 
     case K_TEXT:
-        let s = cmd.textString()
+        let s = cmdTextString(cmdPtr)
         if s.isEmpty { return }
         let font = Font.system(size: cmd.size > 0 ? cmd.size : 14)
         let text = Text(s).font(font).foregroundColor(color)

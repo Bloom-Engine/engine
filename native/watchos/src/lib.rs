@@ -13,6 +13,31 @@ mod ffi_stubs;
 mod draw_list;
 mod textures;
 
+/// Perry StringHeader layout — mirrors bloom-shared's copy. Inlined here
+/// because we don't depend on bloom-shared (keeps the watchos crate
+/// wgpu-free).
+#[repr(C)]
+struct StringHeader {
+    utf16_len: u32,
+    byte_len: u32,
+    capacity: u32,
+    refcount: u32,
+}
+
+/// Decode a Perry-side string pointer (i64 on this ABI) into a borrowed &str.
+/// Returns "" for null / too-small pointers to keep the FFI boundary robust.
+fn perry_str<'a>(ptr: i64) -> &'a str {
+    if ptr == 0 { return ""; }
+    let p = ptr as *const u8;
+    if (p as usize) < 0x1000 { return ""; }
+    unsafe {
+        let header = p as *const StringHeader;
+        let len = (*header).byte_len as usize;
+        let data = p.add(std::mem::size_of::<StringHeader>());
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
+    }
+}
+
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -366,7 +391,7 @@ pub extern "C" fn bloom_draw_poly(_cx: f64, _cy: f64, _sides: f64, _radius: f64,
 
 #[no_mangle]
 pub extern "C" fn bloom_load_texture(path: i64) -> f64 {
-    textures::load(path as *const c_char) as f64
+    textures::load(perry_str(path)) as f64
 }
 
 #[no_mangle]
@@ -448,7 +473,7 @@ pub extern "C" fn bloom_set_texture_filter(_handle: f64, _mode: f64) {}
 pub extern "C" fn bloom_draw_text(text: i64, x: f64, y: f64, size: f64,
     r: f64, g: f64, b: f64, a: f64,
 ) {
-    push_text(text as *const c_char, 0, x, y, size, r, g, b, a);
+    push_text(perry_str(text), x, y, size, r, g, b, a);
 }
 
 #[no_mangle]
@@ -456,18 +481,13 @@ pub extern "C" fn bloom_draw_text_ex(_font: f64, text: i64,
     x: f64, y: f64, size: f64, _spacing: f64,
     r: f64, g: f64, b: f64, a: f64,
 ) {
-    push_text(text as *const c_char, 0, x, y, size, r, g, b, a);
+    push_text(perry_str(text), x, y, size, r, g, b, a);
 }
 
-fn push_text(text_c: *const c_char, _font: u32,
-    x: f64, y: f64, size: f64,
+fn push_text(s: &str, x: f64, y: f64, size: f64,
     r: f64, g: f64, b: f64, a: f64,
 ) {
-    if text_c.is_null() { return; }
-    let s = match unsafe { std::ffi::CStr::from_ptr(text_c) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+    if s.is_empty() { return; }
     let mut c = DrawCmd::zero();
     c.kind = kind::TEXT;
     c.x = x; c.y = y;
@@ -482,12 +502,7 @@ fn push_text(text_c: *const c_char, _font: u32,
 /// (CoreText) or bundling a font parser.
 #[no_mangle]
 pub extern "C" fn bloom_measure_text(text: i64, size: f64) -> f64 {
-    if text == 0 { return 0.0; }
-    let s = match unsafe { std::ffi::CStr::from_ptr(text as *const c_char) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return 0.0,
-    };
-    s.chars().count() as f64 * size * 0.55
+    perry_str(text).chars().count() as f64 * size * 0.55
 }
 
 #[no_mangle]
@@ -509,10 +524,11 @@ pub extern "C" fn bloom_unload_font(_handle: f64) {}
 
 #[no_mangle]
 pub extern "C" fn bloom_file_exists(path: i64) -> f64 {
-    if path == 0 { return 0.0; }
-    let s = unsafe { std::ffi::CStr::from_ptr(path as *const c_char) };
-    let p = match s.to_str() { Ok(s) => s, Err(_) => return 0.0 };
-    if std::path::Path::new(p).exists() { 1.0 } else { 0.0 }
+    let p = perry_str(path);
+    if p.is_empty() { return 0.0; }
+    // Resolve bundle-relative paths the same way textures does.
+    let full = if p.starts_with('/') { p.to_string() } else { textures::resolve_bundle_path(p) };
+    if std::path::Path::new(&full).exists() { 1.0 } else { 0.0 }
 }
 
 #[no_mangle]

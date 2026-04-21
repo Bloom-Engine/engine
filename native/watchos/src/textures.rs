@@ -6,7 +6,7 @@
 //! to Swift. Only PNG is supported for this first cut — adequate for Jump
 //! (all its sprites are PNG).
 
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
@@ -26,17 +26,13 @@ static REG: Mutex<Registry> = Mutex::new(Registry { entries: Vec::new() });
 
 /// Load a texture — stores the path + parses PNG header for dimensions,
 /// returns a 1-based handle. Returns 0 on failure.
-pub fn load(path_c: *const c_char) -> u32 {
-    if path_c.is_null() {
+pub fn load(path: &str) -> u32 {
+    if path.is_empty() {
         return 0;
     }
-    let path = match unsafe { CStr::from_ptr(path_c) }.to_str() {
-        Ok(s) => s.to_string(),
-        Err(_) => return 0,
-    };
 
     // Resolve bundle-relative paths against the main bundle's resource path.
-    let full = resolve_bundle_path(&path);
+    let full = resolve_bundle_path(path);
 
     let (w, h) = match parse_png_size(&full) {
         Some(v) => v,
@@ -83,7 +79,7 @@ pub fn path_ptr(handle: u32) -> *const c_char {
 /// On watchOS the Swift shell populates `BUNDLE_RESOURCE_PATH` on startup
 /// via `bloom_watchos_set_bundle_path`; if it hasn't, paths are returned
 /// unchanged.
-fn resolve_bundle_path(p: &str) -> String {
+pub fn resolve_bundle_path(p: &str) -> String {
     if p.starts_with('/') {
         return p.to_string();
     }
