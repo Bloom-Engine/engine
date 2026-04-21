@@ -34,7 +34,16 @@ import ImageIO
 @_silgen_name("bloom_watchos_has_3d") func bloom_watchos_has_3d() -> Double
 
 // Retained scene graph accessors
-@_silgen_name("bloom_watchos_scene_copy_nodes") func bloom_watchos_scene_copy_nodes(_ dst: UnsafeMutablePointer<SceneNodeInfo>, _ max: Int64) -> Int64
+@_silgen_name("bloom_watchos_scene_drain_dirty") func bloom_watchos_scene_drain_dirty(_ dst: UnsafeMutablePointer<SceneNodeInfo>, _ max: Int64) -> Int64
+@_silgen_name("bloom_watchos_scene_drain_destroyed") func bloom_watchos_scene_drain_destroyed(_ dst: UnsafeMutablePointer<UInt32>, _ max: Int64) -> Int64
+
+// Mirrors scene.rs DIRTY_* constants.
+let DIRTY_TRANSFORM: UInt32  = 1 << 0
+let DIRTY_MATERIAL: UInt32   = 1 << 1
+let DIRTY_VISIBILITY: UInt32 = 1 << 2
+let DIRTY_PARENT: UInt32     = 1 << 3
+let DIRTY_GEOMETRY: UInt32   = 1 << 4
+let DIRTY_SKIN: UInt32       = 1 << 5
 @_silgen_name("bloom_watchos_scene_copy_lights") func bloom_watchos_scene_copy_lights(_ dst: UnsafeMutablePointer<SceneLight>, _ max: Int64) -> Int64
 @_silgen_name("bloom_watchos_scene_geometry") func bloom_watchos_scene_geometry(_ handle: UInt32, _ out: UnsafeMutablePointer<SceneGeometryPtrs>)
 @_silgen_name("bloom_watchos_scene_skin") func bloom_watchos_scene_skin(_ handle: UInt32, _ out: UnsafeMutablePointer<SceneSkinPtrs>)
@@ -77,6 +86,7 @@ struct PostFxState {
 
 // SceneNodeInfo — must match Rust's #[repr(C)] struct in scene.rs.
 struct SceneNodeInfo {
+    var dirtyFlags: UInt32 = 0
     var handle: UInt32 = 0
     var parent: UInt32 = 0
     var visible: UInt32 = 0
@@ -487,17 +497,40 @@ struct BloomSceneView: View {
     }
 
     private func syncRetainedNodes() {
-        let count = Int(bloom_watchos_scene_copy_nodes(nodeBuf.baseAddress!, 1024))
-        var seen: Set<UInt32> = []
-        seen.reserveCapacity(count)
+        // Step 1: retire destroyed nodes first so their handles don't collide
+        // with new-node creations that may reuse slots.
+        var destroyed: [UInt32] = Array(repeating: 0, count: 256)
+        destroyed.withUnsafeMutableBufferPointer { buf in
+            while true {
+                let n = Int(bloom_watchos_scene_drain_destroyed(buf.baseAddress!, Int64(buf.count)))
+                if n == 0 { break }
+                for i in 0..<n {
+                    let h = buf[i]
+                    if let node = retainedNodes.removeValue(forKey: h) {
+                        node.removeFromParentNode()
+                    }
+                    retainedGeomVersions.removeValue(forKey: h)
+                    retainedSkinVersions.removeValue(forKey: h)
+                    cachedAnimTracks.removeValue(forKey: h)
+                    cachedAnimDuration.removeValue(forKey: h)
+                }
+                if n < buf.count { break }
+            }
+        }
 
-        // Pass 1: ensure a SCNNode exists for every live handle and update its
-        // transform + material. Geometry is versioned so we only rebuild when
-        // it actually changes.
-        for i in 0..<count {
-            let info = nodeBuf[i]
-            seen.insert(info.handle)
+        // Step 2: drain dirty nodes. Each drain call reports nodes with
+        // non-zero dirty_flags and clears them, so we pull until empty. For
+        // a static scene this returns 0 on the first call — O(0) sync cost.
+        var allDirty: [SceneNodeInfo] = []
+        while true {
+            let count = Int(bloom_watchos_scene_drain_dirty(nodeBuf.baseAddress!, 1024))
+            if count == 0 { break }
+            for i in 0..<count { allDirty.append(nodeBuf[i]) }
+            if count < 1024 { break }
+        }
 
+        // Step 3: pass 1 — create-or-update nodes, apply dirty fields only.
+        for info in allDirty {
             let node: SCNNode
             if let existing = retainedNodes[info.handle] {
                 node = existing
@@ -507,22 +540,27 @@ struct BloomSceneView: View {
                 retainedRoot.addChildNode(node)
             }
 
-            node.isHidden = info.visible == 0
-            node.transform = scnMatrix4(from: info.transform)
-
-            let cached = retainedGeomVersions[info.handle] ?? .max
-            if info.hasGeometry != 0 && cached != info.geometryVersion {
-                node.geometry = buildGeometry(handle: info.handle)
-                retainedGeomVersions[info.handle] = info.geometryVersion
+            if info.dirtyFlags & DIRTY_VISIBILITY != 0 {
+                node.isHidden = info.visible == 0
+            }
+            if info.dirtyFlags & DIRTY_TRANSFORM != 0 {
+                node.transform = scnMatrix4(from: info.transform)
             }
 
-            // Skinning: rebuild SCNSkinner when skin_version changes. Needs
-            // all bone SCNNodes to exist first — the retained pass-1 loop
-            // creates them before we reach this point for any later-visited
-            // skinned mesh. For skinned meshes near the top of the scene
-            // walk order, bones may still be missing on frame 0; we retry
-            // the build on the next sync tick if any bone is still nil.
-            if info.skinVersion != 0 && retainedSkinVersions[info.handle] != info.skinVersion {
+            if info.dirtyFlags & DIRTY_GEOMETRY != 0 {
+                let cached = retainedGeomVersions[info.handle] ?? .max
+                if info.hasGeometry != 0 && cached != info.geometryVersion {
+                    node.geometry = buildGeometry(handle: info.handle)
+                    retainedGeomVersions[info.handle] = info.geometryVersion
+                }
+            }
+
+            // Skinning: rebuild SCNSkinner when skin_version changes. Bones
+            // may not all exist in retainedNodes yet on the first sync — if
+            // so, buildSkinner returns nil and we retry on the next tick
+            // when all nodes have been created.
+            if info.dirtyFlags & DIRTY_SKIN != 0,
+               retainedSkinVersions[info.handle] != info.skinVersion {
                 if let skinner = buildSkinner(mesh: node, handle: info.handle) {
                     node.skinner = skinner
                     attachAnimations(handle: info.handle)
@@ -530,7 +568,7 @@ struct BloomSceneView: View {
                 }
             }
 
-            if let g = node.geometry {
+            if info.dirtyFlags & DIRTY_MATERIAL != 0, let g = node.geometry {
                 let m = g.firstMaterial ?? SCNMaterial()
                 // PBR needs per-vertex normals. Some glTF exports (e.g. Fox)
                 // omit NORMAL entirely — fall back to constant lighting so
@@ -592,18 +630,10 @@ struct BloomSceneView: View {
             }
         }
 
-        // Pass 2: retire SCNNodes whose handle no longer appears in the
-        // snapshot (bloom_scene_destroy_node).
-        for (h, node) in retainedNodes where !seen.contains(h) {
-            node.removeFromParentNode()
-            retainedNodes.removeValue(forKey: h)
-            retainedGeomVersions.removeValue(forKey: h)
-        }
-
-        // Pass 3: fix up parent-child — done after all nodes exist so
-        // bloom_scene_set_parent to a not-yet-created node doesn't matter.
-        for i in 0..<count {
-            let info = nodeBuf[i]
+        // Step 4: parent fix-up — only for nodes whose PARENT bit was dirty.
+        // Done after the material/geometry pass so both parent and child
+        // exist when we reparent, even for newly-spawned subtrees.
+        for info in allDirty where info.dirtyFlags & DIRTY_PARENT != 0 {
             guard let node = retainedNodes[info.handle] else { continue }
             let desiredParent: SCNNode = info.parent == 0 ? retainedRoot
                 : (retainedNodes[info.parent] ?? retainedRoot)

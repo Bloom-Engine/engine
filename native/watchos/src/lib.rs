@@ -960,8 +960,13 @@ pub extern "C" fn bloom_watchos_postfx_state(out: *mut postfx::PostFxState) {
 // ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_watchos_scene_copy_nodes(dst: *mut scene::SceneNodeInfo, max: i64) -> i64 {
-    scene::copy_nodes(dst, max)
+pub extern "C" fn bloom_watchos_scene_drain_dirty(dst: *mut scene::SceneNodeInfo, max: i64) -> i64 {
+    scene::drain_dirty(dst, max)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_watchos_scene_drain_destroyed(dst: *mut u32, max: i64) -> i64 {
+    scene::drain_destroyed(dst, max)
 }
 
 #[no_mangle]

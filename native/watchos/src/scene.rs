@@ -12,9 +12,23 @@
 
 use std::sync::Mutex;
 
+// Dirty-flag bits — Node.dirty_flags is the bitwise-OR of these. Each Node
+// mutator sets its corresponding bit; drain_dirty reports them to Swift and
+// clears on consumption. Newly created nodes start with DIRTY_ALL so Swift
+// sees every field on the first drain.
+pub const DIRTY_TRANSFORM: u32  = 1 << 0;
+pub const DIRTY_MATERIAL: u32   = 1 << 1;
+pub const DIRTY_VISIBILITY: u32 = 1 << 2;
+pub const DIRTY_PARENT: u32     = 1 << 3;
+pub const DIRTY_GEOMETRY: u32   = 1 << 4;
+pub const DIRTY_SKIN: u32       = 1 << 5;
+pub const DIRTY_ALL: u32 = DIRTY_TRANSFORM | DIRTY_MATERIAL | DIRTY_VISIBILITY
+                         | DIRTY_PARENT | DIRTY_GEOMETRY | DIRTY_SKIN;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SceneNodeInfo {
+    pub dirty_flags: u32,
     pub handle: u32,
     pub parent: u32,
     pub visible: u32,
@@ -61,6 +75,10 @@ struct Node {
     uvs: Vec<f32>,
     indices: Vec<u32>,
     geometry_version: u32,
+    /// Bitmask of DIRTY_* flags that need to go out to Swift on the next
+    /// drain. Freshly created nodes start with DIRTY_ALL so Swift builds a
+    /// full SCNNode on first sight.
+    dirty_flags: u32,
 
     // Skinning data (SCNSkinner). Present only on the mesh-carrying node of
     // a skinned glTF primitive. skin_version bumps when any of the fields
@@ -103,6 +121,7 @@ impl Node {
             uvs: Vec::new(),
             indices: Vec::new(),
             geometry_version: 0,
+            dirty_flags: DIRTY_ALL,
             skin_joint_handles: Vec::new(),
             skin_inverse_bind: Vec::new(),
             skin_vertex_joints: Vec::new(),
@@ -127,11 +146,15 @@ pub struct Light {
 struct Inner {
     nodes: Vec<Option<Node>>,  // 1-based: nodes[0] is always None (handle 0 = "none")
     lights: Vec<Light>,
+    /// Handles of nodes destroyed since the last Swift drain. Swift consumes
+    /// via drain_destroyed() and removes the matching SCNNodes from its cache.
+    destroyed_queue: Vec<u32>,
 }
 
 static INNER: Mutex<Inner> = Mutex::new(Inner {
     nodes: Vec::new(),
     lights: Vec::new(),
+    destroyed_queue: Vec::new(),
 });
 
 fn with<F, R>(f: F) -> R where F: FnOnce(&mut Inner) -> R {
@@ -162,12 +185,17 @@ pub fn create() -> u32 {
 
 pub fn destroy(handle: u32) {
     with(|inner| {
-        if let Some(slot) = inner.nodes.get_mut(handle as usize) {
-            *slot = None;
-        }
-        // Any node with this as parent becomes a root.
+        let existed = if let Some(slot) = inner.nodes.get_mut(handle as usize) {
+            if slot.is_some() { *slot = None; true } else { false }
+        } else { false };
+        if existed { inner.destroyed_queue.push(handle); }
+        // Any node with this as parent becomes a root — flag PARENT dirty
+        // so Swift reparents it.
         for n in inner.nodes.iter_mut().flatten() {
-            if n.parent == handle { n.parent = 0; }
+            if n.parent == handle {
+                n.parent = 0;
+                n.dirty_flags |= DIRTY_PARENT;
+            }
         }
     });
 }
@@ -180,20 +208,37 @@ fn mutate<F: FnOnce(&mut Node)>(handle: u32, f: F) {
     });
 }
 
-pub fn set_visible(handle: u32, v: bool) { mutate(handle, |n| n.visible = v); }
-pub fn set_parent(handle: u32, parent: u32) { mutate(handle, |n| n.parent = parent); }
-pub fn set_transform(handle: u32, m: [f32; 16]) { mutate(handle, |n| n.transform = m); }
-pub fn set_color(handle: u32, rgba: [f32; 4]) { mutate(handle, |n| n.color = rgba); }
-pub fn set_pbr(handle: u32, rough: f32, metal: f32) {
-    mutate(handle, |n| { n.roughness = rough; n.metalness = metal; });
+fn mark_dirty<F: FnOnce(&mut Node)>(handle: u32, bits: u32, f: F) {
+    mutate(handle, |n| {
+        f(n);
+        n.dirty_flags |= bits;
+    });
 }
-pub fn set_texture(handle: u32, tex: u32) { mutate(handle, |n| n.texture = tex); }
+
+pub fn set_visible(handle: u32, v: bool) {
+    mark_dirty(handle, DIRTY_VISIBILITY, |n| n.visible = v);
+}
+pub fn set_parent(handle: u32, parent: u32) {
+    mark_dirty(handle, DIRTY_PARENT, |n| n.parent = parent);
+}
+pub fn set_transform(handle: u32, m: [f32; 16]) {
+    mark_dirty(handle, DIRTY_TRANSFORM, |n| n.transform = m);
+}
+pub fn set_color(handle: u32, rgba: [f32; 4]) {
+    mark_dirty(handle, DIRTY_MATERIAL, |n| n.color = rgba);
+}
+pub fn set_pbr(handle: u32, rough: f32, metal: f32) {
+    mark_dirty(handle, DIRTY_MATERIAL, |n| { n.roughness = rough; n.metalness = metal; });
+}
+pub fn set_texture(handle: u32, tex: u32) {
+    mark_dirty(handle, DIRTY_MATERIAL, |n| n.texture = tex);
+}
 
 pub fn set_pbr_textures(handle: u32,
     base_color: u32, normal: u32, metallic_roughness: u32,
     emissive: u32, occlusion: u32,
 ) {
-    mutate(handle, |n| {
+    mark_dirty(handle, DIRTY_MATERIAL, |n| {
         n.tex_base_color = base_color;
         n.tex_normal = normal;
         n.tex_metallic_roughness = metallic_roughness;
@@ -206,7 +251,7 @@ pub fn set_skin(handle: u32,
     joint_handles: Vec<u32>, inverse_bind: Vec<[f32; 16]>,
     vertex_joints: Vec<u32>, vertex_weights: Vec<f32>,
 ) {
-    mutate(handle, |n| {
+    mark_dirty(handle, DIRTY_SKIN, |n| {
         n.skin_joint_handles = joint_handles;
         n.skin_inverse_bind = inverse_bind;
         n.skin_vertex_joints = vertex_joints;
@@ -218,7 +263,7 @@ pub fn set_skin(handle: u32,
 /// Replace the animation tracks on a skinned mesh node. Bumps skin_version
 /// so Swift re-picks them up alongside the skinner rebuild.
 pub fn set_anim_tracks(handle: u32, tracks: Vec<AnimTrack>) {
-    mutate(handle, |n| {
+    mark_dirty(handle, DIRTY_SKIN, |n| {
         n.anim_tracks = tracks;
         n.skin_version = n.skin_version.wrapping_add(1);
     });
@@ -231,7 +276,7 @@ pub fn set_anim_tracks(handle: u32, tracks: Vec<AnimTrack>) {
 pub fn set_geometry(handle: u32,
     positions: Vec<f32>, normals: Vec<f32>, uvs: Vec<f32>, indices: Vec<u32>,
 ) {
-    mutate(handle, |n| {
+    mark_dirty(handle, DIRTY_GEOMETRY, |n| {
         n.positions = positions;
         n.normals = normals;
         n.uvs = uvs;
@@ -241,7 +286,7 @@ pub fn set_geometry(handle: u32,
 }
 
 pub fn update_geometry_f64(handle: u32, verts: &[f64], indices: &[f64]) {
-    mutate(handle, |n| {
+    mark_dirty(handle, DIRTY_GEOMETRY, |n| {
         let count = verts.len() / 12;
         n.positions.clear();
         n.normals.clear();
@@ -299,16 +344,20 @@ pub fn node_count() -> usize {
 // Snapshot API — called from Swift each frame.
 // ============================================================
 
-/// Copy all alive node infos into the Swift-supplied buffer.
-/// Returns the number written (capped at `max`).
-pub fn copy_nodes(dst: *mut SceneNodeInfo, max: i64) -> i64 {
+/// Delta-sync: emit only nodes whose dirty_flags are non-zero, and clear
+/// flags on the nodes we report. Swift calls this once per frame and
+/// applies the reported changes — static scenes get O(0) cost, moving
+/// scenes scale with the number of actually-changing nodes.
+pub fn drain_dirty(dst: *mut SceneNodeInfo, max: i64) -> i64 {
     if dst.is_null() || max <= 0 { return 0; }
     with(|inner| {
         let mut written = 0i64;
-        for (i, slot) in inner.nodes.iter().enumerate() {
+        for (i, slot) in inner.nodes.iter_mut().enumerate() {
             if written >= max { break; }
             let Some(n) = slot else { continue };
+            if n.dirty_flags == 0 { continue; }
             let info = SceneNodeInfo {
+                dirty_flags: n.dirty_flags,
                 handle: i as u32,
                 parent: n.parent,
                 visible: if n.visible { 1 } else { 0 },
@@ -327,9 +376,24 @@ pub fn copy_nodes(dst: *mut SceneNodeInfo, max: i64) -> i64 {
                 skin_version: n.skin_version,
             };
             unsafe { *dst.add(written as usize) = info; }
+            n.dirty_flags = 0;
             written += 1;
         }
         written
+    })
+}
+
+/// Drain the list of handles destroyed since the last call. Swift pulls
+/// these and removes the matching SCNNodes from its retainedNodes map.
+pub fn drain_destroyed(dst: *mut u32, max: i64) -> i64 {
+    if dst.is_null() || max <= 0 { return 0; }
+    with(|inner| {
+        let n = inner.destroyed_queue.len().min(max as usize);
+        unsafe {
+            std::ptr::copy_nonoverlapping(inner.destroyed_queue.as_ptr(), dst, n);
+        }
+        inner.destroyed_queue.drain(..n);
+        n as i64
     })
 }
 
