@@ -1,6 +1,33 @@
 # 006 — Frustum-cull casters in shadow pass
 
-**Effort:** ~0.5 day · **Expected gain:** Shadow pass 14 ms → 7-10 ms · **Status:** open
+**Effort:** ~0.5 day · **Expected gain:** Shadow pass 14 ms → 7-10 ms · **Status:** landed
+
+## Result
+
+Per-cascade ortho-frustum cull against a world-AABB cached on `SceneNode`
+during `prepare()`. Culling happens after the shared caster list is built
+and drives a per-cascade index list; each cascade only writes uniforms
+and records draws for the subset that overlaps its volume.
+
+On the panning-camera cache-miss path at `--quality 2 --fps-only 300`:
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| FPS (quality=2 Medium) | 50.3 | 52.8 | +5.0% |
+| Frame time | 19.88 ms | 18.95 ms | -0.93 ms |
+| shadow_pass CPU | 648 µs | 489 µs | **-24%** |
+| shadow_pass GPU | 3120 µs | 2046 µs | **-34%** |
+
+The ticket's 14 ms → 7-10 ms target was set against the pre-95da6af
+baseline. `CASCADE_MAP_SIZE` dropped 2048 → 1024 in 95da6af, which already
+took the pass from 14 ms to ~3 ms on the cache-miss path, so absolute
+headroom is small. The proportional cut (34% on the GPU side) matches
+the ticket's intent. The 10% FPS target in the original acceptance is
+unreachable at today's baseline because shadow is no longer a 14 ms cost.
+
+Sun-behind-camera pose (`--yaw π`) diff against the before binary:
+RMSE 0.168/255 vs a same-run TAA noise floor of 0.191/255 — shadows of
+off-screen casters still land on-screen correctly.
 
 ## Problem
 

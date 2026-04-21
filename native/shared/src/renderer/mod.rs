@@ -4969,16 +4969,20 @@ impl Renderer {
                 || self.shadow_map.rendered_scene_version != scene_ver;
 
             if should_render {
-            // Build draw list once (shared across all cascades).
-            // Collect per-node data before any render pass borrows the scene.
+            // Build a shared caster list + buffer-ref vectors, then
+            // filter per cascade against that cascade's ortho frustum.
+            // A caster outside cascade N's frustum can't write pixels
+            // into cascade N; near/far pancaking already covers
+            // behind-camera casters via the cascade's own far plane.
             struct ShadowDrawEntry {
                 vb_idx: usize,
                 ib_idx: usize,
                 index_count: u32,
                 transform: [[f32; 4]; 4],
+                wmin: [f32; 3],
+                wmax: [f32; 3],
             }
             let mut shadow_nodes: Vec<ShadowDrawEntry> = Vec::new();
-            // Collect buffer references separately for the render pass
             let mut shadow_vbs: Vec<&wgpu::Buffer> = Vec::new();
             let mut shadow_ibs: Vec<&wgpu::Buffer> = Vec::new();
             for (_handle, node) in scene.nodes.iter() {
@@ -4995,19 +4999,40 @@ impl Renderer {
                     ib_idx: vb_idx,
                     index_count: node.gpu_index_count,
                     transform: node.transform,
+                    wmin: node.world_bounds_min,
+                    wmax: node.world_bounds_max,
                 });
+            }
+
+            let cascade_planes: [[[f32; 4]; 6]; crate::shadows::NUM_CASCADES] =
+                std::array::from_fn(|c| {
+                    crate::scene::extract_frustum_planes(&self.shadow_map.light_vps[c])
+                });
+            let mut cascade_indices: [Vec<usize>; crate::shadows::NUM_CASCADES] =
+                std::array::from_fn(|_| Vec::with_capacity(shadow_nodes.len()));
+            for (i, entry) in shadow_nodes.iter().enumerate() {
+                let has_bounds = entry.wmin[0] <= entry.wmax[0];
+                for c in 0..crate::shadows::NUM_CASCADES {
+                    if has_bounds
+                        && crate::scene::aabb_outside_frustum(&cascade_planes[c], entry.wmin, entry.wmax)
+                    {
+                        continue;
+                    }
+                    cascade_indices[c].push(i);
+                }
             }
 
             // Render each cascade
             for cascade in 0..crate::shadows::NUM_CASCADES {
                 let stride = crate::shadows::SHADOW_UNIFORM_STRIDE as usize;
                 let max = crate::shadows::SHADOW_MAX_NODES as usize;
-                let mut uniform_data: Vec<u8> = vec![0u8; stride * max];
-                let mut slot = 0usize;
+                let entries = &cascade_indices[cascade];
+                let count = entries.len().min(max);
+                let mut uniform_data: Vec<u8> = vec![0u8; stride * count.max(1)];
                 let cascade_vp = self.shadow_map.light_vps[cascade];
 
-                for entry in &shadow_nodes {
-                    if slot >= max { break; }
+                for (slot, &ei) in entries.iter().take(count).enumerate() {
+                    let entry = &shadow_nodes[ei];
                     let uniforms = crate::shadows::ShadowUniforms {
                         light_vp: cascade_vp,
                         model: entry.transform,
@@ -5015,14 +5040,13 @@ impl Renderer {
                     let off = slot * stride;
                     uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
                         .copy_from_slice(bytemuck::bytes_of(&uniforms));
-                    slot += 1;
                 }
 
-                if slot > 0 {
+                if count > 0 {
                     self.queue.write_buffer(
                         &self.shadow_map.uniform_buffer,
                         0,
-                        &uniform_data[..slot * stride],
+                        &uniform_data[..count * stride],
                     );
                 }
 
@@ -5045,9 +5069,9 @@ impl Renderer {
 
                     shadow_pass.set_pipeline(&self.shadow_map.pipeline);
 
-                    for (i, entry) in shadow_nodes.iter().enumerate() {
-                        if i >= max { break; }
-                        let offset = (i * stride) as u32;
+                    for (slot, &ei) in entries.iter().take(count).enumerate() {
+                        let entry = &shadow_nodes[ei];
+                        let offset = (slot * stride) as u32;
                         shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[offset]);
                         shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
                         shadow_pass.set_index_buffer(shadow_ibs[entry.ib_idx].slice(..), wgpu::IndexFormat::Uint32);

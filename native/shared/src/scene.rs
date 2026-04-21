@@ -89,6 +89,14 @@ pub struct SceneNode {
     // Cached world-space AABB, recomputed when geometry changes (Q5).
     pub bounds_min: [f32; 3],
     pub bounds_max: [f32; 3],
+    /// World-space AABB cached each frame by `prepare()` — the result of
+    /// transforming the local `bounds_min`/`bounds_max` box by the node
+    /// transform. Consumed by the shadow pass for per-cascade frustum
+    /// culling so it doesn't repeat the 8-corner transform. Sentinel
+    /// `world_bounds_min[0] > world_bounds_max[0]` means "not yet valid"
+    /// (node never passed through `prepare()`, or local bounds empty).
+    pub world_bounds_min: [f32; 3],
+    pub world_bounds_max: [f32; 3],
     // GPU resources (lazily created)
     pub gpu_vb: Option<wgpu::Buffer>,
     pub gpu_ib: Option<wgpu::Buffer>,
@@ -128,6 +136,8 @@ impl SceneNode {
             user_data: 0,
             bounds_min: [0.0; 3],
             bounds_max: [0.0; 3],
+            world_bounds_min: [f32::MAX; 3],
+            world_bounds_max: [f32::MIN; 3],
             gpu_vb: None,
             gpu_ib: None,
             gpu_index_count: 0,
@@ -467,9 +477,13 @@ impl SceneGraph {
                     }
                 }
                 node.in_view_frustum = !aabb_outside_frustum(&frustum, wmin, wmax);
+                node.world_bounds_min = wmin;
+                node.world_bounds_max = wmax;
             } else {
                 // Empty or uninitialized bounds — can't cull, play safe.
                 node.in_view_frustum = true;
+                node.world_bounds_min = [f32::MAX; 3];
+                node.world_bounds_max = [f32::MIN; 3];
             }
             if node.geo_dirty || node.gpu_vb.is_none() {
                 node.gpu_vb = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -663,7 +677,7 @@ impl SceneGraph {
 // means the point is inside that plane's half-space. No normalization
 // — we only care about the sign.
 
-fn extract_frustum_planes(vp: &[[f32; 4]; 4]) -> [[f32; 4]; 6] {
+pub(crate) fn extract_frustum_planes(vp: &[[f32; 4]; 4]) -> [[f32; 4]; 6] {
     // Row vectors of the column-major matrix: row_i[col] = vp[col][i].
     let row = |i: usize| [vp[0][i], vp[1][i], vp[2][i], vp[3][i]];
     let r0 = row(0); let r1 = row(1); let r2 = row(2); let r3 = row(3);
@@ -679,7 +693,7 @@ fn extract_frustum_planes(vp: &[[f32; 4]; 4]) -> [[f32; 4]; 6] {
     ]
 }
 
-fn aabb_outside_frustum(planes: &[[f32; 4]; 6], bmin: [f32; 3], bmax: [f32; 3]) -> bool {
+pub(crate) fn aabb_outside_frustum(planes: &[[f32; 4]; 6], bmin: [f32; 3], bmax: [f32; 3]) -> bool {
     for p in planes.iter() {
         let mut all_outside = true;
         for ix in 0..2 {
