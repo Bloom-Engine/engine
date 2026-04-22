@@ -1,6 +1,6 @@
 # 012 — Cache the 5 remaining per-frame `create_bind_group` calls
 
-**Effort:** ~0.5 day · **Expected gain:** ~15-30 µs CPU · **Status:** open
+**Effort:** ~0.5 day · **Expected gain:** ~15-30 µs CPU · **Status:** deferred
 
 ## Problem
 
@@ -54,3 +54,40 @@ existing four.
 
 - `native/shared/src/renderer.rs` — add 5 more cache fields, build/read
   them in `end_frame_with_scene`, invalidate in `resize()`.
+
+## Deferred — prototype notes
+
+A V1 prototype landed all five caches as `Option<(u32, wgpu::BindGroup)>`
+fields, keyed on small state enums:
+
+- `scene_compose_bg_cache`: `ssr_history_idx` when SSR is on, else 2 for the
+  no-SSR path (three entries total).
+- `dof_bg_cache`: `taa_dst_idx` when TAA on, else 2 (three entries).
+- `motion_blur_bg_cache`: 0=DoF, 1/2=TAA (by ping-pong), 3=hdr (four entries).
+- `sss_bg_cache`: 0=MB, 1=DoF, 2/3=TAA, 4=hdr (five entries).
+- `composite_bg_cache`: `composite_src_variant | (exposure_dst_idx << 4)`
+  covering the same composite_src branch chain (six variants) times the
+  exposure ping-pong (12 entries).
+
+All five invalidated alongside the existing ssao / ssr caches in
+`resize()`. The pattern built and passed `--quality 3 --ssgi 1 --fps-only
+300` at 60 fps vsync, but on interactive launch the window rendered
+entirely black. Most likely cause: one of the cached bind groups bound
+a view (probably in the composite chain) whose contents had not yet
+been written by the current frame's pass on the first frame the key
+appeared — i.e. the key covered the *input selection* but missed an
+implicit frame-order dependency. Re-opening would need either:
+
+1. Per-pass screenshot diff after each cache is wired, so a regression is
+   caught at the first broken cache rather than the composite chain.
+2. A more aggressive key that includes the "was this view written this
+   frame?" bit, or just the pure `[Option<BindGroup>; N]` form so the
+   prior frame's bg stays resident rather than getting evicted when the
+   state flips and back.
+
+Given the ticket's own best-case 15-30 µs CPU gain and the perf-README
+rule that "Sponza is GPU-bound, not CPU-bound. Don't chase CPU micro-
+optimizations expecting FPS improvement," this is parked until a scene
+shows up that's actually CPU-bound on bind-group rebuilds. At that point
+the prototype should be the starting point, with the screenshot-diff
+protocol baked into the per-pass rollout from the start.
