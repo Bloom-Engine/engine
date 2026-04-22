@@ -81,7 +81,11 @@ struct PostFxState {
     var chromaticAberration: Float = 0
     var filmGrain: Float = 0
     var exposure: Float = 1
-    var _pad: Float = 0
+    var sunStrength: Float = 0
+    var sunDecay: Float = 0.85
+    var sunR: Float = 1.0
+    var sunG: Float = 0.9
+    var sunB: Float = 0.7
 }
 
 // SceneNodeInfo — must match Rust's #[repr(C)] struct in scene.rs.
@@ -347,9 +351,8 @@ struct BloomRootView: View {
             .brightness(fx.enabled != 0 && fx.autoExposure == 0 ? Double(fx.exposure - 1.0) : 0)
             .overlay {
                 if fx.enabled != 0 && fx.vignetteStrength > 0.001 {
-                    // Vignette via a radial gradient: transparent in the
-                    // middle, black at the edges. Strength scales the outer
-                    // alpha; softness shifts the gradient's transition point.
+                    // Vignette stays on pure SwiftUI — cheaper than a shader
+                    // and identical visually.
                     let soft = max(0.0, min(0.95, Double(fx.vignetteSoftness)))
                     let str = min(1.0, Double(fx.vignetteStrength))
                     Canvas { ctx, size in
@@ -372,6 +375,30 @@ struct BloomRootView: View {
         .background(Color.black)
     }
 }
+
+// MARK: - Metal-shader post-FX
+//
+// default.metallib is compiled + bundled by Perry (PerryTS/perry#124) and
+// contains three [[ stitchable ]] shader functions (bloom_chromatic_aberration,
+// bloom_film_grain, bloom_sun_shafts).
+//
+// HOWEVER: SwiftUI's Shader-consumer modifiers —
+// `.colorEffect(Shader)` / `.layerEffect(Shader)` / `ShaderLibrary` —
+// are iOS 17+ / tvOS 17+ / macOS 14+ ONLY. Apple explicitly did not ship
+// them on watchOS, so even though the .metallib sits in the bundle
+// (ShaderLibrary.default would resolve it correctly), there's no way to
+// attach the shaders to a view on the watch today.
+//
+// Paths forward when we revisit:
+//   1. SCNTechnique — SceneKit's pass-based Metal post-process. Works on
+//      watchOS and can load from default.metallib, but only applies to the
+//      SceneKit layer (not the 2D Canvas overlay). Follow-up ticket.
+//   2. Raw MTLCommandQueue offscreen render + present through a custom
+//      SwiftUI view bridge — much more invasive, probably not worth it.
+//   3. Wait for Apple to ship SwiftUI Shader support on watchOS (filed as
+//      a Feedback, no ETA).
+//
+// Today vignette + exposure continue to use pure-SwiftUI modifiers above.
 
 // MARK: - 3D layer (SceneKit)
 

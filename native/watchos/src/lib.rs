@@ -931,9 +931,9 @@ fn apply_primitive(handle: u32, prim: &models::Primitive) {
     postfx::set_auto_exposure(on > 0.5);
 }
 #[no_mangle] pub extern "C" fn bloom_set_sun_shafts(
-    _strength: f64, _decay: f64, _r: f64, _g: f64, _b: f64,
+    strength: f64, decay: f64, r: f64, g: f64, b: f64,
 ) {
-    // Needs a Metal post-pass — deferred. State discarded for now.
+    postfx::set_sun_shafts(strength, decay, r, g, b);
 }
 
 #[no_mangle]
