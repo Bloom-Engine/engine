@@ -1,6 +1,6 @@
 # 005 — Depth prepass for main HDR pass
 
-**Effort:** ~1 day · **Expected gain:** main_hdr 17 ms → ~8 ms · **Status:** open
+**Effort:** ~1 day · **Expected gain:** main_hdr 17 ms → ~8 ms · **Status:** deprioritized (see Findings, 2026-04-21)
 
 ## Problem
 
@@ -83,3 +83,72 @@ Classic **Z-prepass**. Before `main_hdr_pass`:
   `scene_pipeline_equal`, new prepass block in `end_frame_with_scene`.
 - `native/shared/src/scene.rs` — add a `render_depth_only()` method mirroring
   `render()`.
+
+## Findings (2026-04-21, headless Sponza baseline)
+
+Post-mortem after a prototype attempt: the ticket as originally scoped does
+not pay off on the current pipeline, and the approach has correctness gaps
+that need a larger design change to fix. Summary:
+
+**Headroom collapsed.** The ticket's 17 ms → ~8 ms `main_hdr_pass` budget
+predates ticket 001. After 001 (TSR half-res) the pass is already ~2 ms
+GPU on the benchmark scene (300-frame default `--fps-only`, Intel Sponza).
+Best-case rejection saves ~1 ms, which is ~10 % of a 9.4 ms frame, not 1.5×.
+Prototype measured **+3–5 % FPS** at full quality (104.7 → 108.2 fps across
+3 runs), inside the run-to-run noise band.
+
+**Correctness failed on Sponza.** Driving scene draws with
+`DepthCompare::Equal` (or `LessEqual`, no depth write) after a `Less`-write
+prepass produced visibly different output — ~11.9 % of pixels differed from
+baseline by ≥8/255, concentrated on the central column and back-wall meshes
+(see investigation screenshots in the session log). The same run-to-run
+variance between two identical prepass runs was ~0.07 %, so this is a real
+rendering bug, not temporal-stochastic noise.
+
+Two root causes, both structural:
+
+1. **Sky pass orchestration.** The baseline sky pipeline is `Always + write`
+   and runs first inside `main_hdr_pass`, laying down background color +
+   depth=1.0 at every pixel. With a prepass wanting Load-depth afterwards,
+   the sky clobbers the prepass depth. Switching sky to `LessEqual +
+   no-write` is correct for depth but means sky color only lands at
+   background pixels — any scene fragment that then fails the main pass's
+   `Equal/LessEqual` (even for benign reasons) blends against the black HDR
+   clear instead of the sky, producing dark artefacts. The three-pass
+   workaround (sky → prepass → main-with-load) fixes this but splits a
+   single render pass into three.
+2. **Coplanar / layered scene geometry.** Sponza uses multiple overlapping
+   meshes per surface (marble base + decal overlays). Under `Less + write`
+   the first-drawn wins and subsequent coplanar surfaces fail Less strictly.
+   Under `Equal` / `LessEqual` they all pass, so alpha blending composites
+   previously-rejected decals into the final image — visually identical
+   pixels get different colors than the baseline. This cannot be fixed with
+   a depth bias or `@invariant` (both were tried).
+
+There are also secondary issues a follow-up would need to address:
+
+- The scene graph's `PbrMaterial` carries no `alpha_cutoff` or blend-mode
+  flag. A correct prepass would need per-node opacity classification to
+  skip alpha-mask geometry (whose discarded fragments must not write
+  depth).
+- `bloom_scene_attach_model` (macOS FFI) doesn't propagate the glTF
+  material's alpha mode onto the scene node, so the runtime can't even
+  detect it.
+
+## Recommendation
+
+Keep the ticket open conceptually but reorder: the structural wins now
+come from tickets 006 (shadow-pass culling) and 007 (Lumen-style SSGI).
+Revisit 005 only if a future profile shows `main_hdr_pass` regressing back
+above ~5 ms — at which point the correct design is Unreal's pattern:
+
+1. Per-material opacity flag on scene nodes, propagated from glTF.
+2. Prepass with a *lightweight* alpha-test fragment shader that samples
+   only base-color alpha and discards below cutoff.
+3. Decal / layered-overlay meshes explicitly skip the prepass and render
+   last in a dedicated depth-less pass.
+
+That's a multi-day refactor, not the ~1 day this ticket originally
+estimated. Not worth it while the frame budget is dominated by bloom /
+TAA / SSGI / final-composite passes (the real targets of tickets 007 and
+010).
