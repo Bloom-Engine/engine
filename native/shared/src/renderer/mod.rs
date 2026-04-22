@@ -7225,56 +7225,67 @@ impl Renderer {
             label: Some("bloom_encoder"),
         });
 
-        // Ticket 007b: build any freshly-created BLASes and refresh
-        // the TLAS before the SSGI probe trace pass can sample it.
-        // No-op when HW RT is off or when nothing has changed.
-        profiler.begin("accel_rebuild");
-        self.rebuild_acceleration_structures(scene, &mut encoder);
-        profiler.end("accel_rebuild");
+        // Ticket 017: gate the entire Lumen warmup + per-frame
+        // pipeline on ssgi_enabled. Every pass below exists solely
+        // to feed the SSGI probe trace — when SSGI is off, running
+        // them is pure waste and breaks the --quality 0 regression
+        // guard (the Mesh-Cards backlog + per-frame card relight
+        // cost held the "off" preset below 60 fps). Pending queues
+        // (BLAS / SDF / card-capture) stay populated so a runtime
+        // setSsgiEnabled(true) flip resumes baking from where it
+        // paused instead of leaving the caches empty.
+        if self.ssgi_enabled {
+            // Ticket 007b: build any freshly-created BLASes and refresh
+            // the TLAS before the SSGI probe trace pass can sample it.
+            // No-op when HW RT is off or when nothing has changed.
+            profiler.begin("accel_rebuild");
+            self.rebuild_acceleration_structures(scene, &mut encoder);
+            profiler.end("accel_rebuild");
 
-        // Ticket 013: rasterise any new mesh cards into the shared
-        // atlas. Drains `scene.pending_card_captures` — empty and
-        // free after the first frame on a static scene.
-        profiler.begin("card_capture");
-        self.capture_pending_mesh_cards(scene, &mut encoder);
-        profiler.end("card_capture");
+            // Ticket 013: rasterise any new mesh cards into the shared
+            // atlas. Drains `scene.pending_card_captures` — empty and
+            // free after the first frame on a static scene.
+            profiler.begin("card_capture");
+            self.capture_pending_mesh_cards(scene, &mut encoder);
+            profiler.end("card_capture");
 
-        // Ticket 014 V1: bake per-mesh UDFs in the same frame encoder.
-        // Runs alongside card capture until the scene's pending queue
-        // is drained; no-op thereafter.
-        profiler.begin("sdf_bake");
-        self.bake_pending_sdfs(scene, &mut encoder);
-        profiler.end("sdf_bake");
+            // Ticket 014 V1: bake per-mesh UDFs in the same frame encoder.
+            // Runs alongside card capture until the scene's pending queue
+            // is drained; no-op thereafter.
+            profiler.begin("sdf_bake");
+            self.bake_pending_sdfs(scene, &mut encoder);
+            profiler.end("sdf_bake");
 
-        // Ticket 014 V5: check if the camera has wandered past the
-        // rebake threshold from the current clipmap centre; if so,
-        // clear the `built` flag so the bake below fires again with
-        // a re-centred origin. SDF trace falls back to Hi-Z for the
-        // single frame between invalidation and re-bake completion.
-        self.maybe_invalidate_sdf_clipmap();
+            // Ticket 014 V5: check if the camera has wandered past the
+            // rebake threshold from the current clipmap centre; if so,
+            // clear the `built` flag so the bake below fires again with
+            // a re-centred origin. SDF trace falls back to Hi-Z for the
+            // single frame between invalidation and re-bake completion.
+            self.maybe_invalidate_sdf_clipmap();
 
-        // Ticket 014 V2: bake the scene-wide SDF clipmap when it's
-        // not already built. First frame after startup, and any
-        // frame after V5 invalidation.
-        profiler.begin("scene_sdf_clipmap");
-        self.bake_scene_sdf_clipmap(scene, &mut encoder);
-        profiler.end("scene_sdf_clipmap");
+            // Ticket 014 V2: bake the scene-wide SDF clipmap when it's
+            // not already built. First frame after startup, and any
+            // frame after V5 invalidation.
+            profiler.begin("scene_sdf_clipmap");
+            self.bake_scene_sdf_clipmap(scene, &mut encoder);
+            profiler.end("scene_sdf_clipmap");
 
-        // Ticket 014 V6: World-Space Radiance Cache. Invalidate on
-        // camera travel past 30 m; re-bake when not built. Runs even
-        // when HW RT is active so a future V7 can wire the HW miss
-        // path into the same cache.
-        self.maybe_invalidate_wsrc();
-        profiler.begin("wsrc_bake");
-        self.bake_wsrc(&mut encoder);
-        profiler.end("wsrc_bake");
+            // Ticket 014 V6: World-Space Radiance Cache. Invalidate on
+            // camera travel past 30 m; re-bake when not built. Runs even
+            // when HW RT is active so a future V7 can wire the HW miss
+            // path into the same cache.
+            self.maybe_invalidate_wsrc();
+            profiler.begin("wsrc_bake");
+            self.bake_wsrc(&mut encoder);
+            profiler.end("wsrc_bake");
 
-        // Ticket 013 V2: re-light the card atlas every frame so the
-        // HW probe trace can sample pre-lit radiance at hit instead
-        // of running the sun/sky math per ray.
-        profiler.begin("card_light");
-        self.light_mesh_cards(scene, &mut encoder);
-        profiler.end("card_light");
+            // Ticket 013 V2: re-light the card atlas every frame so the
+            // HW probe trace can sample pre-lit radiance at hit instead
+            // of running the sun/sky math per ray.
+            profiler.begin("card_light");
+            self.light_mesh_cards(scene, &mut encoder);
+            profiler.end("card_light");
+        }
 
         // Shadow pass: render scene nodes from light's perspective into
         // cascaded shadow maps (3 cascades).

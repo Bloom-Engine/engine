@@ -3,10 +3,14 @@ use bloom_shared::renderer::Renderer;
 
 use wasm_bindgen::prelude::*;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut LAST_PROJECT: (f64, f64) = (0.0, 0.0);
 static mut LAST_PICK: Option<bloom_shared::picking::PickResult> = None;
+// Guards against double wgpu init when bloom_init_window is called twice
+// (once by the JS orchestrator before Perry boots, and once by Perry's main).
+static INIT_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
@@ -23,10 +27,25 @@ extern "C" {
 // Window
 // ============================================================
 
+/// Returns 1.0 once `ENGINE` has been populated by the async wgpu setup, 0.0
+/// before then. Non-panicking — safe to call at any time. Used by the JS
+/// orchestrator to gate Perry boot until the engine is actually usable.
+#[wasm_bindgen]
+pub fn bloom_is_initialized() -> f64 {
+    unsafe { if ENGINE.get().is_some() { 1.0 } else { 0.0 } }
+}
+
 #[wasm_bindgen]
 pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) {
     // Set up panic hook for better error messages in the browser console
     console_error_panic_hook::set_once();
+
+    // Idempotent: once an init is in flight (or done), later calls are no-ops.
+    // Perry's main() typically calls initWindow after the JS orchestrator has
+    // already kicked off wgpu setup — the second call must not start a new one.
+    if INIT_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
 
     let w = width as u32;
     let h = height as u32;

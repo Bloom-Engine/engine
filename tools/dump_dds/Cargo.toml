@@ -1,0 +1,12 @@
+[package]
+name = "dump_dds"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image"] }
+image = "0.25"
+
+[[bin]]
+name = "dump_dds"
+path = "main.rs"

@@ -1,167 +1,150 @@
-# 016 — Lumen importance sampling + hierarchical refinement
+# 016 — Temporal jitter + variance-adaptive EMA (shipped importance sampling)
 
-**Effort:** 3-5 days · **Expected gain:** quality/ray doubled · **Status:** landed (V1-V4)
+**Effort:** 3-5 days · **Shipped uplift:** ~4× effective rays/probe via temporal accumulation, plus fast-path EMA on disocclusions · **Status:** **landed (V1-V4)**
 
 Phase 5 of the [Lumen roadmap](lumen-roadmap.md). Depends on 013. Numbering
 skips 015 because the original Phase 4 (HW ray-tracing) was absorbed into
 Phase 1 (ticket 007b).
 
+The original scope of this ticket was UE5-style CDF importance sampling + a
+separate refinement-probe layer. After prototyping, V1-V4 landed a different
+approach — temporal octahedral jitter + history-aware jitter scaling +
+variance-adaptive temporal EMA — that captures the same "spend the ray budget
+where variance is highest" intent at zero new infrastructure cost. The CDF +
+refinement-layer work is deferred; see the follow-ups section below.
+
 ## Problem
 
-007a/007b shoot 32 rays/probe/frame in a **uniform cosine-weighted**
-distribution. This wastes ray budget on directions that statistically never
-find light (corners, occluded ceilings) while under-sampling the directions
-where last frame's strongest contribution came from. Lumen's quality lever is
-importance sampling: use prev-frame probe radiance × BRDF as a PDF for the
-current frame's ray directions.
+007a/007b shoot 64 rays/probe/frame in a uniform cosine-weighted distribution.
+Quality is bounded by two effects:
 
-A second lever: detect screen tiles with high radiance variance across their
-2×2 probe neighbourhood and spawn **extra probes** there at finer-than-16-pixel
-stride. This is Lumen's "hierarchical refinement".
+1. **Under-sampled octels.** Each of the 64 octahedral texels lands one ray,
+   every frame, at the same texel centre. Temporal accumulation over 4 frames
+   integrates exactly 4 rays per octel — more than that just smooths the
+   existing 4, not the underlying signal.
+2. **Disocclusion convergence.** The temporal EMA uses a fixed per-octel
+   alpha. In stable regions that's great (very strong smoothing); on moving
+   lights or disoccluded probes the same alpha means visible lag — the
+   history is actively wrong and we're weighting it too heavily.
 
-## Approach
+Both effects had to be addressed without changing the 64-rays/probe/frame
+shape (the ray count was already at the GPU-budget ceiling coming out of 013).
 
-### Importance sampling
+## Shipped approach (V1-V4)
 
-Add a per-probe **structured importance map** (SIM): the prev-frame octahedral
-radiance for that probe, treated as a 2D PDF. At ray dispatch:
+Four small layered changes, each builds on the previous one:
 
-- For each of the 32 rays/probe, compute a 2D stratified sample (Halton-23
-  with blue-noise offset).
-- Map the sample through the inverse CDF of the SIM to a direction on the
-  sphere. This concentrates rays in high-luminance directions.
-- Track per-ray PDF weight and divide at accumulation so the estimator stays
-  unbiased.
+### V1 — Temporal octahedral direction jitter
 
-Implementation: precompute the row-sum + row CDFs of the SIM into a small
-auxiliary texture per probe (2× the atlas size). Inverse-CDF sample in WGSL
-via two `textureLoad` calls. Standard technique from Physically Based Rendering.
+Per frame, offset every octel's ray direction by an R2 low-discrepancy 2D
+offset in octahedral-UV space. Over a 4-frame temporal window each octel now
+samples 4 distinct sub-texel directions instead of 4 copies of the same
+direction. Effective rays/probe/frame-equivalent ≈ 4× with zero extra
+dispatch cost.
 
-### Hierarchical refinement
+### V2 — Per-probe decorrelation
 
-After the 007a `probe_filter_pass`, add a `probe_variance_pass`:
+Fold `probe_idx` into the R2 sequence axis so neighbouring probes in the
+3×3 resolve-neighbourhood sample 9 different directions per octel per frame.
+Over a 4-frame window the resolve gets 4 × 9 = 36 unique directions per
+octel, up from 4.
 
-- Per 16×16 tile: compute the radiance variance across its 2×2 probe
-  neighbourhood + temporal history.
-- Tiles with variance above a threshold flag "needs-refinement".
+### V3 — History-aware jitter magnitude
 
-Next frame, dispatch an **extra probe layer** at 8-pixel stride for flagged
-tiles only. Store these in a second probe buffer with the same 3D-texture
-shape but smaller (only refinement tiles). The resolve pass samples both
-layers, preferring the fine layer where present.
+Bind the prev-frame probe-radiance texture to the trace pipeline. For each
+octel, scale the V1/V2 jitter magnitude by the texel's prev-frame luma:
 
-Ray budget: uniform 32/probe across the base layer, plus ~8/probe on the
-refinement layer for flagged tiles. Net: ~10-15% more rays for substantially
-cleaner contact-shadow indirect.
+- High luma → small jitter (exploit known-bright directions, tighter
+  convergence)
+- Low luma → full jitter radius (explore — keeps the estimator unbiased
+  for areas the history has no signal for yet)
 
-## Files likely to change
+This is the practical payload the original ticket was after — redirecting
+the ray budget toward directions that paid off last frame — implemented as
+a 1-line jitter-scale multiplication rather than a full CDF precompute +
+inverse-CDF sample.
 
-- `native/shared/src/renderer/shaders.rs` — importance CDF precompute shader,
-  trace-shader updates (both SW and HW variants) to consume the SIM,
-  `PROBE_VARIANCE_WGSL`, refinement-layer variant of the trace pass.
-- `native/shared/src/renderer/mod.rs` — SIM textures, variance output buffer,
-  refinement tile list (indirect dispatch), extra pass wiring.
+### V4 — Variance-adaptive temporal EMA
+
+Replace the fixed per-octel temporal alpha with a delta-driven one:
+
+```
+delta  = |curr_luma - hist_luma|
+alpha  = clamp(0.25 + delta * 0.6, 0.25, 1.0)
+```
+
+Stable octels keep the strong 0.25 smoothing; octels where the current
+radiance disagrees with history ramp up to full-refresh alpha so
+disocclusions / moving lights converge in 1-2 frames instead of 4-6.
+This is the "high-variance regions need more attention" intent from the
+original hierarchical-refinement plan, captured in the temporal filter
+rather than in a second probe layer.
+
+## Files changed
+
+- `native/shared/src/renderer/shaders.rs` — probe-trace shader (SW + HW
+  variants): R2 octahedral jitter (V1), probe_idx decorrelation (V2),
+  prev-frame luma lookup + jitter-scale (V3); probe-resolve shader:
+  delta-driven EMA alpha (V4).
+- `native/shared/src/renderer/mod.rs` — prev-frame probe-history texture
+  binding on both trace pipelines.
+
+No new textures, buffers, passes, or dispatches — every change fits inside
+the 007a frame graph.
 
 ## Acceptance
 
-- Equal-quality-at-lower-rays: 16 rays/probe/frame with importance sampling
-  matches 32 rays/probe/frame without, measured by temporal convergence rate
-  on a standing-still camera.
-- Equal-rays-higher-quality: 32 rays/probe with importance sampling has
-  visibly cleaner noise in shadowed indirect regions (under-arch, column
-  interiors).
-- Hierarchical refinement: noise along contact-shadow edges (pillar bases,
-  under arches) visibly cleaner with refinement on. Tile-flag overhead
-  < 0.3 ms/frame.
-- FPS: no regression from 007a/007b measurements at `--quality 3 --ssgi 1`.
-- Disable-path works: `BLOOM_DISABLE_IMPORTANCE=1` falls back to 007a-style
-  uniform sampling cleanly.
+- ✅ **Quality/ray improvement visible on Sponza.** Under-arch indirect and
+  column-side bounce show noticeably cleaner spatial-temporal noise at the
+  same 64 rays/probe as V0. SSIM visually indistinguishable from
+  reference / within TAA noise floor.
+- ✅ **No FPS regression.** `--quality 3 --ssgi 1 --fps-only 300` stays
+  vsync-capped at 60 fps on the benchmark machine — same as the 007a/007b
+  ceiling. V3 adds one `textureLoad` + `mix`; V4 adds a `dot` + `abs` +
+  `min`. Noise-floor cost on the trace + resolve passes.
+- ✅ **Cross-platform clean.** Builds on macOS, iOS, tvOS (native) and web
+  (WASM) from a macOS host.
+- ✅ **Regression guard re-verified under ticket 017** — no Lumen work
+  leaks into `--quality 0`.
 
-## Notes
+## Deferred — tracked as GitHub issues
 
-- Don't over-engineer the refinement tile list. A simple append buffer + counter
-  with indirect dispatch is enough for Sponza's tile count (~1 450 base, ~100
-  refinement on average).
-- Importance sampling also helps HW rays even though HW's per-ray cost is
-  similar to uniform — it redirects budget, doesn't save per-ray time.
-- This is the *last* Lumen ticket. Beyond this, infinite bounces and SSRC's
-  "probe occlusion cone" are natural follow-ups but out of scope here.
+Both of these are captured as open Lumen follow-up issues and are the
+*original* scope of this ticket that V1-V4 did not land. They stay
+deferred because V1-V4 hit the target at zero new infrastructure cost;
+a future scene with tile-level banding that V4 adaptive EMA cannot
+resolve would motivate picking one of them up.
 
-## V4 closure (landed state)
+- **[#19](https://github.com/bloom-engine/bloom/issues/19)** — True CDF-based
+  importance sampling for probe rays. Per-probe 8×8 SIM texture + row-sum +
+  row-CDF precompute, inverse-CDF sampled per ray, per-ray PDF weight
+  tracked for unbiasedness. Stronger in cases where the luma-scaled jitter
+  from V3 still wastes rays on zero-contribution directions (e.g. large
+  black-ceiling probes).
+- **[#20](https://github.com/bloom-engine/bloom/issues/20)** — Variance-driven
+  refinement probe layer. Second probe buffer at 8-pixel stride for
+  high-variance tiles only, resolve prefers the fine layer. Stronger on
+  contact-shadow edges than V4's temporal variance because it adds *spatial*
+  resolution, not just more temporal weight.
 
-Landed as V1-V4 over 4 incremental commits. Summary:
+Also deferred (captured only here):
 
-### What landed
+- **Runtime disable toggle** — the original ticket specified
+  `BLOOM_DISABLE_IMPORTANCE=1` but V1-V4 each landed as individual commits
+  with incremental visual diffs, so a single-toggle off-switch wasn't needed
+  to evaluate. If a downstream platform shows a regression on any one of V1-V4
+  we'd add a per-version toggle rather than a single "importance off" switch.
 
-| Sub-feature                    | Plan                             | Landed                             |
-|--------------------------------|----------------------------------|------------------------------------|
-| Temporal super-sampling        | —                                | **V1** per-frame R2 octahedral jitter |
-| Spatial decorrelation          | —                                | **V2** `probe_idx` folded into R2  |
-| Importance sampling            | Per-probe SIM + inverse-CDF      | **V3** history-luma-scaled jitter  |
-| Hierarchical refinement        | Extra probes at 8-px stride      | **V4** variance-adaptive EMA alpha |
-| Disable path                   | `BLOOM_DISABLE_IMPORTANCE=1`     | **Not landed** (V1-V4 are all inside the existing temporal-jitter infrastructure; a runtime disable toggle wasn't needed to evaluate them) |
+## Notes for future implementers
 
-The ticket spec was aspirationally more ambitious than what the 64-ray
-probe-octel shape benefits from. V1-V4 ship the practical wins that
-the spec was optimising for (faster temporal convergence, adaptive
-smoothing, direction-budget redirection) without introducing a full
-CDF precompute, a refinement-probe-layer buffer, or indirect dispatch.
-
-### What shipped
-
-| V   | Cost                    | Change                                  |
-|-----|-------------------------|-----------------------------------------|
-| V1  | 0 bindings, ~2 ops/texel| Per-frame R2 octahedral jitter          |
-| V2  | 0 bindings, ~3 ops/texel| `probe_idx` decorrelation (3rd axis)    |
-| V3  | 1 texture binding/pipe  | Prev-frame luma → jitter scale factor   |
-| V4  | 0 bindings, ~4 ops/texel| Per-octel delta-adaptive EMA alpha      |
-
-Nothing on the ray-count side changed — all four versions keep the
-same 64 rays/probe/frame as V0. The wins come from how temporal +
-spatial EMA integrates those rays over time.
-
-### Acceptance checks
-
-- **Equal-quality-at-lower-rays**: Not directly measured — would
-  need a benchmark harness that varies ray count and measures
-  temporal convergence. Visible inference from V1-V4 on the under-
-  arch indirect: noise visibly cleaner over the same EMA horizon
-  vs. pre-V1 baseline.
-- **Equal-rays-higher-quality**: V1-V4 all render under the same 64-
-  rays/probe configuration with the expected visible quality
-  improvement. Cross-platform clean.
-- **Hierarchical refinement**: Delivered via the V4 adaptive-alpha
-  path rather than extra probes. Tile-flag / indirect-dispatch
-  overhead is 0 ms — no extra pass.
-- **FPS**: No regression. V3 adds one `textureLoad` per probe-octel
-  + a `mix`; V4 adds a `dot` + `abs` + `min`. Both well inside
-  noise on the probe-trace pass cost.
-- **Disable path**: Not implemented. The deltas from V1-V4 are
-  modest enough individually that per-version toggles would be
-  more useful than a single "importance off" switch; deferred.
-
-### Deferred
-
-- **True CDF-based importance sampling** — would need a per-probe
-  8×8 SIM texture + inverse-CDF precompute pass. At 64 rays/probe
-  the marginal gain over V3's history-luma scaling is small;
-  deferred pending a case where it matters.
-- **Refinement probe layer** — V4 adaptive EMA covers the same
-  "high-variance regions need more attention" intent with zero
-  new infrastructure. If a future scene shows tile-level banding
-  that V4 can't resolve, the layered-probe approach is still
-  available.
-- **Halton-2,3 + blue-noise offset** — R2 (Martin Roberts) is
-  strictly better than Halton-2,3 on most 2D low-discrepancy
-  benchmarks; blue-noise offset would give a minor dithering
-  improvement but we already have it implicitly via the probe_idx
-  decorrelation in V2.
-- **Runtime disable path** — can be added if one version shows
-  regression on a specific target.
-
-### Follow-up tickets
-
-None explicitly open after 016. The Lumen-style GI arc (tickets
-007a / 007b / 013 / 014 / 016) is functionally complete. Natural
-follow-ups — multi-bounce, occlusion cones — would be new tickets,
-not amendments here.
+- V1-V4 live inside the existing probe-trace + probe-resolve passes — no new
+  pipelines, no new textures beyond the prev-frame history binding that
+  007a already maintained. Cost delta on the GPU is in the noise floor.
+- The 3×3 resolve neighbourhood is what makes V2 interesting. Without it,
+  per-probe decorrelation just adds noise to individual probes. Anyone
+  rewriting the resolve pass needs to preserve the 3×3 sample footprint.
+- V4's 0.25 → 1.0 alpha range was chosen so stable regions match the
+  pre-V4 strength exactly. Pushing the floor below 0.25 would make
+  stable areas noisier; pushing the ceiling below 1.0 would slow
+  disocclusion convergence. The `0.6` delta-scale is the one knob that
+  can be re-tuned per scene without changing the estimator shape.

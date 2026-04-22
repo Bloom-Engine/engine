@@ -237,9 +237,15 @@ let camYaw = initYaw;
 let camPitch = initPitch;
 let cursorLocked = false;
 
+// Accumulates total elapsed time for short runs where getFPS() hasn't
+// yet ticked its 1 s rolling window (e.g. `--fps-only 60` at 60 fps
+// finishes in 1.0 s flat, which can round below the sampler threshold).
+let measureAccumS = 0.0;
+
 // ---- Main loop ----
 while (!windowShouldClose()) {
   const dt = getDeltaTime();
+  measureAccumS = measureAccumS + dt;
 
   // Shadow-drag repro: after `turnAt` frames at the initial yaw,
   // start rotating continuously toward `turnYaw` at mouse-like
@@ -373,7 +379,10 @@ while (!windowShouldClose()) {
       endDrawing();
       const cpuUs = getProfilerFrameCpuUs();
       const gpuUs = getProfilerFrameGpuUs();
-      const measuredFps = getFPS();
+      const rollingFps = getFPS();
+      const measuredFps = rollingFps > 0
+        ? rollingFps
+        : (measureAccumS > 0 ? frameCount / measureAccumS : 0);
       const measuredMs = measuredFps > 0 ? 1000 / measuredFps : 0;
       console.log(`\n=== PROFILE (${frameCount} frames) ===`);
       console.log(`FPS:       ${measuredFps.toFixed(1)} (${measuredMs.toFixed(2)} ms/frame)`);
@@ -390,7 +399,12 @@ while (!windowShouldClose()) {
     if (!noPan) { camYaw = camYaw + 0.005; }
     if (frameCount >= fpsOnlyFrames) {
       endDrawing();
-      const measuredFps = getFPS();
+      // Prefer the rolling-window sampler; fall back to cumulative
+      // deltaTime when the run is shorter than one sampler tick.
+      const rollingFps = getFPS();
+      const measuredFps = rollingFps > 0
+        ? rollingFps
+        : (measureAccumS > 0 ? frameCount / measureAccumS : 0);
       const measuredMs = measuredFps > 0 ? 1000 / measuredFps : 0;
       console.log(`\n=== FPS-ONLY (${frameCount} frames, no profiler) ===`);
       console.log(`FPS: ${measuredFps.toFixed(1)} (${measuredMs.toFixed(2)} ms/frame)`);

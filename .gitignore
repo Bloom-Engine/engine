@@ -39,3 +39,18 @@ tools/validate-out/
 # Throwaway probe scripts
 /test_*.ts
 _perry_stubs.o
+
+# Claude Code harness-local state
+.claude/scheduled_tasks.lock
+
+# Local research / external-engine reference clones. Not part of the
+# Bloom source tree — each dir is a full Unity / Unreal / Three.js /
+# Babylon.js project set up locally for side-by-side perf comparison
+# during Lumen work. Multi-GB; commit individually if ever needed.
+tools/babylonjs_reference/
+tools/threejs_reference/
+tools/unity_reference/
+tools/unreal_reference/
+tools/dump_dds/target/
+tools/dump_dds/Cargo.lock
+examples/intel-sponza/assets/outdoor.hdr

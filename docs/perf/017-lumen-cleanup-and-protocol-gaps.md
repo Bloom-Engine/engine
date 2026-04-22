@@ -1,6 +1,6 @@
 # 017 — Lumen rollout cleanup: regression-guard + scope-match gaps
 
-**Effort:** 1-2 days · **Expected gain:** protocol compliance, not FPS · **Status:** open
+**Effort:** 1-2 days · **Expected gain:** protocol compliance, not FPS · **Status:** landed
 
 Follow-up to the Lumen roadmap (007-prep / 007a / 007b / 013 / 014 / 016). The
 main acceptance target landed — `--quality 3 --ssgi 1 --fps-only 300` hits
@@ -129,3 +129,93 @@ Either path is defensible; pick one and make the docs match the code.
 - `BLOOM_FORCE_SW_GI=1` exists and forces the SW path even on RT-capable
   adapters — useful to isolate whether the `--ssgi 0` hang is on the HW
   side only.
+
+## Landed state
+
+### Root cause — #1 and #2 were the same bug
+
+The Lumen warmup + per-frame block in `Renderer::end_frame_with_scene`
+(renderer/mod.rs around the original line 7228-7277) ran unconditionally:
+
+- `rebuild_acceleration_structures` (BLAS/TLAS refresh)
+- `capture_pending_mesh_cards` (rate-limited 20 slots/frame — ~120 frames
+  to drain Sponza's 2430-slot backlog)
+- `bake_pending_sdfs` (8 per-mesh UDFs/frame)
+- `maybe_invalidate_sdf_clipmap` + `bake_scene_sdf_clipmap`
+- `maybe_invalidate_wsrc` + `bake_wsrc` (per cascade)
+- `light_mesh_cards` (per-frame card relight compute — runs every frame
+  once any card slot is populated, which is all frames after first)
+
+Every one of these feeds the SSGI probe trace downstream. The probe trace
+itself was gated on `self.ssgi_enabled`, but the warmup + relight passes
+weren't. At `--quality 0` the card-capture backlog + per-frame relight
+compute held the frame 3-500 ms depending on where in the drain schedule
+you measured — hence the 2.0 fps vs 31.9 fps vs 27.6 fps numbers that
+moved across runs. `--ssgi 0` hit the same pattern.
+
+### Fix — one conditional block in the renderer
+
+Wrapped the whole Lumen warmup + relight section in
+`if self.ssgi_enabled { ... }`. Pending queues stay populated, so a
+runtime `setSsgiEnabled(true)` resumes baking from where it paused.
+
+### FPS-harness fallback
+
+The old `FPS = getFPS()` in `examples/intel-sponza/main.ts` uses the
+engine's 1-second rolling window. A 60-frame run at 60 fps finishes in
+exactly 1.0 s and the sampler reset threshold (`>= 1.0 s`) can fire
+either side of frame 60 — so the harness prints `0.0 fps (0.00 ms/frame)`
+on fast runs. Added a cumulative `measureAccumS` (summed `getDeltaTime()`)
+fallback so `--fps-only 60` at pass-speed now reports the real fps.
+Doesn't change the engine's rolling-window metric — only the harness'
+short-run output.
+
+### Measurements (3× consecutive runs, BLOOM_NO_FULLSCREEN=1)
+
+| Command | Before | After |
+|---|---|---|
+| `--quality 0 --fps-only 60`  | 2.0 fps     | **65.7 / 65.4 / 65.0 fps** ✅ |
+| `--quality 0 --fps-only 300` | 31.9 fps    | **59.9 / 60.2 / 60.0 fps** ✅ |
+| `--quality 0 --ssgi 0 --fps-only 300` | 0.1 fps / 13.3 fps | **60.0 / 60.1 / 60.0 fps** ✅ |
+| `--quality 3 --ssgi 1 --fps-only 300` | 60.0 fps | **60.0 / 60.2 / 59.9 fps** ✅ |
+
+All four acceptance conditions pass.
+
+### #3 — Ticket 016 rewrite
+
+Rewrote 016 top-to-bottom. Problem + Approach now describe the shipped
+V1-V4 temporal-jitter + variance-adaptive EMA work. Deferred original
+scope (CDF importance sampling + hierarchical refinement probe layer)
+pointed at the pre-existing GitHub issues
+[#19](https://github.com/bloom-engine/bloom/issues/19) and
+[#20](https://github.com/bloom-engine/bloom/issues/20). The V4 closure
+table at the bottom of 016 was already present from the 9af6111 commit;
+left intact so the ticket reads "here's what shipped, here's the per-V
+audit underneath it."
+
+### #4 — Untracked state
+
+- `native/web/src/lib.rs` init-guard (`bloom_is_initialized` +
+  `INIT_STARTED`) committed. Looked correct — idempotent
+  `bloom_init_window` prevents the JS orchestrator + Perry `main()`
+  both kicking wgpu init.
+- `.claude/scheduled_tasks.lock` deleted, added to `.gitignore`
+  (harness-local).
+- `examples/intel-sponza/assets/outdoor.hdr` gitignored
+  alongside the existing `NewSponza_Main_glTF_003.*` + `textures/`
+  entries (consistent with the other Sponza assets pattern).
+- `tools/{babylonjs,threejs,unity,unreal}_reference/` gitignored with
+  a comment explaining they're local external-engine reference clones
+  for side-by-side perf comparison, not repo source.
+- `tools/dump_dds/target/` + `tools/dump_dds/Cargo.lock` gitignored;
+  tool source (main.rs + Cargo.toml) committed as a small utility for
+  inspecting compressed textures.
+- Jolt physics WIP (`.gitmodules`, `native/shared/build.rs`,
+  `native/shared/src/jolt_sys.rs`, `native/shared/src/lib.rs`
+  `#[cfg(feature = "jolt")]` line, `native/shared/Cargo.toml` feature
+  flag + cmake build-dep, `native/third_party/JoltPhysics` +
+  `native/third_party/bloom_jolt`, `src/physics/index.v2.ts`) is a
+  separate dev track and was intentionally not touched by 017 — the
+  original 017 problem statement explicitly flagged it as "not perf."
+  Resolution stays with that physics track, not this perf-rollout
+  cleanup.
