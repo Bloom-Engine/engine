@@ -170,6 +170,12 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             .unwrap_or(false);
         let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
         let mut required_features = wgpu::Features::empty();
+        // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
+        // can record GPU timings. Optional — profiler falls back to CPU-only
+        // when the adapter doesn't grant it (many Android GPUs won't).
+        if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
+            required_features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
         if !force_sw_gi && supported.contains(rt_mask) {
             required_features |= rt_mask;
         }
@@ -1646,16 +1652,57 @@ pub extern "C" fn bloom_physics_destroy_joint(handle: f64) {
 #[no_mangle] pub extern "C" fn bloom_set_ssgi_intensity(_intensity: f64) {}
 #[no_mangle] pub extern "C" fn bloom_set_ssgi_radius(_radius: f64) {}
 #[no_mangle] pub extern "C" fn bloom_set_dof(_enabled: f64, _focus_distance: f64, _aperture: f64) {}
-#[no_mangle] pub extern "C" fn bloom_set_quality_preset(_preset: f64) {}
-#[no_mangle] pub extern "C" fn bloom_set_shadows_enabled(_on: f64) {}
-#[no_mangle] pub extern "C" fn bloom_set_shadows_always_fresh(_on: f64) {}
-#[no_mangle] pub extern "C" fn bloom_set_bloom_enabled(_on: f64) {}
+// Ticket 011: real quality / profiler implementations. Prior build had
+// no-op stubs — TS games calling setQualityPreset / setProfilerEnabled etc.
+// linked fine but did nothing at runtime on Android.
+#[no_mangle] pub extern "C" fn bloom_set_quality_preset(preset: f64) {
+    engine().renderer.apply_quality_preset(preset as u32);
+}
+#[no_mangle] pub extern "C" fn bloom_set_shadows_enabled(on: f64) {
+    engine().renderer.set_shadows_enabled(on != 0.0);
+}
+#[no_mangle] pub extern "C" fn bloom_set_shadows_always_fresh(on: f64) {
+    engine().renderer.set_shadows_always_fresh(on != 0.0);
+}
+#[no_mangle] pub extern "C" fn bloom_set_bloom_enabled(on: f64) {
+    engine().renderer.set_bloom_enabled(on != 0.0);
+}
 #[no_mangle] pub extern "C" fn bloom_set_early_z_enabled(_on: f64) {}
-#[no_mangle] pub extern "C" fn bloom_set_ssao_enabled(_on: f64) {}
-#[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(_on: f64) {}
-#[no_mangle] pub extern "C" fn bloom_set_motion_blur_enabled(_on: f64) {}
-#[no_mangle] pub extern "C" fn bloom_set_sss_enabled(_on: f64) {}
-#[no_mangle] pub extern "C" fn bloom_set_profiler_enabled(_on: f64) {}
-#[no_mangle] pub extern "C" fn bloom_get_profiler_frame_cpu_us() -> f64 { 0.0 }
-#[no_mangle] pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 { 0.0 }
-#[no_mangle] pub extern "C" fn bloom_print_profiler_summary() {}
+#[no_mangle] pub extern "C" fn bloom_set_ssao_enabled(on: f64) {
+    engine().renderer.set_ssao_enabled(on != 0.0);
+}
+#[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(on: f64) {
+    engine().renderer.set_ssr_enabled(on != 0.0);
+}
+#[no_mangle] pub extern "C" fn bloom_set_motion_blur_enabled(on: f64) {
+    engine().renderer.set_motion_blur_enabled(on != 0.0);
+}
+#[no_mangle] pub extern "C" fn bloom_set_sss_enabled(on: f64) {
+    engine().renderer.set_sss_enabled(on != 0.0);
+}
+#[no_mangle] pub extern "C" fn bloom_set_profiler_enabled(on: f64) {
+    engine().profiler.set_enabled(on != 0.0);
+}
+#[no_mangle] pub extern "C" fn bloom_get_profiler_frame_cpu_us() -> f64 {
+    engine().profiler.avg_frame_cpu_us()
+}
+#[no_mangle] pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 {
+    engine().profiler.avg_frame_gpu_us()
+}
+#[no_mangle] pub extern "C" fn bloom_print_profiler_summary() {
+    // Android has no stdout — log the summary via android_log so
+    // `adb logcat` picks it up alongside the rest of the engine log.
+    // %s + ptr variant so `%` characters in the summary (none today,
+    // but cheap safety) aren't interpreted as format specifiers.
+    let summary = engine().profiler.summary();
+    if let Ok(c) = std::ffi::CString::new(summary) {
+        unsafe {
+            __android_log_print(
+                4,
+                b"BloomEngine\0".as_ptr(),
+                b"%s\0".as_ptr(),
+                c.as_ptr(),
+            );
+        }
+    }
+}

@@ -328,6 +328,12 @@ unsafe extern "C" fn scene_will_connect(
         .unwrap_or(false);
     let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
     let mut required_features = wgpu::Features::empty();
+    // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
+    // can record GPU timings. Optional — profiler falls back to CPU-only
+    // when the adapter doesn't grant it.
+    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
+        required_features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
     if !force_sw_gi && supported.contains(rt_mask) {
         required_features |= rt_mask;
     }
@@ -493,6 +499,12 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
         .unwrap_or(false);
     let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
     let mut required_features = wgpu::Features::empty();
+    // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
+    // can record GPU timings. Optional — profiler falls back to CPU-only
+    // when the adapter doesn't grant it.
+    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
+        required_features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
     if !force_sw_gi && supported.contains(rt_mask) {
         required_features |= rt_mask;
     }
@@ -2332,4 +2344,66 @@ pub extern "C" fn bloom_physics_destroy_joint(handle: f64) {
     if let Some(phys) = engine().physics.as_mut() {
         phys.destroy_joint(handle);
     }
+}
+
+// ============================================================
+// Render quality toggles (individual + preset) — ticket 011
+// Mirror of the macOS FFI surface added in commit 95da6af; previously
+// macOS-only, now exposed on every native platform so non-macOS builds
+// don't fail at runtime (missing symbol) when the TS API invokes them.
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_set_quality_preset(preset: f64) {
+    engine().renderer.apply_quality_preset(preset as u32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_shadows_enabled(on: f64) {
+    engine().renderer.set_shadows_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_shadows_always_fresh(on: f64) {
+    engine().renderer.set_shadows_always_fresh(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_bloom_enabled(on: f64) {
+    engine().renderer.set_bloom_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_ssao_enabled(on: f64) {
+    engine().renderer.set_ssao_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_ssr_enabled(on: f64) {
+    engine().renderer.set_ssr_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_motion_blur_enabled(on: f64) {
+    engine().renderer.set_motion_blur_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_sss_enabled(on: f64) {
+    engine().renderer.set_sss_enabled(on != 0.0);
+}
+
+// ============================================================
+// Profiler — CPU phase timings (always available) + GPU timestamps
+// (when the adapter supports TIMESTAMP_QUERY). Disabled by default.
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_set_profiler_enabled(on: f64) {
+    engine().profiler.set_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_profiler_frame_cpu_us() -> f64 {
+    engine().profiler.avg_frame_cpu_us()
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 {
+    engine().profiler.avg_frame_gpu_us()
+}
+#[no_mangle]
+pub extern "C" fn bloom_print_profiler_summary() {
+    print!("{}", engine().profiler.summary());
 }

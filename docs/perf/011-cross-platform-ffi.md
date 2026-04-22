@@ -1,6 +1,6 @@
 # 011 — Port quality/profiler FFI to iOS/Win/Lin/Android/tvOS/web
 
-**Effort:** ~1 day · **Expected gain:** Unblocks non-macOS TS API · **Status:** open
+**Effort:** ~1 day · **Expected gain:** Unblocks non-macOS TS API · **Status:** landed
 
 ## Problem
 
@@ -79,3 +79,41 @@ works elsewhere when the adapter supports it.
   `native/android/src/lib.rs`, `native/web/src/lib.rs`.
 - All platform `lib.rs` files that do `request_device` — add the
   TIMESTAMP_QUERY conditional feature request.
+
+## Landed state
+
+Full FFI block appended to `native/{ios,tvos,windows,linux}/src/lib.rs`
+with the same `#[no_mangle] extern "C"` signatures as macOS. Android's
+pre-existing no-op stubs were replaced with real implementations
+(including an `__android_log_print`-backed `bloom_print_profiler_summary`
+since Android has no stdout — the summary lands in `adb logcat` under
+the `BloomEngine` tag). Web got the equivalent block with
+`#[wasm_bindgen]` signatures; `bloom_print_profiler_summary` routes
+through the existing `console_log` import into the browser devtools.
+The JS glue in `native/web/index.html` auto-wraps every `bloom_*`
+export via the default i64/f64 converter loop, so no explicit entries
+are needed.
+
+TIMESTAMP_QUERY conditional feature request was mirrored into every
+platform's `request_device` setup (ios / tvos / windows / linux /
+android), matching the pattern already in macOS. GPU-path profiler
+works wherever the adapter grants the feature — Metal on iOS typically
+doesn't, DX12 on Windows typically does, Android GPUs mostly don't.
+Profiler falls back to CPU-only cleanly when the feature isn't granted.
+Web does not request TIMESTAMP_QUERY (not part of the WebGPU spec as
+of wgpu 29) so the GPU path returns 0 there; CPU phase timings remain
+fully available.
+
+Verification:
+- `cargo check` passes on `bloom-shared` (default), `bloom-ios`,
+  `bloom-tvos`, `bloom-macos`, and `bloom-web` (wasm32) from the macOS
+  host. Windows / Linux / Android need native toolchains
+  (x86_64-pc-windows-msvc / GNU + ALSA / NDK respectively) to link
+  their C-dep build scripts — not a code-level issue. The appended
+  blocks use patterns that already compile in the equivalent
+  Apple-platform crates, so cross-platform syntactic correctness is
+  reasonable to claim.
+- Every platform defines `bloom_set_quality_preset` exactly once (grep
+  audit).
+- The TS API side (`src/core/index.ts` ~240-316) matches the FFI
+  surface 1:1.

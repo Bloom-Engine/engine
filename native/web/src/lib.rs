@@ -2032,3 +2032,70 @@ pub fn bloom_get_clipboard_text() -> f64 { 0.0 }
 pub fn bloom_open_file_dialog(_filter_ptr: *const u8, _title_ptr: *const u8) -> f64 { 0.0 }
 #[wasm_bindgen]
 pub fn bloom_save_file_dialog(_default_name_ptr: *const u8, _title_ptr: *const u8) -> f64 { 0.0 }
+
+// ============================================================
+// Render quality toggles (individual + preset) — ticket 011
+// Mirror of the macOS FFI surface added in commit 95da6af, exposed to
+// the browser via wasm_bindgen. Without these the TS API's
+// setQualityPreset / setShadowsEnabled / etc. would fail with
+// "bloom_set_quality_preset is not a function" on the web target.
+// ============================================================
+
+#[wasm_bindgen]
+pub fn bloom_set_quality_preset(preset: f64) {
+    engine().renderer.apply_quality_preset(preset as u32);
+}
+#[wasm_bindgen]
+pub fn bloom_set_shadows_enabled(on: f64) {
+    engine().renderer.set_shadows_enabled(on != 0.0);
+}
+#[wasm_bindgen]
+pub fn bloom_set_shadows_always_fresh(on: f64) {
+    engine().renderer.set_shadows_always_fresh(on != 0.0);
+}
+#[wasm_bindgen]
+pub fn bloom_set_bloom_enabled(on: f64) {
+    engine().renderer.set_bloom_enabled(on != 0.0);
+}
+#[wasm_bindgen]
+pub fn bloom_set_ssao_enabled(on: f64) {
+    engine().renderer.set_ssao_enabled(on != 0.0);
+}
+#[wasm_bindgen]
+pub fn bloom_set_ssr_enabled(on: f64) {
+    engine().renderer.set_ssr_enabled(on != 0.0);
+}
+#[wasm_bindgen]
+pub fn bloom_set_motion_blur_enabled(on: f64) {
+    engine().renderer.set_motion_blur_enabled(on != 0.0);
+}
+#[wasm_bindgen]
+pub fn bloom_set_sss_enabled(on: f64) {
+    engine().renderer.set_sss_enabled(on != 0.0);
+}
+
+// ============================================================
+// Profiler — CPU phase timings (always available). TIMESTAMP_QUERY
+// is not part of the WebGPU spec as of wgpu 29, so the GPU path
+// returns 0 on web regardless of adapter — the profiler stays
+// CPU-only, which is still useful for frame-phase profiling.
+// ============================================================
+
+#[wasm_bindgen]
+pub fn bloom_set_profiler_enabled(on: f64) {
+    engine().profiler.set_enabled(on != 0.0);
+}
+#[wasm_bindgen]
+pub fn bloom_get_profiler_frame_cpu_us() -> f64 {
+    engine().profiler.avg_frame_cpu_us()
+}
+#[wasm_bindgen]
+pub fn bloom_get_profiler_frame_gpu_us() -> f64 {
+    engine().profiler.avg_frame_gpu_us()
+}
+#[wasm_bindgen]
+pub fn bloom_print_profiler_summary() {
+    // No stdout in the browser — route through the existing
+    // console_log binding so the summary lands in devtools.
+    console_log(&engine().profiler.summary());
+}
