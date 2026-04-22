@@ -347,35 +347,31 @@ pub(super) fn create_scene_sdf_clipmap(
     (texture, view)
 }
 
-/// Ticket 014 V6/V10 — World-Space Radiance Cache. 16³ grid of
-/// octahedral probes, each an 8×8 slab of pre-integrated distant
-/// lighting. Sampled when a probe-trace ray escapes the clipmap or
-/// exhausts its march budget.
+/// Ticket 014 V6/V10/V13 — World-Space Radiance Cache. 16³ grid of
+/// octahedral probes per cascade, each an 8×8 slab of pre-integrated
+/// distant lighting (padded to 10×10 in V10 for hardware bilinear).
+/// V13 stacks `WSRC_CASCADE_COUNT` cascades in Z at a range of
+/// extents so long-range bounces don't share one probe's coarse
+/// cell with close bounces.
 ///
-/// V10 added a 1-texel border around each probe's 8×8 slab so the
-/// hardware sampler can do octel bilinear natively. Borders are
-/// filled at bake time with edge-extended octel values. The Z axis
-/// is unpadded (each probe is one Z slice) — adjacent probes in Z
-/// are naturally next to each other, so Z trilinear falls out of
-/// the sampler for free. X/Y cross-probe blending must still be
-/// done manually (the borders prevent the sampler from leaking
-/// adjacent-probe data into the current probe's bilinear tap).
+/// Cascade extents: near 30 m / mid 120 m / far 500 m. 16³ probes
+/// per cascade → cell sizes of 1.875 / 7.5 / 31.25 m. The near
+/// cascade re-bakes often as the camera moves (1.875 × 0.25 ≈
+/// 0.47 m threshold → 7.5 m rebake extent; inverted: cascades with
+/// larger extents rebake less often).
 ///
-/// Layout (rgba16float D3 texture at `(160, 160, 16)`):
-///   probe at grid `(gx, gy, gz)`, padded octel `(ox_pad, oy_pad)
-///   in [0, 9]` → texel `(gx * 10 + ox_pad, gy * 10 + oy_pad, gz)`
+/// Atlas layout (rgba16float D3 at `(160, 160, 48)`):
+///   probe `(gx, gy, gz)` in cascade `c ∈ [0, 3)`, padded octel
+///   `(ox_pad, oy_pad) ∈ [0, 10)²` → texel
+///   `(gx * 10 + ox_pad, gy * 10 + oy_pad, c * 16 + gz)`
 ///
-/// Real octel `(ox, oy)` in `[0, 7]` sits at padded `(ox + 1, oy + 1)`.
-/// The 1-texel border at `ox_pad = 0` or `9` mirrors the nearest
-/// inside octel (clamp — V11 could do true octahedral wrap).
-///
-/// Extent is 3× the SDF clipmap — 7.5 m per cell, plenty for rays
-/// that terminal beyond the SDF window. Camera-follows via
-/// `WSRC_REBAKE_THRESHOLD`.
+/// Borders are octahedrally-wrapped at bake time (V11) so the
+/// sampler's bilinear tap stays smooth across the silhouette.
 pub(super) const WSRC_GRID_RES: u32 = 16;
 pub(super) const WSRC_OCT_PAD: u32 = 1;
 pub(super) const WSRC_OCT_PADDED: u32 = PROBE_OCT_SIZE + 2 * WSRC_OCT_PAD;
-pub(super) const WSRC_EXTENT: f32 = 120.0;
+pub(super) const WSRC_CASCADE_COUNT: u32 = 3;
+pub(super) const WSRC_CASCADE_EXTENTS: [f32; 3] = [30.0, 120.0, 500.0];
 pub(super) const WSRC_REBAKE_THRESHOLD: f32 = 0.25;
 
 pub(super) fn create_wsrc_atlas(
@@ -386,7 +382,7 @@ pub(super) fn create_wsrc_atlas(
         size: wgpu::Extent3d {
             width: WSRC_GRID_RES * WSRC_OCT_PADDED,
             height: WSRC_GRID_RES * WSRC_OCT_PADDED,
-            depth_or_array_layers: WSRC_GRID_RES,
+            depth_or_array_layers: WSRC_GRID_RES * WSRC_CASCADE_COUNT,
         },
         mip_level_count: 1,
         sample_count: 1,

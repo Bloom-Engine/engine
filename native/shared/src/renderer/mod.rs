@@ -31,7 +31,8 @@ use formats::{
     CARD_AXES_PER_MESH, create_mesh_sdf_texture, MESH_SDF_RES,
     create_scene_sdf_clipmap, SCENE_SDF_CLIPMAP_RES,
     SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD,
-    create_wsrc_atlas, WSRC_GRID_RES, WSRC_EXTENT, WSRC_REBAKE_THRESHOLD,
+    create_wsrc_atlas, WSRC_GRID_RES, WSRC_CASCADE_COUNT,
+    WSRC_CASCADE_EXTENTS, WSRC_REBAKE_THRESHOLD,
     create_taa_textures,
     create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
     create_exposure_textures, create_composed_rt, create_dof_rt,
@@ -252,12 +253,14 @@ struct ProbeTraceParams {
     /// by the SDF sphere-trace variant to map world-space march
     /// positions into clipmap sample UVs.
     clipmap: [f32; 4],
-    /// Ticket 014 V6 — WSRC cube origin (xyz) + full extent (w).
-    /// Read by the SDF shader on miss to project the ray-terminal
-    /// position into the world-space radiance cache. HW + Hi-Z
-    /// variants carry the same field for uniform-buffer size parity
-    /// but ignore it.
-    wsrc: [f32; 4],
+    /// Ticket 014 V6/V13 — WSRC cascade cubes. Each entry is
+    /// (origin xyz, extent w). Cascades are ordered near→far; miss
+    /// paths pick the smallest cascade whose cube contains the
+    /// ray-terminal position. `extent = 0.0` marks an unbaked
+    /// cascade (shader falls through to the next one). HW + Hi-Z
+    /// carry these for uniform-buffer size parity; Hi-Z ignores
+    /// them.
+    wsrc_cascades: [[f32; 4]; 3],
 }
 
 #[repr(C)]
@@ -977,21 +980,23 @@ pub struct Renderer {
     pub wsrc_bake_layout: wgpu::BindGroupLayout,
     pub wsrc_bake_uniform: wgpu::Buffer,
     wsrc_bake_bg_cache: Option<wgpu::BindGroup>,
-    /// Cleared on camera travel past `WSRC_REBAKE_THRESHOLD × extent`
-    /// or on any change to the lighting environment (sun colour,
-    /// shadow-cascade rebuild). Like the SDF clipmap, starts `false`
-    /// and gets re-baked on first frame.
-    pub wsrc_built: bool,
-    pub wsrc_origin: [f32; 3],
-    /// Ticket 014 V7/V12 — last-baked lighting state. `sun_dir` is
-    /// xyz + intensity in w (intensity isn't threshold-checked on
-    /// its own — it's folded into `sun_color × intensity`). V12
-    /// switched the compare from strict `!=` to perceptual
-    /// hysteresis in `maybe_invalidate_wsrc`: 1° angular threshold
-    /// on sun direction + 5% relative luma on sun and sky colours.
-    pub wsrc_last_sun_dir: [f32; 4],
-    pub wsrc_last_sun_color: [f32; 3],
-    pub wsrc_last_sky_color: [f32; 3],
+    /// V13 — per-cascade state. Each cascade (near/mid/far) tracks
+    /// its own `built` flag, voxel-snapped origin, and lighting
+    /// snapshot. Invalidation uses the cascade's own cell size
+    /// as the camera-travel threshold, so the far cascade rebakes
+    /// far less often than the near one despite the same relative
+    /// threshold constant.
+    pub wsrc_built: [bool; 3],
+    pub wsrc_origin: [[f32; 3]; 3],
+    /// Ticket 014 V7/V12/V13 — per-cascade last-baked lighting
+    /// state. `sun_dir` is xyz + intensity in w (intensity isn't
+    /// threshold-checked on its own — it's folded into `sun_color
+    /// × intensity`). V12 perceptual hysteresis applies per cascade
+    /// — any one cascade going out-of-threshold rebakes only that
+    /// cascade.
+    pub wsrc_last_sun_dir: [[f32; 4]; 3],
+    pub wsrc_last_sun_color: [[f32; 3]; 3],
+    pub wsrc_last_sky_color: [[f32; 3]; 3],
 
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
@@ -4819,11 +4824,11 @@ impl Renderer {
             wsrc_bake_layout,
             wsrc_bake_uniform,
             wsrc_bake_bg_cache: None,
-            wsrc_built: false,
-            wsrc_origin: [0.0, 0.0, 0.0],
-            wsrc_last_sun_dir: [0.0; 4],
-            wsrc_last_sun_color: [0.0; 3],
-            wsrc_last_sky_color: [0.0; 3],
+            wsrc_built: [false; 3],
+            wsrc_origin: [[0.0; 3]; 3],
+            wsrc_last_sun_dir: [[0.0; 4]; 3],
+            wsrc_last_sun_color: [[0.0; 3]; 3],
+            wsrc_last_sky_color: [[0.0; 3]; 3],
             probe_temporal_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
@@ -5540,56 +5545,23 @@ impl Renderer {
         self.scene_sdf_clipmap_built = true;
     }
 
-    /// Ticket 014 V6/V7/V12 — invalidate the WSRC atlas on camera
-    /// travel OR meaningful lighting change. V7 compared lighting
-    /// state with strict `!=`, which meant any sub-degree sun
-    /// jitter or sub-percent color drift re-baked every frame —
-    /// wiping the cache benefit on any dynamic-lighting scene. V12
-    /// swaps that for perceptual hysteresis:
-    ///
-    /// - Sun direction: dot-product `< cos(1°)` against the last
-    ///   baked direction. 1° is the smallest sun rotation that
-    ///   noticeably shifts the envelope at probe-cell resolution
-    ///   (7.5 m cells, 8×8 octel → ~22° per octel texel).
-    /// - Sun + sky colour: relative luma delta `> 5%`. Luma (not
-    ///   component-wise) so a pure hue shift doesn't rebake when
-    ///   the perceived brightness is unchanged.
-    ///
-    /// Shadow-VP exact-compare is dropped — it drifts with sub-
-    /// threshold camera motion, which would drag rebake cadence
-    /// back to every-frame. The angular sun check covers cascade
-    /// refits that matter (sun rotation); refits from pure camera
-    /// motion within the 30 m window don't meaningfully change the
-    /// cached envelope.
+    /// Ticket 014 V6/V7/V12/V13 — invalidate WSRC cascades on
+    /// camera travel OR meaningful lighting change. V13 runs the
+    /// V12 hysteresis checks per cascade, so a sun rotation or
+    /// camera shift only rebakes the affected cascade(s). Typical
+    /// pattern: camera moves 10 m → near cascade (1.875 m cell,
+    /// ~0.47 m threshold) rebakes every few frames, mid cascade
+    /// (7.5 m cell, ~1.9 m threshold) rebakes occasionally, far
+    /// cascade (31 m cell, ~7.8 m threshold) stays cached for
+    /// much longer.
     fn maybe_invalidate_wsrc(&mut self) {
-        if !self.wsrc_built {
-            return;
-        }
-        // Camera travel — unchanged from V6.
         let cam = self.current_camera_world_pos();
-        let dx = cam[0] - self.wsrc_origin[0];
-        let dy = cam[1] - self.wsrc_origin[1];
-        let dz = cam[2] - self.wsrc_origin[2];
-        let dist_sq = dx * dx + dy * dy + dz * dz;
-        let threshold = WSRC_EXTENT * WSRC_REBAKE_THRESHOLD;
-        if dist_sq > threshold * threshold {
-            self.wsrc_built = false;
-            return;
-        }
-
-        // V12 — sun direction hysteresis via dot product.
         let ld = self.lighting_uniforms.light_dir;
-        let last = self.wsrc_last_sun_dir;
-        let sun_dot = ld[0] * last[0] + ld[1] * last[1] + ld[2] * last[2];
-        // cos(1°) ≈ 0.99985.
-        if sun_dot < 0.99985 {
-            self.wsrc_built = false;
-            return;
-        }
+        let lc = self.lighting_uniforms.light_color;
+        let amb = self.lighting_uniforms.ambient;
+        let cur_sun_color = [lc[0] * ld[3], lc[1] * ld[3], lc[2] * ld[3]];
+        let cur_sky_color = [amb[0] * amb[3], amb[1] * amb[3], amb[2] * amb[3]];
 
-        // V12 — luma-based relative colour tests. `rel_diff` returns
-        // `|a-b| / max(a, b, 1e-4)` so the test stays stable when
-        // either side is near zero (common for night / eclipse).
         fn luma(c: [f32; 3]) -> f32 {
             c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722
         }
@@ -5597,17 +5569,39 @@ impl Renderer {
             (a - b).abs() / a.max(b).max(1e-4)
         }
 
-        let lc = self.lighting_uniforms.light_color;
-        let cur_sun_color = [lc[0] * ld[3], lc[1] * ld[3], lc[2] * ld[3]];
-        if rel_diff(luma(cur_sun_color), luma(self.wsrc_last_sun_color)) > 0.05 {
-            self.wsrc_built = false;
-            return;
-        }
+        for c in 0..WSRC_CASCADE_COUNT as usize {
+            if !self.wsrc_built[c] {
+                continue;
+            }
+            // Camera travel — per-cascade threshold scales with the
+            // cascade's extent, so each cascade has its own
+            // "moved enough" metric.
+            let extent = WSRC_CASCADE_EXTENTS[c];
+            let origin = self.wsrc_origin[c];
+            let dx = cam[0] - origin[0];
+            let dy = cam[1] - origin[1];
+            let dz = cam[2] - origin[2];
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+            let threshold = extent * WSRC_REBAKE_THRESHOLD;
+            if dist_sq > threshold * threshold {
+                self.wsrc_built[c] = false;
+                continue;
+            }
 
-        let amb = self.lighting_uniforms.ambient;
-        let cur_sky_color = [amb[0] * amb[3], amb[1] * amb[3], amb[2] * amb[3]];
-        if rel_diff(luma(cur_sky_color), luma(self.wsrc_last_sky_color)) > 0.05 {
-            self.wsrc_built = false;
+            // V12 hysteresis — angular sun + 5% relative luma.
+            let last = self.wsrc_last_sun_dir[c];
+            let sun_dot = ld[0] * last[0] + ld[1] * last[1] + ld[2] * last[2];
+            if sun_dot < 0.99985 {
+                self.wsrc_built[c] = false;
+                continue;
+            }
+            if rel_diff(luma(cur_sun_color), luma(self.wsrc_last_sun_color[c])) > 0.05 {
+                self.wsrc_built[c] = false;
+                continue;
+            }
+            if rel_diff(luma(cur_sky_color), luma(self.wsrc_last_sky_color[c])) > 0.05 {
+                self.wsrc_built[c] = false;
+            }
         }
     }
 
@@ -5621,21 +5615,17 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
     ) {
-        if self.wsrc_built {
+        // V13 — bake only cascades that are marked not-built. Each
+        // cascade snaps to its own cell grid (cell = extent / 16)
+        // and writes into its own 16-slice block of the shared
+        // atlas.
+        if self.wsrc_built.iter().all(|b| *b) {
             return;
         }
 
-        // Snap origin to one probe-cell so sub-cell camera drift
-        // doesn't shift which probe a miss samples.
-        let cell = WSRC_EXTENT / WSRC_GRID_RES as f32;
-        let cam = self.current_camera_world_pos();
-        let origin = [
-            (cam[0] / cell).round() * cell,
-            (cam[1] / cell).round() * cell,
-            (cam[2] / cell).round() * cell,
-        ];
-        self.wsrc_origin = origin;
-
+        // Resolve a single set of lighting params — they're the same
+        // across all cascades in one frame. Per-cascade differences
+        // come from the origin + extent passed through the uniform.
         let ld = self.lighting_uniforms.light_dir;
         let inv_len = 1.0 / (ld[0]*ld[0] + ld[1]*ld[1] + ld[2]*ld[2]).sqrt().max(1e-4);
         let sun_dir_ws = [-ld[0]*inv_len, -ld[1]*inv_len, -ld[2]*inv_len, ld[3]];
@@ -5669,21 +5659,6 @@ impl Renderer {
             [f32::INFINITY, f32::INFINITY, f32::INFINITY, 0.0]
         };
 
-        let params = WsrcBakeParams {
-            sun_dir: sun_dir_ws,
-            sun_color,
-            sky_color,
-            grid: [origin[0], origin[1], origin[2], WSRC_EXTENT],
-            shadow_vps,
-            shadow_splits,
-            flags: [0.002, if shadows_enabled { 1.0 } else { 0.0 }, 0.0, 0.0],
-        };
-        self.queue.write_buffer(
-            &self.wsrc_bake_uniform,
-            0,
-            bytemuck::bytes_of(&params),
-        );
-
         if self.wsrc_bake_bg_cache.is_none() {
             self.wsrc_bake_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("wsrc_bake_bg"),
@@ -5699,27 +5674,57 @@ impl Renderer {
             }));
         }
 
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("wsrc_bake_pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.wsrc_bake_pipeline);
-        pass.set_bind_group(0, self.wsrc_bake_bg_cache.as_ref().unwrap(), &[]);
-        // One workgroup per probe (16³). V10: 10×10 threads per
-        // workgroup so each thread writes one padded octel texel
-        // (8×8 real + 1-texel border all around).
-        pass.dispatch_workgroups(WSRC_GRID_RES, WSRC_GRID_RES, WSRC_GRID_RES);
-        drop(pass);
+        let cam = self.current_camera_world_pos();
 
-        self.wsrc_built = true;
+        for c in 0..WSRC_CASCADE_COUNT as usize {
+            if self.wsrc_built[c] {
+                continue;
+            }
+            let extent = WSRC_CASCADE_EXTENTS[c];
+            let cell = extent / WSRC_GRID_RES as f32;
+            let origin = [
+                (cam[0] / cell).round() * cell,
+                (cam[1] / cell).round() * cell,
+                (cam[2] / cell).round() * cell,
+            ];
+            self.wsrc_origin[c] = origin;
 
-        // V7/V12 — snapshot the lighting state we just baked against
-        // so `maybe_invalidate_wsrc` can detect meaningful changes
-        // next frame. V12 dropped the shadow-VP compare, so we don't
-        // snapshot it either.
-        self.wsrc_last_sun_dir = ld;
-        self.wsrc_last_sun_color = [sun_color[0], sun_color[1], sun_color[2]];
-        self.wsrc_last_sky_color = [sky_color[0], sky_color[1], sky_color[2]];
+            let params = WsrcBakeParams {
+                sun_dir: sun_dir_ws,
+                sun_color,
+                sky_color,
+                grid: [origin[0], origin[1], origin[2], extent],
+                shadow_vps,
+                shadow_splits,
+                flags: [
+                    0.002,
+                    if shadows_enabled { 1.0 } else { 0.0 },
+                    c as f32,
+                    0.0,
+                ],
+            };
+            self.queue.write_buffer(
+                &self.wsrc_bake_uniform,
+                0,
+                bytemuck::bytes_of(&params),
+            );
+
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("wsrc_bake_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.wsrc_bake_pipeline);
+            pass.set_bind_group(0, self.wsrc_bake_bg_cache.as_ref().unwrap(), &[]);
+            // One workgroup per probe in this cascade (16³),
+            // 10×10 threads per workgroup (padded octel).
+            pass.dispatch_workgroups(WSRC_GRID_RES, WSRC_GRID_RES, WSRC_GRID_RES);
+            drop(pass);
+
+            self.wsrc_built[c] = true;
+            self.wsrc_last_sun_dir[c] = ld;
+            self.wsrc_last_sun_color[c] = [sun_color[0], sun_color[1], sun_color[2]];
+            self.wsrc_last_sky_color[c] = [sky_color[0], sky_color[1], sky_color[2]];
+        }
     }
 
     /// Ticket 014 V1 — bake per-mesh unsigned distance fields via
@@ -7917,15 +7922,31 @@ impl Renderer {
                     self.scene_sdf_clipmap_origin[2],
                     SCENE_SDF_CLIPMAP_EXTENT,
                 ],
-                // Ticket 014 V6 — WSRC cube origin xyz + extent w.
-                // Pass extent=0 if WSRC isn't built yet; shader reads
-                // that as "skip the cache, return black" — which is
-                // equivalent to the pre-V6 miss behaviour.
-                wsrc: [
-                    self.wsrc_origin[0],
-                    self.wsrc_origin[1],
-                    self.wsrc_origin[2],
-                    if self.wsrc_built { WSRC_EXTENT } else { 0.0 },
+                // Ticket 014 V6/V13 — WSRC cascade cubes. `extent =
+                // 0` marks an unbaked cascade; the shader's
+                // `pick_cascade` helper skips those and falls through
+                // to the next cascade (or returns black if none are
+                // ready). First frame after startup all three are
+                // unbaked → miss returns black, matching pre-V6.
+                wsrc_cascades: [
+                    [
+                        self.wsrc_origin[0][0],
+                        self.wsrc_origin[0][1],
+                        self.wsrc_origin[0][2],
+                        if self.wsrc_built[0] { WSRC_CASCADE_EXTENTS[0] } else { 0.0 },
+                    ],
+                    [
+                        self.wsrc_origin[1][0],
+                        self.wsrc_origin[1][1],
+                        self.wsrc_origin[1][2],
+                        if self.wsrc_built[1] { WSRC_CASCADE_EXTENTS[1] } else { 0.0 },
+                    ],
+                    [
+                        self.wsrc_origin[2][0],
+                        self.wsrc_origin[2][1],
+                        self.wsrc_origin[2][2],
+                        if self.wsrc_built[2] { WSRC_CASCADE_EXTENTS[2] } else { 0.0 },
+                    ],
                 ],
             };
             self.queue.write_buffer(&self.probe_trace_uniform, 0, bytemuck::bytes_of(&trace_params));

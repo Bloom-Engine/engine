@@ -2533,11 +2533,14 @@ struct WsrcBakeParams {
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
     sky_color: vec4<f32>,
-    // xyz = clipmap origin (world-space cube centre), w = full extent
+    // xyz = cascade origin (world-space cube centre), w = full extent
     grid: vec4<f32>,
     shadow_vps: array<mat4x4<f32>, 3>,
     shadow_splits: vec4<f32>,
-    // x = shadow bias, y = shadows-enabled flag, zw unused
+    // x = shadow bias, y = shadows-enabled flag, z = cascade index
+    // (0..WSRC_CASCADE_COUNT), w unused. Cascade index offsets the
+    // output z-slice so this pipeline can be dispatched once per
+    // cascade with the same layout.
     flags: vec4<f32>,
 };
 
@@ -2642,10 +2645,12 @@ fn cs_main(
 
     let radiance = sun + sky;
 
+    // V13 — cascade index in flags.z offsets the output z-slice.
+    let cascade_idx = u32(u.flags.z);
     let tex_coord = vec3<i32>(
         i32(wg.x * WSRC_OCT_PADDED_SIZE + lid.x),
         i32(wg.y * WSRC_OCT_PADDED_SIZE + lid.y),
-        i32(wg.z),
+        i32(cascade_idx * grid_res + wg.z),
     );
     textureStore(wsrc_out, tex_coord, vec4<f32>(radiance, 1.0));
 }
@@ -2819,14 +2824,16 @@ struct TraceParams {
     size: vec4<u32>,
     // x = frame_index, y = intensity, z = max_march_t_world, w = firefly_cap
     params: vec4<f32>,
-    // Ticket 014 V3/V6 — rest of the shared `ProbeTraceParams` layout.
-    // Ignored by Hi-Z; present only so the shader struct size matches
-    // the host uniform buffer.
+    // Ticket 014 V3/V6/V13 — rest of the shared `ProbeTraceParams`
+    // layout. Ignored by Hi-Z; present only so the shader struct
+    // size matches the host uniform buffer. V13 replaced the single
+    // `wsrc` vec4 with a 3-element cascade array (xyz = origin,
+    // w = extent).
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
     sky_color: vec4<f32>,
     clipmap: vec4<f32>,
-    wsrc: vec4<f32>,
+    wsrc_cascades: array<vec4<f32>, 3>,
 };
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
@@ -2984,12 +2991,11 @@ struct TraceParams {
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
     sky_color: vec4<f32>,
-    // Ticket 014 V3/V6 — clipmap + WSRC padding. Ignored here; present
-    // only so the struct size matches the host-side `ProbeTraceParams`
-    // uniform buffer layout (HW path uses ray-query and its own miss
-    // sky, not WSRC).
+    // Ticket 014 V3/V6/V13 — clipmap + WSRC cascade array. HW path
+    // consumes `wsrc_cascades` on its miss branch; the clipmap field
+    // is padding here (HW ray-query has its own world-space trace).
     clipmap: vec4<f32>,
-    wsrc: vec4<f32>,
+    wsrc_cascades: array<vec4<f32>, 3>,
 };
 
 struct InstanceGiData {
@@ -3023,24 +3029,40 @@ const HW_WSRC_GRID_RES: i32 = 16;
 // direction. extent=0 is the cache-not-ready sentinel that the
 // host writes before the first bake completes, so the HW miss
 // falls back to the pre-V7 return-black behaviour.
-// Ticket 014 V10 — HW mirror of the SDF sampler-based WSRC lookup.
-// See the SDF path's comment block for layout + uv derivation.
-fn hw_wsrc_sample_probe(gx: i32, gy: i32, gz_f: f32, ru: vec2<f32>) -> vec3<f32> {
+// Ticket 014 V10/V13 — HW mirror of the SDF sampler-based WSRC
+// lookup. Same 48-slice cascade packing + smallest-containing-
+// cascade selection.
+fn hw_wsrc_sample_probe(cascade: i32, gx: i32, gy: i32, gz_f: f32, ru: vec2<f32>) -> vec3<f32> {
     let gxc = clamp(gx, 0, 15);
     let gyc = clamp(gy, 0, 15);
     let ax = (f32(gxc) + 0.1 + ru.x * 0.8) / 16.0;
     let ay = (f32(gyc) + 0.1 + ru.y * 0.8) / 16.0;
-    let az = gz_f / 16.0;
+    let az = (f32(cascade) * 16.0 + gz_f) / 48.0;
     return textureSampleLevel(wsrc_atlas, wsrc_samp,
         vec3<f32>(ax, ay, az), 0.0).rgb;
 }
 
+fn hw_wsrc_pick_cascade(pos_ws: vec3<f32>) -> i32 {
+    for (var c: i32 = 0; c < 3; c = c + 1) {
+        let origin = u.wsrc_cascades[c].xyz;
+        let extent = u.wsrc_cascades[c].w;
+        if (extent <= 0.0) { continue; }
+        let rel = pos_ws - origin;
+        let half = extent * 0.5;
+        if (abs(rel.x) < half && abs(rel.y) < half && abs(rel.z) < half) {
+            return c;
+        }
+    }
+    return -1;
+}
+
 fn hw_wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
-    let origin = u.wsrc.xyz;
-    let extent = u.wsrc.w;
-    if (extent <= 0.0) {
+    let cascade = hw_wsrc_pick_cascade(pos_ws);
+    if (cascade < 0) {
         return vec3<f32>(0.0);
     }
+    let origin = u.wsrc_cascades[cascade].xyz;
+    let extent = u.wsrc_cascades[cascade].w;
     let cell = extent / 16.0;
     let rel = pos_ws - origin + vec3<f32>(extent * 0.5);
     let pf = rel / cell - vec3<f32>(0.5);
@@ -3054,10 +3076,10 @@ fn hw_wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
 
     let ru = oct_encode(dir_ws);
 
-    let c00 = hw_wsrc_sample_probe(gix,     giy,     gz_f, ru);
-    let c10 = hw_wsrc_sample_probe(gix + 1, giy,     gz_f, ru);
-    let c01 = hw_wsrc_sample_probe(gix,     giy + 1, gz_f, ru);
-    let c11 = hw_wsrc_sample_probe(gix + 1, giy + 1, gz_f, ru);
+    let c00 = hw_wsrc_sample_probe(cascade, gix,     giy,     gz_f, ru);
+    let c10 = hw_wsrc_sample_probe(cascade, gix + 1, giy,     gz_f, ru);
+    let c01 = hw_wsrc_sample_probe(cascade, gix,     giy + 1, gz_f, ru);
+    let c11 = hw_wsrc_sample_probe(cascade, gix + 1, giy + 1, gz_f, ru);
 
     let ix = 1.0 - fx;
     let iy = 1.0 - fy;
@@ -3269,9 +3291,12 @@ struct TraceParams {
     sky_color: vec4<f32>,
     // xyz = clipmap origin, w = extent (full width, not half)
     clipmap: vec4<f32>,
-    // Ticket 014 V6 — WSRC camera-follow cube: xyz = origin, w = extent.
-    // Used by the miss path to project hit_pos into the WSRC atlas.
-    wsrc: vec4<f32>,
+    // Ticket 014 V6/V13 — WSRC cascade cubes. Each element is
+    // (origin xyz, extent w). Cascades are ordered near→far; the
+    // miss path picks the smallest cascade whose cube contains the
+    // ray-terminal position. extent <= 0 marks an unbaked cascade
+    // (per-cascade); the shader falls back to black if none match.
+    wsrc_cascades: array<vec4<f32>, 3>,
 };
 
 struct SdfInstanceGiData {
@@ -3314,46 +3339,57 @@ fn clipmap_sample(pos_ws: vec3<f32>) -> f32 {
     return textureSampleLevel(clipmap_tex, clipmap_samp, uv, 0.0).r;
 }
 
-// Ticket 014 V10 — WSRC lookup via the hardware linear-filtering
-// sampler. Each probe's 10×10 padded octel slab lets the sampler do
-// a native bilinear XY blend inside one probe without leaking into
-// the neighbouring probe's data (that's what the 1-texel border is
-// for). The Z axis is unpadded — probes are contiguous in Z, so
-// sampling at `(gz + 0.5 + fz) / grid_res` gives native Z trilinear
-// across adjacent probes for free. X/Y cross-probe blend is still
-// done manually — 4 sample calls per miss ray, one per XY corner of
-// the probe cube.
+// Ticket 014 V10/V13 — WSRC lookup via the hardware linear-filtering
+// sampler, now multi-cascade. Each cascade occupies 16 z-slices of
+// the atlas at depth offset `cascade_idx * 16`. The miss path picks
+// the smallest cascade whose cube contains `pos_ws` and does the
+// V10 4-sample trilinear inside that cascade.
 //
-// Atlas packing:
-//   atlas texel for probe (gx, gy, gz) at padded octel (ox_p, oy_p
-//   in [0, 9]) is (gx*10 + ox_p, gy*10 + oy_p, gz).
-//   Real octel (ox, oy in [0, 7]) sits at padded (ox+1, oy+1).
-//   Border texels (padded 0 or 9) clone the nearest inside octel
-//   — edge-extend, not true octahedral wrap (V11).
+// Atlas packing (per cascade, same within each 16-slice block):
+//   probe (gx, gy, gz) at padded octel (ox_p, oy_p in [0, 9]) lives
+//   at texel `(gx*10 + ox_p, gy*10 + oy_p, cascade * 16 + gz)`.
+//   Real octel sits at padded (ox+1, oy+1). Borders are
+//   octahedrally-wrapped at bake (V11).
 //
-// Sampler uv formula (atlas x-axis):
-//   texel_x for real-octel `ru_x ∈ [0, 1]` at probe `gx` is
-//   `gx*10 + 1 + ru_x * 8`. Atlas uv = texel_x / 160.
-//   → `atlas_uv_x = (gx + 0.1 + ru_x * 0.8) / 16`
-//   `ru_x = 0` → texel 1 (centre of border, edge-extends octel 0)
-//   `ru_x = 0.5` → texel 5 (centre of real area)
-//   `ru_x = 1` → texel 9 (centre of opposite border)
-fn wsrc_sample_probe(gx: i32, gy: i32, gz_f: f32, ru: vec2<f32>) -> vec3<f32> {
+// Sampler uv formula (atlas x-axis): `atlas_uv_x = (gx + 0.1 +
+// ru_x * 0.8) / 16`. Z picks the cascade: `atlas_uv_z = (c * 16 +
+// gz + 0.5 + fz) / 48` for 3 cascades.
+fn wsrc_sample_probe(cascade: i32, gx: i32, gy: i32, gz_f: f32, ru: vec2<f32>) -> vec3<f32> {
     let gxc = clamp(gx, 0, 15);
     let gyc = clamp(gy, 0, 15);
     let ax = (f32(gxc) + 0.1 + ru.x * 0.8) / 16.0;
     let ay = (f32(gyc) + 0.1 + ru.y * 0.8) / 16.0;
-    let az = gz_f / 16.0;
+    // 48-slice atlas = 3 cascades × 16 probes in Z. Sample at the
+    // cascade's slice block; the `gz_f` carries the per-cascade
+    // sub-slice fraction (already centred for the sampler).
+    let az = (f32(cascade) * 16.0 + gz_f) / 48.0;
     return textureSampleLevel(wsrc_atlas, wsrc_samp,
         vec3<f32>(ax, ay, az), 0.0).rgb;
 }
 
+// V13 — pick the first cascade whose cube contains `pos_ws` and is
+// built (extent > 0). Returns -1 if none match.
+fn wsrc_pick_cascade(pos_ws: vec3<f32>) -> i32 {
+    for (var c: i32 = 0; c < 3; c = c + 1) {
+        let origin = u.wsrc_cascades[c].xyz;
+        let extent = u.wsrc_cascades[c].w;
+        if (extent <= 0.0) { continue; }
+        let rel = pos_ws - origin;
+        let half = extent * 0.5;
+        if (abs(rel.x) < half && abs(rel.y) < half && abs(rel.z) < half) {
+            return c;
+        }
+    }
+    return -1;
+}
+
 fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
-    let origin = u.wsrc.xyz;
-    let extent = u.wsrc.w;
-    if (extent <= 0.0) {
+    let cascade = wsrc_pick_cascade(pos_ws);
+    if (cascade < 0) {
         return vec3<f32>(0.0);
     }
+    let origin = u.wsrc_cascades[cascade].xyz;
+    let extent = u.wsrc_cascades[cascade].w;
     let cell = extent / 16.0;
     let rel = pos_ws - origin + vec3<f32>(extent * 0.5);
     let pf = rel / cell - vec3<f32>(0.5);
@@ -3363,18 +3399,14 @@ fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
     let giy = i32(pfy);
     let fx = pf.x - pfx;
     let fy = pf.y - pfy;
-    // V10 — Z blend is native via the sampler. Pass the full
-    // floating-point z-slice position (`gz + 0.5 + fz`) clamped to
-    // the atlas range so the sampler blends between the two adjacent
-    // probe z-slices.
     let gz_f = clamp(pf.z + 0.5, 0.5, 15.5);
 
     let ru = oct_encode(dir_ws);
 
-    let c00 = wsrc_sample_probe(gix,     giy,     gz_f, ru);
-    let c10 = wsrc_sample_probe(gix + 1, giy,     gz_f, ru);
-    let c01 = wsrc_sample_probe(gix,     giy + 1, gz_f, ru);
-    let c11 = wsrc_sample_probe(gix + 1, giy + 1, gz_f, ru);
+    let c00 = wsrc_sample_probe(cascade, gix,     giy,     gz_f, ru);
+    let c10 = wsrc_sample_probe(cascade, gix + 1, giy,     gz_f, ru);
+    let c01 = wsrc_sample_probe(cascade, gix,     giy + 1, gz_f, ru);
+    let c11 = wsrc_sample_probe(cascade, gix + 1, giy + 1, gz_f, ru);
 
     let ix = 1.0 - fx;
     let iy = 1.0 - fy;
