@@ -2937,6 +2937,29 @@ fn octel_direction(octel: vec2<u32>) -> vec3<f32> {
     return oct_decode(uv);
 }
 
+// Ticket 016 V1 — temporal octahedral direction jitter. Offsets
+// the sample point within each octel texel by a 2D low-discrepancy
+// sequence indexed by frame. Over the 4-frame probe EMA this
+// super-samples the sphere without extra rays per frame — at the
+// steady state each octel's stored radiance is an integrated
+// sample over a small cone of directions rather than a point
+// sample at the texel centre. The R2 sequence (Martin Roberts
+// 2018) gives the best low-discrepancy 2D coverage I've seen
+// for this kind of temporal jitter. `frame` is `u.params.x` (the
+// shared TraceParams frame index).
+const OCT_JITTER_A1: f32 = 0.7548776662;
+const OCT_JITTER_A2: f32 = 0.5698402910;
+fn octel_jitter(frame: f32) -> vec2<f32> {
+    return vec2<f32>(
+        fract(0.5 + OCT_JITTER_A1 * frame) - 0.5,
+        fract(0.5 + OCT_JITTER_A2 * frame) - 0.5,
+    );
+}
+fn octel_direction_jittered(octel: vec2<u32>, jitter: vec2<f32>) -> vec3<f32> {
+    let uv = (vec2<f32>(octel) + vec2<f32>(0.5) + jitter) / f32(PROBE_OCT_SIZE);
+    return oct_decode(uv);
+}
+
 fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32,
                         p00: f32, p11: f32, p20: f32, p21: f32) -> vec3<f32> {
     let ndc_x = uv.x * 2.0 - 1.0;
@@ -3105,7 +3128,9 @@ fn cs_main(
         return;
     }
 
-    let dir_ws = octel_direction(lid.xy);
+    // V1 — temporal jitter within each octel; 4-frame EMA turns
+    // this into free super-sampling.
+    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x));
     let n_ws = header.normal.xyz;
 
     // Hemisphere cull — rays pointing below the surface carry no diffuse contribution.
@@ -3333,7 +3358,9 @@ fn cs_main(
         return;
     }
 
-    let dir_ws = octel_direction(lid.xy);
+    // V1 — temporal jitter within each octel; 4-frame EMA turns
+    // this into free super-sampling.
+    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x));
     let n_ws = header.normal.xyz;
     let ndotd = dot(dir_ws, n_ws);
     if (ndotd <= 0.0) {
@@ -3659,7 +3686,9 @@ fn cs_main(
         return;
     }
 
-    let dir_ws = octel_direction(lid.xy);
+    // V1 — temporal jitter within each octel; 4-frame EMA turns
+    // this into free super-sampling.
+    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x));
     let n_ws = header.normal.xyz;
     let ndotd = dot(dir_ws, n_ws);
     if (ndotd <= 0.0) {
