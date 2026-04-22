@@ -21,6 +21,20 @@
     await init();
     globalThis.__bloomModule = bloom;
 
+    // 1b. Initialise JoltPhysics.js (WASM build of Jolt for browsers). The
+    //     jolt_bridge.js module that wasm-bindgen bundled into pkg/snippets/
+    //     owns all physics state; we reach it via the Rust-exported helper
+    //     so we're talking to the same instance bloom_physics_* calls use.
+    //     Override with globalThis.__joltFactory to self-host instead of CDN.
+    try {
+      const factory = globalThis.__joltFactory
+        ?? (await import('https://cdn.jsdelivr.net/npm/jolt-physics@1.0.0/+esm')).default;
+      await bloom.bloom_physics_init_jolt(factory);
+      console.log('[bloom] Jolt physics ready');
+    } catch (e) {
+      console.warn('[bloom] Jolt init failed:', e, '- bloom_physics_* calls will be no-ops');
+    }
+
     // 2. Build FFI imports for Perry WASM
     //    Perry WASM passes all args as i64 (NaN-boxed BigInt).
     //    Most bloom_* functions expect f64 (plain numbers).

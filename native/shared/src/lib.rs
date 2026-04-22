@@ -15,8 +15,13 @@ pub mod postfx;
 pub mod custom_shaders;
 pub mod staging;
 pub mod profiler;
-#[cfg(feature = "physics")]
-pub mod physics;
+// Jolt C ABI + Rust wrapper live on native only. On wasm32 the web crate
+// routes bloom_physics_* calls through wasm_bindgen to JoltPhysics.js;
+// no Rust-side Jolt integration is needed.
+#[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
+pub mod jolt_sys;
+#[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
+pub mod physics_jolt;
 pub mod engine;
 
 pub use engine::EngineState;

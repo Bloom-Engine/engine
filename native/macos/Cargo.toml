@@ -7,8 +7,16 @@ edition = "2021"
 name = "bloom_macos"
 crate-type = ["staticlib"]
 
+[features]
+# Jolt physics is enabled by default because Perry's native-library build
+# pipeline does not forward cargo feature flags to nativeLibrary crates —
+# any game importing `bloom/physics` would otherwise fail to link. The
+# tradeoff is ~60s extra cold-build time for games that don't use physics.
+default = ["jolt"]
+jolt = ["bloom-shared/jolt"]
+
 [dependencies]
-bloom-shared = { path = "../shared" }
+bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
 image = { version = "0.25", default-features = false, features = ["hdr"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread"] }

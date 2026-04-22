@@ -7,8 +7,12 @@ edition = "2021"
 name = "bloom_tvos"
 crate-type = ["staticlib"]
 
+[features]
+default = ["jolt"]
+jolt = ["bloom-shared/jolt"]
+
 [dependencies]
-bloom-shared = { path = "../shared" }
+bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread", "NSObject"] }
 raw-window-handle = "0.6"

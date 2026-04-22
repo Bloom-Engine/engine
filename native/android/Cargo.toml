@@ -7,8 +7,12 @@ edition = "2021"
 name = "bloom_android"
 crate-type = ["staticlib", "cdylib"]
 
+[features]
+default = ["jolt"]
+jolt = ["bloom-shared/jolt"]
+
 [dependencies]
-bloom-shared = { path = "../shared" }
+bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
 raw-window-handle = "0.6"
 wgpu = "29"
 libc = "0.2"

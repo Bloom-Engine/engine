@@ -1466,469 +1466,6 @@ pub fn bloom_get_crown_rotation() -> f64 {
     engine().input.consume_crown_rotation()
 }
 
-// ============================================================
-// Physics (Rapier 3D)
-// ============================================================
-
-#[cfg(feature = "physics")]
-use bloom_shared::physics::PhysicsWorld;
-
-#[cfg(feature = "physics")]
-fn physics() -> &'static mut PhysicsWorld {
-    engine().physics.as_mut().expect("Physics world not created")
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_create_world(gx: f64, gy: f64, gz: f64) {
-    #[cfg(feature = "physics")]
-    {
-        engine().physics = Some(PhysicsWorld::new(gx as f32, gy as f32, gz as f32));
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_set_gravity(gx: f64, gy: f64, gz: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.set_gravity(gx as f32, gy as f32, gz as f32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_set_timestep(dt: f64, max_substeps: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.set_timestep(dt, max_substeps as u32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_create_body(
-    body_type: f64, px: f64, py: f64, pz: f64,
-    rx: f64, ry: f64, rz: f64, rw: f64,
-) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().create_body(body_type, px, py, pz, rx, ry, rz, rw); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_destroy_body(handle: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.destroy_body(handle);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_set_body_enabled(handle: f64, enabled: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.set_body_enabled(handle, enabled != 0.0);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_set_body_ccd(handle: f64, enabled: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.set_body_ccd(handle, enabled != 0.0);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_set_body_gravity_scale(handle: f64, scale: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.set_body_gravity_scale(handle, scale as f32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_set_kinematic_target(
-    handle: f64, px: f64, py: f64, pz: f64,
-    rx: f64, ry: f64, rz: f64, rw: f64,
-) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.set_kinematic_target(handle, px, py, pz, rx, ry, rz, rw);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_lock_rotations(handle: f64, lock_x: f64, lock_y: f64, lock_z: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.lock_rotations(handle, lock_x != 0.0, lock_y != 0.0, lock_z != 0.0);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_add_box_collider(body: f64, hx: f64, hy: f64, hz: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().add_box_collider(body, hx as f32, hy as f32, hz as f32); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_add_sphere_collider(body: f64, radius: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().add_sphere_collider(body, radius as f32); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_add_capsule_collider(body: f64, half_height: f64, radius: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().add_capsule_collider(body, half_height as f32, radius as f32); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_add_cylinder_collider(body: f64, half_height: f64, radius: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().add_cylinder_collider(body, half_height as f32, radius as f32); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_set_collider_properties(
-    collider: f64, friction: f64, restitution: f64, density: f64,
-) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.set_collider_properties(collider, friction as f32, restitution as f32, density as f32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_apply_force(body: f64, fx: f64, fy: f64, fz: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.apply_force(body, fx as f32, fy as f32, fz as f32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_apply_impulse(body: f64, ix: f64, iy: f64, iz: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.apply_impulse(body, ix as f32, iy as f32, iz as f32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_apply_torque(body: f64, tx: f64, ty: f64, tz: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.apply_torque(body, tx as f32, ty as f32, tz as f32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_apply_torque_impulse(body: f64, tx: f64, ty: f64, tz: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.apply_torque_impulse(body, tx as f32, ty as f32, tz as f32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_set_linear_velocity(body: f64, vx: f64, vy: f64, vz: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.set_linear_velocity(body, vx as f32, vy as f32, vz as f32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_set_angular_velocity(body: f64, vx: f64, vy: f64, vz: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.set_angular_velocity(body, vx as f32, vy as f32, vz as f32);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_step(delta_time: f64) {
-    #[cfg(feature = "physics")]
-    {
-        let eng = engine();
-        let (physics, scene) = (&mut eng.physics, &mut eng.scene);
-        if let Some(phys) = physics.as_mut() {
-            phys.step(delta_time);
-            phys.sync_transforms(scene);
-        }
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_sync_transforms() {
-    #[cfg(feature = "physics")]
-    {
-        let eng = engine();
-        let (physics, scene) = (&mut eng.physics, &mut eng.scene);
-        if let Some(phys) = physics.as_mut() {
-            phys.sync_transforms(scene);
-        }
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_body_position_x(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_body_position_x(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_body_position_y(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_body_position_y(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_body_position_z(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_body_position_z(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_body_rotation_x(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_body_rotation_x(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_body_rotation_y(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_body_rotation_y(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_body_rotation_z(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_body_rotation_z(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_body_rotation_w(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_body_rotation_w(body); }
-    #[cfg(not(feature = "physics"))]
-    1.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_linear_velocity_x(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_linear_velocity_x(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_linear_velocity_y(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_linear_velocity_y(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_linear_velocity_z(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_linear_velocity_z(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_angular_velocity_x(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_angular_velocity_x(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_angular_velocity_y(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_angular_velocity_y(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_angular_velocity_z(body: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().get_angular_velocity_z(body); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_raycast(
-    ox: f64, oy: f64, oz: f64,
-    dx: f64, dy: f64, dz: f64,
-    max_dist: f64,
-) -> f64 {
-    #[cfg(feature = "physics")]
-    {
-        if physics().raycast(ox, oy, oz, dx, dy, dz, max_dist) { return 1.0; } else { return 0.0; }
-    }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_ray_hit_body() -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().last_ray_hit.as_ref().map_or(0.0, |h| h.body_handle); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_ray_hit_distance() -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().last_ray_hit.as_ref().map_or(0.0, |h| h.distance); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_ray_hit_x() -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().last_ray_hit.as_ref().map_or(0.0, |h| h.point[0]); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_ray_hit_y() -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().last_ray_hit.as_ref().map_or(0.0, |h| h.point[1]); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_ray_hit_z() -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().last_ray_hit.as_ref().map_or(0.0, |h| h.point[2]); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_collision_count() -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().collision_events.len() as f64; }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_collision_event(index: f64) -> f64 {
-    #[cfg(feature = "physics")]
-    {
-        let phys = physics();
-        let i = index as usize;
-        if i < phys.collision_events.len() {
-            let evt = &phys.collision_events[i];
-            phys.last_collision_read = (evt.body_a, evt.body_b, evt.started);
-            return evt.body_a;
-        }
-        return 0.0;
-    }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_collision_body_b() -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().last_collision_read.1; }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_get_collision_started() -> f64 {
-    #[cfg(feature = "physics")]
-    { return if physics().last_collision_read.2 { 1.0 } else { 0.0 }; }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_attach_scene_node(body: f64, scene_node: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.attach_scene_node(body, scene_node);
-    }
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_create_fixed_joint(
-    body_a: f64, body_b: f64,
-    ax: f64, ay: f64, az: f64,
-    bx: f64, by: f64, bz: f64,
-) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().create_fixed_joint(body_a, body_b, ax as f32, ay as f32, az as f32, bx as f32, by as f32, bz as f32); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_create_revolute_joint(
-    body_a: f64, body_b: f64,
-    ax: f64, ay: f64, az: f64,
-    axis_x: f64, axis_y: f64, axis_z: f64,
-) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().create_revolute_joint(body_a, body_b, ax as f32, ay as f32, az as f32, axis_x as f32, axis_y as f32, axis_z as f32); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_create_prismatic_joint(
-    body_a: f64, body_b: f64,
-    ax: f64, ay: f64, az: f64,
-    axis_x: f64, axis_y: f64, axis_z: f64,
-) -> f64 {
-    #[cfg(feature = "physics")]
-    { return physics().create_prismatic_joint(body_a, body_b, ax as f32, ay as f32, az as f32, axis_x as f32, axis_y as f32, axis_z as f32); }
-    #[cfg(not(feature = "physics"))]
-    0.0
-}
-
-#[wasm_bindgen]
-pub fn bloom_physics_destroy_joint(handle: f64) {
-    #[cfg(feature = "physics")]
-    if let Some(phys) = engine().physics.as_mut() {
-        phys.destroy_joint(handle);
-    }
-}
 
 // Scene graph QoL — Q4/Q5/Q6/Q7
 #[wasm_bindgen]
@@ -2098,4 +1635,612 @@ pub fn bloom_print_profiler_summary() {
     // No stdout in the browser — route through the existing
     // console_log binding so the summary lands in devtools.
     console_log(&engine().profiler.summary());
+}
+// ============================================================
+
+// ============================================================
+// Physics (Jolt 5.x via JoltPhysics.js) — web FFI surface
+// ============================================================
+//
+// Every bloom_physics_* call is a thin wrapper around a JS function defined
+// in jolt_bridge.js. Block is generated from package.json manifest.
+
+// 117 physics FFI entries — generated from package.json
+#[cfg(feature = "jolt")]
+#[wasm_bindgen(module = "/jolt_bridge.js")]
+extern "C" {
+    #[wasm_bindgen(js_name = initJolt, catch)]
+    async fn jb_init_jolt(factory: JsValue) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = createWorld)]
+    fn jb_create_world(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) -> f64;
+    #[wasm_bindgen(js_name = destroyWorld)]
+    fn jb_destroy_world(a0: f64);
+    #[wasm_bindgen(js_name = setGravity)]
+    fn jb_set_gravity(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = getGravity)]
+    fn jb_get_gravity(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = optimizeBroadphase)]
+    fn jb_optimize_broadphase(a0: f64);
+    #[wasm_bindgen(js_name = step)]
+    fn jb_step(a0: f64, a1: f64, a2: f64);
+    #[wasm_bindgen(js_name = setLayerCollides)]
+    fn jb_set_layer_collides(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = getLayerCollides)]
+    fn jb_get_layer_collides(a0: f64, a1: f64, a2: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyCount)]
+    fn jb_body_count(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = activeBodyCount)]
+    fn jb_active_body_count(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeBox)]
+    fn jb_shape_box(a0: f64, a1: f64, a2: f64, a3: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeSphere)]
+    fn jb_shape_sphere(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeCapsule)]
+    fn jb_shape_capsule(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeCylinder)]
+    fn jb_shape_cylinder(a0: f64, a1: f64, a2: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeScaled)]
+    fn jb_shape_scaled(a0: f64, a1: f64, a2: f64, a3: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeOffsetCom)]
+    fn jb_shape_offset_com(a0: f64, a1: f64, a2: f64, a3: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeRelease)]
+    fn jb_shape_release(a0: f64);
+    #[wasm_bindgen(js_name = scratchReset)]
+    fn jb_scratch_reset();
+    #[wasm_bindgen(js_name = scratchPushF32)]
+    fn jb_scratch_push_f32(a0: f64);
+    #[wasm_bindgen(js_name = scratchPushU32)]
+    fn jb_scratch_push_u32(a0: f64);
+    #[wasm_bindgen(js_name = shapeConvexHull)]
+    fn jb_shape_convex_hull(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeMesh)]
+    fn jb_shape_mesh(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeHeightfield)]
+    fn jb_shape_heightfield(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64) -> f64;
+    #[wasm_bindgen(js_name = compoundBegin)]
+    fn jb_compound_begin();
+    #[wasm_bindgen(js_name = compoundAddChild)]
+    fn jb_compound_add_child(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64);
+    #[wasm_bindgen(js_name = compoundEnd)]
+    fn jb_compound_end() -> f64;
+    #[wasm_bindgen(js_name = shapeBounds)]
+    fn jb_shape_bounds(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = shapeVolume)]
+    fn jb_shape_volume(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyCreate)]
+    fn jb_body_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyDestroy)]
+    fn jb_body_destroy(a0: f64);
+    #[wasm_bindgen(js_name = bodyActivate)]
+    fn jb_body_activate(a0: f64);
+    #[wasm_bindgen(js_name = bodyDeactivate)]
+    fn jb_body_deactivate(a0: f64);
+    #[wasm_bindgen(js_name = bodyIsActive)]
+    fn jb_body_is_active(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyIsValid)]
+    fn jb_body_is_valid(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyGetPosition)]
+    fn jb_body_get_position(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyGetRotation)]
+    fn jb_body_get_rotation(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = bodySetPosition)]
+    fn jb_body_set_position(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64);
+    #[wasm_bindgen(js_name = bodySetRotation)]
+    fn jb_body_set_rotation(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64);
+    #[wasm_bindgen(js_name = bodySetTransform)]
+    fn jb_body_set_transform(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64);
+    #[wasm_bindgen(js_name = bodyMoveKinematic)]
+    fn jb_body_move_kinematic(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64);
+    #[wasm_bindgen(js_name = bodyGetLinearVelocity)]
+    fn jb_body_get_linear_velocity(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyGetAngularVelocity)]
+    fn jb_body_get_angular_velocity(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyGetPointVelocity)]
+    fn jb_body_get_point_velocity(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) -> f64;
+    #[wasm_bindgen(js_name = bodySetLinearVelocity)]
+    fn jb_body_set_linear_velocity(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = bodySetAngularVelocity)]
+    fn jb_body_set_angular_velocity(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = bodyAddForce)]
+    fn jb_body_add_force(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = bodyAddImpulse)]
+    fn jb_body_add_impulse(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = bodyAddTorque)]
+    fn jb_body_add_torque(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = bodyAddAngularImpulse)]
+    fn jb_body_add_angular_impulse(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = bodyAddForceAt)]
+    fn jb_body_add_force_at(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64);
+    #[wasm_bindgen(js_name = bodyAddImpulseAt)]
+    fn jb_body_add_impulse_at(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64);
+    #[wasm_bindgen(js_name = bodySetFriction)]
+    fn jb_body_set_friction(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = bodySetRestitution)]
+    fn jb_body_set_restitution(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = bodySetLinearDamping)]
+    fn jb_body_set_linear_damping(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = bodySetAngularDamping)]
+    fn jb_body_set_angular_damping(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = bodySetGravityFactor)]
+    fn jb_body_set_gravity_factor(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = bodySetCcd)]
+    fn jb_body_set_ccd(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = bodySetMotionType)]
+    fn jb_body_set_motion_type(a0: f64, a1: f64, a2: f64);
+    #[wasm_bindgen(js_name = bodySetObjectLayer)]
+    fn jb_body_set_object_layer(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = bodySetIsSensor)]
+    fn jb_body_set_is_sensor(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = bodySetAllowSleeping)]
+    fn jb_body_set_allow_sleeping(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = bodySetShape)]
+    fn jb_body_set_shape(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = bodyLockRotationAxes)]
+    fn jb_body_lock_rotation_axes(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = bodyLockTranslationAxes)]
+    fn jb_body_lock_translation_axes(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = bodyGetMass)]
+    fn jb_body_get_mass(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyGetFriction)]
+    fn jb_body_get_friction(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyGetRestitution)]
+    fn jb_body_get_restitution(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = bodyGetObjectLayer)]
+    fn jb_body_get_object_layer(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = bodySetUserData)]
+    fn jb_body_set_user_data(a0: f64, a1: f64, a2: f64);
+    #[wasm_bindgen(js_name = bodyGetUserData)]
+    fn jb_body_get_user_data(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = raycast)]
+    fn jb_raycast(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64) -> f64;
+    #[wasm_bindgen(js_name = raycastAll)]
+    fn jb_raycast_all(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64) -> f64;
+    #[wasm_bindgen(js_name = rayHitCount)]
+    fn jb_ray_hit_count() -> f64;
+    #[wasm_bindgen(js_name = rayHitBody)]
+    fn jb_ray_hit_body(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = rayHitAxis)]
+    fn jb_ray_hit_axis(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = rayHitFraction)]
+    fn jb_ray_hit_fraction(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = rayHitSubShape)]
+    fn jb_ray_hit_sub_shape(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = overlapSphere)]
+    fn jb_overlap_sphere(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64) -> f64;
+    #[wasm_bindgen(js_name = overlapPoint)]
+    fn jb_overlap_point(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64) -> f64;
+    #[wasm_bindgen(js_name = overlapBox)]
+    fn jb_overlap_box(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64) -> f64;
+    #[wasm_bindgen(js_name = overlapBody)]
+    fn jb_overlap_body(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = constraintFixed)]
+    fn jb_constraint_fixed(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64) -> f64;
+    #[wasm_bindgen(js_name = constraintPoint)]
+    fn jb_constraint_point(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64) -> f64;
+    #[wasm_bindgen(js_name = constraintHinge)]
+    fn jb_constraint_hinge(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64) -> f64;
+    #[wasm_bindgen(js_name = constraintSlider)]
+    fn jb_constraint_slider(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64) -> f64;
+    #[wasm_bindgen(js_name = constraintDistance)]
+    fn jb_constraint_distance(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64;
+    #[wasm_bindgen(js_name = constraintDestroy)]
+    fn jb_constraint_destroy(a0: f64);
+    #[wasm_bindgen(js_name = constraintSetEnabled)]
+    fn jb_constraint_set_enabled(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = contactCount)]
+    fn jb_contact_count() -> f64;
+    #[wasm_bindgen(js_name = contactField)]
+    fn jb_contact_field(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = clearContacts)]
+    fn jb_clear_contacts(a0: f64);
+    #[wasm_bindgen(js_name = characterCreate)]
+    fn jb_character_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64) -> f64;
+    #[wasm_bindgen(js_name = characterDestroy)]
+    fn jb_character_destroy(a0: f64);
+    #[wasm_bindgen(js_name = characterUpdate)]
+    fn jb_character_update(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64);
+    #[wasm_bindgen(js_name = characterGetPosition)]
+    fn jb_character_get_position(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = characterGetRotation)]
+    fn jb_character_get_rotation(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = characterSetPosition)]
+    fn jb_character_set_position(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = characterSetRotation)]
+    fn jb_character_set_rotation(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64);
+    #[wasm_bindgen(js_name = characterGetLinearVelocity)]
+    fn jb_character_get_linear_velocity(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = characterSetLinearVelocity)]
+    fn jb_character_set_linear_velocity(a0: f64, a1: f64, a2: f64, a3: f64);
+    #[wasm_bindgen(js_name = characterGetGroundState)]
+    fn jb_character_get_ground_state(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = characterGetGroundNormal)]
+    fn jb_character_get_ground_normal(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = characterGetGroundPosition)]
+    fn jb_character_get_ground_position(a0: f64, a1: f64) -> f64;
+    #[wasm_bindgen(js_name = characterGetGroundBody)]
+    fn jb_character_get_ground_body(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = characterSetShape)]
+    fn jb_character_set_shape(a0: f64, a1: f64);
+    #[wasm_bindgen(js_name = softBodyCreate)]
+    fn jb_soft_body_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64) -> f64;
+    #[wasm_bindgen(js_name = softBodyVertexCount)]
+    fn jb_soft_body_vertex_count(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = softBodyGetVertex)]
+    fn jb_soft_body_get_vertex(a0: f64, a1: f64, a2: f64) -> f64;
+    #[wasm_bindgen(js_name = softBodySetVertex)]
+    fn jb_soft_body_set_vertex(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64);
+    #[wasm_bindgen(js_name = softBodySetVertexInvMass)]
+    fn jb_soft_body_set_vertex_inv_mass(a0: f64, a1: f64, a2: f64);
+    #[wasm_bindgen(js_name = vehicleCreate)]
+    fn jb_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64, a37: f64) -> f64;
+    #[wasm_bindgen(js_name = vehicleDestroy)]
+    fn jb_vehicle_destroy(a0: f64);
+    #[wasm_bindgen(js_name = vehicleGetChassis)]
+    fn jb_vehicle_get_chassis(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = vehicleSetInput)]
+    fn jb_vehicle_set_input(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64);
+    #[wasm_bindgen(js_name = vehicleGetWheelTransform)]
+    fn jb_vehicle_get_wheel_transform(a0: f64, a1: f64, a2: f64) -> f64;
+    #[wasm_bindgen(js_name = vehicleGetEngineRpm)]
+    fn jb_vehicle_get_engine_rpm(a0: f64) -> f64;
+    #[wasm_bindgen(js_name = vehicleGetWheelAngularVelocity)]
+    fn jb_vehicle_get_wheel_angular_velocity(a0: f64, a1: f64) -> f64;
+}
+
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_create_world(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) -> f64 { jb_create_world(a0, a1, a2, a3, a4) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_destroy_world(a0: f64) { jb_destroy_world(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_set_gravity(a0: f64, a1: f64, a2: f64, a3: f64) { jb_set_gravity(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_get_gravity(a0: f64, a1: f64) -> f64 { jb_get_gravity(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_optimize_broadphase(a0: f64) { jb_optimize_broadphase(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_step(a0: f64, a1: f64, a2: f64) { jb_step(a0, a1, a2) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_set_layer_collides(a0: f64, a1: f64, a2: f64, a3: f64) { jb_set_layer_collides(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_get_layer_collides(a0: f64, a1: f64, a2: f64) -> f64 { jb_get_layer_collides(a0, a1, a2) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_count(a0: f64) -> f64 { jb_body_count(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_active_body_count(a0: f64) -> f64 { jb_active_body_count(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_box(a0: f64, a1: f64, a2: f64, a3: f64) -> f64 { jb_shape_box(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_sphere(a0: f64) -> f64 { jb_shape_sphere(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_capsule(a0: f64, a1: f64) -> f64 { jb_shape_capsule(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_cylinder(a0: f64, a1: f64, a2: f64) -> f64 { jb_shape_cylinder(a0, a1, a2) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_scaled(a0: f64, a1: f64, a2: f64, a3: f64) -> f64 { jb_shape_scaled(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_offset_com(a0: f64, a1: f64, a2: f64, a3: f64) -> f64 { jb_shape_offset_com(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_release(a0: f64) { jb_shape_release(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_scratch_reset() { jb_scratch_reset() }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_scratch_push_f32(a0: f64) { jb_scratch_push_f32(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_scratch_push_u32(a0: f64) { jb_scratch_push_u32(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_convex_hull(a0: f64, a1: f64) -> f64 { jb_shape_convex_hull(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_mesh(a0: f64, a1: f64) -> f64 { jb_shape_mesh(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_heightfield(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64) -> f64 { jb_shape_heightfield(a0, a1, a2, a3, a4, a5, a6, a7) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_compound_begin() { jb_compound_begin() }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_compound_add_child(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64) { jb_compound_add_child(a0, a1, a2, a3, a4, a5, a6, a7) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_compound_end() -> f64 { jb_compound_end() }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_bounds(a0: f64, a1: f64) -> f64 { jb_shape_bounds(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_shape_volume(a0: f64) -> f64 { jb_shape_volume(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64 { jb_body_create(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_destroy(a0: f64) { jb_body_destroy(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_activate(a0: f64) { jb_body_activate(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_deactivate(a0: f64) { jb_body_deactivate(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_is_active(a0: f64) -> f64 { jb_body_is_active(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_is_valid(a0: f64) -> f64 { jb_body_is_valid(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_position(a0: f64, a1: f64) -> f64 { jb_body_get_position(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_rotation(a0: f64, a1: f64) -> f64 { jb_body_get_rotation(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_position(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) { jb_body_set_position(a0, a1, a2, a3, a4) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_rotation(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64) { jb_body_set_rotation(a0, a1, a2, a3, a4, a5) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_transform(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64) { jb_body_set_transform(a0, a1, a2, a3, a4, a5, a6, a7, a8) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_move_kinematic(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64) { jb_body_move_kinematic(a0, a1, a2, a3, a4, a5, a6, a7, a8) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_linear_velocity(a0: f64, a1: f64) -> f64 { jb_body_get_linear_velocity(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_angular_velocity(a0: f64, a1: f64) -> f64 { jb_body_get_angular_velocity(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_point_velocity(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) -> f64 { jb_body_get_point_velocity(a0, a1, a2, a3, a4) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_linear_velocity(a0: f64, a1: f64, a2: f64, a3: f64) { jb_body_set_linear_velocity(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_angular_velocity(a0: f64, a1: f64, a2: f64, a3: f64) { jb_body_set_angular_velocity(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_add_force(a0: f64, a1: f64, a2: f64, a3: f64) { jb_body_add_force(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_add_impulse(a0: f64, a1: f64, a2: f64, a3: f64) { jb_body_add_impulse(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_add_torque(a0: f64, a1: f64, a2: f64, a3: f64) { jb_body_add_torque(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_add_angular_impulse(a0: f64, a1: f64, a2: f64, a3: f64) { jb_body_add_angular_impulse(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_add_force_at(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64) { jb_body_add_force_at(a0, a1, a2, a3, a4, a5, a6) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_add_impulse_at(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64) { jb_body_add_impulse_at(a0, a1, a2, a3, a4, a5, a6) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_friction(a0: f64, a1: f64) { jb_body_set_friction(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_restitution(a0: f64, a1: f64) { jb_body_set_restitution(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_linear_damping(a0: f64, a1: f64) { jb_body_set_linear_damping(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_angular_damping(a0: f64, a1: f64) { jb_body_set_angular_damping(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_gravity_factor(a0: f64, a1: f64) { jb_body_set_gravity_factor(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_ccd(a0: f64, a1: f64) { jb_body_set_ccd(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_motion_type(a0: f64, a1: f64, a2: f64) { jb_body_set_motion_type(a0, a1, a2) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_object_layer(a0: f64, a1: f64) { jb_body_set_object_layer(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_is_sensor(a0: f64, a1: f64) { jb_body_set_is_sensor(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_allow_sleeping(a0: f64, a1: f64) { jb_body_set_allow_sleeping(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_shape(a0: f64, a1: f64, a2: f64, a3: f64) { jb_body_set_shape(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_lock_rotation_axes(a0: f64, a1: f64, a2: f64, a3: f64) { jb_body_lock_rotation_axes(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_lock_translation_axes(a0: f64, a1: f64, a2: f64, a3: f64) { jb_body_lock_translation_axes(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_mass(a0: f64) -> f64 { jb_body_get_mass(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_friction(a0: f64) -> f64 { jb_body_get_friction(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_restitution(a0: f64) -> f64 { jb_body_get_restitution(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_object_layer(a0: f64) -> f64 { jb_body_get_object_layer(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_set_user_data(a0: f64, a1: f64, a2: f64) { jb_body_set_user_data(a0, a1, a2) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_body_get_user_data(a0: f64, a1: f64) -> f64 { jb_body_get_user_data(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_raycast(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64) -> f64 { jb_raycast(a0, a1, a2, a3, a4, a5, a6, a7, a8) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_raycast_all(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64) -> f64 { jb_raycast_all(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_ray_hit_count() -> f64 { jb_ray_hit_count() }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_ray_hit_body(a0: f64) -> f64 { jb_ray_hit_body(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_ray_hit_axis(a0: f64, a1: f64) -> f64 { jb_ray_hit_axis(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_ray_hit_fraction(a0: f64) -> f64 { jb_ray_hit_fraction(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_ray_hit_sub_shape(a0: f64) -> f64 { jb_ray_hit_sub_shape(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_overlap_sphere(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64) -> f64 { jb_overlap_sphere(a0, a1, a2, a3, a4, a5, a6) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_overlap_point(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64) -> f64 { jb_overlap_point(a0, a1, a2, a3, a4, a5) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_overlap_box(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64) -> f64 { jb_overlap_box(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_overlap_body(a0: f64) -> f64 { jb_overlap_body(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_constraint_fixed(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64) -> f64 { jb_constraint_fixed(a0, a1, a2, a3, a4, a5, a6, a7, a8) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_constraint_point(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64) -> f64 { jb_constraint_point(a0, a1, a2, a3, a4, a5, a6, a7, a8) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_constraint_hinge(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64) -> f64 { jb_constraint_hinge(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_constraint_slider(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64) -> f64 { jb_constraint_slider(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_constraint_distance(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64 { jb_constraint_distance(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_constraint_destroy(a0: f64) { jb_constraint_destroy(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_constraint_set_enabled(a0: f64, a1: f64) { jb_constraint_set_enabled(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_contact_count() -> f64 { jb_contact_count() }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_contact_field(a0: f64, a1: f64) -> f64 { jb_contact_field(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_clear_contacts(a0: f64) { jb_clear_contacts(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64) -> f64 { jb_character_create(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_destroy(a0: f64) { jb_character_destroy(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_update(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) { jb_character_update(a0, a1, a2, a3, a4) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_get_position(a0: f64, a1: f64) -> f64 { jb_character_get_position(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_get_rotation(a0: f64, a1: f64) -> f64 { jb_character_get_rotation(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_set_position(a0: f64, a1: f64, a2: f64, a3: f64) { jb_character_set_position(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_set_rotation(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) { jb_character_set_rotation(a0, a1, a2, a3, a4) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_get_linear_velocity(a0: f64, a1: f64) -> f64 { jb_character_get_linear_velocity(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_set_linear_velocity(a0: f64, a1: f64, a2: f64, a3: f64) { jb_character_set_linear_velocity(a0, a1, a2, a3) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_get_ground_state(a0: f64) -> f64 { jb_character_get_ground_state(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_get_ground_normal(a0: f64, a1: f64) -> f64 { jb_character_get_ground_normal(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_get_ground_position(a0: f64, a1: f64) -> f64 { jb_character_get_ground_position(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_get_ground_body(a0: f64) -> f64 { jb_character_get_ground_body(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_character_set_shape(a0: f64, a1: f64) { jb_character_set_shape(a0, a1) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_soft_body_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64) -> f64 { jb_soft_body_create(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_soft_body_vertex_count(a0: f64) -> f64 { jb_soft_body_vertex_count(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_soft_body_get_vertex(a0: f64, a1: f64, a2: f64) -> f64 { jb_soft_body_get_vertex(a0, a1, a2) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_soft_body_set_vertex(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) { jb_soft_body_set_vertex(a0, a1, a2, a3, a4) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_soft_body_set_vertex_inv_mass(a0: f64, a1: f64, a2: f64) { jb_soft_body_set_vertex_inv_mass(a0, a1, a2) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64, a37: f64) -> f64 { jb_vehicle_create(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33, a34, a35, a36, a37) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_vehicle_destroy(a0: f64) { jb_vehicle_destroy(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_vehicle_get_chassis(a0: f64) -> f64 { jb_vehicle_get_chassis(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_vehicle_set_input(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64) { jb_vehicle_set_input(a0, a1, a2, a3, a4) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_vehicle_get_wheel_transform(a0: f64, a1: f64, a2: f64) -> f64 { jb_vehicle_get_wheel_transform(a0, a1, a2) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_vehicle_get_engine_rpm(a0: f64) -> f64 { jb_vehicle_get_engine_rpm(a0) }
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub fn bloom_physics_vehicle_get_wheel_angular_velocity(a0: f64, a1: f64) -> f64 { jb_vehicle_get_wheel_angular_velocity(a0, a1) }
+
+#[cfg(feature = "jolt")]
+#[wasm_bindgen]
+pub async fn bloom_physics_init_jolt(factory: JsValue) -> Result<(), JsValue> {
+    jb_init_jolt(factory).await.map(|_| ())
 }

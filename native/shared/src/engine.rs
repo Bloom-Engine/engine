@@ -8,8 +8,8 @@ use crate::scene::SceneGraph;
 use crate::frame_callbacks::FrameCallbackSystem;
 use crate::postfx::PostFxPipeline;
 use crate::profiler::Profiler;
-#[cfg(feature = "physics")]
-use crate::physics::PhysicsWorld;
+#[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
+use crate::physics_jolt::JoltPhysics;
 
 #[cfg(feature = "web")]
 use web_time::Instant;
@@ -47,8 +47,8 @@ pub struct EngineState {
     // Off by default to preserve existing behaviour.
     pub direct_2d_mode: bool,
 
-    #[cfg(feature = "physics")]
-    pub physics: Option<PhysicsWorld>,
+    #[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
+    pub jolt: JoltPhysics,
 }
 
 impl EngineState {
@@ -83,8 +83,8 @@ impl EngineState {
             start_time: now,
             should_close: false,
             direct_2d_mode: false,
-            #[cfg(feature = "physics")]
-            physics: None,
+            #[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
+            jolt: JoltPhysics::new(),
         }
     }
 

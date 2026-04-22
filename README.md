@@ -62,6 +62,7 @@ cd dist/web && python3 -m http.server 8080
 | **Audio** | `bloom/audio` | Sound effects + music streaming |
 | **Models** | `bloom/models` | 3D model loading (glTF, OBJ), skeletal animation |
 | **Math** | `bloom/math` | Vectors, matrices, quaternions, easing |
+| **Physics** | `bloom/physics` | Jolt-backed rigid + soft bodies, character, vehicles ([docs](docs/physics.md)) |
 
 ## Platforms
 

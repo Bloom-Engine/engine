@@ -75,6 +75,7 @@ cp -r "$WEB_CRATE/pkg" "$OUTPUT_DIR/pkg"
 # Copy HTML template and glue
 cp "$WEB_CRATE/index.html" "$OUTPUT_DIR/index.html"
 cp "$WEB_CRATE/bloom_glue.js" "$OUTPUT_DIR/bloom_glue.js"
+cp "$WEB_CRATE/jolt_bridge.js" "$OUTPUT_DIR/jolt_bridge.js"
 
 # Copy game assets (if game directory has an assets/ folder)
 if [ -n "$GAME_FILE" ]; then

@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["mp3", "physics"]
+default = ["mp3", "jolt"]
 mp3 = ["dep:minimp3"]
-physics = ["dep:rapier3d"]
+jolt = []
 web = ["dep:web-time"]
+
+[build-dependencies]
+cmake = "0.1"
 
 [dependencies]
 wgpu = "29"
@@ -22,5 +25,4 @@ gltf = { version = "1", features = ["KHR_materials_pbrSpecularGlossiness", "KHR_
 lewton = "0.10"
 minimp3 = { version = "0.5", optional = true }
 earcutr = "0.4"
-rapier3d = { version = "0.32", optional = true }
 web-time = { version = "0.2", optional = true }
