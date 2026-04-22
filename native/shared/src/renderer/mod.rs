@@ -983,16 +983,15 @@ pub struct Renderer {
     /// and gets re-baked on first frame.
     pub wsrc_built: bool,
     pub wsrc_origin: [f32; 3],
-    /// Ticket 014 V7 — last-baked sun direction + intensity (xyzw)
-    /// and sun colour × intensity (xyz). Compared against the current
-    /// lighting state every frame; any mismatch clears `wsrc_built`
-    /// so the cache re-bakes with the new envelope. Also covers
-    /// shadow-cascade rebuilds: light_vps[2] changes with the sun
-    /// or the auto-fit cascade refresh.
+    /// Ticket 014 V7/V12 — last-baked lighting state. `sun_dir` is
+    /// xyz + intensity in w (intensity isn't threshold-checked on
+    /// its own — it's folded into `sun_color × intensity`). V12
+    /// switched the compare from strict `!=` to perceptual
+    /// hysteresis in `maybe_invalidate_wsrc`: 1° angular threshold
+    /// on sun direction + 5% relative luma on sun and sky colours.
     pub wsrc_last_sun_dir: [f32; 4],
     pub wsrc_last_sun_color: [f32; 3],
     pub wsrc_last_sky_color: [f32; 3],
-    pub wsrc_last_shadow_vp: [[f32; 4]; 4],
 
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
@@ -4825,7 +4824,6 @@ impl Renderer {
             wsrc_last_sun_dir: [0.0; 4],
             wsrc_last_sun_color: [0.0; 3],
             wsrc_last_sky_color: [0.0; 3],
-            wsrc_last_shadow_vp: [[0.0; 4]; 4],
             probe_temporal_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
@@ -5542,19 +5540,32 @@ impl Renderer {
         self.scene_sdf_clipmap_built = true;
     }
 
-    /// Ticket 014 V6/V7 — invalidate the WSRC atlas on camera travel
-    /// OR any lighting change. V6 handled the camera-travel case (30 m
-    /// threshold on the 120 m cube); V7 adds lighting parity, since
-    /// the cache bakes in the current sun × shadow envelope and a
-    /// rotated sun / rebuilt cascade would leave it stale forever on
-    /// a stationary camera.
+    /// Ticket 014 V6/V7/V12 — invalidate the WSRC atlas on camera
+    /// travel OR meaningful lighting change. V7 compared lighting
+    /// state with strict `!=`, which meant any sub-degree sun
+    /// jitter or sub-percent color drift re-baked every frame —
+    /// wiping the cache benefit on any dynamic-lighting scene. V12
+    /// swaps that for perceptual hysteresis:
     ///
-    /// Cheap: four array-equality comparisons per frame, no hashes.
+    /// - Sun direction: dot-product `< cos(1°)` against the last
+    ///   baked direction. 1° is the smallest sun rotation that
+    ///   noticeably shifts the envelope at probe-cell resolution
+    ///   (7.5 m cells, 8×8 octel → ~22° per octel texel).
+    /// - Sun + sky colour: relative luma delta `> 5%`. Luma (not
+    ///   component-wise) so a pure hue shift doesn't rebake when
+    ///   the perceived brightness is unchanged.
+    ///
+    /// Shadow-VP exact-compare is dropped — it drifts with sub-
+    /// threshold camera motion, which would drag rebake cadence
+    /// back to every-frame. The angular sun check covers cascade
+    /// refits that matter (sun rotation); refits from pure camera
+    /// motion within the 30 m window don't meaningfully change the
+    /// cached envelope.
     fn maybe_invalidate_wsrc(&mut self) {
         if !self.wsrc_built {
             return;
         }
-        // Camera travel.
+        // Camera travel — unchanged from V6.
         let cam = self.current_camera_world_pos();
         let dx = cam[0] - self.wsrc_origin[0];
         let dy = cam[1] - self.wsrc_origin[1];
@@ -5565,29 +5576,37 @@ impl Renderer {
             self.wsrc_built = false;
             return;
         }
-        // Lighting changes. We compare the raw scene-light fields
-        // (not the derived sun_color × intensity we store post-bake)
-        // so a temporary intensity=0 frame and back still reads as
-        // "changed" and triggers the re-bake. Any drift beyond the
-        // float epsilon is treated as a real change to stay conservative
-        // — the re-bake is one cheap dispatch, not worth a similarity
-        // threshold.
+
+        // V12 — sun direction hysteresis via dot product.
         let ld = self.lighting_uniforms.light_dir;
+        let last = self.wsrc_last_sun_dir;
+        let sun_dot = ld[0] * last[0] + ld[1] * last[1] + ld[2] * last[2];
+        // cos(1°) ≈ 0.99985.
+        if sun_dot < 0.99985 {
+            self.wsrc_built = false;
+            return;
+        }
+
+        // V12 — luma-based relative colour tests. `rel_diff` returns
+        // `|a-b| / max(a, b, 1e-4)` so the test stays stable when
+        // either side is near zero (common for night / eclipse).
+        fn luma(c: [f32; 3]) -> f32 {
+            c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722
+        }
+        fn rel_diff(a: f32, b: f32) -> f32 {
+            (a - b).abs() / a.max(b).max(1e-4)
+        }
+
         let lc = self.lighting_uniforms.light_color;
-        let amb = self.lighting_uniforms.ambient;
-        let cur_sun_dir = ld;
         let cur_sun_color = [lc[0] * ld[3], lc[1] * ld[3], lc[2] * ld[3]];
+        if rel_diff(luma(cur_sun_color), luma(self.wsrc_last_sun_color)) > 0.05 {
+            self.wsrc_built = false;
+            return;
+        }
+
+        let amb = self.lighting_uniforms.ambient;
         let cur_sky_color = [amb[0] * amb[3], amb[1] * amb[3], amb[2] * amb[3]];
-        let cur_shadow_vp = if self.shadow_map.enabled {
-            self.shadow_map.light_vps[2]
-        } else {
-            IDENTITY_MAT4
-        };
-        let lighting_changed = cur_sun_dir != self.wsrc_last_sun_dir
-            || cur_sun_color != self.wsrc_last_sun_color
-            || cur_sky_color != self.wsrc_last_sky_color
-            || cur_shadow_vp != self.wsrc_last_shadow_vp;
-        if lighting_changed {
+        if rel_diff(luma(cur_sky_color), luma(self.wsrc_last_sky_color)) > 0.05 {
             self.wsrc_built = false;
         }
     }
@@ -5694,16 +5713,13 @@ impl Renderer {
 
         self.wsrc_built = true;
 
-        // V7 — snapshot the lighting state we just baked against so
-        // `maybe_invalidate_wsrc` can detect changes next frame.
+        // V7/V12 — snapshot the lighting state we just baked against
+        // so `maybe_invalidate_wsrc` can detect meaningful changes
+        // next frame. V12 dropped the shadow-VP compare, so we don't
+        // snapshot it either.
         self.wsrc_last_sun_dir = ld;
         self.wsrc_last_sun_color = [sun_color[0], sun_color[1], sun_color[2]];
         self.wsrc_last_sky_color = [sky_color[0], sky_color[1], sky_color[2]];
-        self.wsrc_last_shadow_vp = if shadows_enabled {
-            self.shadow_map.light_vps[2]
-        } else {
-            IDENTITY_MAT4
-        };
     }
 
     /// Ticket 014 V1 — bake per-mesh unsigned distance fields via
@@ -6863,6 +6879,23 @@ impl Renderer {
         }
 
         {
+            // Only attach a depth target when we're drawing 3D. pipeline_2d is
+            // depth-less; on some mobile Vulkan drivers (Adreno) pairing a
+            // depth-less pipeline with a pass that carries a depth attachment
+            // discards all draws silently. Matches the overlay_2d pass in
+            // end_frame_with_scene, which also omits depth.
+            let depth_attachment = if has_3d {
+                Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &owned_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                })
+            } else {
+                None
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -6874,14 +6907,7 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &owned_depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
+                depth_stencil_attachment: depth_attachment,
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
@@ -6981,13 +7007,16 @@ impl Renderer {
         self.flush_joint_matrices();
         profiler.end("joint_flush");
 
+        profiler.begin("surface_acquire");
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             _ => {
                 self.surface.configure(&self.device, &self.surface_config);
+                profiler.end("surface_acquire");
                 return;
             }
         };
+        profiler.end("surface_acquire");
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -8819,7 +8848,9 @@ impl Renderer {
             staging.unmap();
             self.screenshot_requested = false;
         } else {
+            profiler.begin("queue_submit");
             self.queue.submit(std::iter::once(encoder.finish()));
+            profiler.end("queue_submit");
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -8827,7 +8858,9 @@ impl Renderer {
             self.queue.submit(std::iter::once(encoder.finish()));
         }
 
+        profiler.begin("swap_present");
         output.present();
+        profiler.end("swap_present");
 
         // After present: swap TAA ping-pong + advance the jitter
         // sequence so next frame's projection picks a new sub-pixel
