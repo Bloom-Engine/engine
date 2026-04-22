@@ -1,6 +1,6 @@
 # 009 — Indirect multi-draw for scene graph
 
-**Effort:** ~1 week · **Expected gain:** Removes 68 CPU draw calls, enables GPU-side cull · **Status:** open
+**Effort:** ~1 week · **Expected gain:** Removes 68 CPU draw calls, enables GPU-side cull · **Status:** deferred
 
 ## Problem
 
@@ -71,3 +71,35 @@ feature flags. Check adapter support at device creation.
 - `native/shared/src/renderer.rs` — shared VB/IB, descriptor buffer, GPU
   cull compute shader, new render pass using `draw_indexed_indirect_count`.
 - `native/shared/src/scene.rs` — reworking of per-node GPU resources.
+
+## Deferred — reopen criteria
+
+Pure CPU-side optimization: removes ~340 CPU draw calls/frame on
+Sponza. But the perf README's own rule of thumb applies — **Sponza is
+GPU-bound, not CPU-bound**. The prior CPU-side wins (uniform pool,
+frustum cull, matrix-inverse cache from commit 95da6af) already cut
+render-total CPU to ~4 ms against a 16.7 ms vsync budget. Shaving
+another ~600 µs of CPU via draw-call collapsing **won't move FPS on
+the current benchmark** — we'd be optimizing a resource we already have
+in surplus.
+
+Reopen when:
+
+- **A CPU-bound scene arrives** — 10 000+ mesh count, many small
+  static props, or CPU-expensive per-frame state updates that push
+  `render_total` CPU past the vsync budget.
+- **Ticket 008 (visibility buffer) starts.** 008's shading pass needs
+  a shared vertex/index buffer + per-mesh descriptor buffer — exactly
+  what this ticket builds. If 008 reopens, this ticket is a hard
+  prerequisite and should land first.
+- **Bindless texture support lands in wgpu.** The current "one
+  `set_bind_group` per draw" pattern is partly about per-material
+  texture binds. With bindless, indirect multi-draw becomes a
+  straightforward win without the material-binding workarounds the
+  ticket's "Notes for the implementer" describes.
+
+Estimated effort when reopening: ~1 week for the baseline
+`draw_indexed_indirect_count` path with GPU frustum cull. Material
+indirection still requires either bindless (not widely supported in
+wgpu 29) or a texture-array trick — that's where the ticket's risk
+sits, and why it's scoped at "week" not "days."

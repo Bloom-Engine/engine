@@ -1,6 +1,6 @@
 # 008 — Visibility buffer replaces 4-MRT G-buffer
 
-**Effort:** ~2 weeks · **Expected gain:** 75% less G-buffer bandwidth · **Status:** open
+**Effort:** ~2 weeks · **Expected gain:** 75% less G-buffer bandwidth · **Status:** deferred
 
 ## Problem
 
@@ -80,3 +80,41 @@ modes. This is a ~2-day win instead of 2 weeks.
 - `native/shared/src/renderer.rs` — scene_pipeline, main_hdr_pass, shading
   pass, SSR/SSGI/SSAO inputs.
 - `native/shared/src/scene.rs` — mesh_id assignment, vertex buffer layout.
+
+## Deferred — reopen criteria
+
+Real GPU bandwidth win (~14 MB/frame at 1600×900 × overdraw factor, on
+a benchmark that currently writes 26 MB/pass) but **invisible behind
+the vsync cap on Sponza**. The main perf target landed at 60 fps vsync
+on full quality, so any further pass-cost reduction just gives headroom
+we can't measure here.
+
+Reopen when one of these triggers:
+
+- **A target scene pushes past the 16.7 ms vsync ceiling on the
+  benchmark machine.** The 50%+ fragment-bandwidth reduction from a
+  visibility buffer is the remaining GPU-side lever for Sponza-class
+  bandwidth-bound scenes.
+- **Integrated / mobile GPUs become a priority.** Bandwidth matters
+  disproportionately more on tile-based and integrated hardware; this
+  ticket is the single biggest available reduction.
+- **Overdraw-heavy scenes** (foliage, hair, transparent-dense
+  particles) become the target. The "every visible pixel shades
+  exactly once" property of a visibility buffer + depth-prepass combo
+  is essentially the only way to keep overdraw from eating bandwidth.
+
+Effort when reopening is a 2+ week redesign: main_hdr_pass output
+becomes `Rgba32Uint (tri_id, u, v, mesh_id)` only, a new shading pass
+fetches vertex data from per-mesh storage buffers and evaluates PBR,
+downstream MRT consumers (SSR / SSGI / SSAO / post-FX) need to read
+from the rebuilt material channels rather than the current 4-MRT
+layout. Ticket 005's depth-prepass is a natural prerequisite (it was
+deprioritized but would become useful again here). Ticket 009's
+unified vertex/index buffers are a hard prerequisite (the shading
+pass needs a single bindless-style fetch across all meshes).
+
+The "simpler intermediate step" in the approach section above — drop
+unused MRTs when features are off — is a legitimate ~2-day quick win
+for low-quality modes (`--quality 1` / `--quality 0` users on
+integrated hardware). That's the most-likely first concrete follow-up
+when this ticket reopens.

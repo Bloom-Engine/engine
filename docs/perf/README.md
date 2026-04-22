@@ -5,6 +5,32 @@ a ticket and work on it without needing conversation context from the session
 that wrote it. Each ticket is self-contained: it states the problem, the
 current measurement, the proposed approach, and the acceptance criteria.
 
+## Sprint status
+
+**🎯 Target met as of 2026-04-22.** `--quality 3 --ssgi 1 --fps-only 300`
+runs at **60.0 fps vsync-capped (16.67 ms/frame)** on the benchmark machine,
+up from the 2.8 fps / 361 ms baseline — a verified **21× speedup** at full
+visual quality with no reduction in SSAO/SSR/SSGI sample counts, shadow
+cascade resolution, or effect fidelity. The `--quality 0` regression guard
+holds at 60.0 fps vsync (3/3 consecutive runs).
+
+**Landed (13 tickets):** 001 TSR half-res, 002 compute GTAO, 003 stochastic
+SSR, 004 cached shadow cascades, 006 shadow-pass culling, 007-prep wgpu 29
+upgrade, 007a SSRC SW trace, 007b SSRC HW trace, 013 Mesh Cards surface
+cache, 014 per-mesh SDFs + WSRC, 016 temporal jitter + variance-adaptive
+EMA, 011 cross-platform quality/profiler FFI, 017 Lumen rollout cleanup.
+
+**Deferred (5 tickets, each with concrete reopen criteria in the ticket):**
+005 depth prepass (prototype failed), 008 visibility buffer, 009 GPU-driven
+rendering, 010 async compute, 012 remaining bind-group caches.
+
+Deferred ≠ abandoned. Each ticket's "Deferred" section documents the
+specific trigger that would make it worth reopening (scene pushes past
+vsync / CPU-bound scene arrives / upstream wgpu feature lands / etc.).
+
+Lumen follow-ups live in GitHub issues #19–#25. Perf-ticket follow-ups
+live alongside them as deferred-ticket issues filed from this sprint.
+
 ## Target
 
 **60 fps on Intel Sponza at 800×450 (Retina physical 1600×900) with full visual
@@ -83,8 +109,8 @@ Ordered roughly by ROI / effort.
 | [004](004-cached-shadow-maps.md) | Cache shadow cascades for static casters | ~2 days | Shadow pass → ~0 after first frame | landed (per-scene shadow_version + cascade VP equality gate + unjittered proj for cascade fit; `--no-pan` CLI flag for stationary measurement. Shadow pass 2907 µs → 67 µs GPU on stationary camera = **43×**; FPS 82→106. Cache-miss path (panning camera) unchanged. SSIM visually indistinguishable) |
 | [005](005-depth-prepass.md) | Depth prepass for main HDR pass | ~1 day | main_hdr 17 ms → ~8 ms | deprioritized (prototype failed — see ticket) |
 | [006](006-shadow-pass-culling.md) | Frustum cull casters in shadow pass | ~0.5 day | Shadow pass 14 → 7-10 ms | landed (per-cascade ortho-frustum cull against a world-AABB cached on SceneNode; shadow_pass GPU 3.1 → 2.0 ms on the panning-cache-miss path = **-34%**, CPU 648 → 489 µs = **-24%**. FPS at `--quality 2` 50.3 → 52.8 = +5%. Absolute headroom capped by 95da6af's earlier 2048 → 1024 cascade-map cut — proportional shape matches the ticket's intent. Sun-behind-camera pose (`--yaw π`) diffs within TAA noise floor — shadows of off-screen casters still land on-screen correctly) |
-| [008](008-visibility-buffer.md) | Visibility buffer replaces 4-MRT G-buffer | ~2 weeks | 75% less bandwidth | open |
-| [009](009-gpu-driven-rendering.md) | Indirect multi-draw for scene graph | ~1 week | Removes CPU draw loop | open |
+| [008](008-visibility-buffer.md) | Visibility buffer replaces 4-MRT G-buffer | ~2 weeks | 75% less bandwidth | deferred — real GPU bandwidth win but invisible behind the vsync cap on Sponza. Reopen when a target scene pushes past 16.7 ms, when integrated / mobile GPUs become the priority, or for overdraw-heavy scenes (foliage, hair, dense transparents). Depth-prepass (005) becomes prerequisite-useful again at that point; ticket 009's unified vertex buffers are a hard prerequisite |
+| [009](009-gpu-driven-rendering.md) | Indirect multi-draw for scene graph | ~1 week | Removes CPU draw loop | deferred — pure CPU optimization on a GPU-bound benchmark. Render-total CPU is already ~4 ms against a 16.7 ms vsync budget; shaving another ~600 µs via draw-call collapsing won't move FPS on Sponza. Reopen when a CPU-bound scene arrives (10 000+ meshes), when ticket 008 starts (hard prerequisite for its shading pass), or when bindless texture support lands in wgpu |
 | [010](010-async-compute.md) | Overlap post-FX on compute queue | ~3 days (see ticket) | Hides ~20% of post-FX | deferred — blocked on wgpu 29's lack of a public multi-queue API. Actual paths to land this are (a) wgpu-hal drop for the compute queue (2-3 weeks, loses wgpu-core safety for every post-FX resource), (b) native Metal / DX12 / Vulkan per-platform (3+ weeks, three impls), or (c) wait for wgpu upstream. Estimated gain is ~1.3 ms of the 16.7 ms vsync budget on Sponza; not worth the redesign until a scene pushes past vsync. Parked in the ticket |
 | [011](011-cross-platform-ffi.md) | Port quality/profiler FFI to iOS/Win/Lin/Android/tvOS/web | ~1 day | Unblocks non-macOS use | landed. Full FFI block (`bloom_set_quality_preset`, `bloom_set_shadows_enabled`, `bloom_set_shadows_always_fresh`, `bloom_set_bloom_enabled`, `bloom_set_ssao_enabled`, `bloom_set_ssr_enabled`, `bloom_set_motion_blur_enabled`, `bloom_set_sss_enabled`, `bloom_set_profiler_enabled`, `bloom_get_profiler_frame_cpu_us`, `bloom_get_profiler_frame_gpu_us`, `bloom_print_profiler_summary`) appended to ios / tvos / windows / linux with matching `#[no_mangle] extern "C"` signatures; web got `#[wasm_bindgen]` variants with `console_log` for the summary printer. Android's prior no-op stubs were replaced with real impls and a `__android_log_print`-backed summary. TIMESTAMP_QUERY conditional feature request mirrored into every platform's `request_device` so the profiler GPU path works wherever the adapter grants it (Metal typically won't, DX12 typically will, Android GPUs mostly won't, web doesn't support it yet). `cargo check` clean on macOS / iOS / tvOS / web from the macOS host; Windows / Linux / Android need native toolchains for their C-dep build scripts (same caveat as 014 V15) |
 | [012](012-remaining-bind-group-caches.md) | Cache the 5 remaining per-frame `create_bind_group` calls | ~0.5 day | ~15-30 µs CPU | deferred — prototype landed a black-window regression (likely a state-key gap that missed a per-frame input variance); the 15-30 µs CPU savings aren't worth the correctness risk on a GPU-bound benchmark. Re-open if a future scene becomes CPU-bound on bind-group rebuilds. See ticket for prototype notes |
