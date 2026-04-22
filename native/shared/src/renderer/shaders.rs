@@ -3105,6 +3105,7 @@ struct TraceParams {
 @group(0) @binding(8) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(9) var hdr_samp: sampler;
 @group(0) @binding(10) var radiance_out: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(11) var prev_history: texture_3d<f32>;
 
 fn hiz_sample(uv: vec2<f32>, mip: i32) -> f32 {
     switch (clamp(mip, 0, 4)) {
@@ -3141,7 +3142,17 @@ fn cs_main(
     // this into free super-sampling.
     // V2 — probe_idx folded into the jitter so neighbouring probes
     // sample decorrelated sub-texel positions.
-    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x, probe_idx));
+    // V3 — scale jitter inversely with prev-frame luma at this octel:
+    // already-bright octels narrow their jitter (exploit / lock in
+    // the peak); dark octels keep full jitter (explore for new
+    // light). Luma is read from the prev-frame temporal-filtered
+    // history texture; `dst_coord` indexes the probe × octel slab
+    // identically between trace output and history.
+    let prev_slice = textureLoad(prev_history, dst_coord, 0).rgb;
+    let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
+    let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
+    let dir_ws = octel_direction_jittered(lid.xy, jitter);
     let n_ws = header.normal.xyz;
 
     // Hemisphere cull — rays pointing below the surface carry no diffuse contribution.
@@ -3285,6 +3296,7 @@ const HW_WSRC_GRID_RES: i32 = 16;
 @group(0) @binding(6) var card_samp: sampler;
 @group(0) @binding(7) var wsrc_atlas: texture_3d<f32>;
 @group(0) @binding(8) var wsrc_samp: sampler;
+@group(0) @binding(9) var prev_history: texture_3d<f32>;
 
 // Ticket 014 V7/V8 — WSRC lookup shared with the SDF path. V8
 // trilinear across the 8 neighbouring probes, nearest octel for
@@ -3373,7 +3385,17 @@ fn cs_main(
     // this into free super-sampling.
     // V2 — probe_idx folded into the jitter so neighbouring probes
     // sample decorrelated sub-texel positions.
-    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x, probe_idx));
+    // V3 — scale jitter inversely with prev-frame luma at this octel:
+    // already-bright octels narrow their jitter (exploit / lock in
+    // the peak); dark octels keep full jitter (explore for new
+    // light). Luma is read from the prev-frame temporal-filtered
+    // history texture; `dst_coord` indexes the probe × octel slab
+    // identically between trace output and history.
+    let prev_slice = textureLoad(prev_history, dst_coord, 0).rgb;
+    let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
+    let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
+    let dir_ws = octel_direction_jittered(lid.xy, jitter);
     let n_ws = header.normal.xyz;
     let ndotd = dot(dir_ws, n_ws);
     if (ndotd <= 0.0) {
@@ -3589,6 +3611,7 @@ const WSRC_GRID_RES: i32 = 16;
 @group(0) @binding(7) var card_samp: sampler;
 @group(0) @binding(8) var wsrc_atlas: texture_3d<f32>;
 @group(0) @binding(9) var wsrc_samp: sampler;
+@group(0) @binding(10) var prev_history: texture_3d<f32>;
 
 fn clipmap_uv(pos_ws: vec3<f32>) -> vec3<f32> {
     let half_extent = u.clipmap.w * 0.5;
@@ -3703,7 +3726,17 @@ fn cs_main(
     // this into free super-sampling.
     // V2 — probe_idx folded into the jitter so neighbouring probes
     // sample decorrelated sub-texel positions.
-    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x, probe_idx));
+    // V3 — scale jitter inversely with prev-frame luma at this octel:
+    // already-bright octels narrow their jitter (exploit / lock in
+    // the peak); dark octels keep full jitter (explore for new
+    // light). Luma is read from the prev-frame temporal-filtered
+    // history texture; `dst_coord` indexes the probe × octel slab
+    // identically between trace output and history.
+    let prev_slice = textureLoad(prev_history, dst_coord, 0).rgb;
+    let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
+    let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
+    let dir_ws = octel_direction_jittered(lid.xy, jitter);
     let n_ws = header.normal.xyz;
     let ndotd = dot(dir_ws, n_ws);
     if (ndotd <= 0.0) {

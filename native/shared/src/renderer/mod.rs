@@ -912,14 +912,18 @@ pub struct Renderer {
     /// otherwise so the shader module isn't even compiled.
     pub probe_trace_hw_pipeline: Option<wgpu::ComputePipeline>,
     pub probe_trace_hw_layout: Option<wgpu::BindGroupLayout>,
-    probe_trace_hw_bg_cache: Option<wgpu::BindGroup>,
+    /// V3 — [Option; 2] so the HW trace can bind the prev-frame
+    /// probe history on a per-frame ping-pong index, matching the
+    /// SW cache shape.
+    probe_trace_hw_bg_cache: [Option<wgpu::BindGroup>; 2],
 
     /// Ticket 014 V3 — SW SDF sphere-trace pipeline + layout.
     /// Active whenever the scene clipmap has been baked; chosen at
     /// dispatch time over the Hi-Z SW fallback when available.
     pub probe_trace_sdf_pipeline: wgpu::ComputePipeline,
     pub probe_trace_sdf_layout: wgpu::BindGroupLayout,
-    probe_trace_sdf_bg_cache: Option<wgpu::BindGroup>,
+    /// V3 — same [Option; 2] shape as the HW + SW caches.
+    probe_trace_sdf_bg_cache: [Option<wgpu::BindGroup>; 2],
 
     // --- Ticket 013: Mesh Cards (Surface Cache, V2 — 6-axis + per-frame lighting) ---
     /// Albedo atlas, baked once per mesh at model load.
@@ -3337,6 +3341,18 @@ impl Renderer {
                         view_dimension: wgpu::TextureViewDimension::D3,
                     }, count: None,
                 },
+                // V3 — prev-frame probe history (textureLoad, no
+                // sampler). Non-filterable so the layout matches
+                // the storage-binding constraint on adapters that
+                // don't advertise FLOAT32_FILTERABLE.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    }, count: None,
+                },
             ],
         });
         let probe_trace_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3442,6 +3458,15 @@ impl Renderer {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // V3 — prev-frame probe history (textureLoad).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        }, count: None,
+                    },
                 ],
             });
             let hw_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3545,6 +3570,15 @@ impl Renderer {
                     binding: 9, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
+                },
+                // V3 — prev-frame probe history (textureLoad).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    }, count: None,
                 },
             ],
         });
@@ -4900,10 +4934,10 @@ impl Renderer {
             probe_trace_bg_cache: [None, None],
             probe_trace_hw_pipeline,
             probe_trace_hw_layout,
-            probe_trace_hw_bg_cache: None,
+            probe_trace_hw_bg_cache: [None, None],
             probe_trace_sdf_pipeline,
             probe_trace_sdf_layout,
-            probe_trace_sdf_bg_cache: None,
+            probe_trace_sdf_bg_cache: [None, None],
             mesh_card_atlas,
             mesh_card_atlas_view,
             mesh_card_atlas_sampler,
@@ -5249,6 +5283,11 @@ impl Renderer {
             self.ssr_bg_cache = None;
             self.probe_place_bg_cache = None;
             self.probe_trace_bg_cache = [None, None];
+            // V3 — HW + SDF trace BGs reference the prev-frame
+            // probe history view too, so invalidate on history
+            // resize.
+            self.probe_trace_hw_bg_cache = [None, None];
+            self.probe_trace_sdf_bg_cache = [None, None];
             self.probe_temporal_bg_cache = [None, None];
             self.probe_resolve_bg_cache = [None, None];
             self.hiz_linearize_bg_cache = None;
@@ -6083,10 +6122,10 @@ impl Renderer {
                 mapped_at_creation: false,
             }));
             self.tlas_max_instances = new_cap;
-            self.probe_trace_hw_bg_cache = None;
+            self.probe_trace_hw_bg_cache = [None, None];
             // V4 — SDF bind group also references instance_data, so
             // invalidate when the buffer is re-allocated.
-            self.probe_trace_sdf_bg_cache = None;
+            self.probe_trace_sdf_bg_cache = [None, None];
             // V14 — WSRC HW bake bg also references the TLAS +
             // instance_data buffer; invalidate on resize.
             self.wsrc_bake_hw_bg_cache = None;
@@ -6165,7 +6204,7 @@ impl Renderer {
                 flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             }));
-            self.probe_trace_hw_bg_cache = None;
+            self.probe_trace_hw_bg_cache = [None, None];
             // V14 — same reason as the resize path above.
             self.wsrc_bake_hw_bg_cache = None;
         }
@@ -8108,10 +8147,11 @@ impl Renderer {
                 ],
             };
             self.queue.write_buffer(&self.probe_trace_uniform, 0, bytemuck::bytes_of(&trace_params));
-            // Trace bind group is cache-stable (always writes into the
-            // single `probe_trace_view`) — only one slot needed.
-            if self.probe_trace_bg_cache[0].is_none() {
-                self.probe_trace_bg_cache[0] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            // V3 — trace BG now binds the prev-frame history view at
+            // binding 11. `prev_idx` ping-pongs every frame so we
+            // cache both slots independently.
+            if self.probe_trace_bg_cache[prev_idx].is_none() {
+                self.probe_trace_bg_cache[prev_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("probe_trace_bg"),
                     layout: &self.probe_trace_layout,
                     entries: &[
@@ -8126,6 +8166,7 @@ impl Renderer {
                         wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
                         wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                         wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&self.probe_trace_view) },
+                        wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.probe_history_views[prev_idx]) },
                     ],
                 }));
             }
@@ -8148,13 +8189,12 @@ impl Renderer {
                 && self.tlas_instance_data_buffer.is_some();
 
             if use_hw {
-                // Build the HW bind group lazily; the TLAS view changes
-                // when the TLAS is recreated at a larger capacity so
-                // invalidation ties to `tlas_max_instances` via the
-                // rebuild path that clears `probe_trace_hw_bg_cache`.
-                if self.probe_trace_hw_bg_cache.is_none() {
+                // Build the HW bind group lazily. V3 uses a per-
+                // prev_idx slot since the prev-frame history view
+                // ping-pongs each frame.
+                if self.probe_trace_hw_bg_cache[prev_idx].is_none() {
                     let tlas = self.tlas.as_ref().unwrap();
-                    self.probe_trace_hw_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    self.probe_trace_hw_bg_cache[prev_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("probe_trace_hw_bg"),
                         layout: self.probe_trace_hw_layout.as_ref().unwrap(),
                         entries: &[
@@ -8171,6 +8211,8 @@ impl Renderer {
                             // V7/V10 — WSRC atlas + linear sampler.
                             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
                             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.wsrc_atlas_sampler) },
+                            // V3 — prev-frame probe history.
+                            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.probe_history_views[prev_idx]) },
                         ],
                     }));
                 }
@@ -8179,11 +8221,13 @@ impl Renderer {
                     label: Some("probe_trace_hw_pass"), timestamp_writes: ts,
                 });
                 pass.set_pipeline(self.probe_trace_hw_pipeline.as_ref().unwrap());
-                pass.set_bind_group(0, self.probe_trace_hw_bg_cache.as_ref().unwrap(), &[]);
+                pass.set_bind_group(0, self.probe_trace_hw_bg_cache[prev_idx].as_ref().unwrap(), &[]);
                 pass.dispatch_workgroups(gw, gh, 1);
             } else if use_sdf {
                 // Ticket 014 V3 — SW SDF sphere-trace path.
-                if self.probe_trace_sdf_bg_cache.is_none() {
+                // V3 (ticket 016) uses a per-prev_idx slot for the
+                // prev-frame history binding.
+                if self.probe_trace_sdf_bg_cache[prev_idx].is_none() {
                     let nf_samp = self.device.create_sampler(&wgpu::SamplerDescriptor {
                         label: Some("clipmap_nonfiltering_sampler"),
                         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -8196,7 +8240,7 @@ impl Renderer {
                     });
                     let instance_buf = self.tlas_instance_data_buffer.as_ref()
                         .expect("V4: instance_data buffer must exist before SDF dispatch");
-                    self.probe_trace_sdf_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    self.probe_trace_sdf_bg_cache[prev_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("probe_trace_sdf_bg"),
                         layout: &self.probe_trace_sdf_layout,
                         entries: &[
@@ -8211,6 +8255,8 @@ impl Renderer {
                             // V6/V10 — WSRC atlas + linear sampler.
                             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
                             wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.wsrc_atlas_sampler) },
+                            // V3 — prev-frame probe history.
+                            wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&self.probe_history_views[prev_idx]) },
                         ],
                     }));
                 }
@@ -8219,7 +8265,7 @@ impl Renderer {
                     label: Some("probe_trace_sdf_pass"), timestamp_writes: ts,
                 });
                 pass.set_pipeline(&self.probe_trace_sdf_pipeline);
-                pass.set_bind_group(0, self.probe_trace_sdf_bg_cache.as_ref().unwrap(), &[]);
+                pass.set_bind_group(0, self.probe_trace_sdf_bg_cache[prev_idx].as_ref().unwrap(), &[]);
                 pass.dispatch_workgroups(gw, gh, 1);
             } else {
                 let ts = profiler.compute_pass_timestamp_writes("probe_trace_pass");
@@ -8227,7 +8273,7 @@ impl Renderer {
                     label: Some("probe_trace_pass"), timestamp_writes: ts,
                 });
                 pass.set_pipeline(&self.probe_trace_pipeline);
-                pass.set_bind_group(0, self.probe_trace_bg_cache[0].as_ref().unwrap(), &[]);
+                pass.set_bind_group(0, self.probe_trace_bg_cache[prev_idx].as_ref().unwrap(), &[]);
                 pass.dispatch_workgroups(gw, gh, 1);
             }
 
