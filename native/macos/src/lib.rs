@@ -652,6 +652,11 @@ pub extern "C" fn bloom_set_target_fps(fps: f64) {
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_set_direct_2d_mode(on: f64) {
+    engine().direct_2d_mode = on > 0.5;
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_get_delta_time() -> f64 {
     engine().delta_time
 }

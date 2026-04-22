@@ -398,6 +398,9 @@ pub extern "C" fn bloom_clear_background(r: f64, g: f64, b: f64, a: f64) {
 pub extern "C" fn bloom_set_target_fps(fps: f64) { engine().target_fps = fps; }
 
 #[no_mangle]
+pub extern "C" fn bloom_set_direct_2d_mode(on: f64) { engine().direct_2d_mode = on > 0.5; }
+
+#[no_mangle]
 pub extern "C" fn bloom_get_delta_time() -> f64 { engine().delta_time }
 
 #[no_mangle]

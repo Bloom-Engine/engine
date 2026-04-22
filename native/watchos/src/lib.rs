@@ -266,6 +266,11 @@ pub extern "C" fn bloom_set_target_fps(fps: f64) {
     state().target_fps.store(fps as i64, Ordering::Release);
 }
 
+// No-op on watchOS (no deferred 3D pipeline); kept to satisfy the FFI
+// surface so cross-platform game code can call setDirect2DMode() freely.
+#[no_mangle]
+pub extern "C" fn bloom_set_direct_2d_mode(_on: f64) {}
+
 #[no_mangle]
 pub extern "C" fn bloom_init_window(_w: f64, _h: f64, _title: i64, _fullscreen: f64) {}
 

@@ -41,6 +41,12 @@ pub struct EngineState {
 
     pub should_close: bool,
 
+    // When true, end_frame() takes a direct-to-swapchain path that skips
+    // scene graph prep, shadow maps, HDR/post-FX, SDF/WSRC bakes, etc.
+    // Intended for pure-2D games that only need the batched 2D pipeline.
+    // Off by default to preserve existing behaviour.
+    pub direct_2d_mode: bool,
+
     #[cfg(feature = "physics")]
     pub physics: Option<PhysicsWorld>,
 }
@@ -76,6 +82,7 @@ impl EngineState {
             current_fps: 0.0,
             start_time: now,
             should_close: false,
+            direct_2d_mode: false,
             #[cfg(feature = "physics")]
             physics: None,
         }
@@ -105,20 +112,32 @@ impl EngineState {
     }
 
     pub fn end_frame(&mut self) {
-        self.profiler.begin("scene_prepare");
-        self.scene.prepare(
-            &self.renderer.device,
-            &self.renderer.queue,
-            &self.renderer.vp_matrix(),
-            &self.renderer.prev_vp_matrix,
-            self.renderer.uniform_3d_layout(),
-        );
-        self.scene.prepare_materials(&self.renderer);
-        self.profiler.end("scene_prepare");
+        if self.direct_2d_mode {
+            // Fast path for pure-2D games: render direct to the swapchain,
+            // skipping scene prep, shadow maps, HDR/tonemap, SSAO, bloom,
+            // SDF/WSRC bakes and mesh-card capture. On mobile GPUs the
+            // full deferred pipeline easily costs tens of ms/frame even
+            // when the scene graph is empty; this path typically hits
+            // 60 fps on the same device.
+            self.profiler.begin("render_total");
+            self.renderer.end_frame();
+            self.profiler.end("render_total");
+        } else {
+            self.profiler.begin("scene_prepare");
+            self.scene.prepare(
+                &self.renderer.device,
+                &self.renderer.queue,
+                &self.renderer.vp_matrix(),
+                &self.renderer.prev_vp_matrix,
+                self.renderer.uniform_3d_layout(),
+            );
+            self.scene.prepare_materials(&self.renderer);
+            self.profiler.end("scene_prepare");
 
-        self.profiler.begin("render_total");
-        self.renderer.end_frame_with_scene(&mut self.scene, &mut self.profiler);
-        self.profiler.end("render_total");
+            self.profiler.begin("render_total");
+            self.renderer.end_frame_with_scene(&mut self.scene, &mut self.profiler);
+            self.profiler.end("render_total");
+        }
 
         self.profiler.frame_end(&self.renderer.device);
         self.input.end_frame();

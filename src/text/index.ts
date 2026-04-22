@@ -12,6 +12,14 @@ export function drawText(text: string, x: number, y: number, size: number, color
   bloom_draw_text(text as any, x, y, size, color.r, color.g, color.b, color.a);
 }
 
+/// RGBA variant of `drawText`. Prefer this over passing a `Color` object on
+/// Android (aarch64): Perry 0.5.x miscompiles `color.r` field reads that feed
+/// straight into an f64 FFI slot, producing NaN for all color components and
+/// dropping the glyph quads. Passing raw numbers bypasses the object read.
+export function drawTextRgba(text: string, x: number, y: number, size: number, r: number, g: number, b: number, a: number): void {
+  bloom_draw_text(text as any, x, y, size, r, g, b, a);
+}
+
 export function measureText(text: string, size: number): number {
   return bloom_measure_text(text as any, size);
 }

@@ -57,6 +57,18 @@ export function drawTexturePro(
   );
 }
 
+// Raw variant: takes primitives directly. Workaround for aarch64 Android
+// Perry miscompilation where obj.field reads feeding f64 FFI args arrive as NaN.
+export function drawTextureProRaw(
+  textureId: number,
+  sx: number, sy: number, sw: number, sh: number,
+  dx: number, dy: number, dw: number, dh: number,
+  ox: number, oy: number, rotation: number,
+  r: number, g: number, b: number, a: number,
+): void {
+  bloom_draw_texture_pro(textureId, sx, sy, sw, sh, dx, dy, dw, dh, ox, oy, rotation, r, g, b, a);
+}
+
 export function getTextureWidth(texture: Texture): number {
   return texture.width;
 }

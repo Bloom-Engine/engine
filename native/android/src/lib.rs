@@ -150,6 +150,14 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             }
         };
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: adapter found\0".as_ptr());
+        {
+            let info = adapter.get_info();
+            let msg = std::ffi::CString::new(format!(
+                "adapter: name='{}' backend={:?} device_type={:?} driver='{}' driver_info='{}'",
+                info.name, info.backend, info.device_type, info.driver, info.driver_info
+            )).unwrap();
+            __android_log_print(3, b"BloomEngine\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
+        }
 
         // Ticket 007b: most Android GPUs lack RT, but recent Adreno /
         // Mali-Immortalis devices do — request the feature if advertised.
@@ -307,6 +315,9 @@ pub extern "C" fn bloom_clear_background(r: f64, g: f64, b: f64, a: f64) {
 
 #[no_mangle]
 pub extern "C" fn bloom_set_target_fps(fps: f64) { engine().target_fps = fps; }
+
+#[no_mangle]
+pub extern "C" fn bloom_set_direct_2d_mode(on: f64) { engine().direct_2d_mode = on > 0.5; }
 
 #[no_mangle]
 pub extern "C" fn bloom_get_delta_time() -> f64 { engine().delta_time }

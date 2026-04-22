@@ -40,6 +40,7 @@ declare function bloom_get_profiler_frame_cpu_us(): number;
 declare function bloom_get_profiler_frame_gpu_us(): number;
 declare function bloom_print_profiler_summary(): void;
 declare function bloom_set_target_fps(fps: number): void;
+declare function bloom_set_direct_2d_mode(on: number): void;
 declare function bloom_get_delta_time(): number;
 declare function bloom_get_fps(): number;
 declare function bloom_get_screen_width(): number;
@@ -320,6 +321,19 @@ export function setTargetFPS(fps: number): void {
   bloom_set_target_fps(fps);
 }
 
+/**
+ * Enable direct-to-swapchain 2D mode. Skips scene prep, shadow maps,
+ * HDR/tonemap, SSAO, bloom, SDF/WSRC bakes and mesh-card passes —
+ * rendering goes straight through the batched 2D pipeline. Intended
+ * for pure-2D games that never populate the scene graph; on mobile
+ * GPUs this is the difference between ~15 fps and 60 fps.
+ *
+ * Call once after initWindow(). Off by default.
+ */
+export function setDirect2DMode(on: boolean): void {
+  bloom_set_direct_2d_mode(on ? 1.0 : 0.0);
+}
+
 export function getDeltaTime(): number {
   return bloom_get_delta_time();
 }
@@ -392,6 +406,12 @@ export function getTouchPosition(index: number): { x: number; y: number } {
 
 export function beginMode2D(camera: Camera2D): void {
   bloom_begin_mode_2d(camera.offset.x, camera.offset.y, camera.target.x, camera.target.y, camera.rotation, camera.zoom);
+}
+
+// Raw variant: takes primitives directly. Workaround for aarch64 Android
+// Perry miscompilation where obj.field reads feeding f64 FFI args arrive as NaN.
+export function beginMode2DRaw(offsetX: number, offsetY: number, targetX: number, targetY: number, rotation: number, zoom: number): void {
+  bloom_begin_mode_2d(offsetX, offsetY, targetX, targetY, rotation, zoom);
 }
 
 export function endMode2D(): void {

@@ -32,6 +32,7 @@
         { "name": "bloom_clear_background",         "params": ["f64", "f64", "f64", "f64"],                              "returns": "void" },
         { "name": "bloom_set_env_clear_from_hdr",   "params": ["i64"],                                                   "returns": "void" },
         { "name": "bloom_set_target_fps",           "params": ["f64"],                                                   "returns": "void" },
+        { "name": "bloom_set_direct_2d_mode",       "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_get_delta_time",           "params": [],                                                        "returns": "f64"  },
         { "name": "bloom_get_fps",                  "params": [],                                                        "returns": "f64"  },
         { "name": "bloom_get_screen_width",         "params": [],                                                        "returns": "f64"  },

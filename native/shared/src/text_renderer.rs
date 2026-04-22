@@ -203,11 +203,11 @@ impl TextRenderer {
 
         match self.atlas_bind_group_idx {
             None => {
-                let idx = renderer.register_texture(self.atlas_width, self.atlas_height, &self.atlas_data);
+                let idx = renderer.register_texture_no_mips(self.atlas_width, self.atlas_height, &self.atlas_data);
                 self.atlas_bind_group_idx = Some(idx);
             }
             Some(idx) => {
-                renderer.update_texture(idx, self.atlas_width, self.atlas_height, &self.atlas_data);
+                renderer.replace_texture_no_mips(idx, self.atlas_width, self.atlas_height, &self.atlas_data);
             }
         }
         self.atlas_dirty = false;

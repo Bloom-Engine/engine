@@ -58,16 +58,35 @@ export function loadMusic(path: string): Music {
   return { handle };
 }
 
+/// Returns the raw numeric handle. Prefer this on Android (aarch64): Perry 0.5.x
+/// miscompiles `music.handle` field reads that feed straight into an f64 FFI slot,
+/// producing NaN and dropping the music.
+export function loadMusicRaw(path: string): number {
+  return bloom_load_music(path as any);
+}
+
 export function playMusic(music: Music): void {
   bloom_play_music(music.handle);
+}
+
+export function playMusicRaw(handle: number): void {
+  bloom_play_music(handle);
 }
 
 export function stopMusic(music: Music): void {
   bloom_stop_music(music.handle);
 }
 
+export function stopMusicRaw(handle: number): void {
+  bloom_stop_music(handle);
+}
+
 export function updateMusicStream(music: Music): void {
   bloom_update_music_stream(music.handle);
+}
+
+export function updateMusicStreamRaw(handle: number): void {
+  bloom_update_music_stream(handle);
 }
 
 // Spec-compliant alias
@@ -77,8 +96,16 @@ export function setMusicVolume(music: Music, volume: number): void {
   bloom_set_music_volume(music.handle, volume);
 }
 
+export function setMusicVolumeRaw(handle: number, volume: number): void {
+  bloom_set_music_volume(handle, volume);
+}
+
 export function isMusicPlaying(music: Music): boolean {
   return bloom_is_music_playing(music.handle) !== 0;
+}
+
+export function isMusicPlayingRaw(handle: number): boolean {
+  return bloom_is_music_playing(handle) !== 0;
 }
 
 // Spatial audio

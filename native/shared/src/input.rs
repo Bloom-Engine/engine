@@ -62,6 +62,11 @@ pub struct InputState {
     // Touch
     pub touch_points: [TouchPoint; MAX_TOUCH_POINTS],
     pub touch_count: usize,
+    // Release-deferral: an ACTION_UP that arrives in the same frame as its
+    // ACTION_DOWN would otherwise zero out `touch_count` before the game has a
+    // chance to poll. Mark the slot here instead and clear at end_frame, so a
+    // fast tap is still visible for one full frame.
+    touch_pending_release: [bool; MAX_TOUCH_POINTS],
 }
 
 impl InputState {
@@ -100,6 +105,7 @@ impl InputState {
             gamepad_axis_count: 0,
             touch_points: [EMPTY_TOUCH; MAX_TOUCH_POINTS],
             touch_count: 0,
+            touch_pending_release: [false; MAX_TOUCH_POINTS],
         }
     }
 
@@ -133,6 +139,17 @@ impl InputState {
         self.prev_gamepad_buttons = self.gamepad_buttons_down;
         self.prev_mouse_x = self.mouse_x;
         self.prev_mouse_y = self.mouse_y;
+        let mut flushed = false;
+        for i in 0..MAX_TOUCH_POINTS {
+            if self.touch_pending_release[i] {
+                self.touch_points[i].active = false;
+                self.touch_pending_release[i] = false;
+                flushed = true;
+            }
+        }
+        if flushed {
+            self.touch_count = self.touch_points.iter().filter(|t| t.active).count();
+        }
     }
 
     // Keyboard
@@ -214,7 +231,20 @@ impl InputState {
     pub fn set_touch(&mut self, index: usize, x: f64, y: f64, active: bool) {
         if index < MAX_TOUCH_POINTS {
             self.touch_points[index] = TouchPoint { x, y, active };
+            if active {
+                self.touch_pending_release[index] = false;
+            }
             self.touch_count = self.touch_points.iter().filter(|t| t.active).count();
+        }
+    }
+    /// Deferred release: keeps the slot active for the current frame and
+    /// clears it at `end_frame`. Call from platform event loops on ACTION_UP
+    /// so a DOWN+UP that falls inside one frame remains visible to the game.
+    pub fn release_touch(&mut self, index: usize, x: f64, y: f64) {
+        if index < MAX_TOUCH_POINTS {
+            self.touch_points[index].x = x;
+            self.touch_points[index].y = y;
+            self.touch_pending_release[index] = true;
         }
     }
     pub fn get_touch_x(&self, index: usize) -> f64 {
