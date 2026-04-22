@@ -278,7 +278,7 @@ struct BloomRootView: View {
                 // bloom_begin_mode_3d call can light it up without view
                 // reconstruction. The scene is empty (transparent) until a
                 // 3D command arrives.
-                BloomSceneView(frameTick: frameTick, drawBuf: drawBuf)
+                BloomSceneView(frameTick: frameTick, drawBuf: drawBuf, fx: fx, viewSize: geo.size)
                     .ignoresSafeArea()
 
                 // 2D overlay — Canvas drives drawing from the snapshot and
@@ -409,12 +409,20 @@ struct BloomRootView: View {
 struct BloomSceneView: View {
     let frameTick: UInt64
     let drawBuf: UnsafeMutableBufferPointer<DrawCmd>
+    /// Caller passes the current PostFx state so we can keep the technique's
+    /// uniforms in sync each frame.
+    let fx: PostFxState
+    let viewSize: CGSize
 
     @State private var scene: SCNScene = makeBaseScene()
     @State private var contentRoot: SCNNode = SCNNode()   // immediate-mode per-frame draws
     @State private var retainedRoot: SCNNode = SCNNode()  // bloom_scene_* retained nodes
     @State private var lightsRoot: SCNNode = SCNNode()    // bloom_add_*_light instances
     @State private var cameraNode: SCNNode = SCNNode()
+    /// Built once from default.metallib. Uniforms are pushed per frame in
+    /// rebuild(); the technique itself is reused (rebuilding the dict each
+    /// frame would churn SceneKit's pipeline cache).
+    @State private var fxTechnique: SCNTechnique? = BloomPostFXTechnique.shared
 
     /// Cache of SCNNodes for retained scene graph, keyed by bloom handle.
     @State private var retainedNodes: [UInt32: SCNNode] = [:]
@@ -443,7 +451,9 @@ struct BloomSceneView: View {
             pointOfView: cameraNode,
             options: [.rendersContinuously],
             preferredFramesPerSecond: 30,
-            antialiasingMode: .none
+            antialiasingMode: .none,
+            delegate: nil,
+            technique: anyEffectActive ? fxTechnique : nil
         )
         .onAppear {
             if contentRoot.parent == nil {
@@ -462,6 +472,17 @@ struct BloomSceneView: View {
             rebuild()
         }
         .onChange(of: frameTick) { _, _ in rebuild() }
+    }
+
+    /// True when at least one Metal-shader effect is on. Toggles whether
+    /// SceneView gets handed the technique at all — when nothing is enabled
+    /// SceneKit takes its default no-post-process path.
+    private var anyEffectActive: Bool {
+        fx.enabled != 0 && (
+            fx.chromaticAberration > 0.001 ||
+            fx.filmGrain > 0.001 ||
+            fx.sunStrength > 0.001
+        )
     }
 
     private func rebuild() {
@@ -521,6 +542,13 @@ struct BloomSceneView: View {
         syncRetainedNodes()
         syncLights()
         advanceAnimations()
+
+        // Push current PostFx state into the technique's uniform buffer so
+        // chromatic aberration / film grain / sun shafts all sample the
+        // up-to-date strengths and animation time.
+        if let tech = fxTechnique, anyEffectActive {
+            BloomPostFXTechnique.update(tech, fx: fx, viewSize: viewSize)
+        }
     }
 
     private func syncRetainedNodes() {
@@ -972,6 +1000,52 @@ private func slerp(_ q0: (Float, Float, Float, Float),
     let a = sin((1 - t) * theta) / sinTheta
     let b = sin(t * theta) / sinTheta
     return (q0.0 * a + x1 * b, q0.1 * a + y1 * b, q0.2 * a + z1 * b, q0.3 * a + w1 * b)
+}
+
+// MARK: - Post-FX SCNTechnique
+//
+// SwiftUI's `.colorEffect(Shader)` / `.layerEffect(Shader)` aren't on
+// watchOS, but SCNTechnique IS — partially. Verified working:
+//   - SCNTechnique(dictionary:) → builds the pass graph
+//   - Attaching technique to SCNView via SwiftUI SceneView's `technique:`
+//     parameter → applies the post-process pass
+//   - Metal shaders compiled into default.metallib via Perry's
+//     metal_sources pipeline → load and execute correctly (proven by a
+//     debug shader that returns a constant red)
+//   - COLOR-semantic input/output binding → routes the scene's main color
+//     attachment in and back out
+//
+// What does NOT work on watchOS:
+//   - Per-draw uniform push. SCNTechnique's
+//     `handleBindingOfSymbol:usingBlock:` takes an `SCNRenderer` parameter,
+//     and `SCNRenderer.h` simply isn't in the watchOS SDK — the method is
+//     uncallable from Swift. SceneKit's `setObject(NSData,forKeyedSubscript:)`
+//     route, which works for SCNProgram per-material shaders, doesn't
+//     deliver values to SCNTechnique-bound Metal `[[buffer(N)]]` slots.
+//
+// So today the technique can run a fixed-strength post-process (hardcode
+// values in the shader, recompile to change them), but the
+// bloom_set_chromatic_aberration / _film_grain / _sun_shafts dynamic-knob
+// API has no path to drive its strengths on watchOS.
+//
+// Tracking: Bloom-Engine#16 stays open with this finding; Apple Feedback
+// filed for SCNRenderer / handleBinding parity on watchOS. See the
+// bloom_postfx.metal shader for the math — it's ready to wire up the
+// moment Apple ships either SCNRenderer or `.colorEffect(Shader)` on the
+// watch.
+enum BloomPostFXTechnique {
+
+    /// Built once on first access. Currently no-op on watchOS — the
+    /// technique would attach and run, but with all uniform strengths
+    /// stuck at zero (no per-draw push API), every effect short-circuits
+    /// to pass-through. Returning nil signals BloomSceneView to skip the
+    /// technique entirely until uniforms can be wired.
+    static let shared: SCNTechnique? = nil
+
+    static func update(_ technique: SCNTechnique, fx: PostFxState, viewSize: CGSize) {
+        // No-op until uniform binding lands. See file-level comment.
+        _ = technique; _ = fx; _ = viewSize
+    }
 }
 
 private func makeBaseScene() -> SCNScene {

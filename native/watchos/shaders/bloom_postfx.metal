@@ -1,73 +1,99 @@
-// bloom_postfx.metal — Post-processing shaders for watchOS.
+// bloom_postfx.metal — Combined post-process pass for watchOS via SCNTechnique.
 //
-// Compiled into the .app as default.metallib by Perry's metal_sources
-// pipeline. SwiftUI's .colorEffect(Shader(...)) / .layerEffect(Shader(...))
-// look them up by name via ShaderLibrary.default.
+// Compiled into the .app's default.metallib by Perry's metal_sources
+// pipeline. Loaded at runtime by BloomPostFXTechnique.swift, which builds
+// an SCNTechnique that runs this pass after SceneKit's main color pass.
 //
-// Each entry is [[ stitchable ]] so SwiftUI's shader stitcher can inline
-// the function into its pipeline.
+// Three effects (chromatic aberration, film grain, sun shafts) are chained
+// in one fragment to avoid ping-pong target plumbing. Each effect reads its
+// strength from the uniforms — strength 0 short-circuits to no-op so games
+// only pay for what's enabled. Vignette + exposure stay on the SwiftUI side
+// (cheaper, no shader needed).
+//
+// SCNTechnique on watchOS requires standard vertex+fragment entry points;
+// `[[ stitchable ]]` (the SwiftUI Shader annotation) doesn't apply here.
 
 #include <metal_stdlib>
-#include <SwiftUI/SwiftUI_Metal.h>
-
 using namespace metal;
 
-// ---------- Film grain ----------
-//
-// Adds time-animated noise to each pixel. Noise is a cheap hash of
-// (position, time) — not cryptographic, but visually indistinguishable from
-// proper noise at grain strengths < 0.3.
-//
-// Args: strength (0..1), time (seconds)
-[[ stitchable ]]
-half4 bloom_film_grain(float2 position, half4 color, float strength, float time) {
-    float2 p = position + float2(time * 13.1, time * 7.3);
-    float n = fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
-    half g = half((n - 0.5) * strength);
-    return half4(color.rgb + g, color.a);
+struct PostFxVertOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+// Fullscreen triangle. SceneKit's DRAW_QUAD draw mode runs this with
+// vertex_count = 3; the math expands to a 2:2 triangle whose rasterized
+// region is exactly the viewport.
+vertex PostFxVertOut bloom_postfx_vertex(uint vid [[vertex_id]]) {
+    PostFxVertOut out;
+    float2 uv = float2((vid << 1) & 2, vid & 2);
+    out.uv = uv;
+    out.position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+    return out;
 }
 
-// ---------- Chromatic aberration ----------
+// Uniforms — three SCNTechnique vec4 symbols bound at buffer 0/1/2.
+// params0 = (chromatic aberration strength, film grain strength,
+//            film grain time, sun shafts strength)
+// params1 = (sun X UV, sun Y UV, sun decay, screen width px)
+// params2 = (sun tint R, sun tint G, sun tint B, screen height px)
 //
-// Samples the layer at slightly offset positions per RGB channel, with the
-// offset growing quadratically with distance from screen center (so it's
-// subtle in the middle and pronounced in the corners — matches real lens
-// behavior). Alpha carried through from the green channel.
-//
-// Args: strength (px at corner), size (screen width, height)
-[[ stitchable ]]
-half4 bloom_chromatic_aberration(float2 position, SwiftUI::Layer layer,
-                                 float strength, float2 size) {
-    float2 center = size * 0.5;
-    float2 radial = (position - center) / center;
-    float dist = dot(radial, radial);  // 0 at center, 1 near corner
-    float2 offset = radial * (strength * dist);
-    half r = layer.sample(position + offset).r;
-    half4 g = layer.sample(position);
-    half b = layer.sample(position - offset).b;
-    return half4(r, g.g, b, g.a);
-}
+// SCNTechnique symbol-to-buffer binding maps each `vec4` symbol to a
+// sequential `[[buffer(N)]]` slot in declaration order.
+fragment half4 bloom_postfx_combined(
+    PostFxVertOut in [[stage_in]],
+    texture2d<half> color [[texture(0)]],
+    constant float4 &params0 [[buffer(0)]],
+    constant float4 &params1 [[buffer(1)]],
+    constant float4 &params2 [[buffer(2)]]
+) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
 
-// ---------- Sun shafts ----------
-//
-// Radial blur from a "sun" screen position — cheap god-ray fake. Samples
-// along the ray from `sun` toward `position`, accumulating with a decay
-// factor so closer samples contribute more. Tinted and scaled by strength.
-//
-// Args: sun (screen-space position), strength (0..1), decay (0..1, typical 0.85),
-//       tint (half3 RGB, 0..1)
-[[ stitchable ]]
-half4 bloom_sun_shafts(float2 position, SwiftUI::Layer layer,
-                      float2 sun, float strength, float decay, half3 tint) {
-    const int STEPS = 12;
-    float2 delta = (position - sun) / float(STEPS);
-    float w = 1.0;
-    half4 acc = half4(0.0);
-    for (int i = 0; i < STEPS; i++) {
-        acc += layer.sample(position - delta * float(i)) * half(w);
-        w *= decay;
+    // Chromatic aberration — sample R/G/B at radial offset positions.
+    half3 rgb;
+    half a;
+    float ca_strength = params0.x;
+    if (ca_strength > 0.001) {
+        float2 center = float2(0.5);
+        float2 radial = in.uv - center;
+        float dist = dot(radial, radial);  // 0 center → 0.5 corner
+        float2 px_to_uv = 1.0 / float2(max(params1.w, 1.0), max(params2.w, 1.0));
+        float2 offset = radial * (ca_strength * dist * 4.0) * px_to_uv;
+        rgb.r = color.sample(s, in.uv + offset).r;
+        half4 g = color.sample(s, in.uv);
+        rgb.g = g.g;
+        a = g.a;
+        rgb.b = color.sample(s, in.uv - offset).b;
+    } else {
+        half4 c = color.sample(s, in.uv);
+        rgb = c.rgb;
+        a = c.a;
     }
-    half4 base = layer.sample(position);
-    half3 shaft = (acc.rgb / half(STEPS)) * tint * half(strength);
-    return half4(base.rgb + shaft, base.a);
+
+    // Sun shafts — radial accumulation from a screen-space sun position.
+    float sun_strength = params0.w;
+    if (sun_strength > 0.001) {
+        const int STEPS = 12;
+        float2 sun = float2(params1.x, params1.y);
+        float decay = params1.z;
+        float2 delta = (in.uv - sun) / float(STEPS);
+        half3 acc = half3(0.0);
+        float w = 1.0;
+        for (int i = 0; i < STEPS; i++) {
+            acc += color.sample(s, in.uv - delta * float(i)).rgb * half(w);
+            w *= decay;
+        }
+        half3 tint = half3(params2.x, params2.y, params2.z);
+        rgb += (acc / half(STEPS)) * tint * half(sun_strength);
+    }
+
+    // Film grain — hash noise added per-pixel.
+    float grain_strength = params0.y;
+    if (grain_strength > 0.001) {
+        float2 p = in.uv * 1024.0 + float2(params0.z * 13.1, params0.z * 7.3);
+        float n = fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+        rgb += half((n - 0.5) * grain_strength);
+    }
+
+    return half4(rgb, a);
 }

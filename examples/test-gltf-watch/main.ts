@@ -31,9 +31,11 @@ setTargetFPS(30);
 bloom_add_directional_light(-0.5, -0.8, -0.3, 1, 1, 1, 1.2);
 bloom_enable_postfx();
 bloom_set_vignette(0.5, 0.3);
-bloom_set_chromatic_aberration(8.0);       // ~8px RGB offset at screen corners
-bloom_set_film_grain(0.15);                 // subtle 15% noise
-bloom_set_sun_shafts(0.4, 0.85, 1.0, 0.9, 0.5); // warm amber rays
+// Post-fx Metal shaders compile + bundle but the Apple SDK gap on watchOS
+// (no SCNRenderer → no SCNTechnique uniform binding) leaves these as
+// no-ops on the watch today. See BloomPostFXTechnique comment.
+// bloom_set_chromatic_aberration(6.0);
+// bloom_set_film_grain(0.10);
 
 const buggy = loadModel("assets/Buggy.glb");
 
