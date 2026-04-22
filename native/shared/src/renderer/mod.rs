@@ -7540,10 +7540,15 @@ impl Renderer {
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
-                            // Default = (0, 1) = non-metal, fully
-                            // rough — sky / 3D / blank pixels won't
-                            // SSR-reflect.
-                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 1.0, b: 0.0, a: 0.0 }),
+                            // Blank pixels clear to metallic=0. SSR's
+                            // `metallic < 0.2` gate early-outs before
+                            // roughness is read, so the roughness
+                            // component of the clear is dead — leaving
+                            // it at 0 instead of 1 keeps the material
+                            // texture black in frame captures and
+                            // avoids a false "green G-buffer" readout
+                            // if the RT is ever viewed as RGBA.
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: wgpu::StoreOp::Store,
                         },
                     }),

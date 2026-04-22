@@ -188,7 +188,7 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
     // Immediate-mode 3D draws (drawCube etc.) aren't PBR — output
     // 0 metallic / 1 roughness so SSR doesn't try to reflect them.
     return Fs3DOut(
-        vec4<f32>(0.0, 1.0, 0.0, 1.0), // DEBUG: green if pipeline_3d renders this
+        vec4<f32>(tex_color.rgb * in.color.rgb * lit, tex_color.a * in.color.a),
         vec2<f32>(0.0, 1.0),
         vel,
         vec4<f32>(0.0),
