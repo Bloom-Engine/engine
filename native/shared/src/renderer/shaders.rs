@@ -2596,13 +2596,37 @@ fn cs_main(
         - vec3<f32>(extent * 0.5)
         + (vec3<f32>(f32(wg.x), f32(wg.y), f32(wg.z)) + vec3<f32>(0.5)) * cell;
 
-    // Map padded octel (0..9) → real octel (0..7) via clamp. Border
-    // texels collapse to the nearest inside octel.
-    let oct_clamped = vec2<u32>(
-        u32(clamp(i32(lid.x) - 1, 0, 7)),
-        u32(clamp(i32(lid.y) - 1, 0, 7)),
-    );
-    let dir = octel_direction(oct_clamped);
+    // V11 — map padded octel → real octel with true octahedral
+    // silhouette wrap on the 4 edges. Beyond v<0 or v>1 in octel uv
+    // space the octahedron folds onto itself with u ↔ 1-u; likewise
+    // u<0 or u>1 folds with v ↔ 1-v. Corners (both axes out) keep
+    // the V10 edge-extend fill since the double-fold has two valid
+    // representations and the exact corner only matters when the
+    // sampler bilinear-weights it near zero anyway.
+    let px = i32(lid.x);
+    let py = i32(lid.y);
+    let is_edge_x = px == 0 || px == 9;
+    let is_edge_y = py == 0 || py == 9;
+    var real_ox: i32;
+    var real_oy: i32;
+    if (is_edge_x && is_edge_y) {
+        // Corner — nearest-inside (edge-extend).
+        real_ox = clamp(px - 1, 0, 7);
+        real_oy = clamp(py - 1, 0, 7);
+    } else if (is_edge_y) {
+        // Top/bottom border: mirror x across the edge, same row.
+        real_ox = 8 - px;
+        real_oy = clamp(py - 1, 0, 7);
+    } else if (is_edge_x) {
+        // Left/right border: same column, mirror y across the edge.
+        real_ox = clamp(px - 1, 0, 7);
+        real_oy = 8 - py;
+    } else {
+        // Interior — direct mapping.
+        real_ox = px - 1;
+        real_oy = py - 1;
+    }
+    let dir = octel_direction(vec2<u32>(u32(real_ox), u32(real_oy)));
 
     // Shadow at the probe position (cascade 2 — widest, covers the
     // full 120 m cube without per-probe cascade selection).
