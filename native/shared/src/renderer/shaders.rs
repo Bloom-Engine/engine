@@ -3942,7 +3942,26 @@ fn cs_main(
     let hist = textureLoad(history_in, coord, 0).rgb;
 
     var alpha = u.params.x;
-    if (u.params.y > 0.5) { alpha = 1.0; }
+    if (u.params.y > 0.5) {
+        alpha = 1.0;
+    } else {
+        // Ticket 016 V4 — variance-adaptive alpha. Scale the base
+        // EMA by `|luma(curr) - luma(hist)|` so moving lights /
+        // disocclusions / scene cuts converge quickly while stable
+        // octels keep strong temporal smoothing. This captures the
+        // hierarchical-refinement intent (high-variance regions get
+        // more per-frame weight, low-variance regions average more
+        // history) without needing a separate refinement probe
+        // layer + indirect dispatch.
+        //
+        // `luma_delta_scale = 0.6` means a 1.0-luma delta pushes
+        // alpha up by 0.6 on top of the 0.25 base — up to 0.85
+        // before the `min(1.0)` clamp.
+        let curr_luma = dot(curr, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let hist_luma = dot(hist, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let delta = abs(curr_luma - hist_luma);
+        alpha = min(1.0, alpha + delta * 0.6);
+    }
     let blended = mix(hist, curr, alpha);
 
     textureStore(history_out, coord, vec4<f32>(blended, 1.0));
