@@ -31,6 +31,7 @@ use formats::{
     CARD_AXES_PER_MESH, create_mesh_sdf_texture, MESH_SDF_RES,
     create_scene_sdf_clipmap, SCENE_SDF_CLIPMAP_RES,
     SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD,
+    create_wsrc_atlas, WSRC_GRID_RES, WSRC_EXTENT, WSRC_REBAKE_THRESHOLD,
     create_taa_textures,
     create_ssao_rt, create_ssao_blur_rt, create_ssao_history_textures, create_sss_rt,
     create_exposure_textures, create_composed_rt, create_dof_rt,
@@ -251,6 +252,12 @@ struct ProbeTraceParams {
     /// by the SDF sphere-trace variant to map world-space march
     /// positions into clipmap sample UVs.
     clipmap: [f32; 4],
+    /// Ticket 014 V6 — WSRC cube origin (xyz) + full extent (w).
+    /// Read by the SDF shader on miss to project the ray-terminal
+    /// position into the world-space radiance cache. HW + Hi-Z
+    /// variants carry the same field for uniform-buffer size parity
+    /// but ignore it.
+    wsrc: [f32; 4],
 }
 
 #[repr(C)]
@@ -359,6 +366,30 @@ struct SdfBakeParams {
     aabb_max: [f32; 4],
     /// x = triangle_count, y = sdf_resolution (32), zw unused
     counts: [u32; 4],
+}
+
+/// Ticket 014 V6 — uniform for `WSRC_BAKE_WGSL`. Analytic sun × shadow
+/// + analytic sky computed per probe-octel. Shadow VPs + splits +
+/// flags mirror CARD_LIGHT_WGSL so the shader can re-use the same
+/// cascade-sampling helper.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct WsrcBakeParams {
+    sun_dir: [f32; 4],
+    sun_color: [f32; 4],
+    sky_color: [f32; 4],
+    /// xyz = WSRC cube origin, w = full extent.
+    grid: [f32; 4],
+    /// Cascade 0..2 VPs. Only cascade 2 is actually sampled by V6
+    /// (widest cascade covers the whole 120 m cube), but we carry
+    /// all three to keep the uniform layout identical to the card-
+    /// lighting params.
+    shadow_vps: [[[f32; 4]; 4]; 3],
+    /// xyz = view-space split distances (unused by V6 because it
+    /// always samples cascade 2), w = 0.
+    shadow_splits: [f32; 4],
+    /// x = shadow bias, y = shadows_enabled (0/1), zw unused.
+    flags: [f32; 4],
 }
 
 /// Uniform struct for the card-lighting compute pass. Matches
@@ -933,6 +964,20 @@ pub struct Renderer {
     /// snapped camera position at last bake). Read every frame by the
     /// trace uniform; updated at bake time.
     pub scene_sdf_clipmap_origin: [f32; 3],
+
+    // --- Ticket 014 V6: World-Space Radiance Cache ---
+    pub wsrc_atlas_tex: wgpu::Texture,
+    pub wsrc_atlas_view: wgpu::TextureView,
+    pub wsrc_bake_pipeline: wgpu::ComputePipeline,
+    pub wsrc_bake_layout: wgpu::BindGroupLayout,
+    pub wsrc_bake_uniform: wgpu::Buffer,
+    wsrc_bake_bg_cache: Option<wgpu::BindGroup>,
+    /// Cleared on camera travel past `WSRC_REBAKE_THRESHOLD × extent`
+    /// or on any change to the lighting environment (sun colour,
+    /// shadow-cascade rebuild). Like the SDF clipmap, starts `false`
+    /// and gets re-baked on first frame.
+    pub wsrc_built: bool,
+    pub wsrc_origin: [f32; 3],
 
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
@@ -3441,6 +3486,18 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Ticket 014 V6 — WSRC atlas. textureLoad-sampled, so
+                // no sampler binding. Non-filterable Float to dodge
+                // the F32_FILTERABLE optional feature (matches the
+                // clipmap's constraint).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    }, count: None,
+                },
             ],
         });
         let probe_trace_sdf_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3906,6 +3963,78 @@ impl Renderer {
         // --- Ticket 014 V2: scene clipmap ---
         let (scene_sdf_clipmap_tex, scene_sdf_clipmap_view) =
             create_scene_sdf_clipmap(&device);
+
+        // --- Ticket 014 V6: WSRC ---
+        let (wsrc_atlas_tex, wsrc_atlas_view) = create_wsrc_atlas(&device);
+        let wsrc_bake_shader = probe_shader("wsrc_bake_shader", WSRC_BAKE_WGSL);
+        let wsrc_bake_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wsrc_bake_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: HDR_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    }, count: None,
+                },
+            ],
+        });
+        let wsrc_bake_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wsrc_bake_pl_layout"),
+            bind_group_layouts: &[Some(&wsrc_bake_layout)],
+            immediate_size: 0,
+        });
+        let wsrc_bake_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("wsrc_bake_pipeline"),
+            layout: Some(&wsrc_bake_pl_layout),
+            module: &wsrc_bake_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let wsrc_bake_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wsrc_bake_uniform"),
+            size: std::mem::size_of::<WsrcBakeParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         // --- Scene-compose pipeline ---
         // Merges HDR + SSR + SSGI*albedo + bloom + fog + shafts into
@@ -4635,6 +4764,14 @@ impl Renderer {
             scene_sdf_clipmap_view,
             scene_sdf_clipmap_built: false,
             scene_sdf_clipmap_origin: [0.0, 0.0, 0.0],
+            wsrc_atlas_tex,
+            wsrc_atlas_view,
+            wsrc_bake_pipeline,
+            wsrc_bake_layout,
+            wsrc_bake_uniform,
+            wsrc_bake_bg_cache: None,
+            wsrc_built: false,
+            wsrc_origin: [0.0, 0.0, 0.0],
             probe_temporal_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
@@ -5349,6 +5486,127 @@ impl Renderer {
         drop(pass);
 
         self.scene_sdf_clipmap_built = true;
+    }
+
+    /// Ticket 014 V6 — invalidate the WSRC atlas on camera travel.
+    /// Mirrors `maybe_invalidate_sdf_clipmap` with the WSRC-specific
+    /// threshold (0.25 × 120 m = 30 m). Also re-bakes any time the
+    /// SDF clipmap gets rebuilt — keeps the two caches in sync so the
+    /// trace miss path always sees a WSRC centred near the clipmap.
+    fn maybe_invalidate_wsrc(&mut self) {
+        if !self.wsrc_built {
+            return;
+        }
+        let cam = self.current_camera_world_pos();
+        let dx = cam[0] - self.wsrc_origin[0];
+        let dy = cam[1] - self.wsrc_origin[1];
+        let dz = cam[2] - self.wsrc_origin[2];
+        let dist_sq = dx * dx + dy * dy + dz * dz;
+        let threshold = WSRC_EXTENT * WSRC_REBAKE_THRESHOLD;
+        if dist_sq > threshold * threshold {
+            self.wsrc_built = false;
+        }
+    }
+
+    /// Ticket 014 V6 — bake the world-space radiance cache. One
+    /// dispatch covers all `WSRC_GRID_RES³` probes × 64 octel texels.
+    /// Cheap: per-texel work is one shadow-cascade lookup + analytic
+    /// sun/sky math, roughly matching a single card-lighting pixel.
+    /// Runs at most once per `WSRC_REBAKE_THRESHOLD × extent` of
+    /// camera travel — same amortisation pattern as the clipmap.
+    fn bake_wsrc(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if self.wsrc_built {
+            return;
+        }
+
+        // Snap origin to one probe-cell so sub-cell camera drift
+        // doesn't shift which probe a miss samples.
+        let cell = WSRC_EXTENT / WSRC_GRID_RES as f32;
+        let cam = self.current_camera_world_pos();
+        let origin = [
+            (cam[0] / cell).round() * cell,
+            (cam[1] / cell).round() * cell,
+            (cam[2] / cell).round() * cell,
+        ];
+        self.wsrc_origin = origin;
+
+        let ld = self.lighting_uniforms.light_dir;
+        let inv_len = 1.0 / (ld[0]*ld[0] + ld[1]*ld[1] + ld[2]*ld[2]).sqrt().max(1e-4);
+        let sun_dir_ws = [-ld[0]*inv_len, -ld[1]*inv_len, -ld[2]*inv_len, ld[3]];
+        let lc = self.lighting_uniforms.light_color;
+        let sun_intensity = ld[3].max(0.0);
+        let sun_color = [
+            lc[0] * sun_intensity,
+            lc[1] * sun_intensity,
+            lc[2] * sun_intensity,
+            0.0,
+        ];
+        let amb = self.lighting_uniforms.ambient;
+        let sky_intensity = amb[3].max(0.0);
+        let sky_color = [
+            amb[0] * sky_intensity,
+            amb[1] * sky_intensity,
+            amb[2] * sky_intensity,
+            0.0,
+        ];
+
+        let shadows_enabled = self.shadow_map.enabled;
+        let shadow_vps: [[[f32; 4]; 4]; 3] = if shadows_enabled {
+            self.shadow_map.light_vps
+        } else {
+            [IDENTITY_MAT4; 3]
+        };
+        let shadow_splits = if shadows_enabled {
+            let s = self.shadow_map.cascade_splits;
+            [s[0], s[1], s[2], 0.0]
+        } else {
+            [f32::INFINITY, f32::INFINITY, f32::INFINITY, 0.0]
+        };
+
+        let params = WsrcBakeParams {
+            sun_dir: sun_dir_ws,
+            sun_color,
+            sky_color,
+            grid: [origin[0], origin[1], origin[2], WSRC_EXTENT],
+            shadow_vps,
+            shadow_splits,
+            flags: [0.002, if shadows_enabled { 1.0 } else { 0.0 }, 0.0, 0.0],
+        };
+        self.queue.write_buffer(
+            &self.wsrc_bake_uniform,
+            0,
+            bytemuck::bytes_of(&params),
+        );
+
+        if self.wsrc_bake_bg_cache.is_none() {
+            self.wsrc_bake_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("wsrc_bake_bg"),
+                layout: &self.wsrc_bake_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.wsrc_bake_uniform.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
+                ],
+            }));
+        }
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("wsrc_bake_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.wsrc_bake_pipeline);
+        pass.set_bind_group(0, self.wsrc_bake_bg_cache.as_ref().unwrap(), &[]);
+        // One workgroup per probe (16³), 8×8 threads per workgroup.
+        pass.dispatch_workgroups(WSRC_GRID_RES, WSRC_GRID_RES, WSRC_GRID_RES);
+        drop(pass);
+
+        self.wsrc_built = true;
     }
 
     /// Ticket 014 V1 — bake per-mesh unsigned distance fields via
@@ -6674,6 +6932,15 @@ impl Renderer {
         self.bake_scene_sdf_clipmap(scene, &mut encoder);
         profiler.end("scene_sdf_clipmap");
 
+        // Ticket 014 V6: World-Space Radiance Cache. Invalidate on
+        // camera travel past 30 m; re-bake when not built. Runs even
+        // when HW RT is active so a future V7 can wire the HW miss
+        // path into the same cache.
+        self.maybe_invalidate_wsrc();
+        profiler.begin("wsrc_bake");
+        self.bake_wsrc(&mut encoder);
+        profiler.end("wsrc_bake");
+
         // Ticket 013 V2: re-light the card atlas every frame so the
         // HW probe trace can sample pre-lit radiance at hit instead
         // of running the sun/sky math per ray.
@@ -7524,6 +7791,16 @@ impl Renderer {
                     self.scene_sdf_clipmap_origin[2],
                     SCENE_SDF_CLIPMAP_EXTENT,
                 ],
+                // Ticket 014 V6 — WSRC cube origin xyz + extent w.
+                // Pass extent=0 if WSRC isn't built yet; shader reads
+                // that as "skip the cache, return black" — which is
+                // equivalent to the pre-V6 miss behaviour.
+                wsrc: [
+                    self.wsrc_origin[0],
+                    self.wsrc_origin[1],
+                    self.wsrc_origin[2],
+                    if self.wsrc_built { WSRC_EXTENT } else { 0.0 },
+                ],
             };
             self.queue.write_buffer(&self.probe_trace_uniform, 0, bytemuck::bytes_of(&trace_params));
             // Trace bind group is cache-stable (always writes into the
@@ -7623,6 +7900,8 @@ impl Renderer {
                             wgpu::BindGroupEntry { binding: 5, resource: instance_buf.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
                             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
+                            // V6 — WSRC atlas for the SDF miss path.
+                            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
                         ],
                     }));
                 }

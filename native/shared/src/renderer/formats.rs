@@ -347,6 +347,46 @@ pub(super) fn create_scene_sdf_clipmap(
     (texture, view)
 }
 
+/// Ticket 014 V6 — World-Space Radiance Cache. 16³ grid of octahedral
+/// probes, each holding an 8×8 slab of pre-integrated distant
+/// lighting. Sampled when a SDF sphere-trace escapes the clipmap or
+/// exhausts its march budget — replaces the V3/V4 "return black" miss
+/// path with a directional envelope sample so off-scene rays still
+/// contribute to the bounce.
+///
+/// Layout (rgba16float D3 texture at `(128, 128, 16)`):
+///   probe at grid `(gx, gy, gz)`, octel `(ox, oy)` → texel
+///   `(gx * 8 + ox, gy * 8 + oy, gz)`
+///
+/// Extent is 3× the SDF clipmap — a single grid cell is 7.5 m, wide
+/// enough that ray-terminal positions beyond the clipmap still land
+/// inside the cache. Camera-follows via `WSRC_REBAKE_THRESHOLD`.
+pub(super) const WSRC_GRID_RES: u32 = 16;
+pub(super) const WSRC_EXTENT: f32 = 120.0;
+pub(super) const WSRC_REBAKE_THRESHOLD: f32 = 0.25;
+
+pub(super) fn create_wsrc_atlas(
+    device: &wgpu::Device,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("wsrc_atlas"),
+        size: wgpu::Extent3d {
+            width: WSRC_GRID_RES * PROBE_OCT_SIZE,
+            height: WSRC_GRID_RES * PROBE_OCT_SIZE,
+            depth_or_array_layers: WSRC_GRID_RES,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+             | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Ticket 014 — per-mesh unsigned distance field. V1 is a fixed 32³
 /// R32Float 3D texture per mesh (128 KB each). R32 instead of R16 so
 /// `WriteOnly` storage binding is accepted on the core wgpu feature

@@ -2515,6 +2515,111 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+/// Ticket 014 V6 — World-Space Radiance Cache bake.
+///
+/// One workgroup per probe (16×16×16 probes on a 120 m camera-following
+/// cube), 8×8 threads per workgroup = one octel texel each. Output is
+/// the flat rgba16float atlas read by the SDF miss path.
+///
+/// Per texel: analytic sun term for the octel direction, gated by a
+/// shadow-cascade lookup at the probe's world position (position-
+/// varying occlusion — the crucial signal that makes the cache worth
+/// having; flat analytic would mean every probe holds the same
+/// content). Analytic sky hemisphere for up-biased directions. No
+/// per-direction geometry trace — this is the "distant envelope",
+/// not another SDF march.
+pub(super) const WSRC_BAKE_WGSL: &str = "
+struct WsrcBakeParams {
+    sun_dir: vec4<f32>,
+    sun_color: vec4<f32>,
+    sky_color: vec4<f32>,
+    // xyz = clipmap origin (world-space cube centre), w = full extent
+    grid: vec4<f32>,
+    shadow_vps: array<mat4x4<f32>, 3>,
+    shadow_splits: vec4<f32>,
+    // x = shadow bias, y = shadows-enabled flag, zw unused
+    flags: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: WsrcBakeParams;
+@group(0) @binding(1) var shadow_atlas_0: texture_depth_2d;
+@group(0) @binding(2) var shadow_atlas_1: texture_depth_2d;
+@group(0) @binding(3) var shadow_atlas_2: texture_depth_2d;
+@group(0) @binding(4) var shadow_samp: sampler_comparison;
+@group(0) @binding(5) var wsrc_out: texture_storage_3d<rgba16float, write>;
+
+fn wsrc_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
+    var clip: vec4<f32>;
+    if (cascade == 0) {
+        clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
+    } else if (cascade == 1) {
+        clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0);
+    } else {
+        clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0);
+    }
+    let ndc = clip.xyz / clip.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let ref_depth = ndc.z - bias;
+    if (cascade == 0) {
+        return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, shadow_uv, ref_depth);
+    } else if (cascade == 1) {
+        return textureSampleCompareLevel(shadow_atlas_1, shadow_samp, shadow_uv, ref_depth);
+    } else {
+        return textureSampleCompareLevel(shadow_atlas_2, shadow_samp, shadow_uv, ref_depth);
+    }
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let grid_res: u32 = 16u;
+    if (wg.x >= grid_res || wg.y >= grid_res || wg.z >= grid_res) { return; }
+    if (lid.x >= PROBE_OCT_SIZE || lid.y >= PROBE_OCT_SIZE) { return; }
+
+    // Probe world-space centre — cell-centre within the grid cube.
+    let extent = u.grid.w;
+    let cell = extent / f32(grid_res);
+    let probe_pos = u.grid.xyz
+        - vec3<f32>(extent * 0.5)
+        + (vec3<f32>(f32(wg.x), f32(wg.y), f32(wg.z)) + vec3<f32>(0.5)) * cell;
+
+    // Octahedral direction for this texel.
+    let dir = octel_direction(lid.xy);
+
+    // Shadow at the probe position. We use cascade 2 (the widest) so a
+    // single lookup covers the full grid without needing view-space-Z
+    // cascade selection; for a 120 m WSRC cube this is plenty for the
+    // distant-envelope use case.
+    var shadow: f32 = 1.0;
+    if (u.flags.y > 0.5) {
+        shadow = wsrc_sample_cascade(2, probe_pos, u.flags.x);
+    }
+
+    let ndotl = max(dot(dir, u.sun_dir.xyz), 0.0);
+    let sun = u.sun_color.xyz * ndotl * shadow;
+
+    // Sky hemisphere — smooth up-bias. dir.y in [-1, 1] → [0, 1]
+    // weighted quadratically so rays pointing horizontally still get
+    // some horizon glow while the zenith term dominates.
+    let up = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    let sky = u.sky_color.xyz * up * up;
+
+    let radiance = sun + sky;
+
+    let tex_coord = vec3<i32>(
+        i32(wg.x * PROBE_OCT_SIZE + lid.x),
+        i32(wg.y * PROBE_OCT_SIZE + lid.y),
+        i32(wg.z),
+    );
+    textureStore(wsrc_out, tex_coord, vec4<f32>(radiance, 1.0));
+}
+";
+
 // ============================================================================
 // Ticket 007a — Lumen-style screen-probe SSGI (software Hi-Z trace)
 //
@@ -2683,13 +2788,14 @@ struct TraceParams {
     size: vec4<u32>,
     // x = frame_index, y = intensity, z = max_march_t_world, w = firefly_cap
     params: vec4<f32>,
-    // Ticket 014 V3 — rest of the shared `ProbeTraceParams` layout.
+    // Ticket 014 V3/V6 — rest of the shared `ProbeTraceParams` layout.
     // Ignored by Hi-Z; present only so the shader struct size matches
     // the host uniform buffer.
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
     sky_color: vec4<f32>,
     clipmap: vec4<f32>,
+    wsrc: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
@@ -2847,10 +2953,12 @@ struct TraceParams {
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
     sky_color: vec4<f32>,
-    // Ticket 014 V3 — clipmap origin xyz + extent w. Ignored here;
-    // present only so the struct size matches the host-side
-    // `ProbeTraceParams` uniform buffer layout.
+    // Ticket 014 V3/V6 — clipmap + WSRC padding. Ignored here; present
+    // only so the struct size matches the host-side `ProbeTraceParams`
+    // uniform buffer layout (HW path uses ray-query and its own miss
+    // sky, not WSRC).
     clipmap: vec4<f32>,
+    wsrc: vec4<f32>,
 };
 
 struct InstanceGiData {
@@ -3068,6 +3176,9 @@ struct TraceParams {
     sky_color: vec4<f32>,
     // xyz = clipmap origin, w = extent (full width, not half)
     clipmap: vec4<f32>,
+    // Ticket 014 V6 — WSRC camera-follow cube: xyz = origin, w = extent.
+    // Used by the miss path to project hit_pos into the WSRC atlas.
+    wsrc: vec4<f32>,
 };
 
 struct SdfInstanceGiData {
@@ -3082,6 +3193,7 @@ struct SdfInstanceGiData {
 
 const SDF_CARD_SLOTS_PER_ROW: f32 = 64.0;
 const SDF_CARD_SLOT_PX: u32 = 64u;
+const WSRC_GRID_RES: i32 = 16;
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
 @group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
@@ -3091,6 +3203,7 @@ const SDF_CARD_SLOT_PX: u32 = 64u;
 @group(0) @binding(5) var<storage, read> instance_data: array<SdfInstanceGiData>;
 @group(0) @binding(6) var card_atlas: texture_2d<f32>;
 @group(0) @binding(7) var card_samp: sampler;
+@group(0) @binding(8) var wsrc_atlas: texture_3d<f32>;
 
 fn clipmap_uv(pos_ws: vec3<f32>) -> vec3<f32> {
     let half_extent = u.clipmap.w * 0.5;
@@ -3105,6 +3218,35 @@ fn clipmap_sample(pos_ws: vec3<f32>) -> f32 {
         return 1e4;
     }
     return textureSampleLevel(clipmap_tex, clipmap_samp, uv, 0.0).r;
+}
+
+// Ticket 014 V6 — WSRC lookup. Nearest-probe grid cell containing
+// `pos_ws`, then nearest-octel for `dir_ws`. No trilinear filtering
+// between probes for V6; the cache is coarse enough (7.5 m cells)
+// that the dominant error is directional aliasing, not spatial.
+fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
+    let origin = u.wsrc.xyz;
+    let extent = u.wsrc.w;
+    if (extent <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let rel = pos_ws - origin + vec3<f32>(extent * 0.5);
+    let cell = extent / f32(WSRC_GRID_RES);
+    let gx = clamp(i32(floor(rel.x / cell)), 0, WSRC_GRID_RES - 1);
+    let gy = clamp(i32(floor(rel.y / cell)), 0, WSRC_GRID_RES - 1);
+    let gz = clamp(i32(floor(rel.z / cell)), 0, WSRC_GRID_RES - 1);
+
+    let uv = oct_encode(dir_ws);
+    let oct_sz = f32(PROBE_OCT_SIZE);
+    let ox = clamp(i32(floor(uv.x * oct_sz)), 0, i32(PROBE_OCT_SIZE) - 1);
+    let oy = clamp(i32(floor(uv.y * oct_sz)), 0, i32(PROBE_OCT_SIZE) - 1);
+
+    let tex_coord = vec3<i32>(
+        gx * i32(PROBE_OCT_SIZE) + ox,
+        gy * i32(PROBE_OCT_SIZE) + oy,
+        gz,
+    );
+    return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -3279,6 +3421,17 @@ fn cs_main(
             if (luma > cap) { raw = raw * (cap / luma); }
             radiance = raw;
         }
+    } else {
+        // Ticket 014 V6 — miss path samples the WSRC envelope instead
+        // of returning black. Ray terminal position (origin + dir * t)
+        // is where we project into the cache; direction picks the
+        // probe's octel. Firefly-clamp to match the hit path.
+        let terminal = origin_ws + dir_ws * t;
+        var raw = wsrc_sample(terminal, dir_ws);
+        let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let cap = u.params.w;
+        if (luma > cap) { raw = raw * (cap / luma); }
+        radiance = raw;
     }
 
     let intensity = u.params.y;
