@@ -2975,6 +2975,7 @@ struct InstanceGiData {
 };
 
 const CARD_SLOTS_PER_ROW: f32 = 64.0;
+const HW_WSRC_GRID_RES: i32 = 16;
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
 @group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
@@ -2983,6 +2984,36 @@ const CARD_SLOTS_PER_ROW: f32 = 64.0;
 @group(0) @binding(4) var radiance_out: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(5) var card_atlas: texture_2d<f32>;
 @group(0) @binding(6) var card_samp: sampler;
+@group(0) @binding(7) var wsrc_atlas: texture_3d<f32>;
+
+// Ticket 014 V7 — WSRC lookup shared with the SDF path (nearest
+// probe + nearest octel). extent=0 is the cache-not-ready sentinel
+// that the host writes before the first bake completes, so the HW
+// miss falls back to the pre-V7 return-black behaviour.
+fn hw_wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
+    let origin = u.wsrc.xyz;
+    let extent = u.wsrc.w;
+    if (extent <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let rel = pos_ws - origin + vec3<f32>(extent * 0.5);
+    let cell = extent / f32(HW_WSRC_GRID_RES);
+    let gx = clamp(i32(floor(rel.x / cell)), 0, HW_WSRC_GRID_RES - 1);
+    let gy = clamp(i32(floor(rel.y / cell)), 0, HW_WSRC_GRID_RES - 1);
+    let gz = clamp(i32(floor(rel.z / cell)), 0, HW_WSRC_GRID_RES - 1);
+
+    let uv = oct_encode(dir_ws);
+    let oct_sz = f32(PROBE_OCT_SIZE);
+    let ox = clamp(i32(floor(uv.x * oct_sz)), 0, i32(PROBE_OCT_SIZE) - 1);
+    let oy = clamp(i32(floor(uv.y * oct_sz)), 0, i32(PROBE_OCT_SIZE) - 1);
+
+    let tex_coord = vec3<i32>(
+        gx * i32(PROBE_OCT_SIZE) + ox,
+        gy * i32(PROBE_OCT_SIZE) + oy,
+        gz,
+    );
+    return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
+}
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(
@@ -3134,6 +3165,18 @@ fn cs_main(
             if (luma > cap) { raw = raw * (cap / luma); }
             radiance = raw;
         }
+    } else {
+        // Ticket 014 V7 — miss path samples the WSRC envelope so HW
+        // traces that escape scene geometry still contribute sky /
+        // sun-visibility signal. Terminal position is the ray's full
+        // march distance; direction picks the octel on the nearest
+        // probe.
+        let terminal = origin_ws + dir_ws * max_t;
+        var raw = hw_wsrc_sample(terminal, dir_ws);
+        let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let cap = u.params.w;
+        if (luma > cap) { raw = raw * (cap / luma); }
+        radiance = raw;
     }
 
     let intensity = u.params.y;

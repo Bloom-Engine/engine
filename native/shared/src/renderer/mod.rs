@@ -978,6 +978,16 @@ pub struct Renderer {
     /// and gets re-baked on first frame.
     pub wsrc_built: bool,
     pub wsrc_origin: [f32; 3],
+    /// Ticket 014 V7 — last-baked sun direction + intensity (xyzw)
+    /// and sun colour × intensity (xyz). Compared against the current
+    /// lighting state every frame; any mismatch clears `wsrc_built`
+    /// so the cache re-bakes with the new envelope. Also covers
+    /// shadow-cascade rebuilds: light_vps[2] changes with the sun
+    /// or the auto-fit cascade refresh.
+    pub wsrc_last_sun_dir: [f32; 4],
+    pub wsrc_last_sun_color: [f32; 3],
+    pub wsrc_last_sky_color: [f32; 3],
+    pub wsrc_last_shadow_vp: [[f32; 4]; 4],
 
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
@@ -3400,6 +3410,16 @@ impl Renderer {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Ticket 014 V7 — WSRC atlas for the HW miss path.
+                    // Non-filterable textureLoad; no sampler binding.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        }, count: None,
+                    },
                 ],
             });
             let hw_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -4772,6 +4792,10 @@ impl Renderer {
             wsrc_bake_bg_cache: None,
             wsrc_built: false,
             wsrc_origin: [0.0, 0.0, 0.0],
+            wsrc_last_sun_dir: [0.0; 4],
+            wsrc_last_sun_color: [0.0; 3],
+            wsrc_last_sky_color: [0.0; 3],
+            wsrc_last_shadow_vp: [[0.0; 4]; 4],
             probe_temporal_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
@@ -5488,15 +5512,19 @@ impl Renderer {
         self.scene_sdf_clipmap_built = true;
     }
 
-    /// Ticket 014 V6 — invalidate the WSRC atlas on camera travel.
-    /// Mirrors `maybe_invalidate_sdf_clipmap` with the WSRC-specific
-    /// threshold (0.25 × 120 m = 30 m). Also re-bakes any time the
-    /// SDF clipmap gets rebuilt — keeps the two caches in sync so the
-    /// trace miss path always sees a WSRC centred near the clipmap.
+    /// Ticket 014 V6/V7 — invalidate the WSRC atlas on camera travel
+    /// OR any lighting change. V6 handled the camera-travel case (30 m
+    /// threshold on the 120 m cube); V7 adds lighting parity, since
+    /// the cache bakes in the current sun × shadow envelope and a
+    /// rotated sun / rebuilt cascade would leave it stale forever on
+    /// a stationary camera.
+    ///
+    /// Cheap: four array-equality comparisons per frame, no hashes.
     fn maybe_invalidate_wsrc(&mut self) {
         if !self.wsrc_built {
             return;
         }
+        // Camera travel.
         let cam = self.current_camera_world_pos();
         let dx = cam[0] - self.wsrc_origin[0];
         let dy = cam[1] - self.wsrc_origin[1];
@@ -5504,6 +5532,32 @@ impl Renderer {
         let dist_sq = dx * dx + dy * dy + dz * dz;
         let threshold = WSRC_EXTENT * WSRC_REBAKE_THRESHOLD;
         if dist_sq > threshold * threshold {
+            self.wsrc_built = false;
+            return;
+        }
+        // Lighting changes. We compare the raw scene-light fields
+        // (not the derived sun_color × intensity we store post-bake)
+        // so a temporary intensity=0 frame and back still reads as
+        // "changed" and triggers the re-bake. Any drift beyond the
+        // float epsilon is treated as a real change to stay conservative
+        // — the re-bake is one cheap dispatch, not worth a similarity
+        // threshold.
+        let ld = self.lighting_uniforms.light_dir;
+        let lc = self.lighting_uniforms.light_color;
+        let amb = self.lighting_uniforms.ambient;
+        let cur_sun_dir = ld;
+        let cur_sun_color = [lc[0] * ld[3], lc[1] * ld[3], lc[2] * ld[3]];
+        let cur_sky_color = [amb[0] * amb[3], amb[1] * amb[3], amb[2] * amb[3]];
+        let cur_shadow_vp = if self.shadow_map.enabled {
+            self.shadow_map.light_vps[2]
+        } else {
+            IDENTITY_MAT4
+        };
+        let lighting_changed = cur_sun_dir != self.wsrc_last_sun_dir
+            || cur_sun_color != self.wsrc_last_sun_color
+            || cur_sky_color != self.wsrc_last_sky_color
+            || cur_shadow_vp != self.wsrc_last_shadow_vp;
+        if lighting_changed {
             self.wsrc_built = false;
         }
     }
@@ -5607,6 +5661,17 @@ impl Renderer {
         drop(pass);
 
         self.wsrc_built = true;
+
+        // V7 — snapshot the lighting state we just baked against so
+        // `maybe_invalidate_wsrc` can detect changes next frame.
+        self.wsrc_last_sun_dir = ld;
+        self.wsrc_last_sun_color = [sun_color[0], sun_color[1], sun_color[2]];
+        self.wsrc_last_sky_color = [sky_color[0], sky_color[1], sky_color[2]];
+        self.wsrc_last_shadow_vp = if shadows_enabled {
+            self.shadow_map.light_vps[2]
+        } else {
+            IDENTITY_MAT4
+        };
     }
 
     /// Ticket 014 V1 — bake per-mesh unsigned distance fields via
@@ -7863,6 +7928,8 @@ impl Renderer {
                             // at hit, not the raw albedo atlas.
                             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
                             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
+                            // V7 — WSRC atlas for the HW miss path.
+                            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
                         ],
                     }));
                 }
