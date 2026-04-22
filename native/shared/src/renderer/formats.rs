@@ -347,21 +347,34 @@ pub(super) fn create_scene_sdf_clipmap(
     (texture, view)
 }
 
-/// Ticket 014 V6 — World-Space Radiance Cache. 16³ grid of octahedral
-/// probes, each holding an 8×8 slab of pre-integrated distant
-/// lighting. Sampled when a SDF sphere-trace escapes the clipmap or
-/// exhausts its march budget — replaces the V3/V4 "return black" miss
-/// path with a directional envelope sample so off-scene rays still
-/// contribute to the bounce.
+/// Ticket 014 V6/V10 — World-Space Radiance Cache. 16³ grid of
+/// octahedral probes, each an 8×8 slab of pre-integrated distant
+/// lighting. Sampled when a probe-trace ray escapes the clipmap or
+/// exhausts its march budget.
 ///
-/// Layout (rgba16float D3 texture at `(128, 128, 16)`):
-///   probe at grid `(gx, gy, gz)`, octel `(ox, oy)` → texel
-///   `(gx * 8 + ox, gy * 8 + oy, gz)`
+/// V10 added a 1-texel border around each probe's 8×8 slab so the
+/// hardware sampler can do octel bilinear natively. Borders are
+/// filled at bake time with edge-extended octel values. The Z axis
+/// is unpadded (each probe is one Z slice) — adjacent probes in Z
+/// are naturally next to each other, so Z trilinear falls out of
+/// the sampler for free. X/Y cross-probe blending must still be
+/// done manually (the borders prevent the sampler from leaking
+/// adjacent-probe data into the current probe's bilinear tap).
 ///
-/// Extent is 3× the SDF clipmap — a single grid cell is 7.5 m, wide
-/// enough that ray-terminal positions beyond the clipmap still land
-/// inside the cache. Camera-follows via `WSRC_REBAKE_THRESHOLD`.
+/// Layout (rgba16float D3 texture at `(160, 160, 16)`):
+///   probe at grid `(gx, gy, gz)`, padded octel `(ox_pad, oy_pad)
+///   in [0, 9]` → texel `(gx * 10 + ox_pad, gy * 10 + oy_pad, gz)`
+///
+/// Real octel `(ox, oy)` in `[0, 7]` sits at padded `(ox + 1, oy + 1)`.
+/// The 1-texel border at `ox_pad = 0` or `9` mirrors the nearest
+/// inside octel (clamp — V11 could do true octahedral wrap).
+///
+/// Extent is 3× the SDF clipmap — 7.5 m per cell, plenty for rays
+/// that terminal beyond the SDF window. Camera-follows via
+/// `WSRC_REBAKE_THRESHOLD`.
 pub(super) const WSRC_GRID_RES: u32 = 16;
+pub(super) const WSRC_OCT_PAD: u32 = 1;
+pub(super) const WSRC_OCT_PADDED: u32 = PROBE_OCT_SIZE + 2 * WSRC_OCT_PAD;
 pub(super) const WSRC_EXTENT: f32 = 120.0;
 pub(super) const WSRC_REBAKE_THRESHOLD: f32 = 0.25;
 
@@ -371,8 +384,8 @@ pub(super) fn create_wsrc_atlas(
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("wsrc_atlas"),
         size: wgpu::Extent3d {
-            width: WSRC_GRID_RES * PROBE_OCT_SIZE,
-            height: WSRC_GRID_RES * PROBE_OCT_SIZE,
+            width: WSRC_GRID_RES * WSRC_OCT_PADDED,
+            height: WSRC_GRID_RES * WSRC_OCT_PADDED,
             depth_or_array_layers: WSRC_GRID_RES,
         },
         mip_level_count: 1,

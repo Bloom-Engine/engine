@@ -2572,14 +2572,22 @@ fn wsrc_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
     }
 }
 
-@compute @workgroup_size(8, 8, 1)
+// V10 — workgroup writes the 10×10 padded slab per probe. Thread
+// (lid.x, lid.y) writes texel (wg.*10 + lid) in the atlas; border
+// threads (lid on 0 or 9) shade for the nearest INSIDE octel
+// direction so the sampler's edge-extend behaviour is baked into
+// the data. The 1-texel border is what lets the hardware bilinear
+// sampler do octel smoothing without leaking into adjacent probes.
+const WSRC_OCT_PADDED_SIZE: u32 = 10u;
+
+@compute @workgroup_size(10, 10, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let grid_res: u32 = 16u;
     if (wg.x >= grid_res || wg.y >= grid_res || wg.z >= grid_res) { return; }
-    if (lid.x >= PROBE_OCT_SIZE || lid.y >= PROBE_OCT_SIZE) { return; }
+    if (lid.x >= WSRC_OCT_PADDED_SIZE || lid.y >= WSRC_OCT_PADDED_SIZE) { return; }
 
     // Probe world-space centre — cell-centre within the grid cube.
     let extent = u.grid.w;
@@ -2588,13 +2596,16 @@ fn cs_main(
         - vec3<f32>(extent * 0.5)
         + (vec3<f32>(f32(wg.x), f32(wg.y), f32(wg.z)) + vec3<f32>(0.5)) * cell;
 
-    // Octahedral direction for this texel.
-    let dir = octel_direction(lid.xy);
+    // Map padded octel (0..9) → real octel (0..7) via clamp. Border
+    // texels collapse to the nearest inside octel.
+    let oct_clamped = vec2<u32>(
+        u32(clamp(i32(lid.x) - 1, 0, 7)),
+        u32(clamp(i32(lid.y) - 1, 0, 7)),
+    );
+    let dir = octel_direction(oct_clamped);
 
-    // Shadow at the probe position. We use cascade 2 (the widest) so a
-    // single lookup covers the full grid without needing view-space-Z
-    // cascade selection; for a 120 m WSRC cube this is plenty for the
-    // distant-envelope use case.
+    // Shadow at the probe position (cascade 2 — widest, covers the
+    // full 120 m cube without per-probe cascade selection).
     var shadow: f32 = 1.0;
     if (u.flags.y > 0.5) {
         shadow = wsrc_sample_cascade(2, probe_pos, u.flags.x);
@@ -2602,18 +2613,14 @@ fn cs_main(
 
     let ndotl = max(dot(dir, u.sun_dir.xyz), 0.0);
     let sun = u.sun_color.xyz * ndotl * shadow;
-
-    // Sky hemisphere — smooth up-bias. dir.y in [-1, 1] → [0, 1]
-    // weighted quadratically so rays pointing horizontally still get
-    // some horizon glow while the zenith term dominates.
     let up = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     let sky = u.sky_color.xyz * up * up;
 
     let radiance = sun + sky;
 
     let tex_coord = vec3<i32>(
-        i32(wg.x * PROBE_OCT_SIZE + lid.x),
-        i32(wg.y * PROBE_OCT_SIZE + lid.y),
+        i32(wg.x * WSRC_OCT_PADDED_SIZE + lid.x),
+        i32(wg.y * WSRC_OCT_PADDED_SIZE + lid.y),
         i32(wg.z),
     );
     textureStore(wsrc_out, tex_coord, vec4<f32>(radiance, 1.0));
@@ -2985,41 +2992,23 @@ const HW_WSRC_GRID_RES: i32 = 16;
 @group(0) @binding(5) var card_atlas: texture_2d<f32>;
 @group(0) @binding(6) var card_samp: sampler;
 @group(0) @binding(7) var wsrc_atlas: texture_3d<f32>;
+@group(0) @binding(8) var wsrc_samp: sampler;
 
 // Ticket 014 V7/V8 — WSRC lookup shared with the SDF path. V8
 // trilinear across the 8 neighbouring probes, nearest octel for
 // direction. extent=0 is the cache-not-ready sentinel that the
 // host writes before the first bake completes, so the HW miss
 // falls back to the pre-V7 return-black behaviour.
-fn hw_wsrc_load_cell(gx: i32, gy: i32, gz: i32, ox: i32, oy: i32) -> vec3<f32> {
+// Ticket 014 V10 — HW mirror of the SDF sampler-based WSRC lookup.
+// See the SDF path's comment block for layout + uv derivation.
+fn hw_wsrc_sample_probe(gx: i32, gy: i32, gz_f: f32, ru: vec2<f32>) -> vec3<f32> {
     let gxc = clamp(gx, 0, 15);
     let gyc = clamp(gy, 0, 15);
-    let gzc = clamp(gz, 0, 15);
-    let tex_coord = vec3<i32>(gxc * 8 + ox, gyc * 8 + oy, gzc);
-    return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
-}
-
-// V9 — octel bilinear within one probe. See SDF-path variant for
-// the comment on why we clamp at the silhouette edges.
-fn hw_wsrc_load_cell_oct_bilinear(
-    gx: i32, gy: i32, gz: i32, ox_f: f32, oy_f: f32,
-) -> vec3<f32> {
-    let ox_fl = floor(ox_f);
-    let oy_fl = floor(oy_f);
-    let ox0 = clamp(i32(ox_fl),     0, 7);
-    let ox1 = clamp(i32(ox_fl) + 1, 0, 7);
-    let oy0 = clamp(i32(oy_fl),     0, 7);
-    let oy1 = clamp(i32(oy_fl) + 1, 0, 7);
-    let fx = ox_f - ox_fl;
-    let fy = oy_f - oy_fl;
-    let ix = 1.0 - fx;
-    let iy = 1.0 - fy;
-    let s00 = hw_wsrc_load_cell(gx, gy, gz, ox0, oy0);
-    let s10 = hw_wsrc_load_cell(gx, gy, gz, ox1, oy0);
-    let s01 = hw_wsrc_load_cell(gx, gy, gz, ox0, oy1);
-    let s11 = hw_wsrc_load_cell(gx, gy, gz, ox1, oy1);
-    return s00 * (ix * iy) + s10 * (fx * iy)
-         + s01 * (ix * fy) + s11 * (fx * fy);
+    let ax = (f32(gxc) + 0.1 + ru.x * 0.8) / 16.0;
+    let ay = (f32(gyc) + 0.1 + ru.y * 0.8) / 16.0;
+    let az = gz_f / 16.0;
+    return textureSampleLevel(wsrc_atlas, wsrc_samp,
+        vec3<f32>(ax, ay, az), 0.0).rgb;
 }
 
 fn hw_wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
@@ -3033,41 +3022,23 @@ fn hw_wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
     let pf = rel / cell - vec3<f32>(0.5);
     let pfx = floor(pf.x);
     let pfy = floor(pf.y);
-    let pfz = floor(pf.z);
     let gix = i32(pfx);
     let giy = i32(pfy);
-    let giz = i32(pfz);
     let fx = pf.x - pfx;
     let fy = pf.y - pfy;
-    let fz = pf.z - pfz;
+    let gz_f = clamp(pf.z + 0.5, 0.5, 15.5);
 
-    // V9 — octel in float texel-space.
-    let uv = oct_encode(dir_ws);
-    let ox_f = uv.x * 8.0 - 0.5;
-    let oy_f = uv.y * 8.0 - 0.5;
+    let ru = oct_encode(dir_ws);
 
-    let c000 = hw_wsrc_load_cell_oct_bilinear(gix,     giy,     giz,     ox_f, oy_f);
-    let c100 = hw_wsrc_load_cell_oct_bilinear(gix + 1, giy,     giz,     ox_f, oy_f);
-    let c010 = hw_wsrc_load_cell_oct_bilinear(gix,     giy + 1, giz,     ox_f, oy_f);
-    let c110 = hw_wsrc_load_cell_oct_bilinear(gix + 1, giy + 1, giz,     ox_f, oy_f);
-    let c001 = hw_wsrc_load_cell_oct_bilinear(gix,     giy,     giz + 1, ox_f, oy_f);
-    let c101 = hw_wsrc_load_cell_oct_bilinear(gix + 1, giy,     giz + 1, ox_f, oy_f);
-    let c011 = hw_wsrc_load_cell_oct_bilinear(gix,     giy + 1, giz + 1, ox_f, oy_f);
-    let c111 = hw_wsrc_load_cell_oct_bilinear(gix + 1, giy + 1, giz + 1, ox_f, oy_f);
+    let c00 = hw_wsrc_sample_probe(gix,     giy,     gz_f, ru);
+    let c10 = hw_wsrc_sample_probe(gix + 1, giy,     gz_f, ru);
+    let c01 = hw_wsrc_sample_probe(gix,     giy + 1, gz_f, ru);
+    let c11 = hw_wsrc_sample_probe(gix + 1, giy + 1, gz_f, ru);
 
     let ix = 1.0 - fx;
     let iy = 1.0 - fy;
-    let iz = 1.0 - fz;
-
-    return
-        c000 * (ix * iy * iz) +
-        c100 * (fx * iy * iz) +
-        c010 * (ix * fy * iz) +
-        c110 * (fx * fy * iz) +
-        c001 * (ix * iy * fz) +
-        c101 * (fx * iy * fz) +
-        c011 * (ix * fy * fz) +
-        c111 * (fx * fy * fz);
+    return c00 * (ix * iy) + c10 * (fx * iy)
+         + c01 * (ix * fy) + c11 * (fx * fy);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -3302,6 +3273,7 @@ const WSRC_GRID_RES: i32 = 16;
 @group(0) @binding(6) var card_atlas: texture_2d<f32>;
 @group(0) @binding(7) var card_samp: sampler;
 @group(0) @binding(8) var wsrc_atlas: texture_3d<f32>;
+@group(0) @binding(9) var wsrc_samp: sampler;
 
 fn clipmap_uv(pos_ws: vec3<f32>) -> vec3<f32> {
     let half_extent = u.clipmap.w * 0.5;
@@ -3318,55 +3290,38 @@ fn clipmap_sample(pos_ws: vec3<f32>) -> f32 {
     return textureSampleLevel(clipmap_tex, clipmap_samp, uv, 0.0).r;
 }
 
-// Ticket 014 V6/V8/V9 — WSRC lookup. V6 was nearest-probe + nearest-
-// octel; V8 added 8-tap trilinear across probes (killed 7.5 m cell
-// banding); V9 adds 4-tap bilinear across octel texels within each
-// probe (kills directional banding visible as 8-step quantisation
-// in the ray bounce). Total: 32 textureLoads per miss ray.
+// Ticket 014 V10 — WSRC lookup via the hardware linear-filtering
+// sampler. Each probe's 10×10 padded octel slab lets the sampler do
+// a native bilinear XY blend inside one probe without leaking into
+// the neighbouring probe's data (that's what the 1-texel border is
+// for). The Z axis is unpadded — probes are contiguous in Z, so
+// sampling at `(gz + 0.5 + fz) / grid_res` gives native Z trilinear
+// across adjacent probes for free. X/Y cross-probe blend is still
+// done manually — 4 sample calls per miss ray, one per XY corner of
+// the probe cube.
 //
-// Boundary octels clamp to [0,7] (edge-extend) — the octahedral wrap
-// at u=0↔1 and v=0↔1 would need a padded-border bake to handle
-// correctly with a standard bilinear filter. In practice the
-// silhouette-edge directions are rarely critical for distant-
-// envelope radiance and the edge-extend approximation is visually
-// acceptable.
+// Atlas packing:
+//   atlas texel for probe (gx, gy, gz) at padded octel (ox_p, oy_p
+//   in [0, 9]) is (gx*10 + ox_p, gy*10 + oy_p, gz).
+//   Real octel (ox, oy in [0, 7]) sits at padded (ox+1, oy+1).
+//   Border texels (padded 0 or 9) clone the nearest inside octel
+//   — edge-extend, not true octahedral wrap (V11).
 //
-// Probes are cell-CENTRED: probe (0,0,0) sits at world-space
-// `origin - extent/2 + cell/2`. We convert `pos_ws` into
-// probe-centre space (pf=0 at probe-0 centre, pf=1 at probe-1
-// centre) so the fractional part gives the blend weights between
-// floor(pf) and floor(pf)+1.
-fn wsrc_load_cell(gx: i32, gy: i32, gz: i32, ox: i32, oy: i32) -> vec3<f32> {
+// Sampler uv formula (atlas x-axis):
+//   texel_x for real-octel `ru_x ∈ [0, 1]` at probe `gx` is
+//   `gx*10 + 1 + ru_x * 8`. Atlas uv = texel_x / 160.
+//   → `atlas_uv_x = (gx + 0.1 + ru_x * 0.8) / 16`
+//   `ru_x = 0` → texel 1 (centre of border, edge-extends octel 0)
+//   `ru_x = 0.5` → texel 5 (centre of real area)
+//   `ru_x = 1` → texel 9 (centre of opposite border)
+fn wsrc_sample_probe(gx: i32, gy: i32, gz_f: f32, ru: vec2<f32>) -> vec3<f32> {
     let gxc = clamp(gx, 0, 15);
     let gyc = clamp(gy, 0, 15);
-    let gzc = clamp(gz, 0, 15);
-    let tex_coord = vec3<i32>(gxc * 8 + ox, gyc * 8 + oy, gzc);
-    return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
-}
-
-// V9 — 4-tap bilinear on the octel grid inside one probe.
-// `ox_f` / `oy_f` are texel-space coords: oct texel centres sit at
-// (i + 0.5), so for a full-res uv we pass `uv * 8 - 0.5` and the
-// floor + fract reads like any 2D bilinear.
-fn wsrc_load_cell_oct_bilinear(
-    gx: i32, gy: i32, gz: i32, ox_f: f32, oy_f: f32,
-) -> vec3<f32> {
-    let ox_fl = floor(ox_f);
-    let oy_fl = floor(oy_f);
-    let ox0 = clamp(i32(ox_fl),     0, 7);
-    let ox1 = clamp(i32(ox_fl) + 1, 0, 7);
-    let oy0 = clamp(i32(oy_fl),     0, 7);
-    let oy1 = clamp(i32(oy_fl) + 1, 0, 7);
-    let fx = ox_f - ox_fl;
-    let fy = oy_f - oy_fl;
-    let ix = 1.0 - fx;
-    let iy = 1.0 - fy;
-    let s00 = wsrc_load_cell(gx, gy, gz, ox0, oy0);
-    let s10 = wsrc_load_cell(gx, gy, gz, ox1, oy0);
-    let s01 = wsrc_load_cell(gx, gy, gz, ox0, oy1);
-    let s11 = wsrc_load_cell(gx, gy, gz, ox1, oy1);
-    return s00 * (ix * iy) + s10 * (fx * iy)
-         + s01 * (ix * fy) + s11 * (fx * fy);
+    let ax = (f32(gxc) + 0.1 + ru.x * 0.8) / 16.0;
+    let ay = (f32(gyc) + 0.1 + ru.y * 0.8) / 16.0;
+    let az = gz_f / 16.0;
+    return textureSampleLevel(wsrc_atlas, wsrc_samp,
+        vec3<f32>(ax, ay, az), 0.0).rgb;
 }
 
 fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
@@ -3380,42 +3335,27 @@ fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
     let pf = rel / cell - vec3<f32>(0.5);
     let pfx = floor(pf.x);
     let pfy = floor(pf.y);
-    let pfz = floor(pf.z);
     let gix = i32(pfx);
     let giy = i32(pfy);
-    let giz = i32(pfz);
     let fx = pf.x - pfx;
     let fy = pf.y - pfy;
-    let fz = pf.z - pfz;
+    // V10 — Z blend is native via the sampler. Pass the full
+    // floating-point z-slice position (`gz + 0.5 + fz`) clamped to
+    // the atlas range so the sampler blends between the two adjacent
+    // probe z-slices.
+    let gz_f = clamp(pf.z + 0.5, 0.5, 15.5);
 
-    // V9 — octel in float texel-space; bilinear helper handles the
-    // floor/clamp per-probe.
-    let uv = oct_encode(dir_ws);
-    let ox_f = uv.x * 8.0 - 0.5;
-    let oy_f = uv.y * 8.0 - 0.5;
+    let ru = oct_encode(dir_ws);
 
-    let c000 = wsrc_load_cell_oct_bilinear(gix,     giy,     giz,     ox_f, oy_f);
-    let c100 = wsrc_load_cell_oct_bilinear(gix + 1, giy,     giz,     ox_f, oy_f);
-    let c010 = wsrc_load_cell_oct_bilinear(gix,     giy + 1, giz,     ox_f, oy_f);
-    let c110 = wsrc_load_cell_oct_bilinear(gix + 1, giy + 1, giz,     ox_f, oy_f);
-    let c001 = wsrc_load_cell_oct_bilinear(gix,     giy,     giz + 1, ox_f, oy_f);
-    let c101 = wsrc_load_cell_oct_bilinear(gix + 1, giy,     giz + 1, ox_f, oy_f);
-    let c011 = wsrc_load_cell_oct_bilinear(gix,     giy + 1, giz + 1, ox_f, oy_f);
-    let c111 = wsrc_load_cell_oct_bilinear(gix + 1, giy + 1, giz + 1, ox_f, oy_f);
+    let c00 = wsrc_sample_probe(gix,     giy,     gz_f, ru);
+    let c10 = wsrc_sample_probe(gix + 1, giy,     gz_f, ru);
+    let c01 = wsrc_sample_probe(gix,     giy + 1, gz_f, ru);
+    let c11 = wsrc_sample_probe(gix + 1, giy + 1, gz_f, ru);
 
     let ix = 1.0 - fx;
     let iy = 1.0 - fy;
-    let iz = 1.0 - fz;
-
-    return
-        c000 * (ix * iy * iz) +
-        c100 * (fx * iy * iz) +
-        c010 * (ix * fy * iz) +
-        c110 * (fx * fy * iz) +
-        c001 * (ix * iy * fz) +
-        c101 * (fx * iy * fz) +
-        c011 * (ix * fy * fz) +
-        c111 * (fx * fy * fz);
+    return c00 * (ix * iy) + c10 * (fx * iy)
+         + c01 * (ix * fy) + c11 * (fx * fy);
 }
 
 @compute @workgroup_size(8, 8, 1)

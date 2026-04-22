@@ -965,9 +965,14 @@ pub struct Renderer {
     /// trace uniform; updated at bake time.
     pub scene_sdf_clipmap_origin: [f32; 3],
 
-    // --- Ticket 014 V6: World-Space Radiance Cache ---
+    // --- Ticket 014 V6/V10: World-Space Radiance Cache ---
     pub wsrc_atlas_tex: wgpu::Texture,
     pub wsrc_atlas_view: wgpu::TextureView,
+    /// V10 — linear-filtering sampler for the padded WSRC atlas.
+    /// Clamp-to-edge in all axes: edge-extend behaves identically
+    /// to the baked borders so the miss-path lookup stays well-
+    /// defined at probe seams.
+    pub wsrc_atlas_sampler: wgpu::Sampler,
     pub wsrc_bake_pipeline: wgpu::ComputePipeline,
     pub wsrc_bake_layout: wgpu::BindGroupLayout,
     pub wsrc_bake_uniform: wgpu::Buffer,
@@ -3410,15 +3415,20 @@ impl Renderer {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
-                    // Ticket 014 V7 — WSRC atlas for the HW miss path.
-                    // Non-filterable textureLoad; no sampler binding.
+                    // Ticket 014 V7/V10 — WSRC atlas for the HW miss
+                    // path. V10 filtering texture + linear sampler.
                     wgpu::BindGroupLayoutEntry {
                         binding: 7, visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
                             view_dimension: wgpu::TextureViewDimension::D3,
                             multisampled: false,
                         }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
                     },
                 ],
             });
@@ -3506,17 +3516,23 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                // Ticket 014 V6 — WSRC atlas. textureLoad-sampled, so
-                // no sampler binding. Non-filterable Float to dodge
-                // the F32_FILTERABLE optional feature (matches the
-                // clipmap's constraint).
+                // Ticket 014 V6/V10 — WSRC atlas for the SDF miss
+                // path. V10 upgrades to a filtering Rgba16Float
+                // texture + linear sampler so the sampler does octel
+                // bilinear + Z trilinear natively inside each
+                // probe's 10×10 padded slab.
                 wgpu::BindGroupLayoutEntry {
                     binding: 8, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D3,
                         multisampled: false,
                     }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
                 },
             ],
         });
@@ -3986,6 +4002,19 @@ impl Renderer {
 
         // --- Ticket 014 V6: WSRC ---
         let (wsrc_atlas_tex, wsrc_atlas_view) = create_wsrc_atlas(&device);
+        // V10 — linear sampler for the padded WSRC atlas. Rgba16Float
+        // is filterable without an extra feature on every backend we
+        // care about, so a plain Filtering sampler is enough.
+        let wsrc_atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("wsrc_atlas_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
         let wsrc_bake_shader = probe_shader("wsrc_bake_shader", WSRC_BAKE_WGSL);
         let wsrc_bake_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("wsrc_bake_layout"),
@@ -4786,6 +4815,7 @@ impl Renderer {
             scene_sdf_clipmap_origin: [0.0, 0.0, 0.0],
             wsrc_atlas_tex,
             wsrc_atlas_view,
+            wsrc_atlas_sampler,
             wsrc_bake_pipeline,
             wsrc_bake_layout,
             wsrc_bake_uniform,
@@ -5656,7 +5686,9 @@ impl Renderer {
         });
         pass.set_pipeline(&self.wsrc_bake_pipeline);
         pass.set_bind_group(0, self.wsrc_bake_bg_cache.as_ref().unwrap(), &[]);
-        // One workgroup per probe (16³), 8×8 threads per workgroup.
+        // One workgroup per probe (16³). V10: 10×10 threads per
+        // workgroup so each thread writes one padded octel texel
+        // (8×8 real + 1-texel border all around).
         pass.dispatch_workgroups(WSRC_GRID_RES, WSRC_GRID_RES, WSRC_GRID_RES);
         drop(pass);
 
@@ -7928,8 +7960,9 @@ impl Renderer {
                             // at hit, not the raw albedo atlas.
                             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
                             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
-                            // V7 — WSRC atlas for the HW miss path.
+                            // V7/V10 — WSRC atlas + linear sampler.
                             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
+                            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.wsrc_atlas_sampler) },
                         ],
                     }));
                 }
@@ -7967,8 +8000,9 @@ impl Renderer {
                             wgpu::BindGroupEntry { binding: 5, resource: instance_buf.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
                             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
-                            // V6 — WSRC atlas for the SDF miss path.
+                            // V6/V10 — WSRC atlas + linear sampler.
                             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
+                            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.wsrc_atlas_sampler) },
                         ],
                     }));
                 }
