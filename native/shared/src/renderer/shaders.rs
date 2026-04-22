@@ -2986,33 +2986,64 @@ const HW_WSRC_GRID_RES: i32 = 16;
 @group(0) @binding(6) var card_samp: sampler;
 @group(0) @binding(7) var wsrc_atlas: texture_3d<f32>;
 
-// Ticket 014 V7 — WSRC lookup shared with the SDF path (nearest
-// probe + nearest octel). extent=0 is the cache-not-ready sentinel
-// that the host writes before the first bake completes, so the HW
-// miss falls back to the pre-V7 return-black behaviour.
+// Ticket 014 V7/V8 — WSRC lookup shared with the SDF path. V8
+// trilinear across the 8 neighbouring probes, nearest octel for
+// direction. extent=0 is the cache-not-ready sentinel that the
+// host writes before the first bake completes, so the HW miss
+// falls back to the pre-V7 return-black behaviour.
+fn hw_wsrc_load_cell(gx: i32, gy: i32, gz: i32, ox: i32, oy: i32) -> vec3<f32> {
+    let gxc = clamp(gx, 0, 15);
+    let gyc = clamp(gy, 0, 15);
+    let gzc = clamp(gz, 0, 15);
+    let tex_coord = vec3<i32>(gxc * 8 + ox, gyc * 8 + oy, gzc);
+    return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
+}
+
 fn hw_wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
     let origin = u.wsrc.xyz;
     let extent = u.wsrc.w;
     if (extent <= 0.0) {
         return vec3<f32>(0.0);
     }
+    let cell = extent / 16.0;
     let rel = pos_ws - origin + vec3<f32>(extent * 0.5);
-    let cell = extent / f32(HW_WSRC_GRID_RES);
-    let gx = clamp(i32(floor(rel.x / cell)), 0, HW_WSRC_GRID_RES - 1);
-    let gy = clamp(i32(floor(rel.y / cell)), 0, HW_WSRC_GRID_RES - 1);
-    let gz = clamp(i32(floor(rel.z / cell)), 0, HW_WSRC_GRID_RES - 1);
+    let pf = rel / cell - vec3<f32>(0.5);
+    let pfx = floor(pf.x);
+    let pfy = floor(pf.y);
+    let pfz = floor(pf.z);
+    let gix = i32(pfx);
+    let giy = i32(pfy);
+    let giz = i32(pfz);
+    let fx = pf.x - pfx;
+    let fy = pf.y - pfy;
+    let fz = pf.z - pfz;
 
     let uv = oct_encode(dir_ws);
-    let oct_sz = f32(PROBE_OCT_SIZE);
-    let ox = clamp(i32(floor(uv.x * oct_sz)), 0, i32(PROBE_OCT_SIZE) - 1);
-    let oy = clamp(i32(floor(uv.y * oct_sz)), 0, i32(PROBE_OCT_SIZE) - 1);
+    let ox = clamp(i32(floor(uv.x * 8.0)), 0, 7);
+    let oy = clamp(i32(floor(uv.y * 8.0)), 0, 7);
 
-    let tex_coord = vec3<i32>(
-        gx * i32(PROBE_OCT_SIZE) + ox,
-        gy * i32(PROBE_OCT_SIZE) + oy,
-        gz,
-    );
-    return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
+    let c000 = hw_wsrc_load_cell(gix,     giy,     giz,     ox, oy);
+    let c100 = hw_wsrc_load_cell(gix + 1, giy,     giz,     ox, oy);
+    let c010 = hw_wsrc_load_cell(gix,     giy + 1, giz,     ox, oy);
+    let c110 = hw_wsrc_load_cell(gix + 1, giy + 1, giz,     ox, oy);
+    let c001 = hw_wsrc_load_cell(gix,     giy,     giz + 1, ox, oy);
+    let c101 = hw_wsrc_load_cell(gix + 1, giy,     giz + 1, ox, oy);
+    let c011 = hw_wsrc_load_cell(gix,     giy + 1, giz + 1, ox, oy);
+    let c111 = hw_wsrc_load_cell(gix + 1, giy + 1, giz + 1, ox, oy);
+
+    let ix = 1.0 - fx;
+    let iy = 1.0 - fy;
+    let iz = 1.0 - fz;
+
+    return
+        c000 * (ix * iy * iz) +
+        c100 * (fx * iy * iz) +
+        c010 * (ix * fy * iz) +
+        c110 * (fx * fy * iz) +
+        c001 * (ix * iy * fz) +
+        c101 * (fx * iy * fz) +
+        c011 * (ix * fy * fz) +
+        c111 * (fx * fy * fz);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -3263,33 +3294,70 @@ fn clipmap_sample(pos_ws: vec3<f32>) -> f32 {
     return textureSampleLevel(clipmap_tex, clipmap_samp, uv, 0.0).r;
 }
 
-// Ticket 014 V6 — WSRC lookup. Nearest-probe grid cell containing
-// `pos_ws`, then nearest-octel for `dir_ws`. No trilinear filtering
-// between probes for V6; the cache is coarse enough (7.5 m cells)
-// that the dominant error is directional aliasing, not spatial.
+// Ticket 014 V6/V8 — WSRC lookup. V6 was nearest-probe; V8 is
+// trilinear across the 8 neighbouring probes to kill the visible
+// banding where the camera or a ray crosses a 7.5 m cell boundary.
+// Octel direction stays nearest — bilinear on the octahedral wrap
+// requires edge-wrap handling that's a separate ticket.
+//
+// Probes are cell-CENTRED: probe (0,0,0) sits at world-space
+// `origin - extent/2 + cell/2`. We convert `pos_ws` into
+// probe-centre space (pf=0 at probe-0 centre, pf=1 at probe-1
+// centre) so the fractional part gives the blend weights between
+// floor(pf) and floor(pf)+1.
+fn wsrc_load_cell(gx: i32, gy: i32, gz: i32, ox: i32, oy: i32) -> vec3<f32> {
+    let gxc = clamp(gx, 0, 15);
+    let gyc = clamp(gy, 0, 15);
+    let gzc = clamp(gz, 0, 15);
+    let tex_coord = vec3<i32>(gxc * 8 + ox, gyc * 8 + oy, gzc);
+    return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
+}
+
 fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
     let origin = u.wsrc.xyz;
     let extent = u.wsrc.w;
     if (extent <= 0.0) {
         return vec3<f32>(0.0);
     }
+    let cell = extent / 16.0;
     let rel = pos_ws - origin + vec3<f32>(extent * 0.5);
-    let cell = extent / f32(WSRC_GRID_RES);
-    let gx = clamp(i32(floor(rel.x / cell)), 0, WSRC_GRID_RES - 1);
-    let gy = clamp(i32(floor(rel.y / cell)), 0, WSRC_GRID_RES - 1);
-    let gz = clamp(i32(floor(rel.z / cell)), 0, WSRC_GRID_RES - 1);
+    let pf = rel / cell - vec3<f32>(0.5);
+    let pfx = floor(pf.x);
+    let pfy = floor(pf.y);
+    let pfz = floor(pf.z);
+    let gix = i32(pfx);
+    let giy = i32(pfy);
+    let giz = i32(pfz);
+    let fx = pf.x - pfx;
+    let fy = pf.y - pfy;
+    let fz = pf.z - pfz;
 
     let uv = oct_encode(dir_ws);
-    let oct_sz = f32(PROBE_OCT_SIZE);
-    let ox = clamp(i32(floor(uv.x * oct_sz)), 0, i32(PROBE_OCT_SIZE) - 1);
-    let oy = clamp(i32(floor(uv.y * oct_sz)), 0, i32(PROBE_OCT_SIZE) - 1);
+    let ox = clamp(i32(floor(uv.x * 8.0)), 0, 7);
+    let oy = clamp(i32(floor(uv.y * 8.0)), 0, 7);
 
-    let tex_coord = vec3<i32>(
-        gx * i32(PROBE_OCT_SIZE) + ox,
-        gy * i32(PROBE_OCT_SIZE) + oy,
-        gz,
-    );
-    return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
+    let c000 = wsrc_load_cell(gix,     giy,     giz,     ox, oy);
+    let c100 = wsrc_load_cell(gix + 1, giy,     giz,     ox, oy);
+    let c010 = wsrc_load_cell(gix,     giy + 1, giz,     ox, oy);
+    let c110 = wsrc_load_cell(gix + 1, giy + 1, giz,     ox, oy);
+    let c001 = wsrc_load_cell(gix,     giy,     giz + 1, ox, oy);
+    let c101 = wsrc_load_cell(gix + 1, giy,     giz + 1, ox, oy);
+    let c011 = wsrc_load_cell(gix,     giy + 1, giz + 1, ox, oy);
+    let c111 = wsrc_load_cell(gix + 1, giy + 1, giz + 1, ox, oy);
+
+    let ix = 1.0 - fx;
+    let iy = 1.0 - fy;
+    let iz = 1.0 - fz;
+
+    return
+        c000 * (ix * iy * iz) +
+        c100 * (fx * iy * iz) +
+        c010 * (ix * fy * iz) +
+        c110 * (fx * fy * iz) +
+        c001 * (ix * iy * fz) +
+        c101 * (fx * iy * fz) +
+        c011 * (ix * fy * fz) +
+        c111 * (fx * fy * fz);
 }
 
 @compute @workgroup_size(8, 8, 1)
