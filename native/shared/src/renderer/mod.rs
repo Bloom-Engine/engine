@@ -980,6 +980,14 @@ pub struct Renderer {
     pub wsrc_bake_layout: wgpu::BindGroupLayout,
     pub wsrc_bake_uniform: wgpu::Buffer,
     wsrc_bake_bg_cache: Option<wgpu::BindGroup>,
+    /// V14 — HW-ray-traced WSRC bake. Built only when
+    /// `hw_rt_enabled`. Same `WsrcBakeParams` uniform as the SW
+    /// bake; extra bindings carry the TLAS + per-instance GI data
+    /// + card atlas so probe-octel rays can sample pre-lit Mesh
+    /// Cards radiance at hit points.
+    pub wsrc_bake_hw_pipeline: Option<wgpu::ComputePipeline>,
+    pub wsrc_bake_hw_layout: Option<wgpu::BindGroupLayout>,
+    wsrc_bake_hw_bg_cache: Option<wgpu::BindGroup>,
     /// V13 — per-cascade state. Each cascade (near/mid/far) tracks
     /// its own `built` flag, voxel-snapped origin, and lighting
     /// snapshot. Invalidation uses the cascade's own cell size
@@ -4089,6 +4097,110 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // V14 — HW-ray-traced WSRC bake pipeline. Built only on
+        // RT-capable adapters. Same uniform as the SW bake (writes
+        // the same `WsrcBakeParams` per cascade) plus TLAS +
+        // instance_data + card_atlas bindings that let probe-octel
+        // rays sample Mesh Cards at hit.
+        let (wsrc_bake_hw_pipeline, wsrc_bake_hw_layout) = if hw_rt_enabled {
+            let hw_source = format!(
+                "enable wgpu_ray_query;\n{}{}",
+                PROBE_HELPERS_WGSL, WSRC_BAKE_HW_WGSL,
+            );
+            let hw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("wsrc_bake_hw_shader"),
+                source: wgpu::ShaderSource::Wgsl(hw_source.into()),
+            });
+            let hw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("wsrc_bake_hw_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: HDR_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::AccelerationStructure { vertex_return: false },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+            let hw_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("wsrc_bake_hw_pl_layout"),
+                bind_group_layouts: &[Some(&hw_layout)],
+                immediate_size: 0,
+            });
+            let hw_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("wsrc_bake_hw_pipeline"),
+                layout: Some(&hw_pl_layout),
+                module: &hw_shader, entry_point: Some("cs_main"),
+                compilation_options: Default::default(), cache: None,
+            });
+            (Some(hw_pipeline), Some(hw_layout))
+        } else {
+            (None, None)
+        };
+
         // --- Scene-compose pipeline ---
         // Merges HDR + SSR + SSGI*albedo + bloom + fog + shafts into
         // composed_rt. Both TAA and composite downstream read from
@@ -4824,6 +4936,9 @@ impl Renderer {
             wsrc_bake_layout,
             wsrc_bake_uniform,
             wsrc_bake_bg_cache: None,
+            wsrc_bake_hw_pipeline,
+            wsrc_bake_hw_layout,
+            wsrc_bake_hw_bg_cache: None,
             wsrc_built: [false; 3],
             wsrc_origin: [[0.0; 3]; 3],
             wsrc_last_sun_dir: [[0.0; 4]; 3],
@@ -5623,6 +5738,15 @@ impl Renderer {
             return;
         }
 
+        // V14 — pick the HW ray-traced bake when the adapter has
+        // ray-query AND the TLAS is ready. The SW path stays the
+        // fallback for non-RT adapters and for the early frames
+        // before BLAS / TLAS have been built.
+        let use_hw = self.hw_rt_enabled
+            && self.wsrc_bake_hw_pipeline.is_some()
+            && self.tlas.is_some()
+            && self.tlas_instance_data_buffer.is_some();
+
         // Resolve a single set of lighting params — they're the same
         // across all cascades in one frame. Per-cascade differences
         // come from the origin + extent passed through the uniform.
@@ -5659,7 +5783,31 @@ impl Renderer {
             [f32::INFINITY, f32::INFINITY, f32::INFINITY, 0.0]
         };
 
-        if self.wsrc_bake_bg_cache.is_none() {
+        // Lazy-build whichever bind group the selected path needs.
+        // The two caches are independent — switching between paths
+        // (e.g. if TLAS becomes available mid-session) is fine.
+        if use_hw {
+            if self.wsrc_bake_hw_bg_cache.is_none() {
+                let tlas = self.tlas.as_ref().unwrap();
+                let instance_buf = self.tlas_instance_data_buffer.as_ref().unwrap();
+                self.wsrc_bake_hw_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("wsrc_bake_hw_bg"),
+                    layout: self.wsrc_bake_hw_layout.as_ref().unwrap(),
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.wsrc_bake_uniform.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
+                        wgpu::BindGroupEntry { binding: 6, resource: tlas.as_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: instance_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
+                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
+                    ],
+                }));
+            }
+        } else if self.wsrc_bake_bg_cache.is_none() {
             self.wsrc_bake_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("wsrc_bake_bg"),
                 layout: &self.wsrc_bake_layout,
@@ -5710,11 +5858,16 @@ impl Renderer {
             );
 
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("wsrc_bake_pass"),
+                label: Some(if use_hw { "wsrc_bake_hw_pass" } else { "wsrc_bake_pass" }),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.wsrc_bake_pipeline);
-            pass.set_bind_group(0, self.wsrc_bake_bg_cache.as_ref().unwrap(), &[]);
+            if use_hw {
+                pass.set_pipeline(self.wsrc_bake_hw_pipeline.as_ref().unwrap());
+                pass.set_bind_group(0, self.wsrc_bake_hw_bg_cache.as_ref().unwrap(), &[]);
+            } else {
+                pass.set_pipeline(&self.wsrc_bake_pipeline);
+                pass.set_bind_group(0, self.wsrc_bake_bg_cache.as_ref().unwrap(), &[]);
+            }
             // One workgroup per probe in this cascade (16³),
             // 10×10 threads per workgroup (padded octel).
             pass.dispatch_workgroups(WSRC_GRID_RES, WSRC_GRID_RES, WSRC_GRID_RES);
@@ -5934,6 +6087,9 @@ impl Renderer {
             // V4 — SDF bind group also references instance_data, so
             // invalidate when the buffer is re-allocated.
             self.probe_trace_sdf_bg_cache = None;
+            // V14 — WSRC HW bake bg also references the TLAS +
+            // instance_data buffer; invalidate on resize.
+            self.wsrc_bake_hw_bg_cache = None;
             resized = true;
         }
 
@@ -6010,6 +6166,8 @@ impl Renderer {
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             }));
             self.probe_trace_hw_bg_cache = None;
+            // V14 — same reason as the resize path above.
+            self.wsrc_bake_hw_bg_cache = None;
         }
 
         // Populate TLAS instance slots. Clear stale entries from prior

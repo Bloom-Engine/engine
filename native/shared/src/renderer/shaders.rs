@@ -2656,6 +2656,232 @@ fn cs_main(
 }
 ";
 
+/// Ticket 014 V14 — HW-ray-traced WSRC bake for RT-capable adapters.
+///
+/// Same probe grid + padded octel layout as the SW bake; the
+/// difference is the radiance computation. For each probe-octel
+/// texel:
+///   1. Fire a ray from `probe_pos` in `dir` (octel direction) with
+///      `t_max = extent * 0.5` — long enough for a probe to reach
+///      the cascade boundary, short enough that each cascade stays
+///      in its spatial regime.
+///   2. On hit: sample the Mesh Cards radiance atlas at the hit
+///      point (already pre-lit each frame with sun × shadow +
+///      emissive by `card_light_pass`, so the bake propagates
+///      one-bounce shaded radiance into WSRC — effectively 2-bounce
+///      when the SSGI probe then samples WSRC on miss).
+///   3. On miss: analytic sun (shadow-sampled at the probe, not
+///      per-direction) + hemisphere sky — same fallback as the V13
+///      SW path, so escaped rays still carry a useful envelope.
+///
+/// Border texels still use the V11 octahedral wrap — same rule as
+/// the SW bake. The cascade index comes from `flags.z` and offsets
+/// the output z slice so one pipeline covers all 3 cascades via
+/// per-dispatch uniform.
+pub(super) const WSRC_BAKE_HW_WGSL: &str = "
+struct WsrcBakeParams {
+    sun_dir: vec4<f32>,
+    sun_color: vec4<f32>,
+    sky_color: vec4<f32>,
+    grid: vec4<f32>,
+    shadow_vps: array<mat4x4<f32>, 3>,
+    shadow_splits: vec4<f32>,
+    flags: vec4<f32>,
+};
+
+struct HwBakeInstanceGiData {
+    albedo: vec3<f32>,
+    emissive_luma: f32,
+    normal_ws: vec3<f32>,
+    _pad0: f32,
+    card_slot: vec4<f32>,
+    card_aabb_min: vec4<f32>,
+    card_aabb_max: vec4<f32>,
+};
+
+const HW_BAKE_CARD_SLOTS_PER_ROW: f32 = 64.0;
+const HW_BAKE_OCT_PADDED: u32 = 10u;
+
+@group(0) @binding(0) var<uniform> u: WsrcBakeParams;
+@group(0) @binding(1) var shadow_atlas_0: texture_depth_2d;
+@group(0) @binding(2) var shadow_atlas_1: texture_depth_2d;
+@group(0) @binding(3) var shadow_atlas_2: texture_depth_2d;
+@group(0) @binding(4) var shadow_samp: sampler_comparison;
+@group(0) @binding(5) var wsrc_out: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(6) var accel: acceleration_structure;
+@group(0) @binding(7) var<storage, read> instance_data: array<HwBakeInstanceGiData>;
+@group(0) @binding(8) var card_atlas: texture_2d<f32>;
+@group(0) @binding(9) var card_samp: sampler;
+
+fn hw_bake_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
+    var clip: vec4<f32>;
+    if (cascade == 0) { clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0); }
+    else if (cascade == 1) { clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0); }
+    else { clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0); }
+    let ndc = clip.xyz / clip.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let ref_depth = ndc.z - bias;
+    if (cascade == 0) { return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, shadow_uv, ref_depth); }
+    else if (cascade == 1) { return textureSampleCompareLevel(shadow_atlas_1, shadow_samp, shadow_uv, ref_depth); }
+    else { return textureSampleCompareLevel(shadow_atlas_2, shadow_samp, shadow_uv, ref_depth); }
+}
+
+@compute @workgroup_size(10, 10, 1)
+fn cs_main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let grid_res: u32 = 16u;
+    if (wg.x >= grid_res || wg.y >= grid_res || wg.z >= grid_res) { return; }
+    if (lid.x >= HW_BAKE_OCT_PADDED || lid.y >= HW_BAKE_OCT_PADDED) { return; }
+
+    let extent = u.grid.w;
+    let cell = extent / f32(grid_res);
+    let probe_pos = u.grid.xyz
+        - vec3<f32>(extent * 0.5)
+        + (vec3<f32>(f32(wg.x), f32(wg.y), f32(wg.z)) + vec3<f32>(0.5)) * cell;
+
+    // V11 octahedral wrap for the padded borders.
+    let px = i32(lid.x);
+    let py = i32(lid.y);
+    let is_edge_x = px == 0 || px == 9;
+    let is_edge_y = py == 0 || py == 9;
+    var real_ox: i32;
+    var real_oy: i32;
+    if (is_edge_x && is_edge_y) {
+        real_ox = clamp(px - 1, 0, 7);
+        real_oy = clamp(py - 1, 0, 7);
+    } else if (is_edge_y) {
+        real_ox = 8 - px;
+        real_oy = clamp(py - 1, 0, 7);
+    } else if (is_edge_x) {
+        real_ox = clamp(px - 1, 0, 7);
+        real_oy = 8 - py;
+    } else {
+        real_ox = px - 1;
+        real_oy = py - 1;
+    }
+    let dir = octel_direction(vec2<u32>(u32(real_ox), u32(real_oy)));
+
+    // V14 — fire a short ray from the probe centre. Ray length
+    // scales with the cascade extent so each cascade's rays stay
+    // in its resolution regime (near: ~15 m, mid: ~60 m, far:
+    // ~250 m).
+    let ray_length = extent * 0.5;
+    var rq: ray_query;
+    rayQueryInitialize(&rq, accel, RayDesc(
+        0u,
+        0xFFu,
+        0.01,
+        ray_length,
+        probe_pos,
+        dir,
+    ));
+    loop {
+        if (!rayQueryProceed(&rq)) { break; }
+    }
+    let hit = rayQueryGetCommittedIntersection(&rq);
+
+    var radiance = vec3<f32>(0.0);
+    if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+        let inst = instance_data[hit.instance_custom_data];
+        if (inst.card_slot.w > 0.5) {
+            // Sample Mesh Cards pre-lit radiance at hit. Same
+            // projection math as SSGI_PROBE_TRACE_HW_WGSL's hit
+            // branch.
+            let hit_world = probe_pos + dir * hit.t;
+            let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
+            let abs_d = abs(dir);
+            var axis_idx: u32 = 0u;
+            if (abs_d.y >= abs_d.x && abs_d.y >= abs_d.z) {
+                axis_idx = 2u;
+            } else if (abs_d.z >= abs_d.x) {
+                axis_idx = 4u;
+            }
+            var signed_axis: u32 = axis_idx;
+            if (axis_idx == 0u && dir.x > 0.0) { signed_axis = 1u; }
+            else if (axis_idx == 2u && dir.y > 0.0) { signed_axis = 3u; }
+            else if (axis_idx == 4u && dir.z > 0.0) { signed_axis = 5u; }
+
+            let first_slot = u32(inst.card_slot.x);
+            let slot = first_slot + signed_axis;
+            let slot_x = slot % 64u;
+            let slot_y = slot / 64u;
+
+            let bmin = inst.card_aabb_min.xyz;
+            let bmax = inst.card_aabb_max.xyz;
+            var u_os: f32;
+            var v_os: f32;
+            var u_lo: f32; var u_hi: f32;
+            var v_lo: f32; var v_hi: f32;
+            var u_flip: f32 = 1.0;
+            if (signed_axis == 0u || signed_axis == 1u) {
+                u_os = hit_os.y; v_os = hit_os.z;
+                u_lo = bmin.y; u_hi = bmax.y; v_lo = bmin.z; v_hi = bmax.z;
+                if (signed_axis == 1u) { u_flip = -1.0; }
+            } else if (signed_axis == 2u || signed_axis == 3u) {
+                u_os = hit_os.x; v_os = hit_os.z;
+                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.z; v_hi = bmax.z;
+                if (signed_axis == 3u) { u_flip = -1.0; }
+            } else {
+                u_os = hit_os.x; v_os = hit_os.y;
+                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.y; v_hi = bmax.y;
+                if (signed_axis == 5u) { u_flip = -1.0; }
+            }
+            var u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
+            let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
+            if (u_flip < 0.0) { u_norm = 1.0 - u_norm; }
+
+            let slot_size_uv = 1.0 / HW_BAKE_CARD_SLOTS_PER_ROW;
+            let texel_in_slot = slot_size_uv / f32(64);
+            let slot_u0 = f32(slot_x) * slot_size_uv + texel_in_slot;
+            let slot_v0 = f32(slot_y) * slot_size_uv + texel_in_slot;
+            let slot_span = slot_size_uv - 2.0 * texel_in_slot;
+            let atlas_uv = vec2<f32>(
+                slot_u0 + u_norm * slot_span,
+                slot_v0 + v_norm * slot_span,
+            );
+            radiance = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
+        } else {
+            // Instance without a card — shade analytically using
+            // its flat normal + albedo.
+            let hit_n = inst.normal_ws;
+            let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
+            let direct = u.sun_color.xyz * ndotl;
+            let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+            let sky = u.sky_color.xyz * ndotup;
+            radiance = inst.albedo * (direct + sky)
+                     + inst.albedo * inst.emissive_luma;
+        }
+    } else {
+        // Miss — V13 analytic fallback (shadow-sampled sun +
+        // hemisphere sky). The ray went past `extent * 0.5` without
+        // hitting anything, so this is the open-sky direction at
+        // probe scale.
+        var shadow: f32 = 1.0;
+        if (u.flags.y > 0.5) {
+            shadow = hw_bake_sample_cascade(2, probe_pos, u.flags.x);
+        }
+        let ndotl = max(dot(dir, u.sun_dir.xyz), 0.0);
+        let sun = u.sun_color.xyz * ndotl * shadow;
+        let up = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+        let sky = u.sky_color.xyz * up * up;
+        radiance = sun + sky;
+    }
+
+    let cascade_idx = u32(u.flags.z);
+    let tex_coord = vec3<i32>(
+        i32(wg.x * HW_BAKE_OCT_PADDED + lid.x),
+        i32(wg.y * HW_BAKE_OCT_PADDED + lid.y),
+        i32(cascade_idx * grid_res + wg.z),
+    );
+    textureStore(wsrc_out, tex_coord, vec4<f32>(radiance, 1.0));
+}
+";
+
 // ============================================================================
 // Ticket 007a — Lumen-style screen-probe SSGI (software Hi-Z trace)
 //
