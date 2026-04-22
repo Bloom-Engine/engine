@@ -2937,22 +2937,31 @@ fn octel_direction(octel: vec2<u32>) -> vec3<f32> {
     return oct_decode(uv);
 }
 
-// Ticket 016 V1 — temporal octahedral direction jitter. Offsets
-// the sample point within each octel texel by a 2D low-discrepancy
-// sequence indexed by frame. Over the 4-frame probe EMA this
-// super-samples the sphere without extra rays per frame — at the
-// steady state each octel's stored radiance is an integrated
-// sample over a small cone of directions rather than a point
-// sample at the texel centre. The R2 sequence (Martin Roberts
-// 2018) gives the best low-discrepancy 2D coverage I've seen
-// for this kind of temporal jitter. `frame` is `u.params.x` (the
-// shared TraceParams frame index).
+// Ticket 016 V1/V2 — temporal octahedral direction jitter with
+// per-probe decorrelation (V2). V1 indexed a 2D R2 low-discrepancy
+// sequence by frame, giving every probe the same per-frame sample
+// offset. That means the 3×3 neighbourhood the resolve pass reads
+// sees 9 probes sampling identical sub-texel positions — the
+// spatial filter averages correlated noise, which is slower to
+// converge than independent samples would be.
+//
+// V2 folds `probe_idx` into the sequence via a third low-
+// discrepancy axis (1/g³ ≈ 0.4301597). Adjacent probes now land
+// at different sub-texel positions each frame, so the 3×3 read
+// effectively samples 9 × 4 = 36 distinct directions per octel
+// over the EMA horizon rather than 4. Same zero-cost structure
+// as V1 — two `fract` calls with an extra multiply.
 const OCT_JITTER_A1: f32 = 0.7548776662;
 const OCT_JITTER_A2: f32 = 0.5698402910;
-fn octel_jitter(frame: f32) -> vec2<f32> {
+const OCT_JITTER_A3: f32 = 0.4301597090;
+fn octel_jitter(frame: f32, probe_idx: u32) -> vec2<f32> {
+    // R2 sequence in `frame` + orthogonal axis in `probe_idx`.
+    // The two components use different probe-axis scales (a3 vs
+    // a3 × R2's irrational) to stay 2D-decorrelated across probes.
+    let pf = f32(probe_idx);
     return vec2<f32>(
-        fract(0.5 + OCT_JITTER_A1 * frame) - 0.5,
-        fract(0.5 + OCT_JITTER_A2 * frame) - 0.5,
+        fract(0.5 + OCT_JITTER_A1 * frame + OCT_JITTER_A3 * pf) - 0.5,
+        fract(0.5 + OCT_JITTER_A2 * frame + OCT_JITTER_A3 * pf * 1.324718) - 0.5,
     );
 }
 fn octel_direction_jittered(octel: vec2<u32>, jitter: vec2<f32>) -> vec3<f32> {
@@ -3130,7 +3139,9 @@ fn cs_main(
 
     // V1 — temporal jitter within each octel; 4-frame EMA turns
     // this into free super-sampling.
-    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x));
+    // V2 — probe_idx folded into the jitter so neighbouring probes
+    // sample decorrelated sub-texel positions.
+    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x, probe_idx));
     let n_ws = header.normal.xyz;
 
     // Hemisphere cull — rays pointing below the surface carry no diffuse contribution.
@@ -3360,7 +3371,9 @@ fn cs_main(
 
     // V1 — temporal jitter within each octel; 4-frame EMA turns
     // this into free super-sampling.
-    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x));
+    // V2 — probe_idx folded into the jitter so neighbouring probes
+    // sample decorrelated sub-texel positions.
+    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x, probe_idx));
     let n_ws = header.normal.xyz;
     let ndotd = dot(dir_ws, n_ws);
     if (ndotd <= 0.0) {
@@ -3688,7 +3701,9 @@ fn cs_main(
 
     // V1 — temporal jitter within each octel; 4-frame EMA turns
     // this into free super-sampling.
-    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x));
+    // V2 — probe_idx folded into the jitter so neighbouring probes
+    // sample decorrelated sub-texel positions.
+    let dir_ws = octel_direction_jittered(lid.xy, octel_jitter(u.params.x, probe_idx));
     let n_ws = header.normal.xyz;
     let ndotd = dot(dir_ws, n_ws);
     if (ndotd <= 0.0) {
