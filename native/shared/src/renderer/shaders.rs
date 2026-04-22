@@ -2999,6 +2999,29 @@ fn hw_wsrc_load_cell(gx: i32, gy: i32, gz: i32, ox: i32, oy: i32) -> vec3<f32> {
     return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
 }
 
+// V9 — octel bilinear within one probe. See SDF-path variant for
+// the comment on why we clamp at the silhouette edges.
+fn hw_wsrc_load_cell_oct_bilinear(
+    gx: i32, gy: i32, gz: i32, ox_f: f32, oy_f: f32,
+) -> vec3<f32> {
+    let ox_fl = floor(ox_f);
+    let oy_fl = floor(oy_f);
+    let ox0 = clamp(i32(ox_fl),     0, 7);
+    let ox1 = clamp(i32(ox_fl) + 1, 0, 7);
+    let oy0 = clamp(i32(oy_fl),     0, 7);
+    let oy1 = clamp(i32(oy_fl) + 1, 0, 7);
+    let fx = ox_f - ox_fl;
+    let fy = oy_f - oy_fl;
+    let ix = 1.0 - fx;
+    let iy = 1.0 - fy;
+    let s00 = hw_wsrc_load_cell(gx, gy, gz, ox0, oy0);
+    let s10 = hw_wsrc_load_cell(gx, gy, gz, ox1, oy0);
+    let s01 = hw_wsrc_load_cell(gx, gy, gz, ox0, oy1);
+    let s11 = hw_wsrc_load_cell(gx, gy, gz, ox1, oy1);
+    return s00 * (ix * iy) + s10 * (fx * iy)
+         + s01 * (ix * fy) + s11 * (fx * fy);
+}
+
 fn hw_wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
     let origin = u.wsrc.xyz;
     let extent = u.wsrc.w;
@@ -3018,18 +3041,19 @@ fn hw_wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
     let fy = pf.y - pfy;
     let fz = pf.z - pfz;
 
+    // V9 — octel in float texel-space.
     let uv = oct_encode(dir_ws);
-    let ox = clamp(i32(floor(uv.x * 8.0)), 0, 7);
-    let oy = clamp(i32(floor(uv.y * 8.0)), 0, 7);
+    let ox_f = uv.x * 8.0 - 0.5;
+    let oy_f = uv.y * 8.0 - 0.5;
 
-    let c000 = hw_wsrc_load_cell(gix,     giy,     giz,     ox, oy);
-    let c100 = hw_wsrc_load_cell(gix + 1, giy,     giz,     ox, oy);
-    let c010 = hw_wsrc_load_cell(gix,     giy + 1, giz,     ox, oy);
-    let c110 = hw_wsrc_load_cell(gix + 1, giy + 1, giz,     ox, oy);
-    let c001 = hw_wsrc_load_cell(gix,     giy,     giz + 1, ox, oy);
-    let c101 = hw_wsrc_load_cell(gix + 1, giy,     giz + 1, ox, oy);
-    let c011 = hw_wsrc_load_cell(gix,     giy + 1, giz + 1, ox, oy);
-    let c111 = hw_wsrc_load_cell(gix + 1, giy + 1, giz + 1, ox, oy);
+    let c000 = hw_wsrc_load_cell_oct_bilinear(gix,     giy,     giz,     ox_f, oy_f);
+    let c100 = hw_wsrc_load_cell_oct_bilinear(gix + 1, giy,     giz,     ox_f, oy_f);
+    let c010 = hw_wsrc_load_cell_oct_bilinear(gix,     giy + 1, giz,     ox_f, oy_f);
+    let c110 = hw_wsrc_load_cell_oct_bilinear(gix + 1, giy + 1, giz,     ox_f, oy_f);
+    let c001 = hw_wsrc_load_cell_oct_bilinear(gix,     giy,     giz + 1, ox_f, oy_f);
+    let c101 = hw_wsrc_load_cell_oct_bilinear(gix + 1, giy,     giz + 1, ox_f, oy_f);
+    let c011 = hw_wsrc_load_cell_oct_bilinear(gix,     giy + 1, giz + 1, ox_f, oy_f);
+    let c111 = hw_wsrc_load_cell_oct_bilinear(gix + 1, giy + 1, giz + 1, ox_f, oy_f);
 
     let ix = 1.0 - fx;
     let iy = 1.0 - fy;
@@ -3294,11 +3318,18 @@ fn clipmap_sample(pos_ws: vec3<f32>) -> f32 {
     return textureSampleLevel(clipmap_tex, clipmap_samp, uv, 0.0).r;
 }
 
-// Ticket 014 V6/V8 — WSRC lookup. V6 was nearest-probe; V8 is
-// trilinear across the 8 neighbouring probes to kill the visible
-// banding where the camera or a ray crosses a 7.5 m cell boundary.
-// Octel direction stays nearest — bilinear on the octahedral wrap
-// requires edge-wrap handling that's a separate ticket.
+// Ticket 014 V6/V8/V9 — WSRC lookup. V6 was nearest-probe + nearest-
+// octel; V8 added 8-tap trilinear across probes (killed 7.5 m cell
+// banding); V9 adds 4-tap bilinear across octel texels within each
+// probe (kills directional banding visible as 8-step quantisation
+// in the ray bounce). Total: 32 textureLoads per miss ray.
+//
+// Boundary octels clamp to [0,7] (edge-extend) — the octahedral wrap
+// at u=0↔1 and v=0↔1 would need a padded-border bake to handle
+// correctly with a standard bilinear filter. In practice the
+// silhouette-edge directions are rarely critical for distant-
+// envelope radiance and the edge-extend approximation is visually
+// acceptable.
 //
 // Probes are cell-CENTRED: probe (0,0,0) sits at world-space
 // `origin - extent/2 + cell/2`. We convert `pos_ws` into
@@ -3311,6 +3342,31 @@ fn wsrc_load_cell(gx: i32, gy: i32, gz: i32, ox: i32, oy: i32) -> vec3<f32> {
     let gzc = clamp(gz, 0, 15);
     let tex_coord = vec3<i32>(gxc * 8 + ox, gyc * 8 + oy, gzc);
     return textureLoad(wsrc_atlas, tex_coord, 0).rgb;
+}
+
+// V9 — 4-tap bilinear on the octel grid inside one probe.
+// `ox_f` / `oy_f` are texel-space coords: oct texel centres sit at
+// (i + 0.5), so for a full-res uv we pass `uv * 8 - 0.5` and the
+// floor + fract reads like any 2D bilinear.
+fn wsrc_load_cell_oct_bilinear(
+    gx: i32, gy: i32, gz: i32, ox_f: f32, oy_f: f32,
+) -> vec3<f32> {
+    let ox_fl = floor(ox_f);
+    let oy_fl = floor(oy_f);
+    let ox0 = clamp(i32(ox_fl),     0, 7);
+    let ox1 = clamp(i32(ox_fl) + 1, 0, 7);
+    let oy0 = clamp(i32(oy_fl),     0, 7);
+    let oy1 = clamp(i32(oy_fl) + 1, 0, 7);
+    let fx = ox_f - ox_fl;
+    let fy = oy_f - oy_fl;
+    let ix = 1.0 - fx;
+    let iy = 1.0 - fy;
+    let s00 = wsrc_load_cell(gx, gy, gz, ox0, oy0);
+    let s10 = wsrc_load_cell(gx, gy, gz, ox1, oy0);
+    let s01 = wsrc_load_cell(gx, gy, gz, ox0, oy1);
+    let s11 = wsrc_load_cell(gx, gy, gz, ox1, oy1);
+    return s00 * (ix * iy) + s10 * (fx * iy)
+         + s01 * (ix * fy) + s11 * (fx * fy);
 }
 
 fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
@@ -3332,18 +3388,20 @@ fn wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
     let fy = pf.y - pfy;
     let fz = pf.z - pfz;
 
+    // V9 — octel in float texel-space; bilinear helper handles the
+    // floor/clamp per-probe.
     let uv = oct_encode(dir_ws);
-    let ox = clamp(i32(floor(uv.x * 8.0)), 0, 7);
-    let oy = clamp(i32(floor(uv.y * 8.0)), 0, 7);
+    let ox_f = uv.x * 8.0 - 0.5;
+    let oy_f = uv.y * 8.0 - 0.5;
 
-    let c000 = wsrc_load_cell(gix,     giy,     giz,     ox, oy);
-    let c100 = wsrc_load_cell(gix + 1, giy,     giz,     ox, oy);
-    let c010 = wsrc_load_cell(gix,     giy + 1, giz,     ox, oy);
-    let c110 = wsrc_load_cell(gix + 1, giy + 1, giz,     ox, oy);
-    let c001 = wsrc_load_cell(gix,     giy,     giz + 1, ox, oy);
-    let c101 = wsrc_load_cell(gix + 1, giy,     giz + 1, ox, oy);
-    let c011 = wsrc_load_cell(gix,     giy + 1, giz + 1, ox, oy);
-    let c111 = wsrc_load_cell(gix + 1, giy + 1, giz + 1, ox, oy);
+    let c000 = wsrc_load_cell_oct_bilinear(gix,     giy,     giz,     ox_f, oy_f);
+    let c100 = wsrc_load_cell_oct_bilinear(gix + 1, giy,     giz,     ox_f, oy_f);
+    let c010 = wsrc_load_cell_oct_bilinear(gix,     giy + 1, giz,     ox_f, oy_f);
+    let c110 = wsrc_load_cell_oct_bilinear(gix + 1, giy + 1, giz,     ox_f, oy_f);
+    let c001 = wsrc_load_cell_oct_bilinear(gix,     giy,     giz + 1, ox_f, oy_f);
+    let c101 = wsrc_load_cell_oct_bilinear(gix + 1, giy,     giz + 1, ox_f, oy_f);
+    let c011 = wsrc_load_cell_oct_bilinear(gix,     giy + 1, giz + 1, ox_f, oy_f);
+    let c111 = wsrc_load_cell_oct_bilinear(gix + 1, giy + 1, giz + 1, ox_f, oy_f);
 
     let ix = 1.0 - fx;
     let iy = 1.0 - fy;
