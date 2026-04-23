@@ -1131,8 +1131,18 @@ pub struct Renderer {
     pub render_mode: RenderMode,
     clear_color: wgpu::Color,
     debug_frame: u64,
-    // Pending joint matrices (written to GPU in end_frame)
-    pub pending_joint_matrices: Option<Vec<[[f32; 4]; 4]>>,
+    // Multi-skin per-frame staging.
+    //
+    // Each `updateModelAnimation` call appends one entry to
+    // `pending_skin_groups` — a pre-scaled/positioned pose for one
+    // skinned model. The matching `drawModel` call consumes the
+    // front entry (FIFO), copies its matrices into
+    // `frame_joint_data` at the current write cursor, and offsets
+    // that draw's per-vertex joint indices by the cursor so the
+    // shader samples its own pose from the shared 1024-slot buffer.
+    // At `end_frame` the accumulator is flushed in one write.
+    pub pending_skin_groups: Vec<Vec<[[f32; 4]; 4]>>,
+    pub frame_joint_data: Vec<[[f32; 4]; 4]>,
     pub model_skin_scale: f32,
 
     // Shadow mapping
@@ -1810,8 +1820,13 @@ impl Renderer {
                 count: None,
             }],
         });
-        // 64 joints × 64 bytes per mat4 = 4096 bytes
-        let joint_data = vec![0u8; 8192];
+        // 1024 joints × 64 bytes per mat4 = 65536 bytes.
+        // Sized so multiple skinned models can coexist in one frame —
+        // each updateModelAnimation stages its pose into a slice of
+        // this buffer, and each skinned drawModel reads its assigned
+        // slice via a per-vertex joint-index offset baked at submit
+        // time. 65536 is the default wgpu max_uniform_buffer_binding_size.
+        let joint_data = vec![0u8; 65536];
         let joint_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("joint_buffer"),
             contents: &joint_data,
@@ -1827,8 +1842,8 @@ impl Renderer {
         });
         // Initialize with identity matrices
         {
-            let mut identity_data = vec![0u8; 8192];
-            for i in 0..128 {
+            let mut identity_data = vec![0u8; 65536];
+            for i in 0..1024 {
                 let offset = i * 64;
                 // Identity matrix in column-major: [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
                 let one = 1.0f32.to_le_bytes();
@@ -5043,7 +5058,8 @@ impl Renderer {
             uniform_3d_layout,
             render_mode: RenderMode::ScreenSpace,
             debug_frame: 0,
-            pending_joint_matrices: None,
+            pending_skin_groups: Vec::with_capacity(8),
+            frame_joint_data: Vec::with_capacity(256),
             model_skin_scale: 1.0,
             clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
@@ -9810,7 +9826,7 @@ impl Renderer {
     }
 
     pub fn set_joint_matrices(&mut self, matrices: &[[[f32; 4]; 4]]) {
-        self.pending_joint_matrices = Some(matrices.to_vec());
+        self.pending_skin_groups.push(matrices.to_vec());
     }
 
     pub fn set_model_skin_scale(&mut self, scale: f32) {
@@ -9843,7 +9859,7 @@ impl Renderer {
             scaled.push(sm);
         }
 
-        self.pending_joint_matrices = Some(scaled);
+        self.pending_skin_groups.push(scaled);
     }
 
     /// Ensure persistent 3D buffers are large enough. Grows with doubling strategy.
@@ -10016,15 +10032,22 @@ impl Renderer {
     }
 
     fn flush_joint_matrices(&mut self) {
-        if let Some(ref matrices) = self.pending_joint_matrices {
-            let count = matrices.len().min(127);
-            let mut all_data = vec![[[0.0f32; 4]; 4]; 128];
+        // Accumulator = all skinned poses staged by skinned drawModel
+        // calls this frame, packed consecutively. Each draw's vertex
+        // joint indices were pre-offset at submit time, so a single
+        // flat upload here is all the GPU needs.
+        const MAX_JOINT_SLOTS: usize = 1024;
+        let count = self.frame_joint_data.len().min(MAX_JOINT_SLOTS);
+        if count > 0 {
+            let mut all_data = vec![[[0.0f32; 4]; 4]; MAX_JOINT_SLOTS];
             for i in 0..count {
-                all_data[i] = matrices[i];
+                all_data[i] = self.frame_joint_data[i];
             }
             self.queue.write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(&all_data));
         }
-        self.pending_joint_matrices = None;
+        self.frame_joint_data.clear();
+        // Any leftover staged poses are stale (no draw consumed them).
+        self.pending_skin_groups.clear();
     }
 
     // ============================================================
@@ -10316,6 +10339,31 @@ impl Renderer {
 
     pub fn draw_model_mesh_tinted(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32) {
         self.ensure_draw_state_3d(texture_idx);
+
+        // If this mesh is skinned, consume the next pending pose
+        // (FIFO) and pack its matrices into the frame accumulator at
+        // the current cursor. Each vertex's joint indices then get
+        // shifted by that cursor so the shader samples this mesh's
+        // slice of the shared joint buffer. With a 1024-slot buffer,
+        // multiple skinned models can coexist in one frame.
+        let mesh_skinned = vertices.iter().any(|v|
+            v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01);
+        let joint_offset: f32 = if mesh_skinned && !self.pending_skin_groups.is_empty() {
+            let group = self.pending_skin_groups.remove(0);
+            let start = self.frame_joint_data.len();
+            // Cap at the 1024-slot buffer. Overflowing poses land at
+            // offset 0, which at least avoids an out-of-range read —
+            // the model will look mis-posed but not corrupt memory.
+            if start + group.len() <= 1024 {
+                self.frame_joint_data.extend_from_slice(&group);
+                start as f32
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
         let base = self.vertices_3d.len() as u32;
         for v in vertices {
             // Check if vertex is skinned (has non-zero weights)
@@ -10329,6 +10377,14 @@ impl Renderer {
                  v.position[1] * scale + position[1],
                  v.position[2] * scale + position[2]]
             };
+            let joints_out = if is_skinned {
+                [v.joints[0] + joint_offset,
+                 v.joints[1] + joint_offset,
+                 v.joints[2] + joint_offset,
+                 v.joints[3] + joint_offset]
+            } else {
+                v.joints
+            };
             self.vertices_3d.push(Vertex3D {
                 position: pos,
                 normal: v.normal,
@@ -10339,7 +10395,7 @@ impl Renderer {
                     v.color[3] * tint[3],
                 ],
                 uv: v.uv,
-                joints: v.joints,
+                joints: joints_out,
                 weights: v.weights,
                 tangent: v.tangent,
             });

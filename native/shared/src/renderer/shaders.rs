@@ -77,7 +77,7 @@ struct Lighting {
 };
 
 struct JointMatrices {
-    matrices: array<mat4x4<f32>, 128>,
+    matrices: array<mat4x4<f32>, 1024>,
 };
 
 struct VertexInput3D {
