@@ -45,7 +45,7 @@ cd dist/web && python3 -m http.server 8080
 
 ## Features
 
-- **Simple API** — Functions, not classes. The entire API fits on a cheatsheet.
+- **Simple API** — Functions, not classes. The entire API fits on a cheatsheet. ([design rationale](docs/design-api.md))
 - **True native** — Compiles to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU via wgpu.
 - **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, Android, and Web from one codebase.
 - **Unified 2D/3D** — Shapes, textures, text, 3D models, and audio in one engine.
