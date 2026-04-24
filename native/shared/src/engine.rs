@@ -134,6 +134,15 @@ impl EngineState {
             self.scene.prepare_materials(&self.renderer);
             self.profiler.end("scene_prepare");
 
+            // Sync material-system PerFrame + PerView UBOs with the
+            // current clock + camera before dispatching any queued
+            // material draws. Without this, group 1 (view/proj/camera/
+            // lights/shadow) is zero and shaders that read e.g.
+            // `view.view_proj` produce offscreen geometry.
+            let t  = self.get_time() as f32;
+            let dt = self.delta_time as f32;
+            self.renderer.material_system_begin_frame(t, dt);
+
             self.profiler.begin("render_total");
             self.renderer.end_frame_with_scene(&mut self.scene, &mut self.profiler);
             self.profiler.end("render_total");

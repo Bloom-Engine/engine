@@ -1362,7 +1362,7 @@ pub extern "C" fn bloom_compile_material_refractive(source_ptr: *const u8) -> f6
         source, FragmentProfile::Translucent, Bucket::Refractive, true,
     ) {
         Ok(handle) => handle as f64,
-        Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
+        Err(e) => { eprintln!("[refractive] compile failed: {:?}", e); 0.0 }
     }
 }
 
@@ -1405,7 +1405,7 @@ pub extern "C" fn bloom_draw_material(
     let eng = engine();
     let handle_bits = mesh_handle.to_bits();
     if let Some(model) = eng.models.get(mesh_handle) {
-        let _ = eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+        eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
     }
     eng.renderer.submit_material_draw(
         material as u32,

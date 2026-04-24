@@ -381,7 +381,14 @@ pub fn compile_material(
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            // Translucent materials (water, glass, particles) are
+            // commonly viewed from both sides, so they render
+            // double-sided. Opaque materials cull backfaces.
+            cull_mode: if matches!(desc.profile, FragmentProfile::Translucent) {
+                None
+            } else {
+                Some(wgpu::Face::Back)
+            },
             ..Default::default()
         },
         depth_stencil,
