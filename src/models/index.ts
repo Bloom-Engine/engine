@@ -18,6 +18,9 @@ declare function bloom_gen_mesh_cube(w: number, h: number, d: number): number;
 declare function bloom_gen_mesh_heightmap(imageHandle: number, sizeX: number, sizeY: number, sizeZ: number): number;
 declare function bloom_load_shader(source: number): number;
 declare function bloom_compile_material(source: number): number;
+declare function bloom_compile_material_refractive(source: number): number;
+declare function bloom_compile_material_transparent(source: number): number;
+declare function bloom_compile_material_additive(source: number): number;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_load_model_animation(path: number): number;
 declare function bloom_update_model_animation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotSin: number, rotCos: number): void;
@@ -235,6 +238,45 @@ export function loadShader(wgslSource: string): number {
 /// on compile failure — errors log to stderr).
 export function compileMaterial(wgslSource: string): number {
   return bloom_compile_material(wgslSource as any);
+}
+
+/// Material profile — matches `FragmentProfile` in the engine's
+/// material_pipeline. Opaque writes the full 4-MRT G-buffer;
+/// Translucent writes a single HDR attachment with alpha blending.
+export const PROFILE_OPAQUE = 0;
+export const PROFILE_TRANSLUCENT = 1;
+
+/// Material bucket — matches `Bucket` in the engine. Decides which
+/// pass the draw lands in and what sort order applies. Refractive
+/// also triggers a scene-colour snapshot before the pass runs.
+export const BUCKET_OPAQUE = 0;
+export const BUCKET_TRANSPARENT = 1;
+export const BUCKET_REFRACTIVE = 2;
+export const BUCKET_ADDITIVE = 3;
+
+/// Phase 4b — full-control material compile. Pass PROFILE_* and
+/// BUCKET_* constants. `readsScene` enables the group-4 SceneInputs
+/// binding; required for refraction / shoreline / depth-fade effects.
+/// Phase 4b — compile a refractive material (profile=Translucent,
+/// bucket=Refractive, reads_scene=true). The material's shader gets
+/// the SceneInputs bind group at group 4 and can sample the
+/// pre-translucent scene colour via `scene_color_tex`.
+export function compileRefractiveMaterial(wgslSource: string): number {
+  return bloom_compile_material_refractive(wgslSource as any);
+}
+
+/// Compile a transparent material (profile=Translucent, bucket=
+/// Transparent, reads_scene=false). Alpha-blended, sorted back-to-
+/// front. No scene-colour sampling.
+export function compileTransparentMaterial(wgslSource: string): number {
+  return bloom_compile_material_transparent(wgslSource as any);
+}
+
+/// Compile an additive material (profile=Translucent, bucket=
+/// Additive, reads_scene=false). Order-independent — use for
+/// particle flares, weapon glows, spell effects.
+export function compileAdditiveMaterial(wgslSource: string): number {
+  return bloom_compile_material_additive(wgslSource as any);
 }
 
 /// Draw a mesh with a material. `mesh` must be a Model created via

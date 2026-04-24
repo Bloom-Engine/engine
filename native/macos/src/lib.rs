@@ -1348,6 +1348,52 @@ pub extern "C" fn bloom_compile_material(source_ptr: *const u8) -> f64 {
     }
 }
 
+/// Phase 4b — compile a refractive material. Shorthand for
+/// `compile_material_with_options(src, Translucent, Refractive,
+/// true)`. Perry's ARM64 FFI garbles mixed-signature calls with
+/// more than a pointer + 0-1 floats, so we ship dedicated entry
+/// points per (profile, bucket, reads_scene) combo that games
+/// actually need.
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_refractive(source_ptr: *const u8) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Refractive, true,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+/// Phase 4b — compile a transparent (non-refractive) material.
+/// Profile=Translucent, Bucket=Transparent, reads_scene=false.
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_transparent(source_ptr: *const u8) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Transparent, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+/// Phase 4b — compile an additive material. Profile=Translucent,
+/// Bucket=Additive, reads_scene=false.
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_additive(source_ptr: *const u8) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Additive, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_draw_material(
     material: f64,

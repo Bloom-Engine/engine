@@ -150,6 +150,27 @@ pub struct MaterialSystem {
     pub per_draw_buffers: Vec<wgpu::Buffer>,
     pub per_draw_bgs:     Vec<wgpu::BindGroup>,
 
+    // Phase 4b — group 4 (SceneInputs) bind group. Rebuilt per-frame
+    // when any Refractive material is submitted and a scene-colour
+    // snapshot is available. `None` means "no material needs this
+    // group this frame" — translucent dispatch skips group 4
+    // binding entirely.
+    pub scene_inputs_bg: Option<wgpu::BindGroup>,
+    /// Linear sampler for scene-colour sampling (group 4 binding 1).
+    _scene_color_sampler: wgpu::Sampler,
+    /// Non-filtering sampler for scene-depth sampling (binding 3).
+    _scene_depth_sampler: wgpu::Sampler,
+    /// 1×1 default texture for impulse / motion-vectors slots when
+    /// no Phase 7 impulse system is wired up yet.
+    _scene_stub_tex:      wgpu::Texture,
+    _scene_stub_view:     wgpu::TextureView,
+    /// 1×1 stub depth texture — bound to scene_depth_tex in Phase 4b
+    /// because the live depth buffer can't be simultaneously sampled
+    /// and used as a depth-stencil attachment. Phase 4c will add a
+    /// copy-to-sample depth snapshot for shoreline-fade materials.
+    _scene_stub_depth:    wgpu::Texture,
+    _scene_stub_depth_view: wgpu::TextureView,
+
     // Frame state — commands split by bucket so the graph can
     // schedule them into the right pass. Phase 4a keeps them in
     // parallel lists; Phase 4b dispatches the translucent lists in
@@ -302,6 +323,59 @@ impl MaterialSystem {
             ],
         });
 
+        // Phase 4b — scene-inputs scratch resources. Samplers are
+        // stable across frames; the bind group itself is rebuilt
+        // when a scene-colour snapshot becomes available.
+        let scene_color_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("scene_color_samp"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let scene_depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("scene_depth_samp"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        // 1×1 black texture as the stub impulse / motion-vector slot
+        // until Phase 7 wires real sources.
+        let scene_stub_tex = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("scene_inputs_stub"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            Default::default(),
+            &[0, 0, 0, 0],
+        );
+        let scene_stub_view = scene_stub_tex.create_view(&Default::default());
+
+        // Stub depth texture — Depth32Float 1×1, cleared to 1.0 (far).
+        let scene_stub_depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene_depth_stub"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let scene_stub_depth_view = scene_stub_depth.create_view(&Default::default());
+
         Self {
             layouts,
             pipelines: Vec::new(),
@@ -316,6 +390,13 @@ impl MaterialSystem {
             _default_sampler: default_sampler,
             per_draw_buffers: Vec::new(),
             per_draw_bgs: Vec::new(),
+            scene_inputs_bg: None,
+            _scene_color_sampler: scene_color_sampler,
+            _scene_depth_sampler: scene_depth_sampler,
+            _scene_stub_tex: scene_stub_tex,
+            _scene_stub_view: scene_stub_view,
+            _scene_stub_depth: scene_stub_depth,
+            _scene_stub_depth_view: scene_stub_depth_view,
             commands: Vec::new(),
             translucent_commands: Vec::new(),
             next_draw_slot: 0,
@@ -485,6 +566,90 @@ impl MaterialSystem {
                 pass.set_bind_group(2, &self.default_per_material_bg, &[]);
                 last_material = cmd.material;
             }
+            if let Some((vb, ib, icount)) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
+                pass.set_bind_group(3, &self.per_draw_bgs[cmd.draw_slot], &[]);
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..icount, 0, 0..1);
+            }
+        }
+    }
+
+    /// Phase 4b — rebuild the SceneInputs (group 4) bind group with
+    /// the current frame's snapshot textures. Called by the Renderer
+    /// once per frame when translucent draws exist and a SceneColor
+    /// transient has been allocated. `scene_color_view` is the
+    /// copy-to-sample snapshot from `hdr_rt`; `scene_depth_view` is
+    /// the live depth buffer the opaque pass wrote. Other slots
+    /// (impulse, motion vectors) bind to internal stub textures
+    /// until Phase 7 wires them.
+    pub fn update_scene_inputs(
+        &mut self,
+        device: &wgpu::Device,
+        scene_color_view: &wgpu::TextureView,
+        _scene_depth_view: &wgpu::TextureView,
+    ) {
+        // Depth is bound to a 1×1 stub in Phase 4b because the live
+        // depth texture is simultaneously used as the depth-stencil
+        // attachment of the translucent pass — wgpu treats that as
+        // a usage conflict. Phase 4c will add a copy-to-sample
+        // snapshot for shoreline-fade materials.
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene_inputs_bg"),
+            layout: &self.layouts.scene_inputs,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(scene_color_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self._scene_color_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self._scene_stub_depth_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self._scene_depth_sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self._scene_stub_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self._scene_color_sampler) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self._scene_stub_view) },
+            ],
+        });
+        self.scene_inputs_bg = Some(bg);
+    }
+
+    /// Dispatch translucent-bucket draws (Transparent, Refractive,
+    /// Additive). Caller owns a render pass set up with a single HDR
+    /// attachment (LoadOp::Load) + depth read-only. Refractive
+    /// materials additionally receive the SceneInputs bind group at
+    /// group 4 — `update_scene_inputs` must have been called this
+    /// frame for that to be non-None.
+    pub fn dispatch_translucent<'pass, F>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        mut mesh_fetch: F,
+    )
+    where F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32)>
+    {
+        if self.translucent_commands.is_empty() { return; }
+
+        let mut last_material: MaterialHandle = 0;
+        let mut last_reads_scene: bool = false;
+        for cmd in &self.translucent_commands {
+            if cmd.material != last_material {
+                let mat = match self.pipelines.get(cmd.material as usize - 1) {
+                    Some(Some(m)) => m,
+                    _ => continue,
+                };
+                pass.set_pipeline(&mat.pipeline);
+                pass.set_bind_group(0, &self.per_frame_bg, &[]);
+                pass.set_bind_group(1, &self.per_view_bg, &[]);
+                pass.set_bind_group(2, &self.default_per_material_bg, &[]);
+                if mat.reads_scene {
+                    if let Some(bg) = self.scene_inputs_bg.as_ref() {
+                        pass.set_bind_group(4, bg, &[]);
+                    }
+                }
+                last_material = cmd.material;
+                last_reads_scene = mat.reads_scene;
+            }
+            // Re-bind group 4 if the material switches its reads_scene
+            // between subsequent draws — rarely happens with a
+            // stable bucket but keeps the state machine honest.
+            let _ = last_reads_scene;
+
             if let Some((vb, ib, icount)) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
                 pass.set_bind_group(3, &self.per_draw_bgs[cmd.draw_slot], &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));

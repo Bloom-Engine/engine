@@ -67,6 +67,7 @@ export {
   drawCube, drawCubeWires, drawSphere, drawSphereWires,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
   loadShader, compileMaterial, drawMeshWithMaterial,
+  compileRefractiveMaterial, compileTransparentMaterial, compileAdditiveMaterial,
   loadModelAnimation, updateModelAnimation, createMesh,
   setAmbientLight, setDirectionalLight, setJointTest,
   loadModelAsync, stageModels, commitModel,
