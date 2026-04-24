@@ -40,6 +40,7 @@ declare function bloom_get_profiler_frame_cpu_us(): number;
 declare function bloom_get_profiler_frame_gpu_us(): number;
 declare function bloom_print_profiler_summary(): void;
 declare function bloom_profiler_overlay_text(): string;
+declare function bloom_splat_impulse(x: number, z: number, radius: number, strength: number): void;
 declare function bloom_set_target_fps(fps: number): void;
 declare function bloom_set_direct_2d_mode(on: number): void;
 declare function bloom_get_delta_time(): number;
@@ -314,6 +315,20 @@ export function getProfilerFrameGpuUs(): number {
 /** Print a per-phase CPU/GPU timing table to stdout. Useful for quick diagnostics. */
 export function printProfilerSummary(): void {
   bloom_print_profiler_summary();
+}
+
+/**
+ * Phase 7 — submit a world-space impulse splat. Per-frame compute
+ * accumulates + decays into a 256×256 top-down field covering a 128m
+ * centred square. Refractive/translucent materials sampling
+ * `impulse_tex` (group 4 binding 4) see the result. Up to 16 splats
+ * per frame; excess is dropped. Typical uses:
+ *   - Footsteps in mud / wet pavement
+ *   - Splashes when the player enters water
+ *   - Explosion rings, impact ripples
+ */
+export function splatImpulse(x: number, z: number, radius: number, strength: number): void {
+  bloom_splat_impulse(x, z, radius, strength);
 }
 
 /**

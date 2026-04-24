@@ -588,8 +588,16 @@ impl MaterialSystem {
         device: &wgpu::Device,
         scene_color_view: &wgpu::TextureView,
         scene_depth_view: Option<&wgpu::TextureView>,
+        impulse_view: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
     ) {
         let depth_view = scene_depth_view.unwrap_or(&self._scene_stub_depth_view);
+        // Layout entry 5 is NonFiltering — fallback uses the depth
+        // sampler (which is also NonFiltering) rather than the
+        // filtering color sampler so the layout matches either way.
+        let (imp_view, imp_samp): (&wgpu::TextureView, &wgpu::Sampler) = match impulse_view {
+            Some((v, s)) => (v, s),
+            None         => (&self._scene_stub_view, &self._scene_depth_sampler),
+        };
         // Phase 4c — group 4 binding 2 receives a COPY_DST snapshot of
         // the opaque depth buffer, rather than the live depth-stencil
         // attachment (wgpu rejects read+write aliasing in the same
@@ -605,8 +613,8 @@ impl MaterialSystem {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self._scene_color_sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(depth_view) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self._scene_depth_sampler) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self._scene_stub_view) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self._scene_color_sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(imp_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(imp_samp) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self._scene_stub_view) },
             ],
         });

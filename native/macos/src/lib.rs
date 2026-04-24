@@ -1265,6 +1265,18 @@ pub extern "C" fn bloom_print_profiler_summary() {
 ///
 /// The TS overlay splits on \n then | per line. Games call this once
 /// per overlay-draw frame.
+/// Phase 7 — submit a world-space impulse. The renderer's per-frame
+/// compute pass decays + accumulates submissions into a 256×256
+/// R32Float texture covering a 128 m centred square; materials that
+/// sample `impulse_tex` (group 4 binding 4) read the result. Up to 16
+/// splats per frame are accepted — overflow is dropped silently.
+#[no_mangle]
+pub extern "C" fn bloom_splat_impulse(x: f64, z: f64, radius: f64, strength: f64) {
+    engine().renderer.impulse_field.submit_splat(
+        x as f32, z as f32, radius as f32, strength as f32,
+    );
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_profiler_overlay_text() -> *const u8 {
     let snap = engine().profiler.snapshot();

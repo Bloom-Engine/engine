@@ -649,15 +649,29 @@ opaque material path (matTest cube retired anyway in Phase 9).
 **Acceptance:** editing `water.wgsl` while the shooter runs hot-reloads
 without a crash. Release build has no watcher thread.
 
-### Phase 7 — Impulse texture
+### Phase 7 — Impulse texture ✅
 
-- [ ] `R16F` world-space texture allocated as a transient.
-- [ ] `splat_impulse(world_pos, radius, strength)` gameplay API.
-- [ ] Decays 1 - t / lifetime per frame in a tiny compute pass.
-- [ ] Bound as `@group(4) @binding(4)` for materials that declare it.
+- [x] `R32Float` 256×256 world-space texture (ping-pong pair) in
+      `renderer::impulse_field::ImpulseField`, persistent across
+      frames rather than transient — splats need to decay for ~2 s,
+      which straddles multiple frames.
+- [x] `splat_impulse(world_pos, radius, strength)` gameplay API via
+      `bloom_splat_impulse` FFI / `splatImpulse()` TS helper.
+- [x] Decay + splat combined in one compute pass
+      (`impulse_field.wgsl`, 8×8 workgroup): reads previous field,
+      multiplies by per-frame decay (~0.968 for a 2 s half-life at
+      60 fps), then adds every queued splat with quadratic falloff.
+- [x] Bound at `@group(4) @binding(4)` in scene_inputs whenever a
+      translucent material declares `reads_scene` — the scene_inputs
+      layout switched binding 4 to `Float { filterable: false }` and
+      binding 5 to `NonFiltering` sampler (R32Float is non-filterable
+      without a feature flag).
 
-**Acceptance:** a splash decal visible for 2 seconds after the shooter's
-player enters a water volume.
+**Acceptance:** ✅ shooter water shader samples `impulse_tex` via
+`textureLoad`; walking across the river submits a splat per frame
+and leaves a visible, decaying trail. Diagnostic red-channel
+visualisation showed a clean path of accumulated impulses along the
+player's route.
 
 ### Phase 8 — Observability ✅
 

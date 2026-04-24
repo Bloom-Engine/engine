@@ -20,6 +20,7 @@ const ENTRIES: &[(&str, &str)] = &[
     ("common/tonemap.wgsl",         include_str!("../../../shared/shaders/common/tonemap.wgsl")),
     ("common/sky.wgsl",             include_str!("../../../shared/shaders/common/sky.wgsl")),
     ("materials/test_minimal.wgsl", include_str!("../../../shared/shaders/materials/test_minimal.wgsl")),
+    ("impulse_field.wgsl",          include_str!("../../../shared/shaders/impulse_field.wgsl")),
 ];
 
 /// The single shared source resolver for built-in shaders. Phase 1

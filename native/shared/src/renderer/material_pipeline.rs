@@ -120,11 +120,27 @@ fn create_scene_inputs_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             entry_samp(1,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
             entry_tex_depth(2, wgpu::ShaderStages::FRAGMENT),
             entry_samp(3,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::NonFiltering),
-            entry_tex_f(4,     wgpu::ShaderStages::FRAGMENT),
-            entry_samp(5,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
+            // Phase 7 — impulse_tex is R32Float which is non-filterable
+            // in wgpu 29 without a feature flag, so the binding is
+            // declared NonFiltering. Materials sample via textureLoad
+            // (no filtering; 0.5 m / texel is already coarse).
+            entry_tex_f_nonfilt(4, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(5,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::NonFiltering),
             entry_tex_f(6,     wgpu::ShaderStages::FRAGMENT),
         ],
     })
+}
+
+fn entry_tex_f_nonfilt(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding, visibility: vis,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
 }
 
 // Small helpers for binding entry construction.

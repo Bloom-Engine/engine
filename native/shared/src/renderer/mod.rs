@@ -10,6 +10,7 @@ pub mod material_pipeline;
 pub mod material_system;
 pub mod graph;
 pub mod transient;
+pub mod impulse_field;
 
 mod util;
 pub use util::{
@@ -1243,6 +1244,12 @@ pub struct Renderer {
     /// snapshots (Phase 4b), depth-as-sampled linearisations (Phase 4b),
     /// and future graph-managed intermediates.
     pub transient_pool: transient::TransientPool,
+
+    /// Phase 7 — persistent world-space impulse field. Games submit
+    /// splats via `bloom_splat_impulse`; the renderer dispatches a
+    /// compute pass per frame to decay + accumulate, then the front
+    /// view is bound at `group(4) binding(4)` in scene_inputs.
+    pub impulse_field: impulse_field::ImpulseField,
 }
 
 /// Ticket 014 — re-exposed for `SceneGraph::prepare()` to allocate
@@ -4789,6 +4796,7 @@ impl Renderer {
         // them; games opt in via compile_material + submit_material_draw.
         let material_system = material_system::MaterialSystem::new(&device, &queue, &joint_buffer);
         let transient_pool = transient::TransientPool::new();
+        let impulse_field = impulse_field::ImpulseField::new(&device);
 
         Self {
             device,
@@ -5119,6 +5127,7 @@ impl Renderer {
             default_normal_view,
             material_system,
             transient_pool,
+            impulse_field,
         }
     }
 
@@ -7818,6 +7827,11 @@ impl Renderer {
             let swap_h = self.surface_config.height;
             self.transient_pool.begin_frame(swap_w, swap_h);
 
+            // Phase 7 — run the impulse decay + splat compute BEFORE
+            // we build scene_inputs so the front view reflects this
+            // frame's submissions.
+            self.impulse_field.update(&self.device, &self.queue, &mut encoder);
+
             // Does any queued translucent material need the scene
             // colour snapshot?
             let needs_scene = self.material_system.translucent_commands
@@ -7894,14 +7908,17 @@ impl Renderer {
                 );
                 let color_view = self.transient_pool.view(ctid).unwrap();
                 let depth_view = self.transient_pool.view(dtid).unwrap();
+                let imp_view = self.impulse_field.front_view();
+                let imp_samp = self.impulse_field.sampler();
                 self.material_system.update_scene_inputs(
                     &self.device, color_view, Some(depth_view),
+                    Some((imp_view, imp_samp)),
                 );
             } else {
                 // No refractive/depth-reading materials this frame —
-                // still need a valid bind group. None → internal stub.
+                // still need a valid bind group. None → internal stubs.
                 self.material_system.update_scene_inputs(
-                    &self.device, &self.hdr_rt_view, None,
+                    &self.device, &self.hdr_rt_view, None, None,
                 );
             }
 
