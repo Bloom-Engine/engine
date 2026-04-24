@@ -665,15 +665,19 @@ release.
 **Acceptance:** side-by-side screenshot review. Water reads as real
 water at distance and close-up. Banks fade. No visible seams or aliasing.
 
-### Phase 10 — Second consumer (glass)
+### Phase 10 — Second consumer (glass) ✅
 
-- [ ] `materials/glass.wgsl` reusing the same header and SceneColor
-      infrastructure.
-- [ ] A glass pane placed in the shooter's upstairs window opening.
+- [x] Glass WGSL (inline in `shooter/src/main.ts`) reusing
+      `material_abi.wgsl` + `common/pbr.wgsl` and the SceneColor
+      (group 4) infrastructure. Flat normal, Schlick Fresnel with
+      F0=0.04, 0.008 refraction offset, faint cyan transmission tint.
+- [x] A glass pane placed in the south-wall door opening of house h1
+      at `(-21, 0, -10)` in the arena_02 world.
 
-**Acceptance:** glass renders without any engine change between phase 9
-and 10. If any engine change is needed, the RFC has a design hole and
-that phase re-opens phase 1-9 as appropriate.
+**Acceptance:** ✅ no engine change between phase 9 and 10. Glass
+compiled via the same `compileRefractiveMaterial` entry point as water
+and rendered correctly; the diag pane in front of the player spawn
+showed the expected Fresnel-biased transmission + sky reflection.
 
 ---
 
