@@ -6,6 +6,7 @@ use shaders::*;
 
 pub mod shader_include;
 pub mod shader_library;
+pub mod material_pipeline;
 
 mod util;
 pub use util::{
