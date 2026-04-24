@@ -4,6 +4,9 @@ use std::collections::HashMap;
 mod shaders;
 use shaders::*;
 
+pub mod shader_include;
+pub mod shader_library;
+
 mod util;
 pub use util::{
     IDENTITY_MAT4,

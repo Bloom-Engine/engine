@@ -1,0 +1,93 @@
+// Baked shader library — the release-build source of truth for every
+// Bloom-owned WGSL file under native/shared/shaders/.
+//
+// Files live on disk so humans can read them, hot-reload can watch them,
+// and diffs show real changes. For release builds we `include_str!`
+// them here so the engine has zero filesystem dependencies at runtime —
+// every shader is embedded in the binary.
+//
+// Adding a new shader: (1) drop the .wgsl file under native/shared/
+// shaders/, (2) add a line below. The path string is what `#include`
+// directives reference.
+
+use super::shader_include::{BakedSource, ShaderSource};
+
+const ENTRIES: &[(&str, &str)] = &[
+    ("material_abi.wgsl",     include_str!("../../../shared/shaders/material_abi.wgsl")),
+    ("common/pbr.wgsl",       include_str!("../../../shared/shaders/common/pbr.wgsl")),
+    ("common/shadows.wgsl",   include_str!("../../../shared/shaders/common/shadows.wgsl")),
+    ("common/fog.wgsl",       include_str!("../../../shared/shaders/common/fog.wgsl")),
+    ("common/tonemap.wgsl",   include_str!("../../../shared/shaders/common/tonemap.wgsl")),
+    ("common/sky.wgsl",       include_str!("../../../shared/shaders/common/sky.wgsl")),
+];
+
+/// The single shared source resolver for built-in shaders. Phase 1
+/// preps it but no pipelines consume it yet — that's Phase 1b.
+pub fn library() -> impl ShaderSource {
+    BakedSource { entries: ENTRIES }
+}
+
+/// Self-check: the ABI header parses to a known version. Called from
+/// Renderer::new so a bad merge is caught at startup, not at the first
+/// draw call.
+pub fn verify_abi_version(expected: u32) -> Result<(), String> {
+    let src = library();
+    let body = src.fetch("material_abi.wgsl")
+        .ok_or_else(|| "material_abi.wgsl missing from shader library".to_string())?;
+    let actual = super::shader_include::abi_version_of(body);
+    if actual != expected {
+        return Err(format!(
+            "shader ABI version mismatch: header declares {}, engine expects {}",
+            actual, expected
+        ));
+    }
+    Ok(())
+}
+
+/// The version the engine was built against. Phase 1 ships ABI v1.
+pub const EXPECTED_ABI_VERSION: u32 = 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::shader_include::process;
+
+    #[test]
+    fn abi_header_present_and_versioned() {
+        verify_abi_version(EXPECTED_ABI_VERSION).unwrap();
+    }
+
+    #[test]
+    fn abi_header_includes_through_preprocessor() {
+        // A synthetic shader that pulls in the ABI header plus one
+        // common helper — proves the include machinery wires to the
+        // baked library end-to-end.
+        let synthetic = BakedSource {
+            entries: &[
+                (
+                    "test.wgsl",
+                    "#include \"material_abi.wgsl\"\n\
+                     #include \"common/pbr.wgsl\"\n\
+                     // synthesised\n",
+                ),
+                ENTRIES[0],
+                ENTRIES[1],
+                ENTRIES[2],
+                ENTRIES[3],
+                ENTRIES[4],
+                ENTRIES[5],
+            ],
+        };
+        let out = process(&synthetic, "test.wgsl").unwrap();
+        assert!(out.contains("struct PerFrame"));
+        assert!(out.contains("fn d_ggx"));
+        assert!(out.contains("synthesised"));
+    }
+
+    #[test]
+    fn every_common_file_appears_in_entries() {
+        for (path, body) in ENTRIES {
+            assert!(!body.is_empty(), "{} should not be empty", path);
+        }
+    }
+}
