@@ -84,8 +84,12 @@ pub(super) fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: HDR_FORMAT,
+        // Phase 4b adds COPY_SRC so the translucent-pass scheduler
+        // can snapshot hdr_rt → a SceneColor transient via
+        // copy_texture_to_texture before refractive draws run.
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+             | wgpu::TextureUsages::TEXTURE_BINDING
+             | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

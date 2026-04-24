@@ -1238,6 +1238,11 @@ pub struct Renderer {
     /// `compile_material` + `submit_material_draw`; existing draws are
     /// untouched.
     pub material_system: material_system::MaterialSystem,
+
+    /// Phase 3 — short-lived texture pool. Feeds scene-colour
+    /// snapshots (Phase 4b), depth-as-sampled linearisations (Phase 4b),
+    /// and future graph-managed intermediates.
+    pub transient_pool: transient::TransientPool,
 }
 
 /// Ticket 014 — re-exposed for `SceneGraph::prepare()` to allocate
@@ -4783,6 +4788,7 @@ impl Renderer {
         // Runs alongside pipeline_3d / scene_pipeline without disturbing
         // them; games opt in via compile_material + submit_material_draw.
         let material_system = material_system::MaterialSystem::new(&device, &queue, &joint_buffer);
+        let transient_pool = transient::TransientPool::new();
 
         Self {
             device,
@@ -5112,6 +5118,7 @@ impl Renderer {
             _default_normal_texture: default_normal_tex,
             default_normal_view,
             material_system,
+            transient_pool,
         }
     }
 
@@ -7789,6 +7796,127 @@ impl Renderer {
             if let Err(e) = graph.execute(&mut ctx) {
                 eprintln!("[graph] material_pass failed: {:?}", e);
             }
+        }
+
+        // ============================================================
+        // Phase 4b — translucent / refractive / additive material pass
+        // ============================================================
+        //
+        // Runs after opaque materials, before post-FX. Loads hdr_rt so
+        // opaque output survives; alpha-blends into it. Depth is
+        // bound as read-only so translucent draws participate in the
+        // depth test without writing.
+        //
+        // If any submitted translucent material declared
+        // `reads_scene = true`, we first snapshot hdr_rt into a
+        // swapchain-sized transient and bind that as group 4
+        // scene_color_tex for the dispatch. Free after the pass so
+        // the transient pool reuses on the next frame.
+        if !self.material_system.translucent_commands.is_empty() {
+            profiler.begin("translucent_pass");
+            let swap_w = self.surface_config.width;
+            let swap_h = self.surface_config.height;
+            self.transient_pool.begin_frame(swap_w, swap_h);
+
+            // Does any queued translucent material need the scene
+            // colour snapshot?
+            let needs_scene = self.material_system.translucent_commands
+                .iter()
+                .any(|c| self.material_system.pipelines
+                    .get(c.material as usize - 1)
+                    .and_then(|p| p.as_ref())
+                    .map(|p| p.reads_scene)
+                    .unwrap_or(false));
+
+            let scene_color_tid = if needs_scene {
+                let desc = transient::TransientDesc::new(
+                    formats::HDR_FORMAT,
+                    wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                    transient::SizePolicy::Swapchain,
+                );
+                Some(self.transient_pool.acquire(&self.device, desc))
+            } else {
+                None
+            };
+
+            // Snapshot hdr_rt -> scene-colour transient.
+            if let Some(tid) = scene_color_tid {
+                let tex = self.transient_pool.texture(tid).expect("fresh transient");
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.hdr_rt_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d { width: swap_w, height: swap_h, depth_or_array_layers: 1 },
+                );
+                let tview = self.transient_pool.view(tid).unwrap();
+                self.material_system.update_scene_inputs(
+                    &self.device, tview, &self.depth_view,
+                );
+            } else {
+                // No refractive materials — but depth-only reads could
+                // still apply. Bind depth + a black stub as scene
+                // colour so the bind group is valid.
+                self.material_system.update_scene_inputs(
+                    &self.device,
+                    &self.hdr_rt_view,      // harmless; no reads_scene=true materials here
+                    &self.depth_view,
+                );
+            }
+
+            {
+                let t_ts = profiler.pass_timestamp_writes("translucent_pass");
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bloom_translucent_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.hdr_rt_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            // Translucents don't write depth — keep
+                            // the opaque pass's depth pristine so
+                            // downstream post-FX (SSR/SSGI) still
+                            // sees the opaque geometry.
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: t_ts,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                let cache = &self.model_gpu_cache;
+                self.material_system.dispatch_translucent(&mut pass, |handle, idx| {
+                    if let Some(Some(meshes)) = cache.get(&handle) {
+                        if idx < meshes.len() {
+                            let mesh = &meshes[idx];
+                            return Some((&mesh.vb, &mesh.ib, mesh.index_count));
+                        }
+                    }
+                    None
+                });
+            }
+
+            if let Some(tid) = scene_color_tid {
+                self.transient_pool.release(tid);
+            }
+            profiler.end("translucent_pass");
         }
 
         // ============================================================
