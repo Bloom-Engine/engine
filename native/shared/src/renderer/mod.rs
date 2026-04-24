@@ -7692,62 +7692,101 @@ impl Renderer {
         }
         profiler.end("main_hdr_pass");
 
-        // Phase 2b — material draws run in their own render pass,
-        // loading main_hdr's 4-MRT outputs + depth. Structurally the
-        // same result as the previous inline dispatch (same load-op
-        // Store, same depth-test), but the pass is now a candidate
-        // to become a render-graph node (Phase 2c) without touching
-        // the main_hdr pass body again. Skipped when the graph has
-        // no material commands this frame.
+        // Phase 2c — schedule the material pass through the render
+        // graph. First real consumer of `renderer::graph` from #35.
+        // For now a one-node graph; later phases add more nodes
+        // (main_hdr, ssao, bloom, translucent, composite) and the
+        // graph's topological sort picks the order from read/write
+        // declarations.
+        //
+        // All per-frame borrows that the pass body needs are captured
+        // here from `&self` before we build the context that wraps
+        // `&mut encoder` + `&mut profiler`. Rust's borrow checker is
+        // happy because the immutable and mutable borrows are
+        // disjoint fields of the same struct.
         if !self.material_system.commands.is_empty() {
-            profiler.begin("material_pass");
-            {
-                let mat_ts = profiler.pass_timestamp_writes("material_pass");
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("bloom_material_pass"),
-                    color_attachments: &[
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: &self.hdr_rt_view,
-                            resolve_target: None, depth_slice: None,
-                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                        }),
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: &self.material_rt_view,
-                            resolve_target: None, depth_slice: None,
-                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                        }),
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: &self.velocity_rt_view,
-                            resolve_target: None, depth_slice: None,
-                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                        }),
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: &self.albedo_rt_view,
-                            resolve_target: None, depth_slice: None,
-                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                        }),
-                    ],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.depth_view,
-                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: mat_ts,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                let cache = &self.model_gpu_cache;
-                self.material_system.dispatch(&mut pass, |handle, idx| {
-                    if let Some(Some(meshes)) = cache.get(&handle) {
-                        if idx < meshes.len() {
-                            let mesh = &meshes[idx];
-                            return Some((&mesh.vb, &mesh.ib, mesh.index_count));
-                        }
-                    }
-                    None
-                });
+            use graph::{Graph, PassNode, PassOutput};
+
+            let hdr_rt_view       = &self.hdr_rt_view;
+            let material_rt_view  = &self.material_rt_view;
+            let velocity_rt_view  = &self.velocity_rt_view;
+            let albedo_rt_view    = &self.albedo_rt_view;
+            let depth_view        = &self.depth_view;
+            let material_system   = &self.material_system;
+            let model_gpu_cache   = &self.model_gpu_cache;
+
+            struct FrameCtx<'a> {
+                encoder:  &'a mut wgpu::CommandEncoder,
+                profiler: &'a mut crate::profiler::Profiler,
             }
-            profiler.end("material_pass");
+
+            let mut graph: Graph<FrameCtx<'_>> = Graph::new();
+            graph.push(
+                PassNode::new("material_pass", Box::new(move |ctx: &mut FrameCtx| {
+                    ctx.profiler.begin("material_pass");
+                    {
+                        let mat_ts = ctx.profiler.pass_timestamp_writes("material_pass");
+                        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("bloom_material_pass"),
+                            color_attachments: &[
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: hdr_rt_view,
+                                    resolve_target: None, depth_slice: None,
+                                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                                }),
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: material_rt_view,
+                                    resolve_target: None, depth_slice: None,
+                                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                                }),
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: velocity_rt_view,
+                                    resolve_target: None, depth_slice: None,
+                                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                                }),
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: albedo_rt_view,
+                                    resolve_target: None, depth_slice: None,
+                                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                                }),
+                            ],
+                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                view: depth_view,
+                                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                                stencil_ops: None,
+                            }),
+                            timestamp_writes: mat_ts,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        material_system.dispatch(&mut pass, |handle, idx| {
+                            if let Some(Some(meshes)) = model_gpu_cache.get(&handle) {
+                                if idx < meshes.len() {
+                                    let mesh = &meshes[idx];
+                                    return Some((&mesh.vb, &mesh.ib, mesh.index_count));
+                                }
+                            }
+                            None
+                        });
+                    }
+                    ctx.profiler.end("material_pass");
+                }))
+                // Writes HdrColor + the G-buffer so Phase 2d's scheduler
+                // can order downstream passes (SSAO, bloom, translucent)
+                // correctly once they're nodes too.
+                .with_writes(&[
+                    PassOutput::HdrColor,
+                    PassOutput::MaterialRt,
+                    PassOutput::VelocityRt,
+                    PassOutput::AlbedoRt,
+                    PassOutput::Depth,
+                ]),
+            );
+
+            let mut ctx = FrameCtx { encoder: &mut encoder, profiler: &mut *profiler };
+            if let Err(e) = graph.execute(&mut ctx) {
+                eprintln!("[graph] material_pass failed: {:?}", e);
+            }
         }
 
         // ============================================================

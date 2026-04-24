@@ -70,11 +70,14 @@ pub enum PassOutput {
 /// need; the scheduler doesn't know or care.
 ///
 /// `RunFn` takes a single untyped context argument because this module
-/// must not depend on `Renderer` (would create a module cycle). Phase
-/// 2b wires a concrete context type on the caller side.
-pub type RunFn<Ctx> = Box<dyn FnOnce(&mut Ctx) + Send>;
+/// must not depend on `Renderer` (would create a module cycle). The
+/// `'a` lifetime lets closures borrow frame-scoped data (render
+/// targets, uniform buffers) from the renderer — dropping the `Send`
+/// bound is deliberate, since graph execution is single-threaded from
+/// the caller's perspective.
+pub type RunFn<'a, Ctx> = Box<dyn FnOnce(&mut Ctx) + 'a>;
 
-pub struct PassNode<Ctx> {
+pub struct PassNode<'a, Ctx> {
     pub name:   &'static str,
     pub reads:  Vec<PassInput>,
     pub writes: Vec<PassOutput>,
@@ -85,11 +88,11 @@ pub struct PassNode<Ctx> {
     pub after:  Vec<&'static str>,
     /// Hard "run this node before X" hints. Validator rejects cycles.
     pub before: Vec<&'static str>,
-    pub run:    RunFn<Ctx>,
+    pub run:    RunFn<'a, Ctx>,
 }
 
-impl<Ctx> PassNode<Ctx> {
-    pub fn new(name: &'static str, run: RunFn<Ctx>) -> Self {
+impl<'a, Ctx> PassNode<'a, Ctx> {
+    pub fn new(name: &'static str, run: RunFn<'a, Ctx>) -> Self {
         Self {
             name, reads: Vec::new(), writes: Vec::new(),
             after: Vec::new(), before: Vec::new(),
@@ -114,8 +117,8 @@ impl<Ctx> PassNode<Ctx> {
 // Graph — a container of nodes + schedule + execute
 // =====================================================================
 
-pub struct Graph<Ctx> {
-    pub nodes: Vec<PassNode<Ctx>>,
+pub struct Graph<'a, Ctx> {
+    pub nodes: Vec<PassNode<'a, Ctx>>,
 }
 
 #[derive(Debug)]
@@ -126,9 +129,9 @@ pub enum GraphError {
     Cycle(Vec<String>),
 }
 
-impl<Ctx> Graph<Ctx> {
+impl<'a, Ctx> Graph<'a, Ctx> {
     pub fn new() -> Self { Self { nodes: Vec::new() } }
-    pub fn push(&mut self, node: PassNode<Ctx>) -> &mut Self {
+    pub fn push(&mut self, node: PassNode<'a, Ctx>) -> &mut Self {
         self.nodes.push(node); self
     }
 
@@ -143,7 +146,7 @@ impl<Ctx> Graph<Ctx> {
         let order = schedule(&self.nodes)?;
         // Drain in order. Using Option<PassNode> trick so we can take()
         // nodes out by index without panicking the Vec's geometry.
-        let mut slots: Vec<Option<PassNode<Ctx>>> = self.nodes.into_iter().map(Some).collect();
+        let mut slots: Vec<Option<PassNode<'a, Ctx>>> = self.nodes.into_iter().map(Some).collect();
         for i in order {
             let node = slots[i].take().expect("each node scheduled exactly once");
             (node.run)(ctx);
@@ -152,7 +155,7 @@ impl<Ctx> Graph<Ctx> {
     }
 }
 
-impl<Ctx> Default for Graph<Ctx> {
+impl<'a, Ctx> Default for Graph<'a, Ctx> {
     fn default() -> Self { Self::new() }
 }
 
@@ -160,7 +163,7 @@ impl<Ctx> Default for Graph<Ctx> {
 // Scheduler — topological sort (Kahn's algorithm) with hint tie-breaks
 // =====================================================================
 
-fn schedule<Ctx>(nodes: &[PassNode<Ctx>]) -> Result<Vec<usize>, GraphError> {
+fn schedule<'a, Ctx>(nodes: &[PassNode<'a, Ctx>]) -> Result<Vec<usize>, GraphError> {
     let n = nodes.len();
     if n == 0 { return Ok(Vec::new()); }
 
@@ -272,13 +275,13 @@ mod tests {
     /// Test context that records the order of pass executions.
     type TestCtx = Vec<&'static str>;
 
-    fn record(name: &'static str) -> RunFn<TestCtx> {
+    fn record(name: &'static str) -> RunFn<'static, TestCtx> {
         Box::new(move |ctx: &mut TestCtx| ctx.push(name))
     }
 
     #[test]
     fn empty_graph_runs_clean() {
-        let graph: Graph<TestCtx> = Graph::new();
+        let graph: Graph<'_, TestCtx> = Graph::new();
         let mut ctx = Vec::new();
         graph.execute(&mut ctx).unwrap();
         assert!(ctx.is_empty());
@@ -362,7 +365,7 @@ mod tests {
 
     #[test]
     fn unknown_after_is_reported() {
-        let mut graph: Graph<TestCtx> = Graph::new();
+        let mut graph: Graph<'_, TestCtx> = Graph::new();
         graph.push(PassNode::new("a", record("a"))
             .with_after(&["does_not_exist"]));
         let err = graph.schedule().unwrap_err();
@@ -377,7 +380,7 @@ mod tests {
 
     #[test]
     fn cycle_via_explicit_hints_is_rejected() {
-        let mut graph: Graph<TestCtx> = Graph::new();
+        let mut graph: Graph<'_, TestCtx> = Graph::new();
         graph.push(PassNode::new("a", record("a"))
             .with_after(&["b"]));
         graph.push(PassNode::new("b", record("b"))
@@ -396,7 +399,7 @@ mod tests {
         // A rough sketch of the Phase-2b target frame graph — shadow
         // → main_hdr → ssao → translucent → composite → swapchain —
         // proves the scheduler produces the expected order.
-        let mut graph: Graph<TestCtx> = Graph::new();
+        let mut graph: Graph<'_, TestCtx> = Graph::new();
         graph.push(PassNode::new("composite", record("composite"))
             .with_reads(&[PassInput::Transient(10)])
             // Composite is the terminal pass — explicit `after` on
@@ -448,7 +451,7 @@ mod tests {
         let c1 = counter.clone();
         let c2 = counter.clone();
 
-        let mut graph: Graph<TestCtx> = Graph::new();
+        let mut graph: Graph<'_, TestCtx> = Graph::new();
         graph.push(PassNode::new("a", Box::new(move |_ctx| {
             *c1.lock().unwrap() += 1;
         })));
