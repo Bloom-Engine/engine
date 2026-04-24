@@ -184,6 +184,49 @@ pub enum FragmentProfile {
     Translucent,
 }
 
+/// Scheduling bucket — tells the render graph which pass a draw
+/// belongs in and what sort order to apply. Distinct from
+/// `FragmentProfile` (which describes pipeline outputs): a material
+/// with profile `Translucent` could be in either `Transparent` or
+/// `Refractive`, and `Additive` is its own bucket even though it
+/// shares attachment layout with `Transparent`.
+///
+/// See RFC 0001 §3.2.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Bucket {
+    /// Opaque draws. Front-to-back sort for early-z efficiency. Runs
+    /// in the main HDR pass; writes the full 4-MRT G-buffer.
+    Opaque,
+    /// Translucent draws. Back-to-front sort for correct blending.
+    /// Single HDR attachment, alpha-blended, depth-test without
+    /// depth-write. Runs in the translucent sub-pass (Phase 4b).
+    Transparent,
+    /// Translucent + reads the scene colour snapshot (for refraction,
+    /// Fresnel, shoreline effects). Same pass + sort as Transparent
+    /// but the graph inserts a SceneColor snapshot before this
+    /// bucket runs.
+    Refractive,
+    /// Additive-blend draws — particle flares, sparks, weapon
+    /// glows. Order-independent, so no sort needed. Runs in the
+    /// translucent sub-pass.
+    Additive,
+}
+
+impl Bucket {
+    /// True if this bucket dispatches in the translucent sub-pass
+    /// (single HDR attachment, alpha/additive blending) rather than
+    /// the main HDR pass.
+    pub fn is_translucent(self) -> bool {
+        matches!(self, Bucket::Transparent | Bucket::Refractive | Bucket::Additive)
+    }
+    /// True if this bucket requires a SceneColor snapshot before it
+    /// runs. Only Refractive does today; future buckets (e.g.
+    /// VolumetricFog) may join.
+    pub fn needs_scene_color(self) -> bool {
+        matches!(self, Bucket::Refractive)
+    }
+}
+
 // =====================================================================
 // Material pipeline — the compiled artefact
 // =====================================================================
@@ -193,6 +236,7 @@ pub enum FragmentProfile {
 pub struct MaterialPipeline {
     pub pipeline: wgpu::RenderPipeline,
     pub profile:  FragmentProfile,
+    pub bucket:   Bucket,
     pub reads_scene: bool,
     /// Label carried through for debug output.
     pub label: String,
@@ -208,6 +252,7 @@ pub struct MaterialCompileDesc<'a> {
     /// Game-supplied shaders live here.
     pub extra_sources: &'a [(&'a str, &'a str)],
     pub profile:       FragmentProfile,
+    pub bucket:        Bucket,
     pub reads_scene:   bool,
     pub hdr_format:    wgpu::TextureFormat,
     pub material_format: wgpu::TextureFormat,
@@ -348,6 +393,7 @@ pub fn compile_material(
     Ok(MaterialPipeline {
         pipeline,
         profile:     desc.profile,
+        bucket:      desc.bucket,
         reads_scene: desc.reads_scene,
         label:       desc.label.to_string(),
     })
