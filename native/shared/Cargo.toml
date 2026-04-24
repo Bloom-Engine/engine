@@ -26,3 +26,6 @@ lewton = "0.10"
 minimp3 = { version = "0.5", optional = true }
 earcutr = "0.4"
 web-time = { version = "0.2", optional = true }
+
+[dev-dependencies]
+pollster = "0.4"
