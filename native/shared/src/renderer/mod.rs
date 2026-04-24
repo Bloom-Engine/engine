@@ -7689,25 +7689,66 @@ impl Renderer {
 
                 scene.render(&mut pass);
             }
-
-            // Phase 1c — material draws against the new ABI. Sits
-            // after the scene graph in the main HDR pass so materials
-            // compose over opaque geometry and write to the same 4-MRT
-            // attachments. Refractive/translucent materials will move
-            // to their own translucent sub-pass in Phase 2's render
-            // graph; opaque materials stay here.
-            let cache = &self.model_gpu_cache;
-            self.material_system.dispatch(&mut pass, |handle, idx| {
-                if let Some(Some(meshes)) = cache.get(&handle) {
-                    if idx < meshes.len() {
-                        let mesh = &meshes[idx];
-                        return Some((&mesh.vb, &mesh.ib, mesh.index_count));
-                    }
-                }
-                None
-            });
         }
         profiler.end("main_hdr_pass");
+
+        // Phase 2b — material draws run in their own render pass,
+        // loading main_hdr's 4-MRT outputs + depth. Structurally the
+        // same result as the previous inline dispatch (same load-op
+        // Store, same depth-test), but the pass is now a candidate
+        // to become a render-graph node (Phase 2c) without touching
+        // the main_hdr pass body again. Skipped when the graph has
+        // no material commands this frame.
+        if !self.material_system.commands.is_empty() {
+            profiler.begin("material_pass");
+            {
+                let mat_ts = profiler.pass_timestamp_writes("material_pass");
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bloom_material_pass"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.hdr_rt_view,
+                            resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.material_rt_view,
+                            resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.velocity_rt_view,
+                            resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.albedo_rt_view,
+                            resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: mat_ts,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                let cache = &self.model_gpu_cache;
+                self.material_system.dispatch(&mut pass, |handle, idx| {
+                    if let Some(Some(meshes)) = cache.get(&handle) {
+                        if idx < meshes.len() {
+                            let mesh = &meshes[idx];
+                            return Some((&mesh.vb, &mesh.ib, mesh.index_count));
+                        }
+                    }
+                    None
+                });
+            }
+            profiler.end("material_pass");
+        }
 
         // ============================================================
         // SSAO: half-res GTAO sampling a hierarchical linear-depth

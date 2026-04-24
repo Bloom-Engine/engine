@@ -400,7 +400,8 @@
           "lib": "libbloom_macos.a",
           "frameworks": ["Metal", "QuartzCore", "AppKit", "CoreGraphics", "CoreText",
                           "CoreFoundation", "CoreAudio", "AudioToolbox", "AVFoundation",
-                          "GameController"]
+                          "GameController"],
+          "libs": ["c++"]
         },
         "ios": {
           "crate": "native/ios/",
