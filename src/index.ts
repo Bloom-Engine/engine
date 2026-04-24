@@ -21,6 +21,8 @@ export {
   injectKeyDown, injectKeyUp, isAnyInputPressed, getPlatform, isMobile, isTV, Platform,
   injectGamepadAxis, injectGamepadButtonDown, injectGamepadButtonUp,
   runGame,
+  setProfilerEnabled, getProfilerFrameCpuUs, getProfilerFrameGpuUs,
+  printProfilerSummary, getProfilerOverlay,
 } from './core/index';
 
 export type {

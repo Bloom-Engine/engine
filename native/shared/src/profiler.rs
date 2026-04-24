@@ -295,4 +295,16 @@ impl Profiler {
     pub fn avg_frame_gpu_us(&self) -> f64 {
         self.rolling.values().filter_map(|s| s.avg_gpu()).sum()
     }
+
+    /// Snapshot the rolling averages in a stable, CPU-time-descending
+    /// order. Games call this once per overlay-draw frame and pull
+    /// label/cpu/gpu out via the accessors below — HashMap iteration
+    /// order would jitter the overlay otherwise.
+    pub fn snapshot(&mut self) -> Vec<(&'static str, f64, Option<f64>)> {
+        let mut v: Vec<(&'static str, f64, Option<f64>)> = self.rolling.iter()
+            .map(|(k, s)| (*k, s.avg_cpu(), s.avg_gpu()))
+            .collect();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
 }

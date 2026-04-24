@@ -1257,6 +1257,44 @@ pub extern "C" fn bloom_print_profiler_summary() {
     print!("{}", engine().profiler.summary());
 }
 
+/// Phase 8 — formatted per-pass overlay text. Returns a Perry-style
+/// header-prefixed string (12-byte header: len, cap, flags, then
+/// UTF-8 bytes) with one line per pass sorted by CPU time descending:
+///
+///   "<label>|<cpu_us>|<gpu_us_or_-1>\n..."
+///
+/// The TS overlay splits on \n then | per line. Games call this once
+/// per overlay-draw frame.
+#[no_mangle]
+pub extern "C" fn bloom_profiler_overlay_text() -> *const u8 {
+    let snap = engine().profiler.snapshot();
+    let mut s = String::with_capacity(snap.len() * 48);
+    for (label, cpu, gpu) in &snap {
+        s.push_str(label);
+        s.push('|');
+        s.push_str(&format!("{:.2}", cpu));
+        s.push('|');
+        match gpu {
+            Some(g) => s.push_str(&format!("{:.2}", g)),
+            None    => s.push_str("-1"),
+        }
+        s.push('\n');
+    }
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let total = 12 + len;
+    let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
+    unsafe {
+        let ptr = std::alloc::alloc(layout);
+        if ptr.is_null() { return std::ptr::null(); }
+        *(ptr as *mut u32) = len as u32;
+        *(ptr.add(4) as *mut u32) = len as u32;
+        *(ptr.add(8) as *mut u32) = 1;
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
+        ptr
+    }
+}
+
 // ============================================================
 // Models
 // ============================================================

@@ -39,6 +39,7 @@ declare function bloom_set_profiler_enabled(on: number): void;
 declare function bloom_get_profiler_frame_cpu_us(): number;
 declare function bloom_get_profiler_frame_gpu_us(): number;
 declare function bloom_print_profiler_summary(): void;
+declare function bloom_profiler_overlay_text(): string;
 declare function bloom_set_target_fps(fps: number): void;
 declare function bloom_set_direct_2d_mode(on: number): void;
 declare function bloom_get_delta_time(): number;
@@ -313,6 +314,32 @@ export function getProfilerFrameGpuUs(): number {
 /** Print a per-phase CPU/GPU timing table to stdout. Useful for quick diagnostics. */
 export function printProfilerSummary(): void {
   bloom_print_profiler_summary();
+}
+
+/**
+ * Per-pass timings, sorted descending by CPU time. Each row:
+ *   `{ label, cpuUs, gpuUs }` (gpuUs = -1 when the device has no
+ *   TIMESTAMP_QUERY feature).
+ * Intended for an in-game overlay — games call it at draw time and
+ * render one `drawText` per entry.
+ */
+export function getProfilerOverlay(): { label: string, cpuUs: number, gpuUs: number }[] {
+  const raw = bloom_profiler_overlay_text();
+  if (!raw || raw.length === 0) return [];
+  const out: { label: string, cpuUs: number, gpuUs: number }[] = [];
+  const lines = raw.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.length === 0) continue;
+    const parts = line.split('|');
+    if (parts.length < 3) continue;
+    out.push({
+      label: parts[0],
+      cpuUs: parseFloat(parts[1]),
+      gpuUs: parseFloat(parts[2]),
+    });
+  }
+  return out;
 }
 
 // Timing
