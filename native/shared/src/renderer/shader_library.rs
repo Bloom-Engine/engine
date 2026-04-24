@@ -13,12 +13,13 @@
 use super::shader_include::{BakedSource, ShaderSource};
 
 const ENTRIES: &[(&str, &str)] = &[
-    ("material_abi.wgsl",     include_str!("../../../shared/shaders/material_abi.wgsl")),
-    ("common/pbr.wgsl",       include_str!("../../../shared/shaders/common/pbr.wgsl")),
-    ("common/shadows.wgsl",   include_str!("../../../shared/shaders/common/shadows.wgsl")),
-    ("common/fog.wgsl",       include_str!("../../../shared/shaders/common/fog.wgsl")),
-    ("common/tonemap.wgsl",   include_str!("../../../shared/shaders/common/tonemap.wgsl")),
-    ("common/sky.wgsl",       include_str!("../../../shared/shaders/common/sky.wgsl")),
+    ("material_abi.wgsl",           include_str!("../../../shared/shaders/material_abi.wgsl")),
+    ("common/pbr.wgsl",             include_str!("../../../shared/shaders/common/pbr.wgsl")),
+    ("common/shadows.wgsl",         include_str!("../../../shared/shaders/common/shadows.wgsl")),
+    ("common/fog.wgsl",             include_str!("../../../shared/shaders/common/fog.wgsl")),
+    ("common/tonemap.wgsl",         include_str!("../../../shared/shaders/common/tonemap.wgsl")),
+    ("common/sky.wgsl",             include_str!("../../../shared/shaders/common/sky.wgsl")),
+    ("materials/test_minimal.wgsl", include_str!("../../../shared/shaders/materials/test_minimal.wgsl")),
 ];
 
 /// The single shared source resolver for built-in shaders. Phase 1
