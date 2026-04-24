@@ -66,7 +66,8 @@ export {
   loadModel, drawModel, unloadModel, getModelBounds, genMeshSplineRibbon,
   drawCube, drawCubeWires, drawSphere, drawSphereWires,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
-  loadShader, loadModelAnimation, updateModelAnimation, createMesh,
+  loadShader, compileMaterial, drawMeshWithMaterial,
+  loadModelAnimation, updateModelAnimation, createMesh,
   setAmbientLight, setDirectionalLight, setJointTest,
   loadModelAsync, stageModels, commitModel,
 } from './models/index';

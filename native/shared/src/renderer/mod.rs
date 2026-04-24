@@ -7,6 +7,7 @@ use shaders::*;
 pub mod shader_include;
 pub mod shader_library;
 pub mod material_pipeline;
+pub mod material_system;
 
 mod util;
 pub use util::{
@@ -1230,6 +1231,11 @@ pub struct Renderer {
     /// textures would silently point to this flat-blue normal map.
     _default_normal_texture: wgpu::Texture,
     pub default_normal_view: wgpu::TextureView,
+
+    /// Phase 1c — the new shader-ABI material draw path. Opt-in via
+    /// `compile_material` + `submit_material_draw`; existing draws are
+    /// untouched.
+    pub material_system: material_system::MaterialSystem,
 }
 
 /// Ticket 014 — re-exposed for `SceneGraph::prepare()` to allocate
@@ -4771,6 +4777,11 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Phase 1c — material system: the new shader-ABI draw path.
+        // Runs alongside pipeline_3d / scene_pipeline without disturbing
+        // them; games opt in via compile_material + submit_material_draw.
+        let material_system = material_system::MaterialSystem::new(&device, &queue, &joint_buffer);
+
         Self {
             device,
             queue,
@@ -5098,6 +5109,7 @@ impl Renderer {
             prefilter_uniform_buffer,
             _default_normal_texture: default_normal_tex,
             default_normal_view,
+            material_system,
         }
     }
 
@@ -7005,6 +7017,10 @@ impl Renderer {
         self.current_uniform_idx = 0;
         self.uniform_slot_count = 0;
         self.render_mode = RenderMode::ScreenSpace;
+        // Phase 1c — clear last frame's material draws so the new
+        // frame's submissions start from an empty list.
+        self.material_system.commands.clear();
+        self.material_system.reset_draw_slot();
 
         // Write identity uniforms to slot 0 (2D uses logical points,
         // not physical pixels — see Renderer::new).
@@ -7672,6 +7688,23 @@ impl Renderer {
 
                 scene.render(&mut pass);
             }
+
+            // Phase 1c — material draws against the new ABI. Sits
+            // after the scene graph in the main HDR pass so materials
+            // compose over opaque geometry and write to the same 4-MRT
+            // attachments. Refractive/translucent materials will move
+            // to their own translucent sub-pass in Phase 2's render
+            // graph; opaque materials stay here.
+            let cache = &self.model_gpu_cache;
+            self.material_system.dispatch(&mut pass, |handle, idx| {
+                if let Some(Some(meshes)) = cache.get(&handle) {
+                    if idx < meshes.len() {
+                        let mesh = &meshes[idx];
+                        return Some((&mesh.vb, &mesh.ib, mesh.index_count));
+                    }
+                }
+                None
+            });
         }
         profiler.end("main_hdr_pass");
 
@@ -10668,5 +10701,111 @@ impl Renderer {
 
         self.custom_pipelines.push(pipeline);
         self.custom_pipelines.len() // 1-based index
+    }
+}
+
+// ============================================================
+// Phase 1c — material system (new shader-ABI draw path)
+// ============================================================
+//
+// Separate impl block so material_system's public surface on Renderer
+// stays co-located and easy to audit. All public methods either
+// compile a material, submit a draw, or sync per-frame uniforms.
+
+impl Renderer {
+    /// Compile a material from user-supplied WGSL source. Returns a
+    /// handle to use with `submit_material_draw`. The source may
+    /// `#include "material_abi.wgsl"` and any `common/*.wgsl` header.
+    pub fn compile_material(
+        &mut self, wgsl_source: &str,
+    ) -> Result<material_system::MaterialHandle, material_pipeline::MaterialCompileError> {
+        self.material_system.compile(
+            &self.device,
+            wgsl_source,
+            // Phase 1c ships opaque-only so materials render in the
+            // existing main-HDR pass without a translucent sub-pass.
+            material_pipeline::FragmentProfile::Opaque,
+            false,                         // reads_scene — phase 2
+            formats::HDR_FORMAT,
+            formats::MATERIAL_FORMAT,
+            formats::VELOCITY_FORMAT,
+            wgpu::TextureFormat::Rgba8Unorm,   // albedo_rt format
+            formats::DEPTH_FORMAT,
+        )
+    }
+
+    /// Submit a material draw against a cached mesh. `mesh_handle` is
+    /// the value returned by `cache_model_if_static` (same as the
+    /// scene pipeline's cached-model path).
+    pub fn submit_material_draw(
+        &mut self,
+        material: material_system::MaterialHandle,
+        mesh_handle: u64,
+        mesh_idx: usize,
+        position: [f32; 3],
+        scale: f32,
+        tint: [f32; 4],
+    ) {
+        let model = mat4_multiply(
+            mat4_translate(IDENTITY_MAT4, position),
+            mat4_scale(IDENTITY_MAT4, [scale, scale, scale]),
+        );
+        let mvp = mat4_multiply(self.current_vp_matrix, model);
+        self.material_system.submit_draw(
+            &self.device, &self.queue, &self.joint_buffer,
+            material, mesh_handle, mesh_idx,
+            mvp, model, mvp, tint, [0, 0, 0, 0],
+        );
+    }
+
+    /// Sync PerFrame + PerView uniforms from current renderer state.
+    /// FFI callers drive this from their frame boundary so `PerFrame.time`
+    /// reflects the real process-uptime clock.
+    pub fn material_system_begin_frame(&mut self, time_seconds: f32, delta_time: f32) {
+        let screen_w = self.surface_config.width as f32;
+        let screen_h = self.surface_config.height as f32;
+        let (rw, rh) = self.render_extent();
+        let per_frame = material_system::PerFrameUniforms {
+            time: time_seconds,
+            delta_time,
+            frame_index: self.taa_frame_index as u32,
+            _pad0: 0,
+            screen_resolution: [screen_w, screen_h],
+            render_resolution: [rw as f32, rh as f32],
+            taa_jitter: [0.0, 0.0],
+            _pad1: [0.0, 0.0],
+        };
+        let per_view = material_system::PerViewUniforms {
+            view:           self.current_view_matrix,
+            proj:           self.current_proj_matrix,
+            view_proj:      self.current_vp_matrix,
+            prev_view_proj: self.prev_vp_matrix,
+            inv_proj:       self.current_inv_proj_matrix,
+            camera_pos: [
+                self.current_camera_pos[0],
+                self.current_camera_pos[1],
+                self.current_camera_pos[2],
+                self.lighting_uniforms.camera_pos[3],
+            ],
+            camera_dir: [0.0, 0.0, -1.0, 70.0_f32.to_radians()],
+            ambient:    self.lighting_uniforms.ambient,
+            fog:        [self.fog_color[0], self.fog_color[1], self.fog_color[2], self.fog_density],
+            sun_dir:    self.lighting_uniforms.light_dir,
+            sun_color:  self.lighting_uniforms.light_color,
+            dir_light_count:   self.lighting_uniforms.dir_light_count,
+            dir_lights:        std::array::from_fn(|i| material_system::PerViewDirLight {
+                direction: self.lighting_uniforms.dir_lights[i].direction,
+                color:     self.lighting_uniforms.dir_lights[i].color,
+            }),
+            point_light_count: self.lighting_uniforms.point_light_count,
+            point_lights:      std::array::from_fn(|i| material_system::PerViewPointLight {
+                position: self.lighting_uniforms.point_lights[i].position,
+                color:    self.lighting_uniforms.point_lights[i].color,
+            }),
+            shadow_splits:   self.lighting_uniforms.shadow_cascade_splits,
+            shadow_view:     self.lighting_uniforms.shadow_view_matrix,
+            shadow_cascades: self.lighting_uniforms.shadow_cascade_vps,
+        };
+        self.material_system.update_frame_uniforms(&self.queue, &per_frame, &per_view);
     }
 }
