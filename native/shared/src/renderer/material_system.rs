@@ -587,20 +587,23 @@ impl MaterialSystem {
         &mut self,
         device: &wgpu::Device,
         scene_color_view: &wgpu::TextureView,
-        _scene_depth_view: &wgpu::TextureView,
+        scene_depth_view: Option<&wgpu::TextureView>,
     ) {
-        // Depth is bound to a 1×1 stub in Phase 4b because the live
-        // depth texture is simultaneously used as the depth-stencil
-        // attachment of the translucent pass — wgpu treats that as
-        // a usage conflict. Phase 4c will add a copy-to-sample
-        // snapshot for shoreline-fade materials.
+        let depth_view = scene_depth_view.unwrap_or(&self._scene_stub_depth_view);
+        // Phase 4c — group 4 binding 2 receives a COPY_DST snapshot of
+        // the opaque depth buffer, rather than the live depth-stencil
+        // attachment (wgpu rejects read+write aliasing in the same
+        // pass). Callers that don't need depth pass the stub view
+        // already held here; `Renderer::end_frame_with_scene` acquires
+        // a transient depth texture when any translucent material
+        // declares a depth read.
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene_inputs_bg"),
             layout: &self.layouts.scene_inputs,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(scene_color_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self._scene_color_sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self._scene_stub_depth_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(depth_view) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self._scene_depth_sampler) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self._scene_stub_view) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self._scene_color_sampler) },

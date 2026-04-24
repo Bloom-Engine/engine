@@ -7839,9 +7839,28 @@ impl Renderer {
                 None
             };
 
-            // Snapshot hdr_rt -> scene-colour transient.
-            if let Some(tid) = scene_color_tid {
-                let tex = self.transient_pool.texture(tid).expect("fresh transient");
+            // Phase 4c — depth snapshot. wgpu forbids sampling a
+            // texture that is also a depth-stencil attachment of the
+            // same pass, so we copy the opaque depth buffer into a
+            // transient before beginning the translucent pass and
+            // bind the transient at group 4 binding 2. Acquired
+            // whenever any translucent material reads_scene (same
+            // gate as colour) — cheap enough that it's not worth a
+            // separate `reads_depth` flag yet.
+            let scene_depth_tid = if needs_scene {
+                let desc = transient::TransientDesc::new(
+                    formats::DEPTH_FORMAT,
+                    wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                    transient::SizePolicy::Swapchain,
+                );
+                Some(self.transient_pool.acquire(&self.device, desc))
+            } else {
+                None
+            };
+
+            // Snapshot hdr_rt + live depth -> transients.
+            if let (Some(ctid), Some(dtid)) = (scene_color_tid, scene_depth_tid) {
+                let color_tex = self.transient_pool.texture(ctid).expect("fresh color transient");
                 encoder.copy_texture_to_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: &self.hdr_rt_texture,
@@ -7850,25 +7869,39 @@ impl Renderer {
                         aspect: wgpu::TextureAspect::All,
                     },
                     wgpu::TexelCopyTextureInfo {
-                        texture: tex,
+                        texture: color_tex,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
                     wgpu::Extent3d { width: swap_w, height: swap_h, depth_or_array_layers: 1 },
                 );
-                let tview = self.transient_pool.view(tid).unwrap();
+                let depth_tex = self.transient_pool.texture(dtid).expect("fresh depth transient");
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.depth_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::DepthOnly,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: depth_tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::DepthOnly,
+                    },
+                    wgpu::Extent3d { width: swap_w, height: swap_h, depth_or_array_layers: 1 },
+                );
+                let color_view = self.transient_pool.view(ctid).unwrap();
+                let depth_view = self.transient_pool.view(dtid).unwrap();
                 self.material_system.update_scene_inputs(
-                    &self.device, tview, &self.depth_view,
+                    &self.device, color_view, Some(depth_view),
                 );
             } else {
-                // No refractive materials — but depth-only reads could
-                // still apply. Bind depth + a black stub as scene
-                // colour so the bind group is valid.
+                // No refractive/depth-reading materials this frame —
+                // still need a valid bind group. None → internal stub.
                 self.material_system.update_scene_inputs(
-                    &self.device,
-                    &self.hdr_rt_view,      // harmless; no reads_scene=true materials here
-                    &self.depth_view,
+                    &self.device, &self.hdr_rt_view, None,
                 );
             }
 

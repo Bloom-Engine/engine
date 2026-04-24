@@ -610,6 +610,24 @@ currently submits non-opaque draws). Synthetic unit test: two
 alpha-blended cubes render in back-to-front order regardless of
 submission order.
 
+### Phase 4c — Scene depth snapshot ✅
+
+- [x] Opaque depth texture gains `COPY_SRC` usage.
+- [x] Translucent-pass path acquires a transient `Depth32Float` in
+      parallel with the scene-colour transient whenever a material
+      declares `reads_scene = true`, copies the live depth into it,
+      and binds it at `group(4) binding(2)` — the live depth view is
+      still the pass's own depth-stencil attachment, so wgpu no
+      longer sees a sampled-and-attached aliasing conflict.
+- [x] `update_scene_inputs` takes `Option<&TextureView>` for depth and
+      falls back to the internal 1×1 stub when no translucent draws
+      need it.
+
+**Acceptance:** water shoreline fade in `shooter/src/main.ts` reads
+`scene_depth_tex`, linearises via `view.inv_proj`, and produces a soft
+dry-to-wet transition at the river edges. No regressions in the
+opaque material path (matTest cube retired anyway in Phase 9).
+
 ### Phase 5 — Material params UBO
 
 - [ ] `PerMaterial` group gains `user_params` binding (§1.4).

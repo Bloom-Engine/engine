@@ -68,8 +68,13 @@ pub(super) fn create_depth_texture(device: &wgpu::Device, width: u32, height: u3
         // SSAO samples this texture in a separate pass after the
         // depth-write HDR pass — needs TEXTURE_BINDING in addition
         // to RENDER_ATTACHMENT.
+        //
+        // COPY_SRC: Phase 4c snapshots this to a transient depth
+        // texture so translucent materials can sample it without
+        // aliasing the pass's own depth-stencil attachment.
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+             | wgpu::TextureUsages::TEXTURE_BINDING
+             | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
