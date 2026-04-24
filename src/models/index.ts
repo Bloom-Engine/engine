@@ -17,6 +17,8 @@ declare function bloom_draw_ray(ox: number, oy: number, oz: number, dx: number, 
 declare function bloom_gen_mesh_cube(w: number, h: number, d: number): number;
 declare function bloom_gen_mesh_heightmap(imageHandle: number, sizeX: number, sizeY: number, sizeZ: number): number;
 declare function bloom_load_shader(source: number): number;
+declare function bloom_compile_material(source: number): number;
+declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_load_model_animation(path: number): number;
 declare function bloom_update_model_animation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotSin: number, rotCos: number): void;
 declare function bloom_create_mesh(vertexPtr: number, vertexCount: number, indexPtr: number, indexCount: number): number;
@@ -225,6 +227,28 @@ export function genMeshHeightmap(imageHandle: number, sizeX: number, sizeY: numb
 
 export function loadShader(wgslSource: string): number {
   return bloom_load_shader(wgslSource as any);
+}
+
+/// Phase 1c — compile a material against the shader ABI in
+/// `native/shared/shaders/material_abi.wgsl`. Source may `#include`
+/// the header and common helpers. Returns a handle (>0 on success, 0
+/// on compile failure — errors log to stderr).
+export function compileMaterial(wgslSource: string): number {
+  return bloom_compile_material(wgslSource as any);
+}
+
+/// Draw a mesh with a material. `mesh` must be a Model created via
+/// `createMesh` or `loadModel`. Transform is a position + uniform
+/// scale; tint is an RGBA color multiplied into PerDraw.model_tint.
+export function drawMeshWithMaterial(
+  material: number, mesh: Model,
+  position: Vec3, scale: number, tint: Color,
+): void {
+  bloom_draw_material(
+    material, mesh.handle, 0,
+    position.x, position.y, position.z, scale,
+    tint.r, tint.g, tint.b, tint.a,
+  );
 }
 
 export function loadModelAnimation(path: string): number {

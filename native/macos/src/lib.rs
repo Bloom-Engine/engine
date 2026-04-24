@@ -386,6 +386,11 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     // them to the spec minimums (2^24 BLAS geometries / TLAS instances,
     // etc.) whenever ray query was granted.
     let mut required_limits = wgpu::Limits::default();
+    // Phase 1c: the material ABI declares 5 bind groups (PerFrame,
+    // PerView, PerMaterial, PerDraw, SceneInputs). wgpu's default
+    // limit is 4. Metal / Vulkan / D3D12 support at least 7, so 5 is
+    // safely within every real backend's capabilities.
+    required_limits.max_bind_groups = 5;
     if required_features.intersects(rt_mask) {
         required_limits = required_limits
             .using_minimum_supported_acceleration_structure_values();
@@ -1325,6 +1330,45 @@ pub extern "C" fn bloom_gen_mesh_heightmap(image_handle: f64, size_x: f64, size_
 pub extern "C" fn bloom_load_shader(source_ptr: *const u8) -> f64 {
     let source = str_from_header(source_ptr);
     engine().renderer.load_custom_shader(source) as f64
+}
+
+// ============================================================
+// Phase 1c — material system FFI
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_compile_material(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material(source) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            eprintln!("[material] compile failed: {:?}", e);
+            0.0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_material(
+    material: f64,
+    mesh_handle: f64,
+    mesh_idx: f64,
+    x: f64, y: f64, z: f64, scale: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let eng = engine();
+    let handle_bits = mesh_handle.to_bits();
+    if let Some(model) = eng.models.get(mesh_handle) {
+        let _ = eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+    }
+    eng.renderer.submit_material_draw(
+        material as u32,
+        handle_bits,
+        mesh_idx as usize,
+        [x as f32, y as f32, z as f32],
+        scale as f32,
+        [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32],
+    );
 }
 
 #[no_mangle]
@@ -2537,6 +2581,14 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
         eng.renderer.uniform_3d_layout(),
     );
     eng.scene.prepare_materials(&eng.renderer);
+    // Phase 1c: sync material PerFrame + PerView UBOs with the
+    // current engine clock before the main HDR pass dispatches any
+    // material draws that were submitted during this frame.
+    {
+        let t = eng.get_time() as f32;
+        let dt = eng.delta_time as f32;
+        eng.renderer.material_system_begin_frame(t, dt);
+    }
     eng.renderer.end_frame_with_scene(&mut eng.scene, &mut eng.profiler);
 
     match eng.renderer.screenshot_data.take() {
