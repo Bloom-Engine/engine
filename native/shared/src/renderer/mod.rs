@@ -8,6 +8,7 @@ pub mod shader_include;
 pub mod shader_library;
 pub mod material_pipeline;
 pub mod material_system;
+pub mod graph;
 
 mod util;
 pub use util::{
