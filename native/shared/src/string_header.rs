@@ -13,6 +13,12 @@ pub struct StringHeader {
     pub capacity: u32,
     /// Reference hint: 0=shared, 1=unique (in-place append OK).
     pub refcount: u32,
+    /// Bit flags (STRING_FLAG_HAS_LONE_SURROGATES = 1). Added in
+    /// Perry 0.5.18x. Engines built against older Perry headers
+    /// skipped 16 bytes and ended up reading 4 bytes into the
+    /// UTF-8 data; strings crossing the FFI came back with a 4-byte
+    /// garbage prefix and trailing truncation.
+    pub flags: u32,
 }
 
 /// Extract a &str from a *const StringHeader pointer (Perry string format).
