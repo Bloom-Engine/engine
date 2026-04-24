@@ -9101,47 +9101,87 @@ impl Renderer {
         // ============================================================
         // 2D pass: immediate-mode 2D geometry on top of composited image
         // ============================================================
-        profiler.begin("overlay_2d");
+        // Phase 2d — overlay_2d ported to a graph node. Second real
+        // consumer of `renderer::graph` after material_pass. Lives in
+        // its own one-node graph here at the end of the frame because
+        // it needs to run AFTER the hand-encoded composite has
+        // written the swapchain. Phase 2e+ will merge into a single
+        // frame-wide graph as more passes port.
         if has_2d {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("bloom_2d_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline_2d);
-            pass.set_vertex_buffer(0, self.persistent_vb_2d.slice(..));
-            pass.set_index_buffer(self.persistent_ib_2d.slice(..), wgpu::IndexFormat::Uint32);
+            use graph::{Graph, PassNode, PassOutput};
 
-            let num_calls = self.draw_calls_2d.len();
-            for i in 0..num_calls {
-                let call = &self.draw_calls_2d[i];
-                let next_start = if i + 1 < num_calls {
-                    self.draw_calls_2d[i + 1].index_start
-                } else {
-                    self.indices_2d.len() as u32
-                };
-                let count = next_start - call.index_start;
-                if count == 0 { continue; }
+            let pipeline_2d        = &self.pipeline_2d;
+            let persistent_vb_2d   = &self.persistent_vb_2d;
+            let persistent_ib_2d   = &self.persistent_ib_2d;
+            let uniform_bind_groups = &self.uniform_bind_groups;
+            let texture_bind_groups = &self.texture_bind_groups;
+            let draw_calls_2d      = &self.draw_calls_2d;
+            let indices_2d_len     = self.indices_2d.len() as u32;
+            let view_ref           = &view;
 
-                pass.set_bind_group(0, &self.uniform_bind_groups[call.uniform_idx as usize], &[]);
-                if (call.texture_idx as usize) < self.texture_bind_groups.len() {
-                    pass.set_bind_group(1, &self.texture_bind_groups[call.texture_idx as usize], &[]);
-                }
-                pass.draw_indexed(call.index_start..next_start, 0, 0..1);
+            struct OverlayCtx<'a> {
+                encoder:  &'a mut wgpu::CommandEncoder,
+                profiler: &'a mut crate::profiler::Profiler,
             }
+
+            let mut graph: Graph<OverlayCtx<'_>> = Graph::new();
+            graph.push(
+                PassNode::new("overlay_2d", Box::new(move |ctx: &mut OverlayCtx| {
+                    ctx.profiler.begin("overlay_2d");
+                    {
+                        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("bloom_2d_pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: view_ref,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        pass.set_pipeline(pipeline_2d);
+                        pass.set_vertex_buffer(0, persistent_vb_2d.slice(..));
+                        pass.set_index_buffer(persistent_ib_2d.slice(..), wgpu::IndexFormat::Uint32);
+
+                        let num_calls = draw_calls_2d.len();
+                        for i in 0..num_calls {
+                            let call = &draw_calls_2d[i];
+                            let next_start = if i + 1 < num_calls {
+                                draw_calls_2d[i + 1].index_start
+                            } else {
+                                indices_2d_len
+                            };
+                            let count = next_start - call.index_start;
+                            if count == 0 { continue; }
+
+                            pass.set_bind_group(0, &uniform_bind_groups[call.uniform_idx as usize], &[]);
+                            if (call.texture_idx as usize) < texture_bind_groups.len() {
+                                pass.set_bind_group(1, &texture_bind_groups[call.texture_idx as usize], &[]);
+                            }
+                            pass.draw_indexed(call.index_start..next_start, 0, 0..1);
+                        }
+                    }
+                    ctx.profiler.end("overlay_2d");
+                }))
+                .with_writes(&[PassOutput::Swapchain]),
+            );
+
+            let mut ctx = OverlayCtx { encoder: &mut encoder, profiler: &mut *profiler };
+            if let Err(e) = graph.execute(&mut ctx) {
+                eprintln!("[graph] overlay_2d failed: {:?}", e);
+            }
+        } else {
+            // Empty graphs are still valid — execute a no-op so the
+            // profiler bracket is symmetric with the populated path.
+            profiler.begin("overlay_2d");
+            profiler.end("overlay_2d");
         }
-        profiler.end("overlay_2d");
 
         profiler.resolve(&mut encoder);
 
