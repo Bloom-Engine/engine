@@ -12,7 +12,7 @@ use wgpu::util::DeviceExt;
 
 use super::material_pipeline::{
     MaterialAbiLayouts, MaterialPipeline, MaterialCompileDesc, FragmentProfile,
-    compile_material, MaterialCompileError,
+    Bucket, compile_material, MaterialCompileError,
 };
 use super::types::Vertex3D;
 
@@ -150,8 +150,12 @@ pub struct MaterialSystem {
     pub per_draw_buffers: Vec<wgpu::Buffer>,
     pub per_draw_bgs:     Vec<wgpu::BindGroup>,
 
-    // Frame state
-    pub commands:   Vec<MaterialDrawCommand>,
+    // Frame state — commands split by bucket so the graph can
+    // schedule them into the right pass. Phase 4a keeps them in
+    // parallel lists; Phase 4b dispatches the translucent lists in
+    // their own sub-pass.
+    pub commands:              Vec<MaterialDrawCommand>,  // Bucket::Opaque
+    pub translucent_commands:  Vec<MaterialDrawCommand>,  // Transparent + Refractive + Additive
     next_draw_slot: usize,
 }
 
@@ -313,6 +317,7 @@ impl MaterialSystem {
             per_draw_buffers: Vec::new(),
             per_draw_bgs: Vec::new(),
             commands: Vec::new(),
+            translucent_commands: Vec::new(),
             next_draw_slot: 0,
         }
     }
@@ -326,6 +331,7 @@ impl MaterialSystem {
         device: &wgpu::Device,
         wgsl_source: &str,
         profile: FragmentProfile,
+        bucket: Bucket,
         reads_scene: bool,
         hdr_format: wgpu::TextureFormat,
         material_format: wgpu::TextureFormat,
@@ -341,6 +347,7 @@ impl MaterialSystem {
             entry_path,
             extra_sources: &[(entry_path, wgsl_source)],
             profile,
+            bucket,
             reads_scene,
             hdr_format,
             material_format,
@@ -371,11 +378,16 @@ impl MaterialSystem {
         queue.write_buffer(&self.per_view_buffer,  0, bytemuck::bytes_of(per_view));
     }
 
-    /// Reset the per-draw slot cursor. Commands list is cleared by the
-    /// Renderer from its own `begin_frame` so the order of reset vs.
-    /// submit is deterministic.
+    /// Reset the per-draw slot cursor. Commands lists are cleared by
+    /// the Renderer from its own `begin_frame` so the order of reset
+    /// vs. submit is deterministic.
     pub fn reset_draw_slot(&mut self) {
         self.next_draw_slot = 0;
+    }
+
+    /// Convenience — true if either bucket has queued work this frame.
+    pub fn any_commands(&self) -> bool {
+        !self.commands.is_empty() || !self.translucent_commands.is_empty()
     }
 
     /// Submit a draw against a compiled material. Allocates (or reuses)
@@ -395,7 +407,13 @@ impl MaterialSystem {
         tint: [f32; 4],
         skin_info: [u32; 4],
     ) {
-        if material == 0 || (material as usize) > self.pipelines.len() { return; }
+        let idx = material as usize;
+        if material == 0 || idx > self.pipelines.len() { return; }
+        let bucket = match self.pipelines[idx - 1].as_ref() {
+            Some(p) => p.bucket,
+            None => return,
+        };
+
         let slot = self.next_draw_slot;
         self.next_draw_slot += 1;
         self.ensure_draw_slot(device, joint_buffer, slot);
@@ -403,9 +421,14 @@ impl MaterialSystem {
         let per_draw = PerDrawUniforms { mvp, model, prev_mvp, model_tint: tint, skin_info };
         queue.write_buffer(&self.per_draw_buffers[slot], 0, bytemuck::bytes_of(&per_draw));
 
-        self.commands.push(MaterialDrawCommand {
+        let cmd = MaterialDrawCommand {
             material, mesh_handle, mesh_idx, draw_slot: slot,
-        });
+        };
+        if bucket.is_translucent() {
+            self.translucent_commands.push(cmd);
+        } else {
+            self.commands.push(cmd);
+        }
     }
 
     fn ensure_draw_slot(

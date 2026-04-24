@@ -7022,6 +7022,7 @@ impl Renderer {
         // Phase 1c — clear last frame's material draws so the new
         // frame's submissions start from an empty list.
         self.material_system.commands.clear();
+        self.material_system.translucent_commands.clear();
         self.material_system.reset_draw_slot();
 
         // Write identity uniforms to slot 0 (2D uses logical points,
@@ -10841,17 +10842,34 @@ impl Renderer {
     pub fn compile_material(
         &mut self, wgsl_source: &str,
     ) -> Result<material_system::MaterialHandle, material_pipeline::MaterialCompileError> {
+        self.compile_material_with_options(
+            wgsl_source,
+            material_pipeline::FragmentProfile::Opaque,
+            material_pipeline::Bucket::Opaque,
+            false,
+        )
+    }
+
+    /// Phase 4a — full-control material compile. Games that want a
+    /// translucent / refractive / additive material (or a non-default
+    /// bucket) call this directly. Plain `compile_material` is a
+    /// convenience for Opaque + no scene reads.
+    pub fn compile_material_with_options(
+        &mut self, wgsl_source: &str,
+        profile:     material_pipeline::FragmentProfile,
+        bucket:      material_pipeline::Bucket,
+        reads_scene: bool,
+    ) -> Result<material_system::MaterialHandle, material_pipeline::MaterialCompileError> {
         self.material_system.compile(
             &self.device,
             wgsl_source,
-            // Phase 1c ships opaque-only so materials render in the
-            // existing main-HDR pass without a translucent sub-pass.
-            material_pipeline::FragmentProfile::Opaque,
-            false,                         // reads_scene — phase 2
+            profile,
+            bucket,
+            reads_scene,
             formats::HDR_FORMAT,
             formats::MATERIAL_FORMAT,
             formats::VELOCITY_FORMAT,
-            wgpu::TextureFormat::Rgba8Unorm,   // albedo_rt format
+            wgpu::TextureFormat::Rgba8Unorm,
             formats::DEPTH_FORMAT,
         )
     }
