@@ -142,7 +142,15 @@ pub struct MaterialSystem {
     _default_material_factors_buffer: wgpu::Buffer,
     _default_user_params_buffer:      wgpu::Buffer,
     _default_white_tex:               wgpu::Texture,
+    _default_white_view:              wgpu::TextureView,
     _default_sampler:                 wgpu::Sampler,
+
+    /// Phase 5 — per-material `user_params` UBOs. Indexed by
+    /// `MaterialHandle - 1`; `None` means the material uses the default
+    /// (zero-initialised) bind group. Created lazily on first
+    /// `set_user_params` call.
+    pub material_params_buffers: Vec<Option<wgpu::Buffer>>,
+    pub material_per_material_bgs: Vec<Option<wgpu::BindGroup>>,
 
     // Per-draw UBO pool. Buffers grow 1-by-1 as draws pile up.
     // Each entry is `(PerDraw UBO, bind group binding it + the global
@@ -387,7 +395,10 @@ impl MaterialSystem {
             _default_material_factors_buffer: default_material_factors_buffer,
             _default_user_params_buffer: default_user_params_buffer,
             _default_white_tex: default_white_tex,
+            _default_white_view: default_white_view,
             _default_sampler: default_sampler,
+            material_params_buffers: Vec::new(),
+            material_per_material_bgs: Vec::new(),
             per_draw_buffers: Vec::new(),
             per_draw_bgs: Vec::new(),
             scene_inputs_bg: None,
@@ -464,6 +475,92 @@ impl MaterialSystem {
     /// vs. submit is deterministic.
     pub fn reset_draw_slot(&mut self) {
         self.next_draw_slot = 0;
+    }
+
+    /// Phase 5 — set/replace `user_params` for a specific material. The
+    /// next dispatch of this handle binds a per-material BindGroup with
+    /// the given bytes uploaded to `@group(2) @binding(11)`. Materials
+    /// that never receive a `set_user_params` call keep using the
+    /// default zero-initialised UBO.
+    ///
+    /// `params.len()` must be ≤ 256 bytes (ABI §1.4 cap). The buffer
+    /// is allocated lazily on first call per handle and reused on
+    /// subsequent updates. Pass an empty slice to revert to the default.
+    pub fn set_user_params(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        handle: MaterialHandle,
+        params: &[u8],
+    ) -> Result<(), &'static str> {
+        if handle == 0 { return Err("invalid material handle"); }
+        let idx = (handle - 1) as usize;
+        if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
+            return Err("material handle not registered");
+        }
+        if params.len() > 256 {
+            return Err("user_params exceeds 256-byte cap");
+        }
+
+        // Grow parallel vectors so handle index is valid.
+        while self.material_params_buffers.len() <= idx {
+            self.material_params_buffers.push(None);
+            self.material_per_material_bgs.push(None);
+        }
+
+        // Reverting to default — drop the per-material entries.
+        if params.is_empty() {
+            self.material_params_buffers[idx] = None;
+            self.material_per_material_bgs[idx] = None;
+            return Ok(());
+        }
+
+        // Allocate the per-material UBO + BG on first set. Padded to 256 B
+        // so the ABI cap is reflected in the buffer size and write_buffer
+        // never partially fills.
+        if self.material_params_buffers[idx].is_none() {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("material_user_params"),
+                size: 256,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("material_per_material_bg_user"),
+                layout: &self.layouts.per_material,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                    wgpu::BindGroupEntry { binding: 1,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                    wgpu::BindGroupEntry { binding: 2,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                    wgpu::BindGroupEntry { binding: 3,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                    wgpu::BindGroupEntry { binding: 4,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                    wgpu::BindGroupEntry { binding: 5,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                    wgpu::BindGroupEntry { binding: 6,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                    wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                    wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                    wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                    wgpu::BindGroupEntry { binding: 10, resource: self._default_material_factors_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 11, resource: buf.as_entire_binding() },
+                ],
+            });
+            self.material_params_buffers[idx] = Some(buf);
+            self.material_per_material_bgs[idx] = Some(bg);
+        }
+
+        // Pad short writes to 256 B so write_buffer doesn't read past `params`.
+        let mut padded = [0u8; 256];
+        padded[..params.len()].copy_from_slice(params);
+        let buf = self.material_params_buffers[idx].as_ref().unwrap();
+        queue.write_buffer(buf, 0, &padded);
+        Ok(())
+    }
+
+    /// Per-material BG when set, otherwise the shared default.
+    fn per_material_bg_for(&self, handle: MaterialHandle) -> &wgpu::BindGroup {
+        let idx = (handle as usize).wrapping_sub(1);
+        self.material_per_material_bgs.get(idx)
+            .and_then(|b| b.as_ref())
+            .unwrap_or(&self.default_per_material_bg)
     }
 
     /// Convenience — true if either bucket has queued work this frame.
@@ -563,7 +660,7 @@ impl MaterialSystem {
                 pass.set_pipeline(&mat.pipeline);
                 pass.set_bind_group(0, &self.per_frame_bg, &[]);
                 pass.set_bind_group(1, &self.per_view_bg, &[]);
-                pass.set_bind_group(2, &self.default_per_material_bg, &[]);
+                pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);
                 last_material = cmd.material;
             }
             if let Some((vb, ib, icount)) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
@@ -647,7 +744,7 @@ impl MaterialSystem {
                 pass.set_pipeline(&mat.pipeline);
                 pass.set_bind_group(0, &self.per_frame_bg, &[]);
                 pass.set_bind_group(1, &self.per_view_bg, &[]);
-                pass.set_bind_group(2, &self.default_per_material_bg, &[]);
+                pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);
                 if mat.reads_scene {
                     if let Some(bg) = self.scene_inputs_bg.as_ref() {
                         pass.set_bind_group(4, bg, &[]);

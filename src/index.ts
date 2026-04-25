@@ -23,7 +23,7 @@ export {
   runGame,
   setProfilerEnabled, getProfilerFrameCpuUs, getProfilerFrameGpuUs,
   printProfilerSummary, getProfilerOverlay,
-  splatImpulse,
+  splatImpulse, setMaterialParams,
 } from './core/index';
 
 export type {

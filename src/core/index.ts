@@ -41,6 +41,7 @@ declare function bloom_get_profiler_frame_gpu_us(): number;
 declare function bloom_print_profiler_summary(): void;
 declare function bloom_profiler_overlay_text(): string;
 declare function bloom_splat_impulse(x: number, z: number, radius: number, strength: number): void;
+declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_set_target_fps(fps: number): void;
 declare function bloom_set_direct_2d_mode(on: number): void;
 declare function bloom_get_delta_time(): number;
@@ -329,6 +330,22 @@ export function printProfilerSummary(): void {
  */
 export function splatImpulse(x: number, z: number, radius: number, strength: number): void {
   bloom_splat_impulse(x, z, radius, strength);
+}
+
+/**
+ * Phase 5 — set per-material `user_params` (ABI §1.4). Bytes are
+ * uploaded to `@group(2) @binding(11)` for the next dispatch of the
+ * given material. The shader casts them to whatever struct it
+ * declared. Up to 64 floats (256-byte ABI cap).
+ *
+ * Pass an empty array to revert to the default zero-initialised UBO.
+ *
+ * Example: a water material with a dynamic tint + wave amplitude
+ *   `setMaterialParams(matWater, [0.10, 0.30, 0.40, 1.0,  0.20])`
+ * lets game code change colour per-zone without recompiling WGSL.
+ */
+export function setMaterialParams(handle: number, params: number[]): void {
+  bloom_set_material_params(handle, params as any, params.length);
 }
 
 /**

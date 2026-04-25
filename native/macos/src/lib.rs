@@ -1277,6 +1277,43 @@ pub extern "C" fn bloom_splat_impulse(x: f64, z: f64, radius: f64, strength: f64
     );
 }
 
+/// Phase 5 — set per-material `user_params` (ABI §1.4). Bytes are
+/// uploaded verbatim to `@group(2) @binding(11)`; shaders cast them
+/// to whatever struct they declared. `param_count` is the number of
+/// f64 slots in the params array (each slot is 8 bytes in Perry's
+/// number[] layout, but we only forward the low 4 bytes as f32 since
+/// WGSL UBO scalars are 4-byte). Up to 64 floats (256 bytes).
+///
+/// Pass `param_count == 0` to revert the material to the default
+/// zero-initialised UBO.
+#[no_mangle]
+pub extern "C" fn bloom_set_material_params(
+    handle: f64,
+    params_ptr: *const f64,
+    param_count: f64,
+) {
+    let count = param_count as usize;
+    if count > 64 {
+        eprintln!("[material] set_material_params: param_count {} > 64 (256-byte UBO cap)", count);
+        return;
+    }
+    let mut bytes = vec![0u8; count * 4];
+    if !params_ptr.is_null() && count > 0 {
+        let slots = unsafe { std::slice::from_raw_parts(params_ptr, count) };
+        for (i, &v) in slots.iter().enumerate() {
+            let f = v as f32;
+            bytes[i*4..i*4+4].copy_from_slice(&f.to_le_bytes());
+        }
+    }
+    let eng = engine();
+    if let Err(e) = eng.renderer.material_system.set_user_params(
+        &eng.renderer.device, &eng.renderer.queue,
+        handle as u32, &bytes,
+    ) {
+        eprintln!("[material] set_material_params failed: {}", e);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_profiler_overlay_text() -> *const u8 {
     let snap = engine().profiler.snapshot();

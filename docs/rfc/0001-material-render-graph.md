@@ -628,16 +628,31 @@ submission order.
 dry-to-wet transition at the river edges. No regressions in the
 opaque material path (matTest cube retired anyway in Phase 9).
 
-### Phase 5 — Material params UBO
+### Phase 5 — Material params UBO ✅
 
-- [ ] `PerMaterial` group gains `user_params` binding (§1.4).
-- [ ] `drawMeshWithMaterial(matId, mesh, transform, tint, userParams[])`
-      API, exported through the FFI and `engine/src/models/index.ts`.
+- [x] `PerMaterial` group `user_params` binding (`@group(2)
+      @binding(11)`) — already declared by the ABI; this phase wired
+      it through `MaterialSystem` so each handle gets its own per-
+      material BindGroup once `set_user_params` is called.
+- [x] `setMaterialParams(handle, params: number[])` TS API + FFI
+      (`bloom_set_material_params(handle, ptr, count)`). 256-byte cap
+      enforced; 64 f32 slots. Pass an empty array to revert to the
+      default zero-initialised UBO. (Chose this shape over a
+      `userParams[]` arg on `drawMeshWithMaterial` because the
+      params are per-material, not per-draw — uploading 60×/sec when
+      they only change on tuning would be wasteful.)
 - [ ] Material descriptor JSON loader (`loadMaterial(path)`).
+      *Deferred* — when shooter materials get pulled out of inline
+      TS strings into disk WGSL files (concurrent with Phase 6 hot
+      reload), a JSON loader fits as a thin wrapper around
+      `compileRefractiveMaterial(readFile(...))` +
+      `setMaterialParams`.
 
-**Acceptance:** a synthetic "tint-cycles-over-time" material written as a
-150-line WGSL file renders on a cube in a minimal example game, reading
-`time` from `PerFrame` and a per-instance colour from `user_params`.
+**Acceptance:** ✅ shooter water material now reads its tint /
+absorption mix / foam strength / rim brightness / sky LOD from a
+`WaterParams` UBO bound at `@group(2) @binding(11)`. Verified by
+swapping the tint from `(0.10, 0.30, 0.40)` to `(0.55, 0.10, 0.10)`
+at runtime — water visibly turned red, no WGSL recompile.
 
 ### Phase 6 — WGSL file layout + hot reload
 
