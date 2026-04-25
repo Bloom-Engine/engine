@@ -1314,6 +1314,31 @@ pub extern "C" fn bloom_set_material_params(
     }
 }
 
+/// Phase 8 — frame history for the histogram. Header-prefixed string,
+/// one line per frame "<cpu_us>|<gpu_us>", oldest first, up to 120
+/// lines.
+#[no_mangle]
+pub extern "C" fn bloom_profiler_frame_history() -> *const u8 {
+    let hist = engine().profiler.frame_history();
+    let mut s = String::with_capacity(hist.len() * 24);
+    for (cpu, gpu) in &hist {
+        s.push_str(&format!("{:.2}|{:.2}\n", cpu, gpu));
+    }
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let total = 12 + len;
+    let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
+    unsafe {
+        let ptr = std::alloc::alloc(layout);
+        if ptr.is_null() { return std::ptr::null(); }
+        *(ptr as *mut u32) = len as u32;
+        *(ptr.add(4) as *mut u32) = len as u32;
+        *(ptr.add(8) as *mut u32) = 1;
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
+        ptr
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_profiler_overlay_text() -> *const u8 {
     let snap = engine().profiler.snapshot();

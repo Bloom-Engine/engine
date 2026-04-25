@@ -40,6 +40,7 @@ declare function bloom_get_profiler_frame_cpu_us(): number;
 declare function bloom_get_profiler_frame_gpu_us(): number;
 declare function bloom_print_profiler_summary(): void;
 declare function bloom_profiler_overlay_text(): string;
+declare function bloom_profiler_frame_history(): string;
 declare function bloom_splat_impulse(x: number, z: number, radius: number, strength: number): void;
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_set_target_fps(fps: number): void;
@@ -370,6 +371,26 @@ export function getProfilerOverlay(): { label: string, cpuUs: number, gpuUs: num
       cpuUs: parseFloat(parts[1]),
       gpuUs: parseFloat(parts[2]),
     });
+  }
+  return out;
+}
+
+/**
+ * Phase 8 — last ~120 frames' CPU + GPU totals, oldest first.
+ * Useful for an overlay bar-chart of frame-time variance. GPU time
+ * is 0 when the device lacks TIMESTAMP_QUERY.
+ */
+export function getProfilerFrameHistory(): { cpuUs: number, gpuUs: number }[] {
+  const raw = bloom_profiler_frame_history();
+  if (!raw || raw.length === 0) return [];
+  const out: { cpuUs: number, gpuUs: number }[] = [];
+  const lines = raw.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.length === 0) continue;
+    const parts = line.split('|');
+    if (parts.length < 2) continue;
+    out.push({ cpuUs: parseFloat(parts[0]), gpuUs: parseFloat(parts[1]) });
   }
   return out;
 }

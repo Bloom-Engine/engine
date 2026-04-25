@@ -22,7 +22,7 @@ export {
   injectGamepadAxis, injectGamepadButtonDown, injectGamepadButtonUp,
   runGame,
   setProfilerEnabled, getProfilerFrameCpuUs, getProfilerFrameGpuUs,
-  printProfilerSummary, getProfilerOverlay,
+  printProfilerSummary, getProfilerOverlay, getProfilerFrameHistory,
   splatImpulse, setMaterialParams,
 } from './core/index';
 

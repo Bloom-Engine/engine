@@ -57,6 +57,15 @@ pub struct Profiler {
     next_query: u32,
     // label -> (begin_index, end_index)
     pending_gpu: Vec<(&'static str, u32, u32)>,
+
+    /// Phase 8 — last `ROLLING_FRAMES` frame totals (sum of all
+    /// samples in `frame` at frame_end), in microseconds. Ring
+    /// buffer indexed by `histogram_idx`; consumers pass through
+    /// `bloom_profiler_frame_history` and render a bar chart.
+    frame_total_cpu_us: [f64; ROLLING_FRAMES],
+    frame_total_gpu_us: [f64; ROLLING_FRAMES],
+    histogram_idx: usize,
+    histogram_filled: usize,
 }
 
 struct RollingStats {
@@ -104,6 +113,10 @@ impl Profiler {
             timestamp_period_ns: 1.0,
             next_query: 0,
             pending_gpu: Vec::new(),
+            frame_total_cpu_us: [0.0; ROLLING_FRAMES],
+            frame_total_gpu_us: [0.0; ROLLING_FRAMES],
+            histogram_idx: 0,
+            histogram_filled: 0,
         }
     }
 
@@ -252,6 +265,20 @@ impl Profiler {
             }
         }
 
+        // Phase 8 — sum the per-pass samples into a per-frame total
+        // for the histogram before draining. CPU sums every sample;
+        // GPU sums only those with timestamps (rest have None).
+        let mut frame_cpu = 0.0;
+        let mut frame_gpu = 0.0;
+        for s in &self.frame {
+            frame_cpu += s.cpu_us;
+            if let Some(g) = s.gpu_us { frame_gpu += g; }
+        }
+        self.frame_total_cpu_us[self.histogram_idx] = frame_cpu;
+        self.frame_total_gpu_us[self.histogram_idx] = frame_gpu;
+        self.histogram_idx = (self.histogram_idx + 1) % ROLLING_FRAMES;
+        self.histogram_filled = (self.histogram_filled + 1).min(ROLLING_FRAMES);
+
         for s in self.frame.drain(..) {
             let entry = self.rolling.entry(s.label).or_insert_with(RollingStats::new);
             entry.push(s.cpu_us, s.gpu_us);
@@ -260,6 +287,21 @@ impl Profiler {
         self.next_query = 0;
         self.pending_gpu.clear();
         self.frame_count = self.frame_count.wrapping_add(1);
+    }
+
+    /// Phase 8 — frame-history snapshot for the overlay's bar chart.
+    /// Returns `(cpu_us, gpu_us)` pairs in chronological order, oldest
+    /// first, exactly `ROLLING_FRAMES.min(filled)` entries long.
+    pub fn frame_history(&self) -> Vec<(f64, f64)> {
+        let n = self.histogram_filled;
+        if n == 0 { return Vec::new(); }
+        let start = if n < ROLLING_FRAMES { 0 } else { self.histogram_idx };
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let idx = (start + i) % ROLLING_FRAMES;
+            out.push((self.frame_total_cpu_us[idx], self.frame_total_gpu_us[idx]));
+        }
+        out
     }
 
     pub fn summary(&self) -> String {

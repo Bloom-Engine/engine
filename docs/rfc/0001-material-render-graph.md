@@ -719,10 +719,14 @@ player's route.
       `getProfilerOverlay()` TS helper expose per-pass averages.
 - [x] Shooter F3 toggles `setProfilerEnabled` + an overlay that lists
       all 28+ passes with CPU / GPU µs, sorted by CPU time descending.
-- [ ] Frame histogram over the last 128 frames. (Deferred — the
-      single rolling-average readout is enough for shipping; a
-      histogram is a later polish pass when we have a concrete
-      variance question to answer.)
+- [x] Frame histogram over the last 120 frames.
+      `Profiler::frame_history()` returns `(cpu_us, gpu_us)` pairs
+      in chronological order; FFI
+      `bloom_profiler_frame_history()` + TS
+      `getProfilerFrameHistory()` expose them. Shooter F3 overlay
+      renders bars above the per-pass table — bars over the 16.7
+      ms (60 fps) reference line are drawn red, under-budget bars
+      blue.
 
 **Acceptance:** overlay renders every pass with stable sub-ms readings
 on the shooter. Zero per-frame cost when disabled — `Profiler::begin`
