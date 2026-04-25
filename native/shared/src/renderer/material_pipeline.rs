@@ -260,6 +260,12 @@ pub struct MaterialPipeline {
     pub profile:  FragmentProfile,
     pub bucket:   Bucket,
     pub reads_scene: bool,
+    /// EN-001 — true when the pipeline was compiled with the
+    /// per-instance vertex layout (slot 1, step_mode = Instance). The
+    /// dispatch site uses this as a sanity flag — it doesn't change
+    /// what bind groups get bound, only which `set_vertex_buffer(1, …)`
+    /// path runs for a given draw command.
+    pub wants_instancing: bool,
     /// Label carried through for debug output.
     pub label: String,
 }
@@ -282,6 +288,10 @@ pub struct MaterialCompileDesc<'a> {
     pub albedo_format:   wgpu::TextureFormat,
     pub depth_format:    wgpu::TextureFormat,
     pub vertex_buffers:  &'a [wgpu::VertexBufferLayout<'a>],
+    /// EN-001 — when true, `compile_material` appends
+    /// `InstanceData3D::desc()` to `vertex_buffers` so the pipeline
+    /// expects a second VB at slot 1 with step_mode = Instance.
+    pub wants_instancing: bool,
 }
 
 #[derive(Debug)]
@@ -400,13 +410,29 @@ pub fn compile_material(
     // 6. Vertex + fragment entry points. Convention: `vs_main` / `fs_main`.
     //    Materials can override by prefixing their shader with
     //    `// @entry vs:foo fs:bar` but the first version is fixed names.
+    //
+    //    EN-001 — when `wants_instancing` is set, append the standard
+    //    InstanceData3D layout so the pipeline expects a second VB at
+    //    slot 1 (step_mode = Instance). The owned Vec only lives long
+    //    enough to be referenced by the RenderPipelineDescriptor.
+    let vertex_buffers_owned: Vec<wgpu::VertexBufferLayout<'_>>;
+    let vertex_buffers: &[wgpu::VertexBufferLayout<'_>] = if desc.wants_instancing {
+        vertex_buffers_owned = desc.vertex_buffers
+            .iter()
+            .cloned()
+            .chain(std::iter::once(crate::renderer::types::InstanceData3D::desc()))
+            .collect();
+        &vertex_buffers_owned
+    } else {
+        desc.vertex_buffers
+    };
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(desc.label),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &module,
             entry_point: Some("vs_main"),
-            buffers: desc.vertex_buffers,
+            buffers: vertex_buffers,
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -439,10 +465,11 @@ pub fn compile_material(
 
     Ok(MaterialPipeline {
         pipeline,
-        profile:     desc.profile,
-        bucket:      desc.bucket,
-        reads_scene: desc.reads_scene,
-        label:       desc.label.to_string(),
+        profile:          desc.profile,
+        bucket:           desc.bucket,
+        reads_scene:      desc.reads_scene,
+        wants_instancing: desc.wants_instancing,
+        label:            desc.label.to_string(),
     })
 }
 

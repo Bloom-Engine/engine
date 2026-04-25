@@ -115,6 +115,29 @@ pub struct MaterialDrawCommand {
     pub mesh_handle: u64,       // matches model_gpu_cache keys
     pub mesh_idx:    usize,     // sub-mesh index within that cached model
     pub draw_slot:   usize,     // which slot in per_draw_buffers to bind
+    /// EN-001 — when set, the engine binds vertex slot 1 to this
+    /// instance buffer and emits draw_indexed with `0..count` instances.
+    /// `None` means a single-instance draw (the legacy path).
+    pub instance:    Option<InstanceDrawInfo>,
+}
+
+/// Reference to an instance buffer for an instanced draw command.
+/// `buffer_handle` is 1-based into `MaterialSystem::instance_buffers`;
+/// `count` is the number of GPU instances to emit. Created via
+/// `MaterialSystem::create_instance_buffer`, consumed by
+/// `submit_draw_instanced`.
+#[derive(Copy, Clone, Debug)]
+pub struct InstanceDrawInfo {
+    pub buffer_handle: u32,
+    pub count:         u32,
+}
+
+/// EN-001 — owned wgpu::Buffer + element count for an instance buffer.
+/// Lives in the `MaterialSystem::instance_buffers` registry, indexed
+/// by 1-based handle (0 = invalid).
+pub struct InstanceBuffer {
+    pub buffer: wgpu::Buffer,
+    pub count:  u32,
 }
 
 // =====================================================================
@@ -188,6 +211,14 @@ pub struct MaterialSystem {
     pub commands:              Vec<MaterialDrawCommand>,  // Bucket::Opaque + Bucket::Cutout
     pub translucent_commands:  Vec<MaterialDrawCommand>,  // Transparent + Refractive + Additive
     next_draw_slot: usize,
+
+    /// EN-001 — instance buffers, indexed by InstanceBufferHandle
+    /// (1-based; 0 = invalid). Each entry owns a wgpu Buffer + element
+    /// count. Created via `create_instance_buffer`, consumed by
+    /// `submit_draw_instanced` commands. Slots remain `None` after
+    /// `destroy_instance_buffer` so existing handles never collide
+    /// with re-issued ones.
+    pub instance_buffers: Vec<Option<InstanceBuffer>>,
 }
 
 impl MaterialSystem {
@@ -416,6 +447,7 @@ impl MaterialSystem {
             commands: Vec::new(),
             translucent_commands: Vec::new(),
             next_draw_slot: 0,
+            instance_buffers: Vec::new(),
         }
     }
 
@@ -430,6 +462,7 @@ impl MaterialSystem {
         profile: FragmentProfile,
         bucket: Bucket,
         reads_scene: bool,
+        wants_instancing: bool,
         hdr_format: wgpu::TextureFormat,
         material_format: wgpu::TextureFormat,
         velocity_format: wgpu::TextureFormat,
@@ -452,6 +485,7 @@ impl MaterialSystem {
             albedo_format,
             depth_format,
             vertex_buffers: &[Vertex3D::desc()],
+            wants_instancing,
         };
         let pipeline = compile_material(device, &self.layouts, &desc)?;
         self.pipelines.push(Some(pipeline));
@@ -606,11 +640,120 @@ impl MaterialSystem {
 
         let cmd = MaterialDrawCommand {
             material, mesh_handle, mesh_idx, draw_slot: slot,
+            instance: None,
         };
         if bucket.is_translucent() {
             self.translucent_commands.push(cmd);
         } else {
             self.commands.push(cmd);
+        }
+    }
+
+    /// EN-001 — submit an instanced draw. Identical to `submit_draw`
+    /// except the engine binds vertex slot 1 to the registered
+    /// instance buffer and emits `draw_indexed(.., 0..count)`. The
+    /// pipeline must have been compiled with `wants_instancing=true`
+    /// (use `compile_material_instanced` on the renderer).
+    ///
+    /// `model` / `mvp` here are the instance-local→world fallback
+    /// transform — the per-instance buffer's `instance_pos`/`rot_y`/
+    /// `scale` typically dominate, so callers usually pass identity
+    /// for `model` and the camera VP for `mvp`. `tint` is multiplied
+    /// per-draw (in addition to the per-instance tint).
+    pub fn submit_draw_instanced(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        joint_buffer: &wgpu::Buffer,
+        material: MaterialHandle,
+        mesh_handle: u64,
+        mesh_idx: usize,
+        instance_buffer: u32,
+        instance_count: u32,
+        mvp: [[f32; 4]; 4],
+        model: [[f32; 4]; 4],
+        prev_mvp: [[f32; 4]; 4],
+        tint: [f32; 4],
+        skin_info: [u32; 4],
+    ) {
+        let idx = material as usize;
+        if material == 0 || idx > self.pipelines.len() { return; }
+        let bucket = match self.pipelines[idx - 1].as_ref() {
+            Some(p) => p.bucket,
+            None => return,
+        };
+
+        let slot = self.next_draw_slot;
+        self.next_draw_slot += 1;
+        self.ensure_draw_slot(device, joint_buffer, slot);
+
+        let per_draw = PerDrawUniforms { mvp, model, prev_mvp, model_tint: tint, skin_info };
+        queue.write_buffer(&self.per_draw_buffers[slot], 0, bytemuck::bytes_of(&per_draw));
+
+        let cmd = MaterialDrawCommand {
+            material, mesh_handle, mesh_idx, draw_slot: slot,
+            instance: Some(InstanceDrawInfo {
+                buffer_handle: instance_buffer,
+                count:         instance_count,
+            }),
+        };
+        if bucket.is_translucent() {
+            self.translucent_commands.push(cmd);
+        } else {
+            self.commands.push(cmd);
+        }
+    }
+
+    /// EN-001 — create a persistent instance buffer from CPU-side
+    /// floats. The data layout matches `InstanceData3D` (9 floats per
+    /// instance: pos.xyz, rot_y, scale, tint.rgba); this method pads
+    /// each instance to 12 floats at upload time so the GPU side gets
+    /// the correct 48-byte stride. Returns a 1-based handle to use
+    /// with `submit_draw_instanced`. Pair with `destroy_instance_buffer`
+    /// when the buffer's no longer needed.
+    pub fn create_instance_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        raw: &[f32],
+        instance_count: u32,
+    ) -> u32 {
+        let count = instance_count as usize;
+        let mut packed: Vec<f32> = Vec::with_capacity(count * 12);
+        for i in 0..count {
+            let off = i * 9;
+            if off + 9 > raw.len() { break; }
+            packed.extend_from_slice(&raw[off..off + 3]);     // pos.xyz
+            packed.push(raw[off + 3]);                        // rot_y
+            packed.push(raw[off + 4]);                        // scale
+            packed.extend_from_slice(&raw[off + 5..off + 9]); // tint.rgba
+            packed.extend_from_slice(&[0.0, 0.0, 0.0]);       // pad to 48 bytes
+        }
+        let size = (packed.len() * std::mem::size_of::<f32>()) as u64;
+        // Empty buffers can't be created (size 0 is invalid in wgpu).
+        // Reserve at least one stride so the BG/binding remains valid.
+        let buffer_size = size.max(48);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("material_instance_buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if !packed.is_empty() {
+            queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&packed));
+        }
+        self.instance_buffers.push(Some(InstanceBuffer { buffer, count: instance_count }));
+        self.instance_buffers.len() as u32
+    }
+
+    /// EN-001 — drop an instance buffer slot. The slot is left as
+    /// `None` so previously-issued handles never alias a future
+    /// allocation. No-op for `handle == 0` or out-of-range handles.
+    pub fn destroy_instance_buffer(&mut self, handle: u32) {
+        if handle == 0 { return; }
+        let idx = handle as usize - 1;
+        if idx < self.instance_buffers.len() {
+            self.instance_buffers[idx] = None;
         }
     }
 
@@ -672,7 +815,37 @@ impl MaterialSystem {
                 pass.set_bind_group(3, &self.per_draw_bgs[cmd.draw_slot], &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..icount, 0, 0..1);
+                let instance_range = self.bind_instance_buffer(pass, &cmd.instance);
+                if instance_range.end > instance_range.start {
+                    pass.draw_indexed(0..icount, 0, instance_range);
+                }
+            }
+        }
+    }
+
+    /// EN-001 — resolve an instanced draw command's vertex slot 1 binding
+    /// and return the instance range. For non-instanced draws (`info` is
+    /// None) this is a no-op and returns `0..1`. For instanced draws
+    /// with a missing/destroyed buffer slot we return an empty range
+    /// so the caller skips the draw rather than crashing on a stale
+    /// handle.
+    fn bind_instance_buffer<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        info: &Option<InstanceDrawInfo>,
+    ) -> std::ops::Range<u32> {
+        match info {
+            None => 0..1,
+            Some(inst) => {
+                if inst.buffer_handle == 0 { return 0..1; }
+                let slot_idx = inst.buffer_handle as usize - 1;
+                match self.instance_buffers.get(slot_idx).and_then(|s| s.as_ref()) {
+                    Some(ib_slot) => {
+                        pass.set_vertex_buffer(1, ib_slot.buffer.slice(..));
+                        0..inst.count
+                    }
+                    None => 0..0,
+                }
             }
         }
     }
@@ -767,7 +940,10 @@ impl MaterialSystem {
                 pass.set_bind_group(3, &self.per_draw_bgs[cmd.draw_slot], &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..icount, 0, 0..1);
+                let instance_range = self.bind_instance_buffer(pass, &cmd.instance);
+                if instance_range.end > instance_range.start {
+                    pass.draw_indexed(0..icount, 0, instance_range);
+                }
             }
         }
     }

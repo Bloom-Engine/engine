@@ -202,6 +202,40 @@ impl Vertex3D {
     }
 }
 
+/// Per-instance data for materials compiled with `wants_instancing = true`.
+/// Bound at vertex buffer slot 1, step_mode = Instance. Layout is fixed
+/// at engine V1; future extensions can parameterise from a material desc.
+///
+/// Per-vertex attributes use shader_location 0..6. Per-instance
+/// attributes start at shader_location 7. The TS-side flat layout is 9
+/// floats per instance (pos.xyz, rot_y, scale, tint.rgba); the Rust
+/// side pads each instance to 12 floats so the GPU stride matches the
+/// 48-byte vec4-aligned layout.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct InstanceData3D {
+    pub position: [f32; 3],   // world-space position
+    pub rot_y:    f32,        // Y-axis rotation in radians
+    pub scale:    f32,        // uniform scale multiplier (1.0 = no scale)
+    pub tint:     [f32; 4],   // RGBA tint multiplier (1,1,1,1 = no tint)
+    pub _pad:     [f32; 3],   // pad to 16-byte alignment (vec4 boundary)
+}
+
+impl InstanceData3D {
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute { offset: 0,  shader_location: 7,  format: wgpu::VertexFormat::Float32x3 },  // position
+                wgpu::VertexAttribute { offset: 12, shader_location: 8,  format: wgpu::VertexFormat::Float32 },    // rot_y
+                wgpu::VertexAttribute { offset: 16, shader_location: 9,  format: wgpu::VertexFormat::Float32 },    // scale
+                wgpu::VertexAttribute { offset: 20, shader_location: 10, format: wgpu::VertexFormat::Float32x4 },  // tint
+            ],
+        }
+    }
+}
+
 // ============================================================
 // Draw call tracking
 // ============================================================

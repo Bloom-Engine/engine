@@ -260,3 +260,44 @@ fn linearize_depth(z_ndc: f32) -> f32 {
   // z_eye = b / (z_clip + a). Result is negative (camera looks down -Z).
   return -b / (z_clip + a);
 }
+
+// =====================================================================
+// EN-001 — Instance attribute layout (wants_instancing pipelines)
+// =====================================================================
+//
+// Materials compiled via `compile_material_instanced` get a second
+// vertex buffer at slot 1, step_mode = Instance. Game shaders that opt
+// into instancing extend their VertexInput with these locations IN
+// ADDITION to the standard 0..6 above:
+//
+//   struct InstancedVertexInput {
+//     @location(0)  position:        vec3<f32>,
+//     @location(1)  normal:          vec3<f32>,
+//     @location(2)  color:           vec4<f32>,
+//     @location(3)  uv:              vec2<f32>,
+//     @location(4)  joints:          vec4<f32>,
+//     @location(5)  weights:         vec4<f32>,
+//     @location(6)  tangent:         vec4<f32>,
+//     @location(7)  instance_pos:    vec3<f32>,
+//     @location(8)  instance_rot_y:  f32,
+//     @location(9)  instance_scale:  f32,
+//     @location(10) instance_tint:   vec4<f32>,
+//   };
+//
+// Typical vertex-shader pattern:
+//
+//   let cy = cos(in.instance_rot_y);
+//   let sy = sin(in.instance_rot_y);
+//   let local = in.position * in.instance_scale;
+//   let world = vec3<f32>(
+//     cy * local.x + sy * local.z,
+//     local.y,
+//     -sy * local.x + cy * local.z,
+//   ) + in.instance_pos;
+//   let world_pos = vec4<f32>(world, 1.0);
+//   out.clip_position = view.view_proj * world_pos;
+//
+// The Rust-side `InstanceData3D` struct mirrors this layout and is
+// the canonical CPU representation. Per-draw `model_tint` is
+// multiplied against `instance_tint` in the fragment shader so games
+// can dim/colour an entire instanced batch without re-uploading.

@@ -11142,6 +11142,7 @@ impl Renderer {
             material_pipeline::FragmentProfile::Opaque,
             material_pipeline::Bucket::Opaque,
             false,
+            false,
         )
     }
 
@@ -11149,11 +11150,17 @@ impl Renderer {
     /// translucent / refractive / additive material (or a non-default
     /// bucket) call this directly. Plain `compile_material` is a
     /// convenience for Opaque + no scene reads.
+    ///
+    /// `wants_instancing` adds a per-instance vertex buffer layout at
+    /// slot 1 (EN-001). Materials compiled with it must be drawn via
+    /// `submit_material_draw_instanced` + a buffer from
+    /// `create_instance_buffer`.
     pub fn compile_material_with_options(
         &mut self, wgsl_source: &str,
-        profile:     material_pipeline::FragmentProfile,
-        bucket:      material_pipeline::Bucket,
-        reads_scene: bool,
+        profile:          material_pipeline::FragmentProfile,
+        bucket:           material_pipeline::Bucket,
+        reads_scene:      bool,
+        wants_instancing: bool,
     ) -> Result<material_system::MaterialHandle, material_pipeline::MaterialCompileError> {
         self.material_system.compile(
             &self.device,
@@ -11161,12 +11168,50 @@ impl Renderer {
             profile,
             bucket,
             reads_scene,
+            wants_instancing,
             formats::HDR_FORMAT,
             formats::MATERIAL_FORMAT,
             formats::VELOCITY_FORMAT,
             wgpu::TextureFormat::Rgba8Unorm,
             formats::DEPTH_FORMAT,
         )
+    }
+
+    /// EN-001 — compile a material that opts into the standard per-instance
+    /// vertex layout (Opaque profile + Opaque bucket + wants_instancing).
+    /// Pair with `create_instance_buffer` + `submit_material_draw_instanced`.
+    /// The game shader's VertexInput must declare the instance attribute
+    /// locations (see `material_abi.wgsl` for the layout).
+    pub fn compile_material_instanced(
+        &mut self, wgsl_source: &str,
+    ) -> Result<material_system::MaterialHandle, material_pipeline::MaterialCompileError> {
+        self.material_system.compile(
+            &self.device,
+            wgsl_source,
+            material_pipeline::FragmentProfile::Opaque,
+            material_pipeline::Bucket::Opaque,
+            false,
+            true, // wants_instancing
+            formats::HDR_FORMAT,
+            formats::MATERIAL_FORMAT,
+            formats::VELOCITY_FORMAT,
+            wgpu::TextureFormat::Rgba8Unorm,
+            formats::DEPTH_FORMAT,
+        )
+    }
+
+    /// EN-001 — upload a CPU-side per-instance buffer to GPU memory.
+    /// `raw` is laid out as 9 floats per instance (pos.xyz, rot_y,
+    /// scale, tint.rgba). Returns a handle for use with
+    /// `submit_material_draw_instanced`.
+    pub fn create_instance_buffer(&mut self, raw: &[f32], count: u32) -> u32 {
+        self.material_system.create_instance_buffer(&self.device, &self.queue, raw, count)
+    }
+
+    /// EN-001 — release the GPU memory backing an instance buffer.
+    /// Safe to call with handle 0 or stale handles (no-op).
+    pub fn destroy_instance_buffer(&mut self, handle: u32) {
+        self.material_system.destroy_instance_buffer(handle);
     }
 
     /// Phase 6 — compile a material from a WGSL file on disk and
@@ -11184,11 +11229,14 @@ impl Renderer {
             .map_err(|e| format!("canonicalize {path:?}: {e}"))?;
         let source = std::fs::read_to_string(&canonical)
             .map_err(|e| format!("read {canonical:?}: {e}"))?;
-        let handle = self.compile_material_with_options(&source, profile, bucket, reads_scene)
+        let handle = self.compile_material_with_options(&source, profile, bucket, reads_scene, false)
             .map_err(|e| format!("compile {canonical:?}: {e:?}"))?;
         self.material_hot_reload.register(
             handle,
-            hot_reload::FileMaterialDesc { path: canonical, profile, bucket, reads_scene },
+            hot_reload::FileMaterialDesc {
+                path: canonical, profile, bucket, reads_scene,
+                wants_instancing: false,
+            },
         );
         Ok(handle)
     }
@@ -11211,6 +11259,7 @@ impl Renderer {
             match self.material_system.compile(
                 &self.device, &source,
                 desc.profile, desc.bucket, desc.reads_scene,
+                desc.wants_instancing,
                 formats::HDR_FORMAT,
                 formats::MATERIAL_FORMAT,
                 formats::VELOCITY_FORMAT,
@@ -11259,6 +11308,30 @@ impl Renderer {
             &self.device, &self.queue, &self.joint_buffer,
             material, mesh_handle, mesh_idx,
             mvp, model, mvp, tint, [0, 0, 0, 0],
+        );
+    }
+
+    /// EN-001 — submit an instanced material draw. The mesh is drawn
+    /// `instance_count` times via a single `draw_indexed` with the
+    /// instance buffer bound at vertex slot 1. Per-draw model/MVP are
+    /// identity / current VP — per-instance pos/rot_y/scale dominate
+    /// from the buffer; the per-draw `tint` is multiplied against the
+    /// per-instance tint in the shader.
+    pub fn submit_material_draw_instanced(
+        &mut self,
+        material: material_system::MaterialHandle,
+        mesh_handle: u64,
+        mesh_idx: usize,
+        instance_buffer: u32,
+        instance_count: u32,
+    ) {
+        let model = IDENTITY_MAT4;
+        let mvp = self.current_vp_matrix;
+        self.material_system.submit_draw_instanced(
+            &self.device, &self.queue, &self.joint_buffer,
+            material, mesh_handle, mesh_idx,
+            instance_buffer, instance_count,
+            mvp, model, mvp, [1.0, 1.0, 1.0, 1.0], [0, 0, 0, 0],
         );
     }
 

@@ -23,6 +23,10 @@ declare function bloom_compile_material_refractive(source: number): number;
 declare function bloom_compile_material_transparent(source: number): number;
 declare function bloom_compile_material_additive(source: number): number;
 declare function bloom_compile_material_cutout(source: number): number;
+declare function bloom_compile_material_instanced(source: number): number;
+declare function bloom_create_instance_buffer(dataPtr: any, instanceCount: number): number;
+declare function bloom_submit_material_draw_instanced(material: number, meshHandle: number, meshIdx: number, instanceBuffer: number, instanceCount: number): void;
+declare function bloom_destroy_instance_buffer(handle: number): void;
 declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
@@ -309,6 +313,62 @@ export function compileAdditiveMaterial(wgslSource: string): number {
 /// faces.
 export function compileMaterialCutout(wgslSource: string): number {
   return bloom_compile_material_cutout(wgslSource as any);
+}
+
+/// EN-001 — compile a material that draws via the instanced pipeline.
+/// Per-instance data is uploaded once via `createInstanceBuffer` and
+/// drawn via `drawMeshWithMaterialInstanced`. The game shader's
+/// VertexInput must declare these locations IN ADDITION to the
+/// standard 0..6 (see `material_abi.wgsl` for the canonical layout):
+///
+///   @location(7)  instance_pos:    vec3<f32>
+///   @location(8)  instance_rot_y:  f32
+///   @location(9)  instance_scale:  f32
+///   @location(10) instance_tint:   vec4<f32>
+///
+/// The pipeline lives in the Opaque bucket (cuts opaque profile +
+/// no scene-color reads). For the shooter's grass/foliage workload
+/// this is the right default; future work can extend to other buckets.
+export function compileMaterialInstanced(wgslSource: string): number {
+  return bloom_compile_material_instanced(wgslSource as any);
+}
+
+/// EN-001 — upload a flat per-instance buffer to the GPU. `data` is
+/// laid out as 9 floats per instance:
+///   [pos.x, pos.y, pos.z, rot_y, scale, tint.r, tint.g, tint.b, tint.a]
+/// × instanceCount. Returns a handle to use with
+/// `drawMeshWithMaterialInstanced`. The buffer is persistent across
+/// frames; call `destroyInstanceBuffer` when the data is no longer
+/// needed.
+///
+/// IMPORTANT: pass `instanceCount` derived from a literal-init array
+/// length OR from a manually-tracked counter. Don't compute
+/// `data.length / 9` if `data` was built via `.push()` — Perry's
+/// `.length` reports the literal-init size, not the post-push count
+/// (a Perry codegen bug — see `feedback_perry_array_push.md`).
+export function createInstanceBuffer(data: number[], instanceCount: number): number {
+  return bloom_create_instance_buffer(data as any, instanceCount);
+}
+
+/// EN-001 — draw `mesh` (a single primitive at `meshIdx`)
+/// `instanceCount` times using `material`'s instanced pipeline. The
+/// instance buffer is bound at vertex slot 1 and the engine emits a
+/// single draw_indexed call. Per-draw model/MVP are identity / current
+/// camera VP — per-instance pos/rot_y/scale dominate from the buffer.
+export function drawMeshWithMaterialInstanced(
+  material: number, mesh: Model, meshIdx: number,
+  instanceBuffer: number, instanceCount: number,
+): void {
+  bloom_submit_material_draw_instanced(
+    material, mesh.handle, meshIdx, instanceBuffer, instanceCount,
+  );
+}
+
+/// EN-001 — release the GPU memory backing an instance buffer
+/// returned by `createInstanceBuffer`. Safe to call with handle 0
+/// (no-op).
+export function destroyInstanceBuffer(handle: number): void {
+  bloom_destroy_instance_buffer(handle);
 }
 
 /**

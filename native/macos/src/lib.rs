@@ -1528,7 +1528,7 @@ pub extern "C" fn bloom_compile_material_refractive(source_ptr: *const u8) -> f6
     use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
     let source = str_from_header(source_ptr);
     match engine().renderer.compile_material_with_options(
-        source, FragmentProfile::Translucent, Bucket::Refractive, true,
+        source, FragmentProfile::Translucent, Bucket::Refractive, true, false,
     ) {
         Ok(handle) => handle as f64,
         Err(e) => { eprintln!("[refractive] compile failed: {:?}", e); 0.0 }
@@ -1542,7 +1542,7 @@ pub extern "C" fn bloom_compile_material_transparent(source_ptr: *const u8) -> f
     use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
     let source = str_from_header(source_ptr);
     match engine().renderer.compile_material_with_options(
-        source, FragmentProfile::Translucent, Bucket::Transparent, false,
+        source, FragmentProfile::Translucent, Bucket::Transparent, false, false,
     ) {
         Ok(handle) => handle as f64,
         Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
@@ -1556,7 +1556,7 @@ pub extern "C" fn bloom_compile_material_additive(source_ptr: *const u8) -> f64 
     use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
     let source = str_from_header(source_ptr);
     match engine().renderer.compile_material_with_options(
-        source, FragmentProfile::Translucent, Bucket::Additive, false,
+        source, FragmentProfile::Translucent, Bucket::Additive, false, false,
     ) {
         Ok(handle) => handle as f64,
         Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
@@ -1574,11 +1574,85 @@ pub extern "C" fn bloom_compile_material_cutout(source_ptr: *const u8) -> f64 {
     use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
     let source = str_from_header(source_ptr);
     match engine().renderer.compile_material_with_options(
-        source, FragmentProfile::Opaque, Bucket::Cutout, false,
+        source, FragmentProfile::Opaque, Bucket::Cutout, false, false,
     ) {
         Ok(handle) => handle as f64,
         Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
     }
+}
+
+/// EN-001 — compile a material pipeline that opts into the standard
+/// per-instance vertex layout (Opaque profile + Opaque bucket +
+/// wants_instancing). Pair with `bloom_create_instance_buffer` +
+/// `bloom_submit_material_draw_instanced` to drive per-instance
+/// rendering through a single draw_indexed call.
+///
+/// Like the other `bloom_compile_material_*` variants this is
+/// macOS-only: the existing material-compile FFI surface lives only
+/// on macOS today (per the EN-010 precedent), and porting all five
+/// variants to ios/tvos/windows/linux/android/web is out of scope for
+/// EN-001. The runtime triple
+/// (`bloom_create_instance_buffer` / `bloom_submit_material_draw_instanced`
+/// / `bloom_destroy_instance_buffer`) follows the same scope so the
+/// surface is consistent — they're useless without the compile FFI.
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_instanced(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_instanced(source) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] instanced compile failed: {:?}", e); 0.0 }
+    }
+}
+
+/// EN-001 — upload a flat per-instance buffer to GPU memory. Perry's
+/// `number[]` is f64-laid-out in memory; this FFI takes the pointer
+/// + the instance count and reads `instance_count * 9` f64 slots.
+/// The Rust side downcasts to f32 and pads each instance to 12 floats
+/// (48 bytes, vec4-aligned) for the GPU stride. Returns a 1-based
+/// handle, or 0 on failure (null pointer or zero count).
+#[no_mangle]
+pub extern "C" fn bloom_create_instance_buffer(
+    data_ptr: *const f64, instance_count: f64,
+) -> f64 {
+    if data_ptr.is_null() || instance_count <= 0.0 { return 0.0; }
+    let count = instance_count as u32;
+    let slot_count = (count as usize) * 9;
+    let raw_f64 = unsafe { std::slice::from_raw_parts(data_ptr, slot_count) };
+    let raw_f32: Vec<f32> = raw_f64.iter().map(|&v| v as f32).collect();
+    engine().renderer.create_instance_buffer(&raw_f32, count) as f64
+}
+
+/// EN-001 — submit an instanced material draw. The mesh at
+/// (mesh_handle, mesh_idx) is drawn `instance_count` times via a
+/// single `draw_indexed` with the instance buffer bound at vertex
+/// slot 1. The pipeline at `material` must have been compiled via
+/// `bloom_compile_material_instanced`. Capped at 5 f64 args to dodge
+/// the Perry-ARM64 9th-arg garbling quirk.
+#[no_mangle]
+pub extern "C" fn bloom_submit_material_draw_instanced(
+    material: f64, mesh_handle: f64, mesh_idx: f64,
+    instance_buffer: f64, instance_count: f64,
+) {
+    let eng = engine();
+    let handle_bits = mesh_handle.to_bits();
+    if let Some(model) = eng.models.get(mesh_handle) {
+        eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+    }
+    eng.renderer.submit_material_draw_instanced(
+        material as u32,
+        handle_bits,
+        mesh_idx as usize,
+        instance_buffer as u32,
+        instance_count as u32,
+    );
+}
+
+/// EN-001 — release the GPU memory backing an instance buffer. The
+/// slot stays `None` so previously-issued handles can never alias a
+/// future allocation. Safe to call with handle 0 or stale handles.
+#[no_mangle]
+pub extern "C" fn bloom_destroy_instance_buffer(handle: f64) {
+    engine().renderer.destroy_instance_buffer(handle as u32);
 }
 
 /// Phase 6 — file-backed material compile. The path is registered

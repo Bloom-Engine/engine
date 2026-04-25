@@ -29,10 +29,14 @@ use super::material_pipeline::{Bucket, FragmentProfile};
 /// rebuild it when the file changes.
 #[derive(Clone)]
 pub struct FileMaterialDesc {
-    pub path:        PathBuf,
-    pub profile:     FragmentProfile,
-    pub bucket:      Bucket,
-    pub reads_scene: bool,
+    pub path:             PathBuf,
+    pub profile:          FragmentProfile,
+    pub bucket:           Bucket,
+    pub reads_scene:      bool,
+    /// EN-001 — preserved across reloads so a file-backed instanced
+    /// material continues to opt into the per-instance vertex layout
+    /// after hot reload.
+    pub wants_instancing: bool,
 }
 
 pub struct MaterialHotReload {
@@ -204,10 +208,11 @@ mod tests {
 
     fn desc(path: &str) -> FileMaterialDesc {
         FileMaterialDesc {
-            path:        PathBuf::from(path),
-            profile:     FragmentProfile::Translucent,
-            bucket:      Bucket::Refractive,
-            reads_scene: true,
+            path:             PathBuf::from(path),
+            profile:          FragmentProfile::Translucent,
+            bucket:           Bucket::Refractive,
+            reads_scene:      true,
+            wants_instancing: false,
         }
     }
 
@@ -216,10 +221,11 @@ mod tests {
         let mut hr = MaterialHotReload::new();
         let p = PathBuf::from("/tmp/bloom_test_water.wgsl");
         hr.register(7, FileMaterialDesc {
-            path:        p.clone(),
-            profile:     FragmentProfile::Translucent,
-            bucket:      Bucket::Refractive,
-            reads_scene: true,
+            path:             p.clone(),
+            profile:          FragmentProfile::Translucent,
+            bucket:           Bucket::Refractive,
+            reads_scene:      true,
+            wants_instancing: false,
         });
         // canonicalize() in drain_pending falls back to the raw path
         // when the file doesn't exist, so this resolves to itself.
