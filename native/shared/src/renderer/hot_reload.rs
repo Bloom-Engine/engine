@@ -161,6 +161,14 @@ impl MaterialHotReload {
         out
     }
 
+    /// Test-only: push a path through the channel as if `notify` had
+    /// fired a Modify event. Lets unit tests exercise the drain +
+    /// debounce logic without a real file system.
+    #[cfg(test)]
+    pub fn test_inject_event(&self, path: PathBuf) {
+        let _ = self._tx.send(path);
+    }
+
     fn ensure_dir_watched(&mut self, path: &std::path::Path) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -186,5 +194,83 @@ impl MaterialHotReload {
         {
             let _ = path;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::material_pipeline::{Bucket, FragmentProfile};
+
+    fn desc(path: &str) -> FileMaterialDesc {
+        FileMaterialDesc {
+            path:        PathBuf::from(path),
+            profile:     FragmentProfile::Translucent,
+            bucket:      Bucket::Refractive,
+            reads_scene: true,
+        }
+    }
+
+    #[test]
+    fn drain_returns_registered_handle_for_event_path() {
+        let mut hr = MaterialHotReload::new();
+        let p = PathBuf::from("/tmp/bloom_test_water.wgsl");
+        hr.register(7, FileMaterialDesc {
+            path:        p.clone(),
+            profile:     FragmentProfile::Translucent,
+            bucket:      Bucket::Refractive,
+            reads_scene: true,
+        });
+        // canonicalize() in drain_pending falls back to the raw path
+        // when the file doesn't exist, so this resolves to itself.
+        hr.test_inject_event(p.clone());
+        let pending = hr.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, 7);
+        assert_eq!(pending[0].1.path, p);
+    }
+
+    #[test]
+    fn drain_dedups_within_debounce_window() {
+        let mut hr = MaterialHotReload::new();
+        let p = PathBuf::from("/tmp/bloom_test_dedup.wgsl");
+        hr.register(3, desc("/tmp/bloom_test_dedup.wgsl"));
+        // notify on macOS fires multiple events per save; same path
+        // 5x within the 120 ms window must collapse to one drain.
+        for _ in 0..5 {
+            hr.test_inject_event(p.clone());
+        }
+        let pending = hr.drain_pending();
+        assert_eq!(pending.len(), 1, "debounce should collapse 5 events to 1");
+    }
+
+    #[test]
+    fn drain_returns_distinct_handles_for_distinct_paths() {
+        let mut hr = MaterialHotReload::new();
+        let p1 = PathBuf::from("/tmp/bloom_test_a.wgsl");
+        let p2 = PathBuf::from("/tmp/bloom_test_b.wgsl");
+        hr.register(1, desc("/tmp/bloom_test_a.wgsl"));
+        hr.register(2, desc("/tmp/bloom_test_b.wgsl"));
+        hr.test_inject_event(p1);
+        hr.test_inject_event(p2);
+        let pending = hr.drain_pending();
+        assert_eq!(pending.len(), 2);
+        let mut handles: Vec<u32> = pending.iter().map(|(h, _)| *h).collect();
+        handles.sort();
+        assert_eq!(handles, vec![1, 2]);
+    }
+
+    #[test]
+    fn drain_ignores_unregistered_paths() {
+        let hr = MaterialHotReload::new();
+        hr.test_inject_event(PathBuf::from("/tmp/never_registered.wgsl"));
+        let pending = hr.drain_pending();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn empty_channel_drains_to_empty_vec() {
+        let hr = MaterialHotReload::new();
+        assert!(hr.drain_pending().is_empty());
     }
 }

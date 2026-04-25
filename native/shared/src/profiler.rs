@@ -265,6 +265,14 @@ impl Profiler {
             }
         }
 
+        self.frame_end_cpu();
+    }
+
+    /// CPU-only end-of-frame: histogram update + drain into rolling.
+    /// Split out so tests don't need a wgpu::Device. Production
+    /// callers go through `frame_end` which handles GPU readback
+    /// first and then delegates here.
+    fn frame_end_cpu(&mut self) {
         // Phase 8 — sum the per-pass samples into a per-frame total
         // for the histogram before draining. CPU sums every sample;
         // GPU sums only those with timestamps (rest have None).
@@ -348,5 +356,61 @@ impl Profiler {
             .collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive the profiler through `frame_end` purely on the CPU
+    /// side (gpu_enabled stays false). Each "frame" pushes a single
+    /// sample with the given cpu_us so the histogram totals are
+    /// known.
+    fn fake_frame(p: &mut Profiler, cpu_us: f64) {
+        p.frame.push(FrameSample { label: "fake", cpu_us, gpu_us: None });
+        // Skip the gpu readback path (no device available) and go
+        // straight to the CPU-only histogram + drain path.
+        p.frame_end_cpu();
+    }
+
+    #[test]
+    fn frame_history_empty_before_any_frames() {
+        let mut p = Profiler::new();
+        p.set_enabled(true);
+        assert!(p.frame_history().is_empty());
+    }
+
+    #[test]
+    fn frame_history_records_in_order_under_capacity() {
+        let mut p = Profiler::new();
+        p.set_enabled(true);
+        for i in 1..=5 {
+            fake_frame(&mut p, i as f64 * 100.0);
+        }
+        let h = p.frame_history();
+        assert_eq!(h.len(), 5);
+        assert_eq!(h[0].0, 100.0);
+        assert_eq!(h[4].0, 500.0);
+    }
+
+    #[test]
+    fn frame_history_wraps_oldest_first_at_capacity() {
+        let mut p = Profiler::new();
+        p.set_enabled(true);
+        // Push more than ROLLING_FRAMES so the ring wraps.
+        for i in 1..=(ROLLING_FRAMES + 30) {
+            fake_frame(&mut p, i as f64);
+        }
+        let h = p.frame_history();
+        assert_eq!(h.len(), ROLLING_FRAMES);
+        // The newest entry is whatever the last push was.
+        assert_eq!(h.last().unwrap().0, (ROLLING_FRAMES + 30) as f64);
+        // The oldest must be `(ROLLING_FRAMES + 30) - ROLLING_FRAMES + 1 = 31`.
+        assert_eq!(h[0].0, 31.0);
+        // Strictly monotonic (oldest → newest).
+        for w in h.windows(2) {
+            assert!(w[0].0 < w[1].0, "history must be in chronological order");
+        }
     }
 }
