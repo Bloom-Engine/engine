@@ -68,8 +68,18 @@ impl MaterialHotReload {
     pub fn new() -> Self {
         let (tx, rx) = channel::<PathBuf>();
 
+        // Watcher is on by default — even in release builds, since
+        // our daily dev cycle uses --release for perf. Shipped game
+        // binaries can opt out by setting `BLOOM_NO_HOT_RELOAD=1`,
+        // which short-circuits the watcher thread (no notify
+        // listener is started; `compile_material_from_file` still
+        // succeeds and `drain_pending` just always returns empty).
+        // Resolves the RFC's "release builds have no watcher
+        // thread" sub-item without breaking dev workflow.
         #[cfg(not(target_arch = "wasm32"))]
-        let watcher = {
+        let watcher = if std::env::var("BLOOM_NO_HOT_RELOAD").map(|v| v == "1").unwrap_or(false) {
+            None
+        } else {
             use notify::{Event, EventKind};
             let tx_clone = tx.clone();
             let cb = move |res: Result<Event, notify::Error>| {

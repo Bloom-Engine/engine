@@ -22,6 +22,7 @@ declare function bloom_compile_material_refractive(source: number): number;
 declare function bloom_compile_material_transparent(source: number): number;
 declare function bloom_compile_material_additive(source: number): number;
 declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
+declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_load_model_animation(path: number): number;
 declare function bloom_update_model_animation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotSin: number, rotCos: number): void;
@@ -303,6 +304,38 @@ export function compileMaterialFromFile(
              : bucket === 'refractive'  ? 2
              :                            3;
   return bloom_compile_material_from_file(path as any, kind);
+}
+
+/**
+ * Phase 5 — material descriptor loader. Compiles a material from
+ * a typed descriptor in one call:
+ *   - resolves `shader` via `compileMaterialFromFile` (gets hot
+ *     reload)
+ *   - applies `params` via `setMaterialParams` if provided
+ *
+ * Returns the material handle (0 on failure).
+ *
+ * Why a typed object instead of a JSON string: Perry's runtime
+ * `JSON.parse` mishandles array `.length`, so a JSON-string variant
+ * would force every game to roll its own parser. Games that DO
+ * want JSON-on-disk should preprocess at build time (see
+ * `shooter/tools/build-world.ts` for the pattern) and emit a TS
+ * module that calls `loadMaterial` with literal descriptors.
+ */
+export interface MaterialDesc {
+  shader: string;
+  bucket: 'opaque' | 'transparent' | 'refractive' | 'additive';
+  params?: number[];
+}
+
+export function loadMaterial(desc: MaterialDesc): number {
+  const handle = compileMaterialFromFile(desc.shader, desc.bucket);
+  if (handle > 0 && desc.params && desc.params.length > 0) {
+    // Inline rather than importing setMaterialParams from core to keep
+    // models module self-contained.
+    bloom_set_material_params(handle, desc.params as any, desc.params.length);
+  }
+  return handle;
 }
 
 /// Draw a mesh with a material. `mesh` must be a Model created via
