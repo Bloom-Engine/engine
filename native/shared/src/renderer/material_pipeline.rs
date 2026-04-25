@@ -213,6 +213,12 @@ pub enum Bucket {
     /// Opaque draws. Front-to-back sort for early-z efficiency. Runs
     /// in the main HDR pass; writes the full 4-MRT G-buffer.
     Opaque,
+    /// Alpha-cutout draws (foliage cards, chain-link fences, leaf
+    /// silhouettes). Runs in the opaque pass with full G-buffer write
+    /// + sun shadow + SSAO, but the fragment shader is expected to
+    /// `discard` against `MaterialFactors.alpha_cutoff`. Rendered
+    /// double-sided so foliage is visible from both faces.
+    Cutout,
     /// Translucent draws. Back-to-front sort for correct blending.
     /// Single HDR attachment, alpha-blended, depth-test without
     /// depth-write. Runs in the translucent sub-pass (Phase 4b).
@@ -414,8 +420,11 @@ pub fn compile_material(
             front_face: wgpu::FrontFace::Ccw,
             // Translucent materials (water, glass, particles) are
             // commonly viewed from both sides, so they render
-            // double-sided. Opaque materials cull backfaces.
-            cull_mode: if matches!(desc.profile, FragmentProfile::Translucent) {
+            // double-sided. Cutout materials (foliage cards, chain-
+            // link fences) likewise need to be visible from both
+            // faces. Plain Opaque materials cull backfaces.
+            cull_mode: if matches!(desc.profile, FragmentProfile::Translucent)
+                    || matches!(desc.bucket, Bucket::Cutout) {
                 None
             } else {
                 Some(wgpu::Face::Back)

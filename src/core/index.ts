@@ -32,6 +32,9 @@ declare function bloom_set_shadows_enabled(on: number): void;
 declare function bloom_set_shadows_always_fresh(on: number): void;
 declare function bloom_set_bloom_enabled(on: number): void;
 declare function bloom_set_ssao_enabled(on: number): void;
+declare function bloom_set_ssao_intensity(intensity: number): void;
+declare function bloom_set_ssao_radius(worldRadius: number): void;
+declare function bloom_set_wind(dirX: number, dirZ: number, amplitude: number, frequency: number): void;
 declare function bloom_set_ssr_enabled(on: number): void;
 declare function bloom_set_motion_blur_enabled(on: number): void;
 declare function bloom_set_sss_enabled(on: number): void;
@@ -277,6 +280,25 @@ export function setBloomEnabled(on: boolean): void {
 /** Toggle screen-space ambient occlusion + its bilateral blur. Default on. */
 export function setSsaoEnabled(on: boolean): void {
   bloom_set_ssao_enabled(on ? 1 : 0);
+}
+
+/** SSAO strength. 0 disables corner darkening, 1 is default, 2 is heavy. */
+export function setSsaoIntensity(intensity: number): void {
+  bloom_set_ssao_intensity(intensity);
+}
+
+/** SSAO sampling radius in world units. 0.1..2.0 m is the sane range. */
+export function setSsaoRadius(worldRadius: number): void {
+  bloom_set_ssao_radius(worldRadius);
+}
+
+/// Set the global wind field used by foliage materials.
+/// dirX/dirZ define the wind direction in the XZ plane (need not be
+/// normalised; magnitude scales effective amplitude).
+/// amplitude is the displacement scale (~0.1 m typical for grass).
+/// frequency is in Hz (~1.0 typical).
+export function setWind(dirX: number, dirZ: number, amplitude: number, frequency: number): void {
+  bloom_set_wind(dirX, dirZ, amplitude, frequency);
 }
 
 /** Toggle screen-space reflections. Default on. */

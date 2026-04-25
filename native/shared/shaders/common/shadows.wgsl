@@ -62,3 +62,16 @@ fn shadow(world_pos: vec3<f32>, view_space_depth: f32) -> f32 {
   let cascade = select_cascade(view_space_depth);
   return sample_shadow_cascade(cascade, world_pos);
 }
+
+// Game-shader entry point. Picks a cascade automatically using the
+// active view matrix and returns a shadow factor in [0, 1]
+// (1 = fully lit, 0 = fully shadowed). Use this from custom materials
+// (grass, tree, terrain, water) that want to receive the directional
+// sun shadow with one line. Requires `view` (PerView) to be in scope —
+// any shader that includes material_abi.wgsl already has it.
+fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
+  let view_pos = view.view * vec4<f32>(world_pos, 1.0);
+  // The engine convention is camera-looks-down-minus-Z; flip so callers
+  // get a positive "in front of camera" depth into select_cascade.
+  return shadow(world_pos, -view_pos.z);
+}

@@ -4,6 +4,7 @@ import { Color, Model, Vec3, Mat4, BoundingBox } from '../core/types';
 // FFI declarations
 declare function bloom_load_model(path: number): number;
 declare function bloom_draw_model(handle: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
+declare function bloom_draw_model_rotated(handle: number, x: number, y: number, z: number, scale: number, rotY: number, colorPackedArgb: number): void;
 declare function bloom_unload_model(handle: number): void;
 declare function bloom_draw_cube(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_cube_wires(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
@@ -21,6 +22,7 @@ declare function bloom_compile_material(source: number): number;
 declare function bloom_compile_material_refractive(source: number): number;
 declare function bloom_compile_material_transparent(source: number): number;
 declare function bloom_compile_material_additive(source: number): number;
+declare function bloom_compile_material_cutout(source: number): number;
 declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
@@ -140,6 +142,22 @@ export function drawModel(model: Model, position: Vec3, scale: number, tint: Col
   bloom_draw_model(model.handle, position.x, position.y, position.z, scale, tint.r, tint.g, tint.b, tint.a);
 }
 
+/// Draw a model with a Y-axis rotation (radians). RGBA is packed into
+/// a single f64 (ARGB byte order) to keep the FFI to 7 args, dodging
+/// the Perry-ARM64 9th-arg quirk.
+export function drawModelRotated(
+  model: Model, position: Vec3, scale: number, rotY: number, tint: Color,
+): void {
+  // Color components are 0..255 ints (matching drawModel above).
+  const a = (tint.a & 0xff) << 24;
+  const r = (tint.r & 0xff) << 16;
+  const g = (tint.g & 0xff) <<  8;
+  const b =  tint.b & 0xff;
+  // Use unsigned-shift-zero to keep the value positive when stored as f64.
+  const packed = (a | r | g | b) >>> 0;
+  bloom_draw_model_rotated(model.handle, position.x, position.y, position.z, scale, rotY, packed);
+}
+
 export function unloadModel(model: Model): void {
   bloom_unload_model(model.handle);
 }
@@ -255,6 +273,7 @@ export const BUCKET_OPAQUE = 0;
 export const BUCKET_TRANSPARENT = 1;
 export const BUCKET_REFRACTIVE = 2;
 export const BUCKET_ADDITIVE = 3;
+export const BUCKET_CUTOUT = 4;
 
 /// Phase 4b — full-control material compile. Pass PROFILE_* and
 /// BUCKET_* constants. `readsScene` enables the group-4 SceneInputs
@@ -281,6 +300,17 @@ export function compileAdditiveMaterial(wgslSource: string): number {
   return bloom_compile_material_additive(wgslSource as any);
 }
 
+/// Compile a material into the Cutout bucket: writes the full G-buffer
+/// (so it casts/receives sun shadow + SSAO), but the fragment shader
+/// is expected to call `discard` against `material.metal_rough.w`
+/// (`MaterialFactors.alpha_cutoff`) to drop transparent texels. Use
+/// for foliage cards, chain-link fences, leaf silhouettes. Rendered
+/// double-sided (cull_mode=None) so foliage is visible from both
+/// faces.
+export function compileMaterialCutout(wgslSource: string): number {
+  return bloom_compile_material_cutout(wgslSource as any);
+}
+
 /**
  * Phase 6 — file-backed material compile with hot reload. Reads the
  * WGSL from disk, compiles it, and registers the path with the
@@ -293,16 +323,17 @@ export function compileAdditiveMaterial(wgslSource: string): number {
  * pipeline running; the error is logged but doesn't crash the game.
  *
  * `bucket` selects the same presets as the dedicated compile* APIs:
- *   'opaque' | 'transparent' | 'refractive' | 'additive'
+ *   'opaque' | 'cutout' | 'transparent' | 'refractive' | 'additive'
  */
 export function compileMaterialFromFile(
   path: string,
-  bucket: 'opaque' | 'transparent' | 'refractive' | 'additive',
+  bucket: 'opaque' | 'cutout' | 'transparent' | 'refractive' | 'additive',
 ): number {
   const kind = bucket === 'opaque'      ? 0
              : bucket === 'transparent' ? 1
              : bucket === 'refractive'  ? 2
-             :                            3;
+             : bucket === 'additive'    ? 3
+             :                            4; // cutout
   return bloom_compile_material_from_file(path as any, kind);
 }
 
@@ -324,7 +355,7 @@ export function compileMaterialFromFile(
  */
 export interface MaterialDesc {
   shader: string;
-  bucket: 'opaque' | 'transparent' | 'refractive' | 'additive';
+  bucket: 'opaque' | 'cutout' | 'transparent' | 'refractive' | 'additive';
   params?: number[];
 }
 
@@ -359,6 +390,22 @@ export function drawMeshWithMaterial(
     position.x, position.y, position.z, scale,
     tint.r, tint.g, tint.b, tint.a,
   );
+}
+
+/// Draw every primitive of a multi-mesh GLB with the same material.
+/// Convenience wrapper around `drawMeshWithMaterial` that loops
+/// 0..mesh.meshCount internally.
+export function drawModelWithMaterial(
+  material: number, mesh: Model,
+  position: Vec3, scale: number, tint: Color,
+): void {
+  for (let i = 0; i < mesh.meshCount; i = i + 1) {
+    bloom_draw_material(
+      material, mesh.handle, i,
+      position.x, position.y, position.z, scale,
+      tint.r, tint.g, tint.b, tint.a,
+    );
+  }
 }
 
 export function loadModelAnimation(path: string): number {

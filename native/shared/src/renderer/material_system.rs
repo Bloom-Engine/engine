@@ -33,6 +33,8 @@ pub struct PerFrameUniforms {
     pub render_resolution: [f32; 2],
     pub taa_jitter:        [f32; 2],
     pub _pad1:             [f32; 2],
+    /// Global wind: x=dir_x, y=dir_z, z=amplitude, w=frequency.
+    pub wind:              [f32; 4],
 }
 
 #[repr(C)]
@@ -183,7 +185,7 @@ pub struct MaterialSystem {
     // schedule them into the right pass. Phase 4a keeps them in
     // parallel lists; Phase 4b dispatches the translucent lists in
     // their own sub-pass.
-    pub commands:              Vec<MaterialDrawCommand>,  // Bucket::Opaque
+    pub commands:              Vec<MaterialDrawCommand>,  // Bucket::Opaque + Bucket::Cutout
     pub translucent_commands:  Vec<MaterialDrawCommand>,  // Transparent + Refractive + Additive
     next_draw_slot: usize,
 }

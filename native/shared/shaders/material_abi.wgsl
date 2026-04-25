@@ -30,6 +30,12 @@ struct PerFrame {
   // TAA / TSR jitter applied to the projection this frame
   taa_jitter:        vec2<f32>,
   _pad1:             vec2<f32>,
+
+  // Global wind field. xy = direction in the XZ plane (need not be
+  // normalised; magnitude scales effective amplitude); z = amplitude
+  // (~0.1 m typical for grass); w = frequency in Hz (~1.0 typical).
+  // Foliage / cloth materials sample this in their vertex stage.
+  wind:              vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: PerFrame;

@@ -705,6 +705,11 @@ pub struct Renderer {
     /// frame from the renderer's `bloom_intensity` field.
     pub composite_uniform_buffer: wgpu::Buffer,
     pub bloom_intensity: f32,
+    /// Global wind field exposed to shaders via `frame.wind`. Layout:
+    /// x = direction X, y = direction Z, z = amplitude (m), w =
+    /// frequency (Hz). Foliage/cloth materials sample this in their
+    /// vertex stage. Default (0,0,0,0) — no wind.
+    pub wind: [f32; 4],
     /// SSAO RT (half-res) + compute GTAO pipeline + uniforms. Run
     /// after the HDR pass; sampled by the composite to darken
     /// crevices.
@@ -4884,6 +4889,7 @@ impl Renderer {
             bloom_layout,
             bloom_uniform_buffer,
             bloom_intensity: 0.04,
+            wind: [0.0, 0.0, 0.0, 0.0],
             ssao_rt_texture,
             ssao_rt_view,
             ssao_pipeline,
@@ -5387,6 +5393,15 @@ impl Renderer {
     /// features but also blurs detail and increases halo risk.
     pub fn set_ssao_radius(&mut self, radius: f32) {
         self.ssao_radius = radius.max(0.0001);
+    }
+
+    /// Set the global wind field exposed to shaders via `frame.wind`.
+    /// Used by foliage / cloth materials. Direction is (dir_x, dir_z)
+    /// in the XZ plane and need not be normalised — the shader-side
+    /// magnitude scales effective amplitude. `amplitude` is the
+    /// displacement scale (~0.1 m for grass), `frequency` is in Hz.
+    pub fn set_wind(&mut self, dir_x: f32, dir_z: f32, amplitude: f32, frequency: f32) {
+        self.wind = [dir_x, dir_z, amplitude, frequency];
     }
 
     /// Toggle TAA on/off. Off = no jitter, no history blend, no
@@ -10685,6 +10700,98 @@ impl Renderer {
         self.draw_model_mesh_tinted(vertices, indices, position, scale, [1.0, 1.0, 1.0, 1.0], 0);
     }
 
+    /// Same as `draw_model_mesh_tinted` but applies a Y-axis rotation
+    /// (radians) to the mesh local space before scale + translate.
+    /// Skinned meshes ignore the rotation here — pose joints already
+    /// drive their orientation. CPU-side baking mirrors the unrotated
+    /// path so callers can mix rotated and unrotated draws freely
+    /// without extra GPU state.
+    pub fn draw_model_mesh_tinted_rotated(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32, rot_y: f32) {
+        self.ensure_draw_state_3d(texture_idx);
+
+        // Mirror the joint-pose plumbing in the non-rotated path so a
+        // skinned mesh drawn here still consumes its pending pose.
+        let mesh_skinned = vertices.iter().any(|v|
+            v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01);
+        let joint_offset: f32 = if mesh_skinned && !self.pending_skin_groups.is_empty() {
+            let group = self.pending_skin_groups.remove(0);
+            let start = self.frame_joint_data.len();
+            if start + group.len() <= 1024 {
+                self.frame_joint_data.extend_from_slice(&group);
+                start as f32
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let cos_y = rot_y.cos();
+        let sin_y = rot_y.sin();
+        let base = self.vertices_3d.len() as u32;
+        for v in vertices {
+            let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
+            let pos = if is_skinned {
+                v.position
+            } else {
+                // Rotate local-space position around Y, then scale + translate.
+                let lx = v.position[0];
+                let ly = v.position[1];
+                let lz = v.position[2];
+                let rx =  cos_y * lx + sin_y * lz;
+                let rz = -sin_y * lx + cos_y * lz;
+                [rx * scale + position[0],
+                 ly * scale + position[1],
+                 rz * scale + position[2]]
+            };
+            // Rotate the surface normal too so lighting matches the new
+            // orientation. Y-axis rotation leaves normal.y untouched.
+            let n = v.normal;
+            let normal = if is_skinned {
+                n
+            } else {
+                [ cos_y * n[0] + sin_y * n[2],
+                  n[1],
+                 -sin_y * n[0] + cos_y * n[2] ]
+            };
+            // Rotate tangent.xyz the same way; preserve handedness in w.
+            let t = v.tangent;
+            let tangent = if is_skinned {
+                t
+            } else {
+                [ cos_y * t[0] + sin_y * t[2],
+                  t[1],
+                 -sin_y * t[0] + cos_y * t[2],
+                  t[3] ]
+            };
+            let joints_out = if is_skinned {
+                [v.joints[0] + joint_offset,
+                 v.joints[1] + joint_offset,
+                 v.joints[2] + joint_offset,
+                 v.joints[3] + joint_offset]
+            } else {
+                v.joints
+            };
+            self.vertices_3d.push(Vertex3D {
+                position: pos,
+                normal,
+                color: [
+                    v.color[0] * tint[0],
+                    v.color[1] * tint[1],
+                    v.color[2] * tint[2],
+                    v.color[3] * tint[3],
+                ],
+                uv: v.uv,
+                joints: joints_out,
+                weights: v.weights,
+                tangent,
+            });
+        }
+        for &idx in indices {
+            self.indices_3d.push(base + idx);
+        }
+    }
+
     pub fn draw_model_mesh_tinted(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32) {
         self.ensure_draw_state_3d(texture_idx);
 
@@ -11171,6 +11278,7 @@ impl Renderer {
             render_resolution: [rw as f32, rh as f32],
             taa_jitter: [0.0, 0.0],
             _pad1: [0.0, 0.0],
+            wind: self.wind,
         };
         let per_view = material_system::PerViewUniforms {
             view:           self.current_view_matrix,

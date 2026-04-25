@@ -909,6 +909,30 @@ pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f
     }
 }
 #[no_mangle]
+pub extern "C" fn bloom_draw_model_rotated(
+    handle: f64, x: f64, y: f64, z: f64,
+    scale: f64, rot_y: f64,
+    color_packed_argb: f64,
+) {
+    let bits = color_packed_argb as u32;
+    let a = ((bits >> 24) & 0xff) as f32 / 255.0;
+    let r = ((bits >> 16) & 0xff) as f32 / 255.0;
+    let g = ((bits >>  8) & 0xff) as f32 / 255.0;
+    let b = ( bits        & 0xff) as f32 / 255.0;
+    let eng = engine();
+    if let Some(model) = eng.models.get(handle) {
+        let position = [x as f32, y as f32, z as f32];
+        let scale = scale as f32;
+        let tint = [r, g, b, a];
+        for mesh in &model.meshes {
+            let tex_idx = mesh.texture_idx.unwrap_or(0);
+            eng.renderer.draw_model_mesh_tinted_rotated(
+                &mesh.vertices, &mesh.indices, position, scale, tint, tex_idx, rot_y as f32,
+            );
+        }
+    }
+}
+#[no_mangle]
 pub extern "C" fn bloom_unload_model(handle: f64) { engine().models.unload_model(handle); }
 
 #[no_mangle]
@@ -1435,6 +1459,18 @@ pub extern "C" fn bloom_set_bloom_enabled(on: f64) {
 #[no_mangle]
 pub extern "C" fn bloom_set_ssao_enabled(on: f64) {
     engine().renderer.set_ssao_enabled(on != 0.0);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_ssao_intensity(value: f64) {
+    engine().renderer.set_ssao_strength(value as f32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_ssao_radius(world_radius: f64) {
+    engine().renderer.set_ssao_radius(world_radius as f32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_wind(dir_x: f64, dir_z: f64, amplitude: f64, frequency: f64) {
+    engine().renderer.set_wind(dir_x as f32, dir_z as f32, amplitude as f32, frequency as f32);
 }
 #[no_mangle]
 pub extern "C" fn bloom_set_ssr_enabled(on: f64) {

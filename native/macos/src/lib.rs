@@ -1237,6 +1237,18 @@ pub extern "C" fn bloom_set_ssao_enabled(on: f64) {
     engine().renderer.set_ssao_enabled(on != 0.0);
 }
 #[no_mangle]
+pub extern "C" fn bloom_set_ssao_intensity(value: f64) {
+    engine().renderer.set_ssao_strength(value as f32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_ssao_radius(world_radius: f64) {
+    engine().renderer.set_ssao_radius(world_radius as f32);
+}
+#[no_mangle]
+pub extern "C" fn bloom_set_wind(dir_x: f64, dir_z: f64, amplitude: f64, frequency: f64) {
+    engine().renderer.set_wind(dir_x as f32, dir_z as f32, amplitude as f32, frequency as f32);
+}
+#[no_mangle]
 pub extern "C" fn bloom_set_ssr_enabled(on: f64) {
     engine().renderer.set_ssr_enabled(on != 0.0);
 }
@@ -1430,6 +1442,37 @@ pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_draw_model_rotated(
+    handle: f64, x: f64, y: f64, z: f64,
+    scale: f64, rot_y: f64,
+    color_packed_argb: f64,
+) {
+    // Pack RGBA into one f64 to keep the FFI to 7 args; the 9th f64
+    // would otherwise be corrupted by the Perry-ARM64 stack-arg quirk.
+    let bits = color_packed_argb as u32;
+    let a = ((bits >> 24) & 0xff) as f32 / 255.0;
+    let r = ((bits >> 16) & 0xff) as f32 / 255.0;
+    let g = ((bits >>  8) & 0xff) as f32 / 255.0;
+    let b = ( bits        & 0xff) as f32 / 255.0;
+    let eng = engine();
+    if let Some(model) = eng.models.get(handle) {
+        let position = [x as f32, y as f32, z as f32];
+        let scale = scale as f32;
+        let tint = [r, g, b, a];
+        // Skip the static-mesh cache: it bakes vertex transforms with
+        // identity rotation, so a rotated draw must take the dynamic
+        // path. Cheap — meshes are unlikely to land in the cache twice
+        // anyway when callers mix rotated + unrotated draws.
+        for mesh in &model.meshes {
+            let tex_idx = mesh.texture_idx.unwrap_or(0);
+            eng.renderer.draw_model_mesh_tinted_rotated(
+                &mesh.vertices, &mesh.indices, position, scale, tint, tex_idx, rot_y as f32,
+            );
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_unload_model(handle: f64) {
     engine().models.unload_model(handle);
 }
@@ -1520,6 +1563,24 @@ pub extern "C" fn bloom_compile_material_additive(source_ptr: *const u8) -> f64 
     }
 }
 
+/// EN-010 — compile a cutout (alpha-tested) material. Profile=Opaque
+/// (full G-buffer write, sun shadow, SSAO), Bucket=Cutout (rendered
+/// double-sided so foliage is visible from both sides),
+/// reads_scene=false. The fragment shader is expected to call
+/// `discard` against `material.metal_rough.w`
+/// (`MaterialFactors.alpha_cutoff`) to drop transparent texels.
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_cutout(source_ptr: *const u8) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Opaque, Bucket::Cutout, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
+    }
+}
+
 /// Phase 6 — file-backed material compile. The path is registered
 /// with the hot-reload watcher; subsequent edits trigger an automatic
 /// recompile on the next end_frame. `bucket_kind` selects the
@@ -1528,6 +1589,8 @@ pub extern "C" fn bloom_compile_material_additive(source_ptr: *const u8) -> f64 
 ///   1 = transparent (translucent, no scene snapshot)
 ///   2 = refractive  (translucent + scene snapshot)
 ///   3 = additive    (translucent, no scene snapshot, additive blend)
+///   4 = cutout      (opaque profile, double-sided, fragment-discard
+///                    against MaterialFactors.alpha_cutoff)
 #[no_mangle]
 pub extern "C" fn bloom_compile_material_from_file(
     path_ptr: *const u8,
@@ -1540,6 +1603,7 @@ pub extern "C" fn bloom_compile_material_from_file(
         1 => (FragmentProfile::Translucent, Bucket::Transparent, false),
         2 => (FragmentProfile::Translucent, Bucket::Refractive,  true),
         3 => (FragmentProfile::Translucent, Bucket::Additive,    false),
+        4 => (FragmentProfile::Opaque,      Bucket::Cutout,      false),
         _ => {
             eprintln!("[material] from_file: unknown bucket_kind {bucket_kind}");
             return 0.0;
