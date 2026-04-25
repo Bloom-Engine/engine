@@ -330,10 +330,15 @@ export interface MaterialDesc {
 
 export function loadMaterial(desc: MaterialDesc): number {
   const handle = compileMaterialFromFile(desc.shader, desc.bucket);
-  if (handle > 0 && desc.params && desc.params.length > 0) {
-    // Inline rather than importing setMaterialParams from core to keep
-    // models module self-contained.
-    bloom_set_material_params(handle, desc.params as any, desc.params.length);
+  if (handle > 0 && desc.params) {
+    // Bind to a local first — Perry currently mishandles `.length`
+    // on an object field passed directly into an FFI call (the FFI
+    // sees count = 0). Re-binding to a local lets `.length` evaluate
+    // before the FFI call is laid out.
+    const p = desc.params;
+    if (p.length > 0) {
+      bloom_set_material_params(handle, p as any, p.length);
+    }
   }
   return handle;
 }
