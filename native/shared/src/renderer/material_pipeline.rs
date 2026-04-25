@@ -357,9 +357,24 @@ pub fn compile_material(
             write_mask: wgpu::ColorWrites::ALL,
         }),
     ];
+    // Additive bucket uses src+dst on color; alpha-blending buckets
+    // (Transparent, Refractive) use SrcAlpha/OneMinusSrcAlpha. Both
+    // share the single HDR attachment.
+    let additive_blend = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation:  wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent::OVER,
+    };
+    let translucent_blend = match desc.bucket {
+        Bucket::Additive => additive_blend,
+        _                => wgpu::BlendState::ALPHA_BLENDING,
+    };
     let translucent_targets = [Some(wgpu::ColorTargetState {
         format: desc.hdr_format,
-        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        blend: Some(translucent_blend),
         write_mask: wgpu::ColorWrites::ALL,
     })];
     let targets: &[Option<wgpu::ColorTargetState>] = match desc.profile {
