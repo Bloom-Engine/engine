@@ -25,7 +25,7 @@ declare function bloom_compile_material_from_file(path: number, bucketKind: numb
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_load_model_animation(path: number): number;
-declare function bloom_update_model_animation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotSin: number, rotCos: number): void;
+declare function bloom_update_model_animation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotY: number): void;
 declare function bloom_create_mesh(vertexPtr: number, vertexCount: number, indexPtr: number, indexCount: number): number;
 declare function bloom_set_ambient_light(r: number, g: number, b: number, intensity: number): void;
 declare function bloom_set_directional_light(dx: number, dy: number, dz: number, r: number, g: number, b: number, intensity: number): void;
@@ -361,8 +361,8 @@ export function loadModelAnimation(path: string): number {
   return bloom_load_model_animation(path as any);
 }
 
-export function updateModelAnimation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotSin: number, rotCos: number): void {
-  bloom_update_model_animation(handle, animIndex, time, scale, px, py, pz, rotSin, rotCos);
+export function updateModelAnimation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotY: number): void {
+  bloom_update_model_animation(handle, animIndex, time, scale, px, py, pz, rotY);
 }
 
 export function createMesh(vertices: number[], indices: number[]): Model {

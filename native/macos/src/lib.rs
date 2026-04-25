@@ -1604,14 +1604,21 @@ pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64, scale: f64, px: f64, py: f64, pz: f64, rot_sin: f64, _rot_cos: f64) {
-    // Derive rot_cos from rot_sin (Perry ARM64 may garble 9th float param on stack)
-    let rot_cos = (1.0 - rot_sin * rot_sin).sqrt();
+pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64, scale: f64, px: f64, py: f64, pz: f64, rot_y: f64) {
+    // Take a single Y-axis angle (radians) instead of sin/cos, so the
+    // engine reconstructs both with full precision + correct signs.
+    // Older callers that passed (rot_sin, rot_cos) hit a Perry-ARM64
+    // 9th-arg garbling bug AND a sqrt(1-sin²) workaround that lost
+    // the sign of cos — model rotation was correct only on half the
+    // circle. 8-arg signature dodges both issues.
+    let rot_y_f = rot_y as f32;
+    let rot_sin = rot_y_f.sin();
+    let rot_cos = rot_y_f.cos();
     let eng = engine();
     eng.models.update_model_animation(handle, anim_index as usize, time as f32);
     if let Some(anim) = eng.models.get_animation(handle) {
         if !anim.joint_matrices.is_empty() {
-            eng.renderer.set_joint_matrices_scaled(&anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32], rot_sin as f32, rot_cos as f32);
+            eng.renderer.set_joint_matrices_scaled(&anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32], rot_sin, rot_cos);
         }
     }
 }
