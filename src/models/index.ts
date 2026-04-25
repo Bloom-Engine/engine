@@ -346,12 +346,16 @@ export function loadMaterial(desc: MaterialDesc): number {
 /// Draw a mesh with a material. `mesh` must be a Model created via
 /// `createMesh` or `loadModel`. Transform is a position + uniform
 /// scale; tint is an RGBA color multiplied into PerDraw.model_tint.
+/// `meshIdx` selects which primitive of a multi-mesh GLB to draw —
+/// default 0 for single-mesh models. Loop 0..mesh.meshCount when
+/// rendering a multi-primitive GLB through a custom material.
 export function drawMeshWithMaterial(
   material: number, mesh: Model,
   position: Vec3, scale: number, tint: Color,
+  meshIdx: number = 0,
 ): void {
   bloom_draw_material(
-    material, mesh.handle, 0,
+    material, mesh.handle, meshIdx,
     position.x, position.y, position.z, scale,
     tint.r, tint.g, tint.b, tint.a,
   );
