@@ -1,3 +1,8 @@
+// `static mut` is intentional in this engine — single-threaded FFI
+// surface, no contention to worry about. Suppress the 2024 lint at
+// the crate root rather than leaving 16+ warnings in every build.
+#![allow(static_mut_refs)]
+
 pub mod string_header;
 pub mod handles;
 pub mod input;

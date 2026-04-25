@@ -28,8 +28,6 @@
 //     real engine backend is single-threaded on the render queue
 //     anyway; multi-queue support is a later concern.
 
-use std::collections::HashMap;
-
 /// Size policy for a transient. Resolved against the swapchain each
 /// time the pool is asked for extents.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]

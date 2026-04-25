@@ -3,7 +3,6 @@
 //! Converts 2D screen position to a 3D world ray via inverse VP matrix,
 //! then tests against all visible scene node triangles using Moller-Trumbore.
 
-use crate::renderer::Vertex3D;
 use crate::scene::SceneGraph;
 
 /// Result of a scene pick operation.

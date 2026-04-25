@@ -1,3 +1,11 @@
+// `static mut` is intentional throughout this FFI surface — Perry calls
+// us from a single OS thread (the macOS run-loop), so the engine
+// singleton + scratch state never race. The 2024 lint flagging
+// `&LAST_PICK`-style accesses is a real concern in multi-threaded
+// code, but inapplicable here. Suppress at the crate root to avoid
+// 16+ noise lines in every build.
+#![allow(static_mut_refs)]
+
 use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
 use bloom_shared::string_header::str_from_header;
