@@ -1481,6 +1481,39 @@ pub extern "C" fn bloom_compile_material_additive(source_ptr: *const u8) -> f64 
     }
 }
 
+/// Phase 6 — file-backed material compile. The path is registered
+/// with the hot-reload watcher; subsequent edits trigger an automatic
+/// recompile on the next end_frame. `bucket_kind` selects the
+/// (profile, bucket, reads_scene) preset:
+///   0 = opaque
+///   1 = transparent (translucent, no scene snapshot)
+///   2 = refractive  (translucent + scene snapshot)
+///   3 = additive    (translucent, no scene snapshot, additive blend)
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_from_file(
+    path_ptr: *const u8,
+    bucket_kind: f64,
+) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let path = str_from_header(path_ptr);
+    let (profile, bucket, reads_scene) = match bucket_kind as u32 {
+        0 => (FragmentProfile::Opaque,      Bucket::Opaque,      false),
+        1 => (FragmentProfile::Translucent, Bucket::Transparent, false),
+        2 => (FragmentProfile::Translucent, Bucket::Refractive,  true),
+        3 => (FragmentProfile::Translucent, Bucket::Additive,    false),
+        _ => {
+            eprintln!("[material] from_file: unknown bucket_kind {bucket_kind}");
+            return 0.0;
+        }
+    };
+    match engine().renderer.compile_material_from_file(
+        std::path::Path::new(path), profile, bucket, reads_scene,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] from_file failed: {e}"); 0.0 }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_draw_material(
     material: f64,

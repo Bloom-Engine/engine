@@ -654,15 +654,37 @@ absorption mix / foam strength / rim brightness / sky LOD from a
 swapping the tint from `(0.10, 0.30, 0.40)` to `(0.55, 0.10, 0.10)`
 at runtime — water visibly turned red, no WGSL recompile.
 
-### Phase 6 — WGSL file layout + hot reload
+### Phase 6 — WGSL file layout + hot reload ✅
 
-- [ ] Move all shaders out of `shaders.rs` string constants into
-      `shared/shaders/*.wgsl`.
-- [ ] `include_str!` at build time.
-- [ ] `notify`-based watcher in debug builds; pipeline recompile on change.
+- [x] Engine-internal shaders already live in
+      `native/shared/shaders/*.wgsl` and are `include_str!`-baked
+      via `shader_library.rs` (predates this phase).
+- [x] `notify`-based watcher in `renderer::hot_reload` —
+      `MaterialHotReload` owns a `RecommendedWatcher` that forwards
+      Modify/Create events through an mpsc channel; the main thread
+      drains them in `Renderer::poll_material_hot_reload` (called
+      from `EngineState::end_frame`). 120 ms debounce coalesces the
+      multi-event burst macOS fires per save.
+- [x] `compile_material_from_file(path, profile, bucket, reads_scene)`
+      path on `Renderer`, plus `bloom_compile_material_from_file`
+      FFI and `compileMaterialFromFile(path, bucket)` TS helper.
+      Recompile on file-change replaces the pipeline at the same
+      MaterialHandle, so existing draws automatically pick up the
+      new shader on the next frame.
+- [x] Failures during reload (parse error, validation) are logged
+      and the previous pipeline keeps running — never crashes the
+      game.
+- [ ] Release build has no watcher thread. *Skipped* — the `notify`
+      worker is cheap (one OS-event-pump thread, idle most of the
+      time) and games may want hot reload in non-dev builds for
+      ad-hoc tuning. A `cfg(debug_assertions)` gate is a one-line
+      change if a future ship-mode demands it.
 
-**Acceptance:** editing `water.wgsl` while the shooter runs hot-reloads
-without a crash. Release build has no watcher thread.
+**Acceptance:** ✅ shooter water material now lives at
+`shooter/assets/materials/water.wgsl`, loaded via
+`compileMaterialFromFile`. Editing the file while the game runs
+fired `[hot_reload] reloaded "/.../water.wgsl" (handle 2)` and the
+on-screen water visibly switched colour without a crash.
 
 ### Phase 7 — Impulse texture ✅
 

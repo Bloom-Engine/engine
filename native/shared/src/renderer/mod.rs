@@ -11,6 +11,7 @@ pub mod material_system;
 pub mod graph;
 pub mod transient;
 pub mod impulse_field;
+pub mod hot_reload;
 
 mod util;
 pub use util::{
@@ -1250,6 +1251,13 @@ pub struct Renderer {
     /// compute pass per frame to decay + accumulate, then the front
     /// view is bound at `group(4) binding(4)` in scene_inputs.
     pub impulse_field: impulse_field::ImpulseField,
+
+    /// Phase 6 — hot-reload registry for file-backed materials. Each
+    /// frame we drain pending file-change events and recompile any
+    /// affected pipelines. Handles registered via
+    /// `compile_material_from_file` participate; inline-string
+    /// materials (compile_material) don't.
+    pub material_hot_reload: hot_reload::MaterialHotReload,
 }
 
 /// Ticket 014 — re-exposed for `SceneGraph::prepare()` to allocate
@@ -4797,6 +4805,7 @@ impl Renderer {
         let material_system = material_system::MaterialSystem::new(&device, &queue, &joint_buffer);
         let transient_pool = transient::TransientPool::new();
         let impulse_field = impulse_field::ImpulseField::new(&device);
+        let material_hot_reload = hot_reload::MaterialHotReload::new();
 
         Self {
             device,
@@ -5128,6 +5137,7 @@ impl Renderer {
             material_system,
             transient_pool,
             impulse_field,
+            material_hot_reload,
         }
     }
 
@@ -11050,6 +11060,75 @@ impl Renderer {
             wgpu::TextureFormat::Rgba8Unorm,
             formats::DEPTH_FORMAT,
         )
+    }
+
+    /// Phase 6 — compile a material from a WGSL file on disk and
+    /// register the path with the hot-reload watcher. Subsequent
+    /// edits to that file fire a recompile in the next
+    /// `poll_material_hot_reload` call (drained from `end_frame`).
+    pub fn compile_material_from_file(
+        &mut self,
+        path:        &std::path::Path,
+        profile:     material_pipeline::FragmentProfile,
+        bucket:      material_pipeline::Bucket,
+        reads_scene: bool,
+    ) -> Result<material_system::MaterialHandle, String> {
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|e| format!("canonicalize {path:?}: {e}"))?;
+        let source = std::fs::read_to_string(&canonical)
+            .map_err(|e| format!("read {canonical:?}: {e}"))?;
+        let handle = self.compile_material_with_options(&source, profile, bucket, reads_scene)
+            .map_err(|e| format!("compile {canonical:?}: {e:?}"))?;
+        self.material_hot_reload.register(
+            handle,
+            hot_reload::FileMaterialDesc { path: canonical, profile, bucket, reads_scene },
+        );
+        Ok(handle)
+    }
+
+    /// Drain pending hot-reload events and rebuild affected pipelines.
+    /// Logs failures and keeps the previous pipeline in place — never
+    /// kills the running game.
+    pub fn poll_material_hot_reload(&mut self) {
+        let pending = self.material_hot_reload.drain_pending();
+        for (handle, desc) in pending {
+            let source = match std::fs::read_to_string(&desc.path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[hot_reload] read {:?} failed: {e}", desc.path);
+                    continue;
+                }
+            };
+            // Compile fresh; on success, replace the slot. On failure,
+            // log and keep the old pipeline running.
+            match self.material_system.compile(
+                &self.device, &source,
+                desc.profile, desc.bucket, desc.reads_scene,
+                formats::HDR_FORMAT,
+                formats::MATERIAL_FORMAT,
+                formats::VELOCITY_FORMAT,
+                wgpu::TextureFormat::Rgba8Unorm,
+                formats::DEPTH_FORMAT,
+            ) {
+                Ok(new_handle) => {
+                    // material_system.compile pushes a NEW slot.
+                    // Move the new pipeline into the original slot
+                    // and clear the trailing one so handles don't
+                    // leak.
+                    let new_idx = (new_handle - 1) as usize;
+                    let old_idx = (handle - 1) as usize;
+                    if let Some(p) = self.material_system.pipelines.get_mut(new_idx).and_then(|s| s.take()) {
+                        if let Some(slot) = self.material_system.pipelines.get_mut(old_idx) {
+                            *slot = Some(p);
+                        }
+                    }
+                    eprintln!("[hot_reload] reloaded {:?} (handle {handle})", desc.path);
+                }
+                Err(e) => {
+                    eprintln!("[hot_reload] compile {:?} failed: {e:?} — keeping previous", desc.path);
+                }
+            }
+        }
     }
 
     /// Submit a material draw against a cached mesh. `mesh_handle` is

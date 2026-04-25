@@ -26,6 +26,11 @@ lewton = "0.10"
 minimp3 = { version = "0.5", optional = true }
 earcutr = "0.4"
 web-time = { version = "0.2", optional = true }
+# Phase 6 — hot-reload watcher for material WGSL files. Native only;
+# wasm doesn't have a filesystem to watch (gated in code via
+# cfg(not(target_arch = "wasm32"))).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+notify = "6"
 
 [dev-dependencies]
 pollster = "0.4"

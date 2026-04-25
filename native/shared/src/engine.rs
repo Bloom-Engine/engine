@@ -134,6 +134,11 @@ impl EngineState {
             self.scene.prepare_materials(&self.renderer);
             self.profiler.end("scene_prepare");
 
+            // Phase 6 — drain hot-reload events and rebuild any
+            // material whose .wgsl file changed on disk. Cheap when
+            // nothing has changed (just a try_recv on an empty queue).
+            self.renderer.poll_material_hot_reload();
+
             // Sync material-system PerFrame + PerView UBOs with the
             // current clock + camera before dispatching any queued
             // material draws. Without this, group 1 (view/proj/camera/

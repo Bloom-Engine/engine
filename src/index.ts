@@ -71,6 +71,7 @@ export {
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
   loadShader, compileMaterial, drawMeshWithMaterial,
   compileRefractiveMaterial, compileTransparentMaterial, compileAdditiveMaterial,
+  compileMaterialFromFile,
   createMeshExplicit,
   loadModelAnimation, updateModelAnimation, createMesh,
   setAmbientLight, setDirectionalLight, setJointTest,

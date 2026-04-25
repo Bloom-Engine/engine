@@ -21,6 +21,7 @@ declare function bloom_compile_material(source: number): number;
 declare function bloom_compile_material_refractive(source: number): number;
 declare function bloom_compile_material_transparent(source: number): number;
 declare function bloom_compile_material_additive(source: number): number;
+declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_load_model_animation(path: number): number;
 declare function bloom_update_model_animation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotSin: number, rotCos: number): void;
@@ -277,6 +278,31 @@ export function compileTransparentMaterial(wgslSource: string): number {
 /// particle flares, weapon glows, spell effects.
 export function compileAdditiveMaterial(wgslSource: string): number {
   return bloom_compile_material_additive(wgslSource as any);
+}
+
+/**
+ * Phase 6 — file-backed material compile with hot reload. Reads the
+ * WGSL from disk, compiles it, and registers the path with the
+ * engine's hot-reload watcher. Editing the file while the game is
+ * running re-compiles the pipeline and replaces it in place — the
+ * material handle stays valid; existing draws automatically pick up
+ * the new shader on the next frame.
+ *
+ * Failures during reload (parse error, validation) keep the previous
+ * pipeline running; the error is logged but doesn't crash the game.
+ *
+ * `bucket` selects the same presets as the dedicated compile* APIs:
+ *   'opaque' | 'transparent' | 'refractive' | 'additive'
+ */
+export function compileMaterialFromFile(
+  path: string,
+  bucket: 'opaque' | 'transparent' | 'refractive' | 'additive',
+): number {
+  const kind = bucket === 'opaque'      ? 0
+             : bucket === 'transparent' ? 1
+             : bucket === 'refractive'  ? 2
+             :                            3;
+  return bloom_compile_material_from_file(path as any, kind);
 }
 
 /// Draw a mesh with a material. `mesh` must be a Model created via
