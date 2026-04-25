@@ -179,7 +179,7 @@ impl AudioMixer {
         let ly = self.listener_y;
         let lz = self.listener_z;
         let lfx = self.listener_forward_x;
-        let lfy = self.listener_forward_y;
+        let _lfy = self.listener_forward_y;  // unused — listener "right" math projects out the Y component
         let lfz = self.listener_forward_z;
         // Listener right vector (cross product of forward and up=[0,1,0])
         let lrx = lfz;

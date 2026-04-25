@@ -36,7 +36,7 @@ pub fn screen_to_ray(
     screen_x: f32, screen_y: f32,
     width: f32, height: f32,
     inv_vp: &[[f32; 4]; 4],
-    camera_pos: &[f32; 3],
+    _camera_pos: &[f32; 3],
 ) -> ([f32; 3], [f32; 3]) {
     // Convert screen coords to NDC (-1 to 1)
     let ndc_x = (screen_x / width) * 2.0 - 1.0;

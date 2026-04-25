@@ -323,7 +323,8 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     } else {
         window.center();
         window.makeKeyAndOrderFront(None);
-        unsafe { app.activateIgnoringOtherApps(true) };
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
     }
 
     // Set up CAMetalLayer on the content view
@@ -489,16 +490,16 @@ pub extern "C" fn bloom_begin_drawing() {
         };
         match event {
             Some(event) => {
-                let event_type = unsafe { event.r#type() };
+                let event_type = event.r#type();
                 match event_type {
                     NSEventType::KeyDown => {
-                        let keycode = unsafe { event.keyCode() };
+                        let keycode = event.keyCode();
                         let bloom_key = map_keycode(keycode);
                         if bloom_key > 0 {
                             engine().input.set_key_down(bloom_key);
                         }
                         // Extract typed characters for text input (E3b).
-                        let chars_obj = unsafe { event.characters() };
+                        let chars_obj = event.characters();
                         if let Some(chars) = chars_obj {
                             let s = chars.to_string();
                             for c in s.chars() {
@@ -511,7 +512,7 @@ pub extern "C" fn bloom_begin_drawing() {
                         }
                     }
                     NSEventType::KeyUp => {
-                        let keycode = unsafe { event.keyCode() };
+                        let keycode = event.keyCode();
                         let bloom_key = map_keycode(keycode);
                         if bloom_key > 0 {
                             engine().input.set_key_up(bloom_key);
@@ -524,7 +525,7 @@ pub extern "C" fn bloom_begin_drawing() {
                             let dy: f64 = unsafe { msg_send![&*event, deltaY] };
                             engine().input.accumulate_mouse_delta(dx, dy);
                         } else if let Some(window) = unsafe { &WINDOW } {
-                            let loc = unsafe { event.locationInWindow() };
+                            let loc = event.locationInWindow();
                             let frame = window.contentView().map(|v| v.frame()).unwrap_or(NSRect::ZERO);
                             engine().input.set_mouse_position(loc.x, frame.size.height - loc.y);
                         }
@@ -550,7 +551,7 @@ pub extern "C" fn bloom_begin_drawing() {
                     }
                     _ => {}
                 }
-                unsafe { app.sendEvent(&event) };
+                app.sendEvent(&event);
             }
             None => break,
         }
@@ -587,14 +588,19 @@ pub extern "C" fn bloom_begin_drawing() {
         }
     }
 
-    // Apply cursor shape (Q2).
+    // Apply cursor shape (Q2). resizeLeftRightCursor /
+    // resizeUpDownCursor are deprecated in newer AppKit but still
+    // function; the suggested replacements need a richer per-frame-
+    // axis API we don't have. Keep + suppress the deprecation
+    // warning until we land that.
+    #[allow(deprecated)]
     match engine().input.cursor_shape {
-        1 => unsafe { objc2_app_kit::NSCursor::pointingHandCursor().set() },
-        2 => unsafe { objc2_app_kit::NSCursor::openHandCursor().set() },
-        3 => unsafe { objc2_app_kit::NSCursor::IBeamCursor().set() },
-        4 => unsafe { objc2_app_kit::NSCursor::resizeLeftRightCursor().set() },
-        5 => unsafe { objc2_app_kit::NSCursor::resizeUpDownCursor().set() },
-        6 => unsafe { objc2_app_kit::NSCursor::crosshairCursor().set() },
+        1 => objc2_app_kit::NSCursor::pointingHandCursor().set(),
+        2 => objc2_app_kit::NSCursor::openHandCursor().set(),
+        3 => objc2_app_kit::NSCursor::IBeamCursor().set(),
+        4 => objc2_app_kit::NSCursor::resizeLeftRightCursor().set(),
+        5 => objc2_app_kit::NSCursor::resizeUpDownCursor().set(),
+        6 => objc2_app_kit::NSCursor::crosshairCursor().set(),
         _ => {},
     }
 
@@ -861,7 +867,7 @@ pub extern "C" fn bloom_measure_text(text_ptr: *const u8, size: f64) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_load_font(path_ptr: *const u8, size: f64) -> f64 {
+pub extern "C" fn bloom_load_font(path_ptr: *const u8, _size: f64) -> f64 {
     let path = str_from_header(path_ptr);
     match std::fs::read(path) {
         Ok(data) => engine().text.load_font(&data) as f64,

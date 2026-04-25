@@ -8269,7 +8269,7 @@ impl Renderer {
             // SSR disabled — clear the RT so TAA's read returns 0
             // (transparent black). One-time clear is cheaper than a
             // full clear+pipeline switch every frame.
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ssr_clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssr_rt_view,
@@ -8694,7 +8694,7 @@ impl Renderer {
         } else {
             // SSGI disabled — clear the resolve target so downstream
             // composite reads contribute zero.
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ssgi_clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.ssgi_rt_view,

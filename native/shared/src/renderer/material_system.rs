@@ -192,7 +192,10 @@ impl MaterialSystem {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        joint_buffer: &wgpu::Buffer,
+        // Joint-buffer plumbing is per-draw (used by ensure_draw_slot,
+        // not at construction time). Kept on the constructor's
+        // signature for symmetry with the per-draw path.
+        _joint_buffer: &wgpu::Buffer,
     ) -> Self {
         let layouts = MaterialAbiLayouts::create(device);
 
