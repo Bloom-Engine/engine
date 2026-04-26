@@ -1019,6 +1019,32 @@ pub fn bloom_compile_material_from_file_str(path: &str, bucket_kind: f64) -> f64
     }
 }
 
+/// EN-017 — stub: JS glue calls `bloom_set_post_pass_str` instead.
+#[wasm_bindgen]
+pub fn bloom_set_post_pass(_source: f64) -> f64 { 0.0 }
+
+/// EN-017 — compile + install a fullscreen post-pass material on web.
+/// See `bloom-macos::bloom_set_post_pass` for the full ABI. Returns
+/// 1.0 on success, 0.0 on compile failure.
+#[wasm_bindgen]
+pub fn bloom_set_post_pass_str(source: &str) -> f64 {
+    match engine().renderer.set_post_pass(source) {
+        Ok(()) => 1.0,
+        Err(e) => {
+            web_sys::console::error_1(
+                &format!("[post_pass] compile failed: {:?}", e).into(),
+            );
+            0.0
+        }
+    }
+}
+
+/// EN-017 — uninstall the active post-pass.
+#[wasm_bindgen]
+pub fn bloom_clear_post_pass() {
+    engine().renderer.clear_post_pass();
+}
+
 #[wasm_bindgen]
 pub fn bloom_draw_material(
     material: f64,

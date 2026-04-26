@@ -2298,6 +2298,23 @@ pub extern "C" fn bloom_compile_material_from_file(
     }
 }
 
+/// EN-017 — compile + install a fullscreen post-pass material.
+/// See `bloom-macos::bloom_set_post_pass` for the full ABI.
+#[no_mangle]
+pub extern "C" fn bloom_set_post_pass(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    match engine().renderer.set_post_pass(source) {
+        Ok(()) => 1.0,
+        Err(e) => { eprintln!("[post_pass] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+/// EN-017 — uninstall the active post-pass.
+#[no_mangle]
+pub extern "C" fn bloom_clear_post_pass() {
+    engine().renderer.clear_post_pass();
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_draw_material(
     material: f64,

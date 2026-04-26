@@ -117,6 +117,8 @@
         { "name": "bloom_create_instance_buffer",      "params": ["i64", "f64"],                                       "returns": "f64"  },
         { "name": "bloom_submit_material_draw_instanced", "params": ["f64", "f64", "f64", "f64", "f64"],               "returns": "void" },
         { "name": "bloom_destroy_instance_buffer",     "params": ["f64"],                                              "returns": "void" },
+        { "name": "bloom_set_post_pass",               "params": ["i64"],                                              "returns": "f64"  },
+        { "name": "bloom_clear_post_pass",             "params": [],                                                   "returns": "void" },
         { "name": "bloom_draw_material",            "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
         { "name": "bloom_load_model_animation",   "params": ["i64"],                                                   "returns": "f64"  },
         { "name": "bloom_update_model_animation",  "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],       "returns": "void" },

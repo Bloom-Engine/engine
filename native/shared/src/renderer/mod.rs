@@ -12,6 +12,7 @@ pub mod graph;
 pub mod transient;
 pub mod impulse_field;
 pub mod hot_reload;
+pub mod post_pass;
 
 mod util;
 pub use util::{
@@ -1261,6 +1262,23 @@ pub struct Renderer {
     /// `compile_material_from_file` participate; inline-string
     /// materials (compile_material) don't.
     pub material_hot_reload: hot_reload::MaterialHotReload,
+
+    /// EN-017 — game-supplied fullscreen post-pass slot. When `Some`,
+    /// composite writes to `composite_ldr_rt` instead of the
+    /// swapchain, then this pipeline runs as a fullscreen draw that
+    /// samples `composite_ldr_rt` + `depth_view` and writes to the
+    /// swapchain. None ⇒ original zero-cost path.
+    pub post_pass: Option<post_pass::PostPassPipeline>,
+    /// LDR intermediate the composite pass redirects into when a
+    /// post-pass is installed. Allocated lazily on first
+    /// `set_post_pass` call and resized in `resize`. Format mirrors
+    /// `surface_config.format` so post-pass shaders see identical
+    /// bits regardless of whether the slot is active.
+    pub composite_ldr_rt_texture: Option<wgpu::Texture>,
+    pub composite_ldr_rt_view: Option<wgpu::TextureView>,
+    /// NonFiltering sampler used for the depth binding in post-pass
+    /// shaders. Created once and reused.
+    pub post_pass_depth_sampler: wgpu::Sampler,
 }
 
 /// Ticket 014 — re-exposed for `SceneGraph::prepare()` to allocate
@@ -4810,6 +4828,20 @@ impl Renderer {
         let impulse_field = impulse_field::ImpulseField::new(&device);
         let material_hot_reload = hot_reload::MaterialHotReload::new();
 
+        // EN-017 — non-filtering sampler shared by every post-pass
+        // shader for the depth binding. Created up front because the
+        // sampler outlives any individual post-pass pipeline.
+        let post_pass_depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("post_pass_depth_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
         Self {
             device,
             queue,
@@ -5141,6 +5173,10 @@ impl Renderer {
             transient_pool,
             impulse_field,
             material_hot_reload,
+            post_pass: None,
+            composite_ldr_rt_texture: None,
+            composite_ldr_rt_view: None,
+            post_pass_depth_sampler,
         }
     }
 
@@ -5356,6 +5392,17 @@ impl Renderer {
             self.hiz_linearize_bg_cache = None;
             for slot in self.hiz_downsample_bg_cache.iter_mut() {
                 *slot = None;
+            }
+
+            // EN-017 — keep the LDR intermediate (used when a post-pass
+            // is installed) in lockstep with the swapchain. Allocated
+            // lazily so titles without a post-pass pay zero memory.
+            if self.composite_ldr_rt_texture.is_some() {
+                let (t, v) = post_pass::create_composite_ldr_rt(
+                    &self.device, width, height, self.surface_config.format,
+                );
+                self.composite_ldr_rt_texture = Some(t);
+                self.composite_ldr_rt_view = Some(v);
             }
         }
     }
@@ -9273,12 +9320,21 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],
         });
+        // EN-017 — when a post-pass is installed the composite writes
+        // into the LDR intermediate, then the user shader samples that
+        // RT and writes the swapchain. Otherwise composite still writes
+        // the swapchain directly (zero-cost original path).
+        let composite_target_view: &wgpu::TextureView = if self.post_pass.is_some() {
+            self.composite_ldr_rt_view.as_ref().unwrap_or(&view)
+        } else {
+            &view
+        };
         {
             let final_composite_ts = profiler.pass_timestamp_writes("final_composite_pass");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom_composite_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: composite_target_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -9296,6 +9352,57 @@ impl Renderer {
             });
             pass.set_pipeline(&self.composite_pipeline);
             pass.set_bind_group(0, &composite_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // EN-017 — fullscreen post-pass: samples the LDR composite
+        // output + scene depth, writes the swapchain. Runs after
+        // composite + tonemapping but before the 2D overlay so the
+        // HUD stays crisp.
+        if let (Some(pp), Some(ldr_view)) =
+            (self.post_pass.as_ref(), self.composite_ldr_rt_view.as_ref())
+        {
+            let pp_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("post_pass_bg"),
+                layout: &pp.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(ldr_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.post_pass_depth_sampler),
+                    },
+                ],
+            });
+            let pp_ts = profiler.pass_timestamp_writes("post_pass");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom_post_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: pp_ts,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pp.pipeline);
+            pass.set_bind_group(0, &pp_bg, &[]);
             pass.draw(0..3, 0..1);
         }
         profiler.end("post_fx");
@@ -11208,6 +11315,43 @@ impl Renderer {
     /// Safe to call with handle 0 or stale handles (no-op).
     pub fn destroy_instance_buffer(&mut self, handle: u32) {
         self.material_system.destroy_instance_buffer(handle);
+    }
+
+    /// EN-017 — install a fullscreen WGSL post-pass. Compiles the
+    /// shader, lazily allocates the LDR intermediate composite RT
+    /// (only first time), and replaces any existing post-pass. The
+    /// fragment shader sees `scene_color_tex` (LDR, post-tonemap) +
+    /// `scene_depth_tex` at `@group(0)` — see `post_pass::POST_PASS_PRELUDE`
+    /// for the exact ABI. Returns Err on shader-compile failure;
+    /// the existing post-pass (if any) is left in place.
+    pub fn set_post_pass(
+        &mut self, wgsl_source: &str,
+    ) -> Result<(), post_pass::PostPassCompileError> {
+        let pipeline = post_pass::compile_post_pass(
+            &self.device, wgsl_source, self.surface_config.format,
+        )?;
+
+        if self.composite_ldr_rt_texture.is_none() {
+            let (t, v) = post_pass::create_composite_ldr_rt(
+                &self.device,
+                self.surface_config.width,
+                self.surface_config.height,
+                self.surface_config.format,
+            );
+            self.composite_ldr_rt_texture = Some(t);
+            self.composite_ldr_rt_view = Some(v);
+        }
+
+        self.post_pass = Some(pipeline);
+        Ok(())
+    }
+
+    /// EN-017 — remove the active post-pass. Composite returns to
+    /// writing the swapchain directly; the LDR intermediate stays
+    /// allocated (cheap to keep around — one full-screen RGBA8 — and
+    /// avoids a re-alloc if the game toggles the slot frequently).
+    pub fn clear_post_pass(&mut self) {
+        self.post_pass = None;
     }
 
     /// Phase 6 — compile a material from a WGSL file on disk and

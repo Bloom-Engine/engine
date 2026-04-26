@@ -32,6 +32,8 @@ declare function bloom_set_shadows_enabled(on: number): void;
 declare function bloom_set_shadows_always_fresh(on: number): void;
 declare function bloom_set_bloom_enabled(on: number): void;
 declare function bloom_set_ssao_enabled(on: number): void;
+declare function bloom_set_post_pass(source: number): number;
+declare function bloom_clear_post_pass(): void;
 declare function bloom_set_ssao_intensity(intensity: number): void;
 declare function bloom_set_ssao_radius(worldRadius: number): void;
 declare function bloom_set_wind(dirX: number, dirZ: number, amplitude: number, frequency: number): void;
@@ -290,6 +292,31 @@ export function setSsaoIntensity(intensity: number): void {
 /** SSAO sampling radius in world units. 0.1..2.0 m is the sane range. */
 export function setSsaoRadius(worldRadius: number): void {
   bloom_set_ssao_radius(worldRadius);
+}
+
+/// EN-017 — install a game-supplied fullscreen WGSL post-pass.
+/// Runs after composite + tonemapping, before the 2D overlay, so
+/// the HUD stays crisp. The fragment shader sees scene_color_tex
+/// (LDR, post-tonemap) and scene_depth_tex at @group(0).
+///
+/// Example — underwater tint:
+///   setPostPass(`
+///     @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+///       let scene = textureSample(scene_color_tex, scene_color_samp, uv);
+///       return vec4<f32>(scene.rgb * vec3<f32>(0.4, 0.7, 0.9), 1.0);
+///     }
+///   `);
+///
+/// Returns true on successful compile, false on shader error.
+/// One slot (V1); subsequent calls replace the existing post-pass.
+export function setPostPass(wgslSource: string): boolean {
+  return bloom_set_post_pass(wgslSource as any) > 0;
+}
+
+/// EN-017 — uninstall the active post-pass. The composite output
+/// goes directly to the swapchain again (zero post-pass cost).
+export function clearPostPass(): void {
+  bloom_clear_post_pass();
 }
 
 /// Set the global wind field used by foliage materials.

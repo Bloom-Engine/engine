@@ -1691,6 +1691,33 @@ pub extern "C" fn bloom_compile_material_from_file(
     }
 }
 
+/// EN-017 — compile + install a fullscreen post-pass material. Runs
+/// after composite + tonemapping, before the 2D overlay (HUD stays
+/// crisp). The fragment shader must declare:
+///
+///     @fragment fn fs_main(@location(0) uv: vec2<f32>)
+///         -> @location(0) vec4<f32> { ... }
+///
+/// and may sample `scene_color_tex` (LDR, post-tonemap), `scene_depth_tex`
+/// from the engine-provided bind group at `@group(0)` —
+/// see `post_pass::POST_PASS_PRELUDE` for the full ABI. Returns 1.0
+/// on success, 0.0 on compile failure.
+#[no_mangle]
+pub extern "C" fn bloom_set_post_pass(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    match engine().renderer.set_post_pass(source) {
+        Ok(()) => 1.0,
+        Err(e) => { eprintln!("[post_pass] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+/// EN-017 — uninstall the active post-pass. Composite goes back to
+/// writing the swapchain directly (zero-cost original path).
+#[no_mangle]
+pub extern "C" fn bloom_clear_post_pass() {
+    engine().renderer.clear_post_pass();
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_draw_material(
     material: f64,
