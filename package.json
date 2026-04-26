@@ -148,6 +148,7 @@
         { "name": "bloom_set_cas_strength",        "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_get_physical_width",      "params": [],                                                        "returns": "f64"  },
         { "name": "bloom_get_physical_height",     "params": [],                                                        "returns": "f64"  },
+        { "name": "bloom_set_auto_resolution",     "params": ["f64", "f64"],                                            "returns": "void" },
         { "name": "bloom_set_manual_exposure",     "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_env_intensity",       "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_ssgi_enabled",        "params": ["f64"],                                                   "returns": "void" },

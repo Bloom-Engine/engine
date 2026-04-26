@@ -86,6 +86,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_get_physical_width() -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_get_physical_height() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_set_auto_resolution(_target_hz: f64, _enabled: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_set_env_intensity(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssgi_enabled(_p0: f64) {

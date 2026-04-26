@@ -1210,6 +1210,17 @@ pub extern "C" fn bloom_get_physical_height() -> f64 {
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_set_auto_resolution(target_hz: f64, enabled: f64) {
+    let eng = engine();
+    if enabled != 0.0 {
+        let current = eng.renderer.render_scale();
+        eng.drs.enable(target_hz as f32, current);
+    } else {
+        eng.drs.disable();
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_set_manual_exposure(value: f64) {
     engine().renderer.set_manual_exposure(value as f32);
 }

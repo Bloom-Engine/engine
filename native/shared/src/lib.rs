@@ -28,6 +28,7 @@ pub mod jolt_sys;
 #[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
 pub mod physics_jolt;
 pub mod engine;
+pub mod drs;
 
 pub use engine::EngineState;
 pub use renderer::Renderer;

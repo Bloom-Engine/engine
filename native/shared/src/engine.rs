@@ -8,6 +8,7 @@ use crate::scene::SceneGraph;
 use crate::frame_callbacks::FrameCallbackSystem;
 use crate::postfx::PostFxPipeline;
 use crate::profiler::Profiler;
+use crate::drs::DrsController;
 #[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
 use crate::physics_jolt::JoltPhysics;
 
@@ -28,6 +29,7 @@ pub struct EngineState {
     pub postfx: Option<PostFxPipeline>,
     pub profiler: Profiler,
     pub screenshot_pending: bool,
+    pub drs: DrsController,
 
     // Timing
     pub target_fps: f64,
@@ -73,6 +75,7 @@ impl EngineState {
             postfx: None,
             profiler,
             screenshot_pending: false,
+            drs: DrsController::new(),
             target_fps: 60.0,
             delta_time: 0.0,
             last_frame_time: now,
@@ -92,6 +95,12 @@ impl EngineState {
         let now = Instant::now();
         self.delta_time = now.duration_since(self.last_frame_time).as_secs_f64();
         self.last_frame_time = now;
+
+        // DRS samples wall-clock frame time and may step render_scale
+        // up or down before this frame's renderer work begins. No-op
+        // when disabled (default) — and the controller's own cooldown
+        // + hysteresis bound how often a step actually happens.
+        self.drs.tick(self.delta_time, &mut self.renderer);
 
         self.fps_frame_count += 1;
         let fps_elapsed = now.duration_since(self.fps_timer).as_secs_f64();

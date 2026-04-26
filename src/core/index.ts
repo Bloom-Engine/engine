@@ -27,6 +27,7 @@ declare function bloom_set_upscale_mode(mode: number): void;
 declare function bloom_set_cas_strength(strength: number): void;
 declare function bloom_get_physical_width(): number;
 declare function bloom_get_physical_height(): number;
+declare function bloom_set_auto_resolution(targetHz: number, enabled: number): void;
 declare function bloom_set_manual_exposure(value: number): void;
 declare function bloom_set_env_intensity(intensity: number): void;
 declare function bloom_set_ssgi_enabled(on: number): void;
@@ -244,6 +245,20 @@ export function setCasStrength(strength: number): void {
 /** Physical-pixel size of the GPU surface (HiDPI-aware on macOS today). */
 export function getPhysicalWidth(): number { return bloom_get_physical_width(); }
 export function getPhysicalHeight(): number { return bloom_get_physical_height(); }
+
+/**
+ * Dynamic resolution scaling. When enabled, the engine self-tunes
+ * `render_scale` toward the given target framerate using a 6-rung
+ * ladder (0.50–1.00) with EMA-smoothed frame time, asymmetric
+ * hysteresis, and a 30-frame cooldown between steps.
+ *
+ * Call with `enabled = false` to disarm. Manual `setRenderScale`
+ * still works while DRS is on (DRS will simply step away from the
+ * value on its next eligible frame).
+ */
+export function setAutoResolution(targetHz: number, enabled: boolean = true): void {
+  bloom_set_auto_resolution(targetHz, enabled ? 1 : 0);
+}
 
 /** Manual exposure multiplier (ignored when auto-exposure is on). 1.0 = default. */
 export function setManualExposure(value: number): void {
