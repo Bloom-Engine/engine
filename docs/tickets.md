@@ -119,11 +119,11 @@ the engine doesn't currently provide build-time tooling.
 
 ---
 
-## EN-005 — Atmospheric scattering / sun disk ✅ V1
+## EN-005 — Atmospheric scattering / sun disk ✅ V1+V2
 
-**Status:** V1 landed 2026-04-26. RFC: `docs/rfc/0002-atmospheric-sky.md`.
+**Status:** V1 + V2 landed 2026-04-26. RFC: `docs/rfc/0002-atmospheric-sky.md`.
 
-**Shipped (Hillaire 2020 procedural sky):**
+**Shipped (Hillaire 2020 procedural sky, full V2):**
 - Phase 1: transmittance + multi-scattering LUTs baked at init.
 - Phase 2: sky-view LUT compute pass + procedural sky render pass +
   sun disk with limb darkening. `setProceduralSky` / `setSunDirection`
@@ -132,6 +132,11 @@ the engine doesn't currently provide build-time tooling.
   reflections + ambient). Sun-shaft tint auto-derived from
   transmittance LUT (sub-RFC #1 answered).
 - Phase 4: sky-tinted fog auto-derive + zenith dithering polish.
+- V2: full 3D aerial-perspective LUT (32³ desktop / 16³ web+mobile),
+  per-frame compute from current camera + sun. scene_compose
+  samples it instead of running the 16-step volumetric fog march
+  when procedural sky is on. Per-pixel angular variation — sunset
+  side reads warmer than the opposite horizon.
 
 **Sub-RFCs answered in RFC 0002:**
 - Sun-shafts tap transmittance (yes — `setSunShaftColor` retains as
@@ -139,11 +144,6 @@ the engine doesn't currently provide build-time tooling.
 - `setSunDirection` is the source of truth when procedural is on;
   `setDirectionalLight` stays as the lower-level escape hatch.
   Time-of-day deliberately deferred to user-space.
-
-**Deferred to EN-005 V2:**
-- 3D aerial-perspective LUT (32³/16³ per-frame compute + PBR fog
-  shader integration). Phase 4's sky-tinted fog is the V1 stand-in;
-  V2 adds per-pixel angular variation.
 
 ---
 

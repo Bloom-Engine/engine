@@ -28,8 +28,9 @@ mod brdf_lut;
 use brdf_lut::build_brdf_lut;
 mod atmosphere_lut;
 use atmosphere_lut::{
-    build_multi_scattering_lut, build_transmittance_lut, MULTI_SCATTERING_SIZE, SKY_VIEW_H,
-    SKY_VIEW_W, TRANSMITTANCE_H, TRANSMITTANCE_W,
+    build_multi_scattering_lut, build_transmittance_lut, AERIAL_D, AERIAL_H,
+    AERIAL_MAX_DIST_KM, AERIAL_W, MULTI_SCATTERING_SIZE, SKY_VIEW_H, SKY_VIEW_W,
+    TRANSMITTANCE_H, TRANSMITTANCE_W,
 };
 
 mod formats;
@@ -151,6 +152,26 @@ struct SunUniforms {
     sun: [f32; 4],
     /// x = sun angular radius (rad), y = limb darkening (0..1), zw unused.
     params: [f32; 4],
+}
+
+// EN-005 V2 — aerial-perspective compute uniforms.
+//
+// Driven each frame from the renderer (camera + sun + atmosphere
+// knobs). Layout must mirror `AerialParams` in
+// AERIAL_PERSPECTIVE_SHADER_WGSL exactly.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct AerialParams {
+    /// xyz = camera world position (engine units, metres assumed),
+    /// w = max distance the LUT covers (km).
+    cam_pos: [f32; 4],
+    /// World→clip inverse, used per-voxel to reconstruct view rays
+    /// from NDC.
+    inv_vp: [[f32; 4]; 4],
+    /// xyz = sun direction (unit), w = sun intensity scalar.
+    sun: [f32; 4],
+    /// x = rayleigh density mult, y = mie density mult, zw unused.
+    knobs: [f32; 4],
 }
 
 
@@ -1324,6 +1345,18 @@ pub struct Renderer {
     /// procedural IBL textures (vs the panorama path). Avoids a
     /// rebuild on every sun-move once the swap is done.
     lighting_bg_is_procedural: bool,
+
+    // EN-005 V2 — aerial perspective. Volume LUT recomputed each
+    // frame (camera moves) when procedural sky is active. Replaces
+    // scene_compose's 16-step volumetric fog march with a single
+    // 3D-tex sample per fragment.
+    aerial_perspective_pipeline: wgpu::ComputePipeline,
+    _aerial_perspective_bgl: wgpu::BindGroupLayout,
+    aerial_perspective_uniform_buffer: wgpu::Buffer,
+    aerial_perspective_bind_group: wgpu::BindGroup,
+    _aerial_perspective_texture: wgpu::Texture,
+    pub aerial_perspective_view: wgpu::TextureView,
+    pub aerial_perspective_sampler: wgpu::Sampler,
     /// Dedicated cosine-convolved diffuse irradiance texture. Separate
     /// from the GGX-prefiltered specular chain so both can use their
     /// full resolution range. Single mip at 128×64 equirect — ample
@@ -2958,6 +2991,128 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 0, resource: prefilter_uniform_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&procedural_sky_equirect_mip0_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&env_sampler) },
+            ],
+        });
+
+        // ============================================================
+        // EN-005 V2 — aerial-perspective 3D LUT. Compute pipeline +
+        // 3D storage texture. Re-baked each frame from
+        // `dispatch_aerial_perspective_lut` when procedural sky is on.
+        // ============================================================
+        let aerial_perspective_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aerial_perspective_lut"),
+            size: wgpu::Extent3d {
+                width: AERIAL_W,
+                height: AERIAL_H,
+                depth_or_array_layers: AERIAL_D,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let aerial_perspective_view =
+            aerial_perspective_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("aerial_perspective_view"),
+                dimension: Some(wgpu::TextureViewDimension::D3),
+                ..Default::default()
+            });
+        let aerial_perspective_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("aerial_perspective_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let aerial_perspective_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("aerial_perspective_shader"),
+            source: wgpu::ShaderSource::Wgsl(AERIAL_PERSPECTIVE_SHADER_WGSL.into()),
+        });
+        let aerial_perspective_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("aerial_perspective_uniform_buffer"),
+            size: std::mem::size_of::<AerialParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let aerial_perspective_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("aerial_perspective_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let aerial_perspective_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("aerial_perspective_pl"),
+            bind_group_layouts: &[Some(&aerial_perspective_bgl)],
+            immediate_size: 0,
+        });
+        let aerial_perspective_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("aerial_perspective_pipeline"),
+            layout: Some(&aerial_perspective_pl_layout),
+            module: &aerial_perspective_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let aerial_perspective_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aerial_perspective_bg"),
+            layout: &aerial_perspective_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: aerial_perspective_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atmosphere_transmittance_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&atmosphere_multi_scattering_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&atmosphere_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&aerial_perspective_view) },
             ],
         });
 
@@ -5213,6 +5368,22 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
+                // EN-005 V2 — aerial-perspective 3D LUT (tex + sampler).
+                // Sampled per fragment when `misc.y > 0` (procedural sky
+                // active); otherwise unused but bound to keep the layout
+                // shape stable across frames.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let scene_compose_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -6014,6 +6185,13 @@ impl Renderer {
             lighting_bg_is_procedural: false,
             transmittance_lut_cpu: transmittance_pixels,
             sun_shaft_color_user_override: false,
+            aerial_perspective_pipeline,
+            _aerial_perspective_bgl: aerial_perspective_bgl,
+            aerial_perspective_uniform_buffer,
+            aerial_perspective_bind_group,
+            _aerial_perspective_texture: aerial_perspective_texture,
+            aerial_perspective_view,
+            aerial_perspective_sampler,
             env_diffuse_texture: None,
             scene_pipeline,
             scene_material_layout,
@@ -8255,6 +8433,67 @@ impl Renderer {
         ];
     }
 
+    /// EN-005 V2 — bake the aerial-perspective 3D LUT for the
+    /// current camera + sun. Called each frame from
+    /// `end_frame_with_scene` before scene_compose runs (which
+    /// samples the LUT). The LUT depends on the camera transform,
+    /// so unlike the sky-view LUT it can't be gated on a dirty
+    /// flag — every frame's view is unique.
+    fn dispatch_aerial_perspective_lut(&mut self) {
+        // Compute inverse VP from current view + projection.
+        let v = self.current_view_matrix;
+        let p = self.current_proj_matrix;
+        // Multiply column-major: vp = p * v
+        let mut vp = [[0.0_f32; 4]; 4];
+        for r in 0..4 {
+            for c in 0..4 {
+                let mut s = 0.0;
+                for k in 0..4 {
+                    s += p[k][r] * v[c][k];
+                }
+                vp[c][r] = s;
+            }
+        }
+        let inv_vp = util::mat4_invert(vp);
+
+        // Camera world position from the view matrix. View is
+        // world→camera, so cam_pos = -R^T * t where R is rotation,
+        // t is the translation column. Equivalent: invert view and
+        // take its translation column.
+        let inv_view = util::mat4_invert(v);
+        let cam_pos = [inv_view[3][0], inv_view[3][1], inv_view[3][2]];
+
+        let params = AerialParams {
+            cam_pos: [cam_pos[0], cam_pos[1], cam_pos[2], AERIAL_MAX_DIST_KM],
+            inv_vp,
+            sun: [
+                self.sun_direction[0],
+                self.sun_direction[1],
+                self.sun_direction[2],
+                self.sun_intensity,
+            ],
+            knobs: [self.rayleigh_density, self.mie_density, 0.0, 0.0],
+        };
+        self.queue
+            .write_buffer(&self.aerial_perspective_uniform_buffer, 0, bytemuck::bytes_of(&params));
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("aerial_perspective_encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("aerial_perspective_compute"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.aerial_perspective_pipeline);
+            pass.set_bind_group(0, &self.aerial_perspective_bind_group, &[]);
+            let gx = (AERIAL_W + 7) / 8;
+            let gy = (AERIAL_H + 7) / 8;
+            pass.dispatch_workgroups(gx, gy, AERIAL_D);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     /// EN-005 Phase 4 — derive a sky-tinted fog color from the
     /// atmosphere. Approximates "what color would you see looking at
     /// the distant horizon" by blending a midday-blue baseline with a
@@ -9030,8 +9269,11 @@ impl Renderer {
         // pass opens. The compute dispatch can't be nested inside a
         // render pass, and `maybe_update_sky_view_lut` is a no-op
         // unless the sun (or atmosphere knobs) actually changed.
+        // EN-005 V2 — also re-bake the aerial-perspective volume,
+        // which must happen every frame because the camera moves.
         if self.procedural_sky_enabled {
             self.maybe_update_sky_view_lut();
+            self.dispatch_aerial_perspective_lut();
         }
 
         profiler.begin("main_hdr_pass");
@@ -10343,7 +10585,15 @@ impl Renderer {
         // nothing visually.
         let effective_bloom_intensity = if self.bloom_enabled { self.bloom_intensity } else { 0.0 };
         let cp = SceneComposeParams {
-            misc: [effective_bloom_intensity, 0.0, 0.0, 0.0],
+            // misc.y = procedural-sky aerial-perspective on/off flag.
+            // The scene_compose shader reads this to decide between
+            // the legacy 16-step fog march and the V2 3D LUT sample.
+            misc: [
+                effective_bloom_intensity,
+                if self.procedural_sky_enabled { 1.0 } else { 0.0 },
+                AERIAL_MAX_DIST_KM,
+                0.0,
+            ],
             inv_vp: inv_vp_current,
             fog_color_density: [
                 self.fog_color[0], self.fog_color[1], self.fog_color[2], self.fog_density,
@@ -10375,6 +10625,9 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
                     wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                    // EN-005 V2 — always bound; shader gates use on `misc.y`.
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&self.aerial_perspective_view) },
+                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::Sampler(&self.aerial_perspective_sampler) },
                 ],
             });
             // NOTE: GPU timestamp deliberately not requested on this pass.

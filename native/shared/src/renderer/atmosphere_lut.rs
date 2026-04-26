@@ -51,6 +51,30 @@ pub const SKY_VIEW_W: u32 = 192;
 #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android")))]
 pub const SKY_VIEW_H: u32 = 108;
 
+// Aerial-perspective 3D LUT — recomputed each frame (camera moves).
+// Indexed by (NDC.x, NDC.y, depth-slice). Stores per-voxel
+// (in-scatter rgb, mean transmittance). Smaller tier on web/mobile
+// keeps the per-frame compute under 1 ms on integrated GPUs.
+#[cfg(any(target_arch = "wasm32", target_os = "ios", target_os = "android"))]
+pub const AERIAL_W: u32 = 16;
+#[cfg(any(target_arch = "wasm32", target_os = "ios", target_os = "android"))]
+pub const AERIAL_H: u32 = 16;
+#[cfg(any(target_arch = "wasm32", target_os = "ios", target_os = "android"))]
+pub const AERIAL_D: u32 = 16;
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android")))]
+pub const AERIAL_W: u32 = 32;
+#[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android")))]
+pub const AERIAL_H: u32 = 32;
+#[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android")))]
+pub const AERIAL_D: u32 = 32;
+
+/// Maximum view-space distance the aerial-perspective LUT covers, in
+/// kilometres. Beyond this the shader clamps to the deepest slice (which
+/// has the longest accumulated path, so it's a sensible fallback for
+/// truly distant geometry like skybox-far mountains).
+pub const AERIAL_MAX_DIST_KM: f32 = 32.0;
+
 // ----------------------------------------------------------------------------
 // Earth-like atmosphere constants (Hillaire 2020, Bruneton-derived)
 // All distances in kilometres; coefficients in 1/km.

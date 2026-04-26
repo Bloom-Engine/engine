@@ -4427,6 +4427,8 @@ struct SceneComposeParams {
 @group(0) @binding(10) var albedo_samp: sampler;
 @group(0) @binding(11) var depth_tex: texture_depth_2d;
 @group(0) @binding(12) var depth_samp: sampler;
+@group(0) @binding(13) var aerial_tex: texture_3d<f32>;
+@group(0) @binding(14) var aerial_samp: sampler;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -4470,9 +4472,36 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let world_h = u.inv_vp * ndc;
     let world = world_h.xyz / world_h.w;
 
-    // Volumetric fog: 16-step Beer-Lambert march with height-based
-    // density falloff. Density 0 = disabled (the mul collapses to
-    // unity; an early-out avoids the loop entirely).
+    // EN-005 V2 — when procedural sky is on (misc.y > 0), sample the
+    // pre-baked aerial-perspective 3D LUT instead of running the
+    // Beer-Lambert march. The LUT is indexed by (NDC.xy, depth-slice)
+    // where depth-slice = world_distance / max_dist_km.
+    if (u.misc.y > 0.5) {
+        let cam_pos = vec3<f32>(
+            u.inv_vp[3][0] / u.inv_vp[3][3],
+            u.inv_vp[3][1] / u.inv_vp[3][3],
+            u.inv_vp[3][2] / u.inv_vp[3][3],
+        );
+        // Engine units are metres; LUT covers misc.z km. Skip far-
+        // plane / sky pixels: depth == 1.0 means no scene geometry,
+        // and the procedural sky pass already drew the right colour
+        // for that pixel — fogging it again would double-tint.
+        if (depth < 1.0) {
+            let dist_m = length(world - cam_pos);
+            let dist_km = dist_m * 0.001;
+            let max_km = u.misc.z;
+            let depth_slice = clamp(dist_km / max_km, 0.0, 1.0);
+            let aerial = textureSampleLevel(
+                aerial_tex,
+                aerial_samp,
+                vec3<f32>(in.uv.x, in.uv.y, depth_slice),
+                0.0,
+            );
+            let in_scatter = aerial.rgb;
+            let mean_t = aerial.a;
+            color = color * mean_t + in_scatter;
+        }
+    } else {
     let fog_density = u.fog_color_density.w;
     if (fog_density > 0.0) {
         let height_ref = u.fog_params.x;
@@ -4500,6 +4529,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             transmittance *= step_extinction;
         }
         color = color * transmittance + in_scatter;
+    }
     }
 
     // Sun shafts: 32-tap march from the pixel toward the projected
@@ -5660,3 +5690,166 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     return textureSampleLevel(sky_view_lut, lut_samp, lut_uv, 0.0);
 }
 ";
+
+// EN-005 V2 — aerial-perspective 3D LUT bake.
+//
+// Each voxel (NDC.x, NDC.y, depth-slice) holds the integrated in-
+// scattered radiance and accumulated transmittance from the camera
+// to a sample point along the view ray. scene_compose samples this
+// in place of its 16-step volumetric fog march when procedural sky
+// is on, giving per-pixel angular variation (sunset side warmer than
+// the opposite horizon) at a fraction of the per-frame cost.
+//
+// Engine units assumed metres; atmosphere math runs in kilometres.
+// Camera height above sea level is treated as 0.5 km regardless of
+// actual y — same approximation the sky-view shader uses, since the
+// atmosphere is far thicker than typical scene height variation.
+
+pub(super) const AERIAL_PERSPECTIVE_SHADER_WGSL: &str = "
+struct AerialParams {
+    // xyz = camera world position (metres), w = max distance (km)
+    cam_pos: vec4<f32>,
+    inv_vp: mat4x4<f32>,
+    // xyz = sun direction (unit), w = sun intensity scale
+    sun: vec4<f32>,
+    // x = rayleigh density mult, y = mie density mult, zw unused
+    knobs: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: AerialParams;
+@group(0) @binding(1) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(2) var multi_scattering_lut: texture_2d<f32>;
+@group(0) @binding(3) var lut_samp: sampler;
+@group(0) @binding(4) var aerial_out: texture_storage_3d<rgba16float, write>;
+
+const PI: f32 = 3.14159265;
+const GROUND_R: f32 = 6360.0;
+const ATMOS_TOP: f32 = 6460.0;
+const RAY_H: f32 = 8.0;
+const MIE_H: f32 = 1.2;
+const RAY_SCAT: vec3<f32> = vec3<f32>(5.802e-3, 13.558e-3, 33.100e-3);
+const MIE_SCAT: f32 = 3.996e-3;
+const MIE_EXT: f32 = 4.440e-3;
+const O3_ABS: vec3<f32> = vec3<f32>(0.650e-3, 1.881e-3, 0.085e-3);
+const O3_PEAK: f32 = 25.0;
+const O3_HALF: f32 = 15.0;
+
+const MARCH_STEPS: u32 = 16u;
+
+fn ray_density(alt: f32) -> f32 { return exp(-alt / RAY_H); }
+fn mie_density(alt: f32) -> f32 { return exp(-alt / MIE_H); }
+fn o3_density(alt: f32) -> f32 { return max(0.0, 1.0 - abs(alt - O3_PEAK) / O3_HALF); }
+
+fn extinction(alt: f32) -> vec3<f32> {
+    let rd = ray_density(alt) * u.knobs.x;
+    let md = mie_density(alt) * u.knobs.y;
+    let od = o3_density(alt);
+    return RAY_SCAT * rd + vec3<f32>(MIE_EXT) * md + O3_ABS * od;
+}
+
+fn sample_transmittance(r: f32, mu: f32) -> vec3<f32> {
+    let v = clamp((r - GROUND_R) / (ATMOS_TOP - GROUND_R), 0.0, 1.0);
+    let uu = clamp((mu + 1.0) * 0.5, 0.0, 1.0);
+    return textureSampleLevel(transmittance_lut, lut_samp, vec2<f32>(uu, v), 0.0).rgb;
+}
+
+fn sample_multi_scattering(r: f32, mu_s: f32) -> vec3<f32> {
+    let v = clamp((r - GROUND_R) / (ATMOS_TOP - GROUND_R), 0.0, 1.0);
+    let uu = clamp((mu_s + 1.0) * 0.5, 0.0, 1.0);
+    return textureSampleLevel(multi_scattering_lut, lut_samp, vec2<f32>(uu, v), 0.0).rgb;
+}
+
+fn rayleigh_phase(cos_t: f32) -> f32 {
+    return (3.0 / (16.0 * PI)) * (1.0 + cos_t * cos_t);
+}
+
+fn mie_phase(cos_t: f32) -> f32 {
+    let g = 0.8;
+    let g2 = g * g;
+    let num = 3.0 * (1.0 - g2) * (1.0 + cos_t * cos_t);
+    let den = 8.0 * PI * (2.0 + g2) * pow(max(1.0 + g2 - 2.0 * g * cos_t, 1e-6), 1.5);
+    return num / den;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(aerial_out);
+    if (gid.x >= dims.x || gid.y >= dims.y || gid.z >= dims.z) { return; }
+
+    // Voxel → NDC. Note: WebGPU NDC has Y up; our render target had
+    // Y down in pixel space but inv_vp produces world space directly,
+    // so we use NDC y = 1 - 2*v to match (top of screen = +Y in NDC).
+    let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5))
+           / vec2<f32>(f32(dims.x), f32(dims.y));
+    let ndc_xy = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+
+    // Reconstruct a far-plane world point through (ndc_xy, z=1). The
+    // ray from cam_pos through that point is the per-voxel view ray.
+    let far_h = u.inv_vp * vec4<f32>(ndc_xy, 1.0, 1.0);
+    let far_world = far_h.xyz / far_h.w;
+    let view_dir = normalize(far_world - u.cam_pos.xyz);
+
+    // Depth slicing — linear from camera out to max_dist_km. The
+    // (gid.z + 0.5) / dims.z maps 0..max evenly; near voxels resolve
+    // close haze, far voxels capture distant horizon scatter.
+    let max_dist_km = u.cam_pos.w;
+    let target_dist_km = (f32(gid.z) + 0.5) / f32(dims.z) * max_dist_km;
+
+    // March from camera to (camera + view_dir * target_dist_km).
+    // Atmosphere math is in km; the engine world-space view ray is
+    // unit-length so we scale step-distance directly.
+    let n_steps = MARCH_STEPS;
+    let step_km = target_dist_km / f32(n_steps);
+    let sun = normalize(u.sun.xyz);
+
+    // Sea-level approximation for camera radius — sky-view shader
+    // uses the same trick. Atmosphere is so much thicker than scene
+    // height variation that the per-altitude correction is < 1 LSB.
+    let r0 = GROUND_R + 0.5;
+    let mu = view_dir.y;
+    let mu_s_cam = sun.y;
+    let nu = dot(view_dir, sun);
+    let phase_r = rayleigh_phase(nu);
+    let phase_m = mie_phase(nu);
+
+    var transmittance = vec3<f32>(1.0);
+    var in_scatter = vec3<f32>(0.0);
+    for (var i = 0u; i < n_steps; i = i + 1u) {
+        let d = (f32(i) + 0.5) * step_km;
+        let r_d = sqrt(r0 * r0 + d * d + 2.0 * r0 * mu * d);
+        let alt = max(0.0, r_d - GROUND_R);
+
+        let mu_s_p = clamp((r0 * mu_s_cam + d * dot(view_dir, sun)) / r_d, -1.0, 1.0);
+
+        let rd = ray_density(alt) * u.knobs.x;
+        let md = mie_density(alt) * u.knobs.y;
+        let scat_r = RAY_SCAT * rd;
+        let scat_m = vec3<f32>(MIE_SCAT) * md;
+
+        let ext = extinction(alt);
+        let step_t = exp(-ext * step_km);
+
+        let t_sun = sample_transmittance(r_d, mu_s_p);
+        let single = (scat_r * phase_r + scat_m * phase_m) * t_sun;
+        let psi_ms = sample_multi_scattering(r_d, mu_s_p);
+        let multi = (scat_r + scat_m) * psi_ms * (1.0 / (4.0 * PI));
+
+        in_scatter = in_scatter + transmittance * (single + multi) * step_km;
+        transmittance = transmittance * step_t;
+    }
+
+    in_scatter = in_scatter * u.sun.w;
+
+    // Mean transmittance — scene_compose applies it as a single
+    // scalar attenuation. Per-channel transmittance would be tighter
+    // physics but pushes us off the existing fog composite shape.
+    let mean_t = (transmittance.x + transmittance.y + transmittance.z) / 3.0;
+
+    textureStore(
+        aerial_out,
+        vec3<i32>(i32(gid.x), i32(gid.y), i32(gid.z)),
+        vec4<f32>(in_scatter, mean_t),
+    );
+}
+";
+

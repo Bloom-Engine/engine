@@ -189,16 +189,22 @@ horizon-tint blend, no GPU compute), plus zenith-banding dither in
 the procedural sky shader. Sun disk + limb darkening already
 landed in Phase 2. ~0.5 day.
 
-The full 3D aerial-perspective LUT (32³ / 16³, per-frame compute,
-PBR fog-term integration) is left as **EN-005 V2** — a follow-up
-ticket. The Phase 4 sky-tinted fog captures the dominant signal
-(warm haze at sunset, cool blue at noon) without the bind-group
-plumbing or per-frame compute cost. V2 trades complexity for
-per-pixel angular variation (sunset-side warmer than the opposite
-horizon).
+**V2 — full aerial-perspective 3D LUT.**
+32×32×32 (16³ web/mobile) volume LUT recomputed each frame from
+the current camera + sun, indexed by (NDC.xy, depth-slice). Stores
+per-voxel (in_scatter_rgb, mean_transmittance). scene_compose
+gates on `misc.y > 0.5` and replaces its 16-step Beer-Lambert fog
+march with a single 3D-tex sample. Sky pixels (`depth == 1.0`)
+skip the composite — the procedural sky pass already drew them
+correctly. Per-pixel angular variation now comes for free: the
+sunset side of the scene reads warmer than the opposite horizon,
+and the haze tint follows the sun smoothly.
 
-Total: ~5 working days for V1 (Phases 1-4); 3D aerial-perspective
-LUT deferred to EN-005 V2.
+The Phase 4 CPU-analytic fog tint stays as the fallback for
+non-procedural-sky scenes (panorama path or no sky at all).
+
+Total: ~5.5 working days. V1 (Phases 1-4) + V2 (aerial perspective)
+both shipped 2026-04-26.
 
 ## Risks
 
