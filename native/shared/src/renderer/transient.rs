@@ -425,4 +425,152 @@ mod tests {
         assert_eq!(pool.slot_count(), 0);
         assert_eq!(pool.rebuild_epoch, 1);
     }
+
+    /// EN-006 — depth snapshot path. Exercises the same
+    /// `copy_texture_to_texture` from a live depth-stencil attachment
+    /// into a transient depth texture that
+    /// `Renderer::end_frame_with_scene` does before binding the
+    /// transient at scene_inputs binding 2 (Phase 4c). The live depth
+    /// can't be sampled while attached as a depth-stencil target, so
+    /// the engine snapshots it first; this test verifies that snapshot
+    /// preserves the clear value byte-for-byte.
+    ///
+    /// Skipped on adapters where `try_create_device` returns None
+    /// (CPU-only environments).
+    #[test]
+    fn depth_snapshot_preserves_cleared_value() {
+        let Some((device, queue)) = try_create_device() else { return; };
+        let mut pool = TransientPool::new();
+        let (width, height) = (64u32, 64u32);
+        pool.begin_frame(width, height);
+
+        // Source: a Depth32Float texture that doubles as a render-pass
+        // depth attachment + COPY_SRC. We don't draw anything; the
+        // pass clears it to a known value. This mirrors the way the
+        // opaque pass populates `Renderer::depth_texture` before the
+        // translucent sub-pass snapshots it.
+        let src = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth_snapshot_src"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
+        let cleared_value: f32 = 0.375;
+
+        // Acquire a snapshot transient. The renderer uses
+        // (COPY_DST | TEXTURE_BINDING) for production; we add COPY_SRC
+        // so the test can read it back. The pool itself doesn't care
+        // about the extra bit — it's the same desc-keyed bucket.
+        let snap_desc = TransientDesc::new(
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            SizePolicy::Swapchain,
+        );
+        let snap_id = pool.acquire(&device, snap_desc);
+        let snap_tex = pool.texture(snap_id).expect("snapshot transient texture");
+
+        let bpr_unpadded = width * 4; // Depth32Float = 4 B / texel
+        let bpr = (bpr_unpadded + 255) & !255;
+        let buf_size = (bpr * height) as u64;
+        let snap_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("depth_snap_staging"),
+            size: buf_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("depth_snapshot_encoder"),
+        });
+        {
+            // Empty render pass — only the clear matters.
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("depth_clear_pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &src_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(cleared_value),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        // The exact code path under test: copy from a live depth
+        // attachment (DepthOnly aspect) into the snapshot transient.
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &src,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: snap_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        // Drain the snapshot to a buffer we can map back.
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: snap_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &snap_staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = snap_staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        rx.recv().expect("map sender").expect("map failed");
+        let data = slice.get_mapped_range();
+        let mut snap_floats: Vec<f32> = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            let row_start = (row * bpr) as usize;
+            let row_end = row_start + (bpr_unpadded as usize);
+            let floats: &[f32] = bytemuck::cast_slice(&data[row_start..row_end]);
+            snap_floats.extend_from_slice(floats);
+        }
+        drop(data);
+        snap_staging.unmap();
+
+        // Every texel in the snapshot must equal the clear value
+        // within float tolerance.
+        let close_count = snap_floats
+            .iter()
+            .filter(|v| (**v - cleared_value).abs() < 1e-5)
+            .count();
+        assert_eq!(
+            close_count,
+            snap_floats.len(),
+            "all snapshot texels should equal the cleared depth value {} (got {} of {} matching)",
+            cleared_value, close_count, snap_floats.len(),
+        );
+    }
 }

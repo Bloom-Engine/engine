@@ -282,4 +282,109 @@ mod tests {
         let hr = MaterialHotReload::new();
         assert!(hr.drain_pending().is_empty());
     }
+
+    /// EN-006 — end-to-end hot-reload: register a real on-disk file,
+    /// inject an event for its canonical path, then verify
+    /// `drain_pending` surfaces the descriptor with the same handle.
+    /// Exercises the path-canonicalisation + by_path lookup that the
+    /// purely-synthetic tests above bypass (their paths don't exist on
+    /// disk, so canonicalize is a no-op fallback).
+    #[test]
+    fn end_to_end_disk_file_drain_returns_descriptor() {
+        let mut tmp = std::env::temp_dir();
+        let unique = format!(
+            "bloom_hotreload_e2e_{}_{}.wgsl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        tmp.push(unique);
+        std::fs::write(&tmp, "// initial contents\n").expect("write tmp wgsl");
+        let canonical = std::fs::canonicalize(&tmp).expect("canonicalize tmp");
+
+        let mut hr = MaterialHotReload::new();
+        hr.register(
+            42,
+            FileMaterialDesc {
+                path:             canonical.clone(),
+                profile:          FragmentProfile::Translucent,
+                bucket:           Bucket::Refractive,
+                reads_scene:      true,
+                wants_instancing: false,
+            },
+        );
+
+        // Simulate a "file changed" event identical to what the notify
+        // worker would push. The drain path canonicalises the inbound
+        // event path before lookup; the registered key is already
+        // canonical, so the two line up.
+        hr.test_inject_event(canonical.clone());
+        let pending = hr.drain_pending();
+        assert_eq!(pending.len(), 1, "registered descriptor surfaced exactly once");
+        assert_eq!(pending[0].0, 42);
+        assert_eq!(pending[0].1.path, canonical);
+        assert_eq!(pending[0].1.bucket, Bucket::Refractive);
+        assert!(pending[0].1.reads_scene);
+
+        // A subsequent edit (rewrite) injected after the debounce window
+        // re-fires for the same handle. We don't actually wait the full
+        // 120 ms here — the synthetic test_inject_event path bypasses
+        // notify entirely; we just rotate the cache by clearing it
+        // through a fresh inject after manual sleep.
+        std::thread::sleep(DEBOUNCE_WINDOW + std::time::Duration::from_millis(10));
+        std::fs::write(&tmp, "// updated contents\n").expect("rewrite tmp wgsl");
+        hr.test_inject_event(canonical.clone());
+        let pending2 = hr.drain_pending();
+        assert_eq!(pending2.len(), 1, "post-debounce edit drains again");
+        assert_eq!(pending2[0].0, 42);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// EN-006 — full notify path. Registers a file, writes to it, waits
+    /// past the debounce window, drains. Skipped by default because
+    /// macOS FSEvents has variable latency (sometimes >500 ms after
+    /// open) which makes this flaky in CI; run locally with
+    /// `cargo test --release -- --ignored real_notify_fires_after_disk_write`
+    /// to validate the end-to-end watcher wiring.
+    #[test]
+    #[ignore]
+    fn real_notify_fires_after_disk_write() {
+        let mut tmp = std::env::temp_dir();
+        let unique = format!(
+            "bloom_hotreload_notify_{}_{}.wgsl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        tmp.push(unique);
+        std::fs::write(&tmp, "// v1\n").expect("write tmp wgsl");
+        let canonical = std::fs::canonicalize(&tmp).expect("canonicalize tmp");
+
+        let mut hr = MaterialHotReload::new();
+        hr.register(99, FileMaterialDesc {
+            path:             canonical.clone(),
+            profile:          FragmentProfile::Opaque,
+            bucket:           Bucket::Opaque,
+            reads_scene:      false,
+            wants_instancing: false,
+        });
+
+        // Give the OS a moment to register the watch, then rewrite and
+        // wait past the debounce.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::write(&tmp, "// v2\n").expect("rewrite tmp wgsl");
+        std::thread::sleep(DEBOUNCE_WINDOW + std::time::Duration::from_millis(400));
+
+        let pending = hr.drain_pending();
+        assert!(
+            pending.iter().any(|(h, _)| *h == 99),
+            "notify should have fired for {:?}", canonical,
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
