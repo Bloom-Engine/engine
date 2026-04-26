@@ -274,7 +274,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
                 )
             );
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: raw_display,
+                raw_display_handle: Some(raw_display),
                 raw_window_handle: raw_window,
             }).expect("Failed to create surface")
         };
