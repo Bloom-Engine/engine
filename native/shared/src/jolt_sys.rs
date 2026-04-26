@@ -1,8 +1,7 @@
 //! Raw FFI bindings to the `bloom_jolt` C++ shim.
 //!
 //! One-to-one mapping of `native/third_party/bloom_jolt/include/bloom_jolt.h`.
-//! Higher-level Rust types and the Perry-facing FFI live in `physics.rs` (once
-//! Phase 1 migrates it off Rapier).
+//! Higher-level Rust types and the Perry-facing FFI live in `physics_jolt.rs`.
 
 #![allow(non_camel_case_types, non_snake_case, dead_code)]
 

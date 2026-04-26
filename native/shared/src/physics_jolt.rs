@@ -1,8 +1,7 @@
 //! Jolt-backed physics world for Bloom Engine.
 //!
 //! Wraps `jolt_sys` behind f64 handle registries so Perry FFI can speak to
-//! Jolt using only scalar values. Mirrors the structure of the legacy
-//! `physics.rs` (Rapier) module but maps the v2 API surface.
+//! Jolt using only scalar values.
 //!
 //! Handle conventions:
 //!   - bloom handles are 1-based f64 indices into HandleRegistry

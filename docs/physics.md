@@ -3,7 +3,7 @@
 Bloom uses **[JoltPhysics 5.5.0](https://github.com/jrouwe/JoltPhysics)** (the engine behind
 Horizon Forbidden West and Godot 4's default backend) on native, and
 **[JoltPhysics.js 1.0.0](https://github.com/jrouwe/JoltPhysics.js)** on the web target.
-Jolt replaces the previous Rapier 3D backend; the migration is complete as of this document.
+Jolt replaced the previous Rapier 3D backend — see ["Why Jolt (and not PhysX or Rapier)"](#why-jolt-and-not-physx-or-rapier) for the rationale.
 
 ## Architecture
 
