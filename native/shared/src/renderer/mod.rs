@@ -28,8 +28,8 @@ mod brdf_lut;
 use brdf_lut::build_brdf_lut;
 mod atmosphere_lut;
 use atmosphere_lut::{
-    build_multi_scattering_lut, build_transmittance_lut, MULTI_SCATTERING_SIZE,
-    TRANSMITTANCE_H, TRANSMITTANCE_W,
+    build_multi_scattering_lut, build_transmittance_lut, MULTI_SCATTERING_SIZE, SKY_VIEW_H,
+    SKY_VIEW_W, TRANSMITTANCE_H, TRANSMITTANCE_W,
 };
 
 mod formats;
@@ -127,6 +127,30 @@ struct SkyUniforms {
     forward: [f32; 4],
     /// x = intensity multiplier; yzw padding.
     intensity: [f32; 4],
+}
+
+// EN-005 Phase 2 — uniforms for the procedural sky path.
+//
+// `SkyViewParams` drives the sky-view LUT compute shader (recomputed
+// when the sun moves). `SunUniforms` drives the per-frame sun-disk
+// composite in the procedural sky fragment shader.
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SkyViewParams {
+    /// xyz = sun direction (world space, unit), w = sun intensity scale.
+    sun: [f32; 4],
+    /// x = rayleigh density mult, y = mie density mult, z = ground albedo, w unused.
+    knobs: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SunUniforms {
+    /// xyz = sun direction (unit), w = sun intensity.
+    sun: [f32; 4],
+    /// x = sun angular radius (rad), y = limb darkening (0..1), zw unused.
+    params: [f32; 4],
 }
 
 
@@ -838,6 +862,10 @@ pub struct Renderer {
     pub prev_vp_matrix: [[f32; 4]; 4],
     /// Fog color (rgb) — blended into scene where fog factor > 0.
     pub fog_color: [f32; 3],
+    /// EN-005 Phase 4 — `true` once the user has called
+    /// `set_fog_color` explicitly. Suppresses procedural-sky's
+    /// auto-derived sky-tinted fog so manual overrides stick.
+    fog_color_user_override: bool,
     /// Fog density. 0 = disabled (default). Positive values engage
     /// exponential fog: fog_factor = 1 - exp(-density * distance).
     pub fog_density: f32,
@@ -855,6 +883,16 @@ pub struct Renderer {
     pub sun_shaft_decay: f32,
     /// Sun shaft tint (rgb 0..1).
     pub sun_shaft_color: [f32; 3],
+    /// EN-005 Phase 3 — `true` once the user has called
+    /// `set_sun_shaft_color` explicitly. Suppresses the procedural
+    /// sky's auto-derived transmittance tint so manual artistic
+    /// overrides stick.
+    sun_shaft_color_user_override: bool,
+    /// EN-005 Phase 3 — CPU copy of the transmittance LUT, kept
+    /// alongside the GPU texture so renderer-side code can sample
+    /// it for things like sun-shaft tint without a GPU readback.
+    /// Sized identically to the GPU texture (`TRANSMITTANCE_W × _H`).
+    transmittance_lut_cpu: Vec<u16>,
     /// SSR (screen-space reflections) pass output — half-res HDR
     /// holding the reflected color for each fragment. Composited
     /// into the final image by the TAA pass.
@@ -1238,6 +1276,54 @@ pub struct Renderer {
     sky_pipeline: wgpu::RenderPipeline,
     sky_bind_group_layout: wgpu::BindGroupLayout,
     sky_sampler: wgpu::Sampler,
+
+    // ----- EN-005 Phase 2: procedural sky -----
+    // Toggled by `set_procedural_sky`; when true, the HDR pass calls
+    // `render_procedural_sky_pass` instead of the panorama-based
+    // `render_sky_pass`. The two paths are independent — the panorama
+    // bind group/texture are untouched.
+    procedural_sky_enabled: bool,
+    sun_direction: [f32; 3],
+    sun_intensity: f32,
+    rayleigh_density: f32,
+    mie_density: f32,
+    ground_albedo: f32,
+    sky_view_dirty: bool,
+    _sky_view_lut_texture: wgpu::Texture,
+    _sky_view_lut_view: wgpu::TextureView,
+    sky_view_compute_pipeline: wgpu::ComputePipeline,
+    _sky_view_compute_bgl: wgpu::BindGroupLayout,
+    sky_view_uniform_buffer: wgpu::Buffer,
+    sky_view_compute_bind_group: wgpu::BindGroup,
+    procedural_sky_pipeline: wgpu::RenderPipeline,
+    _procedural_sky_bgl: wgpu::BindGroupLayout,
+    procedural_sun_uniform_buffer: wgpu::Buffer,
+    procedural_sky_bind_group: wgpu::BindGroup,
+
+    // EN-005 Phase 3 — IBL re-bake from procedural sky. The equirect
+    // texture is the source for both the GGX-prefiltered specular mip
+    // chain (which `lighting_bind_group` points at) and the diffuse
+    // irradiance pass. Re-rendered every sun-move via
+    // `bake_procedural_ibl`. Mip 0 holds the un-prefiltered sky
+    // (sampled by anything that wants raw radiance); mips 1..N are
+    // GGX-roughness-stratified for split-sum specular IBL.
+    procedural_ibl_pipeline: wgpu::RenderPipeline,
+    _procedural_ibl_bgl: wgpu::BindGroupLayout,
+    procedural_ibl_uniform_buffer: wgpu::Buffer,
+    procedural_ibl_bind_group: wgpu::BindGroup,
+    procedural_sky_equirect_texture: wgpu::Texture,
+    procedural_sky_equirect_full_view: wgpu::TextureView,
+    procedural_sky_equirect_mip0_view: wgpu::TextureView,
+    procedural_env_diffuse_texture: wgpu::Texture,
+    procedural_env_diffuse_view: wgpu::TextureView,
+    /// Bind group used by the GGX prefilter pipeline when re-baking
+    /// procedural IBL — references the mip-0 view of
+    /// `procedural_sky_equirect_texture` as its source.
+    procedural_prefilter_bind_group: wgpu::BindGroup,
+    /// Tracks whether `lighting_bind_group` currently points at
+    /// procedural IBL textures (vs the panorama path). Avoids a
+    /// rebuild on every sun-move once the swap is done.
+    lighting_bg_is_procedural: bool,
     /// Dedicated cosine-convolved diffuse irradiance texture. Separate
     /// from the GGX-prefiltered specular chain so both can use their
     /// full resolution range. Single mip at 128×64 equirect — ample
@@ -2290,6 +2376,402 @@ impl Renderer {
         });
 
         // ============================================================
+        // EN-005 Phase 2 — procedural sky pipeline + sky-view LUT
+        // compute pipeline. Both built unconditionally at init so
+        // toggling `set_procedural_sky(true)` later doesn't pay any
+        // shader-compile cost. Memory cost is small: ~150 KB for the
+        // sky-view LUT at desktop sizes, ~3 KB compiled shader.
+        // ============================================================
+
+        // Sky-view LUT storage texture — receives the output of the
+        // compute shader on every sun move. We allocate it before the
+        // compute pipeline so the bind group can hold a view directly.
+        let sky_view_lut_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky_view_lut"),
+            size: wgpu::Extent3d {
+                width: SKY_VIEW_W,
+                height: SKY_VIEW_H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let sky_view_lut_view =
+            sky_view_lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Sky-view LUT compute pipeline.
+        let sky_view_compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sky_view_compute_shader"),
+            source: wgpu::ShaderSource::Wgsl(SKY_VIEW_LUT_SHADER_WGSL.into()),
+        });
+        let sky_view_compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky_view_compute_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let sky_view_compute_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky_view_compute_pl"),
+            bind_group_layouts: &[Some(&sky_view_compute_bgl)],
+            immediate_size: 0,
+        });
+        let sky_view_compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("sky_view_compute_pipeline"),
+            layout: Some(&sky_view_compute_pl_layout),
+            module: &sky_view_compute_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let sky_view_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sky_view_uniform_buffer"),
+            size: std::mem::size_of::<SkyViewParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sky_view_compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sky_view_compute_bg"),
+            layout: &sky_view_compute_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: sky_view_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atmosphere_transmittance_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&atmosphere_multi_scattering_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&atmosphere_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&sky_view_lut_view) },
+            ],
+        });
+
+        // Procedural sky render pipeline (mirror of `sky_pipeline` shape).
+        let procedural_sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("procedural_sky_shader"),
+            source: wgpu::ShaderSource::Wgsl(PROCEDURAL_SKY_SHADER_WGSL.into()),
+        });
+        let procedural_sun_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("procedural_sun_uniform_buffer"),
+            size: std::mem::size_of::<SunUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let procedural_sky_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("procedural_sky_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let procedural_sky_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("procedural_sky_pl"),
+            bind_group_layouts: &[Some(&procedural_sky_bgl)],
+            immediate_size: 0,
+        });
+        let procedural_sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("procedural_sky_pipeline"),
+            layout: Some(&procedural_sky_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &procedural_sky_shader,
+                entry_point: Some("sky_vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &procedural_sky_shader,
+                entry_point: Some("sky_fs"),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: MATERIAL_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: VELOCITY_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let procedural_sky_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("procedural_sky_bg"),
+            layout: &procedural_sky_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: sky_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&sky_view_lut_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&atmosphere_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: procedural_sun_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&atmosphere_transmittance_view) },
+            ],
+        });
+
+        // ============================================================
+        // EN-005 Phase 3 — procedural IBL. Allocate the destination
+        // textures + the sky-view → equirect re-projection pipeline.
+        // The textures are dimensionally fixed across platforms (IBL
+        // is low-frequency; 256×128 + 128×64 is plenty), but the
+        // re-render cost is gated by the sky-view dirty flag, so
+        // static suns pay this exactly once.
+        // ============================================================
+
+        const PROC_IBL_W: u32 = 256;
+        const PROC_IBL_H: u32 = 128;
+        const PROC_IBL_DIFFUSE_W: u32 = 128;
+        const PROC_IBL_DIFFUSE_H: u32 = 64;
+        let proc_ibl_mip_count = (PROC_IBL_W.max(PROC_IBL_H) as f32).log2().floor() as u32 + 1;
+
+        let procedural_sky_equirect_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("procedural_sky_equirect"),
+            size: wgpu::Extent3d {
+                width: PROC_IBL_W,
+                height: PROC_IBL_H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: proc_ibl_mip_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let procedural_sky_equirect_full_view =
+            procedural_sky_equirect_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let procedural_sky_equirect_mip0_view =
+            procedural_sky_equirect_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("procedural_sky_equirect_mip0"),
+                base_mip_level: 0,
+                mip_level_count: Some(1),
+                ..Default::default()
+            });
+
+        let procedural_env_diffuse_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("procedural_env_diffuse"),
+            size: wgpu::Extent3d {
+                width: PROC_IBL_DIFFUSE_W,
+                height: PROC_IBL_DIFFUSE_H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let procedural_env_diffuse_view =
+            procedural_env_diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Equirect re-projection pipeline (sky-view LUT → equirect).
+        let procedural_ibl_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("procedural_ibl_shader"),
+            source: wgpu::ShaderSource::Wgsl(EQUIRECT_FROM_SKY_VIEW_SHADER_WGSL.into()),
+        });
+        let procedural_ibl_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("procedural_ibl_uniform_buffer"),
+            size: 16, // BakeParams = vec4<f32> dims
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let procedural_ibl_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("procedural_ibl_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let procedural_ibl_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("procedural_ibl_pl"),
+            bind_group_layouts: &[Some(&procedural_ibl_bgl)],
+            immediate_size: 0,
+        });
+        let procedural_ibl_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("procedural_ibl_pipeline"),
+            layout: Some(&procedural_ibl_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &procedural_ibl_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &procedural_ibl_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let procedural_ibl_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("procedural_ibl_bg"),
+            layout: &procedural_ibl_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: procedural_ibl_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&sky_view_lut_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&atmosphere_lut_sampler) },
+            ],
+        });
+
+        // The GGX prefilter source bind group — see the
+        // `procedural_prefilter_bind_group = ...` definition below
+        // (after the prefilter pipeline + layout are created). We
+        // can't build it here because `prefilter_layout` and
+        // `prefilter_uniform_buffer` haven't been declared yet.
+
+        // ============================================================
         // Scene pipeline (retained scene-graph draws with normal maps)
         // ============================================================
         let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2461,6 +2943,22 @@ impl Renderer {
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
+        });
+
+        // EN-005 Phase 3 — bind group for the GGX prefilter when
+        // re-baking procedural IBL. Sources from the mip-0 view of
+        // the procedural sky equirect (re-rendered each sun-move).
+        // Same shape as the temporary panorama-path bind group built
+        // inside `load_env_from_hdr`, but persistent so we don't
+        // re-allocate on every sun move.
+        let procedural_prefilter_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("procedural_prefilter_src_bg"),
+            layout: &prefilter_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: prefilter_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&procedural_sky_equirect_mip0_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&env_sampler) },
+            ],
         });
 
         let scene_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -5291,6 +5789,7 @@ impl Renderer {
             render_scale_explicit: false,
             prev_vp_matrix: IDENTITY_MAT4,
             fog_color: [0.7, 0.75, 0.82],
+            fog_color_user_override: false,
             fog_density: 0.0,
             fog_height_ref: 0.0,
             fog_height_falloff: 0.25,
@@ -5485,6 +5984,36 @@ impl Renderer {
             sky_pipeline,
             sky_bind_group_layout,
             sky_sampler,
+            procedural_sky_enabled: false,
+            sun_direction: [0.0, 1.0, 0.0],
+            sun_intensity: 1.0,
+            rayleigh_density: 1.0,
+            mie_density: 1.0,
+            ground_albedo: 0.1,
+            sky_view_dirty: true,
+            _sky_view_lut_texture: sky_view_lut_texture,
+            _sky_view_lut_view: sky_view_lut_view,
+            sky_view_compute_pipeline,
+            _sky_view_compute_bgl: sky_view_compute_bgl,
+            sky_view_uniform_buffer,
+            sky_view_compute_bind_group,
+            procedural_sky_pipeline,
+            _procedural_sky_bgl: procedural_sky_bgl,
+            procedural_sun_uniform_buffer,
+            procedural_sky_bind_group,
+            procedural_ibl_pipeline,
+            _procedural_ibl_bgl: procedural_ibl_bgl,
+            procedural_ibl_uniform_buffer,
+            procedural_ibl_bind_group,
+            procedural_sky_equirect_texture,
+            procedural_sky_equirect_full_view,
+            procedural_sky_equirect_mip0_view,
+            procedural_env_diffuse_texture,
+            procedural_env_diffuse_view,
+            procedural_prefilter_bind_group,
+            lighting_bg_is_procedural: false,
+            transmittance_lut_cpu: transmittance_pixels,
+            sun_shaft_color_user_override: false,
             env_diffuse_texture: None,
             scene_pipeline,
             scene_material_layout,
@@ -6968,6 +7497,7 @@ impl Renderer {
     /// Fog color that distant geometry fades to (rgb, 0-1).
     pub fn set_fog_color(&mut self, r: f32, g: f32, b: f32) {
         self.fog_color = [r, g, b];
+        self.fog_color_user_override = true;
     }
 
     /// Fog density. 0 (default) = fog disabled. 0.02 = gentle
@@ -7027,6 +7557,7 @@ impl Renderer {
     /// Sun shaft tint (rgb).
     pub fn set_sun_shaft_color(&mut self, r: f32, g: f32, b: f32) {
         self.sun_shaft_color = [r, g, b];
+        self.sun_shaft_color_user_override = true;
     }
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
@@ -7406,6 +7937,427 @@ impl Renderer {
             .write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         pass.set_pipeline(&self.sky_pipeline);
         pass.set_bind_group(0, bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    // ========================================================================
+    // EN-005 Phase 2 — procedural sky public surface
+    // ========================================================================
+
+    /// Toggle the procedural-atmosphere sky. When enabled, the HDR
+    /// pass renders a Hillaire 2020 atmosphere driven by `set_sun_direction`
+    /// instead of sampling a static panorama. Defaults to off so games
+    /// that already call `bloom_set_env_map` keep their existing look.
+    pub fn set_procedural_sky(
+        &mut self,
+        enabled: bool,
+        rayleigh_density: f32,
+        mie_density: f32,
+        ground_albedo: f32,
+    ) {
+        self.procedural_sky_enabled = enabled;
+        self.rayleigh_density = rayleigh_density.max(0.0);
+        self.mie_density = mie_density.max(0.0);
+        self.ground_albedo = ground_albedo.clamp(0.0, 1.0);
+        self.sky_view_dirty = true;
+        if !enabled && self.lighting_bg_is_procedural {
+            // Switching back to the panorama path — rebuild lighting
+            // bind group pointing at whatever HDR (or the 1×1 default)
+            // was last loaded.
+            self.swap_lighting_bg_to_panorama();
+        }
+    }
+
+    /// Whether procedural sky is currently active. Used by the HDR
+    /// pass to pick between `render_procedural_sky_pass` and the
+    /// panorama-based `render_sky_pass`.
+    pub fn procedural_sky_enabled(&self) -> bool {
+        self.procedural_sky_enabled
+    }
+
+    /// Set the sun direction (world space, points *toward* the sun)
+    /// and intensity multiplier. Triggers a sky-view LUT rebake on
+    /// the next frame; the rebake itself is a single compute dispatch
+    /// that takes ~0.1 ms on desktop GPUs.
+    pub fn set_sun_direction(&mut self, dx: f32, dy: f32, dz: f32, intensity: f32) {
+        let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+        self.sun_direction = [dx / len, dy / len, dz / len];
+        self.sun_intensity = intensity.max(0.0);
+        self.sky_view_dirty = true;
+    }
+
+    /// Recompute the sky-view LUT if the sun has moved (or atmosphere
+    /// params changed) since the last bake. Called from the HDR pass
+    /// before sampling the LUT in the procedural sky shader. No-op
+    /// when the dirty flag is clear, so a static sun pays this cost
+    /// exactly once.
+    fn maybe_update_sky_view_lut(&mut self) {
+        if !self.sky_view_dirty {
+            return;
+        }
+        let params = SkyViewParams {
+            sun: [
+                self.sun_direction[0],
+                self.sun_direction[1],
+                self.sun_direction[2],
+                self.sun_intensity,
+            ],
+            knobs: [self.rayleigh_density, self.mie_density, self.ground_albedo, 0.0],
+        };
+        self.queue
+            .write_buffer(&self.sky_view_uniform_buffer, 0, bytemuck::bytes_of(&params));
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("sky_view_lut_encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("sky_view_lut_compute"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.sky_view_compute_pipeline);
+            pass.set_bind_group(0, &self.sky_view_compute_bind_group, &[]);
+            // 8×8 workgroups; round up to cover the full LUT.
+            let gx = (SKY_VIEW_W + 7) / 8;
+            let gy = (SKY_VIEW_H + 7) / 8;
+            pass.dispatch_workgroups(gx, gy, 1);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // EN-005 Phase 3 — re-bake IBL from the freshly-updated sky-
+        // view LUT so material reflections + ambient track the sun.
+        self.bake_procedural_ibl();
+        if !self.lighting_bg_is_procedural {
+            self.swap_lighting_bg_to_procedural();
+        }
+
+        // EN-005 Phase 3 — auto-derive the sun-shaft tint from
+        // atmospheric transmittance unless the user has overridden
+        // it. Gives free physical sunset warmth.
+        self.update_sun_shaft_color_from_transmittance();
+
+        // EN-005 Phase 4 — auto-derive fog tint from the same LUT,
+        // so distance haze tracks the sun. Cheap stand-in for full
+        // 3D aerial-perspective LUT — captures the dominant signal
+        // (warm fog at sunset, cool blue at noon) without the per-
+        // frame compute pass + 3D texture binding plumbing.
+        self.update_fog_color_from_atmosphere();
+
+        self.sky_view_dirty = false;
+    }
+
+    /// EN-005 Phase 3 — re-render the procedural sky into the IBL
+    /// equirect texture and run the existing GGX prefilter chain
+    /// over its mip levels (plus the diffuse irradiance pass).
+    /// Cheap (sub-millisecond on desktop), but only runs when the
+    /// sun has actually moved.
+    fn bake_procedural_ibl(&mut self) {
+        let proc_w = self.procedural_sky_equirect_texture.width();
+        let proc_h = self.procedural_sky_equirect_texture.height();
+        let mip_count = self.procedural_sky_equirect_texture.mip_level_count();
+
+        // Update the bake-pipeline uniform (just dest dims).
+        let dims = [proc_w as f32, proc_h as f32, 0.0_f32, 0.0_f32];
+        self.queue.write_buffer(&self.procedural_ibl_uniform_buffer, 0, bytemuck::cast_slice(&dims));
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("procedural_ibl_encoder"),
+        });
+
+        // --- Step 1: render sky-view LUT → mip 0 of equirect ---
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("procedural_ibl_bake_mip0"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.procedural_sky_equirect_mip0_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.procedural_ibl_pipeline);
+            pass.set_bind_group(0, &self.procedural_ibl_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // --- Step 2: GGX prefilter mips 1..N ---
+        for level in 1..mip_count {
+            let mip_w = (proc_w >> level).max(1);
+            let mip_h = (proc_h >> level).max(1);
+            let roughness = level as f32 / (mip_count - 1) as f32;
+            let sample_count = (128.0 + 384.0 * roughness).round();
+            let uniforms = PrefilterUniforms {
+                params: [roughness, sample_count, mip_w as f32, mip_h as f32],
+            };
+            self.queue
+                .write_buffer(&self.prefilter_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+
+            let mip_view = self
+                .procedural_sky_equirect_texture
+                .create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("procedural_ibl_dst_mip"),
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("procedural_ibl_prefilter_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &mip_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.prefilter_pipeline);
+            pass.set_bind_group(0, &self.procedural_prefilter_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // --- Step 3: diffuse irradiance pass ---
+        let diffuse_w = self.procedural_env_diffuse_texture.width();
+        let diffuse_h = self.procedural_env_diffuse_texture.height();
+        let diffuse_uniforms = PrefilterUniforms {
+            params: [1.0, 1024.0, diffuse_w as f32, diffuse_h as f32],
+        };
+        self.queue
+            .write_buffer(&self.prefilter_uniform_buffer, 0, bytemuck::bytes_of(&diffuse_uniforms));
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("procedural_ibl_diffuse_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.procedural_env_diffuse_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.prefilter_diffuse_pipeline);
+            pass.set_bind_group(0, &self.procedural_prefilter_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// EN-005 Phase 3 — restore `lighting_bind_group` to the
+    /// panorama path. Called when the user disables procedural sky.
+    /// Falls back to the 1×1 default env if no HDR was ever loaded.
+    fn swap_lighting_bg_to_panorama(&mut self) {
+        let env_view = self
+            .sky_texture
+            .as_ref()
+            .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
+            .unwrap_or_else(|| {
+                self._scene_env_default_texture
+                    .create_view(&wgpu::TextureViewDescriptor::default())
+            });
+        let diffuse_view = self
+            .env_diffuse_texture
+            .as_ref()
+            .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
+            .unwrap_or_else(|| {
+                self._scene_env_default_texture
+                    .create_view(&wgpu::TextureViewDescriptor::default())
+            });
+        let new_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lighting_bg_panorama"),
+            layout: &self.lighting_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.lighting_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&env_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&diffuse_view) },
+            ],
+        });
+        self.lighting_bind_group = new_bg;
+        self.lighting_bg_is_procedural = false;
+    }
+
+    /// EN-005 Phase 3 — rebuild `lighting_bind_group` so PBR materials
+    /// sample the procedural sky for IBL specular + diffuse instead of
+    /// whatever panorama was last loaded. Called once on first
+    /// procedural bake; the textures themselves are re-written on
+    /// every sun-move and the bind group's TextureView references
+    /// remain valid.
+    fn swap_lighting_bg_to_procedural(&mut self) {
+        let new_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lighting_bg_procedural"),
+            layout: &self.lighting_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.lighting_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.procedural_sky_equirect_full_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.procedural_env_diffuse_view) },
+            ],
+        });
+        self.lighting_bind_group = new_bg;
+        self.lighting_bg_is_procedural = true;
+    }
+
+    /// Sample the transmittance LUT for the current sun direction
+    /// at sea level and write the resulting tint into
+    /// `sun_shaft_color`. RFC 0002 sub-RFC #1: shafts auto-warm at
+    /// sunset when the procedural sky is on. Skipped when the user
+    /// has set a manual override via `set_sun_shaft_color`.
+    fn update_sun_shaft_color_from_transmittance(&mut self) {
+        if self.sun_shaft_color_user_override {
+            return;
+        }
+        // Sample at sea level (matches sky-view LUT camera height);
+        // mu = sun.y is cos(sun-zenith) for an observer looking up
+        // toward the sun.
+        let r0 = 6360.0 + 0.5; // matches sky-view shader
+        let mu = self.sun_direction[1];
+        let lut = &self.transmittance_lut_cpu;
+        let t = atmosphere_lut::sample_transmittance_lut(lut, TRANSMITTANCE_W, TRANSMITTANCE_H, r0, mu);
+        // Multiply by sun radiance scalar; matches sun-disk's `vec3(20)
+        // * t_sun * intensity` so shafts and the disk warm together.
+        let radiance_scale = 1.0_f32; // shafts are tinted, not lit-additive — keep unscaled
+        self.sun_shaft_color = [
+            t[0] * radiance_scale * self.sun_intensity,
+            t[1] * radiance_scale * self.sun_intensity,
+            t[2] * radiance_scale * self.sun_intensity,
+        ];
+    }
+
+    /// EN-005 Phase 4 — derive a sky-tinted fog color from the
+    /// atmosphere. Approximates "what color would you see looking at
+    /// the distant horizon" by blending a midday-blue baseline with a
+    /// transmittance-derived sunset warm tint, gated by the sun
+    /// elevation. Skipped when the user has set a manual override
+    /// via `set_fog_color`.
+    ///
+    /// This is a CPU analytic stand-in for a full 3D aerial-
+    /// perspective LUT — enough to make distance haze read as "tied
+    /// to the sky" without per-frame compute or per-fragment 3D
+    /// texture sampling.
+    fn update_fog_color_from_atmosphere(&mut self) {
+        if self.fog_color_user_override {
+            return;
+        }
+        // Sun-zenith cosine. Clamped so a sun slightly below the
+        // horizon still tints the fog (matches the procedural sky's
+        // -0.05 cutoff for the sun disk).
+        let mu_s = self.sun_direction[1].max(-0.05);
+        let day_factor = (mu_s.max(0.0) * 2.0).clamp(0.0, 1.0);
+
+        // Sample transmittance for a horizon-grazing ray. Gives the
+        // R/G/B ratio of light surviving the long path through dense
+        // air — the dominant signal behind sunset orange.
+        let r0 = 6360.0 + 0.5;
+        let lut = &self.transmittance_lut_cpu;
+        let horizon_t = atmosphere_lut::sample_transmittance_lut(
+            lut,
+            TRANSMITTANCE_W,
+            TRANSMITTANCE_H,
+            r0,
+            0.05, // ~3° above horizon
+        );
+
+        // Two end-points the model interpolates between as the sun
+        // descends. Numbers tuned to read well at default exposure.
+        let midday_blue = [0.45_f32, 0.55, 0.70];
+        let sunset_warm = [
+            horizon_t[0] * 0.9,
+            horizon_t[1] * 0.55,
+            horizon_t[2] * 0.25,
+        ];
+
+        let mix_factor = (1.0 - day_factor).powf(0.5);
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let color = [
+            lerp(midday_blue[0], sunset_warm[0], mix_factor),
+            lerp(midday_blue[1], sunset_warm[1], mix_factor),
+            lerp(midday_blue[2], sunset_warm[2], mix_factor),
+        ];
+
+        // Dim toward night so the fog doesn't keep glowing after sunset.
+        let intensity_scale = 0.4 + 0.6 * day_factor;
+        self.fog_color = [
+            color[0] * intensity_scale,
+            color[1] * intensity_scale,
+            color[2] * intensity_scale,
+        ];
+    }
+
+    /// Render the procedural sky into `pass`. Mirrors `render_sky_pass`
+    /// but samples the sky-view LUT (built by `maybe_update_sky_view_lut`)
+    /// instead of an HDR panorama. Caller is responsible for invoking
+    /// `maybe_update_sky_view_lut` *before* opening the render pass —
+    /// compute dispatches can't be nested inside a render pass.
+    fn render_procedural_sky_pass(&self, pass: &mut wgpu::RenderPass<'_>, intensity: f32) {
+        // Update sky uniforms (same camera basis as panorama path).
+        let v = self.current_view_matrix;
+        let right_world = [v[0][0], v[1][0], v[2][0]];
+        let up_world = [v[0][1], v[1][1], v[2][1]];
+        let forward_world = [-v[0][2], -v[1][2], -v[2][2]];
+        let aspect = self.surface_config.width as f32 / self.surface_config.height as f32;
+        let p = self.current_proj_matrix;
+        let tan_half = if p[1][1].abs() > 1e-6 { 1.0 / p[1][1] } else { 1.0 };
+
+        let uniforms = SkyUniforms {
+            right: [
+                right_world[0] * tan_half * aspect,
+                right_world[1] * tan_half * aspect,
+                right_world[2] * tan_half * aspect,
+                0.0,
+            ],
+            up: [up_world[0] * tan_half, up_world[1] * tan_half, up_world[2] * tan_half, 0.0],
+            forward: [forward_world[0], forward_world[1], forward_world[2], 0.0],
+            intensity: [intensity, 0.0, 0.0, 0.0],
+        };
+        self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+
+        // Sun disk parameters. Real solar disk is ~0.27° (4.7 mrad);
+        // we exaggerate slightly for visibility at default exposure.
+        let sun = SunUniforms {
+            sun: [
+                self.sun_direction[0],
+                self.sun_direction[1],
+                self.sun_direction[2],
+                self.sun_intensity,
+            ],
+            params: [0.012, 0.6, 0.0, 0.0], // ~0.7° disk, moderate limb darkening
+        };
+        self.queue.write_buffer(&self.procedural_sun_uniform_buffer, 0, bytemuck::bytes_of(&sun));
+
+        pass.set_pipeline(&self.procedural_sky_pipeline);
+        pass.set_bind_group(0, &self.procedural_sky_bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -8074,6 +9026,14 @@ impl Renderer {
         // intermediate radiance in HDR sets up a future bloom pass
         // and means tonemap + sRGB encode happen exactly once, in
         // one place.
+        // EN-005 Phase 2 — refresh the sky-view LUT before the HDR
+        // pass opens. The compute dispatch can't be nested inside a
+        // render pass, and `maybe_update_sky_view_lut` is a no-op
+        // unless the sun (or atmosphere knobs) actually changed.
+        if self.procedural_sky_enabled {
+            self.maybe_update_sky_view_lut();
+        }
+
         profiler.begin("main_hdr_pass");
         {
             // HDR clear: the user's clear_color is in 0-1 srgb-ish
@@ -8150,7 +9110,11 @@ impl Renderer {
             // Sky uses the same env_intensity as IBL so the background
             // and lighting stay in sync — otherwise bumping IBL down
             // would leave the sky blown out.
-            self.render_sky_pass(&mut pass, self.lighting_uniforms.camera_pos[3]);
+            if self.procedural_sky_enabled {
+                self.render_procedural_sky_pass(&mut pass, self.lighting_uniforms.camera_pos[3]);
+            } else {
+                self.render_sky_pass(&mut pass, self.lighting_uniforms.camera_pos[3]);
+            }
 
             if has_3d {
                 pass.set_pipeline(&self.pipeline_3d);

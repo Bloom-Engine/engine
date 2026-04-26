@@ -5312,3 +5312,351 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 ";
 
+// ============================================================================
+// EN-005 Phase 2 — Procedural sky (Hillaire 2020)
+// ============================================================================
+//
+// Two shaders working off the LUTs baked in atmosphere_lut.rs:
+//
+//  1. SKY_VIEW_LUT_SHADER_WGSL — compute pass, dispatched on sun-move.
+//     Ray-marches every (azimuth, elevation) texel of a 2D radiance
+//     cache, accumulating Rayleigh + Mie + ozone single-scattering
+//     and reading the multi-scattering LUT for the bounce term.
+//
+//  2. PROCEDURAL_SKY_SHADER_WGSL — fullscreen render pass per frame.
+//     Reconstructs view direction per pixel, samples the sky-view
+//     LUT for sky radiance, draws the sun disk attenuated by
+//     transmittance. Slots into the existing HDR pass in place of
+//     `sky_pipeline` when procedural sky is enabled.
+//
+// Shared atmosphere parameters are inlined as `const`s in each shader
+// rather than uniformed — they're physical constants, not user knobs.
+// The runtime knobs (sun direction, density multipliers) live in the
+// uniform blocks.
+
+pub(super) const SKY_VIEW_LUT_SHADER_WGSL: &str = "
+struct SkyViewParams {
+    // xyz = sun direction (world space, unit), w = sun intensity scale
+    sun: vec4<f32>,
+    // x = rayleigh density multiplier
+    // y = mie density multiplier
+    // z = ground albedo (grey)
+    // w = unused
+    knobs: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: SkyViewParams;
+@group(0) @binding(1) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(2) var multi_scattering_lut: texture_2d<f32>;
+@group(0) @binding(3) var lut_samp: sampler;
+@group(0) @binding(4) var sky_view_out: texture_storage_2d<rgba16float, write>;
+
+// --- Atmosphere constants (must match atmosphere_lut.rs) ---
+const PI: f32 = 3.14159265;
+const GROUND_R: f32 = 6360.0;
+const ATMOS_TOP: f32 = 6460.0;
+const RAY_H: f32 = 8.0;
+const MIE_H: f32 = 1.2;
+const RAY_SCAT: vec3<f32> = vec3<f32>(5.802e-3, 13.558e-3, 33.100e-3);
+const MIE_SCAT: f32 = 3.996e-3;
+const MIE_EXT: f32 = 4.440e-3;
+const O3_ABS: vec3<f32> = vec3<f32>(0.650e-3, 1.881e-3, 0.085e-3);
+const O3_PEAK: f32 = 25.0;
+const O3_HALF: f32 = 15.0;
+
+const VIEW_STEPS: u32 = 32u;
+
+fn ray_density(alt: f32) -> f32 { return exp(-alt / RAY_H); }
+fn mie_density(alt: f32) -> f32 { return exp(-alt / MIE_H); }
+fn o3_density(alt: f32) -> f32 { return max(0.0, 1.0 - abs(alt - O3_PEAK) / O3_HALF); }
+
+fn extinction(alt: f32) -> vec3<f32> {
+    let rd = ray_density(alt) * u.knobs.x;
+    let md = mie_density(alt) * u.knobs.y;
+    let od = o3_density(alt);
+    return RAY_SCAT * rd + vec3<f32>(MIE_EXT) * md + O3_ABS * od;
+}
+
+fn ray_atmosphere_intersect(r: f32, mu: f32, sphere_r: f32) -> f32 {
+    // Returns the first positive intersection distance, or -1 if none.
+    let disc = r * r * (mu * mu - 1.0) + sphere_r * sphere_r;
+    if (disc < 0.0) { return -1.0; }
+    let sd = sqrt(disc);
+    let t1 = -r * mu - sd;
+    let t2 = -r * mu + sd;
+    if (t1 > 0.0) { return t1; }
+    if (t2 > 0.0) { return t2; }
+    return -1.0;
+}
+
+fn dist_to_boundary(r: f32, mu: f32) -> f32 {
+    let to_top = ray_atmosphere_intersect(r, mu, ATMOS_TOP);
+    let to_ground = ray_atmosphere_intersect(r, mu, GROUND_R);
+    if (to_ground > 0.0 && (to_top < 0.0 || to_ground < to_top)) {
+        return to_ground;
+    }
+    return max(to_top, 0.0);
+}
+
+// LUT mappings (must match atmosphere_lut.rs).
+fn sample_transmittance(r: f32, mu: f32) -> vec3<f32> {
+    let v = clamp((r - GROUND_R) / (ATMOS_TOP - GROUND_R), 0.0, 1.0);
+    let uu = clamp((mu + 1.0) * 0.5, 0.0, 1.0);
+    return textureSampleLevel(transmittance_lut, lut_samp, vec2<f32>(uu, v), 0.0).rgb;
+}
+
+fn sample_multi_scattering(r: f32, mu_s: f32) -> vec3<f32> {
+    let v = clamp((r - GROUND_R) / (ATMOS_TOP - GROUND_R), 0.0, 1.0);
+    let uu = clamp((mu_s + 1.0) * 0.5, 0.0, 1.0);
+    return textureSampleLevel(multi_scattering_lut, lut_samp, vec2<f32>(uu, v), 0.0).rgb;
+}
+
+fn rayleigh_phase(cos_t: f32) -> f32 {
+    return (3.0 / (16.0 * PI)) * (1.0 + cos_t * cos_t);
+}
+
+fn mie_phase(cos_t: f32) -> f32 {
+    // Cornette-Shanks, g=0.8 — standard for atmospheric Mie.
+    let g = 0.8;
+    let g2 = g * g;
+    let num = 3.0 * (1.0 - g2) * (1.0 + cos_t * cos_t);
+    let den = 8.0 * PI * (2.0 + g2) * pow(max(1.0 + g2 - 2.0 * g * cos_t, 1e-6), 1.5);
+    return num / den;
+}
+
+// Decode (workgroup-local) coords into a world-space view direction.
+// V1 uses linear (azimuth, elevation) — simple, slightly horizon-poor;
+// future revision can switch to Hillaire's sin² mapping for sharper
+// horizon detail.
+fn sky_view_uv_to_dir(uv: vec2<f32>) -> vec3<f32> {
+    let azimuth = uv.x * 2.0 * PI;
+    let elevation = (uv.y - 0.5) * PI; // [-π/2, π/2]
+    let cos_e = cos(elevation);
+    return vec3<f32>(cos_e * cos(azimuth), sin(elevation), cos_e * sin(azimuth));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(sky_view_out);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+
+    let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5)) / vec2<f32>(f32(dims.x), f32(dims.y));
+    let view_dir = sky_view_uv_to_dir(uv);
+
+    // V1: camera at sea level, atmosphere centred at origin. The y axis
+    // is up; r = GROUND_R + altitude. Phase 3 lifts this once the host
+    // can pass per-frame camera height.
+    let r0 = GROUND_R + 0.5; // 0.5 km above ground = typical eye height + atmospheric haze
+    let mu = view_dir.y;     // cos(view-zenith)
+    let sun = normalize(u.sun.xyz);
+    let mu_s = sun.y;
+    let nu = dot(view_dir, sun); // cos(view-sun angle)
+
+    let total_dist = dist_to_boundary(r0, mu);
+    if (total_dist <= 0.0) {
+        textureStore(sky_view_out, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    let dx = total_dist / f32(VIEW_STEPS);
+    var radiance = vec3<f32>(0.0);
+    var transmittance = vec3<f32>(1.0);
+
+    let phase_r = rayleigh_phase(nu);
+    let phase_m = mie_phase(nu);
+
+    for (var i: u32 = 0u; i < VIEW_STEPS; i = i + 1u) {
+        let d = (f32(i) + 0.5) * dx;
+        // Radius at sample point.
+        let r_d = sqrt(r0 * r0 + d * d + 2.0 * r0 * mu * d);
+        let alt = max(0.0, r_d - GROUND_R);
+
+        // Sun zenith cosine at the sample point (parallel-sun
+        // approximation — sun direction stays fixed in world space).
+        let mu_s_p = clamp((r0 * mu_s + d * dot(view_dir, sun)) / r_d, -1.0, 1.0);
+
+        let rd = ray_density(alt) * u.knobs.x;
+        let md = mie_density(alt) * u.knobs.y;
+        let scat_r = RAY_SCAT * rd;
+        let scat_m = vec3<f32>(MIE_SCAT) * md;
+
+        let ext = extinction(alt);
+        let step_t = exp(-ext * dx);
+
+        // Sun radiance at sample after travelling to top of atmosphere.
+        let t_sun = sample_transmittance(r_d, mu_s_p);
+
+        // Single-scattering — Rayleigh + Mie with their phase functions.
+        let single = (scat_r * phase_r + scat_m * phase_m) * t_sun;
+
+        // Multi-scattering — isotropic (1/4π) scaled by the LUT-baked
+        // bounce coefficient. Hillaire's energy-conserving form.
+        let psi_ms = sample_multi_scattering(r_d, mu_s_p);
+        let multi = (scat_r + scat_m) * psi_ms * (1.0 / (4.0 * PI));
+
+        let in_scatter = (single + multi) * dx;
+        // Analytic in-scattering integral: contribution × accumulated transmittance.
+        radiance = radiance + transmittance * in_scatter;
+        transmittance = transmittance * step_t;
+    }
+
+    radiance = radiance * u.sun.w;
+
+    textureStore(
+        sky_view_out,
+        vec2<i32>(i32(gid.x), i32(gid.y)),
+        vec4<f32>(radiance, 1.0),
+    );
+}
+";
+
+pub(super) const PROCEDURAL_SKY_SHADER_WGSL: &str = "
+struct SkyUniforms {
+    right:    vec4<f32>,
+    up:       vec4<f32>,
+    forward:  vec4<f32>,
+    intensity: vec4<f32>, // x = scene-wide intensity multiplier
+};
+
+struct SunUniforms {
+    sun: vec4<f32>,        // xyz = sun direction, w = sun intensity
+    params: vec4<f32>,     // x = sun angular radius (rad), y = limb darkening, zw unused
+};
+
+@group(0) @binding(0) var<uniform> u: SkyUniforms;
+@group(0) @binding(1) var sky_view_lut: texture_2d<f32>;
+@group(0) @binding(2) var lut_samp: sampler;
+@group(0) @binding(3) var<uniform> sun_u: SunUniforms;
+@group(0) @binding(4) var transmittance_lut: texture_2d<f32>;
+
+const PI: f32 = 3.14159265;
+const GROUND_R: f32 = 6360.0;
+const ATMOS_TOP: f32 = 6460.0;
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) ndc: vec2<f32>,
+};
+
+@vertex
+fn sky_vs(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    var out: VsOut;
+    out.clip_pos = vec4<f32>(x, y, 1.0, 1.0);
+    out.ndc = vec2<f32>(x, y);
+    return out;
+}
+
+fn dir_to_sky_uv(dir: vec3<f32>) -> vec2<f32> {
+    // Inverse of sky_view_uv_to_dir in the compute shader. Matches
+    // the linear (azimuth, elevation) parameterization.
+    let elevation = asin(clamp(dir.y, -1.0, 1.0));
+    let azimuth = atan2(dir.z, dir.x);
+    var u_norm = azimuth / (2.0 * PI);
+    if (u_norm < 0.0) { u_norm = u_norm + 1.0; }
+    let v_norm = elevation / PI + 0.5;
+    return vec2<f32>(u_norm, v_norm);
+}
+
+fn sample_transmittance(r: f32, mu: f32) -> vec3<f32> {
+    let v = clamp((r - GROUND_R) / (ATMOS_TOP - GROUND_R), 0.0, 1.0);
+    let uu = clamp((mu + 1.0) * 0.5, 0.0, 1.0);
+    return textureSampleLevel(transmittance_lut, lut_samp, vec2<f32>(uu, v), 0.0).rgb;
+}
+
+struct SkyOut {
+    @location(0) color: vec4<f32>,
+    @location(1) material: vec2<f32>,
+    @location(2) velocity: vec2<f32>,
+    @location(3) albedo: vec4<f32>,
+};
+
+@fragment
+fn sky_fs(in: VsOut) -> SkyOut {
+    let dir = normalize(u.forward.xyz + in.ndc.x * u.right.xyz + in.ndc.y * u.up.xyz);
+    let uv = dir_to_sky_uv(dir);
+    var radiance = textureSampleLevel(sky_view_lut, lut_samp, uv, 0.0).rgb;
+
+    // Sun disk: if view direction is within sun_angular_radius of sun
+    // direction, add the sun's radiance attenuated by atmospheric
+    // transmittance toward the sun. Below the horizon (sun.y < 0) we
+    // skip — sun has set, no disk.
+    let sun_dir = normalize(sun_u.sun.xyz);
+    let cos_to_sun = dot(dir, sun_dir);
+    let cos_radius = cos(sun_u.params.x);
+    if (cos_to_sun > cos_radius && sun_dir.y > -0.05) {
+        let r0 = GROUND_R + 0.5;
+        let t_sun = sample_transmittance(r0, sun_dir.y);
+        // Limb darkening: fade toward the disk edge by params.y.
+        let edge = (cos_to_sun - cos_radius) / (1.0 - cos_radius);
+        let limb = mix(1.0 - sun_u.params.y, 1.0, sqrt(max(edge, 0.0)));
+        // Sun radiance ~ 20 (linear) at unit intensity; t_sun colours it.
+        let sun_radiance = vec3<f32>(20.0) * sun_u.sun.w * limb * t_sun;
+        radiance = radiance + sun_radiance;
+    }
+
+    radiance = radiance * u.intensity.x;
+
+    // EN-005 Phase 4 — sub-LSB dither to break up the banding that
+    // Rgba16Float storage produces in low-frequency regions like the
+    // zenith (where sky color changes < 1 lsb across many pixels).
+    // Pseudo-blue-noise via the integer bit-mash of fragment coords;
+    // amplitude scaled to ~1/2 lsb of the smallest channel so it
+    // disappears once quantised.
+    let dither_seed = vec2<u32>(u32(in.clip_pos.x), u32(in.clip_pos.y));
+    let h = (dither_seed.x * 1597u + dither_seed.y * 31337u) ^ (dither_seed.x * 71u + dither_seed.y * 113u);
+    let dither = (f32(h & 0xFFu) / 255.0 - 0.5) * (1.0 / 1024.0);
+    radiance = radiance + vec3<f32>(dither);
+
+    var out: SkyOut;
+    out.color = vec4<f32>(radiance, 1.0);
+    out.material = vec2<f32>(0.0, 0.0);
+    out.velocity = vec2<f32>(0.0, 0.0);
+    out.albedo = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    return out;
+}
+";
+
+// EN-005 Phase 3 — sky-view LUT → equirect HDR re-projection. Drives
+// the existing GGX prefilter chain (which is the IBL specular source
+// for PBR materials), so material reflections track the procedural
+// sky as the sun moves.
+//
+// Sky-view LUT v-axis goes nadir→zenith (0 → 1); prefilter equirect
+// v-axis goes zenith→nadir (0 → 1). The only correction needed is
+// `sky_view_v = 1 - equirect_v`. Destination dimensions arrive in a
+// small uniform so the shader can map gl_FragCoord to UV (the
+// existing prefilter shader uses the same pattern).
+
+pub(super) const EQUIRECT_FROM_SKY_VIEW_SHADER_WGSL: &str = "
+struct BakeParams {
+    // x = dest width, y = dest height, zw unused
+    dims: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: BakeParams;
+@group(0) @binding(1) var sky_view_lut: texture_2d<f32>;
+@group(0) @binding(2) var lut_samp: sampler;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((vid & 1u) * 4u) - 1.0;
+    let y = f32((vid >> 1u) * 4u) - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+    // Equirect destination UV (matches `prefilter`'s `dir_to_uv`
+    // convention: u = phi/(2π), v = theta/π where theta is from zenith).
+    let uv = vec2<f32>(frag_pos.x / u.dims.x, frag_pos.y / u.dims.y);
+
+    // Convert to sky-view LUT UV — only the v axis differs:
+    //   sky-view: v ∈ [0, 1] ↔ elevation ∈ [-π/2, π/2]   (0 = nadir, 1 = zenith)
+    //   equirect: v ∈ [0, 1] ↔ theta     ∈ [0, π]        (0 = zenith, 1 = nadir)
+    // → sky_view_v = 1 - equirect_v, u stays the same.
+    let lut_uv = vec2<f32>(uv.x, 1.0 - uv.y);
+    return textureSampleLevel(sky_view_lut, lut_samp, lut_uv, 0.0);
+}
+";

@@ -119,22 +119,31 @@ the engine doesn't currently provide build-time tooling.
 
 ---
 
-## EN-005 — Atmospheric scattering / sun disk 🔴
+## EN-005 — Atmospheric scattering / sun disk ✅ V1
 
-**Why:** the HDR environment provides a static sky panorama with
-clouds, but no real sun disk + atmospheric scattering. The sky
-reads as "very nice photograph" rather than "physically alive
-sky" — fine outdoors, but breaks down at sunset / the moment the
-sun moves.
+**Status:** V1 landed 2026-04-26. RFC: `docs/rfc/0002-atmospheric-sky.md`.
 
-**Scope:** large — a real sky shader (Rayleigh + Mie scattering,
-parameterised by sun direction + density) replacing or
-augmenting the existing sky pass.
+**Shipped (Hillaire 2020 procedural sky):**
+- Phase 1: transmittance + multi-scattering LUTs baked at init.
+- Phase 2: sky-view LUT compute pass + procedural sky render pass +
+  sun disk with limb darkening. `setProceduralSky` / `setSunDirection`
+  TS API across all platform crates.
+- Phase 3: IBL re-bake on sun-move (procedural sky drives PBR
+  reflections + ambient). Sun-shaft tint auto-derived from
+  transmittance LUT (sub-RFC #1 answered).
+- Phase 4: sky-tinted fog auto-derive + zenith dithering polish.
 
-**Sub-RFCs needed:**
-- Should the sun-shaft pass tap the new sky's transmittance?
-- Time-of-day API: do we want it, and if so, how does it interact
-  with `setDirectionalLight`?
+**Sub-RFCs answered in RFC 0002:**
+- Sun-shafts tap transmittance (yes — `setSunShaftColor` retains as
+  override).
+- `setSunDirection` is the source of truth when procedural is on;
+  `setDirectionalLight` stays as the lower-level escape hatch.
+  Time-of-day deliberately deferred to user-space.
+
+**Deferred to EN-005 V2:**
+- 3D aerial-perspective LUT (32³/16³ per-frame compute + PBR fog
+  shader integration). Phase 4's sky-tinted fog is the V1 stand-in;
+  V2 adds per-pixel angular variation.
 
 ---
 
@@ -223,3 +232,432 @@ drawModelWithMaterial(material: number, mesh: Model,
 Internally loops `0..mesh.meshCount` calling `drawMeshWithMaterial`.
 
 **Scope:** tiny — TS-only wrapper, no engine change.
+
+---
+
+# UE5-tier rendering enablers
+
+EN-010 onward are the engine-side gates that unlock the next
+quality tier in the shooter's grass / trees / water. Game-side
+counterparts and the phase ordering are in
+`bloom/shooter/docs/visual-quality.md` (Tier 6+ section) and the
+SH-020..SH-024 tickets.
+
+---
+
+## EN-010 — Alpha-cutout bucket 🟢
+
+**Why:** today's render buckets are Opaque (full G-buffer),
+Transparent (back-to-front blend), Refractive (Transparent +
+auto-snapshot), Additive (order-independent). Foliage cards,
+chain-link fence textures, and any leaf-silhouette material need
+a fifth: alpha-test with `discard` against
+`MaterialFactors.alpha_cutoff` — runs in the opaque pass (G-buffer
+write, sun shadow, SSAO) but skips the discarded fragments.
+
+`MaterialFactors.alpha_cutoff.w` already exists in the ABI
+(`shaders/material_abi.wgsl`); the scoreboard already has a slot.
+What's missing is the pipeline state (the discard path is a
+fragment-shader emit + a flag at compile time so the alpha
+channel of `base_color_tex` actually drives the cutoff) and the
+bucket assignment.
+
+**API sketch:**
+
+```rust
+pub enum Bucket {
+    Opaque,
+    Cutout,        // ← new: front-to-back like Opaque, fragment discards
+    Transparent,
+    Refractive,
+    Additive,
+}
+```
+
+WGSL side: a new `CutoutOut` writes the same 4 G-buffer targets as
+`OpaqueOut` and the engine wraps the fragment with a `discard`
+based on `alpha < alpha_cutoff`. Or simpler: keep `OpaqueOut` and
+let materials in `Bucket::Cutout` call `discard` themselves —
+engine just changes pipeline state to disable z-pre-pass merging.
+
+**Acceptance:** shooter ships SH-020 leaf-card trees that drop
+discarded leaf pixels but still cast and receive proper sun
+shadows.
+
+**Scope:** small — pipeline state branch + bucket enum + WGSL
+emit doc update.
+
+---
+
+## EN-011 — Planar reflection capture 🟢
+
+**Why:** the water material today reads `env_tex` (the static HDR
+panorama) for sky reflection. That's correct for sky but means a
+river never reflects the trees on its banks or the bridge crossing
+it. Planar reflections — a second camera mirrored across the water
+plane, rendering scene geometry into a low-res RT bound as a
+texture in the water material — are the standard solution and the
+single most-noticed water upgrade in modern games.
+
+**API sketch:**
+
+```ts
+const probe = createPlanarReflection({
+  plane:    { y: 0.05, normal: vec3(0, 1, 0) },
+  resolution: 512,                    // wide-screen-aligned RT
+  layers:   ReflectionLayers.WORLD,   // skip player, skip foliage if perf-bound
+});
+// Material binds the probe's RT at @group(2) @binding(12)
+setMaterialReflectionProbe(matWater, probe);
+```
+
+Engine does:
+1. Per frame, build a mirrored view matrix across the plane.
+2. Render the world list (with a layer mask) to the probe's
+   colour RT.
+3. Bind the RT into materials that opt in.
+4. Materials sample with the perturbed wave normal as offset.
+
+**Open questions:**
+- One probe per plane vs shared probe? (V1: one per plane. River
+  is one plane.)
+- Should the probe re-render every frame or every other frame?
+  (V1: every frame at half-res; tune later.)
+- Cull list — same as main camera or whitelist? (V1: whitelist
+  big-silhouette geometry, skip particle systems and grass.)
+
+**Scope:** medium — render-graph addition + new material binding
+slot + cull-list filter. Roughly 3 days.
+
+**Acceptance:** SH-022 ships the river reflecting the actual tree
+bank, with the reflection wobbling on the wave normal.
+
+---
+
+## EN-012 — Foliage shading model in PBR ABI 🟡
+
+**Why:** SH-011 (grass) and SH-012 (tree) both bolt local
+wrap-lambert + transmission terms into bespoke material shaders.
+The pattern is universal across foliage — a real shading model
+in `material_abi.wgsl` would let any new foliage material
+declare `shading_model: foliage` and inherit:
+
+- Wrap-lambert diffuse so back-faces don't go pure black.
+- Transmission term (sun behind leaf → warm tint into camera).
+- Two-sided normal handling (no need to double the geometry).
+- Per-material transmission colour from `MaterialFactors`.
+
+UE5 calls this the **Foliage** shading model; it's the second-most-
+used shading model after Default Lit in any outdoor scene.
+
+**API sketch:**
+
+```wgsl
+// In material_abi.wgsl additions:
+struct FoliageShading {
+  transmission_color: vec3<f32>,
+  transmission_amount: f32,
+  wrap_factor: f32,
+};
+
+// MaterialFactors gets a new sub-block:
+struct MaterialFactors {
+  // ... existing fields
+  shading_model: u32,            // 0 = default, 1 = foliage, 2 = subsurface
+  foliage:       FoliageShading,
+};
+```
+
+**Open questions:**
+- Should subsurface (skin/wax) and foliage share a shading-model
+  enum or be separate? (Foliage is a subset; recommend shared
+  enum.)
+- How do shadow / SSAO behave on two-sided foliage? (Sample
+  shadow on either side; SSAO masks at half-strength on
+  backfaces.)
+
+**Scope:** medium — shading model branch in the deferred lighting
+pass + ABI struct + WGSL standard library helper.
+
+**Acceptance:** SH-023 ports `grass.wgsl` and `tree.wgsl` to
+`shading_model: foliage` declarations and ~30 lines of bespoke
+math go away from each.
+
+---
+
+## EN-013 — Global wind UBO in PerFrame 🟢
+
+**Why:** every foliage material today re-declares its own `wind:
+vec4<f32>` in a per-material UBO (GrassParams, TreeParams). When
+new foliage materials land (SH-020 leaf cards, future ferns,
+clovers, etc.) the game has to keep N UBOs in sync per frame.
+A small extension to the global PerFrame UBO — adding a
+`wind: vec4<f32>` (dir.xz, amplitude, frequency) plus a
+`gust_phase: f32` — lets all foliage materials sample one source
+of truth.
+
+**API sketch:**
+
+```ts
+setWind(dirX: number, dirZ: number, amplitude: number, frequency: number): void;
+```
+
+WGSL side: `frame.wind: vec4<f32>` becomes available in any shader
+including `material_abi.wgsl`.
+
+**Acceptance:** grass and tree materials read `frame.wind` instead
+of their own UBOs; one `setWind()` call drives all foliage; visual
+parity with today's per-material params.
+
+**Scope:** tiny — extend PerFrame, FFI passthrough, doc update.
+Per-material wind UBOs become deprecated but stay for one-off
+overrides.
+
+---
+
+## EN-014 — Texture-array binding pattern for splat-mapped terrain 🟡
+
+**Why:** SH-009 wants 4 PBR layers (grass / dry-grass / dirt /
+rock) blended in the fragment by weight masks. The current
+PerMaterial group has 5 PBR slots (base, normal, MR, emissive,
+occ), each as a single `texture_2d`. A 4-layer terrain needs 12
+textures (4 × albedo/normal/MR) which doesn't fit, and even if it
+did, the fragment shader would have to declare 12 samplers — ugly
+and wasteful.
+
+The standard solution is **texture arrays**: one
+`texture_2d_array<f32>` slot bound with N layers, sampled with a
+layer-index parameter. UE5 calls these "Texture2DArray" and uses
+them everywhere for landscape materials.
+
+**API sketch:**
+
+```ts
+// CPU side
+const albedoArray = loadTextureArray([
+  'assets/textures/grass_lush_albedo.png',
+  'assets/textures/grass_dry_albedo.png',
+  'assets/textures/dirt_albedo.png',
+  'assets/textures/rock_cliff_albedo.png',
+]);
+setMaterialTextureArray(matTerrain, /*slot=*/0, albedoArray);
+```
+
+Material ABI: a new optional binding pattern at @group(2)
+@binding(13/14/15) (after the user_params slot at 11) for albedo
+/ normal / MR arrays. WGSL emits `texture_2d_array` declarations
+when materials opt in.
+
+**Open questions:**
+- One array slot or three (albedo / normal / MR separately)?
+  (Recommend three; lets games mix-and-match resolutions.)
+- Layer count limit — max 16? 64? (16 is enough for any landscape
+  shader; 64 is wgpu's typical limit.)
+
+**Scope:** medium — wgpu binding type, FFI loader, ABI doc.
+
+**Acceptance:** SH-009 ships 4-layer triplanar terrain with one
+sampler call per layer-class instead of 4.
+
+---
+
+## EN-015 — Imposter / billboard system 🟡
+
+**Why:** the shooter ships 120 trees today; opening the playfield
+or moving toward "stand on a hill, see a forest stretching to the
+horizon" needs 500 – 5 000 trees. Beyond ~40 m, full-poly
+foliage is wasted budget — an octahedral imposter (a single quad
+textured with a pre-rendered multi-angle bake) renders in 2
+triangles instead of 2 000.
+
+**Pieces:**
+
+1. **Bake tool** (`engine/tools/bake-imposters.ts`?): renders a
+   GLB into 8 × 8 = 64 view directions on an octahedron, packs
+   the colour + depth bakes into one atlas texture.
+2. **Imposter material** that samples the right view from the
+   atlas based on the camera-to-imposter direction.
+3. **LOD selection** — game code or engine picks imposter vs
+   full mesh by distance.
+
+**API sketch:**
+
+```ts
+const imposter = bakeImposter(treeOakModel, { views: 8, atlasRes: 2048 });
+// Game draws full mesh inside 40 m, imposter outside.
+drawImposter(imposter, position, scale, distance);
+```
+
+**Open questions:**
+- Static-only or skinned? (V1: static. Foliage doesn't skin.)
+- Lit imposters require packing albedo + normal + roughness, not
+  just colour. (V1: ship with full PBR pack.)
+- Distance hysteresis to avoid LOD pop. (Engine TAA may already
+  hide it.)
+
+**Scope:** medium-large — new draw bucket + bake tool + atlas
+loader. Roughly 1 week.
+
+**Acceptance:** SH-024 ships 1 000 trees at the same per-frame
+cost as today's 120.
+
+---
+
+## EN-016 — Custom-material shadow-receive helper 🟢
+
+**Why:** game materials (`grass.wgsl`, `tree.wgsl`, `terrain.wgsl`,
+`water.wgsl`) all want to sample the directional shadow cascades.
+The math lives in `material_abi.wgsl` (cascade selection by depth,
+PCF Vogel disk, comparison-sampler call) but isn't exposed as a
+helper — every consumer has to copy it inline. After Phase 6 a
+`#include "common/shadows.wgsl"` with a one-call helper would
+make all four shaders sample shadows correctly with one line.
+
+**API sketch:**
+
+```wgsl
+// In common/shadows.wgsl
+fn sample_sun_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>) -> f32 {
+    // Return 0 (fully shadowed) .. 1 (fully lit). Auto-picks cascade,
+    // applies normal-bias offset, runs PCF Vogel disk.
+}
+```
+
+**Scope:** tiny — package existing shader code into a helper +
+include path.
+
+**Acceptance:** SH-011 (grass) and SH-012 (tree) drop in a one-line
+shadow sample and visually receive sun shadows from the canopy
+above.
+
+---
+
+## EN-017 — Post-pass slot for game-side full-screen FX 🟡
+
+**Why:** SH-019 wants an underwater colour tint when the camera Y
+falls below the water surface. The engine ships several built-in
+post effects (bloom, vignette, film grain, chromatic aberration,
+sun shafts, auto-exposure) but no slot for a game-supplied
+fullscreen WGSL pass. SH-019 is the immediate use case; future
+candidates: damage-flash red overlay, scope vignette, low-health
+desaturation.
+
+**API sketch:**
+
+```ts
+const matUnderwater = compileMaterial(`
+  @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    let scene = textureSample(scene_color_tex, scene_color_samp, uv);
+    return vec4<f32>(scene.rgb * vec3<f32>(0.4, 0.7, 0.9), 1.0);
+  }
+`, /*post=*/true);
+setPostPass(matUnderwater);
+clearPostPass(); // for transient effects
+```
+
+The post-pass runs after composite + tonemapping but before the
+final blit; it samples `scene_color_tex` (LDR) and outputs to the
+swapchain. Game can disable / replace per frame.
+
+**Open questions:**
+- One slot or stack? (V1: one slot. Stacking can wait.)
+- Does the post-pass see depth? (Bind `scene_depth_tex` like
+  refractive bucket, yes.)
+
+**Scope:** small — render-graph addition + FFI + ABI doc.
+
+**Acceptance:** SH-019 ships an underwater tint that toggles on
+when the camera Y < water Y; HUD remains crisp because the post
+pass runs before the UI overlay.
+
+---
+
+## EN-018 — Validate render-scale + DRS on macOS Retina 🟢
+
+**Why:** PRs `4ba0ea4` → `f1c9cd2` shipped `setRenderScale`,
+`setUpscaleMode`, `setCasStrength`, and `setAutoResolution`
+(auto-DRS) end-to-end. macOS already honored `backingScaleFactor`,
+so a 4K Retina display is the cheapest place to confirm the new
+machinery works visually + that the DRS controller settles.
+Nothing in CI exercises a real GPU at fractional scales today.
+
+**Scope:** test/manual, no engine code changes expected.
+
+**Acceptance:**
+1. `examples/intel-sponza` (or whichever 3D scene is current)
+   runs at native 4K Retina with no visible regression vs
+   pre-PR-1 baseline (TAA on, render_scale=0.5 default).
+2. Sweeping `setRenderScale` from 1.0 → 0.75 → 0.5 produces
+   monotonically decreasing GPU frame time
+   (`bloom_get_profiler_frame_gpu_us`), Catmull-Rom upscale
+   shows no obvious aliasing vs bilinear at 0.75.
+3. CAS at 0.4 visibly sharpens silhouettes on the marble columns
+   without crunching the shadowed crevices (HDR pre-tonemap
+   placement is the whole point — verify on a stop-motion
+   screenshot pair, CAS off vs CAS on at scale 0.75).
+4. **Auto-DRS settling test:** call `setAutoResolution(60, true)`
+   in the example, then induce a GPU spike via
+   `setSsgiIntensity(5.0)` (or rotate the camera into the
+   sun-shaft heavy courtyard). Within ~30 frames `getRenderScale()`
+   should step *down* one rung. Restore the workload, confirm it
+   steps *up* again within 60–90 frames. Asymmetric hysteresis is
+   the design — drops fast, recovers slowly.
+5. `setTaaEnabled(true)` then `setRenderScale(0.75)` then
+   `setTaaEnabled(false)` should leave scale at 0.75 (the explicit
+   setter pins it). With no manual scale call, toggling TAA should
+   continue to flip 0.5 ↔ 1.0 (legacy coupling preserved).
+
+**Notes:**
+- Logs each scale change so the trace is auditable.
+- A short MP4 of the DRS settling for the visual-quality doc
+  would be nice-to-have; not blocking.
+
+**Blocked on:** the in-flight atmosphere/sky WIP currently breaks
+`cargo test --lib`; either land or revert that before adding any
+new screenshot fixtures via the test harness.
+
+---
+
+## EN-019 — Validate cross-platform HiDPI on Windows + Linux 🟡
+
+**Why:** PR `f1c9cd2` added Per-Monitor-Aware-V2 + WM_DPICHANGED
+on Windows, X11 `XDisplayWidth/MM` scale detection on Linux, and
+`devicePixelRatio` canvas sizing + `ResizeObserver` on Web. These
+were written from a macOS dev box without cross-targets installed
+— code paths compile but were never actually run on the target
+OS. A 4K Windows monitor at 150% DPI is the canonical "before
+this PR rendered at ~2560×1440, after it should render at 3840×2160"
+test.
+
+**Scope:** test/manual + likely small follow-up bug fixes.
+
+**Acceptance:**
+1. **Windows 4K @ 150%:** `examples/intel-sponza` window at
+   `setRenderScale(1.0)` shows `getPhysicalWidth()` ≈ 1.5 ×
+   `screenWidth()`. UI text is crisp (was blurry before). DPI
+   scale persists when dragging the window between a 100% and
+   150% monitor (WM_DPICHANGED fires; the window resizes to keep
+   apparent size; a follow-up WM_SIZE re-resizes the renderer).
+2. **Linux X11 @ 144 DPI** (e.g. set via `xrandr --dpi 144` or
+   a 27" 4K monitor with correct EDID): `display_scale()` returns
+   1.5 (snapped from raw 1.5). Surface created at logical × 1.5.
+3. **Web Retina (Chrome + Safari on macOS):** canvas `width`
+   attribute equals logical × `devicePixelRatio` (2 on Retina).
+   CSS dimensions unchanged. Browser zoom (Cmd+ to 125 %, then
+   Cmd+0) round-trips through the matchMedia listener and
+   re-resizes the surface.
+4. **Confirm `bloom_set_render_scale(0.75)` actually scales fragment
+   cost** on each platform — same `bloom_get_profiler_frame_gpu_us`
+   methodology as EN-018.
+
+**Open questions:**
+- Wayland: explicitly skipped in PR 3 ("Wayland out of scope").
+  EN-019b if a Linux user files a regression on a Wayland session.
+- Per-window DPI on Windows pre-1607 (no `GetDpiForWindow`):
+  PR 3 falls back to `GetDpiForSystem` which is good enough for
+  the initial window create. If this becomes a real-world issue
+  add `GetDeviceCaps(hdc, LOGPIXELSX)` as a third fallback.
+
+**Blocked on:** access to a Windows 11 box with a HiDPI display
+(or a VM forwarding DPI), and a Linux dev with X11. Web checks
+can be done from any modern browser on the macOS dev box.

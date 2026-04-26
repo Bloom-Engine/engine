@@ -78,10 +78,11 @@ export {
   createMeshExplicit,
   loadModelAnimation, updateModelAnimation, createMesh,
   setAmbientLight, setDirectionalLight, setJointTest,
+  setProceduralSky, setSunDirection,
   loadModelAsync, stageModels, commitModel,
 } from './models/index';
 
-export type { DrawCubeOpts } from './models/index';
+export type { DrawCubeOpts, ProceduralSkyOptions } from './models/index';
 
 export {
   vec2, vec2Add, vec2Sub, vec2Scale, vec2Length, vec2LengthSq,

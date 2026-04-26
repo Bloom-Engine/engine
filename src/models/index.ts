@@ -42,6 +42,8 @@ declare function bloom_update_model_animation(handle: number, animIndex: number,
 declare function bloom_create_mesh(vertexPtr: number, vertexCount: number, indexPtr: number, indexCount: number): number;
 declare function bloom_set_ambient_light(r: number, g: number, b: number, intensity: number): void;
 declare function bloom_set_directional_light(dx: number, dy: number, dz: number, r: number, g: number, b: number, intensity: number): void;
+declare function bloom_set_procedural_sky(enabled: number, rayleighDensity: number, mieDensity: number, groundAlbedo: number): void;
+declare function bloom_set_sun_direction(dx: number, dy: number, dz: number, intensity: number): void;
 declare function bloom_gen_mesh_spline_ribbon(pointsPtr: number, pointCount: number, widthsPtr: number, widthCount: number): number;
 declare function bloom_get_model_mesh_count(handle: number): number;
 declare function bloom_get_model_material_count(handle: number): number;
@@ -673,6 +675,40 @@ export function setAmbientLight(color: Color, intensity: number): void {
 
 export function setDirectionalLight(direction: Vec3, color: Color, intensity: number): void {
   bloom_set_directional_light(direction.x, direction.y, direction.z, color.r, color.g, color.b, intensity);
+}
+
+// EN-005 — Hillaire 2020 procedural sky.
+//
+// `setProceduralSky(true)` swaps the static HDR-panorama background
+// for a physics-based atmosphere driven by Rayleigh + Mie scattering.
+// `setSunDirection` then steers the sun: the sky-view LUT re-bakes
+// on the next frame and the sun disk + transmittance update together.
+//
+// `setProceduralSky(false)` returns to the panorama path; the
+// existing `loadEnvironment` / `setEnvironmentIntensity` flow is
+// untouched.
+
+export interface ProceduralSkyOptions {
+  /** Rayleigh density multiplier. 1.0 = Earth standard. Higher = bluer
+   * thicker air; lower = thinner. */
+  rayleighDensity?: number;
+  /** Mie density multiplier. Drives haze + sun-glow size. 1.0 = Earth
+   * standard, raise for hazy/dusty scenes. */
+  mieDensity?: number;
+  /** Ground albedo (0..1). Affects how much light bounces back up
+   * into the lower atmosphere. 0.1 = soil/grass, 0.9 = snow. */
+  groundAlbedo?: number;
+}
+
+export function setProceduralSky(enabled: boolean, opts?: ProceduralSkyOptions): void {
+  const rd = opts?.rayleighDensity ?? 1.0;
+  const md = opts?.mieDensity ?? 1.0;
+  const ga = opts?.groundAlbedo ?? 0.1;
+  bloom_set_procedural_sky(enabled ? 1 : 0, rd, md, ga);
+}
+
+export function setSunDirection(direction: Vec3, intensity: number = 1.0): void {
+  bloom_set_sun_direction(direction.x, direction.y, direction.z, intensity);
 }
 
 declare function bloom_set_joint_test(joint: number, angle: number): void;

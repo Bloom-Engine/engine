@@ -1136,6 +1136,26 @@ pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64,
     engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
 }
 
+// --- EN-005: procedural sky ---
+// Toggle procedural-atmosphere rendering and steer the sun. The
+// renderer owns the on/off flag + LUT state; setting the sun marks
+// the sky-view LUT dirty so it re-bakes before the next frame.
+
+#[no_mangle]
+pub extern "C" fn bloom_set_procedural_sky(enabled: f64, rayleigh_density: f64, mie_density: f64, ground_albedo: f64) {
+    engine().renderer.set_procedural_sky(
+        enabled != 0.0,
+        rayleigh_density as f32,
+        mie_density as f32,
+        ground_albedo as f32,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_sun_direction(dx: f64, dy: f64, dz: f64, intensity: f64) {
+    engine().renderer.set_sun_direction(dx as f32, dy as f32, dz as f32, intensity as f32);
+}
+
 // --- Post-FX knobs (heuristic visual layer; default-off) ---
 
 #[no_mangle]

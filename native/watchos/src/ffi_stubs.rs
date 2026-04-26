@@ -73,6 +73,10 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_directional_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_procedural_sky(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_sun_direction(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_set_fog(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_p0: f64) {
