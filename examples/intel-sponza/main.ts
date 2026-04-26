@@ -22,6 +22,7 @@ import {
   getProfilerFrameCpuUs, getProfilerFrameGpuUs,
   setQualityPreset, QualityPreset,
   setShadowsEnabled, setSsaoEnabled, setSsrEnabled, setSsgiEnabled,
+  setRenderScale, setUpscaleMode, setCasStrength,
 } from "bloom/core";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
@@ -74,6 +75,34 @@ let turnAt = 0;
 // the cache-hit path; the default 0.005 rad/frame pan invalidates the
 // cascade VPs every frame and forces a re-render.
 let noPan = false;
+
+// --scale-sweep state. The grid is 5 configs of (render_scale, taa,
+// upscale_mode, cas_strength). Per-config we run `warmup` frames to
+// settle the renderer after a setRenderScale() resize, then
+// `sweepFramesPerConfig` measurement frames, then print one CSV row
+// and advance. Exits when the last row is logged.
+const sweepWarmup = 60;
+let sweepFramesPerConfig = 0;
+let sweepConfigIdx = -1; // -1 = not yet entered
+let sweepFrameInConfig = 0;
+let sweepConfigStartS = 0.0;
+const sweepCount = 5;
+// Parallel arrays (Perry-friendly: indexed access, no .push).
+const sweepName: string[] = new Array(sweepCount);
+sweepName[0] = "native+TAA";
+sweepName[1] = "native, no AA";
+sweepName[2] = "quality";
+sweepName[3] = "perf";
+sweepName[4] = "floor";
+const sweepScale: number[] = new Array(sweepCount);
+sweepScale[0] = 1.0; sweepScale[1] = 1.0; sweepScale[2] = 0.75; sweepScale[3] = 0.5; sweepScale[4] = 0.5;
+const sweepTaa: number[] = new Array(sweepCount);
+sweepTaa[0] = 1; sweepTaa[1] = 0; sweepTaa[2] = 1; sweepTaa[3] = 1; sweepTaa[4] = 0;
+// 0 = bilinear, 1 = catmull-rom (matches the FFI encoding).
+const sweepUpscaleN: number[] = new Array(sweepCount);
+sweepUpscaleN[0] = 1; sweepUpscaleN[1] = 1; sweepUpscaleN[2] = 1; sweepUpscaleN[3] = 1; sweepUpscaleN[4] = 0;
+const sweepCas: number[] = new Array(sweepCount);
+sweepCas[0] = 0.0; sweepCas[1] = 0.0; sweepCas[2] = 0.4; sweepCas[3] = 0.5; sweepCas[4] = 0.0;
 for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -149,6 +178,14 @@ for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--no-pan") {
     noPan = true;
   }
+  // --scale-sweep N runs N measurement frames per config across a
+  // 5-row grid (native+TAA / native / quality / perf / floor),
+  // 60 warmup frames between configs to let resize() settle and
+  // the FPS sampler refill its 1 s rolling window. Prints CSV to
+  // stdout. See sweep* arrays below.
+  if (argv[i] === "--scale-sweep" && i + 1 < argv.length) {
+    sweepFramesPerConfig = Math.floor(parseFloat(argv[i + 1]));
+  }
 }
 
 // ---- Init ----
@@ -198,6 +235,23 @@ setChromaticAberration(0.0);
 // one-shot setup costs.
 if (profileFrames > 0) {
   setProfilerEnabled(true);
+}
+
+// --scale-sweep needs the GPU profiler so it can log per-config
+// gpu_us alongside the FPS sample.
+if (sweepFramesPerConfig > 0) {
+  setProfilerEnabled(true);
+  // CSV header — one row per config follows in the loop.
+  console.log("config,scale,taa,upscale,cas,frames,fps,ms,gpu_us,cpu_us");
+  // Apply config 0 here so the warmup countdown starts on the next
+  // frame; the loop's state machine handles every later transition.
+  setRenderScale(sweepScale[0]);
+  setTaaEnabled(sweepTaa[0] !== 0);
+  setUpscaleMode(sweepUpscaleN[0] === 1 ? "catmull-rom" : "bilinear");
+  setCasStrength(sweepCas[0]);
+  sweepConfigIdx = 0;
+  sweepFrameInConfig = 0;
+  sweepConfigStartS = 0.0;
 }
 
 // Apply quality preset if requested on the CLI (overrides the per-FX
@@ -390,6 +444,54 @@ while (!windowShouldClose()) {
       console.log(`Total GPU: ${(gpuUs / 1000).toFixed(2)} ms`);
       printProfilerSummary();
       break;
+    }
+  }
+
+  // --scale-sweep: cycle 5 (scale, TAA, upscale, CAS) configs and
+  // print a CSV row per config. Per-config: 60 warmup frames so
+  // the renderer's resize() and TAA history settle, then N
+  // measurement frames. Camera pans through each segment so shadow
+  // and TAA reprojection get exercised. Exits after the last row.
+  if (sweepFramesPerConfig > 0 && sweepConfigIdx >= 0) {
+    if (!noPan) { camYaw = camYaw + 0.005; }
+    sweepFrameInConfig = sweepFrameInConfig + 1;
+    if (sweepFrameInConfig === sweepWarmup + 1) {
+      // Reset the per-config FPS accumulator at the end of warmup
+      // so the measurement window only covers the steady-state
+      // frames.
+      sweepConfigStartS = measureAccumS;
+    }
+    if (sweepFrameInConfig >= sweepWarmup + sweepFramesPerConfig) {
+      endDrawing();
+      const measFrames = sweepFramesPerConfig;
+      const elapsedS = measureAccumS - sweepConfigStartS;
+      const fps = elapsedS > 0 ? measFrames / elapsedS : 0;
+      const ms = fps > 0 ? 1000 / fps : 0;
+      const gpuUs = getProfilerFrameGpuUs();
+      const cpuUs = getProfilerFrameCpuUs();
+      const upscaleStr = sweepUpscaleN[sweepConfigIdx] === 1 ? "catmull-rom" : "bilinear";
+      console.log(
+        sweepName[sweepConfigIdx] + "," +
+        sweepScale[sweepConfigIdx].toFixed(2) + "," +
+        (sweepTaa[sweepConfigIdx] !== 0 ? "on" : "off") + "," +
+        upscaleStr + "," +
+        sweepCas[sweepConfigIdx].toFixed(2) + "," +
+        measFrames.toString() + "," +
+        fps.toFixed(1) + "," +
+        ms.toFixed(2) + "," +
+        gpuUs.toFixed(0) + "," +
+        cpuUs.toFixed(0)
+      );
+      sweepConfigIdx = sweepConfigIdx + 1;
+      if (sweepConfigIdx >= sweepCount) { break; }
+      // Apply next config — the next frame's first `sweepWarmup`
+      // ticks absorb the resize cost.
+      setRenderScale(sweepScale[sweepConfigIdx]);
+      setTaaEnabled(sweepTaa[sweepConfigIdx] !== 0);
+      setUpscaleMode(sweepUpscaleN[sweepConfigIdx] === 1 ? "catmull-rom" : "bilinear");
+      setCasStrength(sweepCas[sweepConfigIdx]);
+      sweepFrameInConfig = 0;
+      sweepConfigStartS = 0.0;
     }
   }
 
