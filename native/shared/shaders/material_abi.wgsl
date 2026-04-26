@@ -139,6 +139,27 @@ struct MaterialFactors {
 // pipeline layout allocates a 16-byte stub UBO there so the bind group
 // always matches the layout.
 
+// EN-011 — Planar reflection RT. Bound by the engine for materials
+// linked to a reflection probe via `setMaterialReflectionProbe`.
+// Materials without a probe get a 1×1 black default texture so
+// unconditional sampling is safe.
+//
+// The RT is `Rgba16Float` HDR (matches the engine's pipeline) and
+// holds the previous frame's mirror-camera render of the world
+// minus excluded materials. Sample with screen-space UV — the
+// reflection texture is camera-aligned. Typical water shader pattern:
+//
+//   let screen_uv = clip_position.xy / vec2<f32>(frame.screen_resolution);
+//   let perturb = wave_normal.xz * 0.05;       // wobble strength
+//   let refl = textureSample(planar_reflection_tex,
+//                            planar_reflection_samp,
+//                            screen_uv + perturb).rgb;
+//
+// Reads are NaN-safe: the default 1×1 black texture means a material
+// can sample even when the game forgot to bind a probe.
+@group(2) @binding(12) var planar_reflection_tex:  texture_2d<f32>;
+@group(2) @binding(13) var planar_reflection_samp: sampler;
+
 // =====================================================================
 // Group 3 — PerDraw (transform + skinning)
 // =====================================================================

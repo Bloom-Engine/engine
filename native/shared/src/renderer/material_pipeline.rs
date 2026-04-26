@@ -82,7 +82,10 @@ fn create_per_material_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     // Bindings 0..9 are texture/sampler pairs. Binding 10 is
     // MaterialFactors UBO. Binding 11 is the user_params UBO (shader-
     // defined type; 256-byte cap enforced by the pipeline-creation
-    // helper, not by the layout itself).
+    // helper, not by the layout itself). Bindings 12 (texture) + 13
+    // (sampler) are the EN-011 planar reflection RT — bound to the
+    // engine's 1×1 black default for materials without a probe so
+    // unconditional sampling is always safe.
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("abi_per_material"),
         entries: &[
@@ -98,6 +101,9 @@ fn create_per_material_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             entry_samp(9,   wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
             entry_ubo(10,   wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
             entry_ubo(11,   wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+            // EN-011 — planar reflection RT (texture + sampler).
+            entry_tex_f(12, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(13,  wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
         ],
     })
 }

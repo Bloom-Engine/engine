@@ -8,6 +8,7 @@ pub mod shader_include;
 pub mod shader_library;
 pub mod material_pipeline;
 pub mod material_system;
+pub mod planar_reflection;
 pub mod graph;
 pub mod transient;
 pub mod impulse_field;
@@ -1255,6 +1256,18 @@ pub struct Renderer {
     /// compute pass per frame to decay + accumulate, then the front
     /// view is bound at `group(4) binding(4)` in scene_inputs.
     pub impulse_field: impulse_field::ImpulseField,
+
+    /// EN-011 — Planar reflection probes, indexed by 1-based handle.
+    /// Slots remain `None` after destroy so previously-issued handles
+    /// never alias a future allocation. The probe RT is repainted
+    /// each frame in `dispatch_planar_reflections` (called from
+    /// `end_frame_with_scene` before the main material pass).
+    pub planar_probes: Vec<Option<planar_reflection::PlanarReflectionProbe>>,
+    /// Per-probe scratch UBO + bind group for the mirrored PerView.
+    /// Parallel to `planar_probes` (1-based index minus one). Allocated
+    /// alongside the probe in `create_planar_reflection`.
+    pub planar_probe_view_buffers: Vec<Option<wgpu::Buffer>>,
+    pub planar_probe_view_bgs:     Vec<Option<wgpu::BindGroup>>,
 
     /// Phase 6 — hot-reload registry for file-backed materials. Each
     /// frame we drain pending file-change events and recompile any
@@ -5172,6 +5185,9 @@ impl Renderer {
             material_system,
             transient_pool,
             impulse_field,
+            planar_probes: Vec::new(),
+            planar_probe_view_buffers: Vec::new(),
+            planar_probe_view_bgs: Vec::new(),
             material_hot_reload,
             post_pass: None,
             composite_ldr_rt_texture: None,
@@ -7778,6 +7794,14 @@ impl Renderer {
             }
         }
         profiler.end("main_hdr_pass");
+
+        // EN-011 — render every registered planar reflection probe
+        // BEFORE the main material pass so the probe RTs are
+        // sampleable when materials run. No-op when no probes are
+        // registered or no opaque material draws are queued.
+        profiler.begin("planar_reflections");
+        self.dispatch_planar_reflections(&mut encoder);
+        profiler.end("planar_reflections");
 
         // Phase 2c — schedule the material pass through the render
         // graph. First real consumer of `renderer::graph` from #35.
@@ -11473,6 +11497,334 @@ impl Renderer {
             instance_buffer, instance_count,
             mvp, model, mvp, [1.0, 1.0, 1.0, 1.0], [0, 0, 0, 0],
         );
+    }
+
+    // ============================================================
+    // EN-011 — planar reflection probes
+    // ============================================================
+
+    /// Create a planar reflection probe and return its 1-based handle
+    /// (0 on failure). The probe owns a square HDR colour RT + depth
+    /// at `resolution²`; pass `0` for `resolution` to default to half
+    /// the swapchain width (matches the V1 ticket spec). The engine
+    /// renders the world (minus excluded materials) into the probe's
+    /// RT every frame in `dispatch_planar_reflections`.
+    ///
+    /// Materials opt into sampling a probe via
+    /// `set_material_reflection_probe(material, probe)`.
+    pub fn create_planar_reflection(
+        &mut self,
+        plane_y:    f32,
+        normal:     [f32; 3],
+        resolution: u32,
+    ) -> u32 {
+        let res = if resolution == 0 {
+            (self.surface_config.width / 2).max(16)
+        } else {
+            resolution
+        };
+        let probe = planar_reflection::PlanarReflectionProbe::new(
+            &self.device, plane_y, normal, res,
+        );
+
+        // Allocate a per-probe PerView UBO + bind group. Layout
+        // matches the material_system's per_view layout (same
+        // bindings 0..9 — UBO + env stubs + shadow stubs). Reuses
+        // the renderer's stub textures + samplers via
+        // `default_normal_view` / friends to keep init cheap.
+        let view_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planar_probe_per_view"),
+            size: std::mem::size_of::<material_system::PerViewUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Reuse the existing per-view layout — we share the env /
+        // BRDF / shadow textures with the main pass since the
+        // mirrored draws still want IBL / shadows. The simplest
+        // path is to hand-build a bind group with the same stub
+        // resources the main MaterialSystem::new built. Easier:
+        // just rebuild the BG using the textures already wired into
+        // material_system's per_view_bg via a fresh BG against the
+        // same layout, but pointing at our own UBO.
+        //
+        // V1: we don't have direct access to the inner stub
+        // resources of material_system.per_view_bg, so we re-create
+        // 1×1 stubs here. They're tiny (a handful of bytes each)
+        // and only allocated when a probe is created — typically 1
+        // per scene.
+        let stub_white = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("planar_probe_stub_white"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let stub_white_view = stub_white.create_view(&Default::default());
+        let stub_samp = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("planar_probe_stub_samp"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let stub_depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("planar_probe_stub_depth"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let stub_depth_view = stub_depth.create_view(&Default::default());
+        let cmp_samp = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("planar_probe_stub_cmp_samp"),
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let view_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("planar_probe_per_view_bg"),
+            layout: &self.material_system.layouts.per_view,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: view_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&stub_white_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&stub_samp) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&stub_white_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&stub_white_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&stub_samp) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&stub_depth_view) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&stub_depth_view) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&stub_depth_view) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&cmp_samp) },
+            ],
+        });
+        // Stub resources outlive the BG via wgpu Arc internals; we
+        // intentionally leak them so the probe BG keeps validating
+        // for the probe's lifetime. Cost: ~120 B per probe;
+        // typically 1 probe per game so it's noise.
+        std::mem::forget(stub_white);
+        std::mem::forget(stub_white_view);
+        std::mem::forget(stub_samp);
+        std::mem::forget(stub_depth);
+        std::mem::forget(stub_depth_view);
+        std::mem::forget(cmp_samp);
+
+        self.planar_probes.push(Some(probe));
+        self.planar_probe_view_buffers.push(Some(view_buffer));
+        self.planar_probe_view_bgs.push(Some(view_bg));
+        self.planar_probes.len() as u32
+    }
+
+    /// Link a material handle to a planar reflection probe. Subsequent
+    /// draws of `material` see the probe's colour RT at
+    /// `@group(2) @binding(12)`. Pass `probe = 0` to revert to the
+    /// default 1×1 black texture.
+    ///
+    /// No-op when either handle is invalid.
+    pub fn set_material_reflection_probe(&mut self, material: u32, probe: u32) {
+        if material == 0 { return; }
+        if probe == 0 {
+            // Unlink — rebind binding 12 to the default black view by
+            // routing through the same helper with our own default.
+            let view = self.material_system.default_black_view.clone();
+            // Cloning a wgpu TextureView is a cheap Arc bump.
+            if let Err(e) = self.material_system.set_reflection_probe(
+                &self.device, material, 0, &view,
+            ) {
+                eprintln!("[planar_reflection] unlink failed for material {material}: {e}");
+            }
+            return;
+        }
+        let idx = probe as usize - 1;
+        let probe_view = match self.planar_probes.get(idx).and_then(|p| p.as_ref()) {
+            Some(p) => p.color_view.clone(),
+            None => {
+                eprintln!("[planar_reflection] unknown probe handle {probe}");
+                return;
+            }
+        };
+        if let Err(e) = self.material_system.set_reflection_probe(
+            &self.device, material, probe, &probe_view,
+        ) {
+            eprintln!("[planar_reflection] set failed for material {material}: {e}");
+        }
+    }
+
+    /// EN-011 — render every registered probe's RT for this frame.
+    /// Called from `end_frame_with_scene` BEFORE the main material
+    /// pass so the probe textures are ready when materials sample
+    /// them.
+    ///
+    /// For each probe:
+    ///   1. Build the mirrored PerView (camera reflected across the
+    ///      probe's plane; same projection as the main camera).
+    ///   2. Upload the mirrored PerView to the probe's UBO.
+    ///   3. Begin a render pass against the probe's RT + depth (clear
+    ///      colour to fog, depth to 1.0).
+    ///   4. Walk material_system.commands and dispatch each non-
+    ///      excluded draw with the mirrored per-view bind group.
+    ///
+    /// V1 cull list: excludes any material whose handle equals one
+    /// of the materials linked to a probe (so the water plane itself
+    /// doesn't reflect). Future revisions can expand this with a
+    /// hardcoded foliage / particle bucket filter via the bucket
+    /// metadata on each compiled pipeline.
+    pub fn dispatch_planar_reflections(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if self.planar_probes.iter().all(|p| p.is_none()) { return; }
+        if self.material_system.commands.is_empty() { return; }
+
+        // Build the V1 exclude set: every material linked to any
+        // probe. The water material itself shouldn't appear in its
+        // own reflection (it'd black-on-black self-occlude the
+        // surface).
+        let mut excluded: std::collections::HashSet<material_system::MaterialHandle> =
+            std::collections::HashSet::new();
+        for (i, probe_link) in self.material_system.material_reflection_probe.iter().enumerate() {
+            if probe_link.is_some() {
+                excluded.insert((i + 1) as material_system::MaterialHandle);
+            }
+        }
+
+        // Cache main-pass per-view inputs once outside the loop.
+        let main_view = self.current_view_matrix;
+        let proj      = self.current_proj_matrix;
+        let cam_pos   = self.current_camera_pos;
+
+        // Snapshot the existing PerView uniforms by reconstructing
+        // the same struct material_system_begin_frame writes — we
+        // need a fresh copy per probe to swap view/view_proj.
+        let base_per_view = material_system::PerViewUniforms {
+            view:           main_view,
+            proj,
+            view_proj:      self.current_vp_matrix,
+            prev_view_proj: self.prev_vp_matrix,
+            inv_proj:       self.current_inv_proj_matrix,
+            camera_pos: [
+                cam_pos[0], cam_pos[1], cam_pos[2],
+                self.lighting_uniforms.camera_pos[3],
+            ],
+            camera_dir: [0.0, 0.0, -1.0, 70.0_f32.to_radians()],
+            ambient:    self.lighting_uniforms.ambient,
+            fog:        [self.fog_color[0], self.fog_color[1], self.fog_color[2], self.fog_density],
+            sun_dir:    self.lighting_uniforms.light_dir,
+            sun_color:  self.lighting_uniforms.light_color,
+            dir_light_count:   self.lighting_uniforms.dir_light_count,
+            dir_lights:        std::array::from_fn(|i| material_system::PerViewDirLight {
+                direction: self.lighting_uniforms.dir_lights[i].direction,
+                color:     self.lighting_uniforms.dir_lights[i].color,
+            }),
+            point_light_count: self.lighting_uniforms.point_light_count,
+            point_lights:      std::array::from_fn(|i| material_system::PerViewPointLight {
+                position: self.lighting_uniforms.point_lights[i].position,
+                color:    self.lighting_uniforms.point_lights[i].color,
+            }),
+            shadow_splits:   self.lighting_uniforms.shadow_cascade_splits,
+            shadow_view:     self.lighting_uniforms.shadow_view_matrix,
+            shadow_cascades: self.lighting_uniforms.shadow_cascade_vps,
+        };
+
+        // Iterate probes by index — we mutate `material_system`'s
+        // commands view while iterating, so collect the work first.
+        let probe_count = self.planar_probes.len();
+        for i in 0..probe_count {
+            let (plane_y, normal, color_view, depth_view) = match &self.planar_probes[i] {
+                Some(p) => (p.plane_y, p.normal, p.color_view.clone(), p.depth_view.clone()),
+                None => continue,
+            };
+            let view_buf = match self.planar_probe_view_buffers[i].as_ref() {
+                Some(b) => b, None => continue,
+            };
+
+            // Mirror the camera + recompute view_proj for the probe.
+            let mirror_view = planar_reflection::mirrored_view(main_view, plane_y, normal);
+            let mirror_vp   = mat4_multiply(proj, mirror_view);
+            let mirror_cam  = planar_reflection::mirrored_camera_pos(cam_pos, plane_y, normal);
+
+            let mut per_view = base_per_view;
+            per_view.view      = mirror_view;
+            per_view.view_proj = mirror_vp;
+            per_view.camera_pos[0] = mirror_cam[0];
+            per_view.camera_pos[1] = mirror_cam[1];
+            per_view.camera_pos[2] = mirror_cam[2];
+            // prev_view_proj stays as the main camera's previous VP
+            // — TAA reprojection isn't meaningful for the reflection
+            // probe (we don't temporally accumulate it), so this is
+            // benign.
+            self.queue.write_buffer(view_buf, 0, bytemuck::bytes_of(&per_view));
+
+            // The fog colour is a sensible "sky colour" approximation
+            // for the cleared reflection RT. Materials sampling the
+            // probe RT outside the rendered frustum (top of the
+            // texture for a horizontal water plane) get fog tinting
+            // instead of pure black.
+            let clear_color = wgpu::Color {
+                r: self.fog_color[0] as f64,
+                g: self.fog_color[1] as f64,
+                b: self.fog_color[2] as f64,
+                a: 1.0,
+            };
+
+            let view_bg = self.planar_probe_view_bgs[i].as_ref().unwrap();
+            let cache   = &self.model_gpu_cache;
+            let mat_sys = &self.material_system;
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bloom_planar_reflection_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear_color),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                mat_sys.dispatch_with_view(
+                    &mut pass, view_bg,
+                    |handle| !excluded.contains(&handle),
+                    |handle, idx| {
+                        if let Some(Some(meshes)) = cache.get(&handle) {
+                            if idx < meshes.len() {
+                                let mesh = &meshes[idx];
+                                return Some((&mesh.vb, &mesh.ib, mesh.index_count));
+                            }
+                        }
+                        None
+                    },
+                );
+            }
+            // NOTE: V1 leaves cull-mode flipping unfixed — the
+            // mirrored pass renders with the materials' compiled
+            // cull_mode, which is `Back` for opaque pipelines. As
+            // documented in the EN-011 ticket, the corollary is
+            // that single-sided Opaque draws look "inside-out" in
+            // the reflection. For a horizontal water plane viewed
+            // from above the artifact is mostly hidden because the
+            // back-faces still discard against the depth buffer
+            // and the most-noticeable reflectees (trees, bridges)
+            // are double-sided cutout. Future work: pass-time
+            // pipeline switching to swap cull modes, OR a uniform
+            // flag the shader honours to flip facing.
+        }
     }
 
     /// Sync PerFrame + PerView uniforms from current renderer state.

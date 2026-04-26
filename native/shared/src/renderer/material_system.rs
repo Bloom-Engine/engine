@@ -169,6 +169,12 @@ pub struct MaterialSystem {
     _default_white_tex:               wgpu::Texture,
     _default_white_view:              wgpu::TextureView,
     _default_sampler:                 wgpu::Sampler,
+    /// EN-011 — 1×1 black texture bound at @group(2) @binding(12) for
+    /// materials that don't have a planar reflection probe linked.
+    /// Lets shaders unconditionally `textureSample(planar_reflection_tex,
+    /// …)` without branching on probe presence.
+    _default_black_tex:               wgpu::Texture,
+    pub default_black_view:           wgpu::TextureView,
 
     /// Phase 5 — per-material `user_params` UBOs. Indexed by
     /// `MaterialHandle - 1`; `None` means the material uses the default
@@ -176,6 +182,15 @@ pub struct MaterialSystem {
     /// `set_user_params` call.
     pub material_params_buffers: Vec<Option<wgpu::Buffer>>,
     pub material_per_material_bgs: Vec<Option<wgpu::BindGroup>>,
+
+    /// EN-011 — link from material → planar reflection probe handle
+    /// (1-based; `None` → default 1×1 black texture at binding 12).
+    /// Indexed by `MaterialHandle - 1`. Set via
+    /// `Renderer::set_material_reflection_probe`; the per-material
+    /// bind group is rebuilt at that call so subsequent draws see
+    /// the probe's texture even though the engine repaints the
+    /// texture each frame (the wgpu Texture identity stays stable).
+    pub material_reflection_probe: Vec<Option<u32>>,
 
     // Per-draw UBO pool. Buffers grow 1-by-1 as draws pile up.
     // Each entry is `(PerDraw UBO, bind group binding it + the global
@@ -264,6 +279,28 @@ impl MaterialSystem {
             &[255, 255, 255, 255],
         );
         let default_white_view = default_white_tex.create_view(&Default::default());
+
+        // EN-011 — Default 1×1 black HDR texture for the planar
+        // reflection slot (binding 12). Format is Rgba16Float to match
+        // the actual probe RT so the bind-group layout is identical
+        // whether a probe is bound or the default.
+        let black_pixel: [u16; 4] = [0, 0, 0, 0];
+        let default_black_tex = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("material_default_black_reflection"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: super::formats::HDR_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            Default::default(),
+            bytemuck::cast_slice(&black_pixel),
+        );
+        let default_black_view = default_black_tex.create_view(&Default::default());
         let default_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("material_default_samp"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -364,6 +401,11 @@ impl MaterialSystem {
                 wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&default_sampler) },
                 wgpu::BindGroupEntry { binding: 10, resource: default_material_factors_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 11, resource: default_user_params_buffer.as_entire_binding() },
+                // EN-011 — default black 1×1 reflection texture +
+                // shared linear sampler. Replaced per-material when a
+                // game calls `set_material_reflection_probe`.
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&default_black_view) },
+                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&default_sampler) },
             ],
         });
 
@@ -433,8 +475,11 @@ impl MaterialSystem {
             _default_white_tex: default_white_tex,
             _default_white_view: default_white_view,
             _default_sampler: default_sampler,
+            _default_black_tex: default_black_tex,
+            default_black_view,
             material_params_buffers: Vec::new(),
             material_per_material_bgs: Vec::new(),
+            material_reflection_probe: Vec::new(),
             per_draw_buffers: Vec::new(),
             per_draw_bgs: Vec::new(),
             scene_inputs_bg: None,
@@ -556,7 +601,10 @@ impl MaterialSystem {
 
         // Allocate the per-material UBO + BG on first set. Padded to 256 B
         // so the ABI cap is reflected in the buffer size and write_buffer
-        // never partially fills.
+        // never partially fills. EN-011 bindings 12/13 default to the
+        // shared 1×1 black reflection texture; if a probe was previously
+        // linked via `set_reflection_probe`, the reflection BG will be
+        // rebuilt by that path the next time the link changes.
         if self.material_params_buffers[idx].is_none() {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("material_user_params"),
@@ -580,6 +628,8 @@ impl MaterialSystem {
                     wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
                     wgpu::BindGroupEntry { binding: 10, resource: self._default_material_factors_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 11, resource: buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.default_black_view) },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
                 ],
             });
             self.material_params_buffers[idx] = Some(buf);
@@ -600,6 +650,85 @@ impl MaterialSystem {
         self.material_per_material_bgs.get(idx)
             .and_then(|b| b.as_ref())
             .unwrap_or(&self.default_per_material_bg)
+    }
+
+    /// EN-011 — link a material to a planar reflection probe's RT
+    /// view. The per-material bind group is rebuilt so binding 12
+    /// resolves to the probe's `color_view` instead of the default
+    /// 1×1 black texture. Subsequent draws of `handle` see the
+    /// probe's contents.
+    ///
+    /// Pass `probe_view = None` (or revert to the default by passing
+    /// `&self.default_black_view` from the caller side) to unlink.
+    /// The `probe_handle` is opaque to this method — it's stored
+    /// purely so `material_reflection_probe[idx]` reflects the link
+    /// for diagnostics + the renderer's per-frame dispatch.
+    ///
+    /// The wgpu Texture identity is stable for the probe's lifetime,
+    /// so we DON'T need to rebuild this bind group every frame; the
+    /// engine repaints the probe's texture but the same view keeps
+    /// pointing at it.
+    ///
+    /// Why we route through here vs direct field access: the BG
+    /// also needs to bind a user-params UBO (binding 11) — either
+    /// the per-material UBO when one was allocated by
+    /// `set_user_params`, or the shared default zero-UBO. This
+    /// helper picks the right one.
+    pub fn set_reflection_probe(
+        &mut self,
+        device: &wgpu::Device,
+        handle:       MaterialHandle,
+        probe_handle: u32,
+        probe_view:   &wgpu::TextureView,
+    ) -> Result<(), &'static str> {
+        if handle == 0 { return Err("invalid material handle"); }
+        let idx = (handle - 1) as usize;
+        if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
+            return Err("material handle not registered");
+        }
+
+        // Grow parallel vectors so the index is in bounds. We grow
+        // BOTH params + reflection registries together — they share
+        // an index domain (MaterialHandle - 1).
+        while self.material_params_buffers.len()  <= idx {
+            self.material_params_buffers.push(None);
+            self.material_per_material_bgs.push(None);
+        }
+        while self.material_reflection_probe.len() <= idx {
+            self.material_reflection_probe.push(None);
+        }
+        self.material_reflection_probe[idx] = Some(probe_handle);
+
+        // Resolve binding 11 — per-material UBO if one's been
+        // allocated, else the shared zero-init default.
+        let user_params_buf: &wgpu::Buffer = self.material_params_buffers
+            .get(idx)
+            .and_then(|b| b.as_ref())
+            .unwrap_or(&self._default_user_params_buffer);
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material_per_material_bg_reflection"),
+            layout: &self.layouts.per_material,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 1,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 2,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 3,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 4,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 5,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 6,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 10, resource: self._default_material_factors_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: user_params_buf.as_entire_binding() },
+                // EN-011 — probe's color view + a filtering sampler.
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(probe_view) },
+                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+            ],
+        });
+        self.material_per_material_bgs[idx] = Some(bg);
+        Ok(())
     }
 
     /// Convenience — true if either bucket has queued work this frame.
@@ -792,14 +921,40 @@ impl MaterialSystem {
     pub fn dispatch<'pass, F>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
-        mut mesh_fetch: F,
+        mesh_fetch: F,
     )
     where F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32)>
+    {
+        self.dispatch_with_view(pass, &self.per_view_bg, |_| true, mesh_fetch);
+    }
+
+    /// EN-011 — like `dispatch`, but uses a caller-supplied PerView
+    /// bind group (so the planar-reflection pass can render the same
+    /// draws against a mirrored camera UBO) and skips any command
+    /// whose material handle the `accept` predicate rejects (so the
+    /// reflection pass can drop hardcoded-excluded materials —
+    /// foliage, particles, grass — without touching the original
+    /// command list).
+    ///
+    /// `accept` is consulted once per command; the engine passes a
+    /// closure that closes over a small `HashSet<MaterialHandle>` of
+    /// excluded material handles.
+    pub fn dispatch_with_view<'pass, F, A>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        per_view_bg: &'pass wgpu::BindGroup,
+        mut accept:  A,
+        mut mesh_fetch: F,
+    )
+    where
+        F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32)>,
+        A: FnMut(MaterialHandle) -> bool,
     {
         if self.commands.is_empty() { return; }
 
         let mut last_material: MaterialHandle = 0;
         for cmd in &self.commands {
+            if !accept(cmd.material) { continue; }
             if cmd.material != last_material {
                 let mat = match self.pipelines.get(cmd.material as usize - 1) {
                     Some(Some(m)) => m,
@@ -807,7 +962,7 @@ impl MaterialSystem {
                 };
                 pass.set_pipeline(&mat.pipeline);
                 pass.set_bind_group(0, &self.per_frame_bg, &[]);
-                pass.set_bind_group(1, &self.per_view_bg, &[]);
+                pass.set_bind_group(1, per_view_bg, &[]);
                 pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);
                 last_material = cmd.material;
             }

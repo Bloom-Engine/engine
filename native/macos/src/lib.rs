@@ -1655,6 +1655,35 @@ pub extern "C" fn bloom_destroy_instance_buffer(handle: f64) {
     engine().renderer.destroy_instance_buffer(handle as u32);
 }
 
+/// EN-011 — create a planar reflection probe and return its 1-based
+/// handle (0 on failure). Each frame, the engine renders the world
+/// (minus materials linked to a probe) from a camera mirrored across
+/// (`plane_y`, `normal_xyz`) into a square HDR RT at `resolution²`.
+/// Pass `resolution = 0` to default to half the swapchain width.
+///
+/// Pair with `bloom_set_material_reflection_probe` to wire the probe
+/// into a water material's `@group(2) @binding(12)` slot.
+#[no_mangle]
+pub extern "C" fn bloom_create_planar_reflection(
+    plane_y: f64, nx: f64, ny: f64, nz: f64, resolution: f64,
+) -> f64 {
+    engine().renderer.create_planar_reflection(
+        plane_y as f32,
+        [nx as f32, ny as f32, nz as f32],
+        resolution as u32,
+    ) as f64
+}
+
+/// EN-011 — link a material to a planar reflection probe. Subsequent
+/// draws of `material` see the probe's RT at `@group(2) @binding(12)`.
+/// Pass `probe = 0` to revert to the default 1×1 black texture.
+#[no_mangle]
+pub extern "C" fn bloom_set_material_reflection_probe(
+    material: f64, probe: f64,
+) {
+    engine().renderer.set_material_reflection_probe(material as u32, probe as u32);
+}
+
 /// Phase 6 — file-backed material compile. The path is registered
 /// with the hot-reload watcher; subsequent edits trigger an automatic
 /// recompile on the next end_frame. `bucket_kind` selects the

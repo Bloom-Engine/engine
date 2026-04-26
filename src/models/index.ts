@@ -27,6 +27,8 @@ declare function bloom_compile_material_instanced(source: number): number;
 declare function bloom_create_instance_buffer(dataPtr: any, instanceCount: number): number;
 declare function bloom_submit_material_draw_instanced(material: number, meshHandle: number, meshIdx: number, instanceBuffer: number, instanceCount: number): void;
 declare function bloom_destroy_instance_buffer(handle: number): void;
+declare function bloom_create_planar_reflection(planeY: number, normalX: number, normalY: number, normalZ: number, resolution: number): number;
+declare function bloom_set_material_reflection_probe(material: number, probe: number): void;
 declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
@@ -369,6 +371,59 @@ export function drawMeshWithMaterialInstanced(
 /// (no-op).
 export function destroyInstanceBuffer(handle: number): void {
   bloom_destroy_instance_buffer(handle);
+}
+
+/// EN-011 — create a planar reflection probe. Each frame, the engine
+/// renders the world (minus excluded materials) from a mirror camera
+/// across the given plane into an HDR RT, bound at `@group(2)
+/// @binding(12)` on materials that opt in via
+/// `setMaterialReflectionProbe`.
+///
+/// Use for water surfaces where the static `env_tex` sky reflection
+/// isn't enough — the planar reflection captures the actual scene
+/// geometry (trees, bridges) reflected on the water plane, with
+/// wave-normal wobble applied by the material's WGSL.
+///
+/// Arguments:
+///   - `planeY` — world-space Y offset of the reflective plane
+///   - `normalX/Y/Z` — plane normal (typically (0,1,0) for water)
+///   - `resolution` — square texture side in pixels; pass 0 to
+///     default to half the swapchain width
+///
+/// Returns a 1-based probe handle (0 on failure).
+///
+/// V1 limits: one probe per plane, repainted every frame, hardcoded
+/// exclude list (materials linked to a probe never appear in their
+/// own reflection — the water plane doesn't show up in itself).
+/// Future: cull-mode flip for correct front-face winding (V1 leaves
+/// pipelines' compiled cull mode in place; the artifact is mostly
+/// hidden for typical horizontal-water-from-above viewpoints).
+///
+/// WGSL pattern in a water material:
+///   ```wgsl
+///   let screen_uv = clip_position.xy / vec2<f32>(frame.screen_resolution);
+///   let perturb = wave_normal.xz * 0.05;
+///   let refl = textureSample(planar_reflection_tex,
+///                            planar_reflection_samp,
+///                            screen_uv + perturb).rgb;
+///   ```
+export function createPlanarReflection(
+  planeY: number,
+  normalX: number, normalY: number, normalZ: number,
+  resolution: number,
+): number {
+  return bloom_create_planar_reflection(planeY, normalX, normalY, normalZ, resolution);
+}
+
+/// EN-011 — link `material` to a planar reflection probe (handle
+/// returned by `createPlanarReflection`). The probe's RT is bound at
+/// `@group(2) @binding(12)` on subsequent draws. Pass `probe = 0` to
+/// unlink and revert to the default 1×1 black texture.
+///
+/// Materials linked to any probe are automatically excluded from
+/// every probe's render — the water surface doesn't reflect itself.
+export function setMaterialReflectionProbe(material: number, probe: number): void {
+  bloom_set_material_reflection_probe(material, probe);
 }
 
 /**

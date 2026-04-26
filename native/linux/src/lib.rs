@@ -1021,6 +1021,30 @@ pub extern "C" fn bloom_destroy_instance_buffer(handle: f64) {
     engine().renderer.destroy_instance_buffer(handle as u32);
 }
 
+/// EN-011 — create a planar reflection probe. See macOS lib.rs for the
+/// full doc comment; this entry-point exists on every native platform
+/// so games can target the same FFI surface across iOS/tvOS/Windows/
+/// Linux/Android.
+#[no_mangle]
+pub extern "C" fn bloom_create_planar_reflection(
+    plane_y: f64, nx: f64, ny: f64, nz: f64, resolution: f64,
+) -> f64 {
+    engine().renderer.create_planar_reflection(
+        plane_y as f32,
+        [nx as f32, ny as f32, nz as f32],
+        resolution as u32,
+    ) as f64
+}
+
+/// EN-011 — link a material to a planar reflection probe. `probe = 0`
+/// reverts the binding to the engine's default 1×1 black texture.
+#[no_mangle]
+pub extern "C" fn bloom_set_material_reflection_probe(
+    material: f64, probe: f64,
+) {
+    engine().renderer.set_material_reflection_probe(material as u32, probe as u32);
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_compile_material_from_file(
     path_ptr: *const u8,
