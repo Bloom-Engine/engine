@@ -1,0 +1,149 @@
+name: Release
+
+# Fires on a version tag push (e.g. `v0.3.2`). Gates on the Tests workflow
+# passing for the exact same commit, then creates/updates the GitHub Release
+# and (once wired up) would publish to npm.
+#
+# The /release Claude Code skill in .claude/skills/release/ drives this end
+# to end: it bumps the version in package.json, commits, tags, pushes, and
+# waits for this workflow to go green.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re-)publish a release for (e.g. v0.3.2)"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # never cancel a release mid-flight
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: wait for `Tests` to pass on this commit before we create the GitHub
+  # Release. Same pattern as Perry's release-packages.yml — query the API by
+  # workflow filename + head_sha and poll until it completes. Fails loud if
+  # Tests failed so we don't ship a known-broken tag.
+  # ---------------------------------------------------------------------------
+  await-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Wait for Tests workflow to pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "workflow_dispatch — bypassing test gate (manual republish)."
+            exit 0
+          fi
+          echo "Gating release on commit $SHA"
+          deadline=$(( SECONDS + 45 * 60 ))
+          retry_on_error=1
+          while :; do
+            set +e
+            api_out=$(gh api \
+              "/repos/$REPO/actions/workflows/test.yml/runs?head_sha=$SHA&per_page=1" \
+              2>&1)
+            rc=$?
+            set -e
+            if [ $rc -ne 0 ]; then
+              echo "  gh api failed (rc=$rc):"
+              echo "$api_out" | awk '{print "    " $0}'
+              if [ $retry_on_error -gt 0 ]; then
+                retry_on_error=0
+                echo "  retrying once after 10s"
+                sleep 10
+                continue
+              fi
+              echo "  gh api still failing after retry — failing gate."
+              exit 1
+            fi
+            retry_on_error=1
+            status=$(echo "$api_out" | jq -r '.workflow_runs[0].status // empty')
+            conclusion=$(echo "$api_out" | jq -r '.workflow_runs[0].conclusion // empty')
+            url=$(echo "$api_out" | jq -r '.workflow_runs[0].html_url // empty')
+            if [ -z "$status" ]; then
+              echo "  no Tests run found yet for $SHA — waiting"
+            elif [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "  OK  Tests passed: $url"
+                break
+              else
+                echo "  FAIL  Tests $conclusion: $url"
+                exit 1
+              fi
+            else
+              echo "  Tests: $status ($url) — waiting"
+            fi
+            if [ $SECONDS -ge $deadline ]; then
+              echo "  timed out waiting for Tests"
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "Gate passed — proceeding to publish."
+
+  # ---------------------------------------------------------------------------
+  # Create (or update) the GitHub Release for this tag. The /release skill
+  # usually creates the release *body* from the CLI after pushing the tag;
+  # this job is a safety net: if the tag exists but no release does yet, it
+  # creates one with auto-generated notes.
+  # ---------------------------------------------------------------------------
+  github-release:
+    needs: await-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: tag
+        env:
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ -n "$DISPATCH_TAG" ]; then
+            TAG="$DISPATCH_TAG"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release (if missing)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — leaving body alone."
+            exit 0
+          fi
+          echo "Creating release $TAG with auto-generated notes."
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes
+
+      - name: Verify package.json version matches tag
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PKG_VERSION" != "$VERSION" ]; then
+            echo "WARNING  package.json version ($PKG_VERSION) does not match tag ($VERSION)."
+            echo "         This is normally a bug — the /release skill should bump package.json"
+            echo "         and commit before tagging. Continuing, but investigate."
+          else
+            echo "OK  package.json version matches tag ($VERSION)"
+          fi

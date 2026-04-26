@@ -1,0 +1,231 @@
+name: Tests
+
+# Runs on every PR to main, every push to main, and on version tag pushes
+# (so release.yml can gate publish on a green Tests run for the exact SHA
+# being released). Mirrors the gating pattern from the Perry compiler repo.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin macOS deployment target so cached object files carry a stable
+  # LC_VERSION_MIN regardless of which runner image Apple rolls to next.
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Shared crate unit tests on all three host OSes. Runs the jolt_sys smoke
+  # tests (bj_global_init → bj_world_create → bj_world_step → gravity fall →
+  # teardown), which exercise the compiled Jolt static lib at runtime. This
+  # is the strongest signal that the Rapier → Jolt migration works on each
+  # platform — a cmake build-only check would miss runtime issues like
+  # mismatched C++ ABI or thread-pool problems.
+  #
+  # Linux needs cmake + a C++ toolchain for the shim. Windows gets MSVC via
+  # the ilammy action so cmake's CXX compiler probe succeeds.
+  # ---------------------------------------------------------------------------
+  shared-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build deps (cmake + C++)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential pkg-config
+
+      - name: Set up MSVC environment (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/shared/target
+          key: ${{ runner.os }}-shared-${{ hashFiles('native/shared/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-shared-
+
+      - name: cargo test (bloom-shared + jolt)
+        working-directory: native/shared
+        run: cargo test --release
+
+  # ---------------------------------------------------------------------------
+  # Lint: rustfmt + clippy. Advisory while the codebase is still in flux.
+  # Flip `continue-on-error: false` once the lint baseline is clean.
+  # ---------------------------------------------------------------------------
+  lint:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: rustfmt --check (shared)
+        working-directory: native/shared
+        continue-on-error: true
+        run: cargo fmt --check
+
+      - name: clippy (shared, advisory)
+        working-directory: native/shared
+        continue-on-error: true
+        run: cargo clippy --release --no-deps -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Per-platform builds: each native crate is a separate Cargo workspace root
+  # (one Cargo.lock per platform) and they only build on their own OS.
+  # A successful build proves that:
+  #   1. The platform crate compiles against the current shared API
+  #   2. The Jolt C++ shim builds for that target (cmake picks a working
+  #      toolchain)
+  #   3. wgpu + the platform's windowing + audio deps resolve cleanly
+  # ---------------------------------------------------------------------------
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/macos/target
+          key: ${{ runner.os }}-macos-crate-${{ hashFiles('native/macos/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-macos-crate-
+
+      - name: cargo build --release (bloom-macos)
+        working-directory: native/macos
+        run: cargo build --release
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system deps (X11, ALSA, cmake, C++ toolchain)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxcb1-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libasound2-dev libpulse-dev \
+            pkg-config cmake build-essential
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/linux/target
+          key: ${{ runner.os }}-linux-crate-${{ hashFiles('native/linux/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-linux-crate-
+
+      - name: cargo build --release (bloom-linux)
+        working-directory: native/linux
+        run: cargo build --release
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up MSVC environment
+        # Populates LIB / INCLUDE / PATH so cmake (which builds the Jolt C++
+        # shim via bloom-shared's build.rs) can find the Windows SDK. Without
+        # this, jolt cmake fails the initial CXX compiler probe even though
+        # MSVC is installed on the runner.
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/windows/target
+          key: ${{ runner.os }}-windows-crate-${{ hashFiles('native/windows/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-windows-crate-
+
+      - name: cargo build --release (bloom-windows)
+        working-directory: native/windows
+        run: cargo build --release
+
+  # ---------------------------------------------------------------------------
+  # Web / WASM. No submodule needed: bloom-shared's build.rs early-exits on
+  # target_arch=wasm32, and web physics is bridged to JoltPhysics.js at
+  # runtime rather than a native Jolt static lib.
+  # ---------------------------------------------------------------------------
+  build-web:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/web/target
+            native/shared/target
+          key: ${{ runner.os }}-web-${{ hashFiles('native/web/Cargo.lock', 'native/shared/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-web-
+
+      - name: cargo check (shared, wasm32, web feature)
+        working-directory: native/shared
+        run: cargo check --target wasm32-unknown-unknown --no-default-features --features web
+
+      - name: wasm-pack build (bloom-web)
+        working-directory: native/web
+        run: wasm-pack build --release --target web
