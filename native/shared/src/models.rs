@@ -534,28 +534,6 @@ fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
     out
 }
 
-/// Walk a glTF scene subtree, composing node transforms down and
-/// recording the world transform of the first node that instances
-/// each mesh. Used by the loader to bake mesh-local vertices into
-/// world space so the realtime render matches reference framings.
-fn walk_scene_for_mesh_transforms(
-    node: &gltf::Node,
-    parent: &[[f32; 4]; 4],
-    out: &mut [Option<[[f32; 4]; 4]>],
-) {
-    let local = node.transform().matrix();
-    let world = mat4_mul(parent, &local);
-    if let Some(mesh) = node.mesh() {
-        let idx = mesh.index();
-        if idx < out.len() && out[idx].is_none() {
-            out[idx] = Some(world);
-        }
-    }
-    for child in node.children() {
-        walk_scene_for_mesh_transforms(&child, &world, out);
-    }
-}
-
 /// Walk the scene graph and collect EVERY world-space transform that
 /// references each mesh. Unlike `walk_scene_for_mesh_transforms` which
 /// records only the first occurrence, this version captures every
@@ -719,16 +697,6 @@ fn sample_vec3(timestamps: &[f32], values: &[[f32; 3]], time: f32) -> [f32; 3] {
     lerp_vec3(&values[i0], &values[i1], t)
 }
 
-fn quat_mul(a: &[f32; 4], b: &[f32; 4]) -> [f32; 4] {
-    // Hamilton product: a * b where q = [x, y, z, w]
-    [
-        a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
-        a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
-        a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
-        a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
-    ]
-}
-
 fn sample_quat(timestamps: &[f32], values: &[[f32; 4]], time: f32) -> [f32; 4] {
     if values.is_empty() { return [0.0, 0.0, 0.0, 1.0]; }
     if values.len() == 1 { return values[0]; }
@@ -761,7 +729,7 @@ fn compute_joint_transforms(
 // glTF animation loader
 // ============================================================
 
-fn read_accessor_f32(gltf: &gltf::Gltf, buffer_data: &[Vec<u8>], accessor: &gltf::Accessor) -> Vec<f32> {
+fn read_accessor_f32(_gltf: &gltf::Gltf, buffer_data: &[Vec<u8>], accessor: &gltf::Accessor) -> Vec<f32> {
     let view = match accessor.view() {
         Some(v) => v,
         None => return Vec::new(),

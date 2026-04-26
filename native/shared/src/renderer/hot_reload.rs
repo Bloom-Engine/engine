@@ -55,7 +55,7 @@ pub struct MaterialHotReload {
     /// Holding the watcher in the struct keeps the worker alive.
     /// `Option` because creation is fallible and we want a clean
     /// fallback (no hot reload) if `notify` errors at startup.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "hot-reload"))]
     _watcher: Option<notify::RecommendedWatcher>,
     /// Last-seen change time per path — `notify` fires multiple
     /// events for one save (truncate + write + close on macOS).
@@ -63,6 +63,7 @@ pub struct MaterialHotReload {
     last_event: Mutex<HashMap<PathBuf, Instant>>,
     /// Directories already passed to `watcher.watch` — repeatedly
     /// adding the same dir is fine but creates duplicate events.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "hot-reload"))]
     watched_dirs: Mutex<Vec<PathBuf>>,
 }
 
@@ -74,13 +75,14 @@ impl MaterialHotReload {
 
         // Watcher is on by default — even in release builds, since
         // our daily dev cycle uses --release for perf. Shipped game
-        // binaries can opt out by setting `BLOOM_NO_HOT_RELOAD=1`,
-        // which short-circuits the watcher thread (no notify
-        // listener is started; `compile_material_from_file` still
-        // succeeds and `drain_pending` just always returns empty).
-        // Resolves the RFC's "release builds have no watcher
-        // thread" sub-item without breaking dev workflow.
-        #[cfg(not(target_arch = "wasm32"))]
+        // binaries can opt out two ways:
+        //   - runtime: set `BLOOM_NO_HOT_RELOAD=1`, short-circuits the
+        //     watcher thread (compile_material_from_file still works,
+        //     drain_pending just always returns empty)
+        //   - compile-time: build with `--no-default-features` (or
+        //     without the `hot-reload` feature), which drops `notify`
+        //     from the dep tree entirely (EN-008)
+        #[cfg(all(not(target_arch = "wasm32"), feature = "hot-reload"))]
         let watcher = if std::env::var("BLOOM_NO_HOT_RELOAD").map(|v| v == "1").unwrap_or(false) {
             None
         } else {
@@ -109,9 +111,10 @@ impl MaterialHotReload {
             descriptors: HashMap::new(),
             rx: Mutex::new(rx),
             _tx: tx,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "hot-reload"))]
             _watcher: watcher,
             last_event: Mutex::new(HashMap::new()),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "hot-reload"))]
             watched_dirs: Mutex::new(Vec::new()),
         }
     }
@@ -174,7 +177,7 @@ impl MaterialHotReload {
     }
 
     fn ensure_dir_watched(&mut self, path: &std::path::Path) {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), feature = "hot-reload"))]
         {
             use notify::{RecursiveMode, Watcher};
             let dir = match path.parent() {
@@ -194,7 +197,7 @@ impl MaterialHotReload {
                 watched.push(dir);
             }
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", not(feature = "hot-reload")))]
         {
             let _ = path;
         }

@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["mp3", "jolt"]
+default = ["mp3", "jolt", "hot-reload"]
 mp3 = ["dep:minimp3"]
 jolt = []
+# EN-008 — gate the `notify` filesystem watcher behind a compile-time
+# feature. Default-on for the dev workflow; ship game binaries with
+# --no-default-features (or --features mp3,jolt) to drop notify from
+# the dep tree entirely.
+hot-reload = ["dep:notify"]
 web = ["dep:web-time"]
 
 [build-dependencies]
@@ -28,9 +33,10 @@ earcutr = "0.4"
 web-time = { version = "0.2", optional = true }
 # Phase 6 — hot-reload watcher for material WGSL files. Native only;
 # wasm doesn't have a filesystem to watch (gated in code via
-# cfg(not(target_arch = "wasm32"))).
+# cfg(not(target_arch = "wasm32"))). EN-008 made it opt-in via the
+# `hot-reload` cargo feature so shipped game builds can drop notify.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-notify = "6"
+notify = { version = "6", optional = true }
 
 [dev-dependencies]
 pollster = "0.4"

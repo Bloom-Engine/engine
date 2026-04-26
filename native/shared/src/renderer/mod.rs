@@ -546,7 +546,6 @@ struct GpuMesh {
     vb: wgpu::Buffer,
     ib: wgpu::Buffer,
     index_count: u32,
-    texture_idx: u32,
     /// Pre-built scene material bind group (base color + normal +
     /// metallic-roughness + emissive + material factors). Cached at
     /// model-upload time so draw_model_cached doesn't build one per
@@ -1144,7 +1143,6 @@ pub struct Renderer {
     // State
     pub render_mode: RenderMode,
     clear_color: wgpu::Color,
-    debug_frame: u64,
     // Multi-skin per-frame staging.
     //
     // Each `updateModelAnimation` call appends one entry to
@@ -5103,7 +5101,6 @@ impl Renderer {
             current_camera_pos: [0.0, 0.0, 0.0],
             uniform_3d_layout,
             render_mode: RenderMode::ScreenSpace,
-            debug_frame: 0,
             pending_skin_groups: Vec::with_capacity(8),
             frame_joint_data: Vec::with_capacity(256),
             model_skin_scale: 1.0,
@@ -10328,7 +10325,6 @@ impl Renderer {
                 vb,
                 ib,
                 index_count: mesh.indices.len() as u32,
-                texture_idx: base_color_idx,
                 material_bg,
                 _material_uniform: material_uniform,
             }

@@ -58,12 +58,15 @@ pub struct ImpulseField {
     pipeline:   wgpu::ComputePipeline,
     bg_layout:  wgpu::BindGroupLayout,
     info_buf:   wgpu::Buffer,
-    tex_a:      wgpu::Texture,
-    tex_b:      wgpu::Texture,
+    /// Backing textures for view_a/view_b — kept alive so the views
+    /// don't dangle. Sampling and binding go through the views; these
+    /// fields are write-only handles.
+    _tex_a:     wgpu::Texture,
+    _tex_b:     wgpu::Texture,
     view_a:     wgpu::TextureView,
     view_b:     wgpu::TextureView,
     sampler:    wgpu::Sampler,
-    /// When true, tex_a is the "front" that scene_inputs reads and
+    /// When true, view_a is the "front" that scene_inputs reads and
     /// the next compute pass reads-from. After dispatch we swap.
     front_is_a: bool,
     splats:     Vec<SplatData>,
@@ -168,7 +171,7 @@ impl ImpulseField {
 
         Self {
             pipeline, bg_layout, info_buf,
-            tex_a, tex_b, view_a, view_b, sampler,
+            _tex_a: tex_a, _tex_b: tex_b, view_a, view_b, sampler,
             front_is_a: true,
             splats: Vec::with_capacity(MAX_SPLATS_PER_FRAME),
         }
