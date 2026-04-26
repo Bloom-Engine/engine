@@ -161,6 +161,28 @@ struct MaterialFactors {
 @group(2) @binding(13) var planar_reflection_samp: sampler;
 
 // =====================================================================
+// EN-014 — Texture-array slots for splat-mapped terrain.
+// =====================================================================
+//
+// Three optional `texture_2d_array<f32>` slots. Materials that don't
+// bind a texture array see a 1×1×1 stub array (single transparent
+// black layer) so unconditional sampling is safe.
+//
+// Layer count is capped at 16 layers per array in V1. Games address
+// individual layers via a fragment-shader argument:
+//   let albedo = textureSample(albedo_array, albedo_array_samp,
+//                              uv_world_xz, layer_idx);
+//
+// Pair these with a splat-weight texture (RGBA8 with 4 weight channels)
+// in user_params for terrain blending. Single sampler is reused across
+// all 3 arrays — terrain layers share UV / filtering, so a per-array
+// sampler would just waste binding slots.
+@group(2) @binding(14) var albedo_array:      texture_2d_array<f32>;
+@group(2) @binding(15) var normal_array:      texture_2d_array<f32>;
+@group(2) @binding(16) var mr_array:          texture_2d_array<f32>;
+@group(2) @binding(17) var albedo_array_samp: sampler;
+
+// =====================================================================
 // Group 3 — PerDraw (transform + skinning)
 // =====================================================================
 

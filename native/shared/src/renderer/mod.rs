@@ -11654,6 +11654,46 @@ impl Renderer {
         }
     }
 
+    // ============================================================
+    // EN-014 — texture-array slots for splat-mapped terrain
+    // ============================================================
+
+    /// Create a texture array from a slice of layer source data
+    /// (`(rgba8 bytes, width, height)` per layer). All layers must
+    /// share the same `width × height`. V1 caps the layer count at
+    /// `MAX_TEXTURE_ARRAY_LAYERS` (16). Returns a 1-based handle, or
+    /// 0 on failure (empty / mismatched extents / zero-sized layer).
+    pub fn create_texture_array(&mut self, layers: &[(&[u8], u32, u32)]) -> u32 {
+        self.material_system.create_texture_array(&self.device, &self.queue, layers)
+    }
+
+    /// Link a texture array to a material at one of three slots:
+    ///   - 0 = albedo  (binding 14)
+    ///   - 1 = normal  (binding 15)
+    ///   - 2 = MR      (binding 16)
+    /// Pass `array = 0` to revert the slot to the engine's 1×1×1
+    /// stub. No-op for unknown handles or out-of-range slots.
+    ///
+    /// Resolves the material's currently-linked planar reflection
+    /// probe (if any) so binding 12 stays pointing at the probe's
+    /// RT across the BG rebuild — otherwise an EN-014 rebind would
+    /// silently drop an EN-011 reflection link.
+    pub fn set_material_texture_array(&mut self, material: u32, slot: u32, array: u32) {
+        let probe_view = match self.material_system.material_reflection_probe_handle(material) {
+            Some(probe) if probe != 0 => {
+                let idx = probe as usize - 1;
+                self.planar_probes.get(idx)
+                    .and_then(|p| p.as_ref())
+                    .map(|p| p.color_view.clone())
+                    .unwrap_or_else(|| self.material_system.default_black_view.clone())
+            }
+            _ => self.material_system.default_black_view.clone(),
+        };
+        self.material_system.set_material_texture_array(
+            &self.device, material, slot, array, &probe_view,
+        );
+    }
+
     /// EN-011 — render every registered probe's RT for this frame.
     /// Called from `end_frame_with_scene` BEFORE the main material
     /// pass so the probe textures are ready when materials sample

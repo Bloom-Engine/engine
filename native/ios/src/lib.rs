@@ -1336,6 +1336,51 @@ pub extern "C" fn bloom_set_material_reflection_probe(
     engine().renderer.set_material_reflection_probe(material as u32, probe as u32);
 }
 
+/// EN-014 — create a texture array from concatenated RGBA8 byte data.
+/// See macOS lib.rs for the full doc comment; this entry-point exists
+/// on every native platform so a TS game targets the same FFI across
+/// iOS / tvOS / Windows / Linux / Android.
+#[no_mangle]
+pub extern "C" fn bloom_create_texture_array(
+    data_ptr:    *const u8,
+    data_len:    f64,
+    width:       f64,
+    height:      f64,
+    layer_count: f64,
+) -> f64 {
+    if data_ptr.is_null() || data_len <= 0.0 { return 0.0; }
+    let w = width as u32;
+    let h = height as u32;
+    if w == 0 || h == 0 { return 0.0; }
+    let layers_count = (layer_count as u32)
+        .min(bloom_shared::renderer::material_system::MAX_TEXTURE_ARRAY_LAYERS);
+    if layers_count == 0 { return 0.0; }
+    let layer_size = (w as usize) * (h as usize) * 4;
+    let total_bytes = (data_len as usize)
+        .min(layers_count as usize * layer_size);
+    let bytes = unsafe { std::slice::from_raw_parts(data_ptr, total_bytes) };
+    let mut layers: Vec<(&[u8], u32, u32)> = Vec::with_capacity(layers_count as usize);
+    for i in 0..(layers_count as usize) {
+        let start = i * layer_size;
+        let end   = start + layer_size;
+        if end > bytes.len() { break; }
+        layers.push((&bytes[start..end], w, h));
+    }
+    engine().renderer.create_texture_array(&layers) as f64
+}
+
+/// EN-014 — link a texture-array handle to a material at one of three
+/// slots: 0 = albedo (binding 14), 1 = normal (binding 15),
+/// 2 = MR (binding 16). Pass `array = 0` to revert to the stub.
+#[no_mangle]
+pub extern "C" fn bloom_set_material_texture_array(
+    material: f64, slot: f64, array: f64,
+) {
+    engine().renderer.set_material_texture_array(
+        material as u32, slot as u32, array as u32,
+    );
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_compile_material_from_file(
     path_ptr: *const u8,

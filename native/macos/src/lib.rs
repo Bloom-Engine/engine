@@ -1684,6 +1684,64 @@ pub extern "C" fn bloom_set_material_reflection_probe(
     engine().renderer.set_material_reflection_probe(material as u32, probe as u32);
 }
 
+/// EN-014 — create a texture array from concatenated RGBA8 byte data.
+/// `data_ptr` points to `layer_count` × `width` × `height` × 4 bytes:
+/// each layer is one slab back-to-back. All layers share the same
+/// `width` × `height` (wgpu requires uniform extent for D2Array).
+/// Layer count is capped at 16 in V1; extras are dropped.
+///
+/// Returns a 1-based handle (0 on failure: null pointer, zero count,
+/// zero extent, or short data buffer). Pair with
+/// `bloom_set_material_texture_array` to bind the array to a
+/// material's @group(2) @binding 14/15/16 slot.
+///
+/// V1 takes raw bytes (not pre-loaded texture handles) because
+/// existing `bloom_load_texture` uploads to GPU and drops the source
+/// bytes — there's no CPU-side image registry to read from. Games
+/// pre-decode their layer images via the standard image-loading API
+/// (`loadImage`, etc.) and pass the raw RGBA bytes here.
+#[no_mangle]
+pub extern "C" fn bloom_create_texture_array(
+    data_ptr:    *const u8,
+    data_len:    f64,
+    width:       f64,
+    height:      f64,
+    layer_count: f64,
+) -> f64 {
+    if data_ptr.is_null() || data_len <= 0.0 { return 0.0; }
+    let w = width as u32;
+    let h = height as u32;
+    if w == 0 || h == 0 { return 0.0; }
+    let layers_count = (layer_count as u32)
+        .min(bloom_shared::renderer::material_system::MAX_TEXTURE_ARRAY_LAYERS);
+    if layers_count == 0 { return 0.0; }
+    let layer_size = (w as usize) * (h as usize) * 4;
+    let total_bytes = (data_len as usize)
+        .min(layers_count as usize * layer_size);
+    let bytes = unsafe { std::slice::from_raw_parts(data_ptr, total_bytes) };
+    let mut layers: Vec<(&[u8], u32, u32)> = Vec::with_capacity(layers_count as usize);
+    for i in 0..(layers_count as usize) {
+        let start = i * layer_size;
+        let end   = start + layer_size;
+        if end > bytes.len() { break; }
+        layers.push((&bytes[start..end], w, h));
+    }
+    engine().renderer.create_texture_array(&layers) as f64
+}
+
+/// EN-014 — link a texture-array handle to a material at one of three
+/// slots: 0 = albedo (binding 14), 1 = normal (binding 15),
+/// 2 = MR (binding 16). Pass `array = 0` to revert to the engine's
+/// 1×1×1 stub. No-op for unknown handles or out-of-range slots.
+#[no_mangle]
+pub extern "C" fn bloom_set_material_texture_array(
+    material: f64, slot: f64, array: f64,
+) {
+    engine().renderer.set_material_texture_array(
+        material as u32, slot as u32, array as u32,
+    );
+}
+
 /// Phase 6 — file-backed material compile. The path is registered
 /// with the hot-reload watcher; subsequent edits trigger an automatic
 /// recompile on the next end_frame. `bucket_kind` selects the

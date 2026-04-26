@@ -1008,6 +1008,55 @@ pub fn bloom_set_material_reflection_probe(
     engine().renderer.set_material_reflection_probe(material as u32, probe as u32);
 }
 
+/// EN-014 — pointer-shaped variant exists only so the FFI manifest
+/// validates against the Perry surface; JS glue calls
+/// `bloom_create_texture_array_bytes` with a `Uint8Array` instead.
+/// Same precedent as `bloom_create_instance_buffer` (see EN-001).
+#[wasm_bindgen]
+pub fn bloom_create_texture_array(
+    _data_ptr: f64, _data_len: f64, _width: f64, _height: f64, _layer_count: f64,
+) -> f64 {
+    0.0
+}
+
+/// EN-014 — create a texture array from concatenated RGBA8 bytes.
+/// JS glue passes a `Uint8Array` of `layer_count × width × height × 4`
+/// bytes (each layer back-to-back). Layer count is capped at 16; the
+/// rest are silently dropped. Returns a 1-based handle (0 on failure).
+#[wasm_bindgen]
+pub fn bloom_create_texture_array_bytes(
+    data: &[u8],
+    width: f64, height: f64, layer_count: f64,
+) -> f64 {
+    let w = width as u32;
+    let h = height as u32;
+    if w == 0 || h == 0 { return 0.0; }
+    let layers_count = (layer_count as u32)
+        .min(bloom_shared::renderer::material_system::MAX_TEXTURE_ARRAY_LAYERS);
+    if layers_count == 0 { return 0.0; }
+    let layer_size = (w as usize) * (h as usize) * 4;
+    let mut layers: Vec<(&[u8], u32, u32)> = Vec::with_capacity(layers_count as usize);
+    for i in 0..(layers_count as usize) {
+        let start = i * layer_size;
+        let end   = start + layer_size;
+        if end > data.len() { break; }
+        layers.push((&data[start..end], w, h));
+    }
+    engine().renderer.create_texture_array(&layers) as f64
+}
+
+/// EN-014 — link a texture-array handle to a material slot
+/// (0 = albedo / 1 = normal / 2 = MR). `array = 0` reverts to the
+/// engine's 1×1×1 stub.
+#[wasm_bindgen]
+pub fn bloom_set_material_texture_array(
+    material: f64, slot: f64, array: f64,
+) {
+    engine().renderer.set_material_texture_array(
+        material as u32, slot as u32, array as u32,
+    );
+}
+
 #[wasm_bindgen]
 pub fn bloom_compile_material_from_file(_path: f64, _bucket_kind: f64) -> f64 {
     // No-op: web has no filesystem — JS glue would have to fetch + call

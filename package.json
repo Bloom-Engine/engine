@@ -119,6 +119,8 @@
         { "name": "bloom_destroy_instance_buffer",     "params": ["f64"],                                              "returns": "void" },
         { "name": "bloom_create_planar_reflection",    "params": ["f64", "f64", "f64", "f64", "f64"],                  "returns": "f64"  },
         { "name": "bloom_set_material_reflection_probe", "params": ["f64", "f64"],                                     "returns": "void" },
+        { "name": "bloom_create_texture_array",        "params": ["i64", "f64", "f64", "f64", "f64"],                  "returns": "f64"  },
+        { "name": "bloom_set_material_texture_array",  "params": ["f64", "f64", "f64"],                                "returns": "void" },
         { "name": "bloom_set_post_pass",               "params": ["i64"],                                              "returns": "f64"  },
         { "name": "bloom_clear_post_pass",             "params": [],                                                   "returns": "void" },
         { "name": "bloom_draw_material",            "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },

@@ -140,6 +140,22 @@ pub struct InstanceBuffer {
     pub count:  u32,
 }
 
+/// EN-014 — owned wgpu::Texture + view + layer-count for a texture
+/// array. Lives in the `MaterialSystem::texture_arrays` registry,
+/// indexed by 1-based handle (0 = invalid). The view is a D2Array
+/// view over all `layer_count` layers (so `textureSample(arr, samp,
+/// uv, layer_idx)` resolves layers 0..layer_count-1).
+pub struct TextureArray {
+    pub texture:     wgpu::Texture,
+    pub view:        wgpu::TextureView,
+    pub layer_count: u32,
+}
+
+/// EN-014 — V1 cap on layers per texture array. The ticket calls this
+/// "enough for any landscape shader" (UE5's typical landscape uses
+/// 4–8 layers; 16 leaves headroom for foliage/debris splats).
+pub const MAX_TEXTURE_ARRAY_LAYERS: u32 = 16;
+
 // =====================================================================
 // The system
 // =====================================================================
@@ -175,6 +191,13 @@ pub struct MaterialSystem {
     /// …)` without branching on probe presence.
     _default_black_tex:               wgpu::Texture,
     pub default_black_view:           wgpu::TextureView,
+    /// EN-014 — 1×1×1 transparent-black texture-array stub bound to
+    /// bindings 14/15/16 (@group(2)) for materials that don't declare
+    /// their own array. Has to be a real D2Array view (not a 2D
+    /// texture cast) so the layout's `view_dimension: D2Array`
+    /// matches at bind time.
+    _default_array_tex:               wgpu::Texture,
+    pub default_array_view:           wgpu::TextureView,
 
     /// Phase 5 — per-material `user_params` UBOs. Indexed by
     /// `MaterialHandle - 1`; `None` means the material uses the default
@@ -234,6 +257,19 @@ pub struct MaterialSystem {
     /// `destroy_instance_buffer` so existing handles never collide
     /// with re-issued ones.
     pub instance_buffers: Vec<Option<InstanceBuffer>>,
+
+    /// EN-014 — texture arrays, indexed by 1-based handle (0 = invalid).
+    /// Each entry owns a wgpu D2Array texture + view + layer-count.
+    /// Created via `create_texture_array`, linked to a material's
+    /// per-material BG via `set_material_texture_array`.
+    pub texture_arrays: Vec<Option<TextureArray>>,
+
+    /// EN-014 — per-material → array-handle link, one slot for each
+    /// of the 3 array bindings (0 = albedo, 1 = normal, 2 = MR).
+    /// `None` means "use the default 1×1×1 stub array". Indexed by
+    /// `MaterialHandle - 1`, parallel to `material_per_material_bgs`
+    /// / `material_reflection_probe`.
+    pub material_texture_arrays: Vec<[Option<u32>; 3]>,
 }
 
 impl MaterialSystem {
@@ -301,6 +337,36 @@ impl MaterialSystem {
             bytemuck::cast_slice(&black_pixel),
         );
         let default_black_view = default_black_tex.create_view(&Default::default());
+
+        // EN-014 — Default 1×1×1 transparent-black texture-array stub
+        // for bindings 14/15/16. Has to be a real D2Array (depth_or_
+        // _array_layers = 1, viewed as D2Array) so the bind-group
+        // layout's view_dimension matches at bind time. Format is
+        // Rgba8Unorm — same as a typical albedo source so a game
+        // dropping in albedo data without thinking gets the expected
+        // sRGB-vs-linear behaviour. Materials that need linear
+        // (normal/MR) typically encode that into the layer they upload.
+        let default_array_tex = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("material_default_array_stub"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            Default::default(),
+            &[0, 0, 0, 0],
+        );
+        let default_array_view = default_array_tex.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("material_default_array_stub_view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
         let default_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("material_default_samp"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -406,6 +472,14 @@ impl MaterialSystem {
                 // game calls `set_material_reflection_probe`.
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&default_black_view) },
                 wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&default_sampler) },
+                // EN-014 — default 1×1×1 stub array bound to all 3
+                // texture-array slots, with the shared default
+                // sampler at binding 17. Replaced per-slot when a
+                // game calls `set_material_texture_array`.
+                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&default_array_view) },
+                wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&default_array_view) },
+                wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&default_array_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&default_sampler) },
             ],
         });
 
@@ -477,6 +551,8 @@ impl MaterialSystem {
             _default_sampler: default_sampler,
             _default_black_tex: default_black_tex,
             default_black_view,
+            _default_array_tex: default_array_tex,
+            default_array_view,
             material_params_buffers: Vec::new(),
             material_per_material_bgs: Vec::new(),
             material_reflection_probe: Vec::new(),
@@ -493,6 +569,8 @@ impl MaterialSystem {
             translucent_commands: Vec::new(),
             next_draw_slot: 0,
             instance_buffers: Vec::new(),
+            texture_arrays: Vec::new(),
+            material_texture_arrays: Vec::new(),
         }
     }
 
@@ -630,6 +708,11 @@ impl MaterialSystem {
                     wgpu::BindGroupEntry { binding: 11, resource: buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.default_black_view) },
                     wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                    // EN-014 — default stub array on all 3 slots.
+                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&self.default_array_view) },
+                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.default_array_view) },
+                    wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&self.default_array_view) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
                 ],
             });
             self.material_params_buffers[idx] = Some(buf);
@@ -706,6 +789,11 @@ impl MaterialSystem {
             .and_then(|b| b.as_ref())
             .unwrap_or(&self._default_user_params_buffer);
 
+        // EN-014 — resolve binding 14/15/16 from any per-material
+        // texture-array links so a probe-bound material doesn't lose
+        // its splat layers when the BG gets rebuilt.
+        let [albedo_view, normal_view, mr_view] = self.resolve_array_views(idx);
+
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material_per_material_bg_reflection"),
             layout: &self.layouts.per_material,
@@ -725,10 +813,224 @@ impl MaterialSystem {
                 // EN-011 — probe's color view + a filtering sampler.
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(probe_view) },
                 wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                // EN-014 — resolved texture arrays + shared sampler.
+                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(albedo_view) },
+                wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(normal_view) },
+                wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(mr_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
             ],
         });
         self.material_per_material_bgs[idx] = Some(bg);
         Ok(())
+    }
+
+    /// EN-014 — resolve the 3 D2Array texture views for a material
+    /// (albedo / normal / MR), falling back to the shared 1×1×1 stub
+    /// when the slot has no link. Returns borrowed views that share
+    /// the lifetime of `self`. Callers use these to populate bindings
+    /// 14/15/16 when (re)building a per-material BG.
+    fn resolve_array_views(&self, idx: usize) -> [&wgpu::TextureView; 3] {
+        let mut out: [&wgpu::TextureView; 3] = [
+            &self.default_array_view,
+            &self.default_array_view,
+            &self.default_array_view,
+        ];
+        if let Some(slots) = self.material_texture_arrays.get(idx) {
+            for (slot, link) in slots.iter().enumerate() {
+                if let Some(handle) = link {
+                    let h = *handle as usize;
+                    if h > 0 {
+                        if let Some(Some(arr)) = self.texture_arrays.get(h - 1) {
+                            out[slot] = &arr.view;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// EN-014 — create a 2D texture array from a slice of layer data.
+    /// Each `(bytes, w, h)` describes one layer's RGBA8 source. All
+    /// layers must share `w × h` (wgpu requires a uniform extent for
+    /// D2Array). V1 panics on mismatch — V2 may resize. Layer count
+    /// is capped at `MAX_TEXTURE_ARRAY_LAYERS`; extra layers are
+    /// dropped. Returns a 1-based handle (0 on failure: empty layers
+    /// or zero extent).
+    pub fn create_texture_array(
+        &mut self,
+        device: &wgpu::Device,
+        queue:  &wgpu::Queue,
+        layers: &[(&[u8], u32, u32)],
+    ) -> u32 {
+        let layer_count = (layers.len() as u32).min(MAX_TEXTURE_ARRAY_LAYERS);
+        if layer_count == 0 { return 0; }
+        let (_first_bytes, w, h) = layers[0];
+        if w == 0 || h == 0 { return 0; }
+        // Uniform extent check — V1 hard-fail surfaces obvious bugs at
+        // creation rather than during silent GPU truncation later.
+        for (i, (_, lw, lh)) in layers.iter().enumerate().take(layer_count as usize) {
+            if *lw != w || *lh != h {
+                eprintln!(
+                    "[texture_array] layer {} extent {}×{} does not match layer 0 ({}×{}); aborting create",
+                    i, lw, lh, w, h,
+                );
+                return 0;
+            }
+        }
+        let bytes_per_layer = (w as usize) * (h as usize) * 4;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("material_texture_array"),
+            size: wgpu::Extent3d {
+                width:                  w,
+                height:                 h,
+                depth_or_array_layers:  layer_count,
+            },
+            mip_level_count: 1,
+            sample_count:    1,
+            dimension:       wgpu::TextureDimension::D2,
+            format:          wgpu::TextureFormat::Rgba8Unorm,
+            usage:           wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (i, (bytes, _, _)) in layers.iter().enumerate().take(layer_count as usize) {
+            // Defensive — a short layer slice would panic in
+            // write_texture; skip and emit a diagnostic instead.
+            if bytes.len() < bytes_per_layer {
+                eprintln!(
+                    "[texture_array] layer {} short: {} B < {} B (skipping)",
+                    i, bytes.len(), bytes_per_layer,
+                );
+                continue;
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes[..bytes_per_layer],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("material_texture_array_view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        self.texture_arrays.push(Some(TextureArray {
+            texture, view, layer_count,
+        }));
+        self.texture_arrays.len() as u32
+    }
+
+    /// EN-014 — link a texture array to a material's per-material
+    /// bind-group at one of three slots (0 = albedo, 1 = normal,
+    /// 2 = MR). Pass `array = 0` to revert the slot to the default
+    /// 1×1×1 stub. The per-material BG is rebuilt so subsequent draws
+    /// see the new array view at @binding 14/15/16.
+    ///
+    /// `probe_view` is the binding-12 source — the caller (typically
+    /// `Renderer::set_material_texture_array`) resolves the
+    /// material's currently-linked reflection probe and passes its
+    /// `color_view` here, or `&self.default_black_view` to default.
+    /// This indirection keeps EN-011 reflection links live across
+    /// EN-014 rebinds without the MaterialSystem having to reach
+    /// into the Renderer's probe registry. Out-of-range slots /
+    /// unknown handles are no-ops with a diagnostic.
+    pub fn set_material_texture_array(
+        &mut self,
+        device:     &wgpu::Device,
+        material:   MaterialHandle,
+        slot:       u32,
+        array:      u32,
+        probe_view: &wgpu::TextureView,
+    ) {
+        if material == 0 { return; }
+        let idx = (material - 1) as usize;
+        if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
+            eprintln!("[texture_array] unknown material handle {material}");
+            return;
+        }
+        if slot >= 3 {
+            eprintln!("[texture_array] slot {slot} out of range (0..=2)");
+            return;
+        }
+        if array != 0 {
+            let h = array as usize;
+            if h == 0 || h > self.texture_arrays.len()
+                || self.texture_arrays[h - 1].is_none()
+            {
+                eprintln!("[texture_array] unknown array handle {array}");
+                return;
+            }
+        }
+
+        // Grow the link table so `idx` is in bounds. Parallel to
+        // the params + reflection registries but not strictly tied
+        // to either — texture-array links are independent.
+        while self.material_texture_arrays.len() <= idx {
+            self.material_texture_arrays.push([None, None, None]);
+        }
+        let link = if array == 0 { None } else { Some(array) };
+        self.material_texture_arrays[idx][slot as usize] = link;
+
+        // Rebuild the per-material BG. Resolve user_params from
+        // existing state so we don't clobber EN-005 links.
+        while self.material_params_buffers.len() <= idx {
+            self.material_params_buffers.push(None);
+            self.material_per_material_bgs.push(None);
+        }
+        let user_params_buf: &wgpu::Buffer = self.material_params_buffers
+            .get(idx)
+            .and_then(|b| b.as_ref())
+            .unwrap_or(&self._default_user_params_buffer);
+
+        let [albedo_view, normal_view, mr_view] = self.resolve_array_views(idx);
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material_per_material_bg_array"),
+            layout: &self.layouts.per_material,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 1,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 2,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 3,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 4,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 5,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 6,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 10, resource: self._default_material_factors_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: user_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(probe_view) },
+                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(albedo_view) },
+                wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(normal_view) },
+                wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(mr_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+            ],
+        });
+        self.material_per_material_bgs[idx] = Some(bg);
+    }
+
+    /// EN-014 — accessor for `material_reflection_probe[idx]`. The
+    /// Renderer wrapper uses this to resolve the currently-linked
+    /// probe handle when rebuilding the BG via
+    /// `set_material_texture_array`. Returns `None` for unset / out-
+    /// of-range / unlinked materials.
+    pub fn material_reflection_probe_handle(&self, material: MaterialHandle) -> Option<u32> {
+        if material == 0 { return None; }
+        let idx = (material as usize).checked_sub(1)?;
+        self.material_reflection_probe.get(idx).copied().flatten()
     }
 
     /// Convenience — true if either bucket has queued work this frame.

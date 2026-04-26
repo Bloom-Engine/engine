@@ -29,6 +29,8 @@ declare function bloom_submit_material_draw_instanced(material: number, meshHand
 declare function bloom_destroy_instance_buffer(handle: number): void;
 declare function bloom_create_planar_reflection(planeY: number, normalX: number, normalY: number, normalZ: number, resolution: number): number;
 declare function bloom_set_material_reflection_probe(material: number, probe: number): void;
+declare function bloom_create_texture_array(dataPtr: any, dataLen: number, width: number, height: number, layerCount: number): number;
+declare function bloom_set_material_texture_array(material: number, slot: number, array: number): void;
 declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
@@ -424,6 +426,49 @@ export function createPlanarReflection(
 /// every probe's render — the water surface doesn't reflect itself.
 export function setMaterialReflectionProbe(material: number, probe: number): void {
   bloom_set_material_reflection_probe(material, probe);
+}
+
+/// EN-014 — slot indices for `setMaterialTextureArray`.
+export const TEXTURE_ARRAY_ALBEDO = 0;
+export const TEXTURE_ARRAY_NORMAL = 1;
+export const TEXTURE_ARRAY_MR     = 2;
+
+/// EN-014 — create a 2D texture array from a flat RGBA8 byte buffer.
+/// All `layerCount` layers must share the same `width × height` (wgpu
+/// requires uniform extent for D2Array). The buffer holds each layer
+/// back-to-back: byte[0..(W·H·4)] = layer 0, byte[W·H·4..2·W·H·4] =
+/// layer 1, and so on. Layer count is capped at 16 in V1.
+///
+/// Returns a 1-based handle (0 on failure: zero count, zero extent,
+/// or short buffer). Pair with `setMaterialTextureArray` to bind to
+/// one of three slots (albedo / normal / MR) on a terrain material;
+/// the WGSL fragment samples the array via:
+///   ```wgsl
+///   let albedo = textureSample(albedo_array, albedo_array_samp,
+///                              uv_world_xz, layer_idx);
+///   ```
+///
+/// IMPORTANT: pass `dataLen` and `layerCount` derived from manually-
+/// tracked counters — NOT `bytes.length` if `bytes` was built via
+/// `.push()` — Perry's `.length` reports the literal-init size, not
+/// the post-push count. (See `feedback_perry_array_push.md`.)
+export function createTextureArray(
+  bytes: number[], dataLen: number,
+  width: number, height: number, layerCount: number,
+): number {
+  return bloom_create_texture_array(bytes as any, dataLen, width, height, layerCount);
+}
+
+/// EN-014 — link a texture-array handle to a material at one of three
+/// slots: `TEXTURE_ARRAY_ALBEDO` (binding 14), `TEXTURE_ARRAY_NORMAL`
+/// (binding 15), `TEXTURE_ARRAY_MR` (binding 16). Pass `array = 0` to
+/// revert the slot to the engine's 1×1×1 stub.
+///
+/// Materials don't need to bind every slot — the stub is safe to
+/// sample. A common pattern is to bind only `TEXTURE_ARRAY_ALBEDO`
+/// for a non-PBR splat-mapped terrain.
+export function setMaterialTextureArray(material: number, slot: number, array: number): void {
+  bloom_set_material_texture_array(material, slot, array);
 }
 
 /**

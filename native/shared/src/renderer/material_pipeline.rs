@@ -85,7 +85,10 @@ fn create_per_material_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     // helper, not by the layout itself). Bindings 12 (texture) + 13
     // (sampler) are the EN-011 planar reflection RT — bound to the
     // engine's 1×1 black default for materials without a probe so
-    // unconditional sampling is always safe.
+    // unconditional sampling is always safe. Bindings 14/15/16/17 are
+    // the EN-014 texture-array slots (albedo / normal / MR + a shared
+    // sampler) for splat-mapped terrain materials — bound to a 1×1×1
+    // black stub array when a material doesn't declare its own.
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("abi_per_material"),
         entries: &[
@@ -104,6 +107,11 @@ fn create_per_material_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             // EN-011 — planar reflection RT (texture + sampler).
             entry_tex_f(12, wgpu::ShaderStages::FRAGMENT),
             entry_samp(13,  wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
+            // EN-014 — texture-array slots for splat-mapped terrain.
+            entry_tex_f_array(14, wgpu::ShaderStages::FRAGMENT),
+            entry_tex_f_array(15, wgpu::ShaderStages::FRAGMENT),
+            entry_tex_f_array(16, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(17, wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
         ],
     })
 }
@@ -167,6 +175,21 @@ fn entry_tex_f(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEn
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+/// EN-014 — `texture_2d_array<f32>` binding entry. Used for the
+/// splat-mapped terrain slots (albedo / normal / MR arrays) at
+/// bindings 14/15/16. Filterable so games can use linear filtering
+/// per-layer.
+fn entry_tex_f_array(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding, visibility: vis,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
             multisampled: false,
         },
         count: None,
