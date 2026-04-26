@@ -801,14 +801,17 @@ pub struct Renderer {
     /// 1 = TAA on (default). When off the renderer behaves exactly
     /// as the pre-TAA pipeline did.
     pub taa_enabled: bool,
-    /// TSR (temporal super-resolution): render the G-buffer + HDR
-    /// chain at half-res, upscale via the TAA pass to full surface
-    /// resolution. Halves fragment count on the dominant passes
-    /// (main_hdr 4-MRT, scene_compose) for ~4× shading throughput.
-    /// Coupled to `taa_enabled` — TAA provides the temporal jitter
-    /// + history blend that reconstructs detail from sub-pixel
-    /// samples. Off → render at native surface resolution.
-    pub tsr_enabled: bool,
+    /// Render-resolution multiplier in [0.5, 1.0]. The G-buffer,
+    /// HDR, and composed RTs are sized to `surface * render_scale`;
+    /// TAA (or the upscale pass) brings the output back up to the
+    /// full surface for composite. At 0.5 = quarter-pixel shading
+    /// (former TSR default). At 1.0 = native.
+    pub render_scale: f32,
+    /// Set once `set_render_scale` is called explicitly. While false,
+    /// `set_taa_enabled` keeps the legacy coupling (TAA on = 0.5,
+    /// TAA off = 1.0). Once the user opts into explicit control, the
+    /// scale they picked sticks across subsequent TAA toggles.
+    pub render_scale_explicit: bool,
     /// Previous frame's view-projection matrix — TAA reads this to
     /// reproject the history texture into current-frame UV space,
     /// removing ghosting under camera motion. Updated at the end
@@ -4987,7 +4990,8 @@ impl Renderer {
             taa_uniform_buffer,
             taa_frame_index: 0,
             taa_enabled: true,
-            tsr_enabled: true,
+            render_scale: 0.5,
+            render_scale_explicit: false,
             prev_vp_matrix: IDENTITY_MAT4,
             fog_color: [0.7, 0.75, 0.82],
             fog_density: 0.0,
@@ -5284,18 +5288,18 @@ impl Renderer {
     /// `logical_width`/`logical_height` are the points size reported to
     /// user code via `screenWidth`/HUD — on non-HiDPI platforms they
     /// match the physical size.
-    /// Render-pass extent used by main_hdr + scene_compose. When TSR
-    /// is on this is half the surface size; the TAA pass upscales to
-    /// the full surface for composite. Off → native surface.
+    /// Render-pass extent used by main_hdr + scene_compose, computed
+    /// from `render_scale`. At 0.5 this is half the surface size and
+    /// the TAA pass (or upscale pass) brings it back to the full
+    /// surface for composite; at 1.0 it matches the surface.
     pub fn render_extent(&self) -> (u32, u32) {
-        if self.tsr_enabled {
-            (
-                (self.surface_config.width / 2).max(1),
-                (self.surface_config.height / 2).max(1),
-            )
-        } else {
-            (self.surface_config.width.max(1), self.surface_config.height.max(1))
-        }
+        let sw = self.surface_config.width as f32;
+        let sh = self.surface_config.height as f32;
+        let s = self.render_scale.clamp(0.5, 1.0);
+        (
+            ((sw * s).round() as u32).max(1),
+            ((sh * s).round() as u32).max(1),
+        )
     }
 
     pub fn resize(&mut self, width: u32, height: u32, logical_width: u32, logical_height: u32) {
@@ -5310,11 +5314,11 @@ impl Renderer {
             self.logical_height = logical_height.max(1);
             self.surface.configure(&self.device, &self.surface_config);
 
-            // Render-resolution RTs (G-buffer + composed). Half of
-            // surface when TSR is on, full surface otherwise. The
-            // TAA pass upscales the half-res composed_rt to the
-            // full-res history texture — the rest of the post-FX
-            // chain (DoF/MB/SSS) and composite stay at full surface.
+            // Render-resolution RTs (G-buffer + composed), sized to
+            // `surface * render_scale`. TAA (or the upscale pass)
+            // brings the composed_rt back to full surface; the rest
+            // of the post-FX chain (DoF/MB/SSS) and composite stay
+            // at full surface.
             let (rw, rh) = self.render_extent();
 
             let (dt, dv) = create_depth_texture(&self.device, rw, rh);
@@ -5525,15 +5529,33 @@ impl Renderer {
     }
 
     /// Toggle TAA on/off. Off = no jitter, no history blend, no
-    /// extra texture writes, no TSR. On = sub-pixel super-sampling
-    /// + half-res shading via TSR upscale.
+    /// extra texture writes. Until `set_render_scale` is called
+    /// explicitly this also flips `render_scale` between 0.5 (on)
+    /// and 1.0 (off) for backwards compat with the former TSR
+    /// coupling; once the user sets scale explicitly that choice
+    /// sticks across subsequent TAA toggles.
     pub fn set_taa_enabled(&mut self, enabled: bool) {
         if enabled != self.taa_enabled {
             self.taa_enabled = enabled;
-            self.tsr_enabled = enabled;
+            if !self.render_scale_explicit {
+                self.render_scale = if enabled { 0.5 } else { 1.0 };
+            }
             self.taa_frame_index = 0;
-            // TSR toggle changes render-resolution; recreate the
-            // affected RTs at the new size.
+            let (w, h) = (self.surface_config.width, self.surface_config.height);
+            self.resize(w, h, self.logical_width, self.logical_height);
+        }
+    }
+
+    /// Set the render-resolution multiplier explicitly. Clamped to
+    /// [0.5, 1.0]. Triggers a resize so render-res intermediates
+    /// pick up the new extent. Marks the scale as user-set so future
+    /// `set_taa_enabled` calls leave it alone.
+    pub fn set_render_scale(&mut self, scale: f32) {
+        let s = scale.clamp(0.5, 1.0);
+        self.render_scale_explicit = true;
+        if (s - self.render_scale).abs() > 1e-4 {
+            self.render_scale = s;
+            self.taa_frame_index = 0;
             let (w, h) = (self.surface_config.width, self.surface_config.height);
             self.resize(w, h, self.logical_width, self.logical_height);
         }
@@ -7531,11 +7553,11 @@ impl Renderer {
                 self.shadow_map.cascade_splits[0],
                 self.shadow_map.cascade_splits[1],
                 self.shadow_map.cascade_splits[2],
-                // .w = mip-LOD bias for material textures. -1 when
-                // TSR is on (rendering at half-res selects 1 mip
-                // coarser by hardware default, so bias finer to
-                // recover detail).
-                if self.tsr_enabled { -1.0 } else { 0.0 },
+                // .w = mip-LOD bias for material textures. Bias finer
+                // by log2(render_scale) — recovers -1.0 at 0.5 (one
+                // mip finer to offset hardware's coarser selection
+                // at half-res), ~-0.42 at 0.75, 0 at native.
+                if self.render_scale < 0.999 { self.render_scale.log2() } else { 0.0 },
             ];
             self.lighting_uniforms.shadow_view_matrix = self.current_view_matrix;
             self.queue.write_buffer(
@@ -9092,10 +9114,12 @@ impl Renderer {
         let taa_src_idx = 1 - self.taa_current_idx;
 
         if self.taa_enabled {
-            // TSR upscale needs a longer history window than full-res
-            // TAA because each frame contributes 1/4 the per-pixel
-            // sample density. 0.05 = ~20-frame effective window.
-            let steady = if self.tsr_enabled { 0.05 } else { 0.1 };
+            // Effective temporal window scales with per-pixel sample
+            // density (~render_scale²). At 0.5 → 0.0625 (~16-frame
+            // window, close to the prior 0.05/20-frame); at 1.0 →
+            // 0.10 (~10-frame), matching native TAA.
+            let s2 = self.render_scale * self.render_scale;
+            let steady = 0.05 + 0.05 * s2;
             let alpha = if self.taa_frame_index < 4 { 1.0 } else { steady };
             let tp = TaaParams {
                 params: [alpha, 0.0, 0.0, 0.0],
@@ -10325,11 +10349,11 @@ impl Renderer {
             let i = (self.taa_frame_index % 16) + 1;
             let jx = halton(i, 2) - 0.5;
             let jy = halton(i, 3) - 0.5;
-            // Jitter is sub-pixel in *render* space — when TSR is
-            // on the G-buffer is half-res, so each render pixel
-            // covers 2× surface pixels and the offset must scale
-            // accordingly. render_extent() returns surface size
-            // when TSR is off.
+            // Jitter is sub-pixel in *render* space — at fractional
+            // render_scale the G-buffer is smaller than the surface,
+            // so each render pixel covers 1/scale surface pixels and
+            // the offset must scale accordingly. render_extent()
+            // already reflects render_scale.
             let (rw, rh) = self.render_extent();
             let render_w = rw.max(1) as f32;
             let render_h = rh.max(1) as f32;
