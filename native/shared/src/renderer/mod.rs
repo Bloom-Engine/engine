@@ -5472,6 +5472,49 @@ impl Renderer {
         self.ssao_radius = radius.max(0.0001);
     }
 
+    // EN-012 V2 — SSAO backface half-strength on two-sided foliage:
+    // status = DEFERRED, requires ABI v3 RFC.
+    //
+    // The ticket asks for "half-strength SSAO on backfaces of two-sided
+    // foliage" so leaves don't go pure black when the camera sees the
+    // unlit side. The clean fix needs per-fragment data that doesn't
+    // exist in the G-buffer today:
+    //   OpaqueOut writes hdr (loc 0), material vec2 (loc 1), velocity
+    //   vec2 (loc 2), albedo vec4 (loc 3). None carries an
+    //   isFrontFace bit or a shading_model id that the SSAO compute
+    //   could read.
+    //
+    // Three viable design paths (V3 RFC needs to pick one):
+    //
+    // 1. Add @location(4) flags: u32 to OpaqueOut. ABI v3 bump. Every
+    //    opaque material shader (built-in + game) re-emits to write
+    //    flags = (is_foliage as u32) | (is_subsurface as u32 << 1).
+    //    SSAO compute samples flags, halves on bit 0.
+    //    Cost: 1 extra G-buffer attachment (~rgba8 = 4 bpp at 1080p =
+    //    ~8 MB). Cleanest data model.
+    //
+    // 2. Steal the unused alpha channel of `albedo` (loc 3) — the
+    //    "for SSGI bounce colour" channel comment confirms it's
+    //    currently unused. Pack shading_model into albedo.a as
+    //    f32 (0.0=lit, 0.5=foliage, 1.0=subsurface). No ABI bump.
+    //    Cost: locks albedo.a forever. Pragmatic.
+    //
+    // 3. Stencil-based: opaque foliage materials get a stencil-write
+    //    pipeline state (currently unused in the engine). SSAO
+    //    compute samples the depth-stencil texture and reads the
+    //    stencil bit. No G-buffer change. Cost: every material
+    //    pipeline now has stencil state; SSAO needs a depth-stencil
+    //    sample binding.
+    //
+    // Workaround until V3 lands: games with heavy foliage can call
+    // `set_ssao_strength(0.5)` globally before drawing foliage-heavy
+    // scenes. Coarse but works.
+    //
+    // Tracking: unblocked once the engine commits to a G-buffer ABI
+    // v3 (which would also let us land #2's `flags` channel for
+    // motion-blur masking, decals, and other "per-pixel material
+    // intent" use cases that keep coming up).
+
     /// Set the global wind field exposed to shaders via `frame.wind`.
     /// Used by foliage / cloth materials. Direction is (dir_x, dir_z)
     /// in the XZ plane and need not be normalised — the shader-side
