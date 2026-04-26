@@ -1561,7 +1561,7 @@ impl MaterialSystem {
     )
     where F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32)>
     {
-        self.dispatch_with_view(pass, &self.per_view_bg, |_| true, mesh_fetch);
+        self.dispatch_with_view(pass, &self.per_view_bg, |_| true, false, mesh_fetch);
     }
 
     /// EN-011 — like `dispatch`, but uses a caller-supplied PerView
@@ -1575,11 +1575,18 @@ impl MaterialSystem {
     /// `accept` is consulted once per command; the engine passes a
     /// closure that closes over a small `HashSet<MaterialHandle>` of
     /// excluded material handles.
+    ///
+    /// EN-011 V2 — `use_reflection_pipeline` swaps in the material's
+    /// sibling pipeline (cull_mode flipped) when one was compiled.
+    /// Falls back to the main pipeline if no reflection variant
+    /// exists (translucent / cutout materials, where the original
+    /// pipeline already cull-mode = None and no flip is needed).
     pub fn dispatch_with_view<'pass, F, A>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
         per_view_bg: &'pass wgpu::BindGroup,
         mut accept:  A,
+        use_reflection_pipeline: bool,
         mut mesh_fetch: F,
     )
     where
@@ -1596,7 +1603,12 @@ impl MaterialSystem {
                     Some(Some(m)) => m,
                     _ => continue,
                 };
-                pass.set_pipeline(&mat.pipeline);
+                let pipeline = if use_reflection_pipeline {
+                    mat.reflection_pipeline.as_ref().unwrap_or(&mat.pipeline)
+                } else {
+                    &mat.pipeline
+                };
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &self.per_frame_bg, &[]);
                 pass.set_bind_group(1, per_view_bg, &[]);
                 pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);

@@ -35,7 +35,7 @@
 //! See `Renderer::dispatch_planar_reflections` for the per-frame
 //! render-graph node that drives all registered probes.
 
-use crate::renderer::util::{mat4_invert, mat4_multiply};
+use crate::renderer::util::{mat4_invert, mat4_mul_vec4, mat4_multiply};
 
 /// One planar reflection probe + its dedicated RT pair.
 ///
@@ -175,13 +175,101 @@ pub fn mirrored_camera_pos(pos: [f32; 3], plane_y: f32, normal: [f32; 3]) -> [f3
     ]
 }
 
-/// Recompute `inv_proj` from a possibly-modified projection. The
-/// reflection pass uses the same projection as the main camera in V1
-/// (no oblique near-plane clip yet — that's a Phase 2 polish item),
-/// so this is currently a passthrough wrapper, but isolated here so
-/// future oblique-clip work has one place to land.
+/// Recompute `inv_proj` from a possibly-modified projection. After the
+/// EN-011 V2 `oblique_proj` rewrite, the reflection pass uses a near-
+/// plane-clipped projection that differs from the main camera's, so
+/// the inverse needs to be recomputed for any view-space reconstruction
+/// downstream (SSR, deferred unprojection).
 pub fn inv_proj_for(proj: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     mat4_invert(proj)
+}
+
+/// Transform a world-space plane `(Nx, Ny, Nz, d)` (such that
+/// `N · p + d = 0` for points on the plane) into eye / view space
+/// using the view matrix. Plane equations transform by the inverse-
+/// transpose of the matrix; for a rigid view matrix this is the same
+/// as the matrix itself, but we do it the general way to stay safe
+/// for skewed views.
+///
+/// For Bloom's column-major / post-mul convention, applying the
+/// inverse-transpose of `view` to a plane `(N, d)` equates to the
+/// standard direct-3D / OpenGL formulation.
+pub fn world_plane_to_eye_space(
+    view: [[f32; 4]; 4],
+    plane_world: [f32; 4],
+) -> [f32; 4] {
+    let inv = mat4_invert(view);
+    // Inverse-transpose, column-major. Multiplying the *transpose* of
+    // `inv` by the plane vector is the same as multiplying `inv`
+    // post-multiplied by the row vector — but we have a column-vec
+    // mul helper so we transpose `inv` first by reading rows as cols.
+    let inv_t: [[f32; 4]; 4] = [
+        [inv[0][0], inv[1][0], inv[2][0], inv[3][0]],
+        [inv[0][1], inv[1][1], inv[2][1], inv[3][1]],
+        [inv[0][2], inv[1][2], inv[2][2], inv[3][2]],
+        [inv[0][3], inv[1][3], inv[2][3], inv[3][3]],
+    ];
+    mat4_mul_vec4(&inv_t, &plane_world)
+}
+
+/// EN-011 V2 — modify a projection matrix so its near plane is clipped
+/// at the given eye-space plane. Used for planar reflection to prevent
+/// geometry below the water from polluting the reflection along the
+/// shoreline edge.
+///
+/// Reference: Eric Lengyel, "Oblique View Frustum Depth Projection
+/// and Clipping" (Journal of Game Development, 2005). The technique
+/// shifts the projection's near plane to coincide with the supplied
+/// plane (typically the water plane), then any geometry on the wrong
+/// side gets clipped at the rasterizer.
+///
+/// `proj` is the original column-major projection matrix.
+/// `plane_eye_space` is `(Nx, Ny, Nz, d)` such that points on the
+/// plane satisfy `N · p_eye + d = 0`. Use `world_plane_to_eye_space`
+/// to convert from a world-space plane.
+pub fn oblique_proj(
+    proj: [[f32; 4]; 4],
+    plane_eye_space: [f32; 4],
+) -> [[f32; 4]; 4] {
+    let c = plane_eye_space;
+
+    // Far-plane corner in clip space is in the direction of (sgn(c.x),
+    // sgn(c.y), 1, 1) — Lengyel §2. Pulled back into eye space by
+    // multiplying with `inv(proj)`.
+    let sx = if c[0] >= 0.0 { 1.0 } else { -1.0 };
+    let sy = if c[1] >= 0.0 { 1.0 } else { -1.0 };
+    let q_clip = [sx, sy, 1.0, 1.0];
+    let inv_p = mat4_invert(proj);
+    let q = mat4_mul_vec4(&inv_p, &q_clip);
+
+    // Scale `c` so the near-plane crosses through the supplied plane:
+    //   M = (2 / dot(c, q)) · c
+    // Then the new third row of P (which controls the depth output) is
+    //   P_row2 = M - P_row3
+    // (P_row3 is the standard perspective w-row, all stays the same.)
+    let denom = c[0] * q[0] + c[1] * q[1] + c[2] * q[2] + c[3] * q[3];
+    if denom.abs() < 1e-10 {
+        // Degenerate plane orientation w.r.t. the frustum — leave
+        // projection unchanged rather than divide-by-zero. The
+        // reflection still renders, just without near-plane clipping.
+        return proj;
+    }
+    let scale = 2.0 / denom;
+    let m = [c[0] * scale, c[1] * scale, c[2] * scale, c[3] * scale];
+
+    // proj is column-major: proj[col][row]. The "third row" we want
+    // to replace is at row index 2 across all four columns. The
+    // "fourth row" is at row index 3. New row-2 = M - row3 — but
+    // since wgpu's clip-space z range is [0, 1] (not [-1, 1] like
+    // OpenGL), the depth-rescaling pre-step is `M - P_row3` exactly
+    // as in Lengyel's original derivation; the [-1, 1] vs [0, 1]
+    // difference is absorbed by the scale.
+    let mut out = proj;
+    out[0][2] = m[0] - proj[0][3];
+    out[1][2] = m[1] - proj[1][3];
+    out[2][2] = m[2] - proj[2][3];
+    out[3][2] = m[3] - proj[3][3];
+    out
 }
 
 fn normalise(v: [f32; 3]) -> [f32; 3] {
@@ -303,5 +391,68 @@ mod tests {
         let Some((device, _queue)) = try_create_device() else { return; };
         let probe = PlanarReflectionProbe::new(&device, 0.0, [0.0, 1.0, 0.0], 4);
         assert_eq!(probe.resolution, 16, "clamps to 16 px floor");
+    }
+
+    /// EN-011 V2 — oblique projection clips a point on the wrong side
+    /// of the supplied plane. Point ABOVE the eye-space plane should
+    /// project inside the [-w, w] z range (clip-space-z divides to
+    /// [0, 1] in wgpu); point BELOW the plane projects with z > w
+    /// (i.e. ndc.z > 1 in wgpu) so the rasterizer clips it.
+    ///
+    /// Setup: identity view (eye-space == world-space), a horizontal
+    /// plane y = 0 (so eye-space plane = (0, 1, 0, 0)), and a perspective
+    /// projection. We then check a point ABOVE (y = +5) renders, and a
+    /// point BELOW (y = -5) gets clipped.
+    #[test]
+    fn oblique_proj_clips_below_plane() {
+        use crate::renderer::util::mat4_perspective;
+        // Standard perspective matching mat4_perspective conventions.
+        let proj = mat4_perspective(70.0_f32.to_radians(), 16.0/9.0, 0.1, 100.0);
+        // Horizontal plane y = 0 in eye-space, normal +Y, points above
+        // satisfy y > 0 → N·p + d > 0 (kept). The plane equation
+        // (Nx, Ny, Nz, d) for "y >= 0 is above" is (0, 1, 0, 0).
+        let plane_eye = [0.0_f32, 1.0, 0.0, 0.0];
+        let oblique = oblique_proj(proj, plane_eye);
+
+        // A point in eye space ABOVE the plane, in front of camera:
+        // y = +5 (above), z = -10 (in front, right-handed view).
+        let p_above = [3.0_f32, 5.0, -10.0, 1.0];
+        let clip_above = mat4_mul_vec4(&oblique, &p_above);
+        // wgpu / D3D / Metal clip space: visible when 0 <= z <= w.
+        // For a point above the plane, z/w should be inside [0, 1].
+        assert!(clip_above[3] > 0.0, "point above plane has positive w (got {})", clip_above[3]);
+        let ndc_z_above = clip_above[2] / clip_above[3];
+        assert!(ndc_z_above >= 0.0 && ndc_z_above <= 1.0,
+            "above-plane point ndc.z within [0,1] (got {})", ndc_z_above);
+
+        // A point BELOW the plane: y = -5 (below), z = -10 (in front).
+        // Oblique projection moves the near plane to coincide with
+        // y = 0, so this point is on the wrong side and should clip.
+        // wgpu's clip space requires 0 <= z <= w to be visible — any
+        // ndc.z outside [0, 1] (or w <= 0) means the rasterizer drops
+        // the fragment.
+        let p_below = [3.0_f32, -5.0, -10.0, 1.0];
+        let clip_below = mat4_mul_vec4(&oblique, &p_below);
+        let visible = clip_below[3] > 0.0
+            && clip_below[2] >= 0.0
+            && clip_below[2] <= clip_below[3];
+        assert!(!visible,
+            "below-plane point should be clipped; got clip = ({}, {}, {}, {})",
+            clip_below[0], clip_below[1], clip_below[2], clip_below[3]);
+    }
+
+    /// `world_plane_to_eye_space` round-trip: a horizontal world plane
+    /// y = 0 (normal +Y) under an identity view stays as (0, 1, 0, 0)
+    /// in eye space — sanity check the inverse-transpose plumbing.
+    #[test]
+    fn world_plane_to_eye_space_identity_view() {
+        use crate::renderer::util::IDENTITY_MAT4;
+        let plane_world = [0.0_f32, 1.0, 0.0, 0.0]; // y = 0 plane
+        let plane_eye = world_plane_to_eye_space(IDENTITY_MAT4, plane_world);
+        for i in 0..4 {
+            assert!((plane_eye[i] - plane_world[i]).abs() < 1e-5,
+                "identity view leaves plane unchanged (comp {}: {} vs {})",
+                i, plane_eye[i], plane_world[i]);
+        }
     }
 }

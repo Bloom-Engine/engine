@@ -297,6 +297,19 @@ pub struct MaterialPipeline {
     pub wants_instancing: bool,
     /// Label carried through for debug output.
     pub label: String,
+    /// EN-011 V2 — sibling pipeline with front-face culling for use in
+    /// planar reflection passes. Reflection inverts triangle winding,
+    /// so an opaque material that would normally cull back-faces needs
+    /// to cull front-faces in the mirrored pass — otherwise single-
+    /// sided geometry renders inside-out. Lazily compiled the first
+    /// time the material gets linked to a probe via
+    /// `MaterialSystem::set_reflection_probe`. Reuses the main
+    /// pipeline's shader module — the only difference is `cull_mode`.
+    ///
+    /// `None` for materials whose original cull mode is already
+    /// `None` (translucent, cutout) — flipping a non-culled pipeline
+    /// is a no-op so we don't bother compiling a duplicate.
+    pub reflection_pipeline: Option<wgpu::RenderPipeline>,
 }
 
 /// Options passed to compile a material. Matches the material-descriptor
@@ -455,42 +468,68 @@ pub fn compile_material(
     } else {
         desc.vertex_buffers
     };
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(desc.label),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &module,
-            entry_point: Some("vs_main"),
-            buffers: vertex_buffers,
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &module,
-            entry_point: Some("fs_main"),
-            targets,
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            // Translucent materials (water, glass, particles) are
-            // commonly viewed from both sides, so they render
-            // double-sided. Cutout materials (foliage cards, chain-
-            // link fences) likewise need to be visible from both
-            // faces. Plain Opaque materials cull backfaces.
-            cull_mode: if matches!(desc.profile, FragmentProfile::Translucent)
-                    || matches!(desc.bucket, Bucket::Cutout) {
-                None
-            } else {
-                Some(wgpu::Face::Back)
+    // Translucent materials (water, glass, particles) are commonly
+    // viewed from both sides, so they render double-sided. Cutout
+    // materials (foliage cards, chain-link fences) likewise need to
+    // be visible from both faces. Plain Opaque materials cull backfaces.
+    let main_cull = if matches!(desc.profile, FragmentProfile::Translucent)
+            || matches!(desc.bucket, Bucket::Cutout) {
+        None
+    } else {
+        Some(wgpu::Face::Back)
+    };
+
+    let make_pipeline = |cull: Option<wgpu::Face>, label_suffix: &str| {
+        let label_owned = format!("{}{}", desc.label, label_suffix);
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&label_owned),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                buffers: vertex_buffers,
+                compilation_options: Default::default(),
             },
-            ..Default::default()
-        },
-        depth_stencil,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: cull,
+                ..Default::default()
+            },
+            depth_stencil: depth_stencil.clone(),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+
+    let pipeline = make_pipeline(main_cull, "");
+
+    // EN-011 V2 — eagerly compile a reflection sibling with cull_mode
+    // flipped (Back → Front). Reflection mirrors world-space, which
+    // inverts triangle winding; without this swap, single-sided opaque
+    // geometry renders inside-out in the planar-reflection pass.
+    //
+    // Only build the variant when the original cull mode is `Back` —
+    // for `None` (translucent, cutout) and any future `Front`-default
+    // case, the reflection variant would be identical to the main
+    // pipeline (or already-flipped), so we save the compile cost.
+    //
+    // The cost when we DO build is a single extra pipeline per
+    // material (typically 5-30 in a scene). Compiled here rather
+    // than lazily at `set_reflection_probe` time so we never need to
+    // stash the WGSL source for a later recompile.
+    let reflection_pipeline = match main_cull {
+        Some(wgpu::Face::Back)  => Some(make_pipeline(Some(wgpu::Face::Front), "_reflection")),
+        Some(wgpu::Face::Front) => Some(make_pipeline(Some(wgpu::Face::Back),  "_reflection")),
+        None                    => None,
+    };
 
     Ok(MaterialPipeline {
         pipeline,
@@ -499,6 +538,7 @@ pub fn compile_material(
         reads_scene:      desc.reads_scene,
         wants_instancing: desc.wants_instancing,
         label:            desc.label.to_string(),
+        reflection_pipeline,
     })
 }
 
