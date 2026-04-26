@@ -1157,6 +1157,23 @@ pub extern "C" fn bloom_clear_post_pass() {
     engine().renderer.clear_post_pass();
 }
 
+/// EN-017 V2 — append a post-pass to the stack.
+/// See `bloom-macos::bloom_add_post_pass` for the full ABI.
+#[no_mangle]
+pub extern "C" fn bloom_add_post_pass(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    match engine().renderer.add_post_pass(source) {
+        Ok(h) => h as f64,
+        Err(e) => { eprintln!("[post_pass] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+/// EN-017 V2 — wipe the entire post-pass stack.
+#[no_mangle]
+pub extern "C" fn bloom_clear_all_post_passes() {
+    engine().renderer.clear_all_post_passes();
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_draw_material(
     material: f64,

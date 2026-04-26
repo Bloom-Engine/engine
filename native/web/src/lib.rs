@@ -1141,6 +1141,32 @@ pub fn bloom_clear_post_pass() {
     engine().renderer.clear_post_pass();
 }
 
+/// EN-017 V2 — stub: JS glue calls `bloom_add_post_pass_str` instead.
+#[wasm_bindgen]
+pub fn bloom_add_post_pass(_source: f64) -> f64 { 0.0 }
+
+/// EN-017 V2 — append a fullscreen post-pass to the stack on web.
+/// See `bloom-macos::bloom_add_post_pass` for the full ABI. Returns
+/// 1-based handle on success, 0.0 on compile failure.
+#[wasm_bindgen]
+pub fn bloom_add_post_pass_str(source: &str) -> f64 {
+    match engine().renderer.add_post_pass(source) {
+        Ok(h) => h as f64,
+        Err(e) => {
+            web_sys::console::error_1(
+                &format!("[post_pass] compile failed: {:?}", e).into(),
+            );
+            0.0
+        }
+    }
+}
+
+/// EN-017 V2 — wipe the entire post-pass stack.
+#[wasm_bindgen]
+pub fn bloom_clear_all_post_passes() {
+    engine().renderer.clear_all_post_passes();
+}
+
 #[wasm_bindgen]
 pub fn bloom_draw_material(
     material: f64,

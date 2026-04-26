@@ -1841,6 +1841,28 @@ pub extern "C" fn bloom_clear_post_pass() {
     engine().renderer.clear_post_pass();
 }
 
+/// EN-017 V2 — append a post-pass to the stack. Returns a 1-based
+/// handle on success (so 0 means failure at the FFI layer; the TS
+/// wrapper subtracts 1 to expose a 0-based index). The fragment
+/// shader sees `scene_color_tex` (LDR, post-tonemap) +
+/// `scene_depth_tex` at `@group(0)` — same ABI as
+/// `bloom_set_post_pass`, just cumulative.
+#[no_mangle]
+pub extern "C" fn bloom_add_post_pass(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    match engine().renderer.add_post_pass(source) {
+        Ok(h) => h as f64,
+        Err(e) => { eprintln!("[post_pass] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+/// EN-017 V2 — wipe the entire post-pass stack. Composite goes back
+/// to writing the swapchain directly (zero post-pass cost).
+#[no_mangle]
+pub extern "C" fn bloom_clear_all_post_passes() {
+    engine().renderer.clear_all_post_passes();
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_draw_material(
     material: f64,

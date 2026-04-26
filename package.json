@@ -125,6 +125,8 @@
         { "name": "bloom_set_material_foliage",        "params": ["f64", "f64", "f64", "f64", "f64", "f64"],           "returns": "void" },
         { "name": "bloom_set_post_pass",               "params": ["i64"],                                              "returns": "f64"  },
         { "name": "bloom_clear_post_pass",             "params": [],                                                   "returns": "void" },
+        { "name": "bloom_add_post_pass",               "params": ["i64"],                                              "returns": "f64"  },
+        { "name": "bloom_clear_all_post_passes",       "params": [],                                                   "returns": "void" },
         { "name": "bloom_draw_material",            "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
         { "name": "bloom_load_model_animation",   "params": ["i64"],                                                   "returns": "f64"  },
         { "name": "bloom_update_model_animation",  "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],       "returns": "void" },

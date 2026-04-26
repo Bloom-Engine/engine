@@ -34,6 +34,8 @@ declare function bloom_set_bloom_enabled(on: number): void;
 declare function bloom_set_ssao_enabled(on: number): void;
 declare function bloom_set_post_pass(source: number): number;
 declare function bloom_clear_post_pass(): void;
+declare function bloom_add_post_pass(source: number): number;
+declare function bloom_clear_all_post_passes(): void;
 declare function bloom_set_ssao_intensity(intensity: number): void;
 declare function bloom_set_ssao_radius(worldRadius: number): void;
 declare function bloom_set_wind(dirX: number, dirZ: number, amplitude: number, frequency: number): void;
@@ -308,15 +310,41 @@ export function setSsaoRadius(worldRadius: number): void {
 ///   `);
 ///
 /// Returns true on successful compile, false on shader error.
-/// One slot (V1); subsequent calls replace the existing post-pass.
+/// In V2 this is shorthand for `clearAllPostPasses()` followed by
+/// `addPostPass(wgsl)` — the existing stack is wiped before the new
+/// pass is installed, matching V1 single-slot semantics.
 export function setPostPass(wgslSource: string): boolean {
   return bloom_set_post_pass(wgslSource as any) > 0;
 }
 
 /// EN-017 — uninstall the active post-pass. The composite output
 /// goes directly to the swapchain again (zero post-pass cost).
+/// V2 alias for `clearAllPostPasses()`.
 export function clearPostPass(): void {
   bloom_clear_post_pass();
+}
+
+/// EN-017 V2 — append a fullscreen WGSL post-pass to the stack.
+/// Each pass samples the previous pass's output (or scene_color_tex
+/// for the first pass) and writes either to the next intermediate
+/// (if more passes follow) or to the swapchain (if last).
+///
+/// Stack order matters: addPostPass(A); addPostPass(B); means A
+/// runs first, then B sees A's output. Compose effects (e.g.
+/// underwater tint, then damage flash, then scope vignette) in the
+/// order they should apply.
+///
+/// Returns the 0-based index of the newly added pass on success,
+/// or -1 if the shader failed to compile (existing stack untouched).
+export function addPostPass(wgslSource: string): number {
+  const r = bloom_add_post_pass(wgslSource as any);
+  return r > 0 ? (r - 1) : -1;
+}
+
+/// EN-017 V2 — wipe the entire post-pass stack. The composite
+/// output goes directly to the swapchain again (zero post-pass cost).
+export function clearAllPostPasses(): void {
+  bloom_clear_all_post_passes();
 }
 
 /// Set the global wind field used by foliage materials.
