@@ -77,19 +77,38 @@ pub struct PerViewUniforms {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialFactorsUniforms {
-    pub metal_rough: [f32; 4],
-    pub emissive:    [f32; 4],
-    pub base_color:  [f32; 4],
-    pub _reserved:   [f32; 4],
+    pub metal_rough:    [f32; 4],
+    pub emissive:       [f32; 4],
+    pub base_color:     [f32; 4],
+    /// EN-012 — shading-model selector + foliage transmission tint.
+    /// x = shading_model enum (0 = default lit, 1 = foliage,
+    ///                         2 = subsurface — V2 stub),
+    /// yzw = transmission_color (rgb tint for back-lit foliage; ignored
+    ///       when shading_model == 0).
+    pub shading_model:  [f32; 4],
+    /// EN-012 — foliage shading parameters. Only consumed when
+    /// `shading_model.x == 1.0`.
+    /// x = transmission_amount (0..1),
+    /// y = wrap_factor          (0..1),
+    /// zw = reserved.
+    pub foliage_params: [f32; 4],
 }
 
 impl Default for MaterialFactorsUniforms {
     fn default() -> Self {
         Self {
-            metal_rough: [0.0, 1.0, 0.0, 0.0],          // non-metal, rough, no MR tex, no cutoff
-            emissive:    [0.0, 0.0, 0.0, 0.0],
-            base_color:  [1.0, 1.0, 1.0, 1.0],
-            _reserved:   [0.0, 0.0, 0.0, 0.0],
+            metal_rough:    [0.0, 1.0, 0.0, 0.0],   // non-metal, rough, no MR tex, no cutoff
+            emissive:       [0.0, 0.0, 0.0, 0.0],
+            base_color:     [1.0, 1.0, 1.0, 1.0],
+            // EN-012 — default lit, white transmission tint. Materials
+            // that never call `setMaterialShadingModel` get standard PBR
+            // (shading_model.x == 0.0).
+            shading_model:  [0.0, 1.0, 1.0, 1.0],
+            // EN-012 — moderate defaults so a freshly-flagged foliage
+            // material (shading_model = 1) looks reasonable before any
+            // tuning. Wrap=0.5 + transmission=0.5 gives soft back-face
+            // shading + a noticeable halo against the sun.
+            foliage_params: [0.5, 0.5, 0.0, 0.0],
         }
     }
 }
@@ -270,6 +289,16 @@ pub struct MaterialSystem {
     /// `MaterialHandle - 1`, parallel to `material_per_material_bgs`
     /// / `material_reflection_probe`.
     pub material_texture_arrays: Vec<[Option<u32>; 3]>,
+
+    /// EN-012 — per-material `MaterialFactorsUniforms` UBO. `None` means
+    /// the material uses the shared `_default_material_factors_buffer`
+    /// (uniform default) — lazily allocated on the first
+    /// `set_material_shading_model` / `set_material_foliage` call.
+    /// Indexed by `MaterialHandle - 1`. The CPU-side mirror in
+    /// `material_factors_data` lets us partial-update one field at a
+    /// time without losing the others.
+    pub material_factors_buffers: Vec<Option<wgpu::Buffer>>,
+    pub material_factors_data:    Vec<MaterialFactorsUniforms>,
 }
 
 impl MaterialSystem {
@@ -571,6 +600,11 @@ impl MaterialSystem {
             instance_buffers: Vec::new(),
             texture_arrays: Vec::new(),
             material_texture_arrays: Vec::new(),
+            // EN-012 — per-material MaterialFactors UBOs are lazy.
+            // Until a material calls `set_shading_model` /
+            // `set_foliage`, it shares the default factors buffer.
+            material_factors_buffers: Vec::new(),
+            material_factors_data:    Vec::new(),
         }
     }
 
@@ -690,6 +724,14 @@ impl MaterialSystem {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            // EN-012 — resolve the per-material factors UBO so a
+            // material that previously called `set_shading_model` /
+            // `set_foliage` keeps its custom factors at binding 10
+            // when user_params is later set on it.
+            let factors_buf: &wgpu::Buffer = self.material_factors_buffers
+                .get(idx)
+                .and_then(|b| b.as_ref())
+                .unwrap_or(&self._default_material_factors_buffer);
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("material_per_material_bg_user"),
                 layout: &self.layouts.per_material,
@@ -704,7 +746,7 @@ impl MaterialSystem {
                     wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
                     wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
                     wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                    wgpu::BindGroupEntry { binding: 10, resource: self._default_material_factors_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 10, resource: factors_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 11, resource: buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.default_black_view) },
                     wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
@@ -789,6 +831,16 @@ impl MaterialSystem {
             .and_then(|b| b.as_ref())
             .unwrap_or(&self._default_user_params_buffer);
 
+        // EN-012 — resolve binding 10 to the per-material factors UBO
+        // when one's been allocated by `set_shading_model` /
+        // `set_foliage`. Otherwise the reflection-probe rebind would
+        // silently revert a foliage-flagged material back to the
+        // default factors at binding 10.
+        let factors_buf: &wgpu::Buffer = self.material_factors_buffers
+            .get(idx)
+            .and_then(|b| b.as_ref())
+            .unwrap_or(&self._default_material_factors_buffer);
+
         // EN-014 — resolve binding 14/15/16 from any per-material
         // texture-array links so a probe-bound material doesn't lose
         // its splat layers when the BG gets rebuilt.
@@ -808,7 +860,7 @@ impl MaterialSystem {
                 wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
                 wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
                 wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 10, resource: self._default_material_factors_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: factors_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 11, resource: user_params_buf.as_entire_binding() },
                 // EN-011 — probe's color view + a filtering sampler.
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(probe_view) },
@@ -848,6 +900,173 @@ impl MaterialSystem {
             }
         }
         out
+    }
+
+    /// EN-012 — resolve the per-material `MaterialFactors` UBO for
+    /// `idx`, falling back to the shared default buffer when no
+    /// per-material factors UBO has been allocated yet. Used by every
+    /// per-material BG-build path so EN-011 / EN-014 rebinds don't
+    /// silently revert a material's foliage / shading-model state to
+    /// the default factors.
+    fn resolve_factors_buffer(&self, idx: usize) -> &wgpu::Buffer {
+        self.material_factors_buffers
+            .get(idx)
+            .and_then(|b| b.as_ref())
+            .unwrap_or(&self._default_material_factors_buffer)
+    }
+
+    /// EN-012 — ensure a per-material `MaterialFactorsUniforms` UBO
+    /// exists for `idx`, allocating + initialising from the default
+    /// values on first use. Returns mutable access to the CPU mirror
+    /// so the caller can mutate one field then write back via
+    /// `flush_material_factors`. Grows `material_factors_buffers` /
+    /// `material_factors_data` so `idx` is in bounds.
+    fn ensure_material_factors(
+        &mut self, device: &wgpu::Device, idx: usize,
+    ) -> &mut MaterialFactorsUniforms {
+        while self.material_factors_buffers.len() <= idx {
+            self.material_factors_buffers.push(None);
+            self.material_factors_data.push(MaterialFactorsUniforms::default());
+        }
+        if self.material_factors_buffers[idx].is_none() {
+            // Allocate a fresh per-material factors UBO seeded with the
+            // current CPU-side data (defaults on first call).
+            let init = self.material_factors_data[idx];
+            let buf = device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("material_factors_per_material"),
+                    contents: bytemuck::bytes_of(&init),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                },
+            );
+            self.material_factors_buffers[idx] = Some(buf);
+        }
+        &mut self.material_factors_data[idx]
+    }
+
+    /// EN-012 — write the current CPU-side `MaterialFactorsUniforms`
+    /// for `idx` to the per-material UBO. Caller must have previously
+    /// called `ensure_material_factors` so the buffer exists.
+    fn flush_material_factors(&self, queue: &wgpu::Queue, idx: usize) {
+        if let Some(Some(buf)) = self.material_factors_buffers.get(idx) {
+            let data = &self.material_factors_data[idx];
+            queue.write_buffer(buf, 0, bytemuck::bytes_of(data));
+        }
+    }
+
+    /// EN-012 — rebuild the per-material BG for `idx` after a
+    /// MaterialFactors mutation. Resolves the per-material UBO,
+    /// user_params UBO, reflection-probe view, and texture-array
+    /// views from the current state so we don't clobber any of the
+    /// EN-005/EN-011/EN-014 wiring. Caller is responsible for
+    /// passing `probe_view` (the renderer wrapper looks the linked
+    /// probe up via `material_reflection_probe_handle` and supplies
+    /// either the probe's RT view or the default 1×1 black view).
+    fn rebuild_per_material_bg(
+        &mut self,
+        device:     &wgpu::Device,
+        idx:        usize,
+        probe_view: &wgpu::TextureView,
+    ) {
+        // Grow parallel BG vector so `idx` is in bounds.
+        while self.material_per_material_bgs.len() <= idx {
+            self.material_params_buffers.push(None);
+            self.material_per_material_bgs.push(None);
+        }
+
+        let factors_buf: &wgpu::Buffer = self.resolve_factors_buffer(idx);
+        let user_params_buf: &wgpu::Buffer = self.material_params_buffers
+            .get(idx)
+            .and_then(|b| b.as_ref())
+            .unwrap_or(&self._default_user_params_buffer);
+        let [albedo_view, normal_view, mr_view] = self.resolve_array_views(idx);
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material_per_material_bg_factors"),
+            layout: &self.layouts.per_material,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 1,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 2,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 3,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 4,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 5,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 6,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
+                wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 10, resource: factors_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: user_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(probe_view) },
+                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(albedo_view) },
+                wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(normal_view) },
+                wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(mr_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+            ],
+        });
+        self.material_per_material_bgs[idx] = Some(bg);
+    }
+
+    /// EN-012 — set the shading model for a material (`0` = default
+    /// lit, `1` = foliage, `2` = subsurface — V2 stub). Lazily
+    /// allocates a per-material `MaterialFactors` UBO on first call,
+    /// then rebuilds the per-material BG so subsequent draws sample
+    /// the new shading model. Caller passes `probe_view` so EN-011
+    /// reflection links survive — see `Renderer::set_material_shading_model`.
+    pub fn set_material_shading_model(
+        &mut self,
+        device: &wgpu::Device,
+        queue:  &wgpu::Queue,
+        material:   MaterialHandle,
+        model:      u32,
+        probe_view: &wgpu::TextureView,
+    ) -> Result<(), &'static str> {
+        if material == 0 { return Err("invalid material handle"); }
+        let idx = (material - 1) as usize;
+        if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
+            return Err("material handle not registered");
+        }
+        {
+            let factors = self.ensure_material_factors(device, idx);
+            factors.shading_model[0] = model as f32;
+        }
+        self.flush_material_factors(queue, idx);
+        self.rebuild_per_material_bg(device, idx, probe_view);
+        Ok(())
+    }
+
+    /// EN-012 — set the foliage shading parameters for a material.
+    /// Only takes effect when `shading_model == 1` (foliage). Updates
+    /// `MaterialFactors.shading_model.yzw` (transmission_color) and
+    /// `foliage_params.xy` (transmission_amount, wrap_factor). Lazily
+    /// allocates a per-material UBO on first call.
+    pub fn set_material_foliage(
+        &mut self,
+        device: &wgpu::Device,
+        queue:  &wgpu::Queue,
+        material:    MaterialHandle,
+        trans_color: [f32; 3],
+        trans_amount: f32,
+        wrap_factor:  f32,
+        probe_view:  &wgpu::TextureView,
+    ) -> Result<(), &'static str> {
+        if material == 0 { return Err("invalid material handle"); }
+        let idx = (material - 1) as usize;
+        if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
+            return Err("material handle not registered");
+        }
+        {
+            let factors = self.ensure_material_factors(device, idx);
+            factors.shading_model[1] = trans_color[0];
+            factors.shading_model[2] = trans_color[1];
+            factors.shading_model[3] = trans_color[2];
+            factors.foliage_params[0] = trans_amount;
+            factors.foliage_params[1] = wrap_factor;
+        }
+        self.flush_material_factors(queue, idx);
+        self.rebuild_per_material_bg(device, idx, probe_view);
+        Ok(())
     }
 
     /// EN-014 — create a 2D texture array from a slice of layer data.
@@ -992,6 +1211,12 @@ impl MaterialSystem {
             .get(idx)
             .and_then(|b| b.as_ref())
             .unwrap_or(&self._default_user_params_buffer);
+        // EN-012 — preserve any per-material MaterialFactors UBO
+        // across an EN-014 array rebind.
+        let factors_buf: &wgpu::Buffer = self.material_factors_buffers
+            .get(idx)
+            .and_then(|b| b.as_ref())
+            .unwrap_or(&self._default_material_factors_buffer);
 
         let [albedo_view, normal_view, mr_view] = self.resolve_array_views(idx);
 
@@ -1009,7 +1234,7 @@ impl MaterialSystem {
                 wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
                 wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
                 wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 10, resource: self._default_material_factors_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: factors_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 11, resource: user_params_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(probe_view) },
                 wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },

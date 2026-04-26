@@ -1191,6 +1191,30 @@ pub extern "C" fn bloom_set_material_texture_array(
     );
 }
 
+/// EN-012 — set the shading model for a material (0=default lit,
+/// 1=foliage, 2=subsurface V2 stub).
+#[no_mangle]
+pub extern "C" fn bloom_set_material_shading_model(
+    material: f64, model: f64,
+) {
+    engine().renderer.set_material_shading_model(material as u32, model as u32);
+}
+
+/// EN-012 — set the foliage shading parameters for a material.
+/// Only takes effect when shading_model == 1 (foliage).
+#[no_mangle]
+pub extern "C" fn bloom_set_material_foliage(
+    material: f64,
+    trans_r: f64, trans_g: f64, trans_b: f64,
+    trans_amount: f64, wrap_factor: f64,
+) {
+    engine().renderer.set_material_foliage(
+        material as u32,
+        [trans_r as f32, trans_g as f32, trans_b as f32],
+        trans_amount as f32, wrap_factor as f32,
+    );
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_compile_material_from_file(
     path_ptr: *const u8,

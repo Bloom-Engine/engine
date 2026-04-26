@@ -31,6 +31,8 @@ declare function bloom_create_planar_reflection(planeY: number, normalX: number,
 declare function bloom_set_material_reflection_probe(material: number, probe: number): void;
 declare function bloom_create_texture_array(dataPtr: any, dataLen: number, width: number, height: number, layerCount: number): number;
 declare function bloom_set_material_texture_array(material: number, slot: number, array: number): void;
+declare function bloom_set_material_shading_model(material: number, model: number): void;
+declare function bloom_set_material_foliage(material: number, transR: number, transG: number, transB: number, transAmount: number, wrapFactor: number): void;
 declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
@@ -469,6 +471,39 @@ export function createTextureArray(
 /// for a non-PBR splat-mapped terrain.
 export function setMaterialTextureArray(material: number, slot: number, array: number): void {
   bloom_set_material_texture_array(material, slot, array);
+}
+
+/// EN-012 — shading-model selectors. Pass to `setMaterialShadingModel`.
+export const SHADING_MODEL_DEFAULT_LIT = 0;
+export const SHADING_MODEL_FOLIAGE     = 1;
+export const SHADING_MODEL_SUBSURFACE  = 2;   // V2 stub — currently behaves as default lit
+
+/// EN-012 — switch a material's shading model. The game shader is
+/// responsible for branching on `material.shading_model.x` and calling
+/// either standard PBR or `shade_foliage` (wrap-lambert + transmission)
+/// from `common/pbr.wgsl`. The engine just exposes the slot.
+///
+/// V1 limitation: SSAO doesn't half-strength on backfaces — the
+/// G-buffer doesn't carry an isFrontFace channel today. Documented as a
+/// follow-up requirement on the EN-012 ticket.
+export function setMaterialShadingModel(material: number, model: number): void {
+  bloom_set_material_shading_model(material, model);
+}
+
+/// EN-012 — set the foliage shading parameters for a material. Only
+/// takes effect when `shading_model == SHADING_MODEL_FOLIAGE`.
+///
+/// `transmissionR/G/B`: rgb tint for back-lit foliage (1,1,1 = neutral).
+/// `transmissionAmount`: 0..1 — how much sun bleeds through the leaf.
+/// `wrapFactor`: 0..1 — wrap-lambert intensity. 0 = standard lambert
+///   (back face goes pure black), 1 = light wraps fully around to the
+///   back face.
+export function setMaterialFoliage(
+  material: number,
+  transmissionR: number, transmissionG: number, transmissionB: number,
+  transmissionAmount: number, wrapFactor: number,
+): void {
+  bloom_set_material_foliage(material, transmissionR, transmissionG, transmissionB, transmissionAmount, wrapFactor);
 }
 
 /**

@@ -11694,6 +11694,72 @@ impl Renderer {
         );
     }
 
+    // ============================================================
+    // EN-012 — Foliage shading model
+    // ============================================================
+
+    /// EN-012 — set the shading model for `material`. Pass `0` for
+    /// default lit (standard PBR), `1` for foliage (wrap-lambert +
+    /// transmission), or `2` for subsurface (V2 stub — currently
+    /// behaves as default lit; the shader wouldn't branch on it
+    /// until V2 ships). Lazily allocates a per-material
+    /// `MaterialFactors` UBO and rebuilds the per-material BG so
+    /// subsequent draws see the new shading model.
+    ///
+    /// Resolves the material's currently-linked planar-reflection
+    /// probe (if any) so binding 12 stays pointing at the probe's
+    /// RT across the BG rebuild — same precedent as
+    /// `set_material_texture_array`.
+    pub fn set_material_shading_model(&mut self, material: u32, model: u32) {
+        let probe_view = self.resolve_probe_view_for_material(material);
+        if let Err(e) = self.material_system.set_material_shading_model(
+            &self.device, &self.queue, material, model, &probe_view,
+        ) {
+            eprintln!("[foliage] set_material_shading_model failed: {e}");
+        }
+    }
+
+    /// EN-012 — set the foliage shading parameters for `material`.
+    /// Only takes effect when `shading_model == 1` (foliage).
+    /// `trans_color` is the rgb tint for back-lit foliage,
+    /// `trans_amount` is 0..1 (how much sun bleeds through), and
+    /// `wrap_factor` is 0..1 (wrap-lambert intensity). See the
+    /// `shade_foliage` helper in `common/pbr.wgsl`.
+    pub fn set_material_foliage(
+        &mut self,
+        material:    u32,
+        trans_color: [f32; 3],
+        trans_amount: f32,
+        wrap_factor:  f32,
+    ) {
+        let probe_view = self.resolve_probe_view_for_material(material);
+        if let Err(e) = self.material_system.set_material_foliage(
+            &self.device, &self.queue, material,
+            trans_color, trans_amount, wrap_factor, &probe_view,
+        ) {
+            eprintln!("[foliage] set_material_foliage failed: {e}");
+        }
+    }
+
+    /// EN-012 — shared helper: resolve the planar-reflection probe
+    /// view for the material's currently-linked probe (or the
+    /// default 1×1 black view when none is linked). Used by
+    /// `set_material_shading_model` / `set_material_foliage` so an
+    /// EN-012 BG rebuild doesn't drop an EN-011 link. Mirrors the
+    /// pattern in `set_material_texture_array`.
+    fn resolve_probe_view_for_material(&self, material: u32) -> wgpu::TextureView {
+        match self.material_system.material_reflection_probe_handle(material) {
+            Some(probe) if probe != 0 => {
+                let idx = probe as usize - 1;
+                self.planar_probes.get(idx)
+                    .and_then(|p| p.as_ref())
+                    .map(|p| p.color_view.clone())
+                    .unwrap_or_else(|| self.material_system.default_black_view.clone())
+            }
+            _ => self.material_system.default_black_view.clone(),
+        }
+    }
+
     /// EN-011 — render every registered probe's RT for this frame.
     /// Called from `end_frame_with_scene` BEFORE the main material
     /// pass so the probe textures are ready when materials sample

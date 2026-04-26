@@ -130,3 +130,57 @@ fn ibl(
 
   return (diffuse + specular) * occlusion;
 }
+
+// =====================================================================
+// EN-012 — Foliage shading model
+// =====================================================================
+//
+// Wrap-lambert diffuse + sun-behind-leaf transmission. Use from custom
+// material shaders that declare the foliage shading model
+// (MaterialFactors.shading_model.x == 1.0). The standard pattern is:
+//
+//   if (material.shading_model.x > 0.5) {
+//     out_color = shade_foliage(N, L, V, lit, sun_color, albedo);
+//   } else {
+//     out_color = shade_pbr_standard(...);
+//   }
+//
+// Inputs:
+//   N_world        = surface normal in world space
+//   L_world        = direction TO the sun (normalized)
+//   V_world        = direction TO the camera (normalized)
+//   base_color_lit = the standard lit colour (sun_color * direct_lambert)
+//                    — V1 doesn't actually consume this; reserved for V2
+//                    when foliage gets to layer over the standard term
+//   sun_color      = sun radiance entering this fragment
+//   base_albedo    = surface albedo (used for both lit + transmitted terms)
+//
+// Returns the final shaded colour. Reads MaterialFactors:
+//   shading_model.yzw = transmission_color
+//   foliage_params.x  = transmission_amount
+//   foliage_params.y  = wrap_factor
+//
+// V1 limitation: ambient / IBL / specular are NOT included — materials
+// that want IBL ambient on foliage add it themselves outside this
+// helper. shade_foliage is just the directional terms.
+fn shade_foliage(
+  N_world: vec3<f32>, L_world: vec3<f32>, V_world: vec3<f32>,
+  base_color_lit: vec3<f32>, sun_color: vec3<f32>, base_albedo: vec3<f32>,
+) -> vec3<f32> {
+  // Wrap-lambert: back-faces don't go pure black. wrap=0 reproduces
+  // standard lambert; wrap=1 wraps light fully around the back.
+  let wrap         = material.foliage_params.y;
+  let n_dot_l      = dot(N_world, L_world);
+  let wrap_diffuse = max((n_dot_l + wrap) / (1.0 + wrap), 0.0);
+  let lit          = base_albedo * sun_color * wrap_diffuse;
+
+  // Transmission: sun behind the leaf → warm tint into the camera.
+  // V . -L is high when the camera is looking toward the sun through
+  // the leaf. The pow(., 4) gives a tight halo around the sun.
+  let v_dot_neg_l   = max(dot(V_world, -L_world), 0.0);
+  let trans_strength = pow(v_dot_neg_l, 4.0) * material.foliage_params.x;
+  let trans_color    = material.shading_model.yzw;
+  let transmitted    = base_albedo * sun_color * trans_color * trans_strength;
+
+  return lit + transmitted;
+}

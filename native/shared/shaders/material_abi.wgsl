@@ -1,6 +1,6 @@
 // Bloom shader ABI header — see docs/rfc/0001-material-render-graph.md.
 //
-// ABI-VERSION: 1
+// ABI-VERSION: 2
 //
 // Included by every 3D shader (built-in PBR, sky, custom user materials).
 // Defines the five bind groups and the vertex attribute layout that any
@@ -111,10 +111,24 @@ struct PerView {
 // doesn't provide its own — shaders can unconditionally sample.
 
 struct MaterialFactors {
-  metal_rough: vec4<f32>,  // x=metallic, y=roughness, z=has_mr_tex, w=alpha_cutoff
-  emissive:    vec4<f32>,  // rgb + 0
-  base_color:  vec4<f32>,  // rgba tint multiplier
-  _reserved:   vec4<f32>,
+  metal_rough:    vec4<f32>,  // x=metallic, y=roughness, z=has_mr_tex, w=alpha_cutoff
+  emissive:       vec4<f32>,  // rgb + 0
+  base_color:     vec4<f32>,  // rgba tint multiplier
+  // EN-012 — shading-model selector + foliage transmission RGB.
+  // x = shading_model (0 = default lit, 1 = foliage,
+  //                    2 = subsurface — V2 stub),
+  // yzw = transmission_color (rgb tint for back-lit foliage; ignored
+  //       for default lit). Default (1, 1, 1) when not set.
+  shading_model:  vec4<f32>,
+  // EN-012 — foliage shading parameters. Read by `shade_foliage`
+  // (in common/pbr.wgsl) when shading_model.x == 1.0.
+  // x = transmission_amount (0..1, how much sun-behind-leaf bleeds
+  //                          through into the camera),
+  // y = wrap_factor (0..1, how much wrap-lambert wraps the diffuse
+  //                  term — 0 is standard lambert, 1 is light fully
+  //                  wrapping around to the back face),
+  // zw = reserved.
+  foliage_params: vec4<f32>,
 };
 
 @group(2) @binding(0)  var base_color_tex:   texture_2d<f32>;

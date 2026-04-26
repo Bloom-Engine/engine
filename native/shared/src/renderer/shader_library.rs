@@ -46,8 +46,11 @@ pub fn verify_abi_version(expected: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// The version the engine was built against. Phase 1 ships ABI v1.
-pub const EXPECTED_ABI_VERSION: u32 = 1;
+/// The version the engine was built against. EN-012 bumped this to 2
+/// when MaterialFactors gained `shading_model` + `foliage_params`
+/// (foliage shading model). Bump together with the
+/// `ABI-VERSION:` comment in `shaders/material_abi.wgsl`.
+pub const EXPECTED_ABI_VERSION: u32 = 2;
 
 #[cfg(test)]
 mod tests {

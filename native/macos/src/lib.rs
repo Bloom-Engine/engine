@@ -1742,6 +1742,42 @@ pub extern "C" fn bloom_set_material_texture_array(
     );
 }
 
+/// EN-012 — set the shading model for a material.
+/// `0` = default lit (standard PBR),
+/// `1` = foliage (wrap-lambert + transmission via `shade_foliage`),
+/// `2` = subsurface (V2 stub — currently behaves as default lit).
+/// Lazily allocates a per-material `MaterialFactors` UBO on first
+/// call. Game shaders branch on `material.shading_model.x` and call
+/// either `shade_pbr_standard` or `shade_foliage` from the engine
+/// helper in `common/pbr.wgsl`.
+#[no_mangle]
+pub extern "C" fn bloom_set_material_shading_model(
+    material: f64, model: f64,
+) {
+    engine().renderer.set_material_shading_model(material as u32, model as u32);
+}
+
+/// EN-012 — set the foliage shading parameters for a material.
+/// Only takes effect when the material's `shading_model == 1`.
+///
+/// `trans_r/g/b`: rgb tint for back-lit foliage (1,1,1 = neutral).
+/// `trans_amount`: 0..1 — how much sun bleeds through the leaf when
+///                 the camera looks at it backlit by the sun.
+/// `wrap_factor`: 0..1 — wrap-lambert intensity. 0 = standard lambert
+///                 (back faces black), 1 = light wraps fully around.
+#[no_mangle]
+pub extern "C" fn bloom_set_material_foliage(
+    material: f64,
+    trans_r: f64, trans_g: f64, trans_b: f64,
+    trans_amount: f64, wrap_factor: f64,
+) {
+    engine().renderer.set_material_foliage(
+        material as u32,
+        [trans_r as f32, trans_g as f32, trans_b as f32],
+        trans_amount as f32, wrap_factor as f32,
+    );
+}
+
 /// Phase 6 — file-backed material compile. The path is registered
 /// with the hot-reload watcher; subsequent edits trigger an automatic
 /// recompile on the next end_frame. `bucket_kind` selects the
