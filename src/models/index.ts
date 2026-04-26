@@ -684,3 +684,108 @@ export function commitModel(stagingHandle: number): Model {
   const handle = bloom_commit_model(stagingHandle);
   return makeModel(handle);
 }
+
+// ---------------------------------------------------------------------
+// EN-015 V1 — Octahedral imposter / billboard helpers.
+//
+// V1 ships the runtime piece only: the WGSL helper library
+// (`common/imposter.wgsl`) plus this TS-side LOD selector +
+// `drawImposterAtlas` wrapper. Bake tooling is a follow-up — V1 expects
+// games to bake atlases externally (Blender's ScreenSpace add-on,
+// Unity Tree Creator, etc.) until the engine bake tool ships.
+//
+// The atlas convention is fixed at 8×8 octahedral views (64 cells
+// total) packed into a single RGBA8 texture.
+//
+// Typical game-side imposter material WGSL (drop in your own .wgsl
+// file and pass to compileMaterial):
+//
+//   #include "material_abi.wgsl"
+//   #include "common/imposter.wgsl"
+//
+//   struct VsOut {
+//     @builtin(position) clip_pos: vec4<f32>,
+//     @location(0)       view_dir: vec3<f32>,
+//     @location(1)       uv:       vec2<f32>,
+//   };
+//
+//   @vertex
+//   fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+//     // node.transform[3].xyz holds the per-instance world position;
+//     // node.scale_x is the imposter scale.
+//     let center = node.transform[3].xyz;
+//     let bb = billboard_quad(
+//       center, node.scale_x,
+//       view.camera_pos.xyz, vec3<f32>(0.0, 1.0, 0.0),
+//       vid,
+//     );
+//     var out: VsOut;
+//     out.clip_pos = view.view_proj * vec4<f32>(bb.world_pos, 1.0);
+//     out.view_dir = normalize(view.camera_pos.xyz - center);
+//     out.uv       = bb.uv;
+//     return out;
+//   }
+//
+//   @fragment
+//   fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+//     let atlas_uv = imposter_atlas_uv(in.view_dir, in.uv);
+//     return textureSample(material_albedo, material_sampler, atlas_uv);
+//   }
+//
+// Then at runtime:
+//
+//   const useImposter = pickImposterLOD(
+//     camera.x, camera.y, camera.z,
+//     tree.x, tree.y, tree.z,
+//     50.0,
+//   );
+//   if (useImposter) {
+//     drawImposterAtlas(impMaterial, impAtlasMesh, treePos, treeScale);
+//   } else {
+//     drawModel(treeModel, treePos, treeScale, WHITE);
+//   }
+// ---------------------------------------------------------------------
+
+/// EN-015 — pick LOD by distance. Returns true if the camera is far
+/// enough that the imposter should be drawn in place of the full mesh.
+///
+/// Typical `switchDistance` is 40–60 m for trees. To mitigate pop at
+/// the LOD boundary, layer a small hysteresis band on top from the
+/// caller (e.g. switch to imposter at 50 m, switch back to mesh at
+/// 47 m); when TAA is enabled the residual flicker is mostly resolved
+/// across frames.
+export function pickImposterLOD(
+  cameraX: number, cameraY: number, cameraZ: number,
+  worldX: number, worldY: number, worldZ: number,
+  switchDistance: number,
+): boolean {
+  const dx = cameraX - worldX;
+  const dy = cameraY - worldY;
+  const dz = cameraZ - worldZ;
+  const distSq = dx * dx + dy * dy + dz * dz;
+  const threshSq = switchDistance * switchDistance;
+  return distSq > threshSq;
+}
+
+/// EN-015 — draw a billboard quad sampling an imposter atlas.
+///
+/// V1 is a thin wrapper around `drawMeshWithMaterial`: the game
+/// supplies its own quad mesh (any 4-vertex / 2-triangle plane the
+/// imposter material's vertex shader will reposition via
+/// `billboard_quad`). The atlas texture is bound through the standard
+/// material albedo slot before this call (via the engine's material
+/// param / texture binding APIs).
+///
+/// Future revs may add a dedicated FFI that submits a hard-coded unit
+/// quad so games don't need to author a quad mesh; for V1 we keep the
+/// API surface tight and reuse the existing draw path.
+export function drawImposterAtlas(
+  material: number, quadMesh: Model,
+  position: Vec3, scale: number,
+): void {
+  bloom_draw_material(
+    material, quadMesh.handle, 0,
+    position.x, position.y, position.z, scale,
+    1.0, 1.0, 1.0, 1.0,
+  );
+}

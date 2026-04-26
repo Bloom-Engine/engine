@@ -16,6 +16,7 @@ const ENTRIES: &[(&str, &str)] = &[
     ("material_abi.wgsl",           include_str!("../../../shared/shaders/material_abi.wgsl")),
     ("common/pbr.wgsl",             include_str!("../../../shared/shaders/common/pbr.wgsl")),
     ("common/shadows.wgsl",         include_str!("../../../shared/shaders/common/shadows.wgsl")),
+    ("common/imposter.wgsl",        include_str!("../../../shared/shaders/common/imposter.wgsl")),
     ("common/fog.wgsl",             include_str!("../../../shared/shaders/common/fog.wgsl")),
     ("common/tonemap.wgsl",         include_str!("../../../shared/shaders/common/tonemap.wgsl")),
     ("common/sky.wgsl",             include_str!("../../../shared/shaders/common/sky.wgsl")),
@@ -94,5 +95,40 @@ mod tests {
         for (path, body) in ENTRIES {
             assert!(!body.is_empty(), "{} should not be empty", path);
         }
+    }
+
+    // EN-015 V1 — imposter helper library is registered and includes
+    // cleanly through the preprocessor.
+
+    #[test]
+    fn imposter_helper_in_library() {
+        let src = library();
+        let body = src.fetch("common/imposter.wgsl")
+            .expect("common/imposter.wgsl must be registered in ENTRIES");
+        assert!(body.contains("fn octahedral_encode"));
+        assert!(body.contains("fn imposter_atlas_uv"));
+        assert!(body.contains("fn billboard_quad"));
+    }
+
+    #[test]
+    fn imposter_helper_includes_through_preprocessor() {
+        // Synthetic shader that pulls in the imposter helper, proving
+        // the include resolves end-to-end against the baked library.
+        let lib = library();
+        let imposter_src = lib.fetch("common/imposter.wgsl").unwrap();
+        let synthetic = BakedSource {
+            entries: &[
+                (
+                    "test_imposter.wgsl",
+                    "#include \"common/imposter.wgsl\"\n\
+                     // synthesised\n",
+                ),
+                ("common/imposter.wgsl", imposter_src),
+            ],
+        };
+        let out = process(&synthetic, "test_imposter.wgsl").unwrap();
+        assert!(out.contains("fn octahedral_encode"));
+        assert!(out.contains("fn imposter_atlas_uv"));
+        assert!(out.contains("synthesised"));
     }
 }
