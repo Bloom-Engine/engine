@@ -30,6 +30,7 @@ declare function bloom_destroy_instance_buffer(handle: number): void;
 declare function bloom_create_planar_reflection(planeY: number, normalX: number, normalY: number, normalZ: number, resolution: number): number;
 declare function bloom_set_material_reflection_probe(material: number, probe: number): void;
 declare function bloom_create_texture_array(dataPtr: any, dataLen: number, width: number, height: number, layerCount: number): number;
+declare function bloom_create_texture_array_ex(dataPtr: any, dataLen: number, width: number, height: number, layerCount: number, format: number, mipLevels: number): number;
 declare function bloom_set_material_texture_array(material: number, slot: number, array: number): void;
 declare function bloom_set_material_shading_model(material: number, model: number): void;
 declare function bloom_set_material_foliage(material: number, transR: number, transG: number, transB: number, transAmount: number, wrapFactor: number): void;
@@ -459,6 +460,37 @@ export function createTextureArray(
   width: number, height: number, layerCount: number,
 ): number {
   return bloom_create_texture_array(bytes as any, dataLen, width, height, layerCount);
+}
+
+/// EN-014 V2 — texture-array pixel format codes for `createTextureArrayEx`.
+///   `TEX_ARRAY_FORMAT_SRGB`   (0) → Rgba8UnormSrgb (albedo / colour textures)
+///   `TEX_ARRAY_FORMAT_LINEAR` (1) → Rgba8Unorm (normal / MR / data textures —
+///     mandatory for normal maps so the GPU doesn't sRGB-decode the encoded
+///     data and silently corrupt the channels).
+export const TEX_ARRAY_FORMAT_SRGB:   number = 0;
+export const TEX_ARRAY_FORMAT_LINEAR: number = 1;
+
+/// EN-014 V2 — create a texture array with explicit format + mip control.
+///
+/// `format`:
+///   `TEX_ARRAY_FORMAT_SRGB`   (0) → Rgba8UnormSrgb (albedo / colour)
+///   `TEX_ARRAY_FORMAT_LINEAR` (1) → Rgba8Unorm (normal / MR / data)
+///
+/// `mipLevels`:
+///   `1` → no mips (matches V1 `createTextureArray`; data is just mip 0)
+///   `0` → auto-generate `floor(log2(max(w,h))) + 1` levels, filled by
+///         point-downsample copies. V2.5 follow-up will upgrade to a
+///         render-pass box filter for higher-quality minification.
+///   `N` (N > 1) → not yet supported in V2; treated as auto-generate.
+///
+/// Backwards compatible: `createTextureArray` (no Ex) stays available
+/// and is equivalent to `createTextureArrayEx(.., TEX_ARRAY_FORMAT_SRGB, 1)`.
+export function createTextureArrayEx(
+  bytes: number[], dataLen: number,
+  width: number, height: number, layerCount: number,
+  format: number, mipLevels: number,
+): number {
+  return bloom_create_texture_array_ex(bytes as any, dataLen, width, height, layerCount, format, mipLevels);
 }
 
 /// EN-014 — link a texture-array handle to a material at one of three

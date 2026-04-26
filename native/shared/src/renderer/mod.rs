@@ -11758,6 +11758,21 @@ impl Renderer {
         self.material_system.create_texture_array(&self.device, &self.queue, layers)
     }
 
+    /// EN-014 V2 — create a texture array with explicit format + mip
+    /// control. See `MaterialSystem::create_texture_array_ex` for the
+    /// format / mip_levels semantics. The V1 `create_texture_array`
+    /// remains as a thin wrapper that forwards `(format=0, mip_levels=1)`.
+    pub fn create_texture_array_ex(
+        &mut self,
+        layers: &[(&[u8], u32, u32)],
+        format: u32,
+        mip_levels: u32,
+    ) -> u32 {
+        self.material_system.create_texture_array_ex(
+            &self.device, &self.queue, layers, format, mip_levels,
+        )
+    }
+
     /// Link a texture array to a material at one of three slots:
     ///   - 0 = albedo  (binding 14)
     ///   - 1 = normal  (binding 15)

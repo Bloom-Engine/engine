@@ -1348,6 +1348,23 @@ pub extern "C" fn bloom_create_texture_array(
     height:      f64,
     layer_count: f64,
 ) -> f64 {
+    // EN-014 V2 — V1 forwards to _ex with default sRGB / no mips.
+    bloom_create_texture_array_ex(data_ptr, data_len, width, height, layer_count, 0.0, 1.0)
+}
+
+/// EN-014 V2 — explicit format + mip control. See macOS lib.rs for the
+/// reference implementation; this entry-point exists on every native
+/// platform so a TS game targets the same FFI surface.
+#[no_mangle]
+pub extern "C" fn bloom_create_texture_array_ex(
+    data_ptr:    *const u8,
+    data_len:    f64,
+    width:       f64,
+    height:      f64,
+    layer_count: f64,
+    format:      f64,
+    mip_levels:  f64,
+) -> f64 {
     if data_ptr.is_null() || data_len <= 0.0 { return 0.0; }
     let w = width as u32;
     let h = height as u32;
@@ -1366,7 +1383,7 @@ pub extern "C" fn bloom_create_texture_array(
         if end > bytes.len() { break; }
         layers.push((&bytes[start..end], w, h));
     }
-    engine().renderer.create_texture_array(&layers) as f64
+    engine().renderer.create_texture_array_ex(&layers, format as u32, mip_levels as u32) as f64
 }
 
 /// EN-014 — link a texture-array handle to a material at one of three

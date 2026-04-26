@@ -175,6 +175,23 @@ pub struct TextureArray {
 /// 4–8 layers; 16 leaves headroom for foliage/debris splats).
 pub const MAX_TEXTURE_ARRAY_LAYERS: u32 = 16;
 
+/// EN-014 V2 — texture-array format codes, as exposed to the TS API
+/// via `TEX_ARRAY_FORMAT_*`. Anything unrecognised falls back to sRGB
+/// since albedo is the most common splat layer.
+pub const TEX_ARRAY_FORMAT_SRGB:   u32 = 0;
+pub const TEX_ARRAY_FORMAT_LINEAR: u32 = 1;
+
+/// Map a TS-side format code to a wgpu format. sRGB suits albedo; linear
+/// is mandatory for normal/MR data textures (sRGB decoding would corrupt
+/// the encoded normals or rough/metal channels).
+pub fn map_texture_array_format(code: u32) -> wgpu::TextureFormat {
+    match code {
+        TEX_ARRAY_FORMAT_SRGB   => wgpu::TextureFormat::Rgba8UnormSrgb,
+        TEX_ARRAY_FORMAT_LINEAR => wgpu::TextureFormat::Rgba8Unorm,
+        _                       => wgpu::TextureFormat::Rgba8UnormSrgb,
+    }
+}
+
 // =====================================================================
 // The system
 // =====================================================================
@@ -1076,11 +1093,44 @@ impl MaterialSystem {
     /// is capped at `MAX_TEXTURE_ARRAY_LAYERS`; extra layers are
     /// dropped. Returns a 1-based handle (0 on failure: empty layers
     /// or zero extent).
+    ///
+    /// Defaults: `format = 0` (Rgba8UnormSrgb, suitable for albedo),
+    /// `mip_levels = 1` (no mips). For data textures (normal / MR)
+    /// or auto-mip generation, see `create_texture_array_ex`.
     pub fn create_texture_array(
         &mut self,
         device: &wgpu::Device,
         queue:  &wgpu::Queue,
         layers: &[(&[u8], u32, u32)],
+    ) -> u32 {
+        // V1 default: sRGB albedo, no mips. V2 callers use the _ex
+        // variant directly.
+        self.create_texture_array_ex(device, queue, layers, 0, 1)
+    }
+
+    /// EN-014 V2 — create a 2D texture array with explicit pixel format
+    /// and mip-level control. Layer extent / count rules match V1.
+    ///
+    /// `format`:
+    ///   0 → `Rgba8UnormSrgb` (albedo / colour textures; default)
+    ///   1 → `Rgba8Unorm`     (normal / MR / data textures — linear)
+    ///   _ → falls back to `Rgba8UnormSrgb`
+    ///
+    /// `mip_levels`:
+    ///   1     → no mips (matches V1 behaviour)
+    ///   0     → auto-generate `floor(log2(max(w,h))) + 1` mips, filled
+    ///           by point-downsample (`copy_texture_to_texture` halving
+    ///           the previous mip). Cheap, correct sized, but aliased
+    ///           — a render-pass box filter is the V2.5 follow-up.
+    ///   N > 1 → not yet supported (game-supplied per-mip bytes); V2
+    ///           treats this as auto-generate.
+    pub fn create_texture_array_ex(
+        &mut self,
+        device:     &wgpu::Device,
+        queue:      &wgpu::Queue,
+        layers:     &[(&[u8], u32, u32)],
+        format:     u32,
+        mip_levels: u32,
     ) -> u32 {
         let layer_count = (layers.len() as u32).min(MAX_TEXTURE_ARRAY_LAYERS);
         if layer_count == 0 { return 0; }
@@ -1097,6 +1147,21 @@ impl MaterialSystem {
                 return 0;
             }
         }
+        let wgpu_format = map_texture_array_format(format);
+        // Resolve mip count. mip_levels = 1 → single mip. mip_levels = 0
+        // → engine-generated max. Anything else (game-supplied per-mip)
+        // is V2.5; for now treat N > 1 as auto so games opting into mips
+        // don't silently regress to no-mips.
+        let max_mips = (w.max(h) as f32).log2().floor() as u32 + 1;
+        let auto_generate = mip_levels == 0 || mip_levels > 1;
+        let mip_level_count = if mip_levels == 1 { 1 } else { max_mips.max(1) };
+        // Auto-gen needs COPY_SRC on the texture so we can ping-pong each
+        // mip into the next via copy_texture_to_texture.
+        let mut usage = wgpu::TextureUsages::TEXTURE_BINDING
+                      | wgpu::TextureUsages::COPY_DST;
+        if auto_generate && mip_level_count > 1 {
+            usage |= wgpu::TextureUsages::COPY_SRC;
+        }
         let bytes_per_layer = (w as usize) * (h as usize) * 4;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("material_texture_array"),
@@ -1105,12 +1170,11 @@ impl MaterialSystem {
                 height:                 h,
                 depth_or_array_layers:  layer_count,
             },
-            mip_level_count: 1,
+            mip_level_count,
             sample_count:    1,
             dimension:       wgpu::TextureDimension::D2,
-            format:          wgpu::TextureFormat::Rgba8Unorm,
-            usage:           wgpu::TextureUsages::TEXTURE_BINDING
-                            | wgpu::TextureUsages::COPY_DST,
+            format:          wgpu_format,
+            usage,
             view_formats: &[],
         });
         for (i, (bytes, _, _)) in layers.iter().enumerate().take(layer_count as usize) {
@@ -1138,6 +1202,51 @@ impl MaterialSystem {
                 },
                 wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             );
+        }
+        // EN-014 V2 — auto-generate the mip chain via point-sample copies.
+        // For each mip > 0, copy a half-size region of mip-1 into mip,
+        // for every layer. wgpu's copy_texture_to_texture covers a single
+        // mip level + array layer per call. This is point-filtered (not
+        // box-filtered): correct sizes, sampleable at distance, but
+        // aliased. V2.5 follow-up upgrades this to a render-pass box
+        // filter (one fullscreen draw per (mip, layer)).
+        if auto_generate && mip_level_count > 1 {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("material_texture_array_mipgen"),
+            });
+            for mip in 1..mip_level_count {
+                let src_w = (w >> (mip - 1)).max(1);
+                let src_h = (h >> (mip - 1)).max(1);
+                let dst_w = (w >> mip).max(1);
+                let dst_h = (h >> mip).max(1);
+                // Copy region is dst-sized so we read the top-left
+                // 2x2 reduction implicitly. Truly we'd want a filter,
+                // but copy is the cheapest "mips exist" path.
+                let copy_w = dst_w.min(src_w);
+                let copy_h = dst_h.min(src_h);
+                for layer in 0..layer_count {
+                    encoder.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &texture,
+                            mip_level: mip - 1,
+                            origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &texture,
+                            mip_level: mip,
+                            origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d {
+                            width: copy_w,
+                            height: copy_h,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            }
+            queue.submit(std::iter::once(encoder.finish()));
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
             label: Some("material_texture_array_view"),

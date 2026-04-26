@@ -1028,6 +1028,29 @@ pub fn bloom_create_texture_array_bytes(
     data: &[u8],
     width: f64, height: f64, layer_count: f64,
 ) -> f64 {
+    // EN-014 V2 — V1 forwards to _ex with default sRGB / no mips.
+    bloom_create_texture_array_ex_bytes(data, width, height, layer_count, 0.0, 1.0)
+}
+
+/// EN-014 V2 — pointer-shaped Ex variant exists only so the FFI manifest
+/// validates against the Perry surface; JS glue uses the `_bytes` form.
+#[wasm_bindgen]
+pub fn bloom_create_texture_array_ex(
+    _data_ptr: f64, _data_len: f64, _width: f64, _height: f64,
+    _layer_count: f64, _format: f64, _mip_levels: f64,
+) -> f64 {
+    0.0
+}
+
+/// EN-014 V2 — bytes form of `_ex`. See `MaterialSystem::create_texture_array_ex`
+/// for `format` (0 = sRGB, 1 = linear) and `mip_levels` (1 = none, 0 =
+/// auto-generate via point-sample copies) semantics.
+#[wasm_bindgen]
+pub fn bloom_create_texture_array_ex_bytes(
+    data: &[u8],
+    width: f64, height: f64, layer_count: f64,
+    format: f64, mip_levels: f64,
+) -> f64 {
     let w = width as u32;
     let h = height as u32;
     if w == 0 || h == 0 { return 0.0; }
@@ -1042,7 +1065,7 @@ pub fn bloom_create_texture_array_bytes(
         if end > data.len() { break; }
         layers.push((&data[start..end], w, h));
     }
-    engine().renderer.create_texture_array(&layers) as f64
+    engine().renderer.create_texture_array_ex(&layers, format as u32, mip_levels as u32) as f64
 }
 
 /// EN-014 — link a texture-array handle to a material slot

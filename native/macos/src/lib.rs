@@ -1708,6 +1708,24 @@ pub extern "C" fn bloom_create_texture_array(
     height:      f64,
     layer_count: f64,
 ) -> f64 {
+    // EN-014 V2 — V1 stays callable; forwards to _ex with default
+    // format = sRGB (0) and mip_levels = 1 (no mips).
+    bloom_create_texture_array_ex(data_ptr, data_len, width, height, layer_count, 0.0, 1.0)
+}
+
+/// EN-014 V2 — create a texture array with explicit format + mip control.
+/// See `MaterialSystem::create_texture_array_ex` for semantics. The V1
+/// entry above is preserved as a thin wrapper.
+#[no_mangle]
+pub extern "C" fn bloom_create_texture_array_ex(
+    data_ptr:    *const u8,
+    data_len:    f64,
+    width:       f64,
+    height:      f64,
+    layer_count: f64,
+    format:      f64,
+    mip_levels:  f64,
+) -> f64 {
     if data_ptr.is_null() || data_len <= 0.0 { return 0.0; }
     let w = width as u32;
     let h = height as u32;
@@ -1726,7 +1744,7 @@ pub extern "C" fn bloom_create_texture_array(
         if end > bytes.len() { break; }
         layers.push((&bytes[start..end], w, h));
     }
-    engine().renderer.create_texture_array(&layers) as f64
+    engine().renderer.create_texture_array_ex(&layers, format as u32, mip_levels as u32) as f64
 }
 
 /// EN-014 — link a texture-array handle to a material at one of three
