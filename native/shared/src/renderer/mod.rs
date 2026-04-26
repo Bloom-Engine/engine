@@ -26,6 +26,11 @@ use util::encode_png_simple;
 
 mod brdf_lut;
 use brdf_lut::build_brdf_lut;
+mod atmosphere_lut;
+use atmosphere_lut::{
+    build_multi_scattering_lut, build_transmittance_lut, MULTI_SCATTERING_SIZE,
+    TRANSMITTANCE_H, TRANSMITTANCE_W,
+};
 
 mod formats;
 use formats::{
@@ -509,6 +514,20 @@ struct TaaParams {
     params: [f32; 4],
     inv_vp: [[f32; 4]; 4],
     prev_vp: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct UpscaleParams {
+    /// x = mode (0 = bilinear, 1 = Catmull-Rom), yzw padding.
+    params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct RcasParams {
+    /// x = sharpen strength (0 off, 1 max), yzw padding.
+    params: [f32; 4],
 }
 
 #[repr(C)]
@@ -1101,6 +1120,32 @@ pub struct Renderer {
     /// beneath the surface. Default 0.01 (~1% of viewport width).
     pub sss_width: f32,
 
+    /// Upscale pass — runs only when `render_scale < 1.0 && !taa_enabled`,
+    /// reading the render-res `composed_rt` and writing the full-surface
+    /// `upscale_rt` via bilinear or Catmull-Rom. When TAA is on the TAA
+    /// pass handles upscaling itself and this pass is skipped.
+    pub upscale_rt_texture: wgpu::Texture,
+    pub upscale_rt_view: wgpu::TextureView,
+    pub upscale_pipeline: wgpu::RenderPipeline,
+    pub upscale_layout: wgpu::BindGroupLayout,
+    pub upscale_uniform_buffer: wgpu::Buffer,
+    /// 0 = bilinear (cheap), 1 = Catmull-Rom 5-tap (sharper edges).
+    /// Default 1.
+    pub upscale_mode: u32,
+
+    /// Contrast-adaptive sharpen pass — 5-tap cross kernel. Gated on
+    /// `cas_strength > 0`; default 0 = pass skipped. Reads whatever
+    /// texture composite would have sampled (sss/mb/dof/taa/upscale/
+    /// composed) and writes full-surface `cas_rt` that composite
+    /// then consumes.
+    pub cas_rt_texture: wgpu::Texture,
+    pub cas_rt_view: wgpu::TextureView,
+    pub cas_pipeline: wgpu::RenderPipeline,
+    pub cas_layout: wgpu::BindGroupLayout,
+    pub cas_uniform_buffer: wgpu::Buffer,
+    /// 0 = off (default), 0.3 subtle, 0.6 punchy, 1.0 max.
+    pub cas_strength: f32,
+
     // Per-frame 2D batch
     vertices_2d: Vec<Vertex2D>,
     indices_2d: Vec<u32>,
@@ -1222,6 +1267,14 @@ pub struct Renderer {
     _brdf_lut_texture: wgpu::Texture,
     pub brdf_lut_view: wgpu::TextureView,
     pub brdf_lut_sampler: wgpu::Sampler,
+    /// EN-005 Phase 1 — Hillaire 2020 atmosphere LUTs, baked once
+    /// at init from CPU code in `atmosphere_lut.rs`. Not yet sampled
+    /// by any pass; Phase 2 wires them into the procedural sky pass.
+    _atmosphere_transmittance_texture: wgpu::Texture,
+    pub atmosphere_transmittance_view: wgpu::TextureView,
+    _atmosphere_multi_scattering_texture: wgpu::Texture,
+    pub atmosphere_multi_scattering_view: wgpu::TextureView,
+    pub atmosphere_lut_sampler: wgpu::Sampler,
     /// GGX prefilter pipeline. Run once per env load to convolve the
     /// HDR env into roughness-weighted mips, replacing the box filter
     /// stand-in. Matches Karis 2013's split-sum specular prefilter.
@@ -1677,6 +1730,107 @@ impl Renderer {
         // already pre-integrated at 256×256 — no mip filtering needed.
         let brdf_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("brdf_lut_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // --- EN-005 Phase 1 — atmosphere LUTs (Hillaire 2020) ---
+        // Two CPU-baked tables for the procedural sky: transmittance
+        // (per-channel survival fraction along view rays through the
+        // atmosphere) and multi-scattering (energy-conserving second-
+        // and-higher-order scattering). Sizes are platform-tiered —
+        // see atmosphere_lut.rs for the cfg constants. Phase 2 wires
+        // these into the new sky pass; for now they only exist on the
+        // Renderer struct so the bake pipeline is exercised in CI.
+        let transmittance_pixels = build_transmittance_lut(TRANSMITTANCE_W, TRANSMITTANCE_H);
+        let atmosphere_transmittance_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("atmosphere_transmittance_lut"),
+            size: wgpu::Extent3d {
+                width: TRANSMITTANCE_W,
+                height: TRANSMITTANCE_H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &atmosphere_transmittance_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&transmittance_pixels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(TRANSMITTANCE_W * 8), // 4 channels × 2 bytes
+                rows_per_image: Some(TRANSMITTANCE_H),
+            },
+            wgpu::Extent3d {
+                width: TRANSMITTANCE_W,
+                height: TRANSMITTANCE_H,
+                depth_or_array_layers: 1,
+            },
+        );
+        let atmosphere_transmittance_view =
+            atmosphere_transmittance_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let multi_scattering_pixels = build_multi_scattering_lut(
+            &transmittance_pixels,
+            TRANSMITTANCE_W,
+            TRANSMITTANCE_H,
+            MULTI_SCATTERING_SIZE,
+        );
+        let atmosphere_multi_scattering_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("atmosphere_multi_scattering_lut"),
+            size: wgpu::Extent3d {
+                width: MULTI_SCATTERING_SIZE,
+                height: MULTI_SCATTERING_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &atmosphere_multi_scattering_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&multi_scattering_pixels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(MULTI_SCATTERING_SIZE * 8),
+                rows_per_image: Some(MULTI_SCATTERING_SIZE),
+            },
+            wgpu::Extent3d {
+                width: MULTI_SCATTERING_SIZE,
+                height: MULTI_SCATTERING_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        let atmosphere_multi_scattering_view = atmosphere_multi_scattering_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Linear, clamp-to-edge sampler shared between both LUTs —
+        // same shape as the BRDF LUT sampler since both are pre-
+        // integrated 2D tables with no mip levels.
+        let atmosphere_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("atmosphere_lut_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -3089,6 +3243,149 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        // --- Upscale pipeline (render-res composed_rt → full-surface
+        // upscale_rt). Engages when render_scale < 1.0 && !taa_enabled.
+        // 3-binding layout: uniform(mode) + input tex + filtering sampler.
+        let upscale_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("upscale_shader"),
+            source: wgpu::ShaderSource::Wgsl(UPSCALE_SHADER_WGSL.into()),
+        });
+        let upscale_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("upscale_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let upscale_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("upscale_pl_layout"),
+            bind_group_layouts: &[Some(&upscale_layout)],
+            immediate_size: 0,
+        });
+        let upscale_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("upscale_pipeline"),
+            layout: Some(&upscale_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &upscale_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &upscale_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT, blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false, conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None, cache: None,
+        });
+        let upscale_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("upscale_uniform_buffer"),
+            size: std::mem::size_of::<UpscaleParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let (upscale_rt_texture, upscale_rt_view) = create_dof_rt(
+            &device, surface_config.width, surface_config.height,
+        );
+
+        // --- RCAS sharpen pipeline. Same 3-binding layout as upscale
+        // (uniform + input tex + sampler), same HDR output format —
+        // runs at full surface res sampling whatever texture composite
+        // would otherwise read. Gated on cas_strength > 0 at frame time.
+        let cas_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cas_shader"),
+            source: wgpu::ShaderSource::Wgsl(RCAS_SHADER_WGSL.into()),
+        });
+        let cas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cas_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let cas_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cas_pl_layout"),
+            bind_group_layouts: &[Some(&cas_layout)],
+            immediate_size: 0,
+        });
+        let cas_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cas_pipeline"),
+            layout: Some(&cas_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &cas_shader, entry_point: Some("vs_main"),
+                buffers: &[], compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &cas_shader, entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT, blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None, front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false, conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None, cache: None,
+        });
+        let cas_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cas_uniform_buffer"),
+            size: std::mem::size_of::<RcasParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let (cas_rt_texture, cas_rt_view) = create_dof_rt(
+            &device, surface_config.width, surface_config.height,
+        );
 
         // --- SSR pipeline ---
         let ssr_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -5127,6 +5424,18 @@ impl Renderer {
             sss_enabled: false,
             sss_strength: 0.5,
             sss_width: 0.01,
+            upscale_rt_texture,
+            upscale_rt_view,
+            upscale_pipeline,
+            upscale_layout,
+            upscale_uniform_buffer,
+            upscale_mode: 1, // Catmull-Rom by default
+            cas_rt_texture,
+            cas_rt_view,
+            cas_pipeline,
+            cas_layout,
+            cas_uniform_buffer,
+            cas_strength: 0.0, // off by default
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
             draw_calls_2d: Vec::new(),
@@ -5186,6 +5495,11 @@ impl Renderer {
             _brdf_lut_texture: brdf_lut_texture,
             brdf_lut_view,
             brdf_lut_sampler,
+            _atmosphere_transmittance_texture: atmosphere_transmittance_texture,
+            atmosphere_transmittance_view,
+            _atmosphere_multi_scattering_texture: atmosphere_multi_scattering_texture,
+            atmosphere_multi_scattering_view,
+            atmosphere_lut_sampler,
             prefilter_pipeline,
             prefilter_diffuse_pipeline,
             prefilter_layout,
@@ -5402,6 +5716,12 @@ impl Renderer {
             let (sss_t, sss_v) = create_sss_rt(&self.device, width, height);
             self.sss_rt_texture = sss_t;
             self.sss_rt_view = sss_v;
+            let (up_t, up_v) = create_dof_rt(&self.device, width, height);
+            self.upscale_rt_texture = up_t;
+            self.upscale_rt_view = up_v;
+            let (cas_t, cas_v) = create_dof_rt(&self.device, width, height);
+            self.cas_rt_texture = cas_t;
+            self.cas_rt_view = cas_v;
 
             // Invalidate bind-group caches that reference any of the
             // RT views we just recreated.
@@ -5559,6 +5879,18 @@ impl Renderer {
             let (w, h) = (self.surface_config.width, self.surface_config.height);
             self.resize(w, h, self.logical_width, self.logical_height);
         }
+    }
+
+    /// Upscale filter when `render_scale < 1.0 && !taa_enabled`.
+    /// 0 = bilinear (cheap, soft), 1 = Catmull-Rom (sharper, default).
+    pub fn set_upscale_mode(&mut self, mode: u32) {
+        self.upscale_mode = if mode > 1 { 1 } else { mode };
+    }
+
+    /// CAS sharpen strength. 0 = off (default, pass skipped),
+    /// 0.3 = subtle, 0.6 = punchy, 1.0 = max. Clamped to [0, 1].
+    pub fn set_cas_strength(&mut self, strength: f32) {
+        self.cas_strength = strength.clamp(0.0, 1.0);
     }
 
     /// Toggle SSR on/off. SSR contributes nothing in scenes with
@@ -9106,6 +9438,49 @@ impl Renderer {
         }
 
         // ============================================================
+        // Upscale pass: render-res composed_rt → full-surface upscale_rt.
+        // Engages only when render_scale < 1.0 AND TAA is off — when
+        // TAA runs it does its own Catmull-Rom upscale. Downstream
+        // post-FX (DoF/MB/SSS/composite) read upscale_rt instead of
+        // hdr_rt in this case so the chain operates at full surface
+        // resolution.
+        // ============================================================
+        if self.render_scale < 0.999 && !self.taa_enabled {
+            let up = UpscaleParams {
+                params: [self.upscale_mode as f32, 0.0, 0.0, 0.0],
+            };
+            self.queue.write_buffer(&self.upscale_uniform_buffer, 0, bytemuck::bytes_of(&up));
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("upscale_bg"),
+                layout: &self.upscale_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.upscale_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.composed_rt_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("upscale_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.upscale_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.upscale_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ============================================================
         // TAA pass: reprojection + neighborhood clamp on composed_rt.
         // Skipped when TAA is off — composite reads composed_rt
         // directly and gets the same composed / fog / shafts output.
@@ -9167,10 +9542,12 @@ impl Renderer {
 
         // ============================================================
         // DoF pass: variable-radius Poisson disc blur driven by CoC
-        // Reads TAA output (or hdr_rt if TAA off) + depth → dof_rt
+        // Reads TAA output / upscale_rt / hdr_rt + depth → dof_rt
         // ============================================================
         let pre_dof_view = if self.taa_enabled {
             &self.taa_views[taa_dst_idx]
+        } else if self.render_scale < 0.999 {
+            &self.upscale_rt_view
         } else {
             &self.hdr_rt_view
         };
@@ -9223,6 +9600,8 @@ impl Renderer {
             &self.dof_rt_view
         } else if self.taa_enabled {
             &self.taa_views[taa_dst_idx]
+        } else if self.render_scale < 0.999 {
+            &self.upscale_rt_view
         } else {
             &self.hdr_rt_view
         };
@@ -9277,6 +9656,8 @@ impl Renderer {
             &self.dof_rt_view
         } else if self.taa_enabled {
             &self.taa_views[taa_dst_idx]
+        } else if self.render_scale < 0.999 {
+            &self.upscale_rt_view
         } else {
             &self.hdr_rt_view
         };
@@ -9320,9 +9701,12 @@ impl Renderer {
         }
 
         // ============================================================
-        // Composite pass: tonemap (ACES + sRGB encode)
+        // RCAS sharpen pass: contrast-adaptive 5-tap cross. Reads the
+        // same texture composite would otherwise sample (sss/mb/dof/
+        // taa/upscale/composed) and writes cas_rt. Off by default —
+        // gated on cas_strength > 0.
         // ============================================================
-        let composite_src_view = if self.sss_enabled && self.sss_strength > 0.0 {
+        let cas_input_view: &wgpu::TextureView = if self.sss_enabled && self.sss_strength > 0.0 {
             &self.sss_rt_view
         } else if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
             &self.motion_blur_rt_view
@@ -9330,12 +9714,56 @@ impl Renderer {
             &self.dof_rt_view
         } else if self.taa_enabled {
             &self.taa_views[taa_dst_idx]
+        } else if self.render_scale < 0.999 {
+            &self.upscale_rt_view
         } else {
-            // TAA off: read the composed buffer directly so SSR /
-            // SSGI / bloom / fog / shafts still land in the final
-            // image. Before the scene-compose split this branch
-            // read raw hdr_rt and silently dropped those effects.
+            // TAA off, native res: composed_rt is already full-surface
+            // and carries SSR / SSGI / bloom / fog / shafts.
             &self.composed_rt_view
+        };
+
+        if self.cas_strength > 0.0 {
+            let cp = RcasParams {
+                params: [self.cas_strength, 0.0, 0.0, 0.0],
+            };
+            self.queue.write_buffer(&self.cas_uniform_buffer, 0, bytemuck::bytes_of(&cp));
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cas_bg"),
+                layout: &self.cas_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.cas_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(cas_input_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cas_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.cas_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.cas_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // ============================================================
+        // Composite pass: tonemap (ACES + sRGB encode)
+        // ============================================================
+        let composite_src_view: &wgpu::TextureView = if self.cas_strength > 0.0 {
+            &self.cas_rt_view
+        } else {
+            cas_input_view
         };
 
         // ============================================================
