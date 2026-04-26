@@ -49,6 +49,7 @@ fn map_keycode(vk: u32) -> usize {
 mod win32 {
     use super::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::Win32::UI::HiDpi::*;
     use windows::Win32::Foundation::*;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::Graphics::Gdi::*;
@@ -164,23 +165,60 @@ mod win32 {
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             0x0005 /* WM_SIZE */ => {
-                let new_w = (lparam.0 & 0xFFFF) as u32;
-                let new_h = ((lparam.0 >> 16) & 0xFFFF) as u32;
-                if new_w > 0 && new_h > 0 {
+                // lParam carries the new client-area size in *physical*
+                // pixels (Per-Monitor-Aware-V2). Derive logical via
+                // current DPI so the rest of the engine sees the same
+                // logical/physical split macOS does.
+                let phys_w = (lparam.0 & 0xFFFF) as u32;
+                let phys_h = ((lparam.0 >> 16) & 0xFFFF) as u32;
+                if phys_w > 0 && phys_h > 0 {
                     if let Some(eng) = ENGINE.get_mut() {
-                        if new_w != eng.renderer.width() || new_h != eng.renderer.height() {
-                            eng.renderer.resize(new_w, new_h, new_w, new_h);
+                        if phys_w != eng.renderer.physical_width()
+                            || phys_h != eng.renderer.physical_height()
+                        {
+                            let scale = dpi_scale(hwnd);
+                            let log_w = ((phys_w as f64) / scale).round() as u32;
+                            let log_h = ((phys_h as f64) / scale).round() as u32;
+                            eng.renderer.resize(phys_w, phys_h, log_w, log_h);
                         }
                     }
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+            0x02E0 /* WM_DPICHANGED */ => {
+                // The window dragged onto a different-DPI monitor.
+                // lParam holds a suggested RECT — Windows wants us to
+                // accept this geometry to keep the window's apparent
+                // size constant across the DPI change. The follow-up
+                // WM_SIZE handles the renderer resize.
+                let suggested = &*(lparam.0 as *const RECT);
+                let _ = SetWindowPos(
+                    hwnd, None,
+                    suggested.left, suggested.top,
+                    suggested.right - suggested.left,
+                    suggested.bottom - suggested.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                LRESULT(0)
+            }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
 
-    pub fn create_window(width: f64, height: f64, title: &str) -> HWND {
+    /// Returns (hwnd, physical_w, physical_h). Caller's `width`/`height`
+    /// are *logical* — on a HiDPI monitor with scale 2.0 the window
+    /// will appear logically the right size while its client area is
+    /// scaled-up physical pixels for the renderer to fill.
+    pub fn create_window(width: f64, height: f64, title: &str) -> (HWND, u32, u32) {
         unsafe {
+            // Per-Monitor-Aware-V2: the window's DPI tracks the monitor
+            // it's currently on, and Windows fires WM_DPICHANGED when
+            // it moves between monitors of different DPI. Without this
+            // call, Win32 silently virtualises us to 96 DPI on HiDPI
+            // displays — a 4K monitor would render at ~2560×1440.
+            // Safe to call early; ignored on pre-Win10 1703.
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
             let hmodule = GetModuleHandleW(None).unwrap();
             let hinstance: HINSTANCE = hmodule.into();
             let class_name = w!("BloomWindowClass");
@@ -198,19 +236,46 @@ mod win32 {
 
             let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
 
+            // Initial window size in physical pixels. We don't have a
+            // window handle yet, so use the system DPI — close enough,
+            // and WM_DPICHANGED will resize on the first move if the
+            // user lands on a different-DPI monitor.
+            let system_dpi = GetDpiForSystem().max(96);
+            let scale = system_dpi as f64 / 96.0;
+            let phys_w = (width * scale).round() as i32;
+            let phys_h = (height * scale).round() as i32;
+
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
                 PCWSTR(title_wide.as_ptr()),
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                 CW_USEDEFAULT, CW_USEDEFAULT,
-                width as i32, height as i32,
+                phys_w, phys_h,
                 None, None, Some(&hinstance), None,
             ).unwrap();
 
             ShowWindow(hwnd, SW_SHOW);
             HWND_GLOBAL = Some(hwnd);
-            hwnd
+
+            // After the window exists, query the actual client-area
+            // size. Includes whatever DWM trimmed for borders and
+            // reflects this monitor's DPI rather than the system one.
+            let mut rect = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rect);
+            let actual_w = (rect.right - rect.left).max(1) as u32;
+            let actual_h = (rect.bottom - rect.top).max(1) as u32;
+            (hwnd, actual_w, actual_h)
+        }
+    }
+
+    /// Current per-monitor DPI scale for this window (1.0 on a 96-DPI
+    /// monitor, 2.0 on a Retina-class 192-DPI monitor, etc.). Falls
+    /// back to 1.0 if the API is missing (pre-Win10 1607).
+    pub fn dpi_scale(hwnd: HWND) -> f64 {
+        unsafe {
+            let dpi = GetDpiForWindow(hwnd);
+            if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
         }
     }
 
@@ -231,7 +296,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
     #[cfg(windows)]
     {
-        let hwnd = win32::create_window(width, height, title);
+        let (hwnd, phys_w, phys_h) = win32::create_window(width, height, title);
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
@@ -295,11 +360,15 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
         let surface_caps = surface.get_capabilities(&adapter);
         let format = surface_caps.formats[0];
+        // Surface is configured at the *physical* client-area size we
+        // got back from create_window; Renderer::new takes the
+        // caller's logical size separately so screenWidth() etc. keep
+        // returning DPI-independent numbers.
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: width as u32,
-            height: height as u32,
+            width: phys_w,
+            height: phys_h,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -1391,6 +1460,21 @@ pub extern "C" fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64
 #[no_mangle]
 pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
     engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_procedural_sky(enabled: f64, rayleigh_density: f64, mie_density: f64, ground_albedo: f64) {
+    engine().renderer.set_procedural_sky(
+        enabled != 0.0,
+        rayleigh_density as f32,
+        mie_density as f32,
+        ground_albedo as f32,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_sun_direction(dx: f64, dy: f64, dz: f64, intensity: f64) {
+    engine().renderer.set_sun_direction(dx as f32, dy as f32, dz as f32, intensity as f32);
 }
 
 // --- Utility FFI ---

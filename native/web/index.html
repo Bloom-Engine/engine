@@ -272,6 +272,41 @@
 
     // 3. Set up DOM event listeners for input injection
     const canvas = document.getElementById('bloom-canvas');
+
+    // HiDPI: re-sync the canvas backing store + renderer surface
+    // whenever the CSS box changes (window resize, layout shift) or
+    // devicePixelRatio shifts (browser zoom, drag between displays).
+    // The init path already sets the right size; this keeps it
+    // current. Clamp dpr to 3 — beyond that the GPU cost balloons
+    // for invisible-to-the-eye pixels.
+    function syncCanvasSize() {
+      const cssRect = canvas.getBoundingClientRect();
+      const logW = Math.max(1, Math.round(cssRect.width));
+      const logH = Math.max(1, Math.round(cssRect.height));
+      const dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+      const physW = Math.round(logW * dpr);
+      const physH = Math.round(logH * dpr);
+      if (canvas.width !== physW) canvas.width = physW;
+      if (canvas.height !== physH) canvas.height = physH;
+      if (typeof bloom.bloom_resize === 'function') {
+        bloom.bloom_resize(physW, physH, logW, logH);
+      }
+    }
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(syncCanvasSize);
+      ro.observe(canvas);
+    }
+    // matchMedia fires when devicePixelRatio crosses an integer
+    // boundary (e.g. zoom 100% → 125%). The query string updates
+    // as dpr changes; we re-listen on each event to keep tracking.
+    function watchDpr() {
+      const q = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      q.addEventListener('change', () => {
+        syncCanvasSize();
+        watchDpr();
+      }, { once: true });
+    }
+    watchDpr();
     const keyMap = {
       'KeyA': 65, 'KeyB': 66, 'KeyC': 67, 'KeyD': 68, 'KeyE': 69, 'KeyF': 70,
       'KeyG': 71, 'KeyH': 72, 'KeyI': 73, 'KeyJ': 74, 'KeyK': 75, 'KeyL': 76,

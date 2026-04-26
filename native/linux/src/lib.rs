@@ -111,7 +111,11 @@ mod x11_impl {
         unsafe { set_fullscreen(!IS_FULLSCREEN); }
     }
 
-    pub fn create_window(width: f64, height: f64, title: &str) {
+    /// Returns (physical_w, physical_h). Caller's `width`/`height`
+    /// are *logical*; on a HiDPI X11 display we multiply by the
+    /// monitor's scale factor so the window appears the right size
+    /// while its surface is at the screen's physical resolution.
+    pub fn create_window(width: f64, height: f64, title: &str) -> (u32, u32) {
         unsafe {
             DISPLAY = x11::xlib::XOpenDisplay(std::ptr::null());
             if DISPLAY.is_null() {
@@ -121,9 +125,13 @@ mod x11_impl {
             let screen = x11::xlib::XDefaultScreen(DISPLAY);
             let root = x11::xlib::XRootWindow(DISPLAY, screen);
 
+            let scale = display_scale(DISPLAY, screen);
+            let phys_w = (width * scale).round() as u32;
+            let phys_h = (height * scale).round() as u32;
+
             X11_WINDOW = x11::xlib::XCreateSimpleWindow(
                 DISPLAY, root,
-                0, 0, width as u32, height as u32, 0,
+                0, 0, phys_w, phys_h, 0,
                 x11::xlib::XBlackPixel(DISPLAY, screen),
                 x11::xlib::XWhitePixel(DISPLAY, screen),
             );
@@ -138,6 +146,27 @@ mod x11_impl {
 
             x11::xlib::XMapWindow(DISPLAY, X11_WINDOW);
             x11::xlib::XFlush(DISPLAY);
+            (phys_w, phys_h)
+        }
+    }
+
+    /// Read the current display's DPI scale factor. Computed from
+    /// physical screen dimensions (pixels / mm). Snapped to the
+    /// nearest 0.25 and clamped to [1.0, 4.0] — EDID often lies
+    /// about millimetres so we want stable integer-ish steps. A
+    /// real Wayland-style desktop environment with explicit scale
+    /// settings is out of scope here; this matches what most X11
+    /// users actually run (fractional scaling via Xft.dpi is the
+    /// only thing GTK/Qt honour by default).
+    pub fn display_scale(display: *mut x11::xlib::Display, screen: i32) -> f64 {
+        unsafe {
+            let pixels = x11::xlib::XDisplayWidth(display, screen) as f64;
+            let mm = x11::xlib::XDisplayWidthMM(display, screen) as f64;
+            if mm <= 0.0 || pixels <= 0.0 { return 1.0; }
+            let dpi = pixels / (mm / 25.4);
+            // 96 DPI = scale 1.0. Snap to 0.25 steps.
+            let raw = (dpi / 96.0).max(1.0).min(4.0);
+            (raw * 4.0).round() / 4.0
         }
     }
 
@@ -196,12 +225,18 @@ mod x11_impl {
                     }
                     x11::xlib::ConfigureNotify => {
                         let configure = event.configure;
-                        let new_w = configure.width as u32;
-                        let new_h = configure.height as u32;
-                        if new_w > 0 && new_h > 0 {
+                        let phys_w = configure.width as u32;
+                        let phys_h = configure.height as u32;
+                        if phys_w > 0 && phys_h > 0 {
                             let eng = engine();
-                            if new_w != eng.renderer.width() || new_h != eng.renderer.height() {
-                                eng.renderer.resize(new_w, new_h, new_w, new_h);
+                            if phys_w != eng.renderer.physical_width()
+                                || phys_h != eng.renderer.physical_height()
+                            {
+                                let screen = x11::xlib::XDefaultScreen(DISPLAY);
+                                let scale = display_scale(DISPLAY, screen);
+                                let log_w = ((phys_w as f64) / scale).round() as u32;
+                                let log_h = ((phys_h as f64) / scale).round() as u32;
+                                eng.renderer.resize(phys_w, phys_h, log_w, log_h);
                             }
                         }
                     }
@@ -221,7 +256,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
     #[cfg(target_os = "linux")]
     {
-        x11_impl::create_window(width, height, title);
+        let (phys_w, phys_h) = x11_impl::create_window(width, height, title);
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
@@ -289,11 +324,15 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
         let surface_caps = surface.get_capabilities(&adapter);
         let format = surface_caps.formats[0];
+        // Surface sized at the *physical* pixel count we computed
+        // from XDisplayWidth/MM; renderer is told the caller's
+        // logical size separately so screenWidth() etc. stay
+        // DPI-independent.
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: width as u32,
-            height: height as u32,
+            width: phys_w,
+            height: phys_h,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -1290,6 +1329,21 @@ pub extern "C" fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64
 #[no_mangle]
 pub extern "C" fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
     engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_procedural_sky(enabled: f64, rayleigh_density: f64, mie_density: f64, ground_albedo: f64) {
+    engine().renderer.set_procedural_sky(
+        enabled != 0.0,
+        rayleigh_density as f32,
+        mie_density as f32,
+        ground_albedo as f32,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_sun_direction(dx: f64, dy: f64, dz: f64, intensity: f64) {
+    engine().renderer.set_sun_direction(dx as f32, dy as f32, dz as f32, intensity as f32);
 }
 
 // --- Utility FFI ---

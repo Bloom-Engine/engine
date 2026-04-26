@@ -47,8 +47,8 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
         return;
     }
 
-    let w = width as u32;
-    let h = height as u32;
+    let log_w = width as u32;
+    let log_h = height as u32;
     let _fullscreen = fullscreen != 0.0;
 
     wasm_bindgen_futures::spawn_local(async move {
@@ -60,8 +60,18 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .expect("element is not a canvas");
 
-        canvas.set_width(w);
-        canvas.set_height(h);
+        // HiDPI: size the canvas *backing store* (set_width/set_height,
+        // i.e. the WebGPU surface) to logical × devicePixelRatio so a
+        // 4K Retina display actually renders at 4K. CSS layout dimensions
+        // stay in logical pixels — index.html keeps `width: 100%` on
+        // the canvas — so the document layout is unchanged. Clamp to
+        // [1, 3] because higher dprs (some phones report 4) are wasted
+        // shading work and can crash low-end mobile GPUs.
+        let dpr = window.device_pixel_ratio().max(1.0).min(3.0);
+        let phys_w = ((log_w as f64) * dpr).round() as u32;
+        let phys_h = ((log_h as f64) * dpr).round() as u32;
+        canvas.set_width(phys_w);
+        canvas.set_height(phys_h);
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
@@ -102,8 +112,8 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
-            width: w,
-            height: h,
+            width: phys_w,
+            height: phys_h,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -111,7 +121,7 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = Renderer::new(device, queue, surface, surface_config, w, h);
+        let renderer = Renderer::new(device, queue, surface, surface_config, log_w, log_h);
         let engine_state = EngineState::new(renderer);
 
         unsafe {
@@ -125,6 +135,26 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
 #[wasm_bindgen]
 pub fn bloom_close_window() {
     // TODO: Phase 3 — clean up resources if needed
+}
+
+/// Web-only resize hook. Called from index.html when a ResizeObserver
+/// or matchMedia(`(resolution: ...)`) signals the canvas's CSS box
+/// changed or devicePixelRatio shifted (e.g. browser zoom). The JS
+/// glue does the dpr math; we just receive both sizes and forward to
+/// the renderer.
+#[wasm_bindgen]
+pub fn bloom_resize(physical_w: f64, physical_h: f64, logical_w: f64, logical_h: f64) {
+    let pw = (physical_w as u32).max(1);
+    let ph = (physical_h as u32).max(1);
+    let lw = (logical_w as u32).max(1);
+    let lh = (logical_h as u32).max(1);
+    unsafe {
+        if let Some(eng) = ENGINE.get_mut() {
+            if pw != eng.renderer.physical_width() || ph != eng.renderer.physical_height() {
+                eng.renderer.resize(pw, ph, lw, lh);
+            }
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -1254,6 +1284,21 @@ pub fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) {
 #[wasm_bindgen]
 pub fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
     engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_procedural_sky(enabled: f64, rayleigh_density: f64, mie_density: f64, ground_albedo: f64) {
+    engine().renderer.set_procedural_sky(
+        enabled != 0.0,
+        rayleigh_density as f32,
+        mie_density as f32,
+        ground_albedo as f32,
+    );
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_sun_direction(dx: f64, dy: f64, dz: f64, intensity: f64) {
+    engine().renderer.set_sun_direction(dx as f32, dy as f32, dz as f32, intensity as f32);
 }
 
 #[wasm_bindgen]
