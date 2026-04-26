@@ -802,6 +802,246 @@ pub fn bloom_create_mesh(_vertex_ptr: f64, _vertex_count: f64, _index_ptr: f64, 
     0.0
 }
 
+// ============================================================
+// Phase 1c — material system FFI
+// ============================================================
+
+#[wasm_bindgen]
+pub fn bloom_set_material_params(_handle: f64, _params_ptr: f64, _param_count: f64) {
+    // No-op: JS glue calls bloom_set_material_params_floats instead
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_material_params_floats(handle: f64, params: &[f32]) {
+    let count = params.len();
+    if count > 64 {
+        web_sys::console::error_1(&format!(
+            "[material] set_material_params: param_count {} > 64 (256-byte UBO cap)",
+            count
+        ).into());
+        return;
+    }
+    let mut bytes = vec![0u8; count * 4];
+    for (i, &v) in params.iter().enumerate() {
+        bytes[i*4..i*4+4].copy_from_slice(&v.to_le_bytes());
+    }
+    let eng = engine();
+    if let Err(e) = eng.renderer.material_system.set_user_params(
+        &eng.renderer.device, &eng.renderer.queue,
+        handle as u32, &bytes,
+    ) {
+        web_sys::console::error_1(&format!("[material] set_material_params failed: {}", e).into());
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_str(source: &str) -> f64 {
+    match engine().renderer.compile_material(source) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_refractive(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_refractive_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_refractive_str(source: &str) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Refractive, true, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[refractive] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_transparent(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_transparent_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_transparent_str(source: &str) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Transparent, false, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_additive(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_additive_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_additive_str(source: &str) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Additive, false, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_cutout(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_cutout_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_cutout_str(source: &str) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Opaque, Bucket::Cutout, false, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_instanced(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_instanced_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_instanced_str(source: &str) -> f64 {
+    match engine().renderer.compile_material_instanced(source) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] instanced compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_create_instance_buffer(_data_ptr: f64, _instance_count: f64) -> f64 {
+    // No-op: JS glue calls bloom_create_instance_buffer_floats instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_create_instance_buffer_floats(data: &[f32], instance_count: f64) -> f64 {
+    if instance_count <= 0.0 { return 0.0; }
+    let count = instance_count as u32;
+    engine().renderer.create_instance_buffer(data, count) as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_submit_material_draw_instanced(
+    material: f64, mesh_handle: f64, mesh_idx: f64,
+    instance_buffer: f64, instance_count: f64,
+) {
+    let eng = engine();
+    let handle_bits = mesh_handle.to_bits();
+    if let Some(model) = eng.models.get(mesh_handle) {
+        eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+    }
+    eng.renderer.submit_material_draw_instanced(
+        material as u32,
+        handle_bits,
+        mesh_idx as usize,
+        instance_buffer as u32,
+        instance_count as u32,
+    );
+}
+
+#[wasm_bindgen]
+pub fn bloom_destroy_instance_buffer(handle: f64) {
+    engine().renderer.destroy_instance_buffer(handle as u32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_from_file(_path: f64, _bucket_kind: f64) -> f64 {
+    // No-op: web has no filesystem — JS glue would have to fetch + call
+    // bloom_compile_material_from_file_str instead.
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_from_file_str(path: &str, bucket_kind: f64) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let (profile, bucket, reads_scene) = match bucket_kind as u32 {
+        0 => (FragmentProfile::Opaque,      Bucket::Opaque,      false),
+        1 => (FragmentProfile::Translucent, Bucket::Transparent, false),
+        2 => (FragmentProfile::Translucent, Bucket::Refractive,  true),
+        3 => (FragmentProfile::Translucent, Bucket::Additive,    false),
+        4 => (FragmentProfile::Opaque,      Bucket::Cutout,      false),
+        _ => {
+            web_sys::console::error_1(&format!(
+                "[material] from_file: unknown bucket_kind {}", bucket_kind
+            ).into());
+            return 0.0;
+        }
+    };
+    match engine().renderer.compile_material_from_file(
+        std::path::Path::new(path), profile, bucket, reads_scene,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] from_file failed: {}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_draw_material(
+    material: f64,
+    mesh_handle: f64,
+    mesh_idx: f64,
+    x: f64, y: f64, z: f64, scale: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let eng = engine();
+    let handle_bits = mesh_handle.to_bits();
+    if let Some(model) = eng.models.get(mesh_handle) {
+        eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+    }
+    eng.renderer.submit_material_draw(
+        material as u32,
+        handle_bits,
+        mesh_idx as usize,
+        [x as f32, y as f32, z as f32],
+        scale as f32,
+        [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32],
+    );
+}
+
 #[wasm_bindgen]
 pub fn bloom_load_model_animation(_path: f64) -> f64 { 0.0 }
 

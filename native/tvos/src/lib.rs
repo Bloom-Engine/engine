@@ -2135,6 +2135,192 @@ pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f32, vertex_count: f64, i
     engine().models.create_mesh(vertex_data, index_data)
 }
 
+// ============================================================
+// Phase 1c — material system FFI
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_set_material_params(
+    handle: f64,
+    params_ptr: *const f64,
+    param_count: f64,
+) {
+    let count = param_count as usize;
+    if count > 64 {
+        eprintln!("[material] set_material_params: param_count {} > 64 (256-byte UBO cap)", count);
+        return;
+    }
+    let mut bytes = vec![0u8; count * 4];
+    if !params_ptr.is_null() && count > 0 {
+        let slots = unsafe { std::slice::from_raw_parts(params_ptr, count) };
+        for (i, &v) in slots.iter().enumerate() {
+            let f = v as f32;
+            bytes[i*4..i*4+4].copy_from_slice(&f.to_le_bytes());
+        }
+    }
+    let eng = engine();
+    if let Err(e) = eng.renderer.material_system.set_user_params(
+        &eng.renderer.device, &eng.renderer.queue,
+        handle as u32, &bytes,
+    ) {
+        eprintln!("[material] set_material_params failed: {}", e);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_compile_material(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material(source) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            eprintln!("[material] compile failed: {:?}", e);
+            0.0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_refractive(source_ptr: *const u8) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Refractive, true, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[refractive] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_transparent(source_ptr: *const u8) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Transparent, false, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_additive(source_ptr: *const u8) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Additive, false, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_cutout(source_ptr: *const u8) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Opaque, Bucket::Cutout, false, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] compile failed: {:?}", e); 0.0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_instanced(source_ptr: *const u8) -> f64 {
+    let source = str_from_header(source_ptr);
+    match engine().renderer.compile_material_instanced(source) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] instanced compile failed: {:?}", e); 0.0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_create_instance_buffer(
+    data_ptr: *const f64, instance_count: f64,
+) -> f64 {
+    if data_ptr.is_null() || instance_count <= 0.0 { return 0.0; }
+    let count = instance_count as u32;
+    let slot_count = (count as usize) * 9;
+    let raw_f64 = unsafe { std::slice::from_raw_parts(data_ptr, slot_count) };
+    let raw_f32: Vec<f32> = raw_f64.iter().map(|&v| v as f32).collect();
+    engine().renderer.create_instance_buffer(&raw_f32, count) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_submit_material_draw_instanced(
+    material: f64, mesh_handle: f64, mesh_idx: f64,
+    instance_buffer: f64, instance_count: f64,
+) {
+    let eng = engine();
+    let handle_bits = mesh_handle.to_bits();
+    if let Some(model) = eng.models.get(mesh_handle) {
+        eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+    }
+    eng.renderer.submit_material_draw_instanced(
+        material as u32,
+        handle_bits,
+        mesh_idx as usize,
+        instance_buffer as u32,
+        instance_count as u32,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_destroy_instance_buffer(handle: f64) {
+    engine().renderer.destroy_instance_buffer(handle as u32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_compile_material_from_file(
+    path_ptr: *const u8,
+    bucket_kind: f64,
+) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let path = str_from_header(path_ptr);
+    let (profile, bucket, reads_scene) = match bucket_kind as u32 {
+        0 => (FragmentProfile::Opaque,      Bucket::Opaque,      false),
+        1 => (FragmentProfile::Translucent, Bucket::Transparent, false),
+        2 => (FragmentProfile::Translucent, Bucket::Refractive,  true),
+        3 => (FragmentProfile::Translucent, Bucket::Additive,    false),
+        4 => (FragmentProfile::Opaque,      Bucket::Cutout,      false),
+        _ => {
+            eprintln!("[material] from_file: unknown bucket_kind {bucket_kind}");
+            return 0.0;
+        }
+    };
+    match engine().renderer.compile_material_from_file(
+        std::path::Path::new(path), profile, bucket, reads_scene,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => { eprintln!("[material] from_file failed: {e}"); 0.0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_draw_material(
+    material: f64,
+    mesh_handle: f64,
+    mesh_idx: f64,
+    x: f64, y: f64, z: f64, scale: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let eng = engine();
+    let handle_bits = mesh_handle.to_bits();
+    if let Some(model) = eng.models.get(mesh_handle) {
+        eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+    }
+    eng.renderer.submit_material_draw(
+        material as u32,
+        handle_bits,
+        mesh_idx as usize,
+        [x as f32, y as f32, z as f32],
+        scale as f32,
+        [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32],
+    );
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
