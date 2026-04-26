@@ -5893,6 +5893,9 @@ impl Renderer {
         self.cas_strength = strength.clamp(0.0, 1.0);
     }
 
+    /// Current render-resolution multiplier in [0.5, 1.0].
+    pub fn render_scale(&self) -> f32 { self.render_scale }
+
     /// Toggle SSR on/off. SSR contributes nothing in scenes with
     /// no on-screen geometry to reflect (e.g., single object
     /// against sky) — turning it off there saves a fullscreen

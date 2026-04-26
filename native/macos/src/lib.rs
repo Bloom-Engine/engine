@@ -1180,6 +1180,36 @@ pub extern "C" fn bloom_set_taa_enabled(on: f64) {
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_set_render_scale(scale: f64) {
+    engine().renderer.set_render_scale(scale as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_render_scale() -> f64 {
+    engine().renderer.render_scale() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_upscale_mode(mode: f64) {
+    engine().renderer.set_upscale_mode(mode as u32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_cas_strength(strength: f64) {
+    engine().renderer.set_cas_strength(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_physical_width() -> f64 {
+    engine().renderer.physical_width() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_physical_height() -> f64 {
+    engine().renderer.physical_height() as f64
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_set_manual_exposure(value: f64) {
     engine().renderer.set_manual_exposure(value as f32);
 }

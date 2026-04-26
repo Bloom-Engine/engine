@@ -21,6 +21,12 @@ declare function bloom_set_film_grain(strength: number): void;
 declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): void;
 declare function bloom_set_auto_exposure(on: number): void;
 declare function bloom_set_taa_enabled(on: number): void;
+declare function bloom_set_render_scale(scale: number): void;
+declare function bloom_get_render_scale(): number;
+declare function bloom_set_upscale_mode(mode: number): void;
+declare function bloom_set_cas_strength(strength: number): void;
+declare function bloom_get_physical_width(): number;
+declare function bloom_get_physical_height(): number;
 declare function bloom_set_manual_exposure(value: number): void;
 declare function bloom_set_env_intensity(intensity: number): void;
 declare function bloom_set_ssgi_enabled(on: number): void;
@@ -205,6 +211,39 @@ export function setAutoExposure(on: boolean): void {
 export function setTaaEnabled(on: boolean): void {
   bloom_set_taa_enabled(on ? 1 : 0);
 }
+
+/**
+ * Render-resolution multiplier. 0.5 = quarter-pixel shading (cheap, soft);
+ * 1.0 = native (sharp, expensive). Clamped to [0.5, 1.0]. Once called
+ * explicitly, the choice sticks across `setTaaEnabled` toggles instead of
+ * being overridden by the legacy 0.5↔1.0 coupling.
+ *
+ * On a 4K display: 0.75 hits a quality/perf sweet spot for 3D scenes.
+ * Catmull-Rom is the default upscale filter (see `setUpscaleMode`).
+ */
+export function setRenderScale(scale: number): void {
+  bloom_set_render_scale(Math.min(1.0, Math.max(0.5, scale)));
+}
+export function getRenderScale(): number { return bloom_get_render_scale(); }
+
+/** Upscale filter when render_scale < 1 and TAA is off. "bilinear" = cheap/soft, "catmull-rom" = sharper (default). */
+export type UpscaleMode = "bilinear" | "catmull-rom";
+export function setUpscaleMode(mode: UpscaleMode): void {
+  bloom_set_upscale_mode(mode === "catmull-rom" ? 1 : 0);
+}
+
+/**
+ * Contrast-adaptive sharpen strength. 0 = off (default, pass skipped);
+ * 0.3 subtle; 0.6 punchy; 1.0 max. Useful at any render_scale — pairs
+ * particularly well with TAA-softened native or Catmull-Rom upscale.
+ */
+export function setCasStrength(strength: number): void {
+  bloom_set_cas_strength(strength);
+}
+
+/** Physical-pixel size of the GPU surface (HiDPI-aware on macOS today). */
+export function getPhysicalWidth(): number { return bloom_get_physical_width(); }
+export function getPhysicalHeight(): number { return bloom_get_physical_height(); }
 
 /** Manual exposure multiplier (ignored when auto-exposure is on). 1.0 = default. */
 export function setManualExposure(value: number): void {

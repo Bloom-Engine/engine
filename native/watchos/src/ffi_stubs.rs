@@ -77,6 +77,15 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_p0: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_render_scale(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_get_render_scale() -> f64 { 1.0 }
+#[no_mangle] pub extern "C" fn bloom_set_upscale_mode(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_cas_strength(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_get_physical_width() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_get_physical_height() -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_set_env_intensity(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssgi_enabled(_p0: f64) {

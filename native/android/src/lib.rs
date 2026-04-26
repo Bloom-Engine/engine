@@ -1641,6 +1641,12 @@ pub extern "C" fn bloom_pick_all_distance(index: f64) -> f64 {
 #[no_mangle] pub extern "C" fn bloom_set_sun_shafts(_strength: f64, _decay: f64, _r: f64, _g: f64, _b: f64) {}
 #[no_mangle] pub extern "C" fn bloom_set_auto_exposure(_on: f64) {}
 #[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_on: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_render_scale(_scale: f64) {}
+#[no_mangle] pub extern "C" fn bloom_get_render_scale() -> f64 { 1.0 }
+#[no_mangle] pub extern "C" fn bloom_set_upscale_mode(_mode: f64) {}
+#[no_mangle] pub extern "C" fn bloom_set_cas_strength(_strength: f64) {}
+#[no_mangle] pub extern "C" fn bloom_get_physical_width() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_get_physical_height() -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_set_manual_exposure(_value: f64) {}
 #[no_mangle] pub extern "C" fn bloom_set_env_intensity(_intensity: f64) {}
 #[no_mangle] pub extern "C" fn bloom_set_ssgi_enabled(_enabled: f64) {}
