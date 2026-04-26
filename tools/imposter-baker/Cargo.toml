@@ -1,0 +1,17 @@
+[package]
+name = "imposter-baker"
+version = "0.1.0"
+edition = "2021"
+description = "Bake octahedral imposter atlases (color/normal/depth) for Bloom from a GLB."
+
+[[bin]]
+name = "imposter-baker"
+path = "src/main.rs"
+
+[dependencies]
+wgpu = "29"
+pollster = "0.4"
+gltf = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+bytemuck = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
