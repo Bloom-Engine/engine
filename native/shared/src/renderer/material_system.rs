@@ -1775,11 +1775,21 @@ mod tests {
             compatible_surface: None,
             force_fallback_adapter: true,
         })).ok()?;
+        // The material ABI uses 5 bind groups (PerFrame, PerView,
+        // PerMaterial, PerDraw, SceneInputs). downlevel_defaults caps
+        // max_bind_groups at 4, which is fine on Metal (it silently
+        // accepts more) but DX12 enforces it strictly — bump to 5 so
+        // the user-material pipeline validates on every backend.
+        // Also bump max_uniform_buffer_binding_size from 16KB to 64KB
+        // for the JointMatrices UBO (1024 × mat4x4 = 64KB).
+        let mut required_limits = wgpu::Limits::downlevel_defaults();
+        required_limits.max_bind_groups = 5;
+        required_limits.max_uniform_buffer_binding_size = 64 << 10;
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("material-test-device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits,
                 ..Default::default()
             },
         )).ok()?;
@@ -1832,7 +1842,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
     /// at (-1,-1), (3,-1), (-1,3). The pipeline's MVP starts as
     /// identity (we override it below) so the triangle covers the
     /// whole viewport.
-    fn make_fullscreen_tri(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+    fn make_fullscreen_tri(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Buffer, wgpu::Buffer, u32) {
         let mut verts: [Vertex3D; 3] = [Vertex3D::default(); 3];
         verts[0].position = [-1.0, -1.0, 0.5];
         verts[1].position = [ 3.0, -1.0, 0.5];
@@ -1847,6 +1857,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        queue.write_buffer(&vb, 0, bytemuck::cast_slice(&verts));
         let indices: [u32; 3] = [0, 1, 2];
         let ib = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("test_tri_ib"),
@@ -1854,6 +1865,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        queue.write_buffer(&ib, 0, bytemuck::cast_slice(&indices));
         (vb, ib, 3)
     }
 
@@ -1919,7 +1931,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ];
-        let (vb, ib, icount) = make_fullscreen_tri(&device);
+        let (vb, ib, icount) = make_fullscreen_tri(&device, &queue);
 
         sys.submit_draw(
             &device, &queue, &joint_buf,

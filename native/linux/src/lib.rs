@@ -308,6 +308,10 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             wgpu::ExperimentalFeatures::disabled()
         };
         let mut required_limits = wgpu::Limits::default();
+        // The material ABI declares 5 bind groups (PerFrame, PerView,
+        // PerMaterial, PerDraw, SceneInputs). wgpu's default limit is
+        // 4. Vulkan supports at least 7 here, so 5 is universally safe.
+        required_limits.max_bind_groups = 5;
         if required_features.intersects(rt_mask) {
             required_limits = required_limits
                 .using_minimum_supported_acceleration_structure_values();

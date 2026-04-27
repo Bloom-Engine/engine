@@ -86,6 +86,9 @@ pub struct TransientId(pub u32);
 
 /// Internal record per live allocation.
 struct Slot {
+    /// Stable handle id — survives `Vec` reordering when invalidation
+    /// drops other slots, so `TransientId` lookups stay valid.
+    id:       u32,
     desc:     TransientDesc,
     /// Physical extent at allocation time — used for resize detection.
     extent:   (u32, u32),
@@ -173,13 +176,13 @@ impl TransientPool {
         let target_extent = desc.size.extent(self.swap_size.0, self.swap_size.1);
 
         // Look for an existing free slot with identical desc + extent.
-        for (i, slot) in self.slots.iter_mut().enumerate() {
+        for slot in self.slots.iter_mut() {
             if !slot.in_use
                 && slot.desc == desc
                 && slot.extent == target_extent
             {
                 slot.in_use = true;
-                return TransientId(i as u32);
+                return TransientId(slot.id);
             }
         }
 
@@ -201,13 +204,10 @@ impl TransientPool {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let id = self.next_id;
         self.next_id += 1;
-        // Slot index equals the id in this simple implementation —
-        // once we add alias-based reuse the mapping becomes indirect,
-        // but for now that's overkill.
-        let slot_index = self.slots.len() as u32;
-        assert_eq!(id, slot_index,
-            "TransientPool invariant: slot ids are contiguous until Phase 3b adds aliasing");
-        self.slots.push(Slot { desc, extent: target_extent, texture, view, in_use: true });
+        // Ids are stable — surviving slots keep theirs across resizes
+        // (which can drop swapchain-relative slots and shrink the Vec),
+        // so handle lookups stay valid even when the slot index shifts.
+        self.slots.push(Slot { id, desc, extent: target_extent, texture, view, in_use: true });
         TransientId(id)
     }
 
@@ -215,7 +215,7 @@ impl TransientPool {
     /// reuse pool and can be handed back to a subsequent `acquire`
     /// with a matching desc.
     pub fn release(&mut self, id: TransientId) {
-        if let Some(slot) = self.slots.get_mut(id.0 as usize) {
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.id == id.0) {
             slot.in_use = false;
         }
     }
@@ -223,12 +223,12 @@ impl TransientPool {
     /// Get the underlying texture for a transient. Borrowed for the
     /// pool's lifetime — callers hold the borrow only while encoding.
     pub fn texture(&self, id: TransientId) -> Option<&wgpu::Texture> {
-        self.slots.get(id.0 as usize).map(|s| &s.texture)
+        self.slots.iter().find(|s| s.id == id.0).map(|s| &s.texture)
     }
 
     /// Get the default view for a transient.
     pub fn view(&self, id: TransientId) -> Option<&wgpu::TextureView> {
-        self.slots.get(id.0 as usize).map(|s| &s.view)
+        self.slots.iter().find(|s| s.id == id.0).map(|s| &s.view)
     }
 
     /// Frame-end book-keeping. Currently does nothing because
