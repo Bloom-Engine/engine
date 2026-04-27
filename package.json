@@ -214,7 +214,7 @@
         { "name": "bloom_get_model_bounds_max_z",   "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_write_file",               "params": ["i64", "i64"],                                            "returns": "f64"  },
         { "name": "bloom_file_exists",              "params": ["i64"],                                                   "returns": "f64"  },
-        { "name": "bloom_read_file",                "params": ["i64"],                                                   "returns": "i64"  },
+        { "name": "bloom_read_file",                "params": ["i64"],                                                   "returns": "string"  },
         { "name": "bloom_get_touch_x",              "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_get_touch_y",              "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_get_touch_count",          "params": [],                                                        "returns": "f64"  },
@@ -242,9 +242,9 @@
         { "name": "bloom_scene_node_index_count",   "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_set_cursor_shape",            "params": ["f64"],                                                   "returns": "void" },
         { "name": "bloom_set_clipboard_text",          "params": ["i64"],                                                   "returns": "void" },
-        { "name": "bloom_get_clipboard_text",          "params": [],                                                        "returns": "i64"  },
-        { "name": "bloom_open_file_dialog",            "params": ["i64", "i64"],                                            "returns": "i64"  },
-        { "name": "bloom_save_file_dialog",            "params": ["i64", "i64"],                                            "returns": "i64"  },
+        { "name": "bloom_get_clipboard_text",          "params": [],                                                        "returns": "string"  },
+        { "name": "bloom_open_file_dialog",            "params": ["i64", "i64"],                                            "returns": "string"  },
+        { "name": "bloom_save_file_dialog",            "params": ["i64", "i64"],                                            "returns": "string"  },
         { "name": "bloom_scene_pick_all",              "params": ["f64", "f64", "f64"],                                     "returns": "f64"  },
         { "name": "bloom_pick_all_handle",             "params": ["f64"],                                                   "returns": "f64"  },
         { "name": "bloom_pick_all_distance",           "params": ["f64"],                                                   "returns": "f64"  },
@@ -465,7 +465,8 @@
         },
         "linux": {
           "crate": "native/linux/",
-          "lib": "libbloom_linux.a",
+          "lib": "libbloom_linux_bundled.a",
+          "libs": ["stdc++"],
           "pkgConfig": ["x11", "xi", "alsa"]
         },
         "android": {

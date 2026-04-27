@@ -33,3 +33,35 @@ pub fn str_from_header(ptr: *const u8) -> &'static str {
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
 }
+
+/// Allocate a Perry 0.5.x heap string suitable for returning across the
+/// FFI boundary (declared as `returns: "string"` in package.json). Layout
+/// matches `StringHeader` above: 5×u32 header (utf16_len, byte_len,
+/// capacity, refcount, flags) followed by UTF-8 data.
+///
+/// Older engine code allocated 12 bytes (Perry 0.4.x layout) and Perry's
+/// 0.5.x runtime read 8 bytes into the payload — strings came back with a
+/// garbage prefix and read past the end. Always go through this helper.
+pub fn alloc_perry_string(s: &str) -> *const u8 {
+    let bytes = s.as_bytes();
+    let byte_len = bytes.len();
+    // ASCII fast path: utf16_len == byte_len when every byte is < 0x80.
+    let utf16_len = if bytes.iter().all(|&b| b < 0x80) {
+        byte_len
+    } else {
+        s.encode_utf16().count()
+    };
+    let total = std::mem::size_of::<StringHeader>() + byte_len;
+    let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
+    unsafe {
+        let ptr = std::alloc::alloc(layout);
+        if ptr.is_null() { return std::ptr::null(); }
+        *(ptr as *mut u32)         = utf16_len as u32;
+        *(ptr.add(4)  as *mut u32) = byte_len  as u32;
+        *(ptr.add(8)  as *mut u32) = byte_len  as u32; // capacity
+        *(ptr.add(12) as *mut u32) = 1;                // refcount=unique
+        *(ptr.add(16) as *mut u32) = 0;                // flags
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(20), byte_len);
+        ptr
+    }
+}

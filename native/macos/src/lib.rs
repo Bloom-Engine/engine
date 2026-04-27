@@ -8,7 +8,7 @@
 
 use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
-use bloom_shared::string_header::str_from_header;
+use bloom_shared::string_header::{str_from_header, alloc_perry_string};
 use bloom_shared::audio::{parse_wav, parse_ogg, parse_mp3};
 
 use objc2::rc::Retained;
@@ -1411,19 +1411,7 @@ pub extern "C" fn bloom_profiler_frame_history() -> *const u8 {
     for (cpu, gpu) in &hist {
         s.push_str(&format!("{:.2}|{:.2}\n", cpu, gpu));
     }
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let total = 12 + len;
-    let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
-    unsafe {
-        let ptr = std::alloc::alloc(layout);
-        if ptr.is_null() { return std::ptr::null(); }
-        *(ptr as *mut u32) = len as u32;
-        *(ptr.add(4) as *mut u32) = len as u32;
-        *(ptr.add(8) as *mut u32) = 1;
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
-        ptr
-    }
+    alloc_perry_string(&s)
 }
 
 #[no_mangle]
@@ -1441,19 +1429,7 @@ pub extern "C" fn bloom_profiler_overlay_text() -> *const u8 {
         }
         s.push('\n');
     }
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let total = 12 + len;
-    let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
-    unsafe {
-        let ptr = std::alloc::alloc(layout);
-        if ptr.is_null() { return std::ptr::null(); }
-        *(ptr as *mut u32) = len as u32;
-        *(ptr.add(4) as *mut u32) = len as u32;
-        *(ptr.add(8) as *mut u32) = 1;
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
-        ptr
-    }
+    alloc_perry_string(&s)
 }
 
 // ============================================================
@@ -2327,27 +2303,11 @@ pub extern "C" fn bloom_set_clipboard_text(text_ptr: *const u8) {
 #[no_mangle]
 pub extern "C" fn bloom_get_clipboard_text() -> *const u8 {
     match arboard::Clipboard::new() {
-        Ok(mut clipboard) => {
-            match clipboard.get_text() {
-                Ok(text) => {
-                    let bytes = text.as_bytes();
-                    let len = bytes.len();
-                    let total = 12 + len;
-                    let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
-                    unsafe {
-                        let ptr = std::alloc::alloc(layout);
-                        if ptr.is_null() { return std::ptr::null(); }
-                        *(ptr as *mut u32) = len as u32;
-                        *(ptr.add(4) as *mut u32) = len as u32;
-                        *(ptr.add(8) as *mut u32) = 1;
-                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
-                        ptr
-                    }
-                }
-                Err(_) => std::ptr::null(),
-            }
-        }
-        Err(_) => std::ptr::null(),
+        Ok(mut clipboard) => match clipboard.get_text() {
+            Ok(text) => alloc_perry_string(&text),
+            Err(_) => alloc_perry_string(""),
+        },
+        Err(_) => alloc_perry_string(""),
     }
 }
 
@@ -2361,23 +2321,8 @@ pub extern "C" fn bloom_open_file_dialog(filter_ptr: *const u8, title_ptr: *cons
         dialog = dialog.add_filter("Files", &[filter]);
     }
     match dialog.pick_file() {
-        Some(path) => {
-            let s = path.to_string_lossy();
-            let bytes = s.as_bytes();
-            let len = bytes.len();
-            let total = 12 + len;
-            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
-            unsafe {
-                let ptr = std::alloc::alloc(layout);
-                if ptr.is_null() { return std::ptr::null(); }
-                *(ptr as *mut u32) = len as u32;
-                *(ptr.add(4) as *mut u32) = len as u32;
-                *(ptr.add(8) as *mut u32) = 1;
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
-                ptr
-            }
-        }
-        None => std::ptr::null(),
+        Some(path) => alloc_perry_string(&path.to_string_lossy()),
+        None => alloc_perry_string(""),
     }
 }
 
@@ -2389,23 +2334,8 @@ pub extern "C" fn bloom_save_file_dialog(default_name_ptr: *const u8, title_ptr:
         .set_title(title)
         .set_file_name(default_name);
     match dialog.save_file() {
-        Some(path) => {
-            let s = path.to_string_lossy();
-            let bytes = s.as_bytes();
-            let len = bytes.len();
-            let total = 12 + len;
-            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
-            unsafe {
-                let ptr = std::alloc::alloc(layout);
-                if ptr.is_null() { return std::ptr::null(); }
-                *(ptr as *mut u32) = len as u32;
-                *(ptr.add(4) as *mut u32) = len as u32;
-                *(ptr.add(8) as *mut u32) = 1;
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
-                ptr
-            }
-        }
-        None => std::ptr::null(),
+        Some(path) => alloc_perry_string(&path.to_string_lossy()),
+        None => alloc_perry_string(""),
     }
 }
 
@@ -2456,24 +2386,12 @@ pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
+    // Always return a valid Perry string. A null pointer would NaN-box into a
+    // string-typed JS value pointing at address 0; `.length` / `.charCodeAt`
+    // would then segfault. Callers detect "missing file" via `data.length === 0`.
     match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            // Return Perry-format string: StringHeader (length u32 + capacity u32 + refcount u32) followed by UTF-8 data
-            let bytes = contents.as_bytes();
-            let len = bytes.len();
-            let total = 12 + len; // 12 bytes header (3 × u32) + data
-            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
-            unsafe {
-                let ptr = std::alloc::alloc(layout);
-                if ptr.is_null() { return std::ptr::null(); }
-                *(ptr as *mut u32) = len as u32;           // length
-                *(ptr.add(4) as *mut u32) = len as u32;    // capacity
-                *(ptr.add(8) as *mut u32) = 1;             // refcount (unique)
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
-                ptr
-            }
-        }
-        Err(_) => std::ptr::null(),
+        Ok(contents) => alloc_perry_string(&contents),
+        Err(_)       => alloc_perry_string(""),
     }
 }
 
