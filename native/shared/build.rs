@@ -50,10 +50,38 @@ fn build_jolt() {
     println!("cargo:rerun-if-changed={}", shim_dir.join("include/bloom_jolt.h").display());
     println!("cargo:rerun-if-changed={}", shim_dir.join("src/bloom_jolt.cpp").display());
 
-    let dst = cmake::Config::new(&shim_dir)
-        .profile("Release")
-        .define("CMAKE_BUILD_TYPE", "Release")
-        .build();
+    // Build into a stable, short path next to the shim itself rather than the
+    // per-build OUT_DIR. Two reasons:
+    //   1. Cargo wraps OUT_DIR with the `\\?\` long-path prefix on Windows
+    //      whenever the absolute path approaches MAX_PATH; MSBuild and cl.exe
+    //      both choke on `\\?\`-prefixed paths in subtle ways (echo'd build
+    //      events fail with MSB3073, cl.exe rewrites the file to `\\testfile`
+    //      and reports C1083).
+    //   2. The Jolt build is expensive and identical across every cargo target
+    //      hash — caching it once per profile lets `cargo clean` not nuke a
+    //      multi-minute compile.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let dst = shim_dir
+        .join("build")
+        .join(format!("{}-{}", target_os, target_arch));
+
+    let lib_ext = if target_os == "windows" { "lib" } else { "a" };
+    let lib_prefix = if target_os == "windows" { "" } else { "lib" };
+    let bloom_jolt_lib = dst
+        .join("lib")
+        .join(format!("{}bloom_jolt.{}", lib_prefix, lib_ext));
+    let jolt_lib = dst
+        .join("lib")
+        .join(format!("{}Jolt.{}", lib_prefix, lib_ext));
+
+    if !(bloom_jolt_lib.exists() && jolt_lib.exists()) {
+        let _ = cmake::Config::new(&shim_dir)
+            .out_dir(&dst)
+            .profile("Release")
+            .define("CMAKE_BUILD_TYPE", "Release")
+            .build();
+    }
 
     println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
     println!("cargo:rustc-link-lib=static=bloom_jolt");

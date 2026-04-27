@@ -110,6 +110,7 @@ name = "bloom-windows"
 version = "0.1.0"
 dependencies = [
  "bloom-shared",
+ "image",
  "raw-window-handle",
  "wgpu",
  "windows 0.58.0",

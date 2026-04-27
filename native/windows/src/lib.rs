@@ -1,6 +1,6 @@
 use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
-use bloom_shared::string_header::str_from_header;
+use bloom_shared::string_header::{alloc_perry_string, str_from_header};
 use bloom_shared::audio::{parse_wav, parse_ogg, parse_mp3};
 
 use std::sync::OnceLock;
@@ -1592,24 +1592,14 @@ pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
+    // Always return a valid Perry string. A null pointer would NaN-box into a
+    // string-typed JS value pointing at address 0; subsequent `.length` /
+    // `.charCodeAt` reads dereference the bogus StringHeader and segfault.
+    // Callers detect "missing file" via `data.length === 0` (e.g. the
+    // jump game's discoverLevels probe across level1..level10 / custom_*).
     match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            // Return Perry-format string: StringHeader (length u32 + capacity u32 + refcount u32) followed by UTF-8 data
-            let bytes = contents.as_bytes();
-            let len = bytes.len();
-            let total = 12 + len; // 12 bytes header (3 × u32) + data
-            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
-            unsafe {
-                let ptr = std::alloc::alloc(layout);
-                if ptr.is_null() { return std::ptr::null(); }
-                *(ptr as *mut u32) = len as u32;           // length
-                *(ptr.add(4) as *mut u32) = len as u32;    // capacity
-                *(ptr.add(8) as *mut u32) = 1;             // refcount (unique)
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
-                ptr
-            }
-        }
-        Err(_) => std::ptr::null(),
+        Ok(contents) => alloc_perry_string(&contents),
+        Err(_)       => alloc_perry_string(""),
     }
 }
 
@@ -1900,6 +1890,219 @@ pub extern "C" fn bloom_set_motion_blur_enabled(on: f64) {
 #[no_mangle]
 pub extern "C" fn bloom_set_sss_enabled(on: f64) {
     engine().renderer.set_sss_enabled(on != 0.0);
+}
+
+// ============================================================
+// Render scale / upscale / DRS / post-FX / screenshots / impulse
+// Ports of the macOS / Linux FFI surface so the bloom/core TS layer
+// links cleanly on Windows. EngineState in bloom-shared already
+// exposes the underlying renderer methods, so these wrappers are
+// platform-agnostic.
+// ============================================================
+
+#[no_mangle]
+pub extern "C" fn bloom_take_screenshot(path_ptr: *const u8) {
+    let path = str_from_header(path_ptr).to_string();
+    let eng = engine();
+    eng.renderer.screenshot_requested = true;
+    eng.renderer.pending_screenshot_path = Some(path);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_env_clear_from_hdr(path_ptr: *const u8) {
+    use image::ImageDecoder;
+    let path = str_from_header(path_ptr).to_string();
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let decoder = match image::codecs::hdr::HdrDecoder::new(std::io::BufReader::new(file)) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let (w, h) = decoder.dimensions();
+    let byte_len = (w as usize) * (h as usize) * 3 * 4;
+    let mut buf = vec![0u8; byte_len];
+    if decoder.read_image(&mut buf).is_err() {
+        return;
+    }
+    let rgb_f32: Vec<f32> = buf
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    engine().renderer.load_env_from_hdr(w, h, &rgb_f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_fog(r: f64, g: f64, b: f64, density: f64, height_ref: f64, height_falloff: f64) {
+    let r_ = engine();
+    r_.renderer.set_fog_color(r as f32, g as f32, b as f32);
+    r_.renderer.set_fog_density(density as f32);
+    r_.renderer.set_fog_height_falloff(height_ref as f32, height_falloff as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) {
+    engine().renderer.set_chromatic_aberration(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_vignette(strength: f64, softness: f64) {
+    engine().renderer.set_vignette(strength as f32, softness as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_film_grain(strength: f64) {
+    engine().renderer.set_film_grain(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_sun_shafts(strength: f64, decay: f64, r: f64, g: f64, b: f64) {
+    let eng = engine();
+    eng.renderer.set_sun_shaft_strength(strength as f32);
+    eng.renderer.set_sun_shaft_decay(decay as f32);
+    eng.renderer.set_sun_shaft_color(r as f32, g as f32, b as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_auto_exposure(on: f64) {
+    engine().renderer.set_auto_exposure(on != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_taa_enabled(on: f64) {
+    engine().renderer.set_taa_enabled(on != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_render_scale(scale: f64) {
+    engine().renderer.set_render_scale(scale as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_render_scale() -> f64 {
+    engine().renderer.render_scale() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_upscale_mode(mode: f64) {
+    engine().renderer.set_upscale_mode(mode as u32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_cas_strength(strength: f64) {
+    engine().renderer.set_cas_strength(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_physical_width() -> f64 {
+    engine().renderer.physical_width() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_physical_height() -> f64 {
+    engine().renderer.physical_height() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_auto_resolution(target_hz: f64, enabled: f64) {
+    let eng = engine();
+    if enabled != 0.0 {
+        let current = eng.renderer.render_scale();
+        eng.drs.enable(target_hz as f32, current);
+    } else {
+        eng.drs.disable();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_manual_exposure(value: f64) {
+    engine().renderer.set_manual_exposure(value as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_env_intensity(intensity: f64) {
+    engine().renderer.set_env_intensity(intensity as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_enabled(enabled: f64) {
+    engine().renderer.set_ssgi_enabled(enabled != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_intensity(intensity: f64) {
+    engine().renderer.set_ssgi_intensity(intensity as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_radius(radius: f64) {
+    engine().renderer.set_ssgi_radius(radius as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_dof(enabled: f64, focus_distance: f64, aperture: f64) {
+    let r = &mut engine().renderer;
+    r.set_dof_enabled(enabled != 0.0);
+    r.set_dof_focus_distance(focus_distance as f32);
+    r.set_dof_aperture(aperture as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_splat_impulse(x: f64, z: f64, radius: f64, strength: f64) {
+    engine().renderer.impulse_field.submit_splat(
+        x as f32, z as f32, radius as f32, strength as f32,
+    );
+}
+
+// Render texture FFI (stub — GPU implementation deferred).
+#[no_mangle]
+pub extern "C" fn bloom_load_render_texture(width: f64, height: f64) -> f64 {
+    engine().textures.load_render_texture(width as u32, height as u32)
+}
+#[no_mangle]
+pub extern "C" fn bloom_unload_render_texture(handle: f64) {
+    engine().textures.unload_render_texture(handle);
+}
+#[no_mangle]
+pub extern "C" fn bloom_begin_texture_mode(_handle: f64) {
+    // Stub: no-op until GPU render-to-texture is wired.
+}
+#[no_mangle]
+pub extern "C" fn bloom_end_texture_mode() {
+    // Stub: no-op.
+}
+#[no_mangle]
+pub extern "C" fn bloom_get_render_texture_texture(handle: f64) -> f64 {
+    engine().textures.get_render_texture_texture(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_profiler_frame_history() -> *const u8 {
+    let hist = engine().profiler.frame_history();
+    let mut s = String::with_capacity(hist.len() * 24);
+    for (cpu, gpu) in &hist {
+        s.push_str(&format!("{:.2}|{:.2}\n", cpu, gpu));
+    }
+    alloc_perry_string(&s)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_profiler_overlay_text() -> *const u8 {
+    let snap = engine().profiler.snapshot();
+    let mut s = String::with_capacity(snap.len() * 48);
+    for (label, cpu, gpu) in &snap {
+        s.push_str(label);
+        s.push('|');
+        s.push_str(&format!("{:.2}", cpu));
+        s.push('|');
+        match gpu {
+            Some(g) => s.push_str(&format!("{:.2}", g)),
+            None    => s.push_str("-1"),
+        }
+        s.push('\n');
+    }
+    alloc_perry_string(&s)
 }
 
 // ============================================================

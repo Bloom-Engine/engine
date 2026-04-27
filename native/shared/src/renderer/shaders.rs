@@ -4337,6 +4337,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var hit_uv = vec2<f32>(-1.0);
     var hit_found = false;
     var prev_t = 0.0;
+    // FXC (the legacy HLSL compiler used by D3D11 + DX12 fallback in wgpu) refuses
+    // to unroll a loop that contains an implicit-gradient texture sample when the
+    // iteration count is uniform-driven, and refuses to *not* unroll because the
+    // body has the gradient op — the only escape is to take the gradient out of
+    // the loop. textureSampleLevel forces explicit LOD and removes the gradient
+    // op, which is also what we want here (depth has no mips).
     for (var i = 0u; i < n_steps; i = i + 1u) {
         let ray_view = view_pos + r * t;
         let ray_clip = u.proj * vec4<f32>(ray_view, 1.0);
@@ -4347,7 +4353,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             break;
         }
         let ray_uv = vec2<f32>(ray_ndc.x * 0.5 + 0.5, 1.0 - (ray_ndc.y * 0.5 + 0.5));
-        let scene_depth = textureSample(depth_tex, depth_samp, ray_uv);
+        let scene_depth = textureSampleLevel(depth_tex, depth_samp, ray_uv, 0i);
 
         if (ray_ndc.z >= scene_depth) {
             let hit_view = view_pos_from_depth(ray_uv, scene_depth);

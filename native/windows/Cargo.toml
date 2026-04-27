@@ -8,11 +8,20 @@ name = "bloom_windows"
 crate-type = ["staticlib"]
 
 [features]
-default = ["jolt"]
+# Jolt is opt-in on Windows because Perry's native-library build pipeline
+# does not forward cargo `--features` to nativeLibrary crates, and bundling
+# Jolt's static archives into bloom_windows.lib leaves the final lld-link
+# step unable to resolve `JPH::*` symbols (the staticlib has no embedded
+# search path and the C++ library lives off cargo's normal lib search).
+# Games that need bloom/physics on Windows must opt in explicitly until the
+# perry side gains a way to thread `cargo:rustc-link-search` through to the
+# final link line.
+default = []
 jolt = ["bloom-shared/jolt"]
 
 [dependencies]
 bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
+image = { version = "0.25", default-features = false, features = ["hdr"] }
 raw-window-handle = "0.6"
 wgpu = "29"
 
