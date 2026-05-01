@@ -128,6 +128,12 @@ pub struct SceneNode {
     /// `None` on non-RT-capable adapters or until the bake lands.
     pub mesh_sdf: Option<wgpu::Texture>,
     pub mesh_sdf_view: Option<wgpu::TextureView>,
+    /// Content hash of (positions, indices) computed at upload time.
+    /// Set whenever `mesh_sdf` exists; the renderer reads it back when
+    /// flushing cache writes after a fresh bake. `None` until the
+    /// first geo upload — and on non-RT-capable adapters that never
+    /// allocate a per-mesh SDF.
+    pub mesh_hash: Option<crate::sdf_cache::MeshHash>,
     /// Flat mesh-average world-space normal, cached on BLAS build so
     /// the per-instance GI data buffer can be populated without
     /// re-reading the vertex array. Rough heuristic — for walls and
@@ -185,6 +191,7 @@ impl SceneNode {
             card_dynamic: false,
             mesh_sdf: None,
             mesh_sdf_view: None,
+            mesh_hash: None,
             flat_normal_ws: [0.0, 1.0, 0.0],
             flat_albedo: [1.0, 1.0, 1.0],
             uniform_slot: None,
@@ -752,9 +759,69 @@ impl SceneGraph {
                                 device,
                                 "scene_node_sdf",
                             );
+
+                            // Ticket 022 — content-hash the geometry and
+                            // try the on-disk SDF cache before scheduling
+                            // a GPU bake. Vertex layout is interleaved;
+                            // pull the position prefix out as a
+                            // [[f32; 3]] slice so the hash only sees
+                            // geometry-relevant bytes.
+                            let positions: Vec<[f32; 3]> =
+                                node.vertices.iter().map(|v| v.position).collect();
+                            let hash = crate::sdf_cache::compute_mesh_hash(
+                                &positions, &node.indices,
+                            );
+                            node.mesh_hash = Some(hash);
+
+                            if let Some(bytes) = crate::sdf_cache::load(hash) {
+                                // Cache hit — pad the tightly-packed
+                                // 128 B/row payload to 256 B/row so it
+                                // clears wgpu's COPY_BYTES_PER_ROW
+                                // alignment, then upload directly and
+                                // skip the bake. Native cache size
+                                // stays compact (128 KB/mesh on disk);
+                                // the 128 KB padding allocation is
+                                // free'd immediately after the call.
+                                const RES: u32 = crate::sdf_cache::VOXEL_RES;
+                                let row_tight = (RES * 4) as usize;
+                                let row_padded = ((row_tight + 255) & !255) as u32;
+                                let mut padded = vec![
+                                    0u8;
+                                    (row_padded as usize) * (RES as usize) * (RES as usize)
+                                ];
+                                for z in 0..RES as usize {
+                                    for y in 0..RES as usize {
+                                        let src_off = (z * RES as usize + y) * row_tight;
+                                        let dst_off = (z * RES as usize + y) * row_padded as usize;
+                                        padded[dst_off..dst_off + row_tight]
+                                            .copy_from_slice(&bytes[src_off..src_off + row_tight]);
+                                    }
+                                }
+                                queue.write_texture(
+                                    wgpu::TexelCopyTextureInfo {
+                                        texture: &sdf_tex,
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d::ZERO,
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    &padded,
+                                    wgpu::TexelCopyBufferLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(row_padded),
+                                        rows_per_image: Some(RES),
+                                    },
+                                    wgpu::Extent3d {
+                                        width: RES,
+                                        height: RES,
+                                        depth_or_array_layers: RES,
+                                    },
+                                );
+                            } else {
+                                pending_sdf.push(handle);
+                            }
+
                             node.mesh_sdf = Some(sdf_tex);
                             node.mesh_sdf_view = Some(sdf_view);
-                            pending_sdf.push(handle);
                         }
                     }
                 }

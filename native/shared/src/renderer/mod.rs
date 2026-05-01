@@ -1055,6 +1055,13 @@ pub struct Renderer {
     pub sdf_bake_pipeline: wgpu::ComputePipeline,
     pub sdf_bake_layout: wgpu::BindGroupLayout,
     pub sdf_bake_uniform: wgpu::Buffer,
+    /// Ticket 022 — staging buffers awaiting readback so freshly-baked
+    /// per-mesh SDFs can be written to the disk cache. Populated by
+    /// `bake_pending_sdfs` (one entry per dispatch); drained by
+    /// `flush_sdf_cache_writes` after the frame's main submit, which
+    /// maps each buffer, copies bytes to the cache file, and drops it.
+    /// Empty on cache-hit frames and after cold launch finishes.
+    sdf_cache_writes: Vec<(crate::sdf_cache::MeshHash, wgpu::Buffer)>,
 
     // --- Ticket 014 V2: scene-wide SDF clipmap ---
     pub scene_sdf_clipmap_tex: wgpu::Texture,
@@ -6040,6 +6047,7 @@ impl Renderer {
             sdf_bake_pipeline,
             sdf_bake_layout,
             sdf_bake_uniform,
+            sdf_cache_writes: Vec::new(),
             scene_sdf_clipmap_tex,
             scene_sdf_clipmap_view,
             scene_sdf_clipmap_built: false,
@@ -7183,6 +7191,13 @@ impl Renderer {
     /// per-frame budget; expensive workload (O(voxels × triangles)
     /// per mesh), so the rate-limit keeps first-frame stutter
     /// bounded. Static scenes amortise and never re-bake.
+    ///
+    /// Ticket 022 — after each dispatch, encode a copy_texture_to_buffer
+    /// against a fresh staging buffer and stash (hash, buffer) on
+    /// `sdf_cache_writes`. The frame's main submit picks up the copies
+    /// alongside the bake; `flush_sdf_cache_writes` then maps and
+    /// persists each buffer to the on-disk cache so the next launch
+    /// hits the load path in scene.rs and skips the bake entirely.
     fn bake_pending_sdfs(
         &mut self,
         scene: &mut crate::scene::SceneGraph,
@@ -7196,18 +7211,21 @@ impl Renderer {
         let pending: Vec<f64> = scene.pending_sdf_bakes.drain(..take).collect();
 
         for handle in pending {
-            let (sdf_view, vb_ptr, ib_ptr, bmin, bmax, index_count) = {
+            let (sdf_tex, sdf_view, vb_ptr, ib_ptr, bmin, bmax, index_count, mesh_hash) = {
                 let Some(node) = scene.nodes.get(handle) else { continue; };
+                let Some(sdf_tex) = node.mesh_sdf.as_ref() else { continue; };
                 let Some(sdf_view) = node.mesh_sdf_view.as_ref() else { continue; };
                 let Some(vb) = node.gpu_vb.as_ref() else { continue; };
                 let Some(ib) = node.gpu_ib.as_ref() else { continue; };
                 (
+                    sdf_tex.clone(),
                     sdf_view.clone(),
                     vb.clone(),
                     ib.clone(),
                     node.bounds_min,
                     node.bounds_max,
                     node.gpu_index_count,
+                    node.mesh_hash,
                 )
             };
             if index_count == 0 {
@@ -7234,13 +7252,95 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&sdf_view) },
                 ],
             });
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("sdf_bake_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.sdf_bake_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(MESH_SDF_RES / 4, MESH_SDF_RES / 4, MESH_SDF_RES / 4);
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("sdf_bake_pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.sdf_bake_pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups(MESH_SDF_RES / 4, MESH_SDF_RES / 4, MESH_SDF_RES / 4);
+            }
+
+            // Ticket 022 — schedule a readback against the freshly-baked
+            // texture so the next launch can skip the bake. We only do
+            // this when scene.rs computed a hash (it always does, but
+            // skip defensively); padded staging size is bound by
+            // wgpu's COPY_BYTES_PER_ROW alignment.
+            if let Some(hash) = mesh_hash {
+                let row_padded = ((MESH_SDF_RES * 4 + 255) & !255) as u64;
+                let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("sdf_cache_readback"),
+                    size: row_padded * (MESH_SDF_RES as u64) * (MESH_SDF_RES as u64),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &sdf_tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &staging,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(row_padded as u32),
+                            rows_per_image: Some(MESH_SDF_RES),
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width: MESH_SDF_RES,
+                        height: MESH_SDF_RES,
+                        depth_or_array_layers: MESH_SDF_RES,
+                    },
+                );
+                self.sdf_cache_writes.push((hash, staging));
+            }
+        }
+    }
+
+    /// Ticket 022 — drain pending SDF cache writes after the frame's
+    /// main submit. Maps each staging buffer in one pass (single
+    /// `device.poll(Wait)` covers all of them), unpads the row-aligned
+    /// payload back to the tightly-packed on-disk layout, and writes
+    /// to the cache. Best-effort throughout: a write failure is
+    /// silently ignored — the next cold launch just rebakes.
+    pub fn flush_sdf_cache_writes(&mut self) {
+        if self.sdf_cache_writes.is_empty() { return; }
+        let entries = std::mem::take(&mut self.sdf_cache_writes);
+
+        // Issue map_async on every buffer up front so a single poll
+        // resolves all of them — much cheaper than serially polling
+        // per buffer when 8 cold-launch bakes complete in one frame.
+        for (_, buf) in &entries {
+            let slice = buf.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| { /* polled below */ });
+        }
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+        let row_tight = (MESH_SDF_RES * 4) as usize;
+        let row_padded = ((MESH_SDF_RES * 4 + 255) & !255) as usize;
+        let res = MESH_SDF_RES as usize;
+
+        for (hash, buf) in entries {
+            let slice = buf.slice(..);
+            let data = slice.get_mapped_range();
+            // Strip the wgpu-required row padding back to a tight
+            // 32³ × 4-byte payload before storing.
+            let mut tight = vec![0u8; res * res * row_tight];
+            for z in 0..res {
+                for y in 0..res {
+                    let src_off = (z * res + y) * row_padded;
+                    let dst_off = (z * res + y) * row_tight;
+                    tight[dst_off..dst_off + row_tight]
+                        .copy_from_slice(&data[src_off..src_off + row_tight]);
+                }
+            }
+            drop(data);
+            buf.unmap();
+            let _ = crate::sdf_cache::store(hash, &tight);
         }
     }
 
@@ -11361,6 +11461,18 @@ impl Renderer {
             profiler.begin("queue_submit");
             self.queue.submit(std::iter::once(encoder.finish()));
             profiler.end("queue_submit");
+        }
+
+        // Ticket 022 — drain freshly-baked SDFs to the on-disk cache.
+        // No-op on cache-hit frames (queue is empty); on cold-launch
+        // bake frames it blocks briefly on a single device.poll(Wait)
+        // covering all 8 readbacks. Skipped on wasm32 (no filesystem
+        // path, sdf_cache::store returns Err immediately).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            profiler.begin("sdf_cache_write");
+            self.flush_sdf_cache_writes();
+            profiler.end("sdf_cache_write");
         }
 
         #[cfg(target_arch = "wasm32")]

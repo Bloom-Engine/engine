@@ -20,6 +20,7 @@ pub mod postfx;
 pub mod custom_shaders;
 pub mod staging;
 pub mod profiler;
+pub mod sdf_cache;
 // Jolt C ABI + Rust wrapper live on native only. On wasm32 the web crate
 // routes bloom_physics_* calls through wasm_bindgen to JoltPhysics.js;
 // no Rust-side Jolt integration is needed.
