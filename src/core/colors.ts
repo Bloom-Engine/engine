@@ -1,6 +1,10 @@
-import { Color } from './types';
+import { Color as ColorType } from './types';
 
-export const ColorConstants: Record<string, Color> = {
+// Canonical color palette. Re-exported as `Color` from `bloom/core` and
+// declared as a real top-level binding (not an alias re-export) so Perry
+// emits a `_perry_fn_src_core_colors_ts__Color` symbol that examples
+// importing `Color` from `bloom/core` can link against.
+export const Color: Record<string, ColorType> = {
   RayWhite:   { r: 245, g: 245, b: 245, a: 255 },
   White:      { r: 255, g: 255, b: 255, a: 255 },
   Black:      { r: 0,   g: 0,   b: 0,   a: 255 },
@@ -27,30 +31,33 @@ export const ColorConstants: Record<string, Color> = {
   Blank:      { r: 0,   g: 0,   b: 0,   a: 0   },
 };
 
+// Backward-compatible alias — same object, kept for older imports.
+export const ColorConstants = Color;
+
 // Backward-compatible alias with SCREAMING_SNAKE keys
-export const Colors: Record<string, Color> = {
-  WHITE:      ColorConstants.White,
-  BLACK:      ColorConstants.Black,
-  RED:        ColorConstants.Red,
-  GREEN:      ColorConstants.Green,
-  BLUE:       ColorConstants.Blue,
-  YELLOW:     ColorConstants.Yellow,
-  ORANGE:     ColorConstants.Orange,
-  PINK:       ColorConstants.Pink,
-  PURPLE:     ColorConstants.Purple,
-  DARKGRAY:   ColorConstants.DarkGray,
-  LIGHTGRAY:  ColorConstants.LightGray,
-  GRAY:       ColorConstants.Gray,
-  DARKBLUE:   ColorConstants.DarkBlue,
-  SKYBLUE:    ColorConstants.SkyBlue,
-  LIME:       ColorConstants.Lime,
-  DARKGREEN:  ColorConstants.DarkGreen,
-  GOLD:       ColorConstants.Gold,
-  MAROON:     ColorConstants.Maroon,
-  BROWN:      ColorConstants.Brown,
-  BEIGE:      ColorConstants.Beige,
-  MAGENTA:    ColorConstants.Magenta,
-  VIOLET:     ColorConstants.Violet,
-  RAYWHITE:   ColorConstants.RayWhite,
-  BLANK:      ColorConstants.Blank,
+export const Colors: Record<string, ColorType> = {
+  WHITE:      Color.White,
+  BLACK:      Color.Black,
+  RED:        Color.Red,
+  GREEN:      Color.Green,
+  BLUE:       Color.Blue,
+  YELLOW:     Color.Yellow,
+  ORANGE:     Color.Orange,
+  PINK:       Color.Pink,
+  PURPLE:     Color.Purple,
+  DARKGRAY:   Color.DarkGray,
+  LIGHTGRAY:  Color.LightGray,
+  GRAY:       Color.Gray,
+  DARKBLUE:   Color.DarkBlue,
+  SKYBLUE:    Color.SkyBlue,
+  LIME:       Color.Lime,
+  DARKGREEN:  Color.DarkGreen,
+  GOLD:       Color.Gold,
+  MAROON:     Color.Maroon,
+  BROWN:      Color.Brown,
+  BEIGE:      Color.Beige,
+  MAGENTA:    Color.Magenta,
+  VIOLET:     Color.Violet,
+  RAYWHITE:   Color.RayWhite,
+  BLANK:      Color.Blank,
 };

@@ -51,18 +51,24 @@ struct VertexOutput {
 @fragment
 fn fs_outline(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(scene_color, tex_sampler, in.uv);
-    let center_id = textureSample(object_id_tex, tex_sampler, in.uv).r;
 
-    let pixel = vec2<f32>(1.0 / params.screen_size.x, 1.0 / params.screen_size.y);
-    let t = params.thickness.x;
+    // Object IDs must not be filtered — interpolating IDs produces nonsense
+    // values at edges. Use textureLoad with integer coords; this also avoids
+    // requiring the FLOAT32_FILTERABLE wgpu feature (not advertised on Apple GPUs).
+    let dim = vec2<i32>(textureDimensions(object_id_tex));
+    let max_xy = dim - vec2<i32>(1, 1);
+    let center_pix = clamp(vec2<i32>(in.uv * vec2<f32>(dim)), vec2<i32>(0, 0), max_xy);
+    let center_id = textureLoad(object_id_tex, center_pix, 0).r;
+
+    let t = max(1, i32(round(params.thickness.x)));
 
     // Sample neighbors for edge detection
     var edge = 0.0;
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
             if (dx == 0 && dy == 0) { continue; }
-            let offset = vec2<f32>(f32(dx), f32(dy)) * pixel * t;
-            let neighbor_id = textureSample(object_id_tex, tex_sampler, in.uv + offset).r;
+            let neighbor_pix = clamp(center_pix + vec2<i32>(dx, dy) * t, vec2<i32>(0, 0), max_xy);
+            let neighbor_id = textureLoad(object_id_tex, neighbor_pix, 0).r;
             if (abs(neighbor_id - center_id) > 0.001) {
                 edge += 1.0;
             }
@@ -169,7 +175,9 @@ impl PostFxPipeline {
             label: Some("outline_bg_layout"),
             entries: &[
                 bgl_texture(0, wgpu::TextureSampleType::Float { filterable: true }),
-                bgl_texture(1, wgpu::TextureSampleType::Float { filterable: true }),
+                // R32Float — non-filterable on adapters without FLOAT32_FILTERABLE
+                // (e.g. Apple GPUs). Sampled via textureLoad in OUTLINE_FRAG.
+                bgl_texture(1, wgpu::TextureSampleType::Float { filterable: false }),
                 bgl_sampler(2),
                 bgl_uniform(3),
             ],
