@@ -1,8 +1,7 @@
 import { Color, Camera2D, Camera3D } from './types';
 
 export type { Color, Vec2, Vec3, Vec4, Rect, Camera2D, Camera3D, Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4, RayHit, FrustumPlanes } from './types';
-export { ColorConstants, Colors } from './colors';
-export { ColorConstants as Color } from './colors';
+export { Color, ColorConstants, Colors } from './colors';
 export { Key, MouseButton } from './keys';
 
 // FFI declarations
