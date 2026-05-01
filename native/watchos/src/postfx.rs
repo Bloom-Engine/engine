@@ -1,19 +1,19 @@
 //! Post-processing effect state. Atomic floats the Swift root view polls
-//! each frame and translates into SwiftUI view modifiers.
+//! each frame and pushes to either SwiftUI view modifiers (cheap effects)
+//! or the SceneKit SCNTechnique uniform binding (Metal-shader effects).
 //!
-//! What maps cleanly onto built-in SwiftUI modifiers:
+//! What maps cleanly onto built-in SwiftUI modifiers (always-on, applies
+//! over both 2D and 3D layers):
 //!   - vignette → `.overlay(RadialGradient)` (strength + softness)
 //!   - manual exposure → `.brightness(ev - 1.0)` approximation
 //!   - auto exposure → identity (SceneKit's own tone mapping handles most of it)
 //!
-//! What would need a Metal shader via `.colorEffect(shader:)` (watchOS 10+)
-//! and a Perry-side .metal compilation step — deferred:
+//! What runs through the Metal shader in bloom_postfx.metal, attached via
+//! SCNTechnique to the 3D SceneView (so it only affects the 3D layer —
+//! 2D-only games see the SwiftUI modifiers above and these read no-op):
 //!   - chromatic aberration (per-channel position offset)
 //!   - film grain (time-animated noise)
 //!   - sun shafts (radial blur + light scattering)
-//!
-//! The corresponding bloom_set_* calls still store their values so a future
-//! shader pipeline can pick them up without breaking TS code today.
 
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 

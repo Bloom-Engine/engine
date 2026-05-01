@@ -378,27 +378,18 @@ struct BloomRootView: View {
 
 // MARK: - Metal-shader post-FX
 //
-// default.metallib is compiled + bundled by Perry (PerryTS/perry#124) and
-// contains three [[ stitchable ]] shader functions (bloom_chromatic_aberration,
-// bloom_film_grain, bloom_sun_shafts).
+// SwiftUI's Shader-consumer modifiers — `.colorEffect(Shader)` /
+// `.layerEffect(Shader)` / `ShaderLibrary` — are iOS 17+ / tvOS 17+ /
+// macOS 14+ only; Apple did not ship them on watchOS. So Metal post-fx
+// can't attach to the 2D Canvas overlay, but it CAN attach to the 3D
+// layer via SCNTechnique on the SceneView (see BloomPostFXTechnique
+// below). This covers the common case — games drawing a 3D scene see
+// chromatic aberration / film grain / sun shafts. Pure-2D games stay on
+// the SwiftUI vignette + exposure path above.
 //
-// HOWEVER: SwiftUI's Shader-consumer modifiers —
-// `.colorEffect(Shader)` / `.layerEffect(Shader)` / `ShaderLibrary` —
-// are iOS 17+ / tvOS 17+ / macOS 14+ ONLY. Apple explicitly did not ship
-// them on watchOS, so even though the .metallib sits in the bundle
-// (ShaderLibrary.default would resolve it correctly), there's no way to
-// attach the shaders to a view on the watch today.
-//
-// Paths forward when we revisit:
-//   1. SCNTechnique — SceneKit's pass-based Metal post-process. Works on
-//      watchOS and can load from default.metallib, but only applies to the
-//      SceneKit layer (not the 2D Canvas overlay). Follow-up ticket.
-//   2. Raw MTLCommandQueue offscreen render + present through a custom
-//      SwiftUI view bridge — much more invasive, probably not worth it.
-//   3. Wait for Apple to ship SwiftUI Shader support on watchOS (filed as
-//      a Feedback, no ETA).
-//
-// Today vignette + exposure continue to use pure-SwiftUI modifiers above.
+// The shader source lives in native/watchos/shaders/bloom_postfx.metal
+// (single fragment with three stacked effects), compiled into
+// default.metallib by Perry's metal_sources pipeline (PerryTS/perry#124).
 
 // MARK: - 3D layer (SceneKit)
 
@@ -1005,46 +996,68 @@ private func slerp(_ q0: (Float, Float, Float, Float),
 // MARK: - Post-FX SCNTechnique
 //
 // SwiftUI's `.colorEffect(Shader)` / `.layerEffect(Shader)` aren't on
-// watchOS, but SCNTechnique IS — partially. Verified working:
-//   - SCNTechnique(dictionary:) → builds the pass graph
-//   - Attaching technique to SCNView via SwiftUI SceneView's `technique:`
-//     parameter → applies the post-process pass
-//   - Metal shaders compiled into default.metallib via Perry's
-//     metal_sources pipeline → load and execute correctly (proven by a
-//     debug shader that returns a constant red)
-//   - COLOR-semantic input/output binding → routes the scene's main color
-//     attachment in and back out
+// watchOS, so the post-fx pipeline runs through SCNTechnique attached to
+// the SceneView. The .metallib is compiled + bundled by Perry from
+// native/watchos/shaders/bloom_postfx.metal (PerryTS/perry#124).
 //
-// What does NOT work on watchOS:
-//   - Per-draw uniform push. SCNTechnique's
-//     `handleBindingOfSymbol:usingBlock:` takes an `SCNRenderer` parameter,
-//     and `SCNRenderer.h` simply isn't in the watchOS SDK — the method is
-//     uncallable from Swift. SceneKit's `setObject(NSData,forKeyedSubscript:)`
-//     route, which works for SCNProgram per-material shaders, doesn't
-//     deliver values to SCNTechnique-bound Metal `[[buffer(N)]]` slots.
-//
-// So today the technique can run a fixed-strength post-process (hardcode
-// values in the shader, recompile to change them), but the
-// bloom_set_chromatic_aberration / _film_grain / _sun_shafts dynamic-knob
-// API has no path to drive its strengths on watchOS.
-//
-// Tracking: Bloom-Engine#16 stays open with this finding; Apple Feedback
-// filed for SCNRenderer / handleBinding parity on watchOS. See the
-// bloom_postfx.metal shader for the math — it's ready to wire up the
-// moment Apple ships either SCNRenderer or `.colorEffect(Shader)` on the
-// watch.
+// Uniform binding: SCNTechnique's `handleBindingOfSymbol:usingBlock:`
+// route is unreachable on watchOS because SCNRenderer isn't in the SDK.
+// We use the keyed-subscript path instead — every symbol declared with
+// a `type` in the technique dictionary is exposed for KVC-style
+// `technique[symbol] = NSData(bytes:length:)` updates, which SceneKit
+// translates into the matching `[[buffer(N)]]` slot on the shader side
+// in declaration order. This path doesn't need SCNRenderer and works on
+// every Apple platform that has SCNTechnique (watchOS included).
 enum BloomPostFXTechnique {
 
-    /// Built once on first access. Currently no-op on watchOS — the
-    /// technique would attach and run, but with all uniform strengths
-    /// stuck at zero (no per-draw push API), every effect short-circuits
-    /// to pass-through. Returning nil signals BloomSceneView to skip the
-    /// technique entirely until uniforms can be wired.
-    static let shared: SCNTechnique? = nil
+    /// Built once on first access. Returns nil on hosts without a
+    /// default Metal library (e.g. Perry was invoked without the
+    /// metal_sources entry compiled in) — BloomSceneView then skips
+    /// attaching the technique entirely.
+    static let shared: SCNTechnique? = build()
+
+    private static func build() -> SCNTechnique? {
+        let dict: [String: Any] = [
+            "passes": [
+                "bloom_postfx_pass": [
+                    "draw": "DRAW_QUAD",
+                    "metalVertexShader": "bloom_postfx_vertex",
+                    "metalFragmentShader": "bloom_postfx_combined",
+                    "inputs": ["color": "COLOR"],
+                    "outputs": ["color": "COLOR"]
+                ]
+            ],
+            "sequence": ["bloom_postfx_pass"],
+            // Declaration order maps to `[[buffer(N)]]` in the fragment
+            // shader: params0 → buffer(0), params1 → buffer(1), etc.
+            "symbols": [
+                "params0": ["type": "vec4"],
+                "params1": ["type": "vec4"],
+                "params2": ["type": "vec4"]
+            ]
+        ]
+        return SCNTechnique(dictionary: dict)
+    }
 
     static func update(_ technique: SCNTechnique, fx: PostFxState, viewSize: CGSize) {
-        // No-op until uniform binding lands. See file-level comment.
-        _ = technique; _ = fx; _ = viewSize
+        // Wrap to keep float precision after multi-hour sessions.
+        let t = Float(ProcessInfo.processInfo.systemUptime
+            .truncatingRemainder(dividingBy: 1000.0))
+
+        // Layout matches bloom_postfx.metal's params0/1/2 vec4s exactly.
+        // bloom_set_sun_shafts doesn't expose a screen-space sun position;
+        // top-center of the viewport is the conventional default.
+        var p0 = SIMD4<Float>(fx.chromaticAberration, fx.filmGrain, t, fx.sunStrength)
+        var p1 = SIMD4<Float>(0.5, 0.15, fx.sunDecay, Float(viewSize.width))
+        var p2 = SIMD4<Float>(fx.sunR, fx.sunG, fx.sunB, Float(viewSize.height))
+
+        let stride = MemoryLayout<SIMD4<Float>>.size
+        technique.setObject(NSData(bytes: &p0, length: stride),
+                            forKeyedSubscript: "params0" as NSString)
+        technique.setObject(NSData(bytes: &p1, length: stride),
+                            forKeyedSubscript: "params1" as NSString)
+        technique.setObject(NSData(bytes: &p2, length: stride),
+                            forKeyedSubscript: "params2" as NSString)
     }
 }
 
