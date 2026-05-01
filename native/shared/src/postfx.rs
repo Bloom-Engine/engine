@@ -43,10 +43,8 @@ struct OutlineParams {
 @group(0) @binding(2) var tex_sampler: sampler;
 @group(0) @binding(3) var<uniform> params: OutlineParams;
 
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
+// VertexOutput is defined in FULLSCREEN_VERT — this string is concatenated
+// after it, so redefining here would be a WGSL parser error.
 
 @fragment
 fn fs_outline(in: VertexOutput) -> @location(0) vec4<f32> {
