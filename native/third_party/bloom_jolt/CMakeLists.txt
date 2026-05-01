@@ -8,11 +8,18 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ---------------------------------------------------------------------------
 # JoltPhysics build options.
-# Matches the "Distribution" flavour: no asserts, no profile, no debug renderer,
-# interprocedural optimisation on. We keep object stream off — we don't use
-# Jolt's scene serialisation (Bloom handles save/load itself).
+# Matches the "Distribution" flavour: no asserts, no profile, no debug renderer.
+# We keep object stream off — we don't use Jolt's scene serialisation (Bloom
+# handles save/load itself).
+#
+# IPO is OFF because Rust's link step on Linux/GCC routes through rust-lld,
+# which doesn't load gcc's lto-wrapper plugin. With IPO on, libJolt.a's archive
+# members are GIMPLE bitcode and rust-lld leaves their implementations
+# unresolved (undefined-symbol errors on JPH::Free, BodyManager locks, vtables,
+# etc — see issue #44). Jolt is heavily inlined via its precompiled header
+# already, so the perf delta from skipping LTO on the static archive is small.
 # ---------------------------------------------------------------------------
-set(INTERPROCEDURAL_OPTIMIZATION        ON  CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION        OFF CACHE BOOL "" FORCE)
 set(USE_STATIC_MSVC_RUNTIME_LIBRARY     OFF CACHE BOOL "" FORCE)
 set(TARGET_UNIT_TESTS                   OFF CACHE BOOL "" FORCE)
 set(TARGET_HELLO_WORLD                  OFF CACHE BOOL "" FORCE)
@@ -21,8 +28,10 @@ set(TARGET_SAMPLES                      OFF CACHE BOOL "" FORCE)
 set(TARGET_VIEWER                       OFF CACHE BOOL "" FORCE)
 set(OBJECT_LAYER_BITS                   16  CACHE STRING "" FORCE)
 set(USE_ASSERTS                         OFF CACHE BOOL "" FORCE)
-set(PROFILE_ENABLED                     OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DEBUG_AND_RELEASE       OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DISTRIBUTION            OFF CACHE BOOL "" FORCE)
 set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(DEBUG_RENDERER_IN_DISTRIBUTION      OFF CACHE BOOL "" FORCE)
 set(CROSS_PLATFORM_DETERMINISTIC        OFF CACHE BOOL "" FORCE)
 set(FLOATING_POINT_EXCEPTIONS_ENABLED   OFF CACHE BOOL "" FORCE)
 set(DOUBLE_PRECISION                    OFF CACHE BOOL "" FORCE)
