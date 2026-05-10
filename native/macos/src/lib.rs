@@ -753,38 +753,32 @@ pub extern "C" fn bloom_is_mouse_button_released(btn: f64) -> f64 {
 // ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_is_gamepad_available(gamepad: f64) -> f64 {
-    let _ = gamepad;
+pub extern "C" fn bloom_is_gamepad_available() -> f64 {
     if engine().input.is_gamepad_available() { 1.0 } else { 0.0 }
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_get_gamepad_axis(gamepad: f64, axis: f64) -> f64 {
-    let _ = gamepad;
+pub extern "C" fn bloom_get_gamepad_axis(axis: f64) -> f64 {
     engine().input.get_gamepad_axis(axis as usize) as f64
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_is_gamepad_button_pressed(gamepad: f64, button: f64) -> f64 {
-    let _ = gamepad;
-    if engine().input.is_gamepad_button_pressed(button as usize) { 1.0 } else { 0.0 }
+pub extern "C" fn bloom_is_gamepad_button_pressed(btn: f64) -> f64 {
+    if engine().input.is_gamepad_button_pressed(btn as usize) { 1.0 } else { 0.0 }
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_is_gamepad_button_down(gamepad: f64, button: f64) -> f64 {
-    let _ = gamepad;
-    if engine().input.is_gamepad_button_down(button as usize) { 1.0 } else { 0.0 }
+pub extern "C" fn bloom_is_gamepad_button_down(btn: f64) -> f64 {
+    if engine().input.is_gamepad_button_down(btn as usize) { 1.0 } else { 0.0 }
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_is_gamepad_button_released(gamepad: f64, button: f64) -> f64 {
-    let _ = gamepad;
-    if engine().input.is_gamepad_button_released(button as usize) { 1.0 } else { 0.0 }
+pub extern "C" fn bloom_is_gamepad_button_released(btn: f64) -> f64 {
+    if engine().input.is_gamepad_button_released(btn as usize) { 1.0 } else { 0.0 }
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_get_gamepad_axis_count(gamepad: f64) -> f64 {
-    let _ = gamepad;
+pub extern "C" fn bloom_get_gamepad_axis_count() -> f64 {
     engine().input.get_gamepad_axis_count() as f64
 }
 
@@ -793,13 +787,13 @@ pub extern "C" fn bloom_get_gamepad_axis_count(gamepad: f64) -> f64 {
 // ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_get_touch_x() -> f64 {
-    engine().input.get_touch_x(0)
+pub extern "C" fn bloom_get_touch_x(index: f64) -> f64 {
+    engine().input.get_touch_x(index as usize)
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_get_touch_y() -> f64 {
-    engine().input.get_touch_y(0)
+pub extern "C" fn bloom_get_touch_y(index: f64) -> f64 {
+    engine().input.get_touch_y(index as usize)
 }
 
 #[no_mangle]
