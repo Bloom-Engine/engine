@@ -83,12 +83,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bloomengine/engine.git"
+    "url": "git+https://github.com/Bloom-Engine/engine.git"
   },
   "bugs": {
-    "url": "https://github.com/bloomengine/engine/issues"
+    "url": "https://github.com/Bloom-Engine/engine/issues"
   },
-  "homepage": "https://github.com/bloomengine/engine#readme",
+  "homepage": "https://github.com/Bloom-Engine/engine#readme",
   "publishConfig": {
     "access": "public"
   },
