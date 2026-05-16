@@ -1,0 +1,21 @@
+{
+  "name": "@bloomengine/jolt-prebuilt",
+  "version": "0.0.1",
+  "description": "Prebuilt JoltPhysics + bloom_jolt static libraries for every (os, arch) Bloom Engine targets. Consumed by @bloomengine/engine to skip the multi-minute Jolt cmake build at install time.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bloom-Engine/engine.git",
+    "directory": "npm/jolt-prebuilt"
+  },
+  "homepage": "https://github.com/Bloom-Engine/engine/tree/main/npm/jolt-prebuilt",
+  "bugs": {
+    "url": "https://github.com/Bloom-Engine/engine/issues"
+  },
+  "files": [
+    "lib/"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

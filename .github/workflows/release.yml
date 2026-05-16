@@ -8,12 +8,22 @@ name: Release
 # to end: it bumps the version in package.json, commits, tags, pushes, and
 # waits for this workflow to go green.
 #
-# Authentication: npm trusted publishing. The @bloomengine/engine package is
-# configured on npmjs.com with this workflow (Bloom-Engine/engine →
-# .github/workflows/release.yml → job publish-npm) as a trusted publisher.
-# `id-token: write` on the publish job is enough — `npm publish` exchanges
+# Authentication: npm trusted publishing. Both packages — @bloomengine/engine
+# (job: publish-npm) and @bloomengine/jolt-prebuilt (job: publish-jolt-prebuilt)
+# — must be configured on npmjs.com with this workflow as a trusted publisher.
+# `id-token: write` on each publish job is enough — `npm publish` exchanges
 # the GitHub OIDC token for a short-lived publish credential, no NPM_TOKEN
 # secret needed. Provenance attestation is automatic under this flow.
+#
+# Job order:
+#   await-tests          — gate on Tests workflow passing for the tag SHA
+#   github-release       — create/keep the GH Release object
+#   build-jolt-prebuilt  — matrix: build libJolt + libbloom_jolt for every
+#                          (os, arch) variant on its native runner
+#   publish-jolt-prebuilt — assemble the artifacts into npm/jolt-prebuilt/lib/
+#                          and publish @bloomengine/jolt-prebuilt
+#   publish-npm          — publish @bloomengine/engine, which depends on the
+#                          jolt-prebuilt version just published
 
 on:
   push:
@@ -156,18 +166,211 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # Build the JoltPhysics + bloom_jolt static libraries for every (os, arch)
+  # combination Bloom supports. Each matrix entry runs on its native runner
+  # (Apple cross-compiles on macos-14, Android NDK on Linux, etc.) and uploads
+  # its archives as a per-target artifact for the publish step below to
+  # assemble. fail-fast: false so a broken slice (typically a platform-specific
+  # cmake quirk) doesn't cancel the other 16 builds — the publish job won't
+  # run anyway, but the failing job's logs land alongside the green ones for
+  # easier triage.
+  #
+  # The 17 variants here mirror the directory layout documented in
+  # npm/jolt-prebuilt/README.md. Adding a new target = new matrix entry +
+  # README update + corresponding arch mapping in native/shared/build.rs.
+  # ---------------------------------------------------------------------------
+  build-jolt-prebuilt:
+    needs: await-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple — built on macos-14 (Apple Silicon). Apple cross-compiles
+          # use the Xcode generator because the make/ninja generators don't
+          # reliably pick up iOS/tvOS/watchOS SDK toolchain quirks.
+          - target: macos-arm64
+            runner: macos-14
+            cmake_flags: ""
+          - target: macos-x64
+            runner: macos-14
+            cmake_flags: "-DCMAKE_OSX_ARCHITECTURES=x86_64"
+
+          - target: ios-arm64
+            runner: macos-14
+            cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos"
+          - target: ios-arm64-sim
+            runner: macos-14
+            cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphonesimulator"
+          - target: ios-x64-sim
+            runner: macos-14
+            cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_SYSROOT=iphonesimulator"
+
+          - target: tvos-arm64
+            runner: macos-14
+            cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=tvOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=appletvos"
+          - target: tvos-arm64-sim
+            runner: macos-14
+            cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=tvOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=appletvsimulator"
+          - target: tvos-x64-sim
+            runner: macos-14
+            cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=tvOS -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_SYSROOT=appletvsimulator"
+
+          - target: watchos-arm64
+            runner: macos-14
+            cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=watchOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=watchos"
+          - target: watchos-arm64-sim
+            runner: macos-14
+            cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=watchOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=watchsimulator"
+          - target: watchos-x64-sim
+            runner: macos-14
+            cmake_flags: "-G Xcode -DCMAKE_SYSTEM_NAME=watchOS -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_SYSROOT=watchsimulator"
+
+          # Linux — native runners (no cross-compile). GitHub provides arm64
+          # Linux runners as of late 2025; if the arm runner becomes flaky,
+          # fall back to a cross-compile from ubuntu-22.04 with
+          # `aarch64-linux-gnu-gcc`.
+          - target: linux-x64
+            runner: ubuntu-22.04
+            cmake_flags: ""
+          - target: linux-arm64
+            runner: ubuntu-22.04-arm
+            cmake_flags: ""
+
+          # Windows — MSVC via the default Visual Studio generator.
+          - target: win32-x64
+            runner: windows-latest
+            cmake_flags: "-A x64"
+
+          # Android — cross-compiled from Linux via the NDK's cmake
+          # toolchain. ANDROID_NDK_HOME is set by the github-hosted ubuntu
+          # image (currently NDK 26+; check if a future release pins a
+          # specific NDK version).
+          - target: android-arm64
+            runner: ubuntu-22.04
+            cmake_flags: "-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21"
+          - target: android-armv7
+            runner: ubuntu-22.04
+            cmake_flags: "-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-21"
+          - target: android-x64
+            runner: ubuntu-22.04
+            cmake_flags: "-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=x86_64 -DANDROID_PLATFORM=android-21"
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure cmake
+        shell: bash
+        run: |
+          cd native/third_party/bloom_jolt
+          mkdir -p build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }}
+
+      - name: Build
+        shell: bash
+        run: cmake --build native/third_party/bloom_jolt/build --config Release --parallel
+
+      - name: Stage prebuilt libs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/${{ matrix.target }}
+          # Generator differences (Xcode → Release/, Make/Ninja → ./ or lib/,
+          # MSBuild → Release/x64/) mean the libs aren't at one fixed path.
+          # Find them by name instead.
+          find native/third_party/bloom_jolt/build -type f \
+            \( -name 'libJolt.a' -o -name 'Jolt.lib' \
+            -o -name 'libbloom_jolt.a' -o -name 'bloom_jolt.lib' \) \
+            -exec cp {} artifacts/${{ matrix.target }}/ \;
+          ls -la artifacts/${{ matrix.target }}/
+          # Sanity: both archives must be present, else the upload below
+          # silently ships a half-broken slice that bites consumers later.
+          if [ "$(ls artifacts/${{ matrix.target }}/ | wc -l)" -lt 2 ]; then
+            echo "::error::expected libJolt + libbloom_jolt for ${{ matrix.target }}, got:"
+            ls -la artifacts/${{ matrix.target }}/
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jolt-prebuilt-${{ matrix.target }}
+          path: artifacts/${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Assemble all per-target artifacts into npm/jolt-prebuilt/lib/<target>/ and
+  # publish @bloomengine/jolt-prebuilt via OIDC trusted publishing. Idempotent:
+  # the "already published" check short-circuits re-runs (workflow_dispatch on
+  # an old tag won't republish the same version, won't fail either).
+  # ---------------------------------------------------------------------------
+  publish-jolt-prebuilt:
+    needs: build-jolt-prebuilt
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all jolt-prebuilt artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: npm/jolt-prebuilt/lib
+          pattern: jolt-prebuilt-*
+
+      - name: Strip the jolt-prebuilt- artifact-name prefix from each subdir
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd npm/jolt-prebuilt/lib
+          for d in jolt-prebuilt-*; do
+            mv "$d" "${d#jolt-prebuilt-}"
+          done
+          ls -la
+
+      - name: Check if version already published
+        id: check
+        run: |
+          PKG_NAME=$(node -p "require('./npm/jolt-prebuilt/package.json').name")
+          PKG_VERSION=$(node -p "require('./npm/jolt-prebuilt/package.json').version")
+          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "$PKG_NAME@$PKG_VERSION is already on the registry — skipping publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$PKG_NAME@$PKG_VERSION not yet published — will publish."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.skip == 'false'
+        working-directory: npm/jolt-prebuilt
+        run: npm publish --provenance --access public
+
+  # ---------------------------------------------------------------------------
   # Publish the package to npm as @bloomengine/engine. Runs after the GitHub
   # Release so a failure here doesn't leave a dangling release-but-no-package
-  # state. Skips cleanly if the version is already on the registry, which
-  # keeps re-runs idempotent (workflow_dispatch on an existing tag won't
-  # double-publish or fail).
+  # state. Also waits on publish-jolt-prebuilt — the engine declares
+  # @bloomengine/jolt-prebuilt as a dependency, so the prebuilt package must
+  # be on the registry first or `npm publish` of the engine will fail
+  # resolution. Skips cleanly if the version is already on the registry,
+  # which keeps re-runs idempotent (workflow_dispatch on an existing tag
+  # won't double-publish or fail).
   #
   # We check out submodules recursively because scripts/prepack.sh refuses
   # to ship a tarball without the JoltPhysics sources materialised — the
   # package vendors them rather than relying on a postinstall git clone.
   # ---------------------------------------------------------------------------
   publish-npm:
-    needs: github-release
+    needs: [github-release, publish-jolt-prebuilt]
     runs-on: ubuntu-latest
     permissions:
       contents: read
