@@ -8,9 +8,12 @@ name: Release
 # to end: it bumps the version in package.json, commits, tags, pushes, and
 # waits for this workflow to go green.
 #
-# Required secrets:
-#   NPM_TOKEN — automation token for the @bloomengine npm scope with
-#               "Publish" permission on @bloomengine/engine.
+# Authentication: npm trusted publishing. The @bloomengine/engine package is
+# configured on npmjs.com with this workflow (Bloom-Engine/engine →
+# .github/workflows/release.yml → job publish-npm) as a trusted publisher.
+# `id-token: write` on the publish job is enough — `npm publish` exchanges
+# the GitHub OIDC token for a short-lived publish credential, no NPM_TOKEN
+# secret needed. Provenance attestation is automatic under this flow.
 
 on:
   push:
@@ -218,6 +221,4 @@ jobs:
 
       - name: Publish to npm
         if: steps.check.outputs.skip == 'false'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public
