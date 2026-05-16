@@ -14,16 +14,15 @@ native/web/pkg/
 
 # Native build dirs
 native/third_party/bloom_jolt/build/
-native/third_party/JoltPhysics/Build/
 
 # Jolt submodule extras we don't need at consumer build time.
-# We only ship JoltPhysics/Jolt/ (the actual sources our cmake builds
-# against) plus LICENSE + README. Everything else is samples, viewer,
-# docs, assets, tests — multi-MB and irrelevant for embedding.
+# We ship JoltPhysics/Jolt/ (the actual sources) plus Build/ (its
+# primary CMakeLists — bloom_jolt does add_subdirectory(Build)),
+# plus LICENSE + README. Everything else is samples, viewer, docs,
+# assets, tests — multi-MB and irrelevant for embedding.
 native/third_party/JoltPhysics/.git
 native/third_party/JoltPhysics/.github/
 native/third_party/JoltPhysics/Assets/
-native/third_party/JoltPhysics/Build/
 native/third_party/JoltPhysics/Docs/
 native/third_party/JoltPhysics/HelloWorld/
 native/third_party/JoltPhysics/JoltViewer/
