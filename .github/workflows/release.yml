@@ -2,11 +2,18 @@ name: Release
 
 # Fires on a version tag push (e.g. `v0.3.2`). Gates on the Tests workflow
 # passing for the exact same commit, then creates/updates the GitHub Release
-# and (once wired up) would publish to npm.
+# and publishes the package to npm as @bloomengine/engine.
 #
 # The /release Claude Code skill in .claude/skills/release/ drives this end
 # to end: it bumps the version in package.json, commits, tags, pushes, and
 # waits for this workflow to go green.
+#
+# Authentication: npm trusted publishing. The @bloomengine/engine package is
+# configured on npmjs.com with this workflow (Bloom-Engine/engine →
+# .github/workflows/release.yml → job publish-npm) as a trusted publisher.
+# `id-token: write` on the publish job is enough — `npm publish` exchanges
+# the GitHub OIDC token for a short-lived publish credential, no NPM_TOKEN
+# secret needed. Provenance attestation is automatic under this flow.
 
 on:
   push:
@@ -147,3 +154,71 @@ jobs:
           else
             echo "OK  package.json version matches tag ($VERSION)"
           fi
+
+  # ---------------------------------------------------------------------------
+  # Publish the package to npm as @bloomengine/engine. Runs after the GitHub
+  # Release so a failure here doesn't leave a dangling release-but-no-package
+  # state. Skips cleanly if the version is already on the registry, which
+  # keeps re-runs idempotent (workflow_dispatch on an existing tag won't
+  # double-publish or fail).
+  #
+  # We check out submodules recursively because scripts/prepack.sh refuses
+  # to ship a tarball without the JoltPhysics sources materialised — the
+  # package vendors them rather than relying on a postinstall git clone.
+  # ---------------------------------------------------------------------------
+  publish-npm:
+    needs: github-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # required for npm provenance attestations
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Resolve tag
+        id: tag
+        env:
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ -n "$DISPATCH_TAG" ]; then
+            TAG="$DISPATCH_TAG"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify package.json version matches tag
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PKG_VERSION" != "$VERSION" ]; then
+            echo "::error::Tag $TAG ($VERSION) does not match package.json ($PKG_VERSION) — refusing to publish."
+            exit 1
+          fi
+
+      - name: Check if version already published
+        id: check
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "$PKG_NAME@$PKG_VERSION is already on the registry — skipping publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$PKG_NAME@$PKG_VERSION not yet published — will publish."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.skip == 'false'
+        run: npm publish --provenance --access public

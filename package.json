@@ -1,5 +1,5 @@
 {
-  "name": "bloom",
+  "name": "@bloomengine/engine",
   "version": "0.3.1",
   "description": "Bloom Engine: native TypeScript game engine compiled by Perry",
   "main": "src/index.ts",
@@ -18,10 +18,83 @@
     "./physics": "./src/physics/index.ts",
     "./world": "./src/world/index.ts"
   },
+  "files": [
+    "src/",
+    "perry.config.ts",
+    "native/shared/Cargo.toml",
+    "native/shared/Cargo.lock",
+    "native/shared/build.rs",
+    "native/shared/src/**",
+    "native/shared/shaders/**",
+    "native/shared/assets/**",
+    "native/macos/Cargo.toml",
+    "native/macos/Cargo.lock",
+    "native/macos/src/**",
+    "native/ios/Cargo.toml",
+    "native/ios/Cargo.lock",
+    "native/ios/src/**",
+    "native/tvos/Cargo.toml",
+    "native/tvos/Cargo.lock",
+    "native/tvos/src/**",
+    "native/watchos/Cargo.toml",
+    "native/watchos/Cargo.lock",
+    "native/watchos/src/**",
+    "native/watchos/shaders/**",
+    "native/windows/Cargo.toml",
+    "native/windows/Cargo.lock",
+    "native/windows/src/**",
+    "native/linux/Cargo.toml",
+    "native/linux/Cargo.lock",
+    "native/linux/src/**",
+    "native/android/Cargo.toml",
+    "native/android/Cargo.lock",
+    "native/android/src/**",
+    "native/web/Cargo.toml",
+    "native/web/Cargo.lock",
+    "native/web/src/**",
+    "native/web/build.sh",
+    "native/web/index.html",
+    "native/web/bloom_glue.js",
+    "native/web/jolt_bridge.js",
+    "native/third_party/bloom_jolt/CMakeLists.txt",
+    "native/third_party/bloom_jolt/include/**",
+    "native/third_party/bloom_jolt/src/**",
+    "native/third_party/JoltPhysics/Jolt/**",
+    "native/third_party/JoltPhysics/LICENSE",
+    "native/third_party/JoltPhysics/README.md"
+  ],
+  "scripts": {
+    "prepack": "scripts/prepack.sh"
+  },
+  "keywords": [
+    "bloom",
+    "game-engine",
+    "perry",
+    "typescript",
+    "native",
+    "wgpu",
+    "metal",
+    "directx",
+    "vulkan",
+    "webgpu",
+    "jolt",
+    "physics"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bloom-Engine/engine.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Bloom-Engine/engine/issues"
+  },
+  "homepage": "https://github.com/Bloom-Engine/engine#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "perry": {
     "nativeLibrary": {
-      "module": "bloom",
+      "module": "@bloomengine/engine",
       "functions": [
         { "name": "bloom_init_window",              "params": ["f64", "f64", "i64", "f64"],                              "returns": "void" },
         { "name": "bloom_close_window",             "params": [],                                                        "returns": "void" },

@@ -54,7 +54,7 @@ python3 -m http.server 8080
 Browsers cannot run blocking `while` loops. Use `runGame()` instead:
 
 ```typescript
-import { initWindow, runGame, clearBackground, drawRect, Colors } from "bloom";
+import { initWindow, runGame, clearBackground, drawRect, Colors } from "@bloomengine/engine";
 
 initWindow(800, 600, "My Game");
 
@@ -113,7 +113,7 @@ if (fileExists("save.json")) {
 ## Platform Detection
 
 ```typescript
-import { getPlatform, Platform } from "bloom";
+import { getPlatform, Platform } from "@bloomengine/engine";
 
 if (getPlatform() === Platform.WEB) {
   // web-specific code

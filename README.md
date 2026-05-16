@@ -5,11 +5,33 @@
 Write TypeScript. Ship native games — and now the web too.
 Bloom compiles your game to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU — one codebase for every platform.
 
+## Install
+
+```bash
+npm install @bloomengine/engine
+```
+
+Or with your preferred package manager:
+
+```bash
+bun add @bloomengine/engine
+pnpm add @bloomengine/engine
+yarn add @bloomengine/engine
+```
+
+The npm package ships the TypeScript API alongside the engine's Rust sources and the bundled [JoltPhysics](https://github.com/jrouwe/JoltPhysics) C++ shim, so a single `install` is enough — there's no separate native download step.
+
+You'll also need:
+
+- **Perry** — the TypeScript AOT compiler that turns your game into a native binary or WASM module. It also drives the engine's native build.
+- **Rust toolchain** ([rustup.rs](https://rustup.rs)) — Perry invokes Cargo to compile the engine's platform crate the first time you build for each target.
+- For web builds only: [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) (`cargo install wasm-pack`).
+
 ## Quick Start
 
 ```typescript
 import { initWindow, windowShouldClose, beginDrawing,
-         endDrawing, clearBackground, drawText, Colors } from "bloom";
+         endDrawing, clearBackground, drawText, Colors } from "@bloomengine/engine";
 
 initWindow(800, 450, "My Game");
 
@@ -26,7 +48,7 @@ while (!windowShouldClose()) {
 Use `runGame()` for code that works on both native and web:
 
 ```typescript
-import { initWindow, runGame, clearBackground, drawText, Colors } from "bloom";
+import { initWindow, runGame, clearBackground, drawText, Colors } from "@bloomengine/engine";
 
 initWindow(800, 450, "My Game");
 
@@ -55,14 +77,14 @@ cd dist/web && python3 -m http.server 8080
 
 | Module | Import | Description |
 |--------|--------|-------------|
-| **Core** | `bloom/core` | Window, game loop, input, timing |
-| **Shapes** | `bloom/shapes` | 2D drawing + collision detection |
-| **Textures** | `bloom/textures` | Image loading, sprite batching |
-| **Text** | `bloom/text` | TTF/OTF font loading and rendering |
-| **Audio** | `bloom/audio` | Sound effects + music streaming |
-| **Models** | `bloom/models` | 3D model loading (glTF, OBJ), skeletal animation |
-| **Math** | `bloom/math` | Vectors, matrices, quaternions, easing |
-| **Physics** | `bloom/physics` | Jolt-backed rigid + soft bodies, character, vehicles ([docs](docs/physics.md)) |
+| **Core** | `@bloomengine/engine/core` | Window, game loop, input, timing |
+| **Shapes** | `@bloomengine/engine/shapes` | 2D drawing + collision detection |
+| **Textures** | `@bloomengine/engine/textures` | Image loading, sprite batching |
+| **Text** | `@bloomengine/engine/text` | TTF/OTF font loading and rendering |
+| **Audio** | `@bloomengine/engine/audio` | Sound effects + music streaming |
+| **Models** | `@bloomengine/engine/models` | 3D model loading (glTF, OBJ), skeletal animation |
+| **Math** | `@bloomengine/engine/math` | Vectors, matrices, quaternions, easing |
+| **Physics** | `@bloomengine/engine/physics` | Jolt-backed rigid + soft bodies, character, vehicles ([docs](docs/physics.md)) |
 
 ## Platforms
 
@@ -143,7 +165,7 @@ Bloom supports GPU-accelerated skeletal animation via glTF/GLB models. The pipel
 
 ```typescript
 import { loadModel, loadModelAnimation, updateModelAnimation, drawModel,
-         getTime, Colors } from "bloom";
+         getTime, Colors } from "@bloomengine/engine";
 
 const character = loadModel("assets/models/character.glb");
 const anim = loadModelAnimation("assets/models/character.glb");

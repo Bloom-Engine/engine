@@ -136,7 +136,7 @@ Joint matrices are written to the GPU in `end_frame()` via `flush_joint_matrices
 ### Loading
 
 ```typescript
-import { loadModel, loadModelAnimation, drawModel, updateModelAnimation } from "bloom";
+import { loadModel, loadModelAnimation, drawModel, updateModelAnimation } from "@bloomengine/engine";
 
 // Load the mesh (vertices with skin data: JOINTS_0 + WEIGHTS_0)
 const model = loadModel("assets/models/character.glb");
@@ -179,7 +179,7 @@ drawModel(model, { x: playerX, y: playerY, z: playerZ }, 1.0, WHITE);
 ```typescript
 import { initWindow, windowShouldClose, beginDrawing, endDrawing,
          clearBackground, loadModel, loadModelAnimation,
-         updateModelAnimation, drawModel, getTime, Colors } from "bloom";
+         updateModelAnimation, drawModel, getTime, Colors } from "@bloomengine/engine";
 
 initWindow(800, 600, "Animation Demo");
 

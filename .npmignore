@@ -1,0 +1,54 @@
+# The `files:` field in package.json is the source of truth for what
+# ships. This .npmignore is belt-and-suspenders — it strips artifacts
+# from globbed directories that `files:` pulls in, so we never ship
+# build output, IDE state, or local caches even by accident.
+
+# Rust build output
+target/
+**/target/
+*.rlib
+*.rmeta
+
+# wasm-pack output (built per consumer; not part of the package)
+native/web/pkg/
+
+# Native build dirs
+native/third_party/bloom_jolt/build/
+native/third_party/JoltPhysics/Build/
+
+# Jolt submodule extras we don't need at consumer build time.
+# We only ship JoltPhysics/Jolt/ (the actual sources our cmake builds
+# against) plus LICENSE + README. Everything else is samples, viewer,
+# docs, assets, tests — multi-MB and irrelevant for embedding.
+native/third_party/JoltPhysics/.git
+native/third_party/JoltPhysics/.github/
+native/third_party/JoltPhysics/Assets/
+native/third_party/JoltPhysics/Build/
+native/third_party/JoltPhysics/Docs/
+native/third_party/JoltPhysics/HelloWorld/
+native/third_party/JoltPhysics/JoltViewer/
+native/third_party/JoltPhysics/PerformanceTest/
+native/third_party/JoltPhysics/Samples/
+native/third_party/JoltPhysics/TestFramework/
+native/third_party/JoltPhysics/UnitTests/
+native/third_party/JoltPhysics/Doxyfile
+native/third_party/JoltPhysics/run_doxygen.bat
+native/third_party/JoltPhysics/sonar-project.properties
+native/third_party/JoltPhysics/ContributorAgreement.md
+
+# Perry build artifacts
+*.ts.o
+*_ts.o
+.perry-cache/
+dist/
+
+# OS / editor junk
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Local-only state never meant for the registry
+.claude/
+node_modules/
+package-lock.json
