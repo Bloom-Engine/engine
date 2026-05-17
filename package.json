@@ -1,6 +1,6 @@
 {
   "name": "@bloomengine/engine",
-  "version": "0.5.0",
+  "version": "0.4.1",
   "description": "Bloom Engine: native TypeScript game engine compiled by Perry",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -58,8 +58,7 @@
     "native/web/jolt_bridge.js"
   ],
   "dependencies": {
-    "@bloomengine/jolt-prebuilt": "0.5.0",
-    "@bloomengine/engine-prebuilt": "0.5.0"
+    "@bloomengine/jolt-prebuilt": "0.4.1"
   },
   "keywords": [
     "bloom",
@@ -497,15 +496,6 @@
         { "name": "bloom_physics_vehicle_get_wheel_angular_velocity", "params": ["f64", "f64"],                                                                          "returns": "f64"  }
       ],
       "targets": {
-        "macos-arm64": {
-          "prebuilt": "@bloomengine/engine-prebuilt/lib/aarch64-apple-darwin/libbloom_macos_bundled.a",
-          "crate": "native/macos/",
-          "lib": "libbloom_macos.a",
-          "frameworks": ["Metal", "QuartzCore", "AppKit", "CoreGraphics", "CoreText",
-                          "CoreFoundation", "CoreAudio", "AudioToolbox", "AVFoundation",
-                          "GameController"],
-          "libs": ["c++"]
-        },
         "macos": {
           "crate": "native/macos/",
           "lib": "libbloom_macos.a",
@@ -515,7 +505,6 @@
           "libs": ["c++"]
         },
         "ios": {
-          "prebuilt": "@bloomengine/engine-prebuilt/lib/aarch64-apple-ios/libbloom_ios_bundled.a",
           "crate": "native/ios/",
           "lib": "libbloom_ios.a",
           "frameworks": ["Metal", "QuartzCore", "UIKit", "CoreGraphics", "CoreText",
@@ -523,7 +512,6 @@
                           "GameController"]
         },
         "tvos": {
-          "prebuilt": "@bloomengine/engine-prebuilt/lib/aarch64-apple-tvos/libbloom_tvos_bundled.a",
           "crate": "native/tvos/",
           "lib": "libbloom_tvos.a",
           "frameworks": ["Metal", "QuartzCore", "UIKit", "CoreGraphics", "CoreText",
@@ -537,35 +525,16 @@
           "swift_sources": ["native/watchos/src/BloomWatchApp.swift", "native/watchos/src/BloomWatchAudio.swift"],
           "metal_sources": ["native/watchos/shaders/bloom_postfx.metal"]
         },
-        "windows-x64": {
-          "prebuilt": "@bloomengine/engine-prebuilt/lib/x86_64-pc-windows-msvc/bloom_windows_bundled.lib",
-          "crate": "native/windows/",
-          "lib": "bloom_windows.lib",
-          "libs": ["user32", "gdi32", "ole32", "shell32", "d3d12", "dxgi", "dxguid", "xinput", "opengl32", "d3dcompiler"]
-        },
         "windows": {
           "crate": "native/windows/",
           "lib": "bloom_windows.lib",
           "libs": ["user32", "gdi32", "ole32", "shell32", "d3d12", "dxgi", "dxguid", "xinput", "opengl32", "d3dcompiler"]
-        },
-        "linux-x64": {
-          "prebuilt": "@bloomengine/engine-prebuilt/lib/x86_64-unknown-linux-gnu/libbloom_linux_bundled.a",
-          "crate": "native/linux/",
-          "lib": "libbloom_linux_bundled.a",
-          "libs": ["stdc++"],
-          "pkgConfig": ["x11", "xi", "alsa"]
         },
         "linux": {
           "crate": "native/linux/",
           "lib": "libbloom_linux_bundled.a",
           "libs": ["stdc++"],
           "pkgConfig": ["x11", "xi", "alsa"]
-        },
-        "android-arm64": {
-          "prebuilt": "@bloomengine/engine-prebuilt/lib/aarch64-linux-android/libbloom_android_bundled.a",
-          "crate": "native/android/",
-          "lib": "libbloom_android.a",
-          "libs": ["android", "log", "c++_static", "c++abi", "OpenSLES"]
         },
         "android": {
           "crate": "native/android/",

@@ -8,27 +8,22 @@ name: Release
 # to end: it bumps the version in package.json, commits, tags, pushes, and
 # waits for this workflow to go green.
 #
-# Authentication: npm trusted publishing. All three packages —
-# @bloomengine/engine (job: publish-npm), @bloomengine/jolt-prebuilt
-# (job: publish-jolt-prebuilt), and @bloomengine/engine-prebuilt
-# (job: publish-engine-prebuilt) — must be configured on npmjs.com with
-# this workflow as a trusted publisher.
+# Authentication: npm trusted publishing. Both packages — @bloomengine/engine
+# (job: publish-npm) and @bloomengine/jolt-prebuilt (job: publish-jolt-prebuilt)
+# — must be configured on npmjs.com with this workflow as a trusted publisher.
 # `id-token: write` on each publish job is enough — `npm publish` exchanges
 # the GitHub OIDC token for a short-lived publish credential, no NPM_TOKEN
 # secret needed. Provenance attestation is automatic under this flow.
 #
 # Job order:
-#   await-tests            — gate on Tests workflow passing for the tag SHA
-#   github-release         — create/keep the GH Release object
-#   build-jolt-prebuilt    — matrix: build libJolt + libbloom_jolt for every
-#                            (os, arch) variant on its native runner
-#   publish-jolt-prebuilt  — assemble jolt artifacts → publish @bloomengine/jolt-prebuilt
-#   build-engine-prebuilt  — matrix: build libbloom_<platform>.a per target on
-#                            its native runner, fetch the matching jolt-prebuilt
-#                            artifact, bundle into a self-contained fat archive
-#   publish-engine-prebuilt — assemble engine artifacts → publish @bloomengine/engine-prebuilt
-#   publish-npm            — publish @bloomengine/engine, which depends on
-#                            both prebuilt packages just published
+#   await-tests          — gate on Tests workflow passing for the tag SHA
+#   github-release       — create/keep the GH Release object
+#   build-jolt-prebuilt  — matrix: build libJolt + libbloom_jolt for every
+#                          (os, arch) variant on its native runner
+#   publish-jolt-prebuilt — assemble the artifacts into npm/jolt-prebuilt/lib/
+#                          and publish @bloomengine/jolt-prebuilt
+#   publish-npm          — publish @bloomengine/engine, which depends on the
+#                          jolt-prebuilt version just published
 
 on:
   push:
@@ -361,207 +356,21 @@ jobs:
         run: npm publish --provenance --access public
 
   # ---------------------------------------------------------------------------
-  # Build the engine's per-platform Rust crates (native/<platform>/) as
-  # prebuilt static archives. Each cargo target pulls in a target-specific
-  # native dep tree (aws-lc-sys, oboe-sys, minimp3-sys, metal, wgpu, objc2,
-  # windows-rs, etc.) that needs its host's C/C++ toolchain — a build hub
-  # cannot host every one of those. So we compile each on the runner that
-  # natively has the right toolchain, merge with the corresponding
-  # @bloomengine/jolt-prebuilt slice into a self-contained fat archive
-  # (Perry's `prebuilt:` field takes a single file), and ship.
-  #
-  # Each matrix slice waits for the whole jolt-prebuilt matrix to finish so
-  # it can fetch the matching jolt slice via the per-target artifact name.
-  # The engine targets here are the six the Perry hub actively builds for;
-  # in-repo dev keeps the bare `targets.<os>.crate` fallback (see
-  # package.json) so iterating without a CI-produced prebuilt still works.
-  # ---------------------------------------------------------------------------
-  build-engine-prebuilt:
-    needs: build-jolt-prebuilt
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: macos-arm64
-            rust_triple: aarch64-apple-darwin
-            platform: macos
-            runner: macos-14
-            tier3: false
-          - target: ios-arm64
-            rust_triple: aarch64-apple-ios
-            platform: ios
-            runner: macos-14
-            tier3: false
-          - target: tvos-arm64
-            rust_triple: aarch64-apple-tvos
-            platform: tvos
-            runner: macos-14
-            # tvOS is Rust Tier 3 — needs nightly + -Zbuild-std. The Perry
-            # link path also takes this branch (see link.rs is_tier3 check).
-            tier3: true
-          - target: android-arm64
-            rust_triple: aarch64-linux-android
-            platform: android
-            runner: ubuntu-22.04
-            tier3: false
-          - target: win32-x64
-            rust_triple: x86_64-pc-windows-msvc
-            platform: windows
-            runner: windows-latest
-            tier3: false
-          - target: linux-x64
-            rust_triple: x86_64-unknown-linux-gnu
-            platform: linux
-            runner: ubuntu-22.04
-            tier3: false
-
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Rust toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ matrix.tier3 }}" = "true" ]; then
-            # Tier 3 needs nightly + rust-src for -Zbuild-std. The target
-            # itself isn't installable via rustup (build-std supplies it).
-            rustup toolchain install nightly --profile minimal --component rust-src
-          else
-            rustup target add ${{ matrix.rust_triple }}
-          fi
-
-      - name: Set up Android NDK linker (android only)
-        if: matrix.platform == 'android'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # github-hosted ubuntu runners ship ANDROID_NDK_HOME pre-set. Wire
-          # the cross-linker so cargo knows what to invoke; cc-rs in
-          # oboe-sys et al. reads CC_<triple> / AR_<triple> the same way.
-          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          {
-            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android21-clang"
-            echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android21-clang"
-            echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar"
-            echo "AR=$NDK_BIN/llvm-ar"
-          } >> "$GITHUB_ENV"
-
-      - name: Set up MSVC dev shell (windows only)
-        if: matrix.platform == 'windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Download matching jolt-prebuilt artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: jolt-prebuilt-${{ matrix.target }}
-          # Stage where build.rs's auto-discovery + bundle script expect it.
-          path: npm/jolt-prebuilt/lib/${{ matrix.target }}
-
-      - name: cargo build
-        shell: bash
-        env:
-          BLOOM_JOLT_PREBUILT_DIR: ${{ github.workspace }}/npm/jolt-prebuilt/lib
-        working-directory: native/${{ matrix.platform }}
-        run: |
-          set -euo pipefail
-          if [ "${{ matrix.tier3 }}" = "true" ]; then
-            cargo +nightly build --release \
-              --target ${{ matrix.rust_triple }} \
-              -Zbuild-std=std,panic_abort
-          else
-            cargo build --release --target ${{ matrix.rust_triple }}
-          fi
-
-      - name: Bundle engine + Jolt + bloom_jolt into one fat archive
-        shell: bash
-        env:
-          BLOOM_JOLT_PREBUILT_DIR: ${{ github.workspace }}/npm/jolt-prebuilt/lib
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/${{ matrix.rust_triple }}
-          scripts/bundle-engine-prebuilt.sh \
-            ${{ matrix.platform }} \
-            ${{ matrix.rust_triple }} \
-            artifacts/${{ matrix.rust_triple }}
-          ls -la artifacts/${{ matrix.rust_triple }}/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: engine-prebuilt-${{ matrix.rust_triple }}
-          path: artifacts/${{ matrix.rust_triple }}/
-          if-no-files-found: error
-          retention-days: 7
-
-  # ---------------------------------------------------------------------------
-  # Assemble all engine-prebuilt slices into npm/engine-prebuilt/lib/ and
-  # publish @bloomengine/engine-prebuilt via OIDC trusted publishing.
-  # Same idempotent skip-if-already-published guard as the other publish
-  # jobs.
-  # ---------------------------------------------------------------------------
-  publish-engine-prebuilt:
-    needs: build-engine-prebuilt
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Download all engine-prebuilt artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: npm/engine-prebuilt/lib
-          pattern: engine-prebuilt-*
-
-      - name: Strip the engine-prebuilt- artifact-name prefix from each subdir
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd npm/engine-prebuilt/lib
-          for d in engine-prebuilt-*; do
-            mv "$d" "${d#engine-prebuilt-}"
-          done
-          ls -la
-
-      - name: Check if version already published
-        id: check
-        run: |
-          PKG_NAME=$(node -p "require('./npm/engine-prebuilt/package.json').name")
-          PKG_VERSION=$(node -p "require('./npm/engine-prebuilt/package.json').version")
-          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
-            echo "$PKG_NAME@$PKG_VERSION is already on the registry — skipping publish."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "$PKG_NAME@$PKG_VERSION not yet published — will publish."
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish to npm
-        if: steps.check.outputs.skip == 'false'
-        working-directory: npm/engine-prebuilt
-        run: npm publish --provenance --access public
-
-  # ---------------------------------------------------------------------------
   # Publish the package to npm as @bloomengine/engine. Runs after the GitHub
   # Release so a failure here doesn't leave a dangling release-but-no-package
-  # state. Waits on both jolt-prebuilt and engine-prebuilt being on the
-  # registry first — the engine declares them as `dependencies`, so the
-  # publish would fail resolution otherwise. Skips cleanly if the version
-  # is already on the registry (workflow_dispatch on an existing tag won't
-  # double-publish or fail).
+  # state. Also waits on publish-jolt-prebuilt — the engine declares
+  # @bloomengine/jolt-prebuilt as a dependency, so the prebuilt package must
+  # be on the registry first or `npm publish` of the engine will fail
+  # resolution. Skips cleanly if the version is already on the registry,
+  # which keeps re-runs idempotent (workflow_dispatch on an existing tag
+  # won't double-publish or fail).
+  #
+  # We check out submodules recursively because scripts/prepack.sh refuses
+  # to ship a tarball without the JoltPhysics sources materialised — the
+  # package vendors them rather than relying on a postinstall git clone.
   # ---------------------------------------------------------------------------
   publish-npm:
-    needs: [github-release, publish-jolt-prebuilt, publish-engine-prebuilt]
+    needs: [github-release, publish-jolt-prebuilt]
     runs-on: ubuntu-latest
     permissions:
       contents: read
