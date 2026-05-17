@@ -1,0 +1,21 @@
+{
+  "name": "@bloomengine/engine-prebuilt",
+  "version": "0.5.0",
+  "description": "Prebuilt bloom_<platform> static libraries — the engine's per-platform native crate (Rust + statically-merged JoltPhysics + bloom_jolt shim) compiled on the appropriate native CI runner, shipped self-contained so consumers and the Perry build hub never need a target-specific C/C++ toolchain. Mirrors @bloomengine/jolt-prebuilt.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bloom-Engine/engine.git",
+    "directory": "npm/engine-prebuilt"
+  },
+  "homepage": "https://github.com/Bloom-Engine/engine/tree/main/npm/engine-prebuilt",
+  "bugs": {
+    "url": "https://github.com/Bloom-Engine/engine/issues"
+  },
+  "files": [
+    "lib/"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

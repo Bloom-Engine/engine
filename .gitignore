@@ -41,12 +41,13 @@ tools/validate-out/
 /test_*.ts
 _perry_stubs.o
 
-# jolt-prebuilt archives are produced by CI's matrix build (one slice per
-# (os, arch)) and assembled into npm/jolt-prebuilt/lib/<target>/ in the
-# publish-jolt-prebuilt job — see .github/workflows/release.yml. Devs may
-# also drop local builds in here for spike work via build.rs; never commit
-# those, the canonical bytes come from CI artifacts.
+# jolt-prebuilt + engine-prebuilt archives are produced by CI's matrix
+# builds (one slice per target) and assembled into
+# npm/<pkg>/lib/<rust-triple>/ in the publish jobs — see
+# .github/workflows/release.yml. Devs may also drop local builds in here
+# for spike work; never commit those, the canonical bytes come from CI.
 npm/jolt-prebuilt/lib/
+npm/engine-prebuilt/lib/
 
 # Claude Code harness-local state
 .claude/scheduled_tasks.lock
