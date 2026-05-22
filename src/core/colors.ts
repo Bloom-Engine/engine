@@ -5,7 +5,7 @@ import { Color as ColorType } from './types';
 // emits a `_perry_fn_src_core_colors_ts__Color` symbol that examples
 // importing `Color` from `bloom/core` can link against.
 export const Color: Record<string, ColorType> = {
-  RayWhite:   { r: 245, g: 245, b: 245, a: 255 },
+  Snow:       { r: 245, g: 245, b: 245, a: 255 },
   White:      { r: 255, g: 255, b: 255, a: 255 },
   Black:      { r: 0,   g: 0,   b: 0,   a: 255 },
   Red:        { r: 230, g: 41,  b: 55,  a: 255 },
@@ -58,6 +58,6 @@ export const Colors: Record<string, ColorType> = {
   BEIGE:      Color.Beige,
   MAGENTA:    Color.Magenta,
   VIOLET:     Color.Violet,
-  RAYWHITE:   Color.RayWhite,
+  SNOW:       Color.Snow,
   BLANK:      Color.Blank,
 };

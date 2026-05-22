@@ -326,7 +326,7 @@ while (!windowShouldClose()) {
   }
 
   beginDrawing();
-  clearBackground(Colors.RAYWHITE);
+  clearBackground(Colors.SNOW);
 
   const camX = 3 + Math.cos(angle) * 12;
   const camZ = 2.5 + Math.sin(angle) * 12;

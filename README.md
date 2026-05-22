@@ -5,18 +5,9 @@
 Write TypeScript. Ship native games — and now the web too.
 Bloom compiles your game to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU — one codebase for every platform.
 
-> ### Inspired by [raylib](https://github.com/raysan5/raylib) 💚
->
-> Bloom is a love letter to **raylib**, the gold standard for simple-but-powerful game
-> libraries. We borrowed its philosophy wholesale: a flat library of plain functions —
-> no classes, no inheritance trees, no framework magic — small enough to fit on a
-> cheatsheet. Bloom's module layout (core, shapes, textures, text, audio, models)
-> directly mirrors raylib's, and even the color names (`Colors.RAYWHITE`) are a nod to
-> its heritage. What we changed is the front end: TypeScript idioms, native compilation
-> via Perry, and one codebase that ships everywhere.
->
-> Huge thanks to [Ramon Santamaria (@raysan5)](https://github.com/raysan5) and the raylib
-> community. If you like Bloom, go star raylib. ([full design rationale](docs/design-api.md))
+> **Inspired by [raylib](https://github.com/raysan5/raylib).** Bloom models its public
+> API on raylib's — in our view one of the best API designs in gamedev. Bloom is an
+> independent implementation, not a port — [how Bloom relates to raylib »](#how-bloom-relates-to-raylib)
 
 ## Install
 
@@ -50,7 +41,7 @@ initWindow(800, 450, "My Game");
 
 while (!windowShouldClose()) {
   beginDrawing();
-  clearBackground(Colors.RAYWHITE);
+  clearBackground(Colors.SNOW);
   drawText("Hello, Bloom!", 190, 200, 20, Colors.DARKGRAY);
   endDrawing();
 }
@@ -66,7 +57,7 @@ import { initWindow, runGame, clearBackground, drawText, Colors } from "@bloomen
 initWindow(800, 450, "My Game");
 
 runGame((dt) => {
-  clearBackground(Colors.RAYWHITE);
+  clearBackground(Colors.SNOW);
   drawText("Hello, Bloom!", 190, 200, 20, Colors.DARKGRAY);
 });
 ```
@@ -85,6 +76,23 @@ cd dist/web && python3 -m http.server 8080
 - **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, Android, and Web from one codebase.
 - **Unified 2D/3D** — Shapes, textures, text, 3D models, and audio in one engine.
 - **Zero magic** — Explicit game loops, no hidden framework overhead.
+
+## How Bloom relates to raylib
+
+Bloom's public API is heavily inspired by [raylib](https://github.com/raysan5/raylib).
+raylib's API is, in our opinion, one of the best in the gamedev space — a flat library
+of plain functions, no classes, small enough to learn from a cheatsheet — so we model
+ours on it. You'll recognize the shape immediately: `initWindow`, `beginDrawing`,
+`clearBackground`, `drawText`, and modules named core / shapes / textures / text /
+audio / models.
+
+That's where the relationship ends. **Bloom's implementation is entirely independent —
+it does not link against, embed, or call raylib.** Bloom compiles TypeScript directly to
+native code via Perry, our LLVM-based AOT compiler, and renders through wgpu (Metal,
+DirectX 12, Vulkan, OpenGL, WebGPU). It is not a port or a binding — just an engine that
+admires raylib's API design. Thanks to
+[Ramon Santamaria (@raysan5)](https://github.com/raysan5) and the raylib community for
+setting the bar. ([full design rationale](docs/design-api.md))
 
 ## Modules
 

@@ -122,7 +122,7 @@ while (!windowShouldClose()) {
   angle += dt * 0.15;
 
   beginDrawing();
-  clearBackground(Colors.RAYWHITE);
+  clearBackground(Colors.SNOW);
 
   const camX = Math.cos(angle) * 12;
   const camZ = Math.sin(angle) * 12;

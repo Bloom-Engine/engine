@@ -176,7 +176,7 @@ while (!windowShouldClose()) {
   angle += dt * 0.3;
 
   beginDrawing();
-  clearBackground(Colors.RAYWHITE);
+  clearBackground(Colors.SNOW);
 
   // Camera orbits around the room
   const camX = 2.5 + Math.cos(angle) * 10;

@@ -198,7 +198,7 @@ while (!windowShouldClose()) {
   const cam = getCameraPosition();
 
   beginDrawing();
-  clearBackground(Colors.RAYWHITE);
+  clearBackground(Colors.SNOW);
 
   beginMode3D({
     position: cam,
