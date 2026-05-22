@@ -110,6 +110,7 @@ name = "bloom-tvos"
 version = "0.1.0"
 dependencies = [
  "bloom-shared",
+ "image",
  "objc2",
  "objc2-foundation",
  "raw-window-handle",

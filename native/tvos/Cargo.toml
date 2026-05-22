@@ -17,6 +17,8 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread", "NSObject"] }
 raw-window-handle = "0.6"
 wgpu = "29"
+# Needed by bloom_set_env_clear_from_hdr (HDR env-map decode); mirrors macOS.
+image = { version = "0.25", default-features = false, features = ["hdr"] }
 
 [patch.crates-io]
 metal = { path = "metal-patched" }

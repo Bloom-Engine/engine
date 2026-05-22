@@ -3177,3 +3177,154 @@ fn bloom_jolt_ffi_physics() -> &'static mut bloom_shared::physics_jolt::JoltPhys
 
 #[cfg(feature = "jolt")]
 bloom_shared::define_physics_ffi!();
+
+// ============================================================
+// Screenshot + HDR env + Post-FX / resolution FFI
+// ------------------------------------------------------------
+// Ported from native/macos/src/lib.rs. These delegate to the shared
+// bloom_shared renderer (identical type used here), so they are real
+// implementations, not stubs. They were present on macOS/linux/windows
+// but missing on tvOS, which caused `ld64.lld: undefined symbol: _bloom_*`
+// link errors for any app using the post-processing API on tvOS.
+// ============================================================
+
+/// Request a PNG screenshot of the next rendered frame. The capture happens
+/// during the next end_drawing(); used by bloom-diff / CI image regression.
+#[no_mangle]
+pub extern "C" fn bloom_take_screenshot(path_ptr: *const u8) {
+    let path = str_from_header(path_ptr).to_string();
+    let eng = engine();
+    eng.renderer.screenshot_requested = true;
+    eng.renderer.pending_screenshot_path = Some(path);
+}
+
+/// Load an HDR equirectangular environment map and upload it to the GPU.
+/// The file must be Radiance HDR (.hdr).
+#[no_mangle]
+pub extern "C" fn bloom_set_env_clear_from_hdr(path_ptr: *const u8) {
+    use image::ImageDecoder;
+    let path = str_from_header(path_ptr).to_string();
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let decoder = match image::codecs::hdr::HdrDecoder::new(std::io::BufReader::new(file)) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let (w, h) = decoder.dimensions();
+    let byte_len = (w as usize) * (h as usize) * 3 * 4;
+    let mut buf = vec![0u8; byte_len];
+    if decoder.read_image(&mut buf).is_err() {
+        return;
+    }
+    let rgb_f32: Vec<f32> = buf
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    engine().renderer.load_env_from_hdr(w, h, &rgb_f32);
+}
+
+// --- Post-FX knobs (heuristic visual layer; default-off) ---
+
+#[no_mangle]
+pub extern "C" fn bloom_set_fog(r: f64, g: f64, b: f64, density: f64, height_ref: f64, height_falloff: f64) {
+    let r_ = engine();
+    r_.renderer.set_fog_color(r as f32, g as f32, b as f32);
+    r_.renderer.set_fog_density(density as f32);
+    r_.renderer.set_fog_height_falloff(height_ref as f32, height_falloff as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) {
+    engine().renderer.set_chromatic_aberration(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_vignette(strength: f64, softness: f64) {
+    engine().renderer.set_vignette(strength as f32, softness as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_film_grain(strength: f64) {
+    engine().renderer.set_film_grain(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_sun_shafts(strength: f64, decay: f64, r: f64, g: f64, b: f64) {
+    let eng = engine();
+    eng.renderer.set_sun_shaft_strength(strength as f32);
+    eng.renderer.set_sun_shaft_decay(decay as f32);
+    eng.renderer.set_sun_shaft_color(r as f32, g as f32, b as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_auto_exposure(on: f64) {
+    engine().renderer.set_auto_exposure(on != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_taa_enabled(on: f64) {
+    engine().renderer.set_taa_enabled(on != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_render_scale(scale: f64) {
+    engine().renderer.set_render_scale(scale as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_render_scale() -> f64 {
+    engine().renderer.render_scale() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_upscale_mode(mode: f64) {
+    engine().renderer.set_upscale_mode(mode as u32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_cas_strength(strength: f64) {
+    engine().renderer.set_cas_strength(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_physical_width() -> f64 {
+    engine().renderer.physical_width() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_physical_height() -> f64 {
+    engine().renderer.physical_height() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_auto_resolution(target_hz: f64, enabled: f64) {
+    let eng = engine();
+    if enabled != 0.0 {
+        let current = eng.renderer.render_scale();
+        eng.drs.enable(target_hz as f32, current);
+    } else {
+        eng.drs.disable();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_manual_exposure(value: f64) {
+    engine().renderer.set_manual_exposure(value as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_env_intensity(intensity: f64) {
+    engine().renderer.set_env_intensity(intensity as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_enabled(enabled: f64) {
+    engine().renderer.set_ssgi_enabled(enabled != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_intensity(intensity: f64) {
+    engine().renderer.set_ssgi_intensity(intensity as f32);
+}
