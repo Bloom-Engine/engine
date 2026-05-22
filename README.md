@@ -5,6 +5,19 @@
 Write TypeScript. Ship native games — and now the web too.
 Bloom compiles your game to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU — one codebase for every platform.
 
+> ### Inspired by [raylib](https://github.com/raysan5/raylib) 💚
+>
+> Bloom is a love letter to **raylib**, the gold standard for simple-but-powerful game
+> libraries. We borrowed its philosophy wholesale: a flat library of plain functions —
+> no classes, no inheritance trees, no framework magic — small enough to fit on a
+> cheatsheet. Bloom's module layout (core, shapes, textures, text, audio, models)
+> directly mirrors raylib's, and even the color names (`Colors.RAYWHITE`) are a nod to
+> its heritage. What we changed is the front end: TypeScript idioms, native compilation
+> via Perry, and one codebase that ships everywhere.
+>
+> Huge thanks to [Ramon Santamaria (@raysan5)](https://github.com/raysan5) and the raylib
+> community. If you like Bloom, go star raylib. ([full design rationale](docs/design-api.md))
+
 ## Install
 
 ```bash
