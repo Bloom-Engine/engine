@@ -11,6 +11,14 @@ crate-type = ["staticlib"]
 default = ["jolt"]
 jolt = ["bloom-shared/jolt"]
 
+# Match perry-runtime's panic strategy so the final perry-driven link
+# doesn't see two copies of rust_eh_personality (and friends) from two
+# independent Rust staticlibs. ld64.lld flags these as duplicate symbols;
+# GNU ld silently tolerates them, which is why only Apple targets break.
+# Mirrors the same setting in native/watchos/Cargo.toml.
+[profile.release]
+panic = "abort"
+
 [dependencies]
 bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
 objc2 = "0.6"
