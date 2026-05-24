@@ -536,7 +536,7 @@
         },
         "linux": {
           "crate": "native/linux/",
-          "lib": "libbloom_linux_bundled.a",
+          "lib": "libbloom_linux.a",
           "libs": ["stdc++"],
           "pkgConfig": ["x11", "xi", "alsa"]
         },
