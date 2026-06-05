@@ -2038,7 +2038,12 @@ pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
                 ptr
             }
         }
-        Err(_) => std::ptr::null(),
+        // A null pointer would NaN-box into a string-typed JS value pointing at
+        // address 0; `.length`/`.charCodeAt` then dereference the header at a
+        // negative offset and segfault. Return a valid empty Perry string so
+        // callers that probe via `data.length === 0` (e.g. level discovery)
+        // are safe. Mirrors the macOS native crate.
+        Err(_) => alloc_perry_string(""),
     }
 }
 
