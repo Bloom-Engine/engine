@@ -1,6 +1,6 @@
 use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
-use bloom_shared::string_header::str_from_header;
+use bloom_shared::string_header::{str_from_header, alloc_perry_string};
 use bloom_shared::audio::{parse_wav, parse_ogg, parse_mp3, SoundData};
 
 use objc2::encode::{Encode, Encoding, RefEncode};
@@ -3327,4 +3327,138 @@ pub extern "C" fn bloom_set_ssgi_enabled(enabled: f64) {
 #[no_mangle]
 pub extern "C" fn bloom_set_ssgi_intensity(intensity: f64) {
     engine().renderer.set_ssgi_intensity(intensity as f32);
+}
+
+// ── Ported from native/macos for tvOS FFI parity (render textures, profiler, DOF/SSGI, splat) ──
+#[no_mangle]
+pub extern "C" fn bloom_begin_texture_mode(handle: f64) {
+    let eng = engine();
+    let (w, h, bg_idx) = match eng.textures.render_textures.get(handle) {
+        Some(rt) => {
+            let tex_handle = rt.texture_handle;
+            match eng.textures.textures.get(tex_handle) {
+                Some(td) => (rt.width, rt.height, td.bind_group_idx as usize),
+                None => return,
+            }
+        }
+        None => return,
+    };
+    if let Some(texture) = eng.renderer.get_texture_ref(bg_idx) {
+        // We need to call begin_texture_mode with a reference to the texture,
+        // but get_texture_ref borrows renderer immutably. Clone the texture view
+        // data we need first, then call the mutable method.
+        let color_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Create depth texture for this RT.
+        let depth_tex = eng.renderer.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rt_depth"), size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        eng.renderer.rt_color_view = Some(color_view);
+        eng.renderer.rt_depth_view = Some(depth_view);
+        eng.renderer.rt_depth_texture = Some(depth_tex);
+        eng.renderer.rt_width = w;
+        eng.renderer.rt_height = h;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_end_texture_mode() {
+    engine().renderer.end_texture_mode();
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_render_texture_texture(handle: f64) -> f64 {
+    engine().textures.get_render_texture_texture(handle)
+}
+
+// Q1: Render texture FFI — create GPU textures for render-to-texture.
+#[no_mangle]
+pub extern "C" fn bloom_load_render_texture(width: f64, height: f64) -> f64 {
+    let w = width as u32;
+    let h = height as u32;
+    let eng = engine();
+    let rt_handle = eng.textures.load_render_texture(w, h);
+
+    // Create the GPU texture via the renderer's public method.
+    let (bind_group_idx, _tex_vec_idx) = eng.renderer.create_render_texture(w, h);
+
+    // Register as a texture handle so drawTexture can sample it.
+    let tex_handle = eng.textures.textures.alloc(bloom_shared::textures::TextureData {
+        bind_group_idx, width: w, height: h,
+    });
+    eng.textures.set_render_texture_handle(rt_handle, tex_handle);
+
+    rt_handle
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_unload_render_texture(handle: f64) {
+    engine().textures.unload_render_texture(handle);
+}
+
+/// Phase 8 — frame history for the histogram. Header-prefixed string,
+/// one line per frame "<cpu_us>|<gpu_us>", oldest first, up to 120
+/// lines.
+#[no_mangle]
+pub extern "C" fn bloom_profiler_frame_history() -> *const u8 {
+    let hist = engine().profiler.frame_history();
+    let mut s = String::with_capacity(hist.len() * 24);
+    for (cpu, gpu) in &hist {
+        s.push_str(&format!("{:.2}|{:.2}\n", cpu, gpu));
+    }
+    alloc_perry_string(&s)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_profiler_overlay_text() -> *const u8 {
+    let snap = engine().profiler.snapshot();
+    let mut s = String::with_capacity(snap.len() * 48);
+    for (label, cpu, gpu) in &snap {
+        s.push_str(label);
+        s.push('|');
+        s.push_str(&format!("{:.2}", cpu));
+        s.push('|');
+        match gpu {
+            Some(g) => s.push_str(&format!("{:.2}", g)),
+            None    => s.push_str("-1"),
+        }
+        s.push('\n');
+    }
+    alloc_perry_string(&s)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_dof(enabled: f64, focus_distance: f64, aperture: f64) {
+    let r = &mut engine().renderer;
+    r.set_dof_enabled(enabled != 0.0);
+    r.set_dof_focus_distance(focus_distance as f32);
+    r.set_dof_aperture(aperture as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_radius(radius: f64) {
+    engine().renderer.set_ssgi_radius(radius as f32);
+}
+
+/// Phase 8 — formatted per-pass overlay text. Returns a Perry-style
+/// header-prefixed string (12-byte header: len, cap, flags, then
+/// UTF-8 bytes) with one line per pass sorted by CPU time descending:
+///
+///   "<label>|<cpu_us>|<gpu_us_or_-1>\n..."
+///
+/// The TS overlay splits on \n then | per line. Games call this once
+/// per overlay-draw frame.
+/// Phase 7 — submit a world-space impulse. The renderer's per-frame
+/// compute pass decays + accumulates submissions into a 256×256
+/// R32Float texture covering a 128 m centred square; materials that
+/// sample `impulse_tex` (group 4 binding 4) read the result. Up to 16
+/// splats per frame are accepted — overflow is dropped silently.
+#[no_mangle]
+pub extern "C" fn bloom_splat_impulse(x: f64, z: f64, radius: f64, strength: f64) {
+    engine().renderer.impulse_field.submit_splat(
+        x as f32, z as f32, radius as f32, strength as f32,
+    );
 }
