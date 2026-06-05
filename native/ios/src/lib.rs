@@ -1,6 +1,6 @@
 use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
-use bloom_shared::string_header::str_from_header;
+use bloom_shared::string_header::{str_from_header, alloc_perry_string};
 use bloom_shared::audio::{parse_wav, parse_ogg, parse_mp3, SoundData};
 
 use objc2::encode::{Encode, Encoding, RefEncode};
@@ -2256,3 +2256,602 @@ fn bloom_jolt_ffi_physics() -> &'static mut bloom_shared::physics_jolt::JoltPhys
 
 #[cfg(feature = "jolt")]
 bloom_shared::define_physics_ffi!();
+
+// ---- FFI parity port from macos (iOS crate drift fix) ----
+#[no_mangle]
+pub extern "C" fn bloom_take_screenshot(path_ptr: *const u8) {
+    let path = str_from_header(path_ptr).to_string();
+    let eng = engine();
+    eng.renderer.screenshot_requested = true;
+    eng.renderer.pending_screenshot_path = Some(path);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_env_clear_from_hdr(path_ptr: *const u8) {
+    use image::ImageDecoder;
+    let path = str_from_header(path_ptr).to_string();
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let decoder = match image::codecs::hdr::HdrDecoder::new(std::io::BufReader::new(file)) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let (w, h) = decoder.dimensions();
+    let byte_len = (w as usize) * (h as usize) * 3 * 4;
+    let mut buf = vec![0u8; byte_len];
+    if decoder.read_image(&mut buf).is_err() {
+        return;
+    }
+    // Reinterpret the byte buffer as f32 RGB triples for the renderer.
+    let rgb_f32: Vec<f32> = buf
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    engine().renderer.load_env_from_hdr(w, h, &rgb_f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_fog(r: f64, g: f64, b: f64, density: f64, height_ref: f64, height_falloff: f64) {
+    let r_ = engine();
+    r_.renderer.set_fog_color(r as f32, g as f32, b as f32);
+    r_.renderer.set_fog_density(density as f32);
+    r_.renderer.set_fog_height_falloff(height_ref as f32, height_falloff as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) {
+    engine().renderer.set_chromatic_aberration(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_vignette(strength: f64, softness: f64) {
+    engine().renderer.set_vignette(strength as f32, softness as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_film_grain(strength: f64) {
+    engine().renderer.set_film_grain(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_sun_shafts(strength: f64, decay: f64, r: f64, g: f64, b: f64) {
+    let eng = engine();
+    eng.renderer.set_sun_shaft_strength(strength as f32);
+    eng.renderer.set_sun_shaft_decay(decay as f32);
+    eng.renderer.set_sun_shaft_color(r as f32, g as f32, b as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_auto_exposure(on: f64) {
+    engine().renderer.set_auto_exposure(on != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_taa_enabled(on: f64) {
+    engine().renderer.set_taa_enabled(on != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_render_scale(scale: f64) {
+    engine().renderer.set_render_scale(scale as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_render_scale() -> f64 {
+    engine().renderer.render_scale() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_upscale_mode(mode: f64) {
+    engine().renderer.set_upscale_mode(mode as u32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_cas_strength(strength: f64) {
+    engine().renderer.set_cas_strength(strength as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_physical_width() -> f64 {
+    engine().renderer.physical_width() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_physical_height() -> f64 {
+    engine().renderer.physical_height() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_auto_resolution(target_hz: f64, enabled: f64) {
+    let eng = engine();
+    if enabled != 0.0 {
+        let current = eng.renderer.render_scale();
+        eng.drs.enable(target_hz as f32, current);
+    } else {
+        eng.drs.disable();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_manual_exposure(value: f64) {
+    engine().renderer.set_manual_exposure(value as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_env_intensity(intensity: f64) {
+    engine().renderer.set_env_intensity(intensity as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_enabled(enabled: f64) {
+    engine().renderer.set_ssgi_enabled(enabled != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_intensity(intensity: f64) {
+    engine().renderer.set_ssgi_intensity(intensity as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_ssgi_radius(radius: f64) {
+    engine().renderer.set_ssgi_radius(radius as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_set_dof(enabled: f64, focus_distance: f64, aperture: f64) {
+    let r = &mut engine().renderer;
+    r.set_dof_enabled(enabled != 0.0);
+    r.set_dof_focus_distance(focus_distance as f32);
+    r.set_dof_aperture(aperture as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_splat_impulse(x: f64, z: f64, radius: f64, strength: f64) {
+    engine().renderer.impulse_field.submit_splat(
+        x as f32, z as f32, radius as f32, strength as f32,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_profiler_frame_history() -> *const u8 {
+    let hist = engine().profiler.frame_history();
+    let mut s = String::with_capacity(hist.len() * 24);
+    for (cpu, gpu) in &hist {
+        s.push_str(&format!("{:.2}|{:.2}\n", cpu, gpu));
+    }
+    alloc_perry_string(&s)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_profiler_overlay_text() -> *const u8 {
+    let snap = engine().profiler.snapshot();
+    let mut s = String::with_capacity(snap.len() * 48);
+    for (label, cpu, gpu) in &snap {
+        s.push_str(label);
+        s.push('|');
+        s.push_str(&format!("{:.2}", cpu));
+        s.push('|');
+        match gpu {
+            Some(g) => s.push_str(&format!("{:.2}", g)),
+            None    => s.push_str("-1"),
+        }
+        s.push('\n');
+    }
+    alloc_perry_string(&s)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_register_frame_callback(priority: f64, callback: extern "C" fn(f64)) -> f64 {
+    engine().frame_callbacks.register(priority as i32, callback) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_unregister_frame_callback(id: f64) {
+    engine().frame_callbacks.unregister(id as u64);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_add_directional_light(
+    dx: f64, dy: f64, dz: f64,
+    r: f64, g: f64, b: f64,
+    intensity: f64,
+) {
+    engine().renderer.add_directional_light(
+        dx as f32, dy as f32, dz as f32,
+        r as f32, g as f32, b as f32,
+        intensity as f32,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_add_point_light(
+    x: f64, y: f64, z: f64, range: f64,
+    r: f64, g: f64, b: f64,
+    intensity: f64,
+) {
+    engine().renderer.add_point_light(
+        x as f32, y as f32, z as f32, range as f32,
+        r as f32, g as f32, b as f32,
+        intensity as f32,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_create_node() -> f64 {
+    engine().scene.create_node()
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_destroy_node(handle: f64) {
+    engine().scene.destroy_node(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_visible(handle: f64, visible: f64) {
+    engine().scene.set_visible(handle, visible != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_cast_shadow(handle: f64, cast: f64) {
+    engine().scene.set_cast_shadow(handle, cast != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_receive_shadow(handle: f64, receive: f64) {
+    engine().scene.set_receive_shadow(handle, receive != 0.0);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_parent(handle: f64, parent: f64) {
+    engine().scene.set_parent(handle, parent);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_transform(handle: f64, mat_ptr: *const f64) {
+    if mat_ptr.is_null() { return; }
+    let slice = unsafe { std::slice::from_raw_parts(mat_ptr, 16) };
+    let mut mat = [[0.0f32; 4]; 4];
+    for col in 0..4 {
+        for row in 0..4 {
+            mat[col][row] = slice[col * 4 + row] as f32;
+        }
+    }
+    engine().scene.set_transform(handle, mat);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_update_geometry(
+    handle: f64,
+    vert_ptr: *const f64,
+    vert_count: f64,
+    idx_ptr: *const f64,
+    idx_count: f64,
+) {
+    if vert_ptr.is_null() || idx_ptr.is_null() { return; }
+    let nv = vert_count as usize;
+    let ni = idx_count as usize;
+
+    let vert_floats = unsafe { std::slice::from_raw_parts(vert_ptr, nv * 12) };
+    let idx_floats = unsafe { std::slice::from_raw_parts(idx_ptr, ni) };
+
+    let mut vertices = Vec::with_capacity(nv);
+    for i in 0..nv {
+        let base = i * 12;
+        vertices.push(bloom_shared::renderer::Vertex3D {
+            position: [vert_floats[base] as f32, vert_floats[base+1] as f32, vert_floats[base+2] as f32],
+            normal: [vert_floats[base+3] as f32, vert_floats[base+4] as f32, vert_floats[base+5] as f32],
+            color: [vert_floats[base+6] as f32, vert_floats[base+7] as f32, vert_floats[base+8] as f32, vert_floats[base+9] as f32],
+            uv: [vert_floats[base+10] as f32, vert_floats[base+11] as f32],
+            joints: [0.0; 4],
+            weights: [0.0; 4],
+            tangent: [0.0; 4],
+        });
+    }
+
+    let indices: Vec<u32> = idx_floats.iter().map(|&v| v as u32).collect();
+
+    engine().scene.update_geometry(handle, vertices, indices);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_color(handle: f64, r: f64, g: f64, b: f64, a: f64) {
+    engine().scene.set_material_color(handle, r as f32, g as f32, b as f32, a as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_pbr(handle: f64, roughness: f64, metalness: f64) {
+    engine().scene.set_material_pbr(handle, roughness as f32, metalness as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_texture(handle: f64, texture_idx: f64) {
+    engine().scene.set_material_texture(handle, texture_idx as u32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_node_count() -> f64 {
+    engine().scene.node_count() as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_node_vertex_count(handle: f64) -> f64 {
+    match engine().scene.nodes.get(handle) {
+        Some(node) => node.vertices.len() as f64,
+        None => -1.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_node_index_count(handle: f64) -> f64 {
+    match engine().scene.nodes.get(handle) {
+        Some(node) => node.indices.len() as f64,
+        None => -1.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_material_water(handle: f64, wave_amp: f64, wave_speed: f64, r: f64, g: f64, b: f64, a: f64) {
+    engine().scene.set_material_water(handle, wave_amp as f32, wave_speed as f32, r as f32, g as f32, b as f32, a as f32);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_gen_mesh_spline_ribbon(points_ptr: *const u8, point_count: f64, widths_ptr: *const u8, width_count: f64) -> f64 {
+    let n = point_count as usize;
+    let wn = width_count as usize;
+    let points = unsafe { std::slice::from_raw_parts(points_ptr as *const f32, n * 3) };
+    let widths = unsafe { std::slice::from_raw_parts(widths_ptr as *const f32, wn) };
+    engine().models.gen_mesh_spline_ribbon(points, widths)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_load_render_texture(width: f64, height: f64) -> f64 {
+    let w = width as u32;
+    let h = height as u32;
+    let eng = engine();
+    let rt_handle = eng.textures.load_render_texture(w, h);
+
+    // Create the GPU texture via the renderer's public method.
+    let (bind_group_idx, _tex_vec_idx) = eng.renderer.create_render_texture(w, h);
+
+    // Register as a texture handle so drawTexture can sample it.
+    let tex_handle = eng.textures.textures.alloc(bloom_shared::textures::TextureData {
+        bind_group_idx, width: w, height: h,
+    });
+    eng.textures.set_render_texture_handle(rt_handle, tex_handle);
+
+    rt_handle
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_unload_render_texture(handle: f64) {
+    engine().textures.unload_render_texture(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_begin_texture_mode(handle: f64) {
+    let eng = engine();
+    let (w, h, bg_idx) = match eng.textures.render_textures.get(handle) {
+        Some(rt) => {
+            let tex_handle = rt.texture_handle;
+            match eng.textures.textures.get(tex_handle) {
+                Some(td) => (rt.width, rt.height, td.bind_group_idx as usize),
+                None => return,
+            }
+        }
+        None => return,
+    };
+    if let Some(texture) = eng.renderer.get_texture_ref(bg_idx) {
+        // We need to call begin_texture_mode with a reference to the texture,
+        // but get_texture_ref borrows renderer immutably. Clone the texture view
+        // data we need first, then call the mutable method.
+        let color_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Create depth texture for this RT.
+        let depth_tex = eng.renderer.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rt_depth"), size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        eng.renderer.rt_color_view = Some(color_view);
+        eng.renderer.rt_depth_view = Some(depth_view);
+        eng.renderer.rt_depth_texture = Some(depth_tex);
+        eng.renderer.rt_width = w;
+        eng.renderer.rt_height = h;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_end_texture_mode() {
+    engine().renderer.end_texture_mode();
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_render_texture_texture(handle: f64) -> f64 {
+    engine().textures.get_render_texture_texture(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_transform(handle: f64, index: f64) -> f64 {
+    let mat = engine().scene.get_transform(handle);
+    let i = index as usize;
+    let col = i / 4;
+    let row = i % 4;
+    if col < 4 && row < 4 { mat[col][row] as f64 } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[0] as f64 }
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[1] as f64 }
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_min_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[2] as f64 }
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[0] as f64 }
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[1] as f64 }
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_bounds_max_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[2] as f64 }
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_set_user_data(handle: f64, data: f64) {
+    engine().scene.set_user_data(handle, data as i64);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_get_user_data(handle: f64) -> f64 {
+    engine().scene.get_user_data(handle) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_extrude_polygon(
+    handle: f64,
+    polygon_ptr: *const f64,
+    polygon_count: f64,
+    depth: f64,
+) {
+    if polygon_ptr.is_null() { return; }
+    let n = polygon_count as usize;
+    let polygon = unsafe { std::slice::from_raw_parts(polygon_ptr, n * 2) };
+
+    let geo = bloom_shared::geometry::extrude_polygon(polygon, &[], depth);
+    engine().scene.update_geometry(handle, geo.vertices, geo.indices);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_subtract_box(
+    handle: f64,
+    min_x: f64, min_y: f64, min_z: f64,
+    max_x: f64, max_y: f64, max_z: f64,
+) {
+    let eng = engine();
+    if let Some(node) = eng.scene.nodes.get(handle) {
+        let current = bloom_shared::geometry::GeometryData {
+            vertices: node.vertices.clone(),
+            indices: node.indices.clone(),
+        };
+        let result = bloom_shared::geometry::subtract_box(
+            &current,
+            [min_x as f32, min_y as f32, min_z as f32],
+            [max_x as f32, max_y as f32, max_z as f32],
+        );
+        eng.scene.update_geometry(handle, result.vertices, result.indices);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_enable_shadows() {
+    engine().renderer.shadow_map.enable();
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_disable_shadows() {
+    engine().renderer.shadow_map.disable();
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_dump_shadow_map(path_ptr: *const u8) {
+    let path = str_from_header(path_ptr).to_string();
+    engine().renderer.dump_shadow_map(&path);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_enable_postfx() {
+    let eng = engine();
+    let w = eng.renderer.width();
+    let h = eng.renderer.height();
+    let fmt = eng.renderer.surface_format();
+    eng.postfx = Some(bloom_shared::postfx::PostFxPipeline::new(
+        &eng.renderer.device, w, h, fmt,
+    ));
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_disable_postfx() {
+    engine().postfx = None;
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_selected(handle: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        if handle == 0.0 {
+            pfx.set_selected(Vec::new());
+        } else {
+            pfx.set_selected(vec![handle]);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_hovered(handle: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        pfx.set_hovered(handle);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_outline_color(r: f64, g: f64, b: f64, a: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        pfx.outline_params.color_selected = [r as f32, g as f32, b as f32, a as f32];
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_postfx_set_outline_thickness(thickness: f64) {
+    if let Some(pfx) = &mut engine().postfx {
+        pfx.outline_params.thickness[0] = thickness as f32;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_index: f64) {
+    let eng = engine();
+    let mi = mesh_index as usize;
+
+    // Get model mesh data
+    let model_data = match eng.models.models.get(model_handle) {
+        Some(md) => md,
+        None => return,
+    };
+    if mi >= model_data.meshes.len() { return; }
+    let mesh = &model_data.meshes[mi];
+
+    // Copy vertices and indices to scene node
+    let vertices = mesh.vertices.clone();
+    let indices = mesh.indices.clone();
+    let base_color_tex = mesh.texture_idx;
+    let normal_tex = mesh.normal_texture_idx;
+    let mr_tex = mesh.metallic_roughness_texture_idx;
+    let emissive_tex = mesh.emissive_texture_idx;
+    let emissive_factor = mesh.emissive_factor;
+    eng.scene.update_geometry(node_handle, vertices, indices);
+
+    // Pipe PBR textures through to the scene node material so the
+    // renderer's scene pipeline can sample them.
+    if let Some(tex_idx) = base_color_tex {
+        eng.scene.set_material_texture(node_handle, tex_idx);
+    }
+    if let Some(tex_idx) = normal_tex {
+        eng.scene.set_material_normal_texture(node_handle, tex_idx);
+    }
+    if let Some(tex_idx) = mr_tex {
+        eng.scene.set_material_metallic_roughness_texture(node_handle, tex_idx);
+    }
+    if let Some(tex_idx) = emissive_tex {
+        eng.scene.set_material_emissive_texture(node_handle, tex_idx);
+    }
+    eng.scene.set_material_emissive_factor(
+        node_handle,
+        emissive_factor[0],
+        emissive_factor[1],
+        emissive_factor[2],
+    );
+}
+
