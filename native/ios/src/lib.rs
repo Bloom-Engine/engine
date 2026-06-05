@@ -365,11 +365,16 @@ unsafe extern "C" fn scene_will_connect(
             // configuration. The renderer keys off device.features() (see
             // renderer/mod.rs), so it transparently falls back to the non-RT
             // path when ray-query isn't granted.
-            eprintln!("[bloom-ios] request_device with preferred features failed ({e:?}); retrying without ray-query/experimental features");
+            eprintln!("[bloom-ios] request_device with preferred features failed ({e:?}); retrying with adapter limits and no ray-query/experimental features");
+            // Request exactly the adapter's reported limits (not wgpu's
+            // Limits::default()): some iOS GPUs cap individual limits — e.g.
+            // max_inter_stage_shader_variables — below wgpu's defaults, so
+            // request_device rejects the default-limits request too. Asking for
+            // adapter.limits() can never exceed what the device supports.
             pollster_block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("bloom_device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: adapter.limits(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 ..Default::default()
             })).expect("Failed to create device (minimal fallback)")
@@ -555,11 +560,16 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
             // configuration. The renderer keys off device.features() (see
             // renderer/mod.rs), so it transparently falls back to the non-RT
             // path when ray-query isn't granted.
-            eprintln!("[bloom-ios] request_device with preferred features failed ({e:?}); retrying without ray-query/experimental features");
+            eprintln!("[bloom-ios] request_device with preferred features failed ({e:?}); retrying with adapter limits and no ray-query/experimental features");
+            // Request exactly the adapter's reported limits (not wgpu's
+            // Limits::default()): some iOS GPUs cap individual limits — e.g.
+            // max_inter_stage_shader_variables — below wgpu's defaults, so
+            // request_device rejects the default-limits request too. Asking for
+            // adapter.limits() can never exceed what the device supports.
             pollster_block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("bloom_device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: adapter.limits(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 ..Default::default()
             })).expect("Failed to create device (minimal fallback)")
