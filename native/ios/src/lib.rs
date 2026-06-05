@@ -347,7 +347,7 @@ unsafe extern "C" fn scene_will_connect(
         required_limits = required_limits
             .using_minimum_supported_acceleration_structure_values();
     }
-    let (device, queue) = pollster_block_on(adapter.request_device(
+    let (device, queue) = match pollster_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("bloom_device"),
             required_features,
@@ -355,7 +355,26 @@ unsafe extern "C" fn scene_will_connect(
             experimental_features,
             ..Default::default()
         },
-    )).expect("Failed to create device");
+    )) {
+        Ok(dq) => dq,
+        Err(e) => {
+            // Some real devices (e.g. iPhone 16 Pro / A18) advertise
+            // EXPERIMENTAL_RAY_QUERY on the adapter but reject it at device
+            // creation through wgpu's Metal backend, which would otherwise
+            // abort the app on launch. Retry with a minimal, always-supported
+            // configuration. The renderer keys off device.features() (see
+            // renderer/mod.rs), so it transparently falls back to the non-RT
+            // path when ray-query isn't granted.
+            eprintln!("[bloom-ios] request_device with preferred features failed ({e:?}); retrying without ray-query/experimental features");
+            pollster_block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("bloom_device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                ..Default::default()
+            })).expect("Failed to create device (minimal fallback)")
+        }
+    };
 
     let surface_caps = surface.get_capabilities(&adapter);
     let format = surface_caps.formats.iter()
@@ -518,7 +537,7 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
         required_limits = required_limits
             .using_minimum_supported_acceleration_structure_values();
     }
-    let (device, queue) = pollster_block_on(adapter.request_device(
+    let (device, queue) = match pollster_block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("bloom_device"),
             required_features,
@@ -526,7 +545,26 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
             experimental_features,
             ..Default::default()
         },
-    )).expect("Failed to create device");
+    )) {
+        Ok(dq) => dq,
+        Err(e) => {
+            // Some real devices (e.g. iPhone 16 Pro / A18) advertise
+            // EXPERIMENTAL_RAY_QUERY on the adapter but reject it at device
+            // creation through wgpu's Metal backend, which would otherwise
+            // abort the app on launch. Retry with a minimal, always-supported
+            // configuration. The renderer keys off device.features() (see
+            // renderer/mod.rs), so it transparently falls back to the non-RT
+            // path when ray-query isn't granted.
+            eprintln!("[bloom-ios] request_device with preferred features failed ({e:?}); retrying without ray-query/experimental features");
+            pollster_block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("bloom_device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                ..Default::default()
+            })).expect("Failed to create device (minimal fallback)")
+        }
+    };
 
     let surface_caps = surface.get_capabilities(&adapter);
     let format = surface_caps.formats.iter()
