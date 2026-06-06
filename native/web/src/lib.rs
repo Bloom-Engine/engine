@@ -1938,7 +1938,12 @@ pub fn bloom_get_platform() -> f64 {
 }
 
 #[wasm_bindgen]
-pub fn bloom_get_language() -> f64 { 25966.0 } // TODO: navigator.language via JS host glue
+pub fn bloom_get_language() -> f64 {
+    // navigator.language (e.g. "en-US" / "zh-Hans") -> packed 2-letter code.
+    let lang = web_sys::window().and_then(|w| w.navigator().language()).unwrap_or_default();
+    let b = lang.to_ascii_lowercase().into_bytes();
+    if b.len() >= 2 { (b[0] as f64) * 256.0 + (b[1] as f64) } else { 25966.0 }
+}
 
 #[wasm_bindgen]
 pub fn bloom_is_any_input_pressed() -> f64 {

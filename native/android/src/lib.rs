@@ -1394,9 +1394,38 @@ pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 5.0 }
 
-/// Preferred OS language packed as `c0*256+c1`. TODO: real per-OS detection; returns "en" for now.
+/// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag), read
+/// from the device locale system property via the NDK (no JNI). Tries the
+/// user-set locale first, then the factory defaults. Falls back to "en".
 #[no_mangle]
-pub extern "C" fn bloom_get_language() -> f64 { 25966.0 }
+pub extern "C" fn bloom_get_language() -> f64 {
+    fn parse(buf: &[u8], n: i32) -> Option<f64> {
+        if n < 2 { return None; }
+        let lc = |b: u8| if b.is_ascii_uppercase() { b + 32 } else { b };
+        let (c0, c1) = (lc(buf[0]), lc(buf[1]));
+        if c0.is_ascii_alphabetic() && c1.is_ascii_alphabetic() {
+            Some((c0 as f64) * 256.0 + (c1 as f64))
+        } else {
+            None
+        }
+    }
+    let props: [&[u8]; 3] = [
+        b"persist.sys.locale\0",
+        b"ro.product.locale\0",
+        b"ro.product.locale.language\0",
+    ];
+    for prop in props {
+        let mut buf = [0u8; 92]; // PROP_VALUE_MAX
+        let n = unsafe {
+            libc::__system_property_get(
+                prop.as_ptr() as *const libc::c_char,
+                buf.as_mut_ptr() as *mut libc::c_char,
+            )
+        };
+        if let Some(v) = parse(&buf, n) { return v; }
+    }
+    25966.0
+}
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }

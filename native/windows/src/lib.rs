@@ -1636,9 +1636,22 @@ pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 3.0 }
 
-/// Preferred OS language packed as `c0*256+c1`. TODO: real per-OS detection; returns "en" for now.
+/// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag), from
+/// `GetUserDefaultLocaleName` (e.g. "en-US" -> "en"). Falls back to "en".
 #[no_mangle]
-pub extern "C" fn bloom_get_language() -> f64 { 25966.0 }
+pub extern "C" fn bloom_get_language() -> f64 {
+    use windows::Win32::Globalization::GetUserDefaultLocaleName;
+    let mut buf = [0u16; 85]; // LOCALE_NAME_MAX_LENGTH
+    let n = unsafe { GetUserDefaultLocaleName(&mut buf) };
+    if n >= 2 {
+        let lc = |c: u16| -> u8 { let b = c as u8; if b.is_ascii_uppercase() { b + 32 } else { b } };
+        let (c0, c1) = (lc(buf[0]), lc(buf[1]));
+        if c0.is_ascii_alphabetic() && c1.is_ascii_alphabetic() {
+            return (c0 as f64) * 256.0 + (c1 as f64);
+        }
+    }
+    25966.0
+}
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
