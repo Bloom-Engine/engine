@@ -27,7 +27,7 @@ panic = "abort"
 bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
 image = { version = "0.25", default-features = false, features = ["hdr"] }
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread"] }
+objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread", "NSLocale", "NSArray"] }
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSEvent", "NSApplication", "NSScreen", "NSGraphicsContext", "NSRunningApplication", "NSResponder"] }
 objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
 raw-window-handle = "0.6"

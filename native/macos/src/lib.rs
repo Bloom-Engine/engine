@@ -2415,6 +2415,25 @@ pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
 }
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 1.0 }
+
+/// Return the user's preferred OS language as a packed 2-letter code:
+/// `c0 * 256 + c1`, where c0/c1 are the ASCII bytes of the lowercased
+/// ISO-639 primary subtag (e.g. "en-US" -> "en" -> 101*256+110). The script
+/// subtag is dropped (zh-Hans/zh-Hant both pack as "zh"); callers map that to
+/// their supported variant. Falls back to "en" when no preference is set.
+#[no_mangle]
+pub extern "C" fn bloom_get_language() -> f64 {
+    fn pack(code: &str) -> f64 {
+        let lower = code.to_ascii_lowercase();
+        let b = lower.as_bytes();
+        if b.len() >= 2 { (b[0] as f64) * 256.0 + (b[1] as f64) } else { 101.0 * 256.0 + 110.0 }
+    }
+    let langs = objc2_foundation::NSLocale::preferredLanguages();
+    match langs.firstObject() {
+        Some(s) => pack(&s.to_string()),
+        None => pack("en"),
+    }
+}
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }

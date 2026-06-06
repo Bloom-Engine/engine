@@ -97,6 +97,7 @@ declare function bloom_inject_gamepad_axis(axis: number, value: number): void;
 declare function bloom_inject_gamepad_button_down(button: number): void;
 declare function bloom_inject_gamepad_button_up(button: number): void;
 declare function bloom_get_platform(): number;
+declare function bloom_get_language(): number;
 declare function bloom_is_any_input_pressed(): number;
 declare function bloom_get_crown_rotation(): number;
 
@@ -821,6 +822,11 @@ export function injectGamepadButtonUp(button: number): void { bloom_inject_gamep
 export const Platform = { UNKNOWN: 0, MACOS: 1, IOS: 2, WINDOWS: 3, LINUX: 4, ANDROID: 5, TVOS: 6, WEB: 7, WATCHOS: 8 } as const;
 
 export function getPlatform(): number { return bloom_get_platform(); }
+
+/// User's preferred OS language as a packed 2-letter code (`c0 * 256 + c1`,
+/// ASCII of the lowercased ISO-639 primary subtag, e.g. "en" = 101*256+110).
+/// Script subtags are dropped (zh-Hans -> "zh"); callers map to their variant.
+export function getLanguage(): number { return bloom_get_language(); }
 
 export function isMobile(): boolean {
   const p = bloom_get_platform();

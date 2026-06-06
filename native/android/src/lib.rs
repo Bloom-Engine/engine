@@ -1393,6 +1393,10 @@ pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
 }
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 5.0 }
+
+/// Preferred OS language packed as `c0*256+c1`. TODO: real per-OS detection; returns "en" for now.
+#[no_mangle]
+pub extern "C" fn bloom_get_language() -> f64 { 25966.0 }
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }

@@ -23,6 +23,6 @@ panic = "abort"
 image = { version = "0.25", default-features = false, features = ["hdr"] }
 bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread", "NSObject"] }
+objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread", "NSObject", "NSLocale", "NSArray"] }
 raw-window-handle = "0.6"
 wgpu = "29"

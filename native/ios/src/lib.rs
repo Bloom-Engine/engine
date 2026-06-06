@@ -2078,6 +2078,14 @@ pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
 }
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 2.0 }
+
+/// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag). See macos lib for format.
+#[no_mangle]
+pub extern "C" fn bloom_get_language() -> f64 {
+    fn pack(code: &str) -> f64 { let l = code.to_ascii_lowercase(); let b = l.as_bytes(); if b.len() >= 2 { (b[0] as f64) * 256.0 + (b[1] as f64) } else { 25966.0 } }
+    let langs = objc2_foundation::NSLocale::preferredLanguages();
+    match langs.firstObject() { Some(s) => pack(&s.to_string()), None => 25966.0 }
+}
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }

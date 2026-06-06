@@ -206,6 +206,10 @@ pub extern "C" fn perry_scene_will_connect(_scene: *const c_void) {}
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 8.0 }
 
+/// Preferred OS language packed as `c0*256+c1`. TODO: real per-OS detection; returns "en" for now.
+#[no_mangle]
+pub extern "C" fn bloom_get_language() -> f64 { 25966.0 }
+
 #[no_mangle]
 pub extern "C" fn bloom_get_crown_rotation() -> f64 { consume_crown() }
 

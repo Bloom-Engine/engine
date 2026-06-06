@@ -1846,6 +1846,14 @@ pub extern "C" fn bloom_inject_gamepad_button_up(button: f64) {
 }
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 4.0 }
+
+/// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag), from $LANG/$LC_*.
+#[no_mangle]
+pub extern "C" fn bloom_get_language() -> f64 {
+    fn pack(code: &str) -> f64 { let l = code.to_ascii_lowercase(); let b = l.as_bytes(); if b.len() >= 2 { (b[0] as f64) * 256.0 + (b[1] as f64) } else { 25966.0 } }
+    let v = std::env::var("LANG").or_else(|_| std::env::var("LC_ALL")).or_else(|_| std::env::var("LC_MESSAGES")).unwrap_or_default();
+    if v.len() >= 2 && !v.starts_with('C') && !v.starts_with("POSIX") { pack(&v) } else { 25966.0 }
+}
 #[no_mangle]
 pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }

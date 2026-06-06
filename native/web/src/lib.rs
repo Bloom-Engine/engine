@@ -1938,6 +1938,9 @@ pub fn bloom_get_platform() -> f64 {
 }
 
 #[wasm_bindgen]
+pub fn bloom_get_language() -> f64 { 25966.0 } // TODO: navigator.language via JS host glue
+
+#[wasm_bindgen]
 pub fn bloom_is_any_input_pressed() -> f64 {
     if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
 }
