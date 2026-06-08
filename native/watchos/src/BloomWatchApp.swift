@@ -176,6 +176,8 @@ let K_TEXTURE: Int32 = 7
 let K_TEXTURE_REC: Int32 = 8
 let K_TEXTURE_PRO: Int32 = 9
 let K_TEXT: Int32 = 10
+let K_BEGIN_2D: Int32 = 11
+let K_END_2D: Int32 = 12
 
 // 3D primitives
 let K_CUBE: Int32 = 20
@@ -307,11 +309,30 @@ struct BloomRootView: View {
                     // Pull this frame's commands. 2D draws render here; 3D
                     // commands are filtered by BloomSceneView.
                     let n = Int(bloom_watchos_copy_draw_list(drawBuf.baseAddress!, 4096))
+                    // `active` is the context world-space draws use: between a
+                    // BEGIN_2D / END_2D pair it carries the camera's affine
+                    // transform (world → screen); otherwise it's the plain
+                    // screen-space context.
+                    var active = ctx
                     for i in 0..<n {
                         let ptr = drawBuf.baseAddress!.advanced(by: i)
                         let k = ptr.pointee.kind
                         if k >= 20 && k <= 29 { continue }  // 3D — handled by SceneView
-                        drawOne(ctx: ctx, cmdPtr: ptr)
+                        if k == K_BEGIN_2D {
+                            let zoom = ptr.pointee.size
+                            var t = CGAffineTransform(translationX: ptr.pointee.x, y: ptr.pointee.y)
+                            t = t.scaledBy(x: zoom, y: zoom)
+                            t = t.translatedBy(x: -ptr.pointee.w, y: -ptr.pointee.h)
+                            var w = ctx
+                            w.transform = t
+                            active = w
+                            continue
+                        }
+                        if k == K_END_2D {
+                            active = ctx
+                            continue
+                        }
+                        drawOne(ctx: active, cmdPtr: ptr)
                     }
                 }
             }
