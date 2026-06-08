@@ -43,13 +43,11 @@
 }
 #[no_mangle] pub extern "C" fn bloom_gen_texture_mipmaps(_p0: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_begin_mode_2d(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_end_mode_2d() {
-}
 #[no_mangle] pub extern "C" fn bloom_draw_ray(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_draw_model(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_draw_model_rotated(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_unload_model(_p0: f64) {
 }
@@ -59,10 +57,64 @@
 #[no_mangle] pub extern "C" fn bloom_load_shader(_p0: i64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_compile_material(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_compile_material_refractive(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_compile_material_transparent(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_compile_material_additive(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_compile_material_cutout(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_compile_material_instanced(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_create_instance_buffer(_p0: i64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_submit_material_draw_instanced(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_destroy_instance_buffer(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_create_planar_reflection(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_material_reflection_probe(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_create_texture_array(_p0: i64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_create_texture_array_ex(_p0: i64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_material_texture_array(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_material_shading_model(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_material_foliage(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_post_pass(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_clear_post_pass() {
+}
+#[no_mangle] pub extern "C" fn bloom_add_post_pass(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_clear_all_post_passes() {
+}
+#[no_mangle] pub extern "C" fn bloom_draw_material(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_load_model_animation(_p0: i64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_update_model_animation(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+#[no_mangle] pub extern "C" fn bloom_update_model_animation(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_create_mesh(_p0: i64, _p1: f64, _p2: i64, _p3: f64) -> f64 {
     0.0
@@ -83,14 +135,20 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_render_scale(_p0: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_get_render_scale() -> f64 { 1.0 }
+#[no_mangle] pub extern "C" fn bloom_get_render_scale() -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_upscale_mode(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_cas_strength(_p0: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_get_physical_width() -> f64 { 0.0 }
-#[no_mangle] pub extern "C" fn bloom_get_physical_height() -> f64 { 0.0 }
-#[no_mangle] pub extern "C" fn bloom_set_auto_resolution(_target_hz: f64, _enabled: f64) {
+#[no_mangle] pub extern "C" fn bloom_get_physical_width() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_physical_height() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_auto_resolution(_p0: f64, _p1: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_env_intensity(_p0: f64) {
 }
@@ -111,6 +169,12 @@
 #[no_mangle] pub extern "C" fn bloom_set_bloom_enabled(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssao_enabled(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_ssao_intensity(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_ssao_radius(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_wind(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(_p0: f64) {
 }
@@ -319,136 +383,301 @@
 #[no_mangle] pub extern "C" fn bloom_commit_music(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_create_world(_p0: f64, _p1: f64, _p2: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_set_gravity(_p0: f64, _p1: f64, _p2: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_set_timestep(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_create_body(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_create_world(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_destroy_body(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_physics_destroy_world(_p0: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_physics_set_body_enabled(_p0: f64, _p1: f64) {
+#[no_mangle] pub extern "C" fn bloom_physics_set_gravity(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_physics_set_body_ccd(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_set_body_gravity_scale(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_set_kinematic_target(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_lock_rotations(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_add_box_collider(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_get_gravity(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_add_sphere_collider(_p0: f64, _p1: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_optimize_broadphase(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_step(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_set_layer_collides(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_get_layer_collides(_p0: f64, _p1: f64, _p2: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_add_capsule_collider(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_count(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_add_cylinder_collider(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_active_body_count(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_set_collider_properties(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_apply_force(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_apply_impulse(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_apply_torque(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_apply_torque_impulse(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_set_linear_velocity(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_set_angular_velocity(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_step(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_sync_transforms() {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_get_body_position_x(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_box(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_body_position_y(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_sphere(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_body_position_z(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_capsule(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_body_rotation_x(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_cylinder(_p0: f64, _p1: f64, _p2: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_body_rotation_y(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_scaled(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_body_rotation_z(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_offset_com(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_body_rotation_w(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_release(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_scratch_reset() {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_scratch_push_f32(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_scratch_push_u32(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_shape_convex_hull(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_linear_velocity_x(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_mesh(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_linear_velocity_y(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_heightfield(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_linear_velocity_z(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_compound_begin() {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_compound_add_child(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_compound_end() -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_angular_velocity_x(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_bounds(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_angular_velocity_y(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_shape_volume(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_angular_velocity_z(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_create(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_raycast(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_destroy(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_activate(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_deactivate(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_is_active(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_body() -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_is_valid(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_distance() -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_position(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_x() -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_rotation(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_y() -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_position(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_rotation(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_transform(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_move_kinematic(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_linear_velocity(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_z() -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_angular_velocity(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_collision_count() -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_point_velocity(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_collision_event(_p0: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_linear_velocity(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_angular_velocity(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_add_force(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_add_impulse(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_add_torque(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_add_angular_impulse(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_add_force_at(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_add_impulse_at(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_friction(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_restitution(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_linear_damping(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_angular_damping(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_gravity_factor(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_ccd(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_motion_type(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_object_layer(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_is_sensor(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_allow_sleeping(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_shape(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_lock_rotation_axes(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_lock_translation_axes(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_mass(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_collision_body_b() -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_friction(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_get_collision_started() -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_restitution(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_attach_scene_node(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_physics_create_fixed_joint(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_object_layer(_p0: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_create_revolute_joint(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_body_set_user_data(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_body_get_user_data(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_create_prismatic_joint(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_raycast(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_physics_destroy_joint(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_physics_raycast_all(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_count() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_body(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_axis(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_fraction(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_ray_hit_sub_shape(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_overlap_sphere(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_overlap_point(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_overlap_box(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_overlap_body(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_constraint_fixed(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_constraint_point(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_constraint_hinge(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_constraint_slider(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_constraint_distance(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_constraint_destroy(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_constraint_set_enabled(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_contact_count() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_contact_field(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_clear_contacts(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_create(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64, _p18: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_destroy(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_update(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_get_position(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_get_rotation(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_set_position(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_set_rotation(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_get_linear_velocity(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_set_linear_velocity(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_get_ground_state(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_get_ground_normal(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_get_ground_position(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_get_ground_body(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_character_set_shape(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_soft_body_create(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_soft_body_vertex_count(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_soft_body_get_vertex(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_soft_body_set_vertex(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_soft_body_set_vertex_inv_mass(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_vehicle_create(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64, _p18: f64, _p19: f64, _p20: f64, _p21: f64, _p22: f64, _p23: f64, _p24: f64, _p25: f64, _p26: f64, _p27: f64, _p28: f64, _p29: f64, _p30: f64, _p31: f64, _p32: f64, _p33: f64, _p34: f64, _p35: f64, _p36: f64, _p37: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_vehicle_destroy(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_vehicle_get_chassis(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_vehicle_set_input(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_vehicle_get_wheel_transform(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_vehicle_get_engine_rpm(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_vehicle_get_wheel_angular_velocity(_p0: f64, _p1: f64) -> f64 {
+    0.0
 }
