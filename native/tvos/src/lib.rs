@@ -685,7 +685,12 @@ unsafe extern "C" fn scene_will_connect(
     let _: () = msg_send![&*layer, setContentsScale: scale];
     let _: () = msg_send![&*layer, setOpaque: Bool::YES];
     let _: () = msg_send![&*layer, setFramebufferOnly: Bool::NO];
-    let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::YES];
+    // presentsWithTransaction MUST stay NO (the default). wgpu presents its
+    // drawable asynchronously via -presentDrawable: on the command buffer;
+    // setting presentsWithTransaction:YES makes CoreAnimation wait for a
+    // synchronous CATransaction commit that wgpu never performs, so the layer
+    // never displays rendered frames (the screen stays black behind UIKit subviews).
+    let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::NO];
 
     // Enable touches & focus
     let _: () = msg_send![&*view, setUserInteractionEnabled: Bool::YES];
@@ -749,7 +754,17 @@ unsafe extern "C" fn scene_will_connect(
     } else {
         wgpu::ExperimentalFeatures::disabled()
     };
+    // Base the requested limits on what the adapter actually advertises so we
+    // never ask for more than the backend can grant. The tvOS/iOS *simulators*
+    // cap several limits below wgpu's desktop default() — notably
+    // max_inter_stage_shader_variables (15 vs 16) — which makes request_device
+    // fail with LimitsExceeded. On real Apple TV hardware adapter.limits()
+    // meets or exceeds default(), so behaviour there is unchanged.
+    let adapter_limits = adapter.limits();
     let mut required_limits = wgpu::Limits::default();
+    required_limits.max_inter_stage_shader_variables = required_limits
+        .max_inter_stage_shader_variables
+        .min(adapter_limits.max_inter_stage_shader_variables);
     if required_features.intersects(rt_mask) {
         required_limits = required_limits
             .using_minimum_supported_acceleration_structure_values();
@@ -945,29 +960,17 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
     let _: () = msg_send![&*layer, setContentsScale: scale];
     let _: () = msg_send![&*layer, setOpaque: Bool::YES];
     let _: () = msg_send![&*layer, setFramebufferOnly: Bool::NO];
-    let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::YES];
+    // presentsWithTransaction MUST stay NO (the default). wgpu presents its
+    // drawable asynchronously via -presentDrawable: on the command buffer;
+    // setting presentsWithTransaction:YES makes CoreAnimation wait for a
+    // synchronous CATransaction commit that wgpu never performs, so the layer
+    // never displays rendered frames (the screen stays black behind UIKit subviews).
+    let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::NO];
 
     // Set up window hierarchy
     let _: () = msg_send![&*vc, setView: &*view];
     let _: () = msg_send![&*window, setRootViewController: &*vc];
     let _: () = msg_send![&*window, makeKeyAndVisible];
-
-    // DEBUG: Add a bright UILabel to verify UIKit content is visible
-    let label_cls = AnyClass::get(c"UILabel").unwrap();
-    let lbl: Allocated<AnyObject> = msg_send![label_cls, alloc];
-    let label_frame = CGRect { origin: CGPoint { x: 100.0, y: 100.0 }, size: CGSize { width: 800.0, height: 200.0 } };
-    let lbl: Retained<AnyObject> = msg_send![lbl, initWithFrame: label_frame];
-    let ns_cls2 = AnyClass::get(c"NSString").unwrap();
-    let text: Retained<AnyObject> = msg_send![ns_cls2, stringWithUTF8String: b"BLOOM JUMP TVOS\0".as_ptr()];
-    let _: () = msg_send![&*lbl, setText: &*text];
-    let white: Retained<AnyObject> = msg_send![color_cls, whiteColor];
-    let _: () = msg_send![&*lbl, setTextColor: &*white];
-    let red_bg: Retained<AnyObject> = msg_send![color_cls, redColor];
-    let _: () = msg_send![&*lbl, setBackgroundColor: &*red_bg];
-    let font_cls = AnyClass::get(c"UIFont").unwrap();
-    let font: Retained<AnyObject> = msg_send![font_cls, systemFontOfSize: 72.0f64];
-    let _: () = msg_send![&*lbl, setFont: &*font];
-    let _: () = msg_send![&*window, addSubview: &*lbl];
 
     UI_VIEW = Some(view.clone());
     UI_WINDOW = Some(window.clone());
@@ -1000,23 +1003,6 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
         scene_win_count,
     );
     let _ = std::fs::write("/tmp/bloom_deferred_3.txt", &debug);
-
-    // DEBUG: Add UILabel to verify window visibility (non-Metal)
-    let label_cls = AnyClass::get(c"UILabel").unwrap();
-    let lbl: Allocated<AnyObject> = msg_send![label_cls, alloc];
-    let lf = CGRect { origin: CGPoint { x: 200.0, y: 200.0 }, size: CGSize { width: 600.0, height: 100.0 } };
-    let lbl: Retained<AnyObject> = msg_send![lbl, initWithFrame: lf];
-    let ns = AnyClass::get(c"NSString").unwrap();
-    let txt: Retained<AnyObject> = msg_send![ns, stringWithUTF8String: b"BLOOM JUMP TVOS DEBUG\0".as_ptr()];
-    let _: () = msg_send![&*lbl, setText: &*txt];
-    let white_c: Retained<AnyObject> = msg_send![color_cls, whiteColor];
-    let _: () = msg_send![&*lbl, setTextColor: &*white_c];
-    let red_c: Retained<AnyObject> = msg_send![color_cls, redColor];
-    let _: () = msg_send![&*lbl, setBackgroundColor: &*red_c];
-    let font_cls = AnyClass::get(c"UIFont").unwrap();
-    let fnt: Retained<AnyObject> = msg_send![font_cls, boldSystemFontOfSize: 48.0f64];
-    let _: () = msg_send![&*lbl, setFont: &*fnt];
-    let _: () = msg_send![&*window, addSubview: &*lbl];
 
     // Create wgpu engine using CAMetalLayer
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -1056,7 +1042,17 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
     } else {
         wgpu::ExperimentalFeatures::disabled()
     };
+    // Base the requested limits on what the adapter actually advertises so we
+    // never ask for more than the backend can grant. The tvOS/iOS *simulators*
+    // cap several limits below wgpu's desktop default() — notably
+    // max_inter_stage_shader_variables (15 vs 16) — which makes request_device
+    // fail with LimitsExceeded. On real Apple TV hardware adapter.limits()
+    // meets or exceeds default(), so behaviour there is unchanged.
+    let adapter_limits = adapter.limits();
     let mut required_limits = wgpu::Limits::default();
+    required_limits.max_inter_stage_shader_variables = required_limits
+        .max_inter_stage_shader_variables
+        .min(adapter_limits.max_inter_stage_shader_variables);
     if required_features.intersects(rt_mask) {
         required_limits = required_limits
             .using_minimum_supported_acceleration_structure_values();
@@ -2993,25 +2989,14 @@ pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
+    // Use alloc_perry_string for the correct Perry 0.5.x 20-byte StringHeader
+    // layout (the old hand-rolled 8-byte header returned garbage data). On a
+    // missing/unreadable file return an EMPTY string, never null — Perry's
+    // inline `.length` dereferences the pointer, so a null here segfaults the
+    // caller (e.g. discoverLevels() probing for optional level files).
     match std::fs::read_to_string(resolve_path(path)) {
-        Ok(contents) => {
-            // Return Perry-format string: StringHeader (length u32 + capacity u32) followed by UTF-8 data
-            let bytes = contents.as_bytes();
-            let len = bytes.len();
-            let total = 8 + len; // 8 bytes header + data
-            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
-            unsafe {
-                let ptr = std::alloc::alloc(layout);
-                if ptr.is_null() { return std::ptr::null(); }
-                // Write length and capacity as u32
-                *(ptr as *mut u32) = len as u32;
-                *(ptr.add(4) as *mut u32) = len as u32;
-                // Copy string data after header
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(8), len);
-                ptr
-            }
-        }
-        Err(_) => std::ptr::null(),
+        Ok(contents) => alloc_perry_string(&contents),
+        Err(_) => alloc_perry_string(""),
     }
 }
 
