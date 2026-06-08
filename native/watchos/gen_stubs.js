@@ -11,7 +11,8 @@ const fns = pkg.perry.nativeLibrary.functions;
 
 const OVERRIDES = new Set([
   // Platform + input
-  'bloom_get_platform', 'bloom_get_crown_rotation',
+  'bloom_get_platform', 'bloom_get_crown_rotation', 'bloom_get_language',
+  'bloom_set_direct_2d_mode',
   'bloom_get_screen_width', 'bloom_get_screen_height',
   'bloom_get_touch_x', 'bloom_get_touch_y', 'bloom_get_touch_count',
   'bloom_get_delta_time', 'bloom_get_time', 'bloom_get_fps',
@@ -25,7 +26,8 @@ const OVERRIDES = new Set([
   'bloom_is_gamepad_available', 'bloom_get_gamepad_axis',
   'bloom_is_gamepad_button_pressed', 'bloom_is_gamepad_button_down', 'bloom_is_gamepad_button_released',
   'bloom_get_gamepad_axis_count',
-  // 2D shapes
+  // 2D camera + shapes
+  'bloom_begin_mode_2d', 'bloom_end_mode_2d',
   'bloom_draw_rect', 'bloom_draw_rect_lines',
   'bloom_draw_circle', 'bloom_draw_circle_lines',
   'bloom_draw_line', 'bloom_draw_triangle', 'bloom_draw_poly',
@@ -69,6 +71,9 @@ const OVERRIDES = new Set([
 const rustType = (p) => {
   if (p === 'f64') return 'f64';
   if (p === 'i64') return 'i64';
+  // Perry passes/returns heap strings as a pointer carried in an integer
+  // register; the stub ignores it, so i64 is the correct ABI-compatible type.
+  if (p === 'string') return 'i64';
   if (p === 'void') return '()';
   throw new Error(`Unknown param type: ${p}`);
 };
@@ -76,6 +81,7 @@ const rustType = (p) => {
 const defaultForReturn = (r) => {
   if (r === 'f64') return '0.0';
   if (r === 'i64') return '0';
+  if (r === 'string') return '0';
   if (r === 'void') return '()';
   throw new Error(`Unknown return type: ${r}`);
 };

@@ -10,6 +10,7 @@
 #![allow(non_upper_case_globals)]
 
 mod ffi_stubs;
+mod ffi_stubs_manual;
 mod draw_list;
 mod textures;
 mod audio;
@@ -26,6 +27,12 @@ struct StringHeader {
     byte_len: u32,
     capacity: u32,
     refcount: u32,
+    // Perry 0.5.x's canonical StringHeader is 5×u32 = 20 bytes (data at +20).
+    // Omitting `flags` made this 16 bytes, so `perry_str` read every incoming
+    // string 4 bytes early — text rendered with a 4-null prefix + truncated
+    // tail ("BLOOM JUMP" → "BLOOM"), and file paths came back corrupted so
+    // levels never loaded.
+    flags: u32,
 }
 
 /// Decode a Perry-side string pointer (i64 on this ABI) into a borrowed &str.
@@ -39,6 +46,43 @@ fn perry_str<'a>(ptr: i64) -> &'a str {
         let len = (*header).byte_len as usize;
         let data = p.add(std::mem::size_of::<StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
+    }
+}
+
+/// Allocate a Perry-side heap string (StringHeader + UTF-8 payload) and return
+/// its pointer as the i64 the FFI boundary expects. Mirrors `perry_str`'s
+/// layout so a string we hand back is read identically to one Perry passed us.
+/// Returning this (never 0) for a `returns:"string"` function is mandatory:
+/// Perry's inline `.length` dereferences the pointer, so a null segfaults the
+/// caller.
+fn alloc_perry_string(s: &str) -> i64 {
+    let bytes = s.as_bytes();
+    let byte_len = bytes.len();
+    let utf16_len = if bytes.iter().all(|&b| b < 0x80) {
+        byte_len
+    } else {
+        s.encode_utf16().count()
+    };
+    // A value RETURNED across the FFI boundary is consumed by Perry's internal
+    // string machinery, whose canonical StringHeader is 5×u32 = 20 bytes
+    // (utf16_len, byte_len, capacity, refcount, flags) with data at +20.
+    // (The local 16-byte `StringHeader`/`perry_str` above describe the *incoming*
+    // arg representation, which omits `flags`; don't conflate the two.)
+    const HEADER_SIZE: usize = 20;
+    let total = HEADER_SIZE + byte_len;
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
+        let ptr = std::alloc::alloc(layout);
+        if ptr.is_null() {
+            return 0;
+        }
+        *(ptr.add(0) as *mut u32) = utf16_len as u32;
+        *(ptr.add(4) as *mut u32) = byte_len as u32;
+        *(ptr.add(8) as *mut u32) = byte_len as u32; // capacity
+        *(ptr.add(12) as *mut u32) = 1; // refcount = unique
+        *(ptr.add(16) as *mut u32) = 0; // flags
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(HEADER_SIZE), byte_len);
+        ptr as i64
     }
 }
 
@@ -374,6 +418,27 @@ pub extern "C" fn bloom_draw_circle(cx: f64, cy: f64, rad: f64, r: f64, g: f64, 
     draw_list::push(c);
 }
 
+// 2D camera: emit marker commands carrying the camera so the Swift Canvas can
+// apply the matching affine transform to every world-space draw until end.
+// world→screen is (world - target) * zoom + offset. Without this, gameplay
+// tiles/sprites (drawn between begin/end) render at raw world coords off-screen.
+#[no_mangle]
+pub extern "C" fn bloom_begin_mode_2d(ox: f64, oy: f64, tx: f64, ty: f64, _rot: f64, zoom: f64) {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::BEGIN_2D;
+    c.x = ox; c.y = oy;   // screen offset
+    c.w = tx; c.h = ty;   // world target
+    c.size = zoom;        // zoom
+    draw_list::push(c);
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_end_mode_2d() {
+    let mut c = DrawCmd::zero();
+    c.kind = kind::END_2D;
+    draw_list::push(c);
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_draw_circle_lines(cx: f64, cy: f64, rad: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
     let mut c = DrawCmd::zero();
@@ -560,11 +625,21 @@ pub extern "C" fn bloom_file_exists(path: i64) -> f64 {
 
 #[no_mangle]
 pub extern "C" fn bloom_read_file(path: i64) -> i64 {
-    // Perry's native FFI wraps string returns — returning 0 signals null
-    // from the watchOS side. Jump reads level files via this path; a later
-    // pass will resolve bundle-relative paths and hand back a StringHeader.
-    let _ = path;
-    0
+    let p = perry_str(path);
+    if p.is_empty() {
+        return alloc_perry_string("");
+    }
+    // Resolve bundle-relative paths the same way bloom_file_exists / textures do.
+    let full = if p.starts_with('/') {
+        p.to_string()
+    } else {
+        textures::resolve_bundle_path(p)
+    };
+    // Always hand back a valid StringHeader — empty on a miss, never null.
+    match std::fs::read_to_string(&full) {
+        Ok(contents) => alloc_perry_string(&contents),
+        Err(_) => alloc_perry_string(""),
+    }
 }
 
 #[no_mangle]

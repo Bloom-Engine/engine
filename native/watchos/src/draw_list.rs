@@ -30,6 +30,12 @@ pub mod kind {
     pub const TEXTURE_PRO: i32 = 9;  // full: source, dest, origin, rotation
     pub const TEXT: i32 = 10;
 
+    // 2D camera mode markers. BEGIN carries the camera in reused fields:
+    // x,y = screen offset; w,h = world target; size = zoom. The Swift Canvas
+    // applies the matching affine transform to every command until END.
+    pub const BEGIN_2D: i32 = 11;
+    pub const END_2D: i32 = 12;
+
     // 3D immediate-mode primitives (pos = x,y,z; w,h = scale; src_x,y,z = secondary).
     pub const CUBE: i32 = 20;         // pos (x,y,z), size (w,h,size=depth)
     pub const CUBE_WIRES: i32 = 21;
