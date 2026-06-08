@@ -521,7 +521,8 @@
           "lib": "libbloom_tvos.a",
           "frameworks": ["Metal", "QuartzCore", "UIKit", "CoreGraphics", "CoreText",
                           "CoreFoundation", "CoreAudio", "AudioToolbox", "AVFoundation",
-                          "GameController"]
+                          "GameController"],
+          "libs": ["c++"]
         },
         "watchos": {
           "crate": "native/watchos/",

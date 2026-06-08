@@ -140,7 +140,18 @@ fn find_prebuilt_dir(
         "arm" => "armv7",
         other => other,
     };
-    let target_token = format!("{}-{}", target_os, arch_token);
+    // Apple simulator targets share `target_os`/`target_arch` with their
+    // device counterpart (e.g. aarch64-apple-tvos-sim vs -tvos both report
+    // os=tvos arch=aarch64) and are only distinguished by the "sim" ABI.
+    // jolt-prebuilt ships a separate `<os>-<arch>-sim` archive built for the
+    // simulator platform; without this suffix we'd link the device archive
+    // into a simulator build and ld would reject the platform mismatch.
+    let sim_suffix = if std::env::var("CARGO_CFG_TARGET_ABI").as_deref() == Ok("sim") {
+        "-sim"
+    } else {
+        ""
+    };
+    let target_token = format!("{}-{}{}", target_os, arch_token, sim_suffix);
 
     let candidates = std::iter::empty::<std::path::PathBuf>()
         .chain(
