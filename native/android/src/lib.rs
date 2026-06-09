@@ -1353,24 +1353,16 @@ pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {
 #[no_mangle]
 pub extern "C" fn bloom_read_file(path_ptr: *const u8) -> *const u8 {
     let path = str_from_header(path_ptr);
+    // Always return a valid Perry string. A null pointer would NaN-box into a
+    // string-typed value pointing at address 0; subsequent `.length` /
+    // `.charCodeAt` reads dereference the bogus StringHeader and segfault.
+    // Callers detect "missing file" via `data.length === 0` (e.g. the jump
+    // game's discoverLevels probe across level1..level10 / custom_*).
+    // Parity with native/linux — Android previously returned null on Err,
+    // crashing discoverLevels at the first non-existent level file.
     match std::fs::read_to_string(resolve_path(path)) {
-        Ok(contents) => {
-            // Return Perry-format string: StringHeader (length u32 + capacity u32 + refcount u32) followed by UTF-8 data
-            let bytes = contents.as_bytes();
-            let len = bytes.len();
-            let total = 12 + len; // 12 bytes header (3 × u32) + data
-            let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
-            unsafe {
-                let ptr = std::alloc::alloc(layout);
-                if ptr.is_null() { return std::ptr::null(); }
-                *(ptr as *mut u32) = len as u32;           // length
-                *(ptr.add(4) as *mut u32) = len as u32;    // capacity
-                *(ptr.add(8) as *mut u32) = 1;             // refcount (unique)
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(12), len);
-                ptr
-            }
-        }
-        Err(_) => std::ptr::null(),
+        Ok(contents) => alloc_perry_string(&contents),
+        Err(_)       => alloc_perry_string(""),
     }
 }
 
