@@ -184,8 +184,21 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         } else {
             wgpu::ExperimentalFeatures::disabled()
         };
+        let adapter_limits = adapter.limits();
         let mut required_limits = wgpu::Limits::downlevel_defaults()
-            .using_resolution(adapter.limits());
+            .using_resolution(adapter_limits.clone());
+        // The renderer's `joint_bg` binds a 64KB uniform buffer, but
+        // downlevel_defaults caps uniform-buffer bindings at 16KB, so
+        // create_bind_group panics on mobile GPUs (e.g. Adreno) with
+        // "range 65536 exceeds max_*_buffer_binding_size limit 16384". Raise the
+        // buffer-binding sizes (and bind-group count) to the adapter's maximum;
+        // these are guaranteed-supported and match the desktop limits.
+        required_limits.max_uniform_buffer_binding_size =
+            adapter_limits.max_uniform_buffer_binding_size;
+        required_limits.max_storage_buffer_binding_size =
+            adapter_limits.max_storage_buffer_binding_size;
+        required_limits.max_bind_groups =
+            required_limits.max_bind_groups.max(5).min(adapter_limits.max_bind_groups);
         if required_features.intersects(rt_mask) {
             required_limits = required_limits
                 .using_minimum_supported_acceleration_structure_values();
