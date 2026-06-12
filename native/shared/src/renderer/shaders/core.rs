@@ -766,6 +766,10 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
                          base_color, metallic, roughness);
     }
 
+    // BEGIN-POINT-LIGHT-LOOP (replaced by the froxel-clustered variant
+    // at pipeline build on storage-buffer-capable backends — see
+    // renderer/froxel.rs; this plain loop is the WebGL fallback and the
+    // semantic reference the clustered path must match exactly)
     let pt_count = u32(lighting.point_light_count.x);
     for (var i = 0u; i < pt_count; i++) {
         let pl = lighting.point_lights[i];
@@ -780,6 +784,7 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
                              base_color, metallic, roughness);
         }
     }
+    // END-POINT-LIGHT-LOOP
 
     // --- Split-sum IBL (Karis 2013) ---
     //   IBL_diffuse  = base_color * (1 - kS_avg) * (1 - metallic)

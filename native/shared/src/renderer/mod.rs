@@ -11,6 +11,8 @@ mod ssgi_pass;
 mod shadow_pass;
 mod postfx_chain;
 mod scene_pass;
+mod froxel;
+mod lighting;
 pub use occlusion::OcclusionCuller;
 use shaders::*;
 
@@ -1394,6 +1396,12 @@ pub struct Renderer {
     // don't have to carry tangent vertex data or normal-map bindings.
     pub scene_pipeline: wgpu::RenderPipeline,
     pub scene_material_layout: wgpu::BindGroupLayout,
+    /// Froxel light clustering (task #23). `Some` when the device has
+    /// fragment-stage storage buffers (everything but WebGL2); the
+    /// scene shader is then compiled with the clustered point-light
+    /// loop and `lighting_layout` gains bindings 10–12. `None` keeps
+    /// the plain count-driven loop.
+    pub froxel: Option<froxel::FroxelPass>,
     /// 1×1 gray env fallback and its sampler — bound in the lighting
     /// bind group before any HDR is loaded. `load_env_from_hdr`
     /// rebuilds the lighting bind group to swap in the real env
@@ -1674,99 +1682,13 @@ impl Renderer {
         // higher device limit). pipeline_3d doesn't reference the env
         // / BRDF bindings — WGSL lets bind group layouts expose more
         // than a shader consumes.
-        let lighting_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("lighting_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 8,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-        });
+        // Froxel clustering first — its presence decides whether the
+        // lighting layout grows bindings 10-12 and which point-light
+        // loop the scene shader is compiled with.
+        let froxel = froxel::FroxelPass::supported(&device)
+            .then(|| froxel::FroxelPass::new(&device));
+
+        let lighting_layout = lighting::create_lighting_layout(&device, froxel.is_some());
         let lighting_uniforms = LightingUniforms::defaults();
         let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lighting_buffer"),
@@ -2020,22 +1942,21 @@ impl Renderer {
         // group since the bind group binds the shadow depth view.
         let shadow_map = crate::shadows::ShadowMap::new(&device, Vertex3D::desc());
 
-        let lighting_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lighting_bg"),
-            layout: &lighting_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: lighting_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&scene_env_default_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&env_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&brdf_lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[0]) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[1]) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[2]) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&shadow_map.sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&scene_env_default_view) },
-            ],
-        });
+        let lighting_bind_group = lighting::create_lighting_bind_group(
+            &device,
+            &lighting_layout,
+            "lighting_bg",
+            &lighting::LightingBindSources {
+                lighting_buffer: &lighting_buffer,
+                env_sampler: &env_sampler,
+                brdf_lut_view: &brdf_lut_view,
+                brdf_lut_sampler: &brdf_lut_sampler,
+                shadow_map: &shadow_map,
+                froxel: froxel.as_ref(),
+            },
+            &scene_env_default_view,
+            &scene_env_default_view,
+        );
 
         // --- Default 1x1 white texture ---
         let white_data = [255u8, 255, 255, 255];
@@ -2864,9 +2785,17 @@ impl Renderer {
         // ============================================================
         // Scene pipeline (retained scene-graph draws with normal maps)
         // ============================================================
+        // Clustered devices get the froxel point-light loop spliced in
+        // place of the plain reference loop (same shading math — the
+        // many_point_lights golden enforces equivalence).
+        let scene_shader_source: std::borrow::Cow<'static, str> = if froxel.is_some() {
+            froxel::clustered_scene_shader(SCENE_SHADER).into()
+        } else {
+            SCENE_SHADER.into()
+        };
         let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene_shader"),
-            source: wgpu::ShaderSource::Wgsl(SCENE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(scene_shader_source),
         });
         // Scene material layout:
         //   0: base_color texture      4: metallic_roughness texture
@@ -6274,6 +6203,7 @@ impl Renderer {
             aerial_perspective_sampler,
             env_diffuse_texture: None,
             scene_pipeline,
+            froxel,
             scene_material_layout,
             _scene_env_default_texture: scene_env_default_texture,
             scene_env_default_view,
@@ -8227,22 +8157,7 @@ impl Renderer {
         // LUT bindings stay put — only env tex/sampler + diffuse view
         // change.
         let diffuse_view_bg = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let new_lighting_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lighting_bg"),
-            layout: &self.lighting_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.lighting_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&diffuse_view_bg) },
-            ],
-        });
+        let new_lighting_bg = self.make_lighting_bind_group("lighting_bg", &view, &diffuse_view_bg);
 
         self.sky_texture = Some(texture);
         self.sky_bind_group = Some(bg);
@@ -8555,22 +8470,7 @@ impl Renderer {
                 self._scene_env_default_texture
                     .create_view(&wgpu::TextureViewDescriptor::default())
             });
-        let new_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lighting_bg_panorama"),
-            layout: &self.lighting_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.lighting_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&env_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&diffuse_view) },
-            ],
-        });
+        let new_bg = self.make_lighting_bind_group("lighting_bg_panorama", &env_view, &diffuse_view);
         self.lighting_bind_group = new_bg;
         self.lighting_bg_is_procedural = false;
     }
@@ -8582,22 +8482,11 @@ impl Renderer {
     /// every sun-move and the bind group's TextureView references
     /// remain valid.
     fn swap_lighting_bg_to_procedural(&mut self) {
-        let new_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lighting_bg_procedural"),
-            layout: &self.lighting_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.lighting_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.procedural_sky_equirect_full_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.procedural_env_diffuse_view) },
-            ],
-        });
+        let new_bg = self.make_lighting_bind_group(
+            "lighting_bg_procedural",
+            &self.procedural_sky_equirect_full_view,
+            &self.procedural_env_diffuse_view,
+        );
         self.lighting_bind_group = new_bg;
         self.lighting_bg_is_procedural = true;
     }
@@ -9285,6 +9174,7 @@ impl Renderer {
             const BLOOM_CHAIN: u32 = 4;
             const COMPOSED: u32 = 5;
             const LDR_FINAL: u32 = 6;
+            const FROXEL_CLUSTERS: u32 = 7;
 
             struct FrameCtx2<'a> {
                 r: &'a mut Renderer,
@@ -9297,6 +9187,15 @@ impl Renderer {
 
             let mut g: Graph<FrameCtx2> = Graph::new();
             g.push(
+                PassNode::new("froxel_assign", Box::new(|c: &mut FrameCtx2| {
+                    // No-op when self.froxel is None (the method gates);
+                    // the node stays in the graph so with_after pins
+                    // never dangle.
+                    c.r.record_froxel_assign(c.encoder);
+                }))
+                .with_writes(&[PassOutput::Transient(FROXEL_CLUSTERS)]),
+            );
+            g.push(
                 PassNode::new("shadow", Box::new(|c: &mut FrameCtx2| {
                     c.r.record_shadow_pass(c.encoder, c.profiler, c.scene);
                 }))
@@ -9306,7 +9205,12 @@ impl Renderer {
                 PassNode::new("hdr_scene", Box::new(|c: &mut FrameCtx2| {
                     c.r.record_hdr_scene_pass(c.encoder, c.profiler, c.scene);
                 }))
-                .with_reads(&[PassInput::Shadow(0), PassInput::Shadow(1), PassInput::Shadow(2)])
+                .with_reads(&[
+                    PassInput::Shadow(0),
+                    PassInput::Shadow(1),
+                    PassInput::Shadow(2),
+                    PassInput::Transient(FROXEL_CLUSTERS),
+                ])
                 .with_writes(&[
                     PassOutput::HdrColor,
                     PassOutput::MaterialRt,
@@ -9314,7 +9218,7 @@ impl Renderer {
                     PassOutput::AlbedoRt,
                     PassOutput::Depth,
                 ])
-                .with_after(&["shadow"]),
+                .with_after(&["shadow", "froxel_assign"]),
             );
             g.push(
                 PassNode::new("translucent", Box::new(|c: &mut FrameCtx2| {
