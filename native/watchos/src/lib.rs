@@ -102,6 +102,7 @@ const MAX_TOUCH: usize = 4;
 
 struct WatchState {
     crown_bits: AtomicU64, // f64 bits
+    language_code: AtomicU64, // packed 2-letter code (c0*256+c1), set by Swift at launch
     touch_x: [AtomicU64; MAX_TOUCH],
     touch_y: [AtomicU64; MAX_TOUCH],
     touch_active: [AtomicU64; MAX_TOUCH],
@@ -117,6 +118,7 @@ fn state() -> &'static WatchState {
     static S: OnceLock<WatchState> = OnceLock::new();
     S.get_or_init(|| WatchState {
         crown_bits: AtomicU64::new(0),
+        language_code: AtomicU64::new(25966), // "en" until Swift reports the locale
         touch_x: std::array::from_fn(|_| AtomicU64::new(0)),
         touch_y: std::array::from_fn(|_| AtomicU64::new(0)),
         touch_active: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -161,6 +163,17 @@ fn consume_crown() -> f64 {
 
 #[no_mangle]
 pub extern "C" fn bloom_watchos_crown_delta(delta: f64) { add_crown(delta); }
+
+/// Swift reports the user's preferred language at launch as a packed
+/// 2-letter ISO-639 primary subtag (c0*256 + c1, lowercased), matching
+/// the bloom_get_language contract on the other platforms.
+#[no_mangle]
+pub extern "C" fn bloom_watchos_set_language(code: f64) {
+    let c = code as u64;
+    if c > 0 {
+        state().language_code.store(c, Ordering::Release);
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn bloom_watchos_touch(index: i64, x: f64, y: f64, active: i64) {
@@ -252,7 +265,9 @@ pub extern "C" fn bloom_get_platform() -> f64 { 8.0 }
 
 /// Preferred OS language packed as `c0*256+c1`. TODO: real per-OS detection; returns "en" for now.
 #[no_mangle]
-pub extern "C" fn bloom_get_language() -> f64 { 25966.0 }
+pub extern "C" fn bloom_get_language() -> f64 {
+    state().language_code.load(Ordering::Acquire) as f64
+}
 
 #[no_mangle]
 pub extern "C" fn bloom_get_crown_rotation() -> f64 { consume_crown() }
