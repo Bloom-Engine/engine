@@ -269,3 +269,359 @@ impl Renderer {
 
     }
 }
+
+impl Renderer {
+    /// Post-FX tail: upscale (when sub-res and TAA is off), TAA, DoF,
+    /// motion blur, SSS, and CAS — each stage reads the output of the
+    /// last enabled stage before it. The internal `pre_*_view`
+    /// selections encode that chain; `composite_source_view` re-derives
+    /// the final link for the composite pass.
+    pub(super) fn record_postfx_tail(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+    ) {
+    // ============================================================
+    // Upscale pass: render-res composed_rt → full-surface upscale_rt.
+    // Engages only when render_scale < 1.0 AND TAA is off — when
+    // TAA runs it does its own Catmull-Rom upscale. Downstream
+    // post-FX (DoF/MB/SSS/composite) read upscale_rt instead of
+    // hdr_rt in this case so the chain operates at full surface
+    // resolution.
+    // ============================================================
+    if self.render_scale < 0.999 && !self.taa_enabled {
+        let up = UpscaleParams {
+            params: [self.upscale_mode as f32, 0.0, 0.0, 0.0],
+        };
+        self.queue.write_buffer(&self.upscale_uniform_buffer, 0, bytemuck::bytes_of(&up));
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("upscale_bg"),
+            layout: &self.upscale_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.upscale_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.composed_rt_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("upscale_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.upscale_rt_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.upscale_pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    // ============================================================
+    // TAA pass: reprojection + neighborhood clamp on composed_rt.
+    // Skipped when TAA is off — composite reads composed_rt
+    // directly and gets the same composed / fog / shafts output.
+    // ============================================================
+    let taa_dst_idx = self.taa_current_idx;
+    let taa_src_idx = 1 - self.taa_current_idx;
+
+    if self.taa_enabled {
+        // Effective temporal window scales with per-pixel sample
+        // density (~render_scale²). At 0.5 → 0.0625 (~16-frame
+        // window, close to the prior 0.05/20-frame); at 1.0 →
+        // 0.10 (~10-frame), matching native TAA.
+        let s2 = self.render_scale * self.render_scale;
+        let steady = 0.05 + 0.05 * s2;
+        let alpha = if self.taa_frame_index < 4 { 1.0 } else { steady };
+        let tp = TaaParams {
+            params: [alpha, 0.0, 0.0, 0.0],
+            inv_vp: self.current_inv_vp_matrix,
+            prev_vp: self.prev_vp_matrix,
+        };
+        self.queue.write_buffer(&self.taa_uniform_buffer, 0, bytemuck::bytes_of(&tp));
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("taa_bg"),
+            layout: &self.taa_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.taa_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.composed_rt_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.taa_views[taa_src_idx]) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+            ],
+        });
+        let taa_ts = profiler.pass_timestamp_writes("taa_pass");
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("taa_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.taa_views[taa_dst_idx],
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: taa_ts,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.taa_pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    // ============================================================
+    // DoF pass: variable-radius Poisson disc blur driven by CoC
+    // Reads TAA output / upscale_rt / hdr_rt + depth → dof_rt
+    // ============================================================
+    let pre_dof_view = if self.taa_enabled {
+        &self.taa_views[taa_dst_idx]
+    } else if self.render_scale < 0.999 {
+        &self.upscale_rt_view
+    } else {
+        &self.hdr_rt_view
+    };
+
+    if self.dof_enabled && self.dof_aperture > 0.0 {
+        let inv_proj = self.current_inv_proj_matrix;
+        let dp = DofParams {
+            params: [self.dof_focus_distance, self.dof_aperture, self.dof_max_blur, 0.0],
+            inv_proj,
+        };
+        self.queue.write_buffer(&self.dof_uniform_buffer, 0, bytemuck::bytes_of(&dp));
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("dof_bg"),
+            layout: &self.dof_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.dof_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(pre_dof_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("dof_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.dof_rt_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.dof_pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    // ============================================================
+    // Motion blur pass: 8-tap directional blur along velocity
+    // Reads upstream color + velocity_rt → motion_blur_rt
+    // ============================================================
+    let pre_mblur_view = if self.dof_enabled && self.dof_aperture > 0.0 {
+        &self.dof_rt_view
+    } else if self.taa_enabled {
+        &self.taa_views[taa_dst_idx]
+    } else if self.render_scale < 0.999 {
+        &self.upscale_rt_view
+    } else {
+        &self.hdr_rt_view
+    };
+
+    if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
+        let mbp = MotionBlurParams {
+            params: [self.motion_blur_strength, self.motion_blur_max_blur, 0.0, 0.0],
+        };
+        self.queue.write_buffer(&self.motion_blur_uniform_buffer, 0, bytemuck::bytes_of(&mbp));
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("motion_blur_bg"),
+            layout: &self.motion_blur_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.motion_blur_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(pre_mblur_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("motion_blur_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.motion_blur_rt_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.motion_blur_pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    // ============================================================
+    // SSS pass: chromatic disc blur (skin / wax / leaves)
+    // Reads upstream color + depth → sss_rt.
+    // Runs after motion blur so it applies to the fully composited
+    // motion state, not to individual geometry.
+    // ============================================================
+    let pre_sss_view = if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
+        &self.motion_blur_rt_view
+    } else if self.dof_enabled && self.dof_aperture > 0.0 {
+        &self.dof_rt_view
+    } else if self.taa_enabled {
+        &self.taa_views[taa_dst_idx]
+    } else if self.render_scale < 0.999 {
+        &self.upscale_rt_view
+    } else {
+        &self.hdr_rt_view
+    };
+
+    if self.sss_enabled && self.sss_strength > 0.0 {
+        let sp = SssParams {
+            params: [self.sss_strength, self.sss_width, 500.0, 0.0],
+        };
+        self.queue.write_buffer(&self.sss_uniform_buffer, 0, bytemuck::bytes_of(&sp));
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sss_bg"),
+            layout: &self.sss_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.sss_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(pre_sss_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("sss_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.sss_rt_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.sss_pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    // ============================================================
+    // RCAS sharpen pass: contrast-adaptive 5-tap cross. Reads the
+    // same texture composite would otherwise sample (sss/mb/dof/
+    // taa/upscale/composed) and writes cas_rt. Off by default —
+    // gated on cas_strength > 0.
+    // ============================================================
+    let cas_input_view: &wgpu::TextureView = if self.sss_enabled && self.sss_strength > 0.0 {
+        &self.sss_rt_view
+    } else if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
+        &self.motion_blur_rt_view
+    } else if self.dof_enabled && self.dof_aperture > 0.0 {
+        &self.dof_rt_view
+    } else if self.taa_enabled {
+        &self.taa_views[taa_dst_idx]
+    } else if self.render_scale < 0.999 {
+        &self.upscale_rt_view
+    } else {
+        // TAA off, native res: composed_rt is already full-surface
+        // and carries SSR / SSGI / bloom / fog / shafts.
+        &self.composed_rt_view
+    };
+
+    if self.cas_strength > 0.0 {
+        let cp = RcasParams {
+            params: [self.cas_strength, 0.0, 0.0, 0.0],
+        };
+        self.queue.write_buffer(&self.cas_uniform_buffer, 0, bytemuck::bytes_of(&cp));
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cas_bg"),
+            layout: &self.cas_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.cas_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(cas_input_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("cas_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.cas_rt_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.cas_pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    }
+
+    /// The view the composite pass reads: the output of the LAST enabled
+    /// stage in chain order CAS > SSS > motion blur > DoF > TAA >
+    /// upscale > raw HDR. Must mirror the `pre_*_view` cascade in
+    /// record_postfx_tail.
+    pub(super) fn composite_source_view(&self) -> &wgpu::TextureView {
+        if self.cas_strength > 0.0 {
+            &self.cas_rt_view
+        } else if self.sss_enabled && self.sss_strength > 0.0 {
+            &self.sss_rt_view
+        } else if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
+            &self.motion_blur_rt_view
+        } else if self.dof_enabled && self.dof_aperture > 0.0 {
+            &self.dof_rt_view
+        } else if self.taa_enabled {
+            &self.taa_views[self.taa_current_idx]
+        } else if self.render_scale < 0.999 {
+            &self.upscale_rt_view
+        } else {
+            &self.hdr_rt_view
+        }
+    }
+}
