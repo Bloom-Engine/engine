@@ -7,8 +7,13 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [features]
-default = ["jolt"]
+# Mirror native/macos: everything defaults ON so existing web games are
+# unaffected; pure-2D games opt out via Perry's per-package feature
+# forwarding (see native/shared/Cargo.toml for the EN-014 rationale).
+default = ["jolt", "models3d", "image-extras"]
 jolt = ["bloom-shared/jolt"]
+models3d = ["bloom-shared/models3d"]
+image-extras = ["bloom-shared/image-extras"]
 
 [dependencies]
 bloom-shared = { path = "../shared", default-features = false, features = ["web"] }
