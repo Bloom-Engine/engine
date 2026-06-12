@@ -20,6 +20,7 @@ declare function bloom_set_film_grain(strength: number): void;
 declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): void;
 declare function bloom_set_auto_exposure(on: number): void;
 declare function bloom_set_taa_enabled(on: number): void;
+declare function bloom_set_occlusion_culling(on: number): void;
 declare function bloom_set_render_scale(scale: number): void;
 declare function bloom_get_render_scale(): number;
 declare function bloom_set_upscale_mode(mode: number): void;
@@ -209,6 +210,17 @@ export function setAutoExposure(on: boolean): void {
 }
 
 /** Toggle temporal anti-aliasing (sub-pixel jitter + reprojected history blend). */
+/**
+ * Hi-Z occlusion culling: scene nodes provably hidden behind other
+ * geometry (per last frame's depth) are skipped in the main camera
+ * pass. Conservative with one frame of latency; on by default. This is
+ * the kill switch for debugging or for scenes that pathologically
+ * defeat it (e.g. every object visible every frame).
+ */
+export function setOcclusionCulling(on: boolean): void {
+  bloom_set_occlusion_culling(on ? 1 : 0);
+}
+
 export function setTaaEnabled(on: boolean): void {
   bloom_set_taa_enabled(on ? 1 : 0);
 }

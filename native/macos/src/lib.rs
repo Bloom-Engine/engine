@@ -1030,6 +1030,9 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
         &eng.renderer.vp_matrix(),
         &eng.renderer.prev_vp_matrix,
         eng.renderer.uniform_3d_layout(),
+        // Screenshot capture renders everything the camera might see —
+        // never occlusion-cull a one-shot capture.
+        None,
     );
     eng.scene.prepare_materials(&eng.renderer);
     // Phase 1c: sync material PerFrame + PerView UBOs with the

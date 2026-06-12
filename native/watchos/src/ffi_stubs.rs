@@ -133,6 +133,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_p0: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_occlusion_culling(_p0: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_set_render_scale(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_get_render_scale() -> f64 {

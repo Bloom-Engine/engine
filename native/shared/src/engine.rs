@@ -159,12 +159,16 @@ impl EngineState {
             self.profiler.end("render_total");
         } else {
             self.profiler.begin("scene_prepare");
+            // Collect last frame's occlusion-grid readback (if it
+            // completed) before culling against it.
+            self.renderer.occlusion.poll(&self.renderer.device);
             self.scene.prepare(
                 &self.renderer.device,
                 &self.renderer.queue,
                 &self.renderer.vp_matrix(),
                 &self.renderer.prev_vp_matrix,
                 self.renderer.uniform_3d_layout(),
+                Some(&self.renderer.occlusion),
             );
             self.scene.prepare_materials(&self.renderer);
             self.profiler.end("scene_prepare");

@@ -3,6 +3,9 @@ use std::collections::HashMap;
 
 mod shaders;
 mod texture_store;
+mod hiz;
+mod occlusion;
+pub use occlusion::OcclusionCuller;
 use shaders::*;
 
 pub mod shader_include;
@@ -178,7 +181,7 @@ struct AerialParams {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct HizLinearizeParams {
+pub(super) struct HizLinearizeParams {
     /// xy = inv_size, z = proj[2][2], w = proj[3][2]
     params: [f32; 4],
     /// xy = mip-0 size, zw unused
@@ -187,7 +190,7 @@ struct HizLinearizeParams {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct HizDownsampleParams {
+pub(super) struct HizDownsampleParams {
     /// xy = dst-mip size, zw unused
     size: [u32; 4],
 }
@@ -801,6 +804,9 @@ pub struct Renderer {
     pub hiz_downsample_layout: wgpu::BindGroupLayout,
     pub hiz_downsample_uniform_buffers: Vec<wgpu::Buffer>,
     hiz_linearize_bg_cache: Option<wgpu::BindGroup>,
+    /// Hi-Z occlusion culling (coarse max-depth grid + async readback);
+    /// scene.prepare tests node AABBs against last frame's grid.
+    pub occlusion: OcclusionCuller,
     hiz_downsample_bg_cache: Vec<Option<wgpu::BindGroup>>,
     /// Bilateral blur pass applied to the raw GTAO output. Reads
     /// ssao_rt, writes ssao_blur_rt (same half-res R8Unorm format).
@@ -3560,6 +3566,7 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        let occlusion = OcclusionCuller::new(&device);
         let (hiz_textures, hiz_views) = create_linear_depth_hiz_chain(
             &device, surface_config.width, surface_config.height,
         );
@@ -5932,6 +5939,7 @@ impl Renderer {
             hiz_downsample_layout,
             hiz_downsample_uniform_buffers,
             hiz_linearize_bg_cache: None,
+            occlusion,
             hiz_downsample_bg_cache: vec![None; (HIZ_MIP_COUNT - 1) as usize],
             ssao_blur_rt_texture,
             ssao_blur_rt_view,
@@ -6423,6 +6431,7 @@ impl Renderer {
             self.probe_temporal_bg_cache = [None, None];
             self.probe_resolve_bg_cache = [None, None];
             self.hiz_linearize_bg_cache = None;
+        self.occlusion.invalidate_bindings();
             for slot in self.hiz_downsample_bg_cache.iter_mut() {
                 *slot = None;
             }
@@ -9810,70 +9819,22 @@ impl Renderer {
             let half_w = (surf_w / 2).max(1);
             let half_h = (surf_h / 2).max(1);
 
-            // --- Hi-Z build: linearize depth into mip 0 -----------------
-            let lin_params = HizLinearizeParams {
-                params: [1.0 / half_w as f32, 1.0 / half_h as f32, p22, p32],
-                size: [half_w, half_h, 0, 0],
-            };
-            self.queue.write_buffer(&self.hiz_linearize_uniform_buffer, 0, bytemuck::bytes_of(&lin_params));
-            if self.hiz_linearize_bg_cache.is_none() {
-                self.hiz_linearize_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("hiz_linearize_bg"),
-                    layout: &self.hiz_linearize_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.hiz_linearize_uniform_buffer.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
-                    ],
-                }));
-            }
-            {
-                let bg = self.hiz_linearize_bg_cache.as_ref().unwrap();
-                let ts = profiler.compute_pass_timestamp_writes("hiz_linearize_pass");
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("hiz_linearize_pass"),
-                    timestamp_writes: ts,
-                });
-                pass.set_pipeline(&self.hiz_linearize_pipeline);
-                pass.set_bind_group(0, bg, &[]);
-                pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
-            }
+            // Hi-Z build (linearize + min-downsample chain) — see hiz.rs.
+            self.record_hiz_chain(&mut encoder, profiler, half_w, half_h, p22, p32);
 
-            // --- Hi-Z build: downsample mip i -> mip i+1 ----------------
-            for i in 0..(HIZ_MIP_COUNT - 1) as usize {
-                let dst_w = (half_w >> (i + 1)).max(1);
-                let dst_h = (half_h >> (i + 1)).max(1);
-                let ds_params = HizDownsampleParams {
-                    size: [dst_w, dst_h, 0, 0],
-                };
-                self.queue.write_buffer(&self.hiz_downsample_uniform_buffers[i], 0, bytemuck::bytes_of(&ds_params));
-                if self.hiz_downsample_bg_cache[i].is_none() {
-                    self.hiz_downsample_bg_cache[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("hiz_downsample_bg"),
-                        layout: &self.hiz_downsample_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: self.hiz_downsample_uniform_buffers[i].as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.hiz_views[i]) },
-                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.hiz_views[i + 1]) },
-                        ],
-                    }));
+            // --- Occlusion grid capture (reads Hi-Z mip 0) ---------------
+            // Max-reduce the linearized depth into the 64x64 occlusion
+            // grid and queue its readback; scene.prepare consumes it
+            // next frame (one-frame latency, no stall).
+            {
+                let vp = self.vp_matrix();
+                // Split borrows: occlusion is a sibling field of device/
+                // queue, but record() also needs the hiz view.
+                let occlusion = &mut self.occlusion as *mut OcclusionCuller;
+                unsafe {
+                    (*occlusion).record(&self.device, &self.queue, &mut encoder,
+                        &self.hiz_views[0], (half_w, half_h), vp);
                 }
-                let bg = self.hiz_downsample_bg_cache[i].as_ref().unwrap();
-                let ts_label: &'static str = match i {
-                    0 => "hiz_downsample_pass_1",
-                    1 => "hiz_downsample_pass_2",
-                    2 => "hiz_downsample_pass_3",
-                    _ => "hiz_downsample_pass_4",
-                };
-                let ts = profiler.compute_pass_timestamp_writes(ts_label);
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some(ts_label),
-                    timestamp_writes: ts,
-                });
-                pass.set_pipeline(&self.hiz_downsample_pipeline);
-                pass.set_bind_group(0, bg, &[]);
-                pass.dispatch_workgroups((dst_w + 7) / 8, (dst_h + 7) / 8, 1);
             }
 
             // --- SSAO (compute GTAO, samples Hi-Z pyramid) --------------
@@ -11468,6 +11429,10 @@ impl Renderer {
             self.queue.submit(std::iter::once(encoder.finish()));
             profiler.end("queue_submit");
         }
+
+        // Map the occlusion-grid readback recorded this frame (no-op if
+        // none was recorded).
+        self.occlusion.after_submit();
 
         // Ticket 022 — drain freshly-baked SDFs to the on-disk cache.
         // No-op on cache-hit frames (queue is empty); on cold-launch

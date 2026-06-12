@@ -237,6 +237,13 @@ macro_rules! __bloom_ffi_visual {
         })
         }
 
+        #[no_mangle]
+        pub extern "C" fn bloom_set_occlusion_culling(on: f64) {
+            $crate::ffi::guard("bloom_set_occlusion_culling", move || {
+                engine().renderer.occlusion.enabled = on != 0.0;
+            })
+        }
+
         // bloom_set_taa_enabled  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_taa_enabled(on: f64) {

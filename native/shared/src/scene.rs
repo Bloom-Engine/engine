@@ -155,6 +155,10 @@ pub struct SceneNode {
     /// by `render()` to skip off-screen nodes. Shadow pass ignores this
     /// flag — off-screen geometry can still cast shadows into view.
     in_view_frustum: bool,
+    /// Hidden behind other geometry per the Hi-Z occlusion grid (one
+    /// frame of latency, conservative). Only gates the main camera
+    /// pass — shadows/picking/TLAS never read it.
+    occluded: bool,
     /// Material bind group for the scene pipeline — holds base color,
     /// normal, metallic-roughness and emissive texture views in one
     /// group. Rebuilt whenever one of the material texture indices
@@ -197,6 +201,7 @@ impl SceneNode {
             uniform_slot: None,
             gpu_uniform_bg: None,
             in_view_frustum: true,
+            occluded: false,
             gpu_material_bg: None,
             gpu_material_uniform_buf: None,
             mat_dirty: true,
@@ -607,6 +612,7 @@ impl SceneGraph {
         vp_matrix: &[[f32; 4]; 4],
         prev_vp_matrix: &[[f32; 4]; 4],
         uniform_layout: &wgpu::BindGroupLayout,
+        occlusion: Option<&crate::renderer::OcclusionCuller>,
     ) {
         let frustum = extract_frustum_planes(vp_matrix);
 
@@ -653,9 +659,15 @@ impl SceneGraph {
                 node.in_view_frustum = !aabb_outside_frustum(&frustum, wmin, wmax);
                 node.world_bounds_min = wmin;
                 node.world_bounds_max = wmax;
+                // Hi-Z occlusion: only worth testing what survived the
+                // frustum; every uncertain case inside test_aabb
+                // resolves to visible.
+                node.occluded = node.in_view_frustum
+                    && occlusion.is_some_and(|o| !o.test_aabb(wmin, wmax));
             } else {
                 // Empty or uninitialized bounds — can't cull, play safe.
                 node.in_view_frustum = true;
+                node.occluded = false;
                 node.world_bounds_min = [f32::MAX; 3];
                 node.world_bounds_max = [f32::MIN; 3];
             }
@@ -989,7 +1001,7 @@ impl SceneGraph {
         pass: &mut wgpu::RenderPass<'a>,
     ) {
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.indices.is_empty() || !node.in_view_frustum {
+            if !node.visible || node.indices.is_empty() || !node.in_view_frustum || node.occluded {
                 continue;
             }
             let Some(vb) = &node.gpu_vb else { continue };

@@ -1154,6 +1154,13 @@
           "returns": "void"
         },
         {
+          "name": "bloom_set_occlusion_culling",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_set_render_scale",
           "params": [
             "f64"
