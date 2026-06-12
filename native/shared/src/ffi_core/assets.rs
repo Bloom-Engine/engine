@@ -183,10 +183,9 @@ macro_rules! __bloom_ffi_assets {
                 let path = $crate::string_header::str_from_header(path_ptr);
                 let path: &str = &bloom_resolve_asset_path(path);
                 match std::fs::read(path) {
-                    Ok(data) => match $crate::audio::decode_audio(path, &data) {
-                        Some(s) => engine().audio.load_music(s),
-                        None => 0.0,
-                    },
+                    // Streams OGG/MP3 from the compressed bytes (background
+                    // decode worker); WAV and wasm32 fully decode.
+                    Ok(data) => engine().audio.load_music_bytes(path, data),
                     Err(_) => 0.0,
                 }
         })

@@ -29,6 +29,7 @@
 mod decode;
 mod render;
 mod spsc;
+pub mod stream;
 
 pub use decode::{decode_audio, parse_ogg, parse_wav};
 #[cfg(feature = "mp3")]
@@ -53,8 +54,20 @@ pub struct MusicShared {
     pub position: AtomicUsize,
 }
 
+enum MusicSource {
+    /// Fully decoded PCM (WAV always; everything on wasm32).
+    Full(Arc<SoundData>),
+    /// Compressed bytes decoded by a background worker at play time.
+    #[cfg(not(target_arch = "wasm32"))]
+    Streamed {
+        kind: stream::StreamKind,
+        bytes: Arc<Vec<u8>>,
+        channels: u16,
+    },
+}
+
 struct MusicEntry {
-    data: Arc<SoundData>,
+    source: MusicSource,
     shared: Arc<MusicShared>,
     volume: f32,
     looping: bool,
@@ -174,8 +187,50 @@ impl AudioMixer {
     // ------------------------------------------------------------ music
 
     pub fn load_music(&mut self, data: SoundData) -> f64 {
+        self.alloc_music(MusicSource::Full(Arc::new(data)))
+    }
+
+    /// Load music from raw file bytes, streaming the decode when the
+    /// format supports it (OGG/MP3 on native — keeps ~5 MB of compressed
+    /// bytes resident instead of ~57 MB of PCM for a 5-minute track).
+    /// WAV — and everything on wasm32, which has no threads — falls back
+    /// to full decode. Returns 0 on undecodable data.
+    pub fn load_music_bytes(&mut self, path: &str, data: Vec<u8>) -> f64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let lower = path.to_ascii_lowercase();
+            let kind = if lower.ends_with(".ogg") {
+                Some(stream::StreamKind::Ogg)
+            } else {
+                #[cfg(feature = "mp3")]
+                if lower.ends_with(".mp3") {
+                    Some(stream::StreamKind::Mp3)
+                } else {
+                    None
+                }
+                #[cfg(not(feature = "mp3"))]
+                None
+            };
+            if let Some(kind) = kind {
+                if let Some((_rate, channels)) = stream::probe(kind, &data) {
+                    return self.alloc_music(MusicSource::Streamed {
+                        kind,
+                        bytes: Arc::new(data),
+                        channels,
+                    });
+                }
+                // Mislabelled file — fall through to sniffing decode.
+            }
+        }
+        match decode_audio(path, &data) {
+            Some(s) => self.load_music(s),
+            None => 0.0,
+        }
+    }
+
+    fn alloc_music(&mut self, source: MusicSource) -> f64 {
         self.music.alloc(MusicEntry {
-            data: Arc::new(data),
+            source,
             shared: Arc::new(MusicShared {
                 playing: AtomicBool::new(false),
                 position: AtomicUsize::new(0),
@@ -191,9 +246,17 @@ impl AudioMixer {
         // moment play_music returns (the render thread confirms on its
         // next callback).
         m.shared.playing.store(true, Ordering::Relaxed);
+        let payload = match &m.source {
+            MusicSource::Full(data) => render::MusicPayload::Full(data.clone()),
+            #[cfg(not(target_arch = "wasm32"))]
+            MusicSource::Streamed { kind, bytes, channels } => render::MusicPayload::Stream {
+                consumer: stream::start(*kind, bytes.clone(), m.looping),
+                channels: *channels,
+            },
+        };
         let cmd = Cmd::PlayMusic {
             music_id: handle.to_bits(),
-            data: m.data.clone(),
+            payload,
             shared: m.shared.clone(),
             volume: m.volume,
             looping: m.looping,

@@ -11,6 +11,8 @@
 //! voice playing it finishes, then the Arc drops on this thread.
 
 use super::spsc::Consumer;
+#[cfg(not(target_arch = "wasm32"))]
+use super::stream::{StreamConsumer, StreamMsg};
 use super::{MusicShared, SoundData};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -30,7 +32,7 @@ pub enum Cmd {
     SetSoundVolume { sound_id: u64, volume: f32 },
     PlayMusic {
         music_id: u64,
-        data: Arc<SoundData>,
+        payload: MusicPayload,
         shared: Arc<MusicShared>,
         volume: f32,
         looping: bool,
@@ -49,13 +51,35 @@ struct Voice {
     spatial: Option<[f32; 3]>,
 }
 
+/// How a music voice gets its samples.
+pub enum MusicPayload {
+    Full(Arc<SoundData>),
+    /// Chunks arrive from a background decode worker; the worker handles
+    /// looping internally (End only arrives for finished non-loop tracks).
+    #[cfg(not(target_arch = "wasm32"))]
+    Stream { consumer: StreamConsumer, channels: u16 },
+}
+
+enum MusicSamples {
+    Full { data: Arc<SoundData>, position: usize },
+    #[cfg(not(target_arch = "wasm32"))]
+    Stream {
+        consumer: StreamConsumer,
+        channels: u16,
+        current: Vec<f32>,
+        offset: usize,
+        ended: bool,
+    },
+}
+
 struct MusicVoice {
     music_id: u64,
-    data: Arc<SoundData>,
+    samples: MusicSamples,
     shared: Arc<MusicShared>,
-    position: usize,
     volume: f32,
     looping: bool,
+    /// Total samples consumed (drives the shared position mirror).
+    consumed: usize,
 }
 
 pub struct AudioRenderer {
@@ -94,12 +118,23 @@ impl AudioRenderer {
                     }
                 }
             }
-            Cmd::PlayMusic { music_id, data, shared, volume, looping } => {
+            Cmd::PlayMusic { music_id, payload, shared, volume, looping } => {
                 // Restart-from-zero semantics (matches the old mixer).
                 self.music.retain(|m| m.music_id != music_id);
                 shared.playing.store(true, Ordering::Relaxed);
                 shared.position.store(0, Ordering::Relaxed);
-                self.music.push(MusicVoice { music_id, data, shared, position: 0, volume, looping });
+                let samples = match payload {
+                    MusicPayload::Full(data) => MusicSamples::Full { data, position: 0 },
+                    #[cfg(not(target_arch = "wasm32"))]
+                    MusicPayload::Stream { consumer, channels } => MusicSamples::Stream {
+                        consumer,
+                        channels,
+                        current: Vec::new(),
+                        offset: 0,
+                        ended: false,
+                    },
+                };
+                self.music.push(MusicVoice { music_id, samples, shared, volume, looping, consumed: 0 });
             }
             Cmd::StopMusic { music_id } => {
                 if let Some(m) = self.music.iter().position(|m| m.music_id == music_id) {
@@ -192,31 +227,81 @@ impl AudioRenderer {
         self.music.retain_mut(|m| {
             let vol = m.volume * master;
             let mut i = 0;
-            while i < output.len() && m.position < m.data.samples.len() {
-                if m.data.channels == 1 {
-                    let sample = m.data.samples[m.position] * vol;
-                    output[i] += sample;
-                    if i + 1 < output.len() {
-                        output[i + 1] += sample;
+            let mut finished = false;
+            match &mut m.samples {
+                MusicSamples::Full { data, position } => {
+                    while i < output.len() && *position < data.samples.len() {
+                        if data.channels == 1 {
+                            let sample = data.samples[*position] * vol;
+                            output[i] += sample;
+                            if i + 1 < output.len() {
+                                output[i + 1] += sample;
+                            }
+                            *position += 1;
+                            i += 2;
+                        } else {
+                            output[i] += data.samples[*position] * vol;
+                            *position += 1;
+                            i += 1;
+                        }
                     }
-                    m.position += 1;
-                    i += 2;
-                } else {
-                    output[i] += m.data.samples[m.position] * vol;
-                    m.position += 1;
-                    i += 1;
+                    if *position >= data.samples.len() {
+                        if m.looping {
+                            *position = 0;
+                        } else {
+                            finished = true;
+                        }
+                    }
+                    m.consumed = *position;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                MusicSamples::Stream { consumer, channels, current, offset, ended } => {
+                    let mono = *channels == 1;
+                    while i < output.len() {
+                        if *offset >= current.len() {
+                            // Refill from the decode worker's ring.
+                            match consumer.rx.pop() {
+                                Some(StreamMsg::Chunk(c)) => {
+                                    *current = c;
+                                    *offset = 0;
+                                }
+                                Some(StreamMsg::End) => {
+                                    *ended = true;
+                                    break;
+                                }
+                                // Underrun: worker is behind (cold start
+                                // or scheduling hiccup) — emit silence for
+                                // the rest of this callback, resume next.
+                                None => break,
+                            }
+                        }
+                        if mono {
+                            let sample = current[*offset] * vol;
+                            output[i] += sample;
+                            if i + 1 < output.len() {
+                                output[i + 1] += sample;
+                            }
+                            *offset += 1;
+                            m.consumed += 1;
+                            i += 2;
+                        } else {
+                            output[i] += current[*offset] * vol;
+                            *offset += 1;
+                            m.consumed += 1;
+                            i += 1;
+                        }
+                    }
+                    if *ended && *offset >= current.len() {
+                        finished = true;
+                    }
                 }
             }
-            if m.position >= m.data.samples.len() {
-                if m.looping {
-                    m.position = 0;
-                } else {
-                    m.shared.playing.store(false, Ordering::Relaxed);
-                    m.shared.position.store(0, Ordering::Relaxed);
-                    return false;
-                }
+            if finished {
+                m.shared.playing.store(false, Ordering::Relaxed);
+                m.shared.position.store(0, Ordering::Relaxed);
+                return false;
             }
-            m.shared.position.store(m.position, Ordering::Relaxed);
+            m.shared.position.store(m.consumed, Ordering::Relaxed);
             true
         });
     }
