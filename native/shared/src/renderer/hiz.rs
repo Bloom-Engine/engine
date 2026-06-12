@@ -5,7 +5,8 @@
 //! policy); pipelines and the mip chain stay fields on [`Renderer`].
 
 use super::formats::HIZ_MIP_COUNT;
-use super::{HizDownsampleParams, HizLinearizeParams, SsaoBlurParams};
+use super::formats::halton;
+use super::{HizDownsampleParams, HizLinearizeParams, SsaoBlurParams, SsaoParams};
 use super::Renderer;
 
 impl Renderer {
@@ -167,5 +168,98 @@ impl Renderer {
             multiview_mask: None,
         });
     }
+    }
+}
+
+impl Renderer {
+    /// GTAO compute dispatch (half-res, Hi-Z-accelerated, temporal EMA
+    /// ping-pong). Caller guards on `ssao_enabled` and passes the
+    /// projection terms. Split from end_frame_with_scene.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_gtao(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+        half_w: u32,
+        half_h: u32,
+        p00: f32,
+        p11: f32,
+        p20: f32,
+        p21: f32,
+    ) {
+        let p22 = self.current_proj_matrix[2][2];
+        let p32 = self.current_proj_matrix[3][2];
+        // --- SSAO (compute GTAO, samples Hi-Z pyramid) --------------
+        let ld = self.lighting_uniforms.light_dir;
+        let v = &self.current_view_matrix;
+        let light_dir_vs = [
+            v[0][0]*ld[0] + v[1][0]*ld[1] + v[2][0]*ld[2],
+            v[0][1]*ld[0] + v[1][1]*ld[1] + v[2][1]*ld[2],
+            v[0][2]*ld[0] + v[1][2]*ld[1] + v[2][2]*ld[2],
+            0.0,
+        ];
+        // Temporal accumulation: ping-pong history textures.
+        // `write_idx` is the current-frame output; `read_idx` the
+        // previous frame's result. First 4 frames force alpha=1
+        // so the initial clear never contaminates the signal.
+        let write_idx = self.ssao_history_idx;
+        let read_idx = 1 - write_idx;
+        let frame_phase = self.ssao_history_frame % 4;
+        let force_refresh = if self.ssao_history_frame < 4 { 1u32 } else { 0u32 };
+        // 4-frame EMA: alpha = 1/4 = 0.25 gives equal weight to
+        // each of the 4 phases at steady state.
+        let alpha = 0.25_f32;
+        // Halton-5 rotation: uncorrelated with TAA's base-2/3 jitter
+        // so the two noise patterns don't resonate.
+        let halton5 = halton(self.ssao_history_frame + 1, 5);
+        let sp = SsaoParams {
+            params: [
+                1.0 / half_w as f32,
+                1.0 / half_h as f32,
+                self.ssao_radius,
+                self.ssao_strength,
+            ],
+            proj_row01: [p00, p11, p20, p21],
+            proj_z: [p22, p32, 1.0 / p00, 1.0 / p11],
+            light_dir_vs,
+            size: [half_w, half_h, frame_phase, force_refresh],
+            temporal: [alpha, halton5, 0.0, 0.0],
+        };
+        self.queue.write_buffer(&self.ssao_uniform_buffer, 0, bytemuck::bytes_of(&sp));
+
+        if self.ssao_bg_cache[write_idx].is_none() {
+            self.ssao_bg_cache[write_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ssao_bg"),
+                layout: &self.ssao_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ssao_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.hiz_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.hiz_views[1]) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.hiz_views[2]) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.hiz_views[3]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.hiz_views[4]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.ssao_history_views[read_idx]) },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.ssao_history_views[write_idx]) },
+                ],
+            }));
+        }
+        let bg = self.ssao_bg_cache[write_idx].as_ref().unwrap();
+
+        let ssao_ts = profiler.compute_pass_timestamp_writes("ssao_pass");
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ssao_pass"),
+            timestamp_writes: ssao_ts,
+        });
+        pass.set_pipeline(&self.ssao_pipeline);
+        pass.set_bind_group(0, bg, &[]);
+        pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
+
+        // Flip ping-pong indices for the next frame.
+        self.ssao_history_idx = read_idx;
+        self.ssao_history_frame = self.ssao_history_frame.wrapping_add(1);
     }
 }
