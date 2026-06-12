@@ -21,7 +21,10 @@ models3d = ["dep:gltf", "dep:image_dds"]
 # EN-014 — image codecs beyond PNG. `image::load_from_memory` is
 # format-agnostic, so disabling this only changes which file formats
 # decode at runtime; PNG always works.
-image-extras = ["image/jpeg", "image/bmp", "image/tga", "image/hdr"]
+# image_dds rides along: cooked BC7 .dds textures are "image formats
+# beyond PNG" in the same sense as jpeg/bmp/tga (decode-only here; the
+# encoder lives in tools/bloom-cook).
+image-extras = ["image/jpeg", "image/bmp", "image/tga", "image/hdr", "dep:image_dds"]
 
 [build-dependencies]
 cmake = "0.1"

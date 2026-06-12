@@ -37,6 +37,14 @@ fn try_engine() -> Option<EngineState> {
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .ok()?;
+    // Software rasterizers (WARP on the Windows CI runners, llvmpipe on
+    // Linux) are not regression targets — WARP crashes outright in the
+    // surface-less path, and software fidelity differs from the real
+    // GPUs the goldens were generated on. Real-GPU coverage comes from
+    // the macos-14 runners.
+    if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+        return None;
+    }
     let (device, queue) =
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_limits: adapter.limits(),
@@ -280,4 +288,60 @@ fn golden_lod_selection() {
         r.add_directional_light(-0.4, -1.0, -0.4, 1.0, 1.0, 1.0, 1.5);
     });
     compare_or_update("lod_selection", w, h, &rgba);
+}
+
+#[test]
+fn cooked_bc7_texture_matches_raw() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let png = std::fs::read(fixtures.join("quadrants.png")).unwrap();
+    let dds = std::fs::read(fixtures.join("quadrants_bc7.dds")).unwrap();
+
+    // Load the same image through both paths: raw PNG (decode +
+    // runtime mips) and cooked BC7 DDS (compressed upload where the
+    // adapter has BC, CPU decode otherwise — both exercised by CI
+    // across runners).
+    let renderer = &mut eng.renderer as *mut bloom_shared::renderer::Renderer;
+    let raw = eng.textures.load_texture(unsafe { &mut *renderer }, &png);
+    let cooked = eng.textures.load_texture(unsafe { &mut *renderer }, &dds);
+    assert_ne!(raw, 0.0);
+    assert_ne!(cooked, 0.0, "cooked DDS failed to load");
+    assert_eq!(
+        {
+            let t = eng.textures.get(cooked).unwrap();
+            (t.width, t.height)
+        },
+        (64, 64)
+    );
+
+    let raw_idx = eng.textures.get(raw).unwrap().bind_group_idx;
+    let cooked_idx = eng.textures.get(cooked).unwrap().bind_group_idx;
+
+    let (w, _h, frame_raw) = render(&mut eng, 2, |eng| {
+        eng.renderer.set_clear_color(0.0, 0.0, 0.0, 255.0);
+        eng.renderer.draw_texture(raw_idx, 0.0, 0.0, 255.0, 255.0, 255.0, 255.0);
+    });
+    let (_, _, frame_cooked) = render(&mut eng, 2, |eng| {
+        eng.renderer.set_clear_color(0.0, 0.0, 0.0, 255.0);
+        eng.renderer.draw_texture(cooked_idx, 0.0, 0.0, 255.0, 255.0, 255.0, 255.0);
+    });
+
+    // BC7 is lossy but high quality: the two frames must agree closely
+    // wherever the texture landed. Compare the texture region.
+    let mut max_diff = 0u8;
+    for y in 0..64u32 {
+        for x in 0..64u32 {
+            let i = ((y * w + x) * 4) as usize;
+            for c in 0..3 {
+                max_diff = max_diff.max(frame_raw[i + c].abs_diff(frame_cooked[i + c]));
+            }
+        }
+    }
+    assert!(
+        max_diff <= 16,
+        "cooked render diverges from raw render: max channel diff {max_diff}"
+    );
 }

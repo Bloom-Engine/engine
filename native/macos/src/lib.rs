@@ -382,6 +382,11 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
         required_features |= wgpu::Features::TIMESTAMP_QUERY;
     }
+    // Cooked BC7 textures (bloom-cook) upload compressed when the
+    // adapter has BC support; without it they CPU-decode at load.
+    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
+    }
     // Ticket 007b: request ray-query + BLAS/TLAS where the adapter
     // supports both (Apple Silicon Metal, DXR 1.1, VK_KHR_ray_query).
     // `BLOOM_FORCE_SW_GI=1` forces the SW fallback for testing parity

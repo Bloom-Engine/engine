@@ -1,0 +1,17 @@
+[package]
+name = "bloom-cook"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# encode feature pulls intel_tex_2 for BC7 — the cook tool is the one
+# place that pays that build cost; the engine runtime only decodes.
+image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image", "encode"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga"] }
+
+[[bin]]
+name = "bloom-cook"
+path = "main.rs"
+
+[profile.release]
+opt-level = 3

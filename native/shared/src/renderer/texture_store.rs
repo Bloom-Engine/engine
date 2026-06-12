@@ -308,7 +308,8 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                // Matches register_texture's non-sRGB convention.
+                format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
@@ -382,5 +383,86 @@ impl Renderer {
     /// Q1: Get a reference to an internal texture by index.
     pub fn get_texture_ref(&self, index: usize) -> Option<&wgpu::Texture> {
         self.textures.get(index)
+    }
+}
+
+impl Renderer {
+    /// Register a cooked BC7 DDS texture (output of bloom-cook).
+    /// Gated on `image-extras` (DDS is a beyond-PNG runtime codec).
+    ///
+    /// On adapters with `TEXTURE_COMPRESSION_BC` the precomputed mip
+    /// chain uploads compressed — 4x less VRAM than RGBA8. Returns None
+    /// when the device lacks BC support; the caller falls back to CPU
+    /// decode through the normal RGBA path.
+    #[cfg(feature = "image-extras")]
+    pub fn register_texture_dds(&mut self, dds: &image_dds::ddsfile::Dds) -> Option<u32> {
+        if !self.device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+            return None;
+        }
+        let surface = image_dds::Surface::from_dds(dds).ok()?;
+        // Engine convention: game textures bind as non-sRGB (the
+        // pipeline applies the transfer itself — see register_texture's
+        // Rgba8Unorm). Both BC7 variants therefore map to the Unorm
+        // view; the sRGB flag in the DDS only records authoring intent.
+        let format = match surface.image_format {
+            image_dds::ImageFormat::BC7RgbaUnormSrgb
+            | image_dds::ImageFormat::BC7RgbaUnorm => wgpu::TextureFormat::Bc7RgbaUnorm,
+            // Other BCn variants can map here as the cook tool grows.
+            _ => return None,
+        };
+        let width = surface.width;
+        let height = surface.height;
+        let mip_count = surface.mipmaps.max(1);
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cooked_bc7"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: mip_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // BC7: 4x4 blocks, 16 bytes each; Surface::get hands back each
+        // mip's slice (truncated files yield None — bail cleanly).
+        for mip in 0..mip_count {
+            let mw = (width >> mip).max(1);
+            let mh = (height >> mip).max(1);
+            let blocks_w = mw.div_ceil(4);
+            let blocks_h = mh.div_ceil(4);
+            let mip_data = surface.get(0, 0, mip)?;
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: mip,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                mip_data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(blocks_w * 16),
+                    rows_per_image: Some(blocks_h),
+                },
+                wgpu::Extent3d { width: mw, height: mh, depth_or_array_layers: 1 },
+            );
+        }
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cooked_bc7_bg"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        let idx = self.texture_bind_groups.len() as u32;
+        self.texture_bind_groups.push(bind_group);
+        self.textures.push(texture);
+        self.texture_sizes.push((width, height));
+        Some(idx)
     }
 }

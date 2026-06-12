@@ -755,6 +755,11 @@ unsafe extern "C" fn scene_will_connect(
     if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
         required_features |= wgpu::Features::TIMESTAMP_QUERY;
     }
+    // Cooked BC7 textures (bloom-cook) upload compressed when the
+    // adapter has BC support; without it they CPU-decode at load.
+    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
+    }
     if !force_sw_gi && supported.contains(rt_mask) {
         required_features |= rt_mask;
     }
@@ -1042,6 +1047,11 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
     // when the adapter doesn't grant it.
     if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
         required_features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
+    // Cooked BC7 textures (bloom-cook) upload compressed when the
+    // adapter has BC support; without it they CPU-decode at load.
+    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
     }
     if !force_sw_gi && supported.contains(rt_mask) {
         required_features |= rt_mask;
