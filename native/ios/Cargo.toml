@@ -8,8 +8,12 @@ name = "bloom_ios"
 crate-type = ["staticlib"]
 
 [features]
-default = ["jolt"]
+default = ["jolt", "models3d", "image-extras"]
 jolt = ["bloom-shared/jolt"]
+# EN-014 — see native/shared/Cargo.toml. Default-on so existing games are
+# unaffected; pure-2D games opt out via Perry feature forwarding.
+models3d = ["bloom-shared/models3d"]
+image-extras = ["bloom-shared/image-extras"]
 
 # Match perry-runtime's panic strategy so the final perry-driven link
 # doesn't see two copies of rust_eh_personality (and friends) from two
