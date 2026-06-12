@@ -397,6 +397,16 @@
 }
 #[no_mangle] pub extern "C" fn bloom_physics_step(_p0: f64, _p1: f64, _p2: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_physics_step_fixed(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_set_fixed_timestep(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_set_interpolation(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_get_step_alpha(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_physics_set_layer_collides(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_physics_get_layer_collides(_p0: f64, _p1: f64, _p2: f64) -> f64 {

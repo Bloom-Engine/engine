@@ -23,6 +23,10 @@ declare function bloom_physics_set_gravity(world: number, gx: number, gy: number
 declare function bloom_physics_get_gravity(world: number, axis: number): number;
 declare function bloom_physics_optimize_broadphase(world: number): void;
 declare function bloom_physics_step(world: number, dt: number, collisionSteps: number): void;
+declare function bloom_physics_step_fixed(world: number, dt: number, collisionSteps: number): number;
+declare function bloom_physics_set_fixed_timestep(world: number, hz: number, maxSteps: number): void;
+declare function bloom_physics_set_interpolation(world: number, on: number): void;
+declare function bloom_physics_get_step_alpha(world: number): number;
 declare function bloom_physics_set_layer_collides(world: number, a: number, b: number, collides: number): void;
 declare function bloom_physics_get_layer_collides(world: number, a: number, b: number): number;
 declare function bloom_physics_body_count(world: number): number;
@@ -260,8 +264,60 @@ export function getGravity(world: WorldHandle): Vec3 {
 
 export function optimizeBroadphase(world: WorldHandle): void { bloom_physics_optimize_broadphase(world); }
 
-export function step(world: WorldHandle, deltaTime: number, collisionSteps: number = 1): void {
+/// Advance the simulation by `deltaTime` seconds of wall-clock time.
+///
+/// Steps the world at a fixed rate (default 60 Hz — configure with
+/// `setFixedTimestep`) using an accumulator: whole fixed steps are
+/// simulated, the remainder carries to the next frame, and a single long
+/// frame is clamped (0.25 s) and capped (default 4 steps) so hitches slow
+/// the simulation down instead of destabilizing the solver.
+///
+/// Returns the interpolation alpha in [0, 1): how far the carried
+/// remainder sits between the last two physics states. With
+/// `setInterpolation(world, true)`, body position/rotation getters apply
+/// it automatically for smooth rendering at any display rate.
+///
+/// Call once per frame with the frame's delta time:
+/// ```ts
+/// runGame((dt) => {
+///   physics.step(world, dt);
+///   // draw using body positions...
+/// });
+/// ```
+///
+/// Need the old behavior of simulating exactly `deltaTime` in one solver
+/// call? Use `stepVariable` — and know that it trades stability for it.
+export function step(world: WorldHandle, deltaTime: number, collisionSteps: number = 1): number {
+  return bloom_physics_step_fixed(world, deltaTime, collisionSteps);
+}
+
+/// Advance the simulation by exactly `deltaTime` in a single solver call
+/// (the pre-fixed-timestep behavior). Variable step sizes feed frame
+/// hitches straight into the solver — prefer `step` unless you are
+/// driving the accumulator yourself.
+export function stepVariable(world: WorldHandle, deltaTime: number, collisionSteps: number = 1): void {
   bloom_physics_step(world, deltaTime, collisionSteps);
+}
+
+/// Set the fixed simulation rate (`hz`, default 60) and the per-frame
+/// catch-up cap (`maxSteps`, default 4) used by `step`.
+export function setFixedTimestep(world: WorldHandle, hz: number, maxSteps: number = 4): void {
+  bloom_physics_set_fixed_timestep(world, hz, maxSteps);
+}
+
+/// Smooth rendering between fixed physics steps: when enabled, body
+/// position/rotation getters return states blended by the current step
+/// alpha instead of the raw simulation state. Physics queries (raycasts,
+/// overlaps) always see the real simulation state. Off by default.
+export function setInterpolation(world: WorldHandle, on: boolean): void {
+  bloom_physics_set_interpolation(world, on ? 1 : 0);
+}
+
+/// Interpolation alpha from the most recent `step` (1.0 if the world has
+/// never been fixed-stepped). Useful for interpolating game-side state
+/// the same way the engine interpolates body transforms.
+export function getStepAlpha(world: WorldHandle): number {
+  return bloom_physics_get_step_alpha(world);
 }
 
 export function setLayerCollides(world: WorldHandle, a: number, b: number, collides: boolean): void {

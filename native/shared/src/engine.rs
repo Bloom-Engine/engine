@@ -107,9 +107,19 @@ impl EngineState {
         }
     }
 
+    /// Hard ceiling on the delta time games observe. A debugger pause, OS
+    /// hitch, or backgrounded tab produces one slowed-down frame instead
+    /// of a quarter-hour dt that explodes physics, animation, and any
+    /// game-side `pos += vel * dt`. Matches Unity's maximumDeltaTime
+    /// default order of magnitude.
+    pub const MAX_DELTA_TIME: f64 = 0.25;
+
     pub fn begin_frame(&mut self) {
         let now = Instant::now();
-        self.delta_time = now.duration_since(self.last_frame_time).as_secs_f64();
+        self.delta_time = now
+            .duration_since(self.last_frame_time)
+            .as_secs_f64()
+            .min(Self::MAX_DELTA_TIME);
         self.last_frame_time = now;
 
         // DRS samples wall-clock frame time and may step render_scale

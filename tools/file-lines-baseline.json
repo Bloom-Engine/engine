@@ -1,7 +1,7 @@
 {
   "native/shared/src/renderer/mod.rs": 13956,
   "native/shared/src/renderer/shaders.rs": 5861,
-  "native/web/src/lib.rs": 2747,
+  "native/web/src/lib.rs": 2146,
   "native/shared/src/renderer/material_system.rs": 2118,
   "tools/bloom-reference/src/main.rs": 2330
 }

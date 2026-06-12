@@ -2224,6 +2224,39 @@
           "returns": "void"
         },
         {
+          "name": "bloom_physics_step_fixed",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_physics_set_fixed_timestep",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_physics_set_interpolation",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_physics_get_step_alpha",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_physics_set_layer_collides",
           "params": [
             "f64",
