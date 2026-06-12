@@ -27,6 +27,7 @@ pub use util::{
     mat4_multiply, mat4_mul_vec4,
     mat4_translate, mat4_scale, mat4_invert,
 };
+#[cfg(not(target_arch = "wasm32"))] // file-writing screenshot path
 use util::encode_png_simple;
 
 mod brdf_lut;
