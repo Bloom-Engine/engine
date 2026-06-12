@@ -111,6 +111,69 @@ macro_rules! __bloom_ffi_scene {
         })
         }
 
+        // bloom_scene_set_lod — reduced-detail variant for a node. Same
+        // 12-float vertex layout as bloom_scene_update_geometry; the base
+        // geometry is the finest level. max_coverage = screen-coverage
+        // threshold below which this level renders.
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_set_lod(
+            handle: f64,
+            lod_index: f64,
+            vert_ptr: *const f64,
+            vert_count: f64,
+            idx_ptr: *const f64,
+            idx_count: f64,
+            max_coverage: f64,
+        ) {
+            $crate::ffi::guard("bloom_scene_set_lod", move || {
+                if vert_ptr.is_null() || idx_ptr.is_null() { return; }
+                let nv = vert_count as usize;
+                let ni = idx_count as usize;
+                let vert_floats = unsafe { std::slice::from_raw_parts(vert_ptr, nv * 12) };
+                let idx_floats = unsafe { std::slice::from_raw_parts(idx_ptr, ni) };
+                let mut vertices = Vec::with_capacity(nv);
+                for i in 0..nv {
+                    let base = i * 12;
+                    vertices.push($crate::renderer::Vertex3D {
+                        position: [vert_floats[base] as f32, vert_floats[base+1] as f32, vert_floats[base+2] as f32],
+                        normal: [vert_floats[base+3] as f32, vert_floats[base+4] as f32, vert_floats[base+5] as f32],
+                        color: [vert_floats[base+6] as f32, vert_floats[base+7] as f32, vert_floats[base+8] as f32, vert_floats[base+9] as f32],
+                        uv: [vert_floats[base+10] as f32, vert_floats[base+11] as f32],
+                        joints: [0.0; 4],
+                        weights: [0.0; 4],
+                        tangent: [0.0; 4],
+                    });
+                }
+                let indices: Vec<u32> = idx_floats.iter().map(|&v| v as u32).collect();
+                engine().scene.set_lod_geometry(handle, lod_index as usize, vertices, indices, max_coverage as f32);
+        })
+        }
+
+        // bloom_scene_attach_model_lod — model mesh as a reduced-detail
+        // variant (LOD counterpart of bloom_scene_attach_model).
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_attach_model_lod(node_handle: f64, model_handle: f64, mesh_index: f64, lod_index: f64, max_coverage: f64) {
+            $crate::ffi::guard("bloom_scene_attach_model_lod", move || {
+                let eng = engine();
+                let mi = mesh_index as usize;
+                let model_data = match eng.models.models.get(model_handle) {
+                    Some(md) => md,
+                    None => return,
+                };
+                if mi >= model_data.meshes.len() { return; }
+                let mesh = &model_data.meshes[mi];
+                let vertices = mesh.vertices.clone();
+                let indices = mesh.indices.clone();
+                eng.scene.set_lod_geometry(node_handle, lod_index as usize, vertices, indices, max_coverage as f32);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_attach_model_lod(_node_handle: f64, _model_handle: f64, _mesh_index: f64, _lod_index: f64, _max_coverage: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_scene_attach_model_lod", "models3d");
+        }
+
         // bloom_scene_set_material_color  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_scene_set_material_color(handle: f64, r: f64, g: f64, b: f64, a: f64) {

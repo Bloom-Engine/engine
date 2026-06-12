@@ -210,3 +210,74 @@ fn golden_many_point_lights() {
     });
     compare_or_update("many_point_lights", w, h, &rgba);
 }
+
+#[test]
+fn golden_lod_selection() {
+    use bloom_shared::renderer::Vertex3D;
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+
+    fn cube_verts(half: f32, color: [f32; 4]) -> (Vec<Vertex3D>, Vec<u32>) {
+        // 6 faces, outward winding (matches scene-node conventions:
+        // prepare() recomputes bounds from positions).
+        let h = half;
+        let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+            ([0.0, 0.0, -1.0], [[-h,-h,-h],[ h,-h,-h],[ h, h,-h],[-h, h,-h]]),
+            ([0.0, 0.0,  1.0], [[ h,-h, h],[-h,-h, h],[-h, h, h],[ h, h, h]]),
+            ([-1.0, 0.0, 0.0], [[-h,-h, h],[-h,-h,-h],[-h, h,-h],[-h, h, h]]),
+            ([1.0, 0.0, 0.0],  [[ h,-h,-h],[ h,-h, h],[ h, h, h],[ h, h,-h]]),
+            ([0.0, 1.0, 0.0],  [[-h, h,-h],[ h, h,-h],[ h, h, h],[-h, h, h]]),
+            ([0.0, -1.0, 0.0], [[-h,-h, h],[ h,-h, h],[ h,-h,-h],[-h,-h,-h]]),
+        ];
+        let mut verts = Vec::new();
+        let mut idx = Vec::new();
+        for (normal, vs) in faces {
+            let base = verts.len() as u32;
+            for p in vs {
+                verts.push(Vertex3D {
+                    position: p,
+                    normal,
+                    color,
+                    uv: [0.0, 0.0],
+                    joints: [0.0; 4],
+                    weights: [0.0; 4],
+                    tangent: [0.0; 4],
+                });
+            }
+            idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        }
+        (verts, idx)
+    }
+
+    let (red_v, red_i) = cube_verts(0.5, [0.9, 0.1, 0.1, 1.0]);
+    let (green_v, green_i) = cube_verts(0.5, [0.1, 0.9, 0.1, 1.0]);
+
+    let mut translate = |x: f32, z: f32| -> [[f32; 4]; 4] {
+        let mut m = [[0.0f32; 4]; 4];
+        m[0][0] = 1.0; m[1][1] = 1.0; m[2][2] = 1.0; m[3][3] = 1.0;
+        m[3][0] = x; m[3][2] = z;
+        m
+    };
+
+    // Near node: large on screen → base (red) geometry.
+    let near = eng.scene.create_node();
+    eng.scene.update_geometry(near, red_v.clone(), red_i.clone());
+    eng.scene.set_lod_geometry(near, 0, green_v.clone(), green_i.clone(), 0.12);
+    eng.scene.set_transform(near, translate(-1.0, 2.0));
+
+    // Far node: small on screen → LOD 0 (green) variant.
+    let far = eng.scene.create_node();
+    eng.scene.update_geometry(far, red_v, red_i);
+    eng.scene.set_lod_geometry(far, 0, green_v, green_i, 0.12);
+    eng.scene.set_transform(far, translate(6.0, -22.0));
+
+    let (w, h, rgba) = render(&mut eng, 4, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(8.0, 8.0, 12.0, 255.0);
+        r.begin_mode_3d(0.0, 1.5, 6.0, 0.0, 0.0, -4.0, 0.0, 1.0, 0.0, 50.0, 0.0);
+        r.add_directional_light(-0.4, -1.0, -0.4, 1.0, 1.0, 1.0, 1.5);
+    });
+    compare_or_update("lod_selection", w, h, &rgba);
+}

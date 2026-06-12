@@ -245,6 +245,10 @@
 }
 #[no_mangle] pub extern "C" fn bloom_unregister_frame_callback(_p0: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_scene_set_lod(_p0: f64, _p1: f64, _p2: i64, _p3: f64, _p4: i64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_scene_attach_model_lod(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_scene_node_vertex_count(_p0: f64) -> f64 {
     0.0
 }

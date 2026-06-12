@@ -229,6 +229,35 @@ export function setSceneNodeColor(handle: SceneNodeHandle, r: number, g: number,
 /**
  * Set PBR material properties (roughness and metalness).
  */
+/**
+ * Add a reduced-detail geometry variant to a node. The node's normal
+ * geometry is the finest level; `lodIndex` 0,1,2… are progressively
+ * coarser variants. `maxCoverage` is the screen-coverage threshold
+ * (0..1, fraction of the viewport the node's bounds span) below which
+ * this variant renders — give coarser variants smaller values, e.g.
+ * LOD0 at 0.4, LOD1 at 0.15, LOD2 at 0.05. Selection has hysteresis to
+ * avoid flicker at boundaries. Shadows and picking always use the full
+ * geometry. Vertex layout matches updateSceneNodeGeometry (12 floats).
+ */
+export function setSceneNodeLod(
+  handle: SceneNodeHandle, lodIndex: number,
+  vertices: number[], indices: number[], maxCoverage: number,
+): void {
+  bloom_scene_set_lod(handle, lodIndex, vertices as any, vertices.length / 12, indices as any, indices.length, maxCoverage);
+}
+
+/**
+ * Attach a mesh from a loaded model as a reduced-detail variant — the
+ * model-based counterpart of setSceneNodeLod. Export your LOD meshes as
+ * separate meshes (or models) and attach each with its threshold.
+ */
+export function attachModelLodToNode(
+  node: SceneNodeHandle, model: { handle: number }, meshIndex: number,
+  lodIndex: number, maxCoverage: number,
+): void {
+  bloom_scene_attach_model_lod(node, model.handle, meshIndex, lodIndex, maxCoverage);
+}
+
 export function setSceneNodePbr(handle: SceneNodeHandle, roughness: number, metalness: number): void {
   bloom_scene_set_material_pbr(handle, roughness, metalness);
 }

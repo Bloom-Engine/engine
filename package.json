@@ -1751,6 +1751,30 @@
           "returns": "void"
         },
         {
+          "name": "bloom_scene_set_lod",
+          "params": [
+            "f64",
+            "f64",
+            "i64",
+            "f64",
+            "i64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_scene_attach_model_lod",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_scene_set_material_color",
           "params": [
             "f64",
