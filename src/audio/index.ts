@@ -69,6 +69,13 @@ export function playMusic(music: Music): void {
   bloom_play_music(music.handle);
 }
 
+/**
+ * @internal Compiler workaround — not part of the public API.
+ * Identical to the non-Raw version but takes primitives instead of
+ * reading object fields (aarch64 Android Perry miscompilation where
+ * obj.field reads feeding f64 FFI args arrive as NaN). Use the
+ * non-Raw version; these disappear when the Perry fix ships.
+ */
 export function playMusicRaw(handle: number): void {
   bloom_play_music(handle);
 }
@@ -77,6 +84,13 @@ export function stopMusic(music: Music): void {
   bloom_stop_music(music.handle);
 }
 
+/**
+ * @internal Compiler workaround — not part of the public API.
+ * Identical to the non-Raw version but takes primitives instead of
+ * reading object fields (aarch64 Android Perry miscompilation where
+ * obj.field reads feeding f64 FFI args arrive as NaN). Use the
+ * non-Raw version; these disappear when the Perry fix ships.
+ */
 export function stopMusicRaw(handle: number): void {
   bloom_stop_music(handle);
 }
@@ -85,6 +99,13 @@ export function updateMusicStream(music: Music): void {
   bloom_update_music_stream(music.handle);
 }
 
+/**
+ * @internal Compiler workaround — not part of the public API.
+ * Identical to the non-Raw version but takes primitives instead of
+ * reading object fields (aarch64 Android Perry miscompilation where
+ * obj.field reads feeding f64 FFI args arrive as NaN). Use the
+ * non-Raw version; these disappear when the Perry fix ships.
+ */
 export function updateMusicStreamRaw(handle: number): void {
   bloom_update_music_stream(handle);
 }
@@ -96,6 +117,13 @@ export function setMusicVolume(music: Music, volume: number): void {
   bloom_set_music_volume(music.handle, volume);
 }
 
+/**
+ * @internal Compiler workaround — not part of the public API.
+ * Identical to the non-Raw version but takes primitives instead of
+ * reading object fields (aarch64 Android Perry miscompilation where
+ * obj.field reads feeding f64 FFI args arrive as NaN). Use the
+ * non-Raw version; these disappear when the Perry fix ships.
+ */
 export function setMusicVolumeRaw(handle: number, volume: number): void {
   bloom_set_music_volume(handle, volume);
 }
@@ -104,6 +132,13 @@ export function isMusicPlaying(music: Music): boolean {
   return bloom_is_music_playing(music.handle) !== 0;
 }
 
+/**
+ * @internal Compiler workaround — not part of the public API.
+ * Identical to the non-Raw version but takes primitives instead of
+ * reading object fields (aarch64 Android Perry miscompilation where
+ * obj.field reads feeding f64 FFI args arrive as NaN). Use the
+ * non-Raw version; these disappear when the Perry fix ships.
+ */
 export function isMusicPlayingRaw(handle: number): boolean {
   return bloom_is_music_playing(handle) !== 0;
 }

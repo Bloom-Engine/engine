@@ -46,7 +46,9 @@ export interface Camera3D {
 }
 
 export interface Texture {
-  id: number;
+  /** Engine handle — same field name as Sound/Music/Font/Model. (Was
+   *  `id` before v0.5, the lone outlier among resource types.) */
+  handle: number;
   width: number;
   height: number;
 }

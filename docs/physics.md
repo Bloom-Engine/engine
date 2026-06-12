@@ -107,11 +107,49 @@ const ball = physics.createBody(world, ballShape, {
 // 4. Call optimizeBroadphase once after initial body setup.
 physics.optimizeBroadphase(world);
 
-// 5. In your game loop:
-physics.step(world, 1 / 60);
+// 5. In your game loop — pass the real frame delta; step() runs the
+// simulation at a fixed rate internally (see "Stepping" below):
+physics.step(world, deltaTime);
 const pos = physics.getBodyPosition(ball);
 // ... read positions and render sprites / meshes at those transforms
 ```
+
+## Stepping
+
+`physics.step(world, deltaTime)` is **fixed-timestep**: it accumulates the
+wall-clock delta and advances the solver in whole steps of 1/60 s
+(configurable via `setFixedTimestep(world, hz, maxSteps?)`). Variable-size
+solver steps feed frame hitches straight into the constraint solver —
+tunneling and joint explosions on any slow frame — so the accumulator is
+the default, with two protections baked in:
+
+- A single frame's contribution is clamped to 0.25 s (debugger pauses and
+  OS hitches produce one slowed-down frame, not minutes of catch-up).
+- At most `maxSteps` (default 4) fixed steps run per frame; surplus
+  backlog is dropped. The simulation slows down instead of spiraling.
+
+`step` returns the **interpolation alpha**: how far the carried remainder
+sits between the last two physics states. Two ways to use it:
+
+```typescript
+// Easiest: let the engine blend body transforms for rendering.
+physics.setInterpolation(world, true);
+runGame((dt) => {
+  physics.step(world, dt);
+  const p = physics.getBodyPosition(ball); // already smoothed
+});
+
+// Manual: interpolate game-side state with the same alpha.
+const alpha = physics.step(world, dt);     // or physics.getStepAlpha(world)
+```
+
+With interpolation on, `getBodyPosition`/`getBodyRotation` return the
+blended state; physics queries (raycasts, overlaps, contacts) always see
+the raw simulation state.
+
+Exact-dt stepping is still available as `physics.stepVariable(world, dt)`
+for code that drives its own accumulator — it trades stability for
+control.
 
 ## Character controllers (Tier 2)
 

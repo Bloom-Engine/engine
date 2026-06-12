@@ -65,6 +65,19 @@ impl TextureManager {
     }
 
     pub fn load_texture(&mut self, renderer: &mut Renderer, file_data: &[u8]) -> f64 {
+        // Cooked textures (bloom-cook BC7 DDS) take the compressed path:
+        // direct mip-chain upload where the adapter has BC support, CPU
+        // decode to RGBA elsewhere. Magic-sniffed so loadTexture() is the
+        // one entry point for raw and cooked assets alike.
+        if file_data.len() >= 4 && &file_data[..4] == b"DDS " {
+            #[cfg(feature = "image-extras")]
+            return self.load_texture_dds(renderer, file_data);
+            #[cfg(not(feature = "image-extras"))]
+            {
+                crate::ffi::feature_off_warn_once("loadTexture(.dds)", "image-extras");
+                return 0.0;
+            }
+        }
         let img = match image::load_from_memory(file_data) {
             Ok(img) => img.to_rgba8(),
             Err(_) => return 0.0,
@@ -140,6 +153,26 @@ impl TextureManager {
                 let flipped = image::imageops::flip_vertical(&src);
                 img_data.data = flipped.into_raw();
             }
+        }
+    }
+
+    #[cfg(feature = "image-extras")]
+    fn load_texture_dds(&mut self, renderer: &mut Renderer, file_data: &[u8]) -> f64 {
+        let Ok(dds) = image_dds::ddsfile::Dds::read(std::io::Cursor::new(file_data)) else {
+            return 0.0;
+        };
+        let (width, height) = (dds.get_width(), dds.get_height());
+        if let Some(bind_group_idx) = renderer.register_texture_dds(&dds) {
+            return self.textures.alloc(TextureData { bind_group_idx, width, height });
+        }
+        // No BC support on this adapter (mobile GL): CPU-decode the top
+        // mip and feed the regular RGBA path (which regenerates mips).
+        match image_dds::image_from_dds(&dds, 0) {
+            Ok(rgba) => {
+                let bind_group_idx = renderer.register_texture(width, height, rgba.as_raw());
+                self.textures.alloc(TextureData { bind_group_idx, width, height })
+            }
+            Err(_) => 0.0,
         }
     }
 

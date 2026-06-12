@@ -455,11 +455,14 @@ pub extern "C" fn bloom_end_mode_2d() {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_draw_circle_lines(cx: f64, cy: f64, rad: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
+pub extern "C" fn bloom_draw_circle_lines(cx: f64, cy: f64, rad: f64, r: f64, g: f64, b: f64, a: f64) {
+    // ABI is (cx, cy, radius, r, g, b, a) — no thickness param (matches
+    // package.json + src/shapes). A phantom 4th `thickness` param here
+    // used to shift every color one slot right on watchOS.
     let mut c = DrawCmd::zero();
     c.kind = kind::CIRCLE_LINES;
     c.x = cx; c.y = cy; c.w = rad; c.h = rad;
-    c.thickness = thickness;
+    c.thickness = 1.0;
     c.r = r; c.g = g; c.b = b; c.a = a;
     draw_list::push(c);
 }
@@ -733,9 +736,11 @@ pub extern "C" fn bloom_draw_sphere_wires(x: f64, y: f64, z: f64, radius: f64,
 
 #[no_mangle]
 pub extern "C" fn bloom_draw_cylinder(x: f64, y: f64, z: f64,
-    radius_top: f64, _radius_bottom: f64, height: f64, _slices: f64,
+    radius_top: f64, _radius_bottom: f64, height: f64,
     r: f64, g: f64, b: f64, a: f64,
 ) {
+    // ABI is 10 params (no slices) — that's bloom_draw_cylinder_ex. The
+    // phantom `slices` param shifted every color one slot right.
     let mut c = DrawCmd::zero();
     c.kind = kind::CYLINDER;
     c.x = x; c.y = y; c.src_x = z; // src_x doubles as z on 3D cmds

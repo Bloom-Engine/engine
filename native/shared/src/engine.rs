@@ -45,6 +45,16 @@ pub struct EngineState {
 
     pub should_close: bool,
 
+    // Read-back state for the split FFI getters: bloom_scene_pick /
+    // bloom_scene_pick_all / bloom_project_to_screen store here, and the
+    // bloom_pick_hit_* / bloom_pick_all_* / bloom_project_screen_y getters
+    // read the components back one f64 at a time (Perry FFI returns are
+    // scalar). Lived in per-crate `static mut`s before the FFI
+    // unification.
+    pub last_pick: Option<crate::picking::PickResult>,
+    pub last_pick_all: Vec<crate::picking::PickResult>,
+    pub last_project: (f64, f64),
+
     // When true, end_frame() takes a direct-to-swapchain path that skips
     // scene graph prep, shadow maps, HDR/post-FX, SDF/WSRC bakes, etc.
     // Intended for pure-2D games that only need the batched 2D pipeline.
@@ -88,15 +98,28 @@ impl EngineState {
             current_fps: 0.0,
             start_time: now,
             should_close: false,
+            last_pick: None,
+            last_pick_all: Vec::new(),
+            last_project: (0.0, 0.0),
             direct_2d_mode: false,
             #[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
             jolt: JoltPhysics::new(),
         }
     }
 
+    /// Hard ceiling on the delta time games observe. A debugger pause, OS
+    /// hitch, or backgrounded tab produces one slowed-down frame instead
+    /// of a quarter-hour dt that explodes physics, animation, and any
+    /// game-side `pos += vel * dt`. Matches Unity's maximumDeltaTime
+    /// default order of magnitude.
+    pub const MAX_DELTA_TIME: f64 = 0.25;
+
     pub fn begin_frame(&mut self) {
         let now = Instant::now();
-        self.delta_time = now.duration_since(self.last_frame_time).as_secs_f64();
+        self.delta_time = now
+            .duration_since(self.last_frame_time)
+            .as_secs_f64()
+            .min(Self::MAX_DELTA_TIME);
         self.last_frame_time = now;
 
         // DRS samples wall-clock frame time and may step render_scale
@@ -136,12 +159,16 @@ impl EngineState {
             self.profiler.end("render_total");
         } else {
             self.profiler.begin("scene_prepare");
+            // Collect last frame's occlusion-grid readback (if it
+            // completed) before culling against it.
+            self.renderer.occlusion.poll(&self.renderer.device);
             self.scene.prepare(
                 &self.renderer.device,
                 &self.renderer.queue,
                 &self.renderer.vp_matrix(),
                 &self.renderer.prev_vp_matrix,
                 self.renderer.uniform_3d_layout(),
+                Some(&self.renderer.occlusion),
             );
             self.scene.prepare_materials(&self.renderer);
             self.profiler.end("scene_prepare");

@@ -133,6 +133,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_p0: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_occlusion_culling(_p0: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_set_render_scale(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_get_render_scale() -> f64 {
@@ -242,6 +244,10 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_unregister_frame_callback(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_lod(_p0: f64, _p1: f64, _p2: i64, _p3: f64, _p4: i64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_scene_attach_model_lod(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_scene_node_vertex_count(_p0: f64) -> f64 {
     0.0
@@ -396,6 +402,16 @@
 #[no_mangle] pub extern "C" fn bloom_physics_optimize_broadphase(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_physics_step(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_step_fixed(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_physics_set_fixed_timestep(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_set_interpolation(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_physics_get_step_alpha(_p0: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_physics_set_layer_collides(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
@@ -662,7 +678,7 @@
 }
 #[no_mangle] pub extern "C" fn bloom_physics_soft_body_set_vertex_inv_mass(_p0: f64, _p1: f64, _p2: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_physics_vehicle_create(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64, _p18: f64, _p19: f64, _p20: f64, _p21: f64, _p22: f64, _p23: f64, _p24: f64, _p25: f64, _p26: f64, _p27: f64, _p28: f64, _p29: f64, _p30: f64, _p31: f64, _p32: f64, _p33: f64, _p34: f64, _p35: f64, _p36: f64, _p37: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_vehicle_create(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64, _p18: f64, _p19: f64, _p20: f64, _p21: f64, _p22: f64, _p23: f64, _p24: f64, _p25: f64, _p26: f64, _p27: f64, _p28: f64, _p29: f64, _p30: f64, _p31: f64, _p32: f64, _p33: f64, _p34: f64, _p35: f64, _p36: f64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_physics_vehicle_destroy(_p0: f64) {

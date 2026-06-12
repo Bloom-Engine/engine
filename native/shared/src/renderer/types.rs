@@ -75,8 +75,15 @@ impl SceneMaterialUniforms {
     }
 }
 
-pub(super) const MAX_DIR_LIGHTS: usize = 4;
-pub(super) const MAX_POINT_LIGHTS: usize = 16;
+// Raised from 4/16: scenes were hard-capped at 16 point lights, the
+// audit's top graphics blocker. Arrays stay in a uniform buffer so the
+// cap raise works on every backend including WebGL2 (whose 16KB minimum
+// UBO size this still fits: 256*32B + 8*32B + header < 9KB). Shaders
+// loop only over the live count, so small scenes pay nothing. Per-pixel
+// cost for genuinely large light counts is the follow-up (froxel
+// clustering); this change removes the capability ceiling.
+pub(crate) const MAX_DIR_LIGHTS: usize = 8;
+pub(crate) const MAX_POINT_LIGHTS: usize = 256;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]

@@ -142,6 +142,7 @@ pub fn mat4_invert(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 /// Encode an RGB byte buffer (no alpha) as a PNG. Used by the
 /// pending-screenshot path so callers can hand us a path and get a
 /// PNG written to disk without worrying about cross-FFI buffer handoff.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn encode_png_simple(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
     use image::{ImageBuffer, Rgb};
     let buf: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_raw(width, height, rgb.to_vec())?;

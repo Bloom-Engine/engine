@@ -51,7 +51,7 @@ setDirectionalLight(0.5, 1.0, 0.3, 255, 240, 220, 0.7);
 const floor = createSceneNode();
 const floorPoly = [-5, -5, 5, -5, 5, 5, -5, 5];
 extrudePolygon(floor, floorPoly, 0.05);
-setSceneNodeColor(floor, 0.8, 0.78, 0.72, 1.0);
+setSceneNodeColor(floor, 204, 199, 184, 255);
 setSceneNodePbr(floor, 0.7, 0.0);
 
 // Walls
@@ -69,7 +69,7 @@ function makeWall(sx: number, sz: number, ex: number, ez: number): void {
     sx - nx, sz - nz,
   ];
   extrudePolygon(node, poly, 3.0);
-  setSceneNodeColor(node, 0.95, 0.93, 0.88, 1.0);
+  setSceneNodeColor(node, 242, 237, 224, 255);
   setSceneNodePbr(node, 0.85, 0.0);
 }
 
@@ -88,7 +88,7 @@ function makeBox(cx: number, cy: number, cz: number, w: number, h: number, d: nu
   // Offset Y via transform
   const t = mat4Translate(mat4Identity(), 0, cy, 0);
   setSceneNodeTransform(node, t);
-  setSceneNodeColor(node, r, g, b, 1.0);
+  setSceneNodeColor(node, r * 255, g * 255, b * 255, 255);
   setSceneNodePbr(node, 0.6, 0.0);
 }
 

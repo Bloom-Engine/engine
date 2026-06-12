@@ -79,7 +79,57 @@ pub struct JoltPhysics {
     /// Compound-shape builder state — cleared by compound_begin, extended
     /// by compound_add_child, consumed by compound_end.
     compound_children: Vec<(bj_shape, BjTransform)>,
+
+    /// Per-world fixed-timestep state, keyed by the raw bj_world handle.
+    /// Created lazily on the first step_fixed / set_fixed_timestep call;
+    /// worlds stepped only via the variable-rate `step()` never allocate
+    /// one.
+    step_states: std::collections::HashMap<u64, WorldStepState>,
 }
+
+/// Fixed-timestep accumulator + interpolation state for one world.
+///
+/// Variable-dt stepping feeds frame hitches straight into the solver
+/// (tunneling, constraint explosions); the accumulator decouples
+/// simulation rate from render rate the standard way: clamp the incoming
+/// frame dt, simulate N whole fixed steps, carry the remainder, and
+/// expose `alpha = remainder / fixed_dt` so rendering can interpolate
+/// between the last two physics states.
+struct WorldStepState {
+    fixed_dt: f32,
+    /// Spiral-of-death guard: at most this many fixed steps per frame.
+    /// When the cap hits, the surplus backlog is dropped — the simulation
+    /// slows down instead of feeding ever-longer frames back into itself.
+    max_steps_per_frame: u32,
+    accumulator: f32,
+    /// remainder / fixed_dt after the latest step_fixed, in [0, 1).
+    alpha: f32,
+    /// When true, body position/rotation getters blend between the state
+    /// snapshot taken before the latest step batch and the current state.
+    /// Physics queries (raycast/overlap) always see the real simulation
+    /// state regardless.
+    interpolate: bool,
+    /// bj_body → (position, rotation) captured before the latest batch.
+    prev: std::collections::HashMap<u64, (BjVec3, BjQuat)>,
+}
+
+impl Default for WorldStepState {
+    fn default() -> Self {
+        Self {
+            fixed_dt: 1.0 / 60.0,
+            max_steps_per_frame: 4,
+            accumulator: 0.0,
+            alpha: 1.0,
+            interpolate: false,
+            prev: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Hard ceiling on a single frame's contribution to the accumulator.
+/// A debugger pause or OS hitch produces one slowed-down frame instead of
+/// minutes of simulated catch-up.
+const MAX_FRAME_DT: f32 = 0.25;
 
 impl Default for JoltPhysics {
     fn default() -> Self { Self::new() }
@@ -101,6 +151,7 @@ impl JoltPhysics {
             scratch_f32: Vec::with_capacity(1024),
             scratch_u32: Vec::with_capacity(512),
             compound_children: Vec::with_capacity(16),
+            step_states: std::collections::HashMap::new(),
         }
     }
 
@@ -221,6 +272,7 @@ impl JoltPhysics {
                     unsafe { bj_constraint_destroy(w, c); }
                 }
             }
+            self.step_states.remove(&world);
             unsafe { bj_world_destroy(world); }
         }
     }
@@ -249,18 +301,133 @@ impl JoltPhysics {
     pub fn step(&mut self, world_h: f64, dt: f32, collision_steps: u32) {
         if let Some(&world) = self.worlds.get(world_h) {
             unsafe { bj_world_step(world, dt, collision_steps.max(1)); }
-            // Drain contact events into our cache so they survive across queries.
-            let count = unsafe { bj_world_contact_count(world) };
-            if count > 0 {
-                self.contact_cache.events.resize(count as usize, unsafe { std::mem::zeroed() });
-                let drained = unsafe {
-                    bj_world_pop_contacts(world, self.contact_cache.events.as_mut_ptr(), count)
-                };
-                self.contact_cache.events.truncate(drained as usize);
-            } else {
-                self.contact_cache.events.clear();
-            }
+            self.drain_contacts(world);
         }
+    }
+
+    /// Drain the shim's queued contact events into our cache so they
+    /// survive across queries. The shim queue accumulates across multiple
+    /// bj_world_step calls, so one drain after a fixed-step batch captures
+    /// the whole batch's events.
+    fn drain_contacts(&mut self, world: bj_world) {
+        let count = unsafe { bj_world_contact_count(world) };
+        if count > 0 {
+            self.contact_cache.events.resize(count as usize, unsafe { std::mem::zeroed() });
+            let drained = unsafe {
+                bj_world_pop_contacts(world, self.contact_cache.events.as_mut_ptr(), count)
+            };
+            self.contact_cache.events.truncate(drained as usize);
+        } else {
+            self.contact_cache.events.clear();
+        }
+    }
+
+    /// Advance the world by whole fixed steps, carrying the remainder.
+    /// Returns the interpolation alpha in [0, 1): how far the carried
+    /// remainder sits between the last simulated state and the next.
+    ///
+    /// This is the default stepping mode for the TS `physics.step()` API;
+    /// the variable-rate `step()` above remains as an explicit opt-out.
+    pub fn step_fixed(&mut self, world_h: f64, frame_dt: f32, collision_steps: u32) -> f32 {
+        let Some(&world) = self.worlds.get(world_h) else { return 1.0 };
+        let dt = if frame_dt.is_finite() { frame_dt.clamp(0.0, MAX_FRAME_DT) } else { 0.0 };
+
+        let st = self.step_states.entry(world).or_default();
+        st.accumulator += dt;
+        let fixed = st.fixed_dt;
+        let mut steps = (st.accumulator / fixed) as u32;
+        if steps > st.max_steps_per_frame {
+            steps = st.max_steps_per_frame;
+            // Drop the surplus backlog (keep at most one extra step's worth
+            // so alpha stays meaningful) — slow down, don't spiral.
+            st.accumulator = st.accumulator.min(fixed * (steps as f32 + 1.0));
+        }
+        let interpolate = st.interpolate;
+
+        if steps > 0 {
+            // Interpolation blends between the two most recent simulated
+            // states, so the snapshot is taken before the LAST step of the
+            // batch — snapshotting before the whole batch would render a
+            // backward jump on multi-step catch-up frames.
+            let mut snap = None;
+            for i in 0..steps {
+                if interpolate && i + 1 == steps {
+                    snap = Some(self.snapshot_world_bodies(world));
+                }
+                unsafe { bj_world_step(world, fixed, collision_steps.max(1)); }
+            }
+            if let Some(s) = snap {
+                self.step_states.get_mut(&world).unwrap().prev = s;
+            }
+            self.drain_contacts(world);
+        }
+
+        let st = self.step_states.get_mut(&world).unwrap();
+        st.accumulator -= steps as f32 * fixed;
+        st.alpha = (st.accumulator / fixed).clamp(0.0, 1.0);
+        st.alpha
+    }
+
+    /// Configure the fixed step rate (`hz`, e.g. 60.0) and the per-frame
+    /// catch-up cap for a world. Values <= 0 keep the current setting.
+    pub fn set_fixed_timestep(&mut self, world_h: f64, hz: f32, max_steps: u32) {
+        let Some(&world) = self.worlds.get(world_h) else { return };
+        let st = self.step_states.entry(world).or_default();
+        if hz > 0.0 && hz.is_finite() {
+            st.fixed_dt = 1.0 / hz;
+        }
+        if max_steps > 0 {
+            st.max_steps_per_frame = max_steps;
+        }
+    }
+
+    /// Enable/disable render interpolation for a world's body transform
+    /// getters. Off by default (getters return the raw simulation state).
+    pub fn set_interpolation(&mut self, world_h: f64, on: bool) {
+        let Some(&world) = self.worlds.get(world_h) else { return };
+        let st = self.step_states.entry(world).or_default();
+        st.interpolate = on;
+        if !on {
+            st.prev.clear();
+            st.alpha = 1.0;
+        }
+    }
+
+    /// Interpolation alpha from the most recent step_fixed (1.0 when the
+    /// world has never been fixed-stepped).
+    pub fn step_alpha(&self, world_h: f64) -> f32 {
+        self.worlds
+            .get(world_h)
+            .and_then(|w| self.step_states.get(w))
+            .map(|st| st.alpha)
+            .unwrap_or(1.0)
+    }
+
+    /// Capture (position, rotation) of every body in `world`.
+    fn snapshot_world_bodies(&self, world: bj_world) -> std::collections::HashMap<u64, (BjVec3, BjQuat)> {
+        self.bodies
+            .iter()
+            .filter(|(_, &(w, _))| w == world)
+            .map(|(_, &(w, b))| {
+                let mut v = BjVec3 { x: 0.0, y: 0.0, z: 0.0 };
+                let mut q = BjQuat { x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+                unsafe {
+                    bj_body_get_position(w, b, &mut v);
+                    bj_body_get_rotation(w, b, &mut q);
+                }
+                (b, (v, q))
+            })
+            .collect()
+    }
+
+    /// Blend factor + previous state for a body, when its world has
+    /// interpolation enabled and a fresh snapshot. None → return raw state.
+    fn interp_prev(&self, world: bj_world, body: bj_body) -> Option<(f32, &(BjVec3, BjQuat))> {
+        let st = self.step_states.get(&world)?;
+        if !st.interpolate || st.alpha >= 1.0 {
+            return None;
+        }
+        st.prev.get(&body).map(|p| (st.alpha, p))
     }
 
     pub fn set_layer_collides(&self, world_h: f64, a: u32, b: u32, collides: bool) {
@@ -453,18 +620,48 @@ impl JoltPhysics {
         self.resolve_body(h).map(|(w, b)| unsafe { bj_body_is_valid(w, b) } != 0).unwrap_or(false)
     }
 
+    /// Position for rendering. When the world has interpolation enabled
+    /// (set_interpolation), blends between the last two simulated states
+    /// using the step_fixed remainder; otherwise the raw simulation state.
     pub fn body_get_position_axis(&self, h: f64, axis: u32) -> f64 {
         if let Some((w, b)) = self.resolve_body(h) {
             let mut v = BjVec3::default();
             unsafe { bj_body_get_position(w, b, &mut v); }
+            if let Some((a, (pv, _))) = self.interp_prev(w, b) {
+                v = BjVec3 {
+                    x: pv.x + (v.x - pv.x) * a,
+                    y: pv.y + (v.y - pv.y) * a,
+                    z: pv.z + (v.z - pv.z) * a,
+                };
+            }
             return match axis { 0 => v.x, 1 => v.y, 2 => v.z, _ => 0.0 } as f64;
         }
         0.0
     }
+    /// Rotation for rendering — see body_get_position_axis. Interpolation
+    /// is a normalized lerp with shortest-path sign handling (nlerp): for
+    /// the sub-17ms rotation deltas a 60 Hz step produces, nlerp is
+    /// visually identical to slerp and considerably cheaper.
     pub fn body_get_rotation_axis(&self, h: f64, axis: u32) -> f64 {
         if let Some((w, b)) = self.resolve_body(h) {
             let mut q = BjQuat::default();
             unsafe { bj_body_get_rotation(w, b, &mut q); }
+            if let Some((a, (_, pq))) = self.interp_prev(w, b) {
+                // shortest path: flip the previous quat if the hemispheres differ
+                let dot = pq.x * q.x + pq.y * q.y + pq.z * q.z + pq.w * q.w;
+                let s = if dot < 0.0 { -1.0 } else { 1.0 };
+                let mut r = BjQuat {
+                    x: pq.x * s + (q.x - pq.x * s) * a,
+                    y: pq.y * s + (q.y - pq.y * s) * a,
+                    z: pq.z * s + (q.z - pq.z * s) * a,
+                    w: pq.w * s + (q.w - pq.w * s) * a,
+                };
+                let len = (r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w).sqrt();
+                if len > 1e-6 {
+                    r = BjQuat { x: r.x / len, y: r.y / len, z: r.z / len, w: r.w / len };
+                }
+                q = r;
+            }
             return match axis { 0 => q.x, 1 => q.y, 2 => q.z, 3 => q.w, _ => 0.0 } as f64;
         }
         0.0
@@ -1132,6 +1329,18 @@ macro_rules! define_physics_ffi {
         #[no_mangle] pub extern "C" fn bloom_physics_step(world: f64, dt: f64, collision_steps: f64) {
             bloom_jolt_ffi_physics().step(world, dt as f32, collision_steps as u32);
         }
+        #[no_mangle] pub extern "C" fn bloom_physics_step_fixed(world: f64, dt: f64, collision_steps: f64) -> f64 {
+            bloom_jolt_ffi_physics().step_fixed(world, dt as f32, collision_steps as u32) as f64
+        }
+        #[no_mangle] pub extern "C" fn bloom_physics_set_fixed_timestep(world: f64, hz: f64, max_steps: f64) {
+            bloom_jolt_ffi_physics().set_fixed_timestep(world, hz as f32, max_steps as u32);
+        }
+        #[no_mangle] pub extern "C" fn bloom_physics_set_interpolation(world: f64, on: f64) {
+            bloom_jolt_ffi_physics().set_interpolation(world, on != 0.0);
+        }
+        #[no_mangle] pub extern "C" fn bloom_physics_get_step_alpha(world: f64) -> f64 {
+            bloom_jolt_ffi_physics().step_alpha(world) as f64
+        }
         #[no_mangle] pub extern "C" fn bloom_physics_set_layer_collides(world: f64, a: f64, b: f64, collides: f64) {
             bloom_jolt_ffi_physics().set_layer_collides(world, a as u32, b as u32, collides != 0.0);
         }
@@ -1525,4 +1734,133 @@ macro_rules! define_physics_ffi {
             bloom_jolt_ffi_physics().vehicle_get_wheel_angular_velocity(v, wheel_index as u32) as f64
         }
     };
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-timestep stepping tests. Run with the same `jolt` feature gate the
+// jolt_sys smoke tests use (CI's shared-tests job exercises them on all
+// three host OSes).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod step_tests {
+    use super::*;
+
+    /// Dynamic sphere falling under default gravity in a fresh world.
+    fn world_with_falling_sphere(p: &mut JoltPhysics) -> (f64, f64) {
+        let world = p.create_world(0.0, -9.81, 0.0, 1024, 1);
+        assert_ne!(world, 0.0);
+        let shape = p.create_sphere_shape(0.5);
+        assert_ne!(shape, 0.0);
+        #[rustfmt::skip]
+        let body = p.create_body(
+            world, shape, 2 /* dynamic */,
+            0.0, 100.0, 0.0,          // position
+            0.0, 0.0, 0.0, 1.0,       // rotation
+            0.0, 0.0, 0.0,            // linear velocity
+            0.0, 0.0, 0.0,            // angular velocity
+            1,                        // moving layer
+            false, false, false, true, // sensor/sleep/ccd/awake
+            0.5, 0.0,                 // friction, restitution
+            0.0, 0.0, 1.0,            // damping, gravity factor
+            0.0,                      // mass override (0 = from shape)
+            0.0, 0.0, 0.0,            // inertia override
+            0,                        // user data
+        );
+        assert_ne!(body, 0.0);
+        (world, body)
+    }
+
+    /// Irregular frame times through the accumulator land on the same
+    /// trajectory as the equivalent number of manual fixed steps.
+    #[test]
+    fn fixed_accumulator_matches_manual_stepping() {
+        let mut p = JoltPhysics::new();
+        let (wa, ba) = world_with_falling_sphere(&mut p);
+        let (wb, bb) = world_with_falling_sphere(&mut p);
+
+        // A: irregular frames summing to 12.5 fixed steps — the half-step
+        // margin keeps the floor() robustly at 12 across f32 accumulation
+        // rounding (an exact-boundary sum floors to 11 or 12 depending on
+        // rounding direction, which is correct but untestable).
+        let frames = [0.04, 0.05, 0.03, 0.06, 12.5 / 60.0 - 0.18];
+        let mut alpha = 1.0;
+        for dt in frames {
+            alpha = p.step_fixed(wa, dt as f32, 1);
+        }
+        assert!((0.3..=0.7).contains(&alpha), "expected ~half-step remainder, alpha = {alpha}");
+        // B: 12 manual steps at exactly 1/60.
+        for _ in 0..12 {
+            p.step(wb, 1.0 / 60.0, 1);
+        }
+
+        let ya = p.body_get_position_axis(ba, 1);
+        let yb = p.body_get_position_axis(bb, 1);
+        // 0.2 s of free fall from rest ≈ ½·9.81·0.04 ≈ 0.196 m
+        assert!(ya < 99.9, "sphere did not fall: y = {ya}");
+        assert!(
+            (ya - yb).abs() < 1e-4,
+            "accumulator diverged from manual stepping: {ya} vs {yb}"
+        );
+
+        p.destroy_world(wa);
+        p.destroy_world(wb);
+    }
+
+    /// A huge hitch frame consumes at most max_steps_per_frame steps and
+    /// drops the backlog instead of simulating seconds of catch-up.
+    #[test]
+    fn hitch_frame_is_clamped_and_capped() {
+        let mut p = JoltPhysics::new();
+        let (w, b) = world_with_falling_sphere(&mut p);
+
+        p.step_fixed(w, 10.0, 1); // debugger-pause-sized frame
+        let y = p.body_get_position_axis(b, 1);
+        // 4 steps at 1/60 ≈ 67ms of fall from rest ≈ 2.2cm. If the clamp or
+        // cap failed we'd have simulated 0.25–10s (0.3m–490m of fall).
+        let fallen = 100.0 - y;
+        assert!(fallen > 0.0, "no simulation happened");
+        assert!(
+            fallen < 0.1,
+            "hitch frame simulated too much catch-up: fell {fallen}m"
+        );
+
+        // The dropped backlog must not leak into later frames: a zero-dt
+        // follow-up frame steps at most once.
+        let y1 = p.body_get_position_axis(b, 1);
+        p.step_fixed(w, 0.0, 1);
+        let y2 = p.body_get_position_axis(b, 1);
+        assert!(
+            (y1 - y2).abs() < 0.01,
+            "backlog leaked into the next frame: {y1} -> {y2}"
+        );
+
+        p.destroy_world(w);
+    }
+
+    /// With interpolation on, the position getter blends between the last
+    /// two simulated states by the carried remainder.
+    #[test]
+    fn interpolation_blends_between_steps() {
+        let mut p = JoltPhysics::new();
+        let (w, b) = world_with_falling_sphere(&mut p);
+        p.set_interpolation(w, true);
+
+        // One and a half fixed steps: alpha should be 0.5 and the reported
+        // position should sit between the step-1 and step-2 states.
+        let alpha = p.step_fixed(w, 1.5 / 60.0, 1);
+        assert!((alpha - 0.5).abs() < 1e-3, "alpha = {alpha}");
+
+        let y_blended = p.body_get_position_axis(b, 1);
+        p.set_interpolation(w, false);
+        let y_raw = p.body_get_position_axis(b, 1);
+        // The sphere is falling, so the blended (half-step-old) position
+        // must be strictly above the raw current position.
+        assert!(
+            y_blended > y_raw,
+            "interpolated y ({y_blended}) not above raw y ({y_raw})"
+        );
+
+        p.destroy_world(w);
+    }
 }

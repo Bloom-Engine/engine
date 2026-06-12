@@ -51,7 +51,7 @@ pub fn verify_abi_version(expected: u32) -> Result<(), String> {
 /// when MaterialFactors gained `shading_model` + `foliage_params`
 /// (foliage shading model). Bump together with the
 /// `ABI-VERSION:` comment in `shaders/material_abi.wgsl`.
-pub const EXPECTED_ABI_VERSION: u32 = 2;
+pub const EXPECTED_ABI_VERSION: u32 = 3;
 
 #[cfg(test)]
 mod tests {

@@ -151,7 +151,7 @@ function slabSystem(dt: number): void {
     extrudePolygon(handle, flat, slab.elevation);
 
     // Gray floor material
-    setSceneNodeColor(handle, 0.75, 0.75, 0.70, 1.0);
+    setSceneNodeColor(handle, 191, 191, 179, 255);
     setSceneNodePbr(handle, 0.6, 0.0);
 
     clearDirty(id);
@@ -203,7 +203,7 @@ function wallSystem(dt: number): void {
     }
 
     // White wall material
-    setSceneNodeColor(handle, 0.95, 0.95, 0.92, 1.0);
+    setSceneNodeColor(handle, 242, 242, 235, 255);
     setSceneNodePbr(handle, 0.8, 0.0);
 
     clearDirty(id);

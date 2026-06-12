@@ -249,6 +249,79 @@ export function step(h, dt, collisionSteps) {
   w.jolt.Step(dt, steps);
 }
 
+// --- fixed-timestep stepping (mirrors physics_jolt.rs WorldStepState) ------
+// Semantics must match the native implementation exactly: clamp the frame
+// dt (0.25s), simulate whole fixed steps with a catch-up cap, carry the
+// remainder, snapshot before the LAST step of a batch for interpolation,
+// and return alpha = remainder / fixedDt.
+
+function stepState(w) {
+  if (!w.stepState) {
+    w.stepState = { fixedDt: 1 / 60, maxSteps: 4, acc: 0, alpha: 1, interpolate: false, prev: new Map() };
+  }
+  return w.stepState;
+}
+
+function snapshotWorldBodies(worldHandle, st) {
+  st.prev.clear();
+  for (const [bh, b] of state.bodies) {
+    if (b.world !== worldHandle) continue;
+    const bi = resolveBodyInterface(b); if (!bi) continue;
+    const p = bi.GetPosition(b.bodyId), q = bi.GetRotation(b.bodyId);
+    st.prev.set(bh, [p.GetX(), p.GetY(), p.GetZ(), q.GetX(), q.GetY(), q.GetZ(), q.GetW()]);
+  }
+}
+
+export function stepFixed(h, frameDt, collisionSteps) {
+  const w = state.worlds.get(h); if (!w) return 1;
+  const st = stepState(w);
+  const dt = Number.isFinite(frameDt) ? Math.min(Math.max(frameDt, 0), 0.25) : 0;
+  st.acc += dt;
+  let steps = Math.floor(st.acc / st.fixedDt);
+  if (steps > st.maxSteps) {
+    steps = st.maxSteps;
+    st.acc = Math.min(st.acc, st.fixedDt * (steps + 1));
+  }
+  if (steps > 0) {
+    const cs = Math.max(1, collisionSteps | 0);
+    for (let i = 0; i < steps; i++) {
+      if (st.interpolate && i + 1 === steps) snapshotWorldBodies(h, st);
+      w.jolt.Step(st.fixedDt, cs);
+    }
+  }
+  st.acc -= steps * st.fixedDt;
+  st.alpha = Math.min(Math.max(st.acc / st.fixedDt, 0), 1);
+  return st.alpha;
+}
+
+export function setFixedTimestep(h, hz, maxSteps) {
+  const w = state.worlds.get(h); if (!w) return;
+  const st = stepState(w);
+  if (hz > 0 && Number.isFinite(hz)) st.fixedDt = 1 / hz;
+  if (maxSteps > 0) st.maxSteps = maxSteps | 0;
+}
+
+export function setInterpolation(h, on) {
+  const w = state.worlds.get(h); if (!w) return;
+  const st = stepState(w);
+  st.interpolate = !!on;
+  if (!st.interpolate) { st.prev.clear(); st.alpha = 1; }
+}
+
+export function getStepAlpha(h) {
+  const w = state.worlds.get(h);
+  return w && w.stepState ? w.stepState.alpha : 1;
+}
+
+/** Interpolation blend for a body's getters, or null for raw state. */
+function interpPrev(b, bh) {
+  const w = state.worlds.get(b.world);
+  const st = w && w.stepState;
+  if (!st || !st.interpolate || st.alpha >= 1) return null;
+  const prev = st.prev.get(bh);
+  return prev ? { a: st.alpha, prev } : null;
+}
+
 export function setLayerCollides(h, a, b, collides) {
   const w = state.worlds.get(h); if (!w) return;
   // JoltSettings filter was already baked; runtime mutation isn't supported via
@@ -383,14 +456,33 @@ export function bodyIsValid(h)    { const b = resolveBody(h); const bi = b && re
 export function bodyGetPosition(h, axis) {
   const b = resolveBody(h); const bi = b && resolveBodyInterface(b); if (!bi) return 0;
   const p = bi.GetPosition(b.bodyId);
-  if (axis === 0) return p.GetX(); if (axis === 1) return p.GetY(); if (axis === 2) return p.GetZ();
+  let x = p.GetX(), y = p.GetY(), z = p.GetZ();
+  const ip = interpPrev(b, h);
+  if (ip) {
+    const [px, py, pz] = ip.prev;
+    x = px + (x - px) * ip.a; y = py + (y - py) * ip.a; z = pz + (z - pz) * ip.a;
+  }
+  if (axis === 0) return x; if (axis === 1) return y; if (axis === 2) return z;
   return 0;
 }
 export function bodyGetRotation(h, axis) {
   const b = resolveBody(h); const bi = b && resolveBodyInterface(b); if (!bi) return 0;
   const q = bi.GetRotation(b.bodyId);
-  if (axis === 0) return q.GetX(); if (axis === 1) return q.GetY();
-  if (axis === 2) return q.GetZ(); if (axis === 3) return q.GetW();
+  let x = q.GetX(), y = q.GetY(), z = q.GetZ(), w = q.GetW();
+  const ip = interpPrev(b, h);
+  if (ip) {
+    // nlerp with shortest-path sign handling — matches the native getter
+    let [, , , px, py, pz, pw] = ip.prev;
+    const dot = px * x + py * y + pz * z + pw * w;
+    const s = dot < 0 ? -1 : 1;
+    px *= s; py *= s; pz *= s; pw *= s;
+    const a = ip.a;
+    x = px + (x - px) * a; y = py + (y - py) * a; z = pz + (z - pz) * a; w = pw + (w - pw) * a;
+    const len = Math.hypot(x, y, z, w);
+    if (len > 1e-6) { x /= len; y /= len; z /= len; w /= len; }
+  }
+  if (axis === 0) return x; if (axis === 1) return y;
+  if (axis === 2) return z; if (axis === 3) return w;
   return 0;
 }
 export function bodySetPosition(h, x, y, z, activate) {

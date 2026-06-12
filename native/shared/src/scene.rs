@@ -155,6 +155,10 @@ pub struct SceneNode {
     /// by `render()` to skip off-screen nodes. Shadow pass ignores this
     /// flag — off-screen geometry can still cast shadows into view.
     in_view_frustum: bool,
+    /// Hidden behind other geometry per the Hi-Z occlusion grid (one
+    /// frame of latency, conservative). Only gates the main camera
+    /// pass — shadows/picking/TLAS never read it.
+    occluded: bool,
     /// Material bind group for the scene pipeline — holds base color,
     /// normal, metallic-roughness and emissive texture views in one
     /// group. Rebuilt whenever one of the material texture indices
@@ -163,6 +167,28 @@ pub struct SceneNode {
     pub gpu_material_uniform_buf: Option<wgpu::Buffer>,
     pub mat_dirty: bool,
     geo_dirty: bool,
+    /// Reduced-detail geometry variants, ordered coarser and coarser
+    /// (descending max_coverage). Selected per frame in prepare() by
+    /// projected screen coverage; the base geometry above is "LOD 0".
+    /// Shadows, picking, BLAS, and SDF always use the base geometry —
+    /// LODs only affect the main camera rasterization.
+    pub lods: Vec<LodLevel>,
+    /// Active LOD this frame: -1 = base geometry, otherwise an index
+    /// into `lods`. Driven by prepare(); render() binds accordingly.
+    active_lod: i32,
+}
+
+/// One reduced-detail variant for a SceneNode.
+pub struct LodLevel {
+    pub vertices: Vec<Vertex3D>,
+    pub indices: Vec<u32>,
+    /// Use this level when the node's projected screen coverage (longest
+    /// NDC extent of its world AABB, 0..1) drops below this value.
+    pub max_coverage: f32,
+    gpu_vb: Option<wgpu::Buffer>,
+    gpu_ib: Option<wgpu::Buffer>,
+    gpu_index_count: u32,
+    dirty: bool,
 }
 
 impl SceneNode {
@@ -197,10 +223,13 @@ impl SceneNode {
             uniform_slot: None,
             gpu_uniform_bg: None,
             in_view_frustum: true,
+            occluded: false,
             gpu_material_bg: None,
             gpu_material_uniform_buf: None,
             mat_dirty: true,
             geo_dirty: true,
+            lods: Vec::new(),
+            active_lod: -1,
         }
     }
 }
@@ -267,6 +296,10 @@ pub struct SceneGraph {
     /// reclaimed in V1 (Sponza fits comfortably in 1024 slots; loop
     /// back when scenes start exceeding capacity).
     pub next_card_slot: u32,
+    /// 6-slot card blocks returned by destroyed nodes, reused before
+    /// next_card_slot grows — without recycling, create/destroy cycles
+    /// exhaust the fixed-size card atlas.
+    free_card_blocks: Vec<u32>,
     /// Ticket 014 — node handles whose per-mesh SDF still needs to
     /// be baked. Populated alongside BLAS creation; renderer drains
     /// in a per-frame budget via a compute pass. Static meshes
@@ -290,6 +323,7 @@ impl SceneGraph {
             pending_blas_builds: Vec::new(),
             pending_card_captures: Vec::new(),
             next_card_slot: 0,
+            free_card_blocks: Vec::new(),
             pending_sdf_bakes: Vec::new(),
         }
     }
@@ -311,6 +345,12 @@ impl SceneGraph {
             }
             if node.visible {
                 self.tlas_version = self.tlas_version.wrapping_add(1);
+            }
+            // Recycle the node's 6-slot card block. The freed node's GPU
+            // buffers/BLAS/SDF drop with the SceneNode itself (wgpu
+            // releases them once in-flight work completes).
+            if let Some(first) = node.card_first_slot {
+                self.free_card_blocks.push(first);
             }
         }
         self.nodes.free(handle);
@@ -412,6 +452,44 @@ impl SceneGraph {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.parent = parent;
         }
+    }
+
+    /// Set (or replace) a reduced-detail variant. `lod_index` is 0-based
+    /// into the reduced set (the node's base geometry is implicitly the
+    /// finest level). `max_coverage` is the screen-coverage threshold
+    /// below which this level is used; give coarser levels smaller
+    /// thresholds. Pass empty vertices to remove the level.
+    pub fn set_lod_geometry(
+        &mut self,
+        handle: f64,
+        lod_index: usize,
+        vertices: Vec<Vertex3D>,
+        indices: Vec<u32>,
+        max_coverage: f32,
+    ) {
+        let Some(node) = self.nodes.get_mut(handle) else { return };
+        if vertices.is_empty() {
+            if lod_index < node.lods.len() {
+                node.lods.remove(lod_index);
+            }
+            return;
+        }
+        while node.lods.len() <= lod_index {
+            node.lods.push(LodLevel {
+                vertices: Vec::new(),
+                indices: Vec::new(),
+                max_coverage: 0.0,
+                gpu_vb: None,
+                gpu_ib: None,
+                gpu_index_count: 0,
+                dirty: true,
+            });
+        }
+        let lod = &mut node.lods[lod_index];
+        lod.vertices = vertices;
+        lod.indices = indices;
+        lod.max_coverage = max_coverage;
+        lod.dirty = true;
     }
 
     pub fn update_geometry(&mut self, handle: f64, vertices: Vec<Vertex3D>, indices: Vec<u32>) {
@@ -596,6 +674,7 @@ impl SceneGraph {
         vp_matrix: &[[f32; 4]; 4],
         prev_vp_matrix: &[[f32; 4]; 4],
         uniform_layout: &wgpu::BindGroupLayout,
+        occlusion: Option<&crate::renderer::OcclusionCuller>,
     ) {
         let frustum = extract_frustum_planes(vp_matrix);
 
@@ -608,6 +687,7 @@ impl SceneGraph {
         let pending_cards = &mut self.pending_card_captures;
         let pending_sdf = &mut self.pending_sdf_bakes;
         let next_card_slot = &mut self.next_card_slot;
+        let free_card_blocks = &mut self.free_card_blocks;
         let mut visible_count: u32 = 0;
         for (handle, node) in self.nodes.iter_mut() {
             if !node.visible || node.indices.is_empty() {
@@ -641,12 +721,60 @@ impl SceneGraph {
                 node.in_view_frustum = !aabb_outside_frustum(&frustum, wmin, wmax);
                 node.world_bounds_min = wmin;
                 node.world_bounds_max = wmax;
+                // Hi-Z occlusion: only worth testing what survived the
+                // frustum; every uncertain case inside test_aabb
+                // resolves to visible.
+                node.occluded = node.in_view_frustum
+                    && occlusion.is_some_and(|o| !o.test_aabb(wmin, wmax));
+
+                // LOD selection by projected screen coverage: longest
+                // NDC extent of the world AABB. Corners at/behind the
+                // near plane force the base level (huge on screen).
+                if !node.lods.is_empty() && node.in_view_frustum && !node.occluded {
+                    let coverage = aabb_screen_coverage(vp_matrix, wmin, wmax);
+                    let current = node.active_lod;
+                    let mut chosen: i32 = -1;
+                    for (i, lod) in node.lods.iter().enumerate() {
+                        // 10% hysteresis: stepping coarser needs coverage
+                        // clearly below the threshold, stepping finer
+                        // clearly above — kills boundary flicker.
+                        let t = if current >= i as i32 {
+                            lod.max_coverage * 1.05
+                        } else {
+                            lod.max_coverage * 0.95
+                        };
+                        if coverage < t {
+                            chosen = i as i32;
+                        }
+                    }
+                    node.active_lod = chosen;
+                } else {
+                    node.active_lod = -1;
+                }
             } else {
                 // Empty or uninitialized bounds — can't cull, play safe.
                 node.in_view_frustum = true;
+                node.occluded = false;
                 node.world_bounds_min = [f32::MAX; 3];
                 node.world_bounds_max = [f32::MIN; 3];
             }
+            // Upload any dirty LOD variants (plain vertex/index buffers —
+            // LODs never feed BLAS/SDF, those read the base geometry).
+            for lod in node.lods.iter_mut().filter(|l| l.dirty) {
+                lod.gpu_vb = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_node_lod_vb"),
+                    contents: bytemuck::cast_slice(&lod.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }));
+                lod.gpu_ib = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_node_lod_ib"),
+                    contents: bytemuck::cast_slice(&lod.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                }));
+                lod.gpu_index_count = lod.indices.len() as u32;
+                lod.dirty = false;
+            }
+
             if node.geo_dirty || node.gpu_vb.is_none() {
                 // Ticket 007b: widen buffer usage when HW RT is on so
                 // the same buffer can back both the raster draw and
@@ -720,8 +848,14 @@ impl SceneGraph {
                     // Runs on both HW and SW paths so the SDF trace's
                     // broad-phase hit can sample textured radiance.
                     if node.card_first_slot.is_none() {
-                        let first = *next_card_slot;
-                        *next_card_slot += 6;
+                        let first = match free_card_blocks.pop() {
+                            Some(reused) => reused,
+                            None => {
+                                let fresh = *next_card_slot;
+                                *next_card_slot += 6;
+                                fresh
+                            }
+                        };
                         node.card_first_slot = Some(first);
                         pending_cards.push(handle);
                     }
@@ -971,18 +1105,31 @@ impl SceneGraph {
         pass: &mut wgpu::RenderPass<'a>,
     ) {
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.indices.is_empty() || !node.in_view_frustum {
+            if !node.visible || node.indices.is_empty() || !node.in_view_frustum || node.occluded {
                 continue;
             }
-            let Some(vb) = &node.gpu_vb else { continue };
-            let Some(ib) = &node.gpu_ib else { continue };
+            // Active LOD overrides the base buffers for the camera pass
+            // (shadows/picking/BLAS keep using the base geometry).
+            let (vb, ib, index_count) = match node
+                .lods
+                .get(node.active_lod.max(0) as usize)
+                .filter(|_| node.active_lod >= 0)
+                .and_then(|l| Some((l.gpu_vb.as_ref()?, l.gpu_ib.as_ref()?, l.gpu_index_count)))
+            {
+                Some(lod) => lod,
+                None => {
+                    let Some(vb) = &node.gpu_vb else { continue };
+                    let Some(ib) = &node.gpu_ib else { continue };
+                    (vb, ib, node.gpu_index_count)
+                }
+            };
             let Some(bg) = &node.gpu_uniform_bg else { continue };
             let Some(mat_bg) = &node.gpu_material_bg else { continue };
             pass.set_bind_group(0, bg, &[]);
             pass.set_bind_group(2, mat_bg, &[]);
             pass.set_vertex_buffer(0, vb.slice(..));
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..node.gpu_index_count, 0, 0..1);
+            pass.draw_indexed(0..index_count, 0, 0..1);
         }
     }
 
@@ -1012,6 +1159,35 @@ impl SceneGraph {
 // Plane format: [nx, ny, nz, d] where `nx*x + ny*y + nz*z + d >= 0`
 // means the point is inside that plane's half-space. No normalization
 // — we only care about the sign.
+
+/// Longest NDC-extent of a world AABB under `vp` — the "screen coverage"
+/// that drives LOD selection (1.0 = spans the full viewport). Corners at
+/// or behind the near plane return 1.0 (force the finest level).
+fn aabb_screen_coverage(vp: &[[f32; 4]; 4], wmin: [f32; 3], wmax: [f32; 3]) -> f32 {
+    let mut lo = [f32::MAX, f32::MAX];
+    let mut hi = [f32::MIN, f32::MIN];
+    for ix in 0..2 {
+        for iy in 0..2 {
+            for iz in 0..2 {
+                let x = if ix == 0 { wmin[0] } else { wmax[0] };
+                let y = if iy == 0 { wmin[1] } else { wmax[1] };
+                let z = if iz == 0 { wmin[2] } else { wmax[2] };
+                let cw = vp[0][3] * x + vp[1][3] * y + vp[2][3] * z + vp[3][3];
+                if cw <= 1e-3 {
+                    return 1.0;
+                }
+                let cx = (vp[0][0] * x + vp[1][0] * y + vp[2][0] * z + vp[3][0]) / cw;
+                let cy = (vp[0][1] * x + vp[1][1] * y + vp[2][1] * z + vp[3][1]) / cw;
+                lo[0] = lo[0].min(cx);
+                lo[1] = lo[1].min(cy);
+                hi[0] = hi[0].max(cx);
+                hi[1] = hi[1].max(cy);
+            }
+        }
+    }
+    // NDC spans -1..1, so extent/2 = fraction of the viewport.
+    (((hi[0] - lo[0]).max(hi[1] - lo[1])) * 0.5).clamp(0.0, 1.0)
+}
 
 pub(crate) fn extract_frustum_planes(vp: &[[f32; 4]; 4]) -> [[f32; 4]; 6] {
     // Row vectors of the column-major matrix: row_i[col] = vp[col][i].

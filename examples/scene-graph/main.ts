@@ -149,10 +149,10 @@ const floorIdx: number[] = [0, 1, 2, 0, 2, 3];
 updateSceneNodeGeometry(floor, floorVerts, floorIdx);
 
 // Set materials
-setSceneNodeColor(wall1, 0.95, 0.95, 0.92, 1.0);
-setSceneNodeColor(wall2, 0.92, 0.92, 0.88, 1.0);
-setSceneNodeColor(wall3, 0.90, 0.90, 0.86, 1.0);
-setSceneNodeColor(floor, 0.7, 0.7, 0.65, 1.0);
+setSceneNodeColor(wall1, 242, 242, 235, 255);
+setSceneNodeColor(wall2, 235, 235, 224, 255);
+setSceneNodeColor(wall3, 230, 230, 219, 255);
+setSceneNodeColor(floor, 179, 179, 166, 255);
 
 // Set PBR properties
 setSceneNodePbr(wall1, 0.8, 0.0);
