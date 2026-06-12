@@ -95,8 +95,13 @@ impl Renderer {
         is_normal_map: bool,
     ) -> u32 {
         let max_dim = if width > height { width } else { height };
-        // On Android/Vulkan, multi-level mipmap upload can fail silently.
-        // Use single mip for 2D textures; only generate mipmaps on desktop.
+        // On Android/Vulkan, multi-level mipmap upload was observed to
+        // fail silently (black textures) when this path was written.
+        // Single mip costs aliasing + texture bandwidth on exactly the
+        // tier of GPU that needs mips most, so this exclusion is worth
+        // re-testing on-device against current wgpu (the failure may
+        // have been the pre-#61 buffer-limit configuration or an older
+        // wgpu bug). Until verified on hardware, keep the safe path.
         #[cfg(target_os = "android")]
         let mip_count = 1u32;
         #[cfg(not(target_os = "android"))]
