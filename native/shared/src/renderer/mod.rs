@@ -227,7 +227,7 @@ struct SsaoParams {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SsaoBlurParams {
+pub(super) struct SsaoBlurParams {
     /// xy = texel_size (of the half-res SSAO RT), z = depth_sigma, w = unused.
     params: [f32; 4],
 }
@@ -9896,21 +9896,77 @@ impl Renderer {
             let half_w = (surf_w / 2).max(1);
             let half_h = (surf_h / 2).max(1);
 
-            // Hi-Z build (linearize + min-downsample chain) — see hiz.rs.
-            self.record_hiz_chain(&mut encoder, profiler, half_w, half_h, p22, p32);
-
-            // --- Occlusion grid capture (reads Hi-Z mip 0) ---------------
-            // Max-reduce the linearized depth into the 64x64 occlusion
-            // grid and queue its readback; scene.prepare consumes it
-            // next frame (one-frame latency, no stall).
+            // Hi-Z build + occlusion capture run on the render graph
+            // (Phase 2b, cluster 1). Unlike the older material-pass nodes
+            // that capture individual field refs, these use the
+            // ctx-owns-renderer pattern: the context carries &mut Renderer
+            // and closures borrow nothing at build time — the shape the
+            // rest of end_frame_with_scene migrates onto.
             {
-                let vp = self.vp_matrix();
-                // Split borrows: occlusion is a sibling field of device/
-                // queue, but record() also needs the hiz view.
-                let occlusion = &mut self.occlusion as *mut OcclusionCuller;
-                unsafe {
-                    (*occlusion).record(&self.device, &self.queue, &mut encoder,
-                        &self.hiz_views[0], (half_w, half_h), vp);
+                use graph::{Graph, PassInput, PassNode, PassOutput};
+                // Transient id 0 = the linearized Hi-Z pyramid for this
+                // frame (graph-internal ordering token; the textures
+                // themselves are persistent renderer fields).
+                const HIZ_PYRAMID: u32 = 0;
+
+                struct HizCtx<'a> {
+                    r: &'a mut Renderer,
+                    encoder: &'a mut wgpu::CommandEncoder,
+                    profiler: &'a mut crate::profiler::Profiler,
+                    half: (u32, u32),
+                    p22: f32,
+                    p32: f32,
+                }
+
+                let mut g: Graph<HizCtx> = Graph::new();
+                g.push(
+                    PassNode::new(
+                        "hiz_build",
+                        Box::new(|ctx: &mut HizCtx| {
+                            let (hw, hh) = ctx.half;
+                            ctx.r.record_hiz_chain(ctx.encoder, ctx.profiler, hw, hh, ctx.p22, ctx.p32);
+                        }),
+                    )
+                    .with_reads(&[PassInput::SceneDepth])
+                    .with_writes(&[PassOutput::Transient(HIZ_PYRAMID)]),
+                );
+                // Max-reduce the linearized depth into the 64x64 occlusion
+                // grid and queue its readback; scene.prepare consumes it
+                // next frame (one-frame latency, no stall).
+                g.push(
+                    PassNode::new(
+                        "occlusion_capture",
+                        Box::new(|ctx: &mut HizCtx| {
+                            let vp = ctx.r.vp_matrix();
+                            let (hw, hh) = ctx.half;
+                            // Split borrows: occlusion is a sibling field
+                            // of device/queue; record() also needs the
+                            // hiz view.
+                            let occlusion = &mut ctx.r.occlusion as *mut OcclusionCuller;
+                            unsafe {
+                                (*occlusion).record(
+                                    &ctx.r.device,
+                                    &ctx.r.queue,
+                                    ctx.encoder,
+                                    &ctx.r.hiz_views[0],
+                                    (hw, hh),
+                                    vp,
+                                );
+                            }
+                        }),
+                    )
+                    .with_reads(&[PassInput::Transient(HIZ_PYRAMID)]),
+                );
+                let mut ctx = HizCtx {
+                    r: self,
+                    encoder: &mut encoder,
+                    profiler,
+                    half: (half_w, half_h),
+                    p22,
+                    p32,
+                };
+                if let Err(e) = g.execute(&mut ctx) {
+                    eprintln!("[graph] hiz/occlusion cluster failed: {:?}", e);
                 }
             }
 
@@ -9988,75 +10044,8 @@ impl Renderer {
             self.ssao_history_frame = self.ssao_history_frame.wrapping_add(1);
         }
 
-        // ============================================================
-        // SSAO bilateral blur: smooth the noisy GTAO output while
-        // preserving depth edges (depth-guided bilateral filter).
-        // Reads ssao_rt → writes ssao_blur_rt.
-        // ============================================================
-        if self.ssao_enabled {
-            // texel_size is the size of one SSAO RT texel (half-res).
-            let ao_w = (surf_w / 2).max(1) as f32;
-            let ao_h = (surf_h / 2).max(1) as f32;
-            let bp = SsaoBlurParams {
-                params: [1.0 / ao_w, 1.0 / ao_h, 0.05, 0.0],
-            };
-            self.queue.write_buffer(&self.ssao_blur_uniform_buffer, 0, bytemuck::bytes_of(&bp));
-
-            if self.ssao_blur_bg_cache.is_none() {
-                self.ssao_blur_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("ssao_blur_bg"),
-                    layout: &self.ssao_blur_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.ssao_blur_uniform_buffer.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
-                    ],
-                }));
-            }
-            let bg = self.ssao_blur_bg_cache.as_ref().unwrap();
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ssao_blur_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.ssao_blur_rt_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.ssao_blur_pipeline);
-            pass.set_bind_group(0, bg, &[]);
-            pass.draw(0..3, 0..1);
-        } else {
-            // SSAO disabled — clear the blur RT to WHITE so the
-            // composite pass samples "no occlusion". Cheaper than a
-            // full blur pass; the clear is the only GPU work.
-            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ssao_blur_disabled_clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.ssao_blur_rt_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
+        // GTAO bilateral blur (or disabled-clear) — see hiz.rs.
+        self.record_ssao_blur(&mut encoder, surf_w, surf_h);
 
         // ============================================================
         // SSR: view-space ray march of the depth buffer + HDR sample.

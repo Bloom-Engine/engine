@@ -5,7 +5,7 @@
 //! policy); pipelines and the mip chain stay fields on [`Renderer`].
 
 use super::formats::HIZ_MIP_COUNT;
-use super::{HizDownsampleParams, HizLinearizeParams};
+use super::{HizDownsampleParams, HizLinearizeParams, SsaoBlurParams};
 use super::Renderer;
 
 impl Renderer {
@@ -84,5 +84,88 @@ impl Renderer {
             pass.dispatch_workgroups((dst_w + 7) / 8, (dst_h + 7) / 8, 1);
         }
 
+    }
+}
+
+impl Renderer {
+    /// SSAO bilateral blur (depth-guided, edge-preserving) when SSAO is
+    /// on, or a white-clear of the blur RT when it's off so the
+    /// composite samples "no occlusion". Split from
+    /// end_frame_with_scene (2000-line file policy).
+    pub(super) fn record_ssao_blur(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        surf_w: u32,
+        surf_h: u32,
+    ) {
+    // ============================================================
+    // SSAO bilateral blur: smooth the noisy GTAO output while
+    // preserving depth edges (depth-guided bilateral filter).
+    // Reads ssao_rt → writes ssao_blur_rt.
+    // ============================================================
+    if self.ssao_enabled {
+        // texel_size is the size of one SSAO RT texel (half-res).
+        let ao_w = (surf_w / 2).max(1) as f32;
+        let ao_h = (surf_h / 2).max(1) as f32;
+        let bp = SsaoBlurParams {
+            params: [1.0 / ao_w, 1.0 / ao_h, 0.05, 0.0],
+        };
+        self.queue.write_buffer(&self.ssao_blur_uniform_buffer, 0, bytemuck::bytes_of(&bp));
+
+        if self.ssao_blur_bg_cache.is_none() {
+            self.ssao_blur_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ssao_blur_bg"),
+                layout: &self.ssao_blur_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.ssao_blur_uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler) },
+                ],
+            }));
+        }
+        let bg = self.ssao_blur_bg_cache.as_ref().unwrap();
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ssao_blur_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.ssao_blur_rt_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.ssao_blur_pipeline);
+        pass.set_bind_group(0, bg, &[]);
+        pass.draw(0..3, 0..1);
+    } else {
+        // SSAO disabled — clear the blur RT to WHITE so the
+        // composite pass samples "no occlusion". Cheaper than a
+        // full blur pass; the clear is the only GPU work.
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ssao_blur_disabled_clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.ssao_blur_rt_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
     }
 }
