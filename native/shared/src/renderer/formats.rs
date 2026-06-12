@@ -430,9 +430,15 @@ pub(super) fn create_mesh_sdf_texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format: wgpu::TextureFormat::R32Float,
+        // COPY_DST is needed by ticket 022's disk cache so a cached
+        // SDF can be uploaded via queue.write_texture instead of
+        // re-baked. COPY_SRC is needed by the same ticket's readback
+        // path on cache miss. Both have zero runtime cost when the
+        // cache isn't used (just usage-flag bits at allocation).
         usage: wgpu::TextureUsages::STORAGE_BINDING
              | wgpu::TextureUsages::TEXTURE_BINDING
-             | wgpu::TextureUsages::COPY_SRC,
+             | wgpu::TextureUsages::COPY_SRC
+             | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

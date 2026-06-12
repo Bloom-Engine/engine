@@ -635,6 +635,7 @@ pub extern "C" fn bloom_clear_background(r: f64, g: f64, b: f64, a: f64) {
     engine().renderer.set_clear_color(r, g, b, a);
 }
 
+#[cfg(feature = "image-extras")]
 /// Load an HDR equirectangular environment map and upload it to the
 /// GPU. Subsequent frames sample it per-background-pixel via a sky
 /// pass, so the background matches a path-traced reference instead of
@@ -1430,6 +1431,7 @@ pub extern "C" fn bloom_profiler_overlay_text() -> *const u8 {
 // Models
 // ============================================================
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_load_model(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
@@ -1453,6 +1455,7 @@ pub extern "C" fn bloom_load_model(path_ptr: *const u8) -> f64 {
     }
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f64, r: f64, g: f64, b: f64, a: f64) {
     let eng = engine();
@@ -1472,6 +1475,7 @@ pub extern "C" fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f
     }
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_draw_model_rotated(
     handle: f64, x: f64, y: f64, z: f64,
@@ -1503,16 +1507,19 @@ pub extern "C" fn bloom_draw_model_rotated(
     }
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_unload_model(handle: f64) {
     engine().models.unload_model(handle);
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_gen_mesh_cube(w: f64, h: f64, d: f64) -> f64 {
     engine().models.gen_mesh_cube(w as f32, h as f32, d as f32)
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_gen_mesh_heightmap(image_handle: f64, size_x: f64, size_y: f64, size_z: f64) -> f64 {
     let eng = engine();
@@ -1653,6 +1660,7 @@ pub extern "C" fn bloom_create_instance_buffer(
     engine().renderer.create_instance_buffer(&raw_f32, count) as f64
 }
 
+#[cfg(feature = "models3d")]
 /// EN-001 — submit an instanced material draw. The mesh at
 /// (mesh_handle, mesh_idx) is drawn `instance_count` times via a
 /// single `draw_indexed` with the instance buffer bound at vertex
@@ -1912,6 +1920,7 @@ pub extern "C" fn bloom_clear_all_post_passes() {
     engine().renderer.clear_all_post_passes();
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_draw_material(
     material: f64,
@@ -1935,6 +1944,7 @@ pub extern "C" fn bloom_draw_material(
     );
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f64, vertex_count: f64, index_ptr: *const f64, index_count: f64) -> f64 {
     // Perry's TS `number[]` is f64-laid-out in memory; Perry passes a
@@ -1959,6 +1969,7 @@ pub extern "C" fn bloom_create_mesh(vertex_ptr: *const f64, vertex_count: f64, i
     engine().models.create_mesh(&vertex_data, &index_data)
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
@@ -1968,6 +1979,7 @@ pub extern "C" fn bloom_load_model_animation(path_ptr: *const u8) -> f64 {
     }
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, time: f64, scale: f64, px: f64, py: f64, pz: f64, rot_y: f64) {
     // Take a single Y-axis angle (radians) instead of sin/cos, so the
@@ -1988,6 +2000,7 @@ pub extern "C" fn bloom_update_model_animation(handle: f64, anim_index: f64, tim
     }
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_get_model_mesh_count(handle: f64) -> f64 {
     match engine().models.get(handle) {
@@ -1996,6 +2009,7 @@ pub extern "C" fn bloom_get_model_mesh_count(handle: f64) -> f64 {
     }
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_get_model_material_count(handle: f64) -> f64 {
     match engine().models.get(handle) {
@@ -2336,26 +2350,32 @@ pub extern "C" fn bloom_save_file_dialog(default_name_ptr: *const u8, title_ptr:
 // Model bounds accessors. Return the axis-aligned bounding box of a loaded
 // model in model-local coordinates. Editors use these to size gizmos, auto-
 // frame the camera on selection, and snap placed entities onto terrain.
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_get_model_bounds_min_x(model_handle: f64) -> f64 {
     engine().models.get_bounds(model_handle).0[0] as f64
 }
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_get_model_bounds_min_y(model_handle: f64) -> f64 {
     engine().models.get_bounds(model_handle).0[1] as f64
 }
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_get_model_bounds_min_z(model_handle: f64) -> f64 {
     engine().models.get_bounds(model_handle).0[2] as f64
 }
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_get_model_bounds_max_x(model_handle: f64) -> f64 {
     engine().models.get_bounds(model_handle).1[0] as f64
 }
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_get_model_bounds_max_y(model_handle: f64) -> f64 {
     engine().models.get_bounds(model_handle).1[1] as f64
 }
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_get_model_bounds_max_z(model_handle: f64) -> f64 {
     engine().models.get_bounds(model_handle).1[2] as f64
@@ -2626,6 +2646,7 @@ pub extern "C" fn bloom_scene_set_material_water(handle: f64, wave_amp: f64, wav
 }
 
 // Q9: Generate a ribbon mesh along a Catmull-Rom spline.
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_gen_mesh_spline_ribbon(points_ptr: *const u8, point_count: f64, widths_ptr: *const u8, width_count: f64) -> f64 {
     let n = point_count as usize;
@@ -2899,6 +2920,7 @@ pub extern "C" fn bloom_project_screen_y() -> f64 {
     unsafe { LAST_PROJECT.1 }
 }
 
+#[cfg(feature = "models3d")]
 /// Attach a loaded GLTF model's mesh geometry to a scene node.
 /// Copies the vertex/index data from the model into the scene node.
 #[no_mangle]
@@ -2959,6 +2981,7 @@ pub extern "C" fn bloom_stage_texture(path_ptr: *const u8) -> f64 {
     }
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_stage_model(path_ptr: *const u8) -> f64 {
     let path = str_from_header(path_ptr);
@@ -3005,6 +3028,7 @@ pub extern "C" fn bloom_commit_texture(staging_handle: f64) -> f64 {
     })
 }
 
+#[cfg(feature = "models3d")]
 #[no_mangle]
 pub extern "C" fn bloom_commit_model(staging_handle: f64) -> f64 {
     let staged = match bloom_shared::staging::take_model(staging_handle) {
@@ -3373,3 +3397,171 @@ fn bloom_jolt_ffi_physics() -> &'static mut bloom_shared::physics_jolt::JoltPhys
 
 #[cfg(feature = "jolt")]
 bloom_shared::define_physics_ffi!();
+
+// ─── EN-014 feature-off stubs ───────────────────────────────────────
+// The Perry TS glue for an imported engine module references every FFI
+// symbol that module declares, whether or not the game calls it. When a
+// feature is compiled out, keep the symbols as warn-once no-ops so the
+// link succeeds and a stray call is diagnosable instead of UB.
+#[cfg(not(feature = "image-extras"))]
+#[no_mangle]
+pub extern "C" fn bloom_set_env_clear_from_hdr(_path_ptr: *const u8) {
+    feature_off_warn_once("bloom_set_env_clear_from_hdr", "image-extras");
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_load_model(_path_ptr: *const u8) -> f64 {
+    feature_off_warn_once("bloom_load_model", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_draw_model(_handle: f64, _x: f64, _y: f64, _z: f64, _scale: f64, _r: f64, _g: f64, _b: f64, _a: f64) {
+    feature_off_warn_once("bloom_draw_model", "models3d");
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_draw_model_rotated(
+    handle: f64, _x: f64, _y: f64, _z: f64,
+    _scale: f64, _rot_y: f64,
+    _color_packed_argb: f64,
+) {
+    feature_off_warn_once("bloom_draw_model_rotated", "models3d");
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_unload_model(_handle: f64) {
+    feature_off_warn_once("bloom_unload_model", "models3d");
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_gen_mesh_cube(_w: f64, _h: f64, _d: f64) -> f64 {
+    feature_off_warn_once("bloom_gen_mesh_cube", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_gen_mesh_heightmap(_image_handle: f64, _size_x: f64, _size_y: f64, _size_z: f64) -> f64 {
+    feature_off_warn_once("bloom_gen_mesh_heightmap", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_draw_material(
+    material: f64,
+    _mesh_handle: f64,
+    _mesh_idx: f64,
+    _x: f64, _y: f64, _z: f64, _scale: f64,
+    _r: f64, _g: f64, _b: f64, _a: f64,
+) {
+    feature_off_warn_once("bloom_draw_material", "models3d");
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_create_mesh(_vertex_ptr: *const f64, _vertex_count: f64, _index_ptr: *const f64, _index_count: f64) -> f64 {
+    feature_off_warn_once("bloom_create_mesh", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_load_model_animation(_path_ptr: *const u8) -> f64 {
+    feature_off_warn_once("bloom_load_model_animation", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_update_model_animation(_handle: f64, _anim_index: f64, _time: f64, _scale: f64, _px: f64, _py: f64, _pz: f64, _rot_y: f64) {
+    feature_off_warn_once("bloom_update_model_animation", "models3d");
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_get_model_mesh_count(_handle: f64) -> f64 {
+    feature_off_warn_once("bloom_get_model_mesh_count", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_get_model_material_count(_handle: f64) -> f64 {
+    feature_off_warn_once("bloom_get_model_material_count", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_x(_model_handle: f64) -> f64 {
+    feature_off_warn_once("bloom_get_model_bounds_min_x", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_y(_model_handle: f64) -> f64 {
+    feature_off_warn_once("bloom_get_model_bounds_min_y", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_min_z(_model_handle: f64) -> f64 {
+    feature_off_warn_once("bloom_get_model_bounds_min_z", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_x(_model_handle: f64) -> f64 {
+    feature_off_warn_once("bloom_get_model_bounds_max_x", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_y(_model_handle: f64) -> f64 {
+    feature_off_warn_once("bloom_get_model_bounds_max_y", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_get_model_bounds_max_z(_model_handle: f64) -> f64 {
+    feature_off_warn_once("bloom_get_model_bounds_max_z", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_gen_mesh_spline_ribbon(_points_ptr: *const u8, _point_count: f64, _widths_ptr: *const u8, _width_count: f64) -> f64 {
+    feature_off_warn_once("bloom_gen_mesh_spline_ribbon", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_scene_attach_model(_node_handle: f64, _model_handle: f64, _mesh_index: f64) {
+    feature_off_warn_once("bloom_scene_attach_model", "models3d");
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_stage_model(_path_ptr: *const u8) -> f64 {
+    feature_off_warn_once("bloom_stage_model", "models3d");
+    0.0
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_commit_model(_staging_handle: f64) -> f64 {
+    feature_off_warn_once("bloom_commit_model", "models3d");
+    0.0
+}
+
+#[cfg(any(not(feature = "models3d"), not(feature = "image-extras")))]
+fn feature_off_warn_once(name: &str, feature: &str) {
+    use std::sync::Mutex;
+    static WARNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut warned = WARNED.lock().unwrap();
+    if !warned.iter().any(|n| *n == name) {
+        // names come from string literals above — leak-free 'static via Box::leak is
+        // overkill; just store a leaked copy once per distinct symbol.
+        warned.push(Box::leak(name.to_string().into_boxed_str()));
+        eprintln!("bloom: {name}() ignored — engine built without the `{feature}` feature");
+    }
+}
+#[cfg(not(feature = "models3d"))]
+#[no_mangle]
+pub extern "C" fn bloom_submit_material_draw_instanced(
+    _material: f64, _mesh_handle: f64, _mesh_idx: f64,
+    _instance_buffer: f64, _instance_count: f64,
+) {
+    feature_off_warn_once("bloom_submit_material_draw_instanced", "models3d");
+}

@@ -12286,6 +12286,7 @@ impl Renderer {
 
     /// Returns true if the model was cached successfully (static model).
     /// Returns false if the model is skinned (uncacheable).
+    #[cfg(feature = "models3d")]
     pub fn cache_model_if_static(&mut self, handle_bits: u64, meshes: &[crate::models::MeshData]) -> bool {
         if let Some(entry) = self.model_gpu_cache.get(&handle_bits) {
             return entry.is_some();

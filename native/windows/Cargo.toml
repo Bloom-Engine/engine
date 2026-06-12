@@ -16,8 +16,12 @@ crate-type = ["staticlib"]
 # Games that need bloom/physics on Windows must opt in explicitly until the
 # perry side gains a way to thread `cargo:rustc-link-search` through to the
 # final link line.
-default = []
+default = ["models3d", "image-extras"]
 jolt = ["bloom-shared/jolt"]
+# EN-014 — see native/shared/Cargo.toml. Default-on so existing games are
+# unaffected; pure-2D games opt out via Perry feature forwarding.
+models3d = ["bloom-shared/models3d"]
+image-extras = ["bloom-shared/image-extras"]
 
 [dependencies]
 bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }

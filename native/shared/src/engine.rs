@@ -3,6 +3,7 @@ use crate::input::InputState;
 use crate::renderer::Renderer;
 use crate::text_renderer::TextRenderer;
 use crate::textures::TextureManager;
+#[cfg(feature = "models3d")]
 use crate::models::ModelManager;
 use crate::scene::SceneGraph;
 use crate::frame_callbacks::FrameCallbackSystem;
@@ -23,6 +24,7 @@ pub struct EngineState {
     pub input: InputState,
     pub audio: AudioMixer,
     pub textures: TextureManager,
+    #[cfg(feature = "models3d")]
     pub models: ModelManager,
     pub scene: SceneGraph,
     pub frame_callbacks: FrameCallbackSystem,
@@ -69,6 +71,7 @@ impl EngineState {
             input: InputState::new(),
             audio: AudioMixer::new(),
             textures: TextureManager::new(),
+            #[cfg(feature = "models3d")]
             models: ModelManager::new(),
             scene,
             frame_callbacks: FrameCallbackSystem::new(),
