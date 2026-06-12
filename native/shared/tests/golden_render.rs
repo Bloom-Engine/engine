@@ -176,3 +176,37 @@ fn golden_lit_primitives_3d() {
     });
     compare_or_update("lit_primitives_3d", w, h, &rgba);
 }
+
+#[test]
+fn golden_many_point_lights() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    // 40 colored point lights in a ring over a dark floor — far past the
+    // old 16-light cap. If the cap regressed, lights 17..40 vanish and
+    // the right side of the ring goes dark (well past tolerance).
+    let (w, h, rgba) = render(&mut eng, 6, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(2.0, 2.0, 4.0, 255.0);
+        r.begin_mode_3d(
+            0.0, 9.0, 0.01, // eye: straight above
+            0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            60.0, 0.0,
+        );
+        r.draw_plane(0.0, 0.0, 0.0, 14.0, 14.0, 110.0, 110.0, 110.0, 255.0);
+        for i in 0..40u32 {
+            let t = i as f32 / 40.0 * std::f32::consts::TAU;
+            let (sx, sz) = (t.cos() * 4.0, t.sin() * 4.0);
+            // hue cycles so neighboring lights are distinguishable
+            let (lr, lg, lb) = (
+                0.5 + 0.5 * (t).cos(),
+                0.5 + 0.5 * (t + 2.094).cos(),
+                0.5 + 0.5 * (t + 4.189).cos(),
+            );
+            r.add_point_light(sx, 1.2, sz, 3.5, lr, lg, lb, 1.6);
+        }
+    });
+    compare_or_update("many_point_lights", w, h, &rgba);
+}

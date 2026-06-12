@@ -71,9 +71,9 @@ struct Lighting {
     light_dir: vec4<f32>,
     light_color: vec4<f32>,
     dir_light_count: vec4<f32>,
-    dir_lights: array<DirLight, 4>,
+    dir_lights: array<DirLight, 8>,
     point_light_count: vec4<f32>,
-    point_lights: array<PointLight, 16>,
+    point_lights: array<PointLight, 256>,
 };
 
 struct JointMatrices {
@@ -219,9 +219,9 @@ struct Lighting {
     light_dir: vec4<f32>,
     light_color: vec4<f32>,
     dir_light_count: vec4<f32>,
-    dir_lights: array<DirLight, 4>,
+    dir_lights: array<DirLight, 8>,
     point_light_count: vec4<f32>,
-    point_lights: array<PointLight, 16>,
+    point_lights: array<PointLight, 256>,
     camera_pos: vec4<f32>,
     shadow_cascade_vps: array<mat4x4<f32>, 3>,
     shadow_cascade_splits: vec4<f32>,

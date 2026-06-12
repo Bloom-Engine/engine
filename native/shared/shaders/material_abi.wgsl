@@ -1,6 +1,6 @@
 // Bloom shader ABI header — see docs/rfc/0001-material-render-graph.md.
 //
-// ABI-VERSION: 2
+// ABI-VERSION: 3
 //
 // Included by every 3D shader (built-in PBR, sky, custom user materials).
 // Defines the five bind groups and the vertex attribute layout that any
@@ -76,9 +76,9 @@ struct PerView {
 
   // Arrayed lights
   dir_light_count:   vec4<f32>, // x = count, yzw = 0
-  dir_lights:        array<DirLight,  4>,
+  dir_lights:        array<DirLight,  8>,
   point_light_count: vec4<f32>,
-  point_lights:     array<PointLight, 16>,
+  point_lights:     array<PointLight, 256>,
 
   // Shadow data — three cascades, split by shadow_splits.xyz
   shadow_splits:   vec4<f32>,
