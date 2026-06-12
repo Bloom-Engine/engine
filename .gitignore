@@ -51,6 +51,15 @@ npm/jolt-prebuilt/lib/
 # Claude Code harness-local state
 .claude/scheduled_tasks.lock
 
+# Perry compiler cache
+.perry-cache/
+
+# CMake build tree from local bloom_jolt builds (CI produces the canonical archives)
+native/third_party/bloom_jolt/build/
+
+# Perf sweep outputs
+examples/intel-sponza/sweep.csv
+
 # Local research / external-engine reference clones. Not part of the
 # Bloom source tree — each dir is a full Unity / Unreal / Three.js /
 # Babylon.js project set up locally for side-by-side perf comparison

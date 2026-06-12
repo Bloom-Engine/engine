@@ -1,4 +1,5 @@
 use std::sync::{Mutex, OnceLock};
+#[cfg(feature = "models3d")]
 use crate::models::ModelData;
 use crate::audio::SoundData;
 
@@ -8,6 +9,7 @@ pub struct StagedTexture {
     pub height: u32,
 }
 
+#[cfg(feature = "models3d")]
 pub struct StagedModel {
     pub model: ModelData,
     pub textures: Vec<StagedTexture>,
@@ -21,6 +23,7 @@ fn texture_store() -> &'static Mutex<Vec<Option<StagedTexture>>> {
     INSTANCE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+#[cfg(feature = "models3d")]
 fn model_store() -> &'static Mutex<Vec<Option<StagedModel>>> {
     static INSTANCE: OnceLock<Mutex<Vec<Option<StagedModel>>>> = OnceLock::new();
     INSTANCE.get_or_init(|| Mutex::new(Vec::new()))
@@ -73,10 +76,12 @@ pub fn take_texture(handle: f64) -> Option<StagedTexture> {
     take_from(texture_store(), handle)
 }
 
+#[cfg(feature = "models3d")]
 pub fn stage_model(model: StagedModel) -> f64 {
     stage_into(model_store(), model)
 }
 
+#[cfg(feature = "models3d")]
 pub fn take_model(handle: f64) -> Option<StagedModel> {
     take_from(model_store(), handle)
 }

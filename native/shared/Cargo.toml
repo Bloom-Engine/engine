@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["mp3", "jolt", "hot-reload"]
+default = ["mp3", "jolt", "hot-reload", "models3d", "image-extras"]
 mp3 = ["dep:minimp3"]
 jolt = []
 # EN-008 — gate the `notify` filesystem watcher behind a compile-time
@@ -13,6 +13,15 @@ jolt = []
 # the dep tree entirely.
 hot-reload = ["dep:notify"]
 web = ["dep:web-time"]
+# EN-014 — 3D model loading (glTF + DDS) and the ModelManager. Pure-2D
+# games disable this via Perry's `[native-library."<pkg>"]` feature
+# forwarding to drop gltf/gltf_json/image_dds from the binary entirely.
+# Default-on so existing 3D games are unaffected.
+models3d = ["dep:gltf", "dep:image_dds"]
+# EN-014 — image codecs beyond PNG. `image::load_from_memory` is
+# format-agnostic, so disabling this only changes which file formats
+# decode at runtime; PNG always works.
+image-extras = ["image/jpeg", "image/bmp", "image/tga", "image/hdr"]
 
 [build-dependencies]
 cmake = "0.1"
@@ -24,9 +33,9 @@ fontdue = "0.9"
 libc = "0.2"
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga", "hdr"] }
-image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image"] }
-gltf = { version = "1", features = ["KHR_materials_pbrSpecularGlossiness", "KHR_materials_transmission"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image"], optional = true }
+gltf = { version = "1", features = ["KHR_materials_pbrSpecularGlossiness", "KHR_materials_transmission"], optional = true }
 lewton = "0.10"
 minimp3 = { version = "0.5", optional = true }
 earcutr = "0.4"

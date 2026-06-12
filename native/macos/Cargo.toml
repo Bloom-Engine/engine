@@ -8,12 +8,21 @@ name = "bloom_macos"
 crate-type = ["staticlib"]
 
 [features]
-# Jolt physics is enabled by default because Perry's native-library build
-# pipeline does not forward cargo feature flags to nativeLibrary crates —
-# any game importing `bloom/physics` would otherwise fail to link. The
-# tradeoff is ~60s extra cold-build time for games that don't use physics.
-default = ["jolt"]
+# Everything defaults ON so existing games are unaffected. Pure-2D games
+# opt out per-project via Perry's `[native-library."<pkg>"]` feature
+# forwarding in perry.toml (perry >= 0.5.1126), e.g.:
+#   [native-library."@bloomengine/engine"]
+#   default-features = false
+# which drops Jolt, glTF/DDS model loading, and the non-PNG image codecs
+# from the game binary.
+default = ["jolt", "models3d", "image-extras"]
 jolt = ["bloom-shared/jolt"]
+# EN-014 — glTF/DDS model loading + ModelManager (and this crate's
+# bloom_load_model/draw_model/... FFI surface).
+models3d = ["bloom-shared/models3d"]
+# EN-014 — image codecs beyond PNG; also gates this crate's own HDR
+# env-map decode (bloom_set_env_clear_from_hdr).
+image-extras = ["bloom-shared/image-extras", "image/hdr"]
 
 # Match perry-runtime's panic strategy so the final perry-driven link
 # doesn't see two copies of rust_eh_personality (and friends) from two
@@ -25,7 +34,7 @@ panic = "abort"
 
 [dependencies]
 bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
-image = { version = "0.25", default-features = false, features = ["hdr"] }
+image = { version = "0.25", default-features = false }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread", "NSLocale", "NSArray"] }
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSEvent", "NSApplication", "NSScreen", "NSGraphicsContext", "NSRunningApplication", "NSResponder"] }

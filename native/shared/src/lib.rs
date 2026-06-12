@@ -10,6 +10,7 @@ pub mod renderer;
 pub mod text_renderer;
 pub mod audio;
 pub mod textures;
+#[cfg(feature = "models3d")]
 pub mod models;
 pub mod scene;
 pub mod frame_callbacks;
@@ -38,6 +39,7 @@ pub use audio::{AudioMixer, SoundData, parse_wav, parse_ogg};
 #[cfg(feature = "mp3")]
 pub use audio::parse_mp3;
 pub use textures::TextureManager;
+#[cfg(feature = "models3d")]
 pub use models::ModelManager;
 pub use scene::SceneGraph;
 pub use frame_callbacks::FrameCallbackSystem;
