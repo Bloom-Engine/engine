@@ -99,7 +99,14 @@ macro_rules! __bloom_ffi_models {
         #[cfg(feature = "models3d")]
         #[no_mangle]
         pub extern "C" fn bloom_unload_model(handle: f64) {
-            $crate::ffi::guard("bloom_unload_model", move || {     engine().models.unload_model(handle); })
+            $crate::ffi::guard("bloom_unload_model", move || {
+                let eng = engine();
+                // Evict cached GPU meshes (keyed by handle bits) before the
+                // handle dies — without this the buffers leak and a slot-
+                // reusing future model would render the stale geometry.
+                eng.renderer.evict_model_cache(handle.to_bits());
+                eng.models.unload_model(handle);
+            })
         }
         #[cfg(not(feature = "models3d"))]
         #[no_mangle]

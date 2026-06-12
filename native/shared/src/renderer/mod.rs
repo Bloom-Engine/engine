@@ -11818,11 +11818,55 @@ impl Renderer {
     }
 
     pub fn unload_texture(&mut self, idx: u32) {
-        // Mark as unused; bind group remains but won't be referenced
+        // Replace the slot's texture with a 1×1 white placeholder so the
+        // heavyweight texture drops (wgpu releases the VRAM once the
+        // queue is done with it). The previous implementation only
+        // zeroed the size entry and kept the texture alive forever —
+        // load/unload cycles grew VRAM unboundedly.
+        //
+        // Slots are intentionally NOT reused: a stale bind_group_idx
+        // held by a scene material renders white rather than ever
+        // aliasing a texture loaded later. The retired slot costs a
+        // handful of bytes, not VRAM.
         let i = idx as usize;
-        if i > 0 && i < self.textures.len() {
-            self.texture_sizes[i] = (0, 0);
+        if i == 0 || i >= self.textures.len() {
+            return;
         }
+        let white = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("unloaded_texture_placeholder"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255, 255, 255, 255],
+        );
+        let view = white.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("unloaded_texture_placeholder_bg"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        self.textures[i] = white;
+        self.texture_bind_groups[i] = bind_group;
+        self.texture_sizes[i] = (0, 0);
+    }
+
+    /// Drop a model's cached GPU meshes. Must be called when the model is
+    /// unloaded: the cache is keyed by handle bits, so without eviction
+    /// the buffers leak — and a future model whose handle reuses the slot
+    /// would render the stale cached geometry.
+    pub fn evict_model_cache(&mut self, handle_bits: u64) {
+        self.model_gpu_cache.remove(&handle_bits);
     }
 
     pub fn set_texture_filter(&mut self, idx: u32, nearest: bool) {

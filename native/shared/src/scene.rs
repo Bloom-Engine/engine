@@ -267,6 +267,10 @@ pub struct SceneGraph {
     /// reclaimed in V1 (Sponza fits comfortably in 1024 slots; loop
     /// back when scenes start exceeding capacity).
     pub next_card_slot: u32,
+    /// 6-slot card blocks returned by destroyed nodes, reused before
+    /// next_card_slot grows — without recycling, create/destroy cycles
+    /// exhaust the fixed-size card atlas.
+    free_card_blocks: Vec<u32>,
     /// Ticket 014 — node handles whose per-mesh SDF still needs to
     /// be baked. Populated alongside BLAS creation; renderer drains
     /// in a per-frame budget via a compute pass. Static meshes
@@ -290,6 +294,7 @@ impl SceneGraph {
             pending_blas_builds: Vec::new(),
             pending_card_captures: Vec::new(),
             next_card_slot: 0,
+            free_card_blocks: Vec::new(),
             pending_sdf_bakes: Vec::new(),
         }
     }
@@ -311,6 +316,12 @@ impl SceneGraph {
             }
             if node.visible {
                 self.tlas_version = self.tlas_version.wrapping_add(1);
+            }
+            // Recycle the node's 6-slot card block. The freed node's GPU
+            // buffers/BLAS/SDF drop with the SceneNode itself (wgpu
+            // releases them once in-flight work completes).
+            if let Some(first) = node.card_first_slot {
+                self.free_card_blocks.push(first);
             }
         }
         self.nodes.free(handle);
@@ -608,6 +619,7 @@ impl SceneGraph {
         let pending_cards = &mut self.pending_card_captures;
         let pending_sdf = &mut self.pending_sdf_bakes;
         let next_card_slot = &mut self.next_card_slot;
+        let free_card_blocks = &mut self.free_card_blocks;
         let mut visible_count: u32 = 0;
         for (handle, node) in self.nodes.iter_mut() {
             if !node.visible || node.indices.is_empty() {
@@ -720,8 +732,14 @@ impl SceneGraph {
                     // Runs on both HW and SW paths so the SDF trace's
                     // broad-phase hit can sample textured radiance.
                     if node.card_first_slot.is_none() {
-                        let first = *next_card_slot;
-                        *next_card_slot += 6;
+                        let first = match free_card_blocks.pop() {
+                            Some(reused) => reused,
+                            None => {
+                                let fresh = *next_card_slot;
+                                *next_card_slot += 6;
+                                fresh
+                            }
+                        };
                         node.card_first_slot = Some(first);
                         pending_cards.push(handle);
                     }
