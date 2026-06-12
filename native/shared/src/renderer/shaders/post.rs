@@ -792,6 +792,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var prev_uv: vec2<f32>;
     if (vel_len > 0.00001) {
         prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
+    } else if (depth >= 0.9999) {
+        // Sky / far plane: the positional reconstruction divides by a
+        // near-zero w and reprojects sky pixels onto arbitrary scene
+        // points — the luma-only history clamp then locks that wrong
+        // chroma in forever (uniform green/red sky tint). The sky is at
+        // infinity, so reproject the view DIRECTION instead: exact under
+        // camera rotation, translation-invariant by definition.
+        let dir = world_h.xyz; // w ~ 0 at the far plane: xyz IS the direction
+        let prev_clip = u.prev_vp * vec4<f32>(dir, 0.0);
+        if (prev_clip.w > 0.00001) {
+            let prev_ndc = prev_clip.xyz / prev_clip.w;
+            prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 1.0 - (prev_ndc.y * 0.5 + 0.5));
+        } else {
+            prev_uv = in.uv;
+        }
     } else {
         let prev_clip = u.prev_vp * vec4<f32>(world, 1.0);
         let prev_ndc = prev_clip.xyz / prev_clip.w;

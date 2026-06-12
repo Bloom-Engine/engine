@@ -17,7 +17,7 @@
 //!   regenerated with BLOOM_UPDATE_GOLDEN=1 `cargo test golden`.
 
 use bloom_shared::engine::EngineState;
-use bloom_shared::renderer::Renderer;
+use bloom_shared::renderer::{Renderer, Vertex3D};
 
 const W: u32 = 256;
 const H: u32 = 256;
@@ -219,45 +219,116 @@ fn golden_many_point_lights() {
     compare_or_update("many_point_lights", w, h, &rgba);
 }
 
+/// Froxel-clustering parity gate. The golden for this test is generated
+/// with `BLOOM_DISABLE_FROXEL=1` (the plain reference loop); the test
+/// then runs through the clustered scene shader, so any divergence
+/// between the two point-light paths — wrong cluster lookup, lights
+/// missed by the sphere/AABB assignment, slice math drift — shows up as
+/// a pixel diff. Unlike `golden_many_point_lights` (immediate-mode
+/// `pipeline_3d`, which keeps the plain loop), this drives the retained
+/// scene graph through `scene_pipeline`, the shader the clustered loop
+/// is spliced into.
 #[test]
-fn golden_lod_selection() {
-    use bloom_shared::renderer::Vertex3D;
+fn golden_many_point_lights_clustered_scene() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
         return;
     };
-
-    fn cube_verts(half: f32, color: [f32; 4]) -> (Vec<Vertex3D>, Vec<u32>) {
-        // 6 faces, outward winding (matches scene-node conventions:
-        // prepare() recomputes bounds from positions).
-        let h = half;
-        let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
-            ([0.0, 0.0, -1.0], [[-h,-h,-h],[ h,-h,-h],[ h, h,-h],[-h, h,-h]]),
-            ([0.0, 0.0,  1.0], [[ h,-h, h],[-h,-h, h],[-h, h, h],[ h, h, h]]),
-            ([-1.0, 0.0, 0.0], [[-h,-h, h],[-h,-h,-h],[-h, h,-h],[-h, h, h]]),
-            ([1.0, 0.0, 0.0],  [[ h,-h,-h],[ h,-h, h],[ h, h, h],[ h, h,-h]]),
-            ([0.0, 1.0, 0.0],  [[-h, h,-h],[ h, h,-h],[ h, h, h],[-h, h, h]]),
-            ([0.0, -1.0, 0.0], [[-h,-h, h],[ h,-h, h],[ h,-h,-h],[-h,-h,-h]]),
-        ];
-        let mut verts = Vec::new();
-        let mut idx = Vec::new();
-        for (normal, vs) in faces {
-            let base = verts.len() as u32;
-            for p in vs {
-                verts.push(Vertex3D {
-                    position: p,
-                    normal,
-                    color,
-                    uv: [0.0, 0.0],
-                    joints: [0.0; 4],
-                    weights: [0.0; 4],
-                    tangent: [0.0; 4],
-                });
-            }
-            idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
-        }
-        (verts, idx)
+    // The gate is meaningless if the clustered path silently fell back
+    // to the reference loop. Storage buffers are available on every
+    // non-WebGL2 device this test runs on, so demand the froxel path
+    // unless the kill-switch is set (golden regeneration).
+    if std::env::var_os("BLOOM_DISABLE_FROXEL").is_none() {
+        assert!(
+            eng.renderer.froxel.is_some(),
+            "froxel clustering inactive on a storage-buffer-capable adapter — \
+             parity test would silently test the reference loop against itself"
+        );
     }
+
+    // Floor (squashed cube) + a ring of cubes, lit by 40 colored point
+    // lights — enough that most froxels see only a few lights, so a
+    // broken cluster lookup cannot hide.
+    let scale_translate = |sx: f32, sy: f32, sz: f32, x: f32, y: f32, z: f32| -> [[f32; 4]; 4] {
+        let mut m = [[0.0f32; 4]; 4];
+        m[0][0] = sx; m[1][1] = sy; m[2][2] = sz; m[3][3] = 1.0;
+        m[3][0] = x; m[3][1] = y; m[3][2] = z;
+        m
+    };
+    let (floor_v, floor_i) = cube_verts(0.5, [0.45, 0.45, 0.45, 1.0]);
+    let floor = eng.scene.create_node();
+    eng.scene.update_geometry(floor, floor_v, floor_i);
+    eng.scene.set_transform(floor, scale_translate(14.0, 0.2, 14.0, 0.0, -0.1, 0.0));
+
+    let (cube_v, cube_i) = cube_verts(0.5, [0.8, 0.8, 0.8, 1.0]);
+    for i in 0..6u32 {
+        let t = i as f32 / 6.0 * std::f32::consts::TAU;
+        let node = eng.scene.create_node();
+        eng.scene.update_geometry(node, cube_v.clone(), cube_i.clone());
+        eng.scene.set_transform(node, scale_translate(1.0, 1.0, 1.0, t.cos() * 2.2, 0.5, t.sin() * 2.2));
+    }
+
+    let (w, h, rgba) = render(&mut eng, 6, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(2.0, 2.0, 4.0, 255.0);
+        r.begin_mode_3d(
+            6.0, 7.0, 6.0,
+            0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            60.0, 0.0,
+        );
+        for i in 0..40u32 {
+            let t = i as f32 / 40.0 * std::f32::consts::TAU;
+            let (sx, sz) = (t.cos() * 4.0, t.sin() * 4.0);
+            let (lr, lg, lb) = (
+                0.5 + 0.5 * (t).cos(),
+                0.5 + 0.5 * (t + 2.094).cos(),
+                0.5 + 0.5 * (t + 4.189).cos(),
+            );
+            r.add_point_light(sx, 1.2, sz, 3.5, lr, lg, lb, 1.6);
+        }
+    });
+    compare_or_update("many_point_lights_clustered_scene", w, h, &rgba);
+}
+
+/// Unit cube as scene-node geometry — 6 faces, outward winding (matches
+/// scene-node conventions: prepare() recomputes bounds from positions).
+fn cube_verts(half: f32, color: [f32; 4]) -> (Vec<Vertex3D>, Vec<u32>) {
+    let h = half;
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        ([0.0, 0.0, -1.0], [[-h,-h,-h],[ h,-h,-h],[ h, h,-h],[-h, h,-h]]),
+        ([0.0, 0.0,  1.0], [[ h,-h, h],[-h,-h, h],[-h, h, h],[ h, h, h]]),
+        ([-1.0, 0.0, 0.0], [[-h,-h, h],[-h,-h,-h],[-h, h,-h],[-h, h, h]]),
+        ([1.0, 0.0, 0.0],  [[ h,-h,-h],[ h,-h, h],[ h, h, h],[ h, h,-h]]),
+        ([0.0, 1.0, 0.0],  [[-h, h,-h],[ h, h,-h],[ h, h, h],[-h, h, h]]),
+        ([0.0, -1.0, 0.0], [[-h,-h, h],[ h,-h, h],[ h,-h,-h],[-h,-h,-h]]),
+    ];
+    let mut verts = Vec::new();
+    let mut idx = Vec::new();
+    for (normal, vs) in faces {
+        let base = verts.len() as u32;
+        for p in vs {
+            verts.push(Vertex3D {
+                position: p,
+                normal,
+                color,
+                uv: [0.0, 0.0],
+                joints: [0.0; 4],
+                weights: [0.0; 4],
+                tangent: [0.0; 4],
+            });
+        }
+        idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+    }
+    (verts, idx)
+}
+
+#[test]
+fn golden_lod_selection() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
 
     let (red_v, red_i) = cube_verts(0.5, [0.9, 0.1, 0.1, 1.0]);
     let (green_v, green_i) = cube_verts(0.5, [0.1, 0.9, 0.1, 1.0]);
@@ -344,4 +415,30 @@ fn cooked_bc7_texture_matches_raw() {
         max_diff <= 16,
         "cooked render diverges from raw render: max channel diff {max_diff}"
     );
+}
+
+#[test]
+fn golden_lit_primitives_taa() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    // Same scene as lit_primitives_3d but with TAA ON: pins the TAA
+    // branch of the post-FX cascade (reprojection, neighborhood clamp,
+    // Catmull-Rom upscale path) that the TAA-off goldens never touch.
+    // The Halton jitter sequence is indexed by frame number, so a fixed
+    // frame count renders deterministically.
+    eng.renderer.set_taa_enabled(true);
+    let (w, h, rgba) = render(&mut eng, 10, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(13.0, 18.0, 26.0, 255.0);
+        r.begin_mode_3d(4.0, 3.0, 6.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+        r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.95, 0.9, 1.2);
+        r.add_point_light(2.0, 2.0, 2.0, 10.0, 0.2, 0.4, 1.0, 2.0);
+        r.draw_plane(0.0, 0.0, 0.0, 10.0, 10.0, 120.0, 120.0, 125.0, 255.0);
+        r.draw_cube(-1.2, 0.5, 0.0, 1.0, 1.0, 1.0, 230.0, 41.0, 55.0, 255.0);
+        r.draw_sphere(1.2, 0.75, 0.5, 0.75, 0.0, 228.0, 48.0, 255.0);
+        r.draw_cube(0.0, 1.6, -1.0, 0.8, 0.8, 0.8, 253.0, 249.0, 0.0, 255.0);
+    });
+    compare_or_update("lit_primitives_taa", w, h, &rgba);
 }

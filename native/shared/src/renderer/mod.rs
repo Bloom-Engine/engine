@@ -11,6 +11,8 @@ mod ssgi_pass;
 mod shadow_pass;
 mod postfx_chain;
 mod scene_pass;
+mod froxel;
+mod lighting;
 pub use occlusion::OcclusionCuller;
 use shaders::*;
 
@@ -204,7 +206,7 @@ pub(super) struct HizDownsampleParams {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SsaoParams {
+pub(super) struct SsaoParams {
     /// xy = inv_size (1/half_w, 1/half_h), z = radius (world units),
     /// w = strength
     params: [f32; 4],
@@ -1394,6 +1396,12 @@ pub struct Renderer {
     // don't have to carry tangent vertex data or normal-map bindings.
     pub scene_pipeline: wgpu::RenderPipeline,
     pub scene_material_layout: wgpu::BindGroupLayout,
+    /// Froxel light clustering (task #23). `Some` when the device has
+    /// fragment-stage storage buffers (everything but WebGL2); the
+    /// scene shader is then compiled with the clustered point-light
+    /// loop and `lighting_layout` gains bindings 10–12. `None` keeps
+    /// the plain count-driven loop.
+    pub froxel: Option<froxel::FroxelPass>,
     /// 1×1 gray env fallback and its sampler — bound in the lighting
     /// bind group before any HDR is loaded. `load_env_from_hdr`
     /// rebuilds the lighting bind group to swap in the real env
@@ -1674,99 +1682,13 @@ impl Renderer {
         // higher device limit). pipeline_3d doesn't reference the env
         // / BRDF bindings — WGSL lets bind group layouts expose more
         // than a shader consumes.
-        let lighting_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("lighting_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 8,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-        });
+        // Froxel clustering first — its presence decides whether the
+        // lighting layout grows bindings 10-12 and which point-light
+        // loop the scene shader is compiled with.
+        let froxel = froxel::FroxelPass::supported(&device)
+            .then(|| froxel::FroxelPass::new(&device));
+
+        let lighting_layout = lighting::create_lighting_layout(&device, froxel.is_some());
         let lighting_uniforms = LightingUniforms::defaults();
         let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lighting_buffer"),
@@ -2020,22 +1942,21 @@ impl Renderer {
         // group since the bind group binds the shadow depth view.
         let shadow_map = crate::shadows::ShadowMap::new(&device, Vertex3D::desc());
 
-        let lighting_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lighting_bg"),
-            layout: &lighting_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: lighting_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&scene_env_default_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&env_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&brdf_lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[0]) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[1]) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&shadow_map.depth_views[2]) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&shadow_map.sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&scene_env_default_view) },
-            ],
-        });
+        let lighting_bind_group = lighting::create_lighting_bind_group(
+            &device,
+            &lighting_layout,
+            "lighting_bg",
+            &lighting::LightingBindSources {
+                lighting_buffer: &lighting_buffer,
+                env_sampler: &env_sampler,
+                brdf_lut_view: &brdf_lut_view,
+                brdf_lut_sampler: &brdf_lut_sampler,
+                shadow_map: &shadow_map,
+                froxel: froxel.as_ref(),
+            },
+            &scene_env_default_view,
+            &scene_env_default_view,
+        );
 
         // --- Default 1x1 white texture ---
         let white_data = [255u8, 255, 255, 255];
@@ -2864,9 +2785,17 @@ impl Renderer {
         // ============================================================
         // Scene pipeline (retained scene-graph draws with normal maps)
         // ============================================================
+        // Clustered devices get the froxel point-light loop spliced in
+        // place of the plain reference loop (same shading math — the
+        // many_point_lights golden enforces equivalence).
+        let scene_shader_source: std::borrow::Cow<'static, str> = if froxel.is_some() {
+            froxel::clustered_scene_shader(SCENE_SHADER).into()
+        } else {
+            SCENE_SHADER.into()
+        };
         let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene_shader"),
-            source: wgpu::ShaderSource::Wgsl(SCENE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(scene_shader_source),
         });
         // Scene material layout:
         //   0: base_color texture      4: metallic_roughness texture
@@ -6274,6 +6203,7 @@ impl Renderer {
             aerial_perspective_sampler,
             env_diffuse_texture: None,
             scene_pipeline,
+            froxel,
             scene_material_layout,
             _scene_env_default_texture: scene_env_default_texture,
             scene_env_default_view,
@@ -8227,22 +8157,7 @@ impl Renderer {
         // LUT bindings stay put — only env tex/sampler + diffuse view
         // change.
         let diffuse_view_bg = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let new_lighting_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lighting_bg"),
-            layout: &self.lighting_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.lighting_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&diffuse_view_bg) },
-            ],
-        });
+        let new_lighting_bg = self.make_lighting_bind_group("lighting_bg", &view, &diffuse_view_bg);
 
         self.sky_texture = Some(texture);
         self.sky_bind_group = Some(bg);
@@ -8555,22 +8470,7 @@ impl Renderer {
                 self._scene_env_default_texture
                     .create_view(&wgpu::TextureViewDescriptor::default())
             });
-        let new_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lighting_bg_panorama"),
-            layout: &self.lighting_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.lighting_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&env_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&diffuse_view) },
-            ],
-        });
+        let new_bg = self.make_lighting_bind_group("lighting_bg_panorama", &env_view, &diffuse_view);
         self.lighting_bind_group = new_bg;
         self.lighting_bg_is_procedural = false;
     }
@@ -8582,22 +8482,11 @@ impl Renderer {
     /// every sun-move and the bind group's TextureView references
     /// remain valid.
     fn swap_lighting_bg_to_procedural(&mut self) {
-        let new_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lighting_bg_procedural"),
-            layout: &self.lighting_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.lighting_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.procedural_sky_equirect_full_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.procedural_env_diffuse_view) },
-            ],
-        });
+        let new_bg = self.make_lighting_bind_group(
+            "lighting_bg_procedural",
+            &self.procedural_sky_equirect_full_view,
+            &self.procedural_env_diffuse_view,
+        );
         self.lighting_bind_group = new_bg;
         self.lighting_bg_is_procedural = true;
     }
@@ -9228,10 +9117,6 @@ impl Renderer {
             profiler.end("card_light");
         }
 
-        // Cascaded shadow maps (with the ticket-004 cache-hit skip) —
-        // see record_shadow_pass in shadow_pass.rs.
-        self.record_shadow_pass(&mut encoder, profiler, scene);
-
         // Upload immediate-mode 2D data
         profiler.begin("upload_geometry");
         let has_2d = !self.vertices_2d.is_empty();
@@ -9254,433 +9139,224 @@ impl Renderer {
         }
         profiler.end("upload_geometry");
 
-        // HDR scene pass (sky-view LUT refresh, sky + 3D batch +
-        // scene-graph render into the HDR MRTs, then the opaque
-        // material pass on the inner graph) — see
-        // record_hdr_scene_pass in scene_pass.rs.
-        self.record_hdr_scene_pass(&mut encoder, profiler, scene);
-        // ============================================================
-        // Phase 4b — translucent / refractive / additive material pass
-        // ============================================================
-        //
-        // Runs after opaque materials, before post-FX. Loads hdr_rt so
-        // opaque output survives; alpha-blends into it. Depth is
-        // bound as read-only so translucent draws participate in the
-        // depth test without writing.
-        //
-        // If any submitted translucent material declared
-        // `reads_scene = true`, we first snapshot hdr_rt into a
-        // swapchain-sized transient and bind that as group 4
-        // scene_color_tex for the dispatch. Free after the pass so
-        // the transient pool reuses on the next frame.
-        if !self.material_system.translucent_commands.is_empty() {
-            // Back-to-front by view depth — required for correct alpha
-            // compositing; submission order is only kept between
-            // equal-depth draws (stable sort).
-            self.material_system.sort_translucent();
-            profiler.begin("translucent_pass");
-            let swap_w = self.surface_config.width;
-            let swap_h = self.surface_config.height;
-            self.transient_pool.begin_frame(swap_w, swap_h);
-
-            // Phase 7 — run the impulse decay + splat compute BEFORE
-            // we build scene_inputs so the front view reflects this
-            // frame's submissions.
-            self.impulse_field.update(&self.device, &self.queue, &mut encoder);
-
-            // Does any queued translucent material need the scene
-            // colour snapshot?
-            let needs_scene = self.material_system.translucent_commands
-                .iter()
-                .any(|c| self.material_system.pipelines
-                    .get(c.material as usize - 1)
-                    .and_then(|p| p.as_ref())
-                    .map(|p| p.reads_scene)
-                    .unwrap_or(false));
-
-            let scene_color_tid = if needs_scene {
-                let desc = transient::TransientDesc::new(
-                    formats::HDR_FORMAT,
-                    wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-                    transient::SizePolicy::Swapchain,
-                );
-                Some(self.transient_pool.acquire(&self.device, desc))
-            } else {
-                None
-            };
-
-            // Phase 4c — depth snapshot. wgpu forbids sampling a
-            // texture that is also a depth-stencil attachment of the
-            // same pass, so we copy the opaque depth buffer into a
-            // transient before beginning the translucent pass and
-            // bind the transient at group 4 binding 2. Acquired
-            // whenever any translucent material reads_scene (same
-            // gate as colour) — cheap enough that it's not worth a
-            // separate `reads_depth` flag yet.
-            let scene_depth_tid = if needs_scene {
-                let desc = transient::TransientDesc::new(
-                    formats::DEPTH_FORMAT,
-                    wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-                    transient::SizePolicy::Swapchain,
-                );
-                Some(self.transient_pool.acquire(&self.device, desc))
-            } else {
-                None
-            };
-
-            // Snapshot hdr_rt + live depth -> transients.
-            if let (Some(ctid), Some(dtid)) = (scene_color_tid, scene_depth_tid) {
-                let color_tex = self.transient_pool.texture(ctid).expect("fresh color transient");
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.hdr_rt_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: color_tex,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::Extent3d { width: swap_w, height: swap_h, depth_or_array_layers: 1 },
-                );
-                let depth_tex = self.transient_pool.texture(dtid).expect("fresh depth transient");
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.depth_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::DepthOnly,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: depth_tex,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::DepthOnly,
-                    },
-                    wgpu::Extent3d { width: swap_w, height: swap_h, depth_or_array_layers: 1 },
-                );
-                let color_view = self.transient_pool.view(ctid).unwrap();
-                let depth_view = self.transient_pool.view(dtid).unwrap();
-                let imp_view = self.impulse_field.front_view();
-                let imp_samp = self.impulse_field.sampler();
-                self.material_system.update_scene_inputs(
-                    &self.device, color_view, Some(depth_view),
-                    Some((imp_view, imp_samp)),
-                );
-            } else {
-                // No refractive/depth-reading materials this frame —
-                // still need a valid bind group. None → internal stubs.
-                self.material_system.update_scene_inputs(
-                    &self.device, &self.hdr_rt_view, None, None,
-                );
-            }
-
-            {
-                let t_ts = profiler.pass_timestamp_writes("translucent_pass");
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("bloom_translucent_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.hdr_rt_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            // Translucents don't write depth — keep
-                            // the opaque pass's depth pristine so
-                            // downstream post-FX (SSR/SSGI) still
-                            // sees the opaque geometry.
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: t_ts,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                let cache = &self.model_gpu_cache;
-                self.material_system.dispatch_translucent(&mut pass, |handle, idx| {
-                    if let Some(Some(meshes)) = cache.get(&handle) {
-                        if idx < meshes.len() {
-                            let mesh = &meshes[idx];
-                            return Some((&mesh.vb, &mesh.ib, mesh.index_count));
-                        }
-                    }
-                    None
-                });
-            }
-
-            if let Some(tid) = scene_color_tid {
-                self.transient_pool.release(tid);
-            }
-            profiler.end("translucent_pass");
-        }
-
-        // ============================================================
-        // SSAO: half-res GTAO sampling a hierarchical linear-depth
-        // pyramid. Build hiz (linearize + 4 min-downsamples), then
-        // dispatch the GTAO compute pass.
-        // ============================================================
-        profiler.begin("post_fx");
         let surf_w = self.surface_config.width;
         let surf_h = self.surface_config.height;
-        if self.ssao_enabled {
-            let p = &self.current_proj_matrix;
-            let p00 = p[0][0];
-            let p11 = p[1][1];
-            let p20 = p[2][0];
-            let p21 = p[2][1];
-            let p22 = p[2][2];
-            let p32 = p[3][2];
-            let half_w = (surf_w / 2).max(1);
-            let half_h = (surf_h / 2).max(1);
-
-            // Hi-Z build + occlusion capture run on the render graph
-            // (Phase 2b, cluster 1). Unlike the older material-pass nodes
-            // that capture individual field refs, these use the
-            // ctx-owns-renderer pattern: the context carries &mut Renderer
-            // and closures borrow nothing at build time — the shape the
-            // rest of end_frame_with_scene migrates onto.
-            {
-                use graph::{Graph, PassInput, PassNode, PassOutput};
-                // Transient id 0 = the linearized Hi-Z pyramid for this
-                // frame (graph-internal ordering token; the textures
-                // themselves are persistent renderer fields).
-                const HIZ_PYRAMID: u32 = 0;
-
-                struct HizCtx<'a> {
-                    r: &'a mut Renderer,
-                    encoder: &'a mut wgpu::CommandEncoder,
-                    profiler: &'a mut crate::profiler::Profiler,
-                    half: (u32, u32),
-                    p22: f32,
-                    p32: f32,
-                }
-
-                let mut g: Graph<HizCtx> = Graph::new();
-                g.push(
-                    PassNode::new(
-                        "hiz_build",
-                        Box::new(|ctx: &mut HizCtx| {
-                            let (hw, hh) = ctx.half;
-                            ctx.r.record_hiz_chain(ctx.encoder, ctx.profiler, hw, hh, ctx.p22, ctx.p32);
-                        }),
-                    )
-                    .with_reads(&[PassInput::SceneDepth])
-                    .with_writes(&[PassOutput::Transient(HIZ_PYRAMID)]),
-                );
-                // Max-reduce the linearized depth into the 64x64 occlusion
-                // grid and queue its readback; scene.prepare consumes it
-                // next frame (one-frame latency, no stall).
-                g.push(
-                    PassNode::new(
-                        "occlusion_capture",
-                        Box::new(|ctx: &mut HizCtx| {
-                            let vp = ctx.r.vp_matrix();
-                            let (hw, hh) = ctx.half;
-                            // Split borrows: occlusion is a sibling field
-                            // of device/queue; record() also needs the
-                            // hiz view.
-                            let occlusion = &mut ctx.r.occlusion as *mut OcclusionCuller;
-                            unsafe {
-                                (*occlusion).record(
-                                    &ctx.r.device,
-                                    &ctx.r.queue,
-                                    ctx.encoder,
-                                    &ctx.r.hiz_views[0],
-                                    (hw, hh),
-                                    vp,
-                                );
-                            }
-                        }),
-                    )
-                    .with_reads(&[PassInput::Transient(HIZ_PYRAMID)]),
-                );
-                let mut ctx = HizCtx {
-                    r: self,
-                    encoder: &mut encoder,
-                    profiler,
-                    half: (half_w, half_h),
-                    p22,
-                    p32,
-                };
-                if let Err(e) = g.execute(&mut ctx) {
-                    eprintln!("[graph] hiz/occlusion cluster failed: {:?}", e);
-                }
-            }
-
-            // --- SSAO (compute GTAO, samples Hi-Z pyramid) --------------
-            let ld = self.lighting_uniforms.light_dir;
-            let v = &self.current_view_matrix;
-            let light_dir_vs = [
-                v[0][0]*ld[0] + v[1][0]*ld[1] + v[2][0]*ld[2],
-                v[0][1]*ld[0] + v[1][1]*ld[1] + v[2][1]*ld[2],
-                v[0][2]*ld[0] + v[1][2]*ld[1] + v[2][2]*ld[2],
-                0.0,
-            ];
-            // Temporal accumulation: ping-pong history textures.
-            // `write_idx` is the current-frame output; `read_idx` the
-            // previous frame's result. First 4 frames force alpha=1
-            // so the initial clear never contaminates the signal.
-            let write_idx = self.ssao_history_idx;
-            let read_idx = 1 - write_idx;
-            let frame_phase = self.ssao_history_frame % 4;
-            let force_refresh = if self.ssao_history_frame < 4 { 1u32 } else { 0u32 };
-            // 4-frame EMA: alpha = 1/4 = 0.25 gives equal weight to
-            // each of the 4 phases at steady state.
-            let alpha = 0.25_f32;
-            // Halton-5 rotation: uncorrelated with TAA's base-2/3 jitter
-            // so the two noise patterns don't resonate.
-            let halton5 = halton(self.ssao_history_frame + 1, 5);
-            let sp = SsaoParams {
-                params: [
-                    1.0 / half_w as f32,
-                    1.0 / half_h as f32,
-                    self.ssao_radius,
-                    self.ssao_strength,
-                ],
-                proj_row01: [p00, p11, p20, p21],
-                proj_z: [p22, p32, 1.0 / p00, 1.0 / p11],
-                light_dir_vs,
-                size: [half_w, half_h, frame_phase, force_refresh],
-                temporal: [alpha, halton5, 0.0, 0.0],
-            };
-            self.queue.write_buffer(&self.ssao_uniform_buffer, 0, bytemuck::bytes_of(&sp));
-
-            if self.ssao_bg_cache[write_idx].is_none() {
-                self.ssao_bg_cache[write_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("ssao_bg"),
-                    layout: &self.ssao_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.ssao_uniform_buffer.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.ssao_rt_view) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.hiz_sampler) },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hiz_views[0]) },
-                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.hiz_views[1]) },
-                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.hiz_views[2]) },
-                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.hiz_views[3]) },
-                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.hiz_views[4]) },
-                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
-                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.ssao_history_views[read_idx]) },
-                        wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                        wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.ssao_history_views[write_idx]) },
-                    ],
-                }));
-            }
-            let bg = self.ssao_bg_cache[write_idx].as_ref().unwrap();
-
-            let ssao_ts = profiler.compute_pass_timestamp_writes("ssao_pass");
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ssao_pass"),
-                timestamp_writes: ssao_ts,
-            });
-            pass.set_pipeline(&self.ssao_pipeline);
-            pass.set_bind_group(0, bg, &[]);
-            pass.dispatch_workgroups((half_w + 7) / 8, (half_h + 7) / 8, 1);
-
-            // Flip ping-pong indices for the next frame.
-            self.ssao_history_idx = read_idx;
-            self.ssao_history_frame = self.ssao_history_frame.wrapping_add(1);
-        }
-
-        // GTAO bilateral blur (or disabled-clear) — see hiz.rs.
-        self.record_ssao_blur(&mut encoder, surf_w, surf_h);
-
-        // SSR ray march — see record_ssr_march in ssr_pass.rs.
-        self.record_ssr_march(&mut encoder, profiler);
-
-        // SSR temporal denoiser — see record_ssr_temporal in ssr_pass.rs.
-        self.record_ssr_temporal(&mut encoder);
-
-        // The compose pass reads denoised SSR from the current history
-        // texture when ssr_enabled; otherwise the raw ssr_rt (which was
-        // cleared to transparent above) so it contributes nothing.
-        // Lumen-style screen-probe SSGI (place/trace/temporal/resolve)
-        // or disabled-clear — see record_ssgi_passes in ssgi_pass.rs.
-        self.record_ssgi_passes(&mut encoder, profiler, surf_w, surf_h);
-
-
-        // The resolve pass writes directly into `ssgi_rt_view`, so
-        // downstream composite + TAA reads are unchanged from the
-        // legacy path.
-        // Bloom chain (Karis-thresholded downsample + additive upsample)
-        // — see record_bloom_chain in postfx_chain.rs.
-        self.record_bloom_chain(&mut encoder, profiler, surf_w, surf_h);
-
-
-        // Scene compose (HDR + SSR + SSGI*albedo + bloom + fog + shafts
-        // -> composed_rt) — see record_scene_compose in postfx_chain.rs.
-        self.record_scene_compose(&mut encoder);
-        // Post-FX tail: upscale/TAA/DoF/motion-blur/SSS/CAS, each
-        // reading the previous enabled stage — see
-        // record_postfx_tail in postfx_chain.rs.
-        self.record_postfx_tail(&mut encoder, profiler);
-
-        let composite_src_view = self.composite_source_view();
-
-        // ============================================================
-        // Auto-exposure update pass (runs only when auto_exposure is
-        // on; otherwise the composite reads the old exposure texture
-        // which is fine since manual_exposure bypasses the read).
-        // ============================================================
         let exposure_src_idx = self.exposure_current_idx;
         let exposure_dst_idx = 1 - self.exposure_current_idx;
-        if self.auto_exposure {
-            let ep = ExposureParams {
-                params: [
-                    self.auto_exposure_key,
-                    self.auto_exposure_rate,
-                    // Wide clamp — without SSGI, Sponza's shadowed
-                    // corridors have ~7× less average luma than its
-                    // sunlit courtyard, so exposure needs to span
-                    // the same range to keep perceived brightness
-                    // stable across rotations.
-                    0.1,
-                    10.0,
-                ],
-            };
-            self.queue.write_buffer(&self.exposure_uniform_buffer, 0, bytemuck::bytes_of(&ep));
 
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("exposure_bg"),
-                layout: &self.exposure_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.exposure_uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(composite_src_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.exposure_views[exposure_src_idx]) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("exposure_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.exposure_views[exposure_dst_idx],
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.exposure_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.draw(0..3, 0..1);
+        // ============================================================
+        // Frame render graph (RFC 0001 Phase 2b — complete).
+        //
+        // Every render pass between geometry upload and the terminal
+        // composite runs as a PassNode. Reads/writes document the real
+        // data dependencies; in addition, each node carries a with_after
+        // pin to its predecessor so the schedule reproduces the
+        // hand-tuned order exactly. Loosening those pins (to let the
+        // scheduler interleave independent passes) is the documented
+        // next refinement — do it dependency-by-dependency with the
+        // golden tests watching.
+        //
+        // The context owns &mut Renderer, so node closures borrow
+        // nothing at build time and can call the record_* methods.
+        // Feature toggles (ssao/ssr/ssgi/bloom) are checked inside the
+        // closures (or inside the methods), never by omitting nodes —
+        // with_after on a missing node is a schedule error.
+        // ============================================================
+        {
+            use graph::{Graph, PassInput, PassNode, PassOutput};
+            // Transient ordering tokens for resources the enum doesn't
+            // name. The textures themselves are persistent renderer
+            // fields; these ids only express producer→consumer edges.
+            const HIZ_PYRAMID: u32 = 0;
+            const SSAO_TEX: u32 = 1;
+            const SSR_TEX: u32 = 2;
+            const SSGI_TEX: u32 = 3;
+            const BLOOM_CHAIN: u32 = 4;
+            const COMPOSED: u32 = 5;
+            const LDR_FINAL: u32 = 6;
+            const FROXEL_CLUSTERS: u32 = 7;
+
+            struct FrameCtx2<'a> {
+                r: &'a mut Renderer,
+                encoder: &'a mut wgpu::CommandEncoder,
+                profiler: &'a mut crate::profiler::Profiler,
+                scene: &'a mut crate::scene::SceneGraph,
+                surf: (u32, u32),
+                exposure_idx: (usize, usize),
+            }
+
+            let mut g: Graph<FrameCtx2> = Graph::new();
+            g.push(
+                PassNode::new("froxel_assign", Box::new(|c: &mut FrameCtx2| {
+                    // No-op when self.froxel is None (the method gates);
+                    // the node stays in the graph so with_after pins
+                    // never dangle.
+                    c.r.record_froxel_assign(c.encoder);
+                }))
+                .with_writes(&[PassOutput::Transient(FROXEL_CLUSTERS)]),
+            );
+            g.push(
+                PassNode::new("shadow", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_shadow_pass(c.encoder, c.profiler, c.scene);
+                }))
+                .with_writes(&[PassOutput::Shadow(0), PassOutput::Shadow(1), PassOutput::Shadow(2)]),
+            );
+            g.push(
+                PassNode::new("hdr_scene", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_hdr_scene_pass(c.encoder, c.profiler, c.scene);
+                }))
+                .with_reads(&[
+                    PassInput::Shadow(0),
+                    PassInput::Shadow(1),
+                    PassInput::Shadow(2),
+                    PassInput::Transient(FROXEL_CLUSTERS),
+                ])
+                .with_writes(&[
+                    PassOutput::HdrColor,
+                    PassOutput::MaterialRt,
+                    PassOutput::VelocityRt,
+                    PassOutput::AlbedoRt,
+                    PassOutput::Depth,
+                ])
+                .with_after(&["shadow", "froxel_assign"]),
+            );
+            g.push(
+                PassNode::new("translucent", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_translucent_pass(c.encoder, c.profiler);
+                }))
+                // Reads the opaque HDR + depth and alpha-blends back into
+                // HdrColor; the pin (not a second HdrColor write) keeps a
+                // single declared writer per resource.
+                .with_after(&["hdr_scene"]),
+            );
+            g.push(
+                PassNode::new("hiz_build", Box::new(|c: &mut FrameCtx2| {
+                    if !c.r.ssao_enabled {
+                        return;
+                    }
+                    let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
+                    let p22 = c.r.current_proj_matrix[2][2];
+                    let p32 = c.r.current_proj_matrix[3][2];
+                    c.r.record_hiz_chain(c.encoder, c.profiler, hw, hh, p22, p32);
+                }))
+                .with_reads(&[PassInput::SceneDepth])
+                .with_writes(&[PassOutput::Transient(HIZ_PYRAMID)])
+                .with_after(&["translucent"]),
+            );
+            g.push(
+                PassNode::new("occlusion_capture", Box::new(|c: &mut FrameCtx2| {
+                    if !c.r.ssao_enabled {
+                        return;
+                    }
+                    let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
+                    let vp = c.r.vp_matrix();
+                    let occlusion = &mut c.r.occlusion as *mut OcclusionCuller;
+                    unsafe {
+                        (*occlusion).record(&c.r.device, &c.r.queue, c.encoder, &c.r.hiz_views[0], (hw, hh), vp);
+                    }
+                }))
+                .with_reads(&[PassInput::Transient(HIZ_PYRAMID)])
+                .with_after(&["hiz_build"]),
+            );
+            g.push(
+                PassNode::new("gtao", Box::new(|c: &mut FrameCtx2| {
+                    if !c.r.ssao_enabled {
+                        return;
+                    }
+                    let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
+                    let p = &c.r.current_proj_matrix;
+                    let (p00, p11, p20, p21) = (p[0][0], p[1][1], p[2][0], p[2][1]);
+                    c.r.record_gtao(c.encoder, c.profiler, hw, hh, p00, p11, p20, p21);
+                }))
+                .with_reads(&[PassInput::Transient(HIZ_PYRAMID)])
+                .with_after(&["occlusion_capture"]),
+            );
+            g.push(
+                PassNode::new("ssao_blur", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_ssao_blur(c.encoder, c.surf.0, c.surf.1);
+                }))
+                .with_writes(&[PassOutput::Transient(SSAO_TEX)])
+                .with_after(&["gtao"]),
+            );
+            g.push(
+                PassNode::new("ssr_march", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_ssr_march(c.encoder, c.profiler);
+                }))
+                .with_reads(&[PassInput::SceneColor, PassInput::SceneDepth])
+                .with_after(&["ssao_blur"]),
+            );
+            g.push(
+                PassNode::new("ssr_temporal", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_ssr_temporal(c.encoder);
+                }))
+                .with_writes(&[PassOutput::Transient(SSR_TEX)])
+                .with_after(&["ssr_march"]),
+            );
+            g.push(
+                PassNode::new("ssgi", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_ssgi_passes(c.encoder, c.profiler, c.surf.0, c.surf.1);
+                }))
+                .with_reads(&[PassInput::SceneColor, PassInput::SceneDepth])
+                .with_writes(&[PassOutput::Transient(SSGI_TEX)])
+                .with_after(&["ssr_temporal"]),
+            );
+            g.push(
+                PassNode::new("bloom", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_bloom_chain(c.encoder, c.profiler, c.surf.0, c.surf.1);
+                }))
+                .with_reads(&[PassInput::SceneColor])
+                .with_writes(&[PassOutput::Transient(BLOOM_CHAIN)])
+                .with_after(&["ssgi"]),
+            );
+            g.push(
+                PassNode::new("compose", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_scene_compose(c.encoder);
+                }))
+                .with_reads(&[
+                    PassInput::SceneColor,
+                    PassInput::Transient(SSAO_TEX),
+                    PassInput::Transient(SSR_TEX),
+                    PassInput::Transient(SSGI_TEX),
+                    PassInput::Transient(BLOOM_CHAIN),
+                ])
+                .with_writes(&[PassOutput::Transient(COMPOSED)])
+                .with_after(&["bloom"]),
+            );
+            g.push(
+                PassNode::new("postfx_tail", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_postfx_tail(c.encoder, c.profiler);
+                }))
+                .with_reads(&[PassInput::Transient(COMPOSED), PassInput::MotionVectors])
+                .with_writes(&[PassOutput::Transient(LDR_FINAL)])
+                .with_after(&["compose"]),
+            );
+            g.push(
+                PassNode::new("auto_exposure", Box::new(|c: &mut FrameCtx2| {
+                    let (src, dst) = c.exposure_idx;
+                    c.r.record_auto_exposure(c.encoder, src, dst);
+                }))
+                .with_reads(&[PassInput::Transient(LDR_FINAL)])
+                .with_after(&["postfx_tail"]),
+            );
+
+            let mut ctx = FrameCtx2 {
+                r: self,
+                encoder: &mut encoder,
+                profiler,
+                scene,
+                surf: (surf_w, surf_h),
+                exposure_idx: (exposure_src_idx, exposure_dst_idx),
+            };
+            if let Err(e) = g.execute(&mut ctx) {
+                // A schedule error means a malformed graph (cycle /
+                // unknown pin) — a programming error, not a runtime
+                // condition. Surface loudly; the frame still presents
+                // whatever was encoded before the failure.
+                eprintln!("[graph] frame graph failed: {:?}", e);
+            }
         }
+
+        let composite_src_view = self.composite_source_view();
 
         // composite_uniform_buffer carries per-frame composite state.
         // x = tonemap kind (0 ACES / 1 AgX)

@@ -285,3 +285,181 @@ impl Renderer {
 
     }
 }
+
+impl Renderer {
+    /// Translucent / refractive / additive material pass: after opaque,
+    /// before post-FX; loads hdr_rt, depth read-only, back-to-front
+    /// sorted; snapshots scene color for reads_scene materials. Split
+    /// from end_frame_with_scene.
+    pub(super) fn record_translucent_pass(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+    ) {
+    // ============================================================
+    // Phase 4b — translucent / refractive / additive material pass
+    // ============================================================
+    //
+    // Runs after opaque materials, before post-FX. Loads hdr_rt so
+    // opaque output survives; alpha-blends into it. Depth is
+    // bound as read-only so translucent draws participate in the
+    // depth test without writing.
+    //
+    // If any submitted translucent material declared
+    // `reads_scene = true`, we first snapshot hdr_rt into a
+    // swapchain-sized transient and bind that as group 4
+    // scene_color_tex for the dispatch. Free after the pass so
+    // the transient pool reuses on the next frame.
+    if !self.material_system.translucent_commands.is_empty() {
+        // Back-to-front by view depth — required for correct alpha
+        // compositing; submission order is only kept between
+        // equal-depth draws (stable sort).
+        self.material_system.sort_translucent();
+        profiler.begin("translucent_pass");
+        let swap_w = self.surface_config.width;
+        let swap_h = self.surface_config.height;
+        self.transient_pool.begin_frame(swap_w, swap_h);
+
+        // Phase 7 — run the impulse decay + splat compute BEFORE
+        // we build scene_inputs so the front view reflects this
+        // frame's submissions.
+        self.impulse_field.update(&self.device, &self.queue, &mut *encoder);
+
+        // Does any queued translucent material need the scene
+        // colour snapshot?
+        let needs_scene = self.material_system.translucent_commands
+            .iter()
+            .any(|c| self.material_system.pipelines
+                .get(c.material as usize - 1)
+                .and_then(|p| p.as_ref())
+                .map(|p| p.reads_scene)
+                .unwrap_or(false));
+
+        let scene_color_tid = if needs_scene {
+            let desc = transient::TransientDesc::new(
+                formats::HDR_FORMAT,
+                wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                transient::SizePolicy::Swapchain,
+            );
+            Some(self.transient_pool.acquire(&self.device, desc))
+        } else {
+            None
+        };
+
+        // Phase 4c — depth snapshot. wgpu forbids sampling a
+        // texture that is also a depth-stencil attachment of the
+        // same pass, so we copy the opaque depth buffer into a
+        // transient before beginning the translucent pass and
+        // bind the transient at group 4 binding 2. Acquired
+        // whenever any translucent material reads_scene (same
+        // gate as colour) — cheap enough that it's not worth a
+        // separate `reads_depth` flag yet.
+        let scene_depth_tid = if needs_scene {
+            let desc = transient::TransientDesc::new(
+                formats::DEPTH_FORMAT,
+                wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                transient::SizePolicy::Swapchain,
+            );
+            Some(self.transient_pool.acquire(&self.device, desc))
+        } else {
+            None
+        };
+
+        // Snapshot hdr_rt + live depth -> transients.
+        if let (Some(ctid), Some(dtid)) = (scene_color_tid, scene_depth_tid) {
+            let color_tex = self.transient_pool.texture(ctid).expect("fresh color transient");
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.hdr_rt_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: color_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d { width: swap_w, height: swap_h, depth_or_array_layers: 1 },
+            );
+            let depth_tex = self.transient_pool.texture(dtid).expect("fresh depth transient");
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.depth_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::DepthOnly,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: depth_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::DepthOnly,
+                },
+                wgpu::Extent3d { width: swap_w, height: swap_h, depth_or_array_layers: 1 },
+            );
+            let color_view = self.transient_pool.view(ctid).unwrap();
+            let depth_view = self.transient_pool.view(dtid).unwrap();
+            let imp_view = self.impulse_field.front_view();
+            let imp_samp = self.impulse_field.sampler();
+            self.material_system.update_scene_inputs(
+                &self.device, color_view, Some(depth_view),
+                Some((imp_view, imp_samp)),
+            );
+        } else {
+            // No refractive/depth-reading materials this frame —
+            // still need a valid bind group. None → internal stubs.
+            self.material_system.update_scene_inputs(
+                &self.device, &self.hdr_rt_view, None, None,
+            );
+        }
+
+        {
+            let t_ts = profiler.pass_timestamp_writes("translucent_pass");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bloom_translucent_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr_rt_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        // Translucents don't write depth — keep
+                        // the opaque pass's depth pristine so
+                        // downstream post-FX (SSR/SSGI) still
+                        // sees the opaque geometry.
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: t_ts,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let cache = &self.model_gpu_cache;
+            self.material_system.dispatch_translucent(&mut pass, |handle, idx| {
+                if let Some(Some(meshes)) = cache.get(&handle) {
+                    if idx < meshes.len() {
+                        let mesh = &meshes[idx];
+                        return Some((&mesh.vb, &mesh.ib, mesh.index_count));
+                    }
+                }
+                None
+            });
+        }
+
+        if let Some(tid) = scene_color_tid {
+            self.transient_pool.release(tid);
+        }
+        profiler.end("translucent_pass");
+    }
+    }
+}
