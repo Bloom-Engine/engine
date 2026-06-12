@@ -9228,10 +9228,6 @@ impl Renderer {
             profiler.end("card_light");
         }
 
-        // Cascaded shadow maps (with the ticket-004 cache-hit skip) —
-        // see record_shadow_pass in shadow_pass.rs.
-        self.record_shadow_pass(&mut encoder, profiler, scene);
-
         // Upload immediate-mode 2D data
         profiler.begin("upload_geometry");
         let has_2d = !self.vertices_2d.is_empty();
@@ -9254,158 +9250,207 @@ impl Renderer {
         }
         profiler.end("upload_geometry");
 
-        // HDR scene pass (sky-view LUT refresh, sky + 3D batch +
-        // scene-graph render into the HDR MRTs, then the opaque
-        // material pass on the inner graph) — see
-        // record_hdr_scene_pass in scene_pass.rs.
-        self.record_hdr_scene_pass(&mut encoder, profiler, scene);
         let surf_w = self.surface_config.width;
         let surf_h = self.surface_config.height;
-
-        // Translucent / refractive / additive material pass —
-        // see record_translucent_pass in scene_pass.rs.
-        self.record_translucent_pass(&mut encoder, profiler);
-
-        // ============================================================
-        // SSAO: half-res GTAO sampling a hierarchical linear-depth
-        // pyramid. Build hiz (linearize + 4 min-downsamples), then
-        // dispatch the GTAO compute pass.
-        // ============================================================
-        profiler.begin("post_fx");
-        if self.ssao_enabled {
-            let p = &self.current_proj_matrix;
-            let p00 = p[0][0];
-            let p11 = p[1][1];
-            let p20 = p[2][0];
-            let p21 = p[2][1];
-            let p22 = p[2][2];
-            let p32 = p[3][2];
-            let half_w = (surf_w / 2).max(1);
-            let half_h = (surf_h / 2).max(1);
-
-            // Hi-Z build + occlusion capture run on the render graph
-            // (Phase 2b, cluster 1). Unlike the older material-pass nodes
-            // that capture individual field refs, these use the
-            // ctx-owns-renderer pattern: the context carries &mut Renderer
-            // and closures borrow nothing at build time — the shape the
-            // rest of end_frame_with_scene migrates onto.
-            {
-                use graph::{Graph, PassInput, PassNode, PassOutput};
-                // Transient id 0 = the linearized Hi-Z pyramid for this
-                // frame (graph-internal ordering token; the textures
-                // themselves are persistent renderer fields).
-                const HIZ_PYRAMID: u32 = 0;
-
-                struct HizCtx<'a> {
-                    r: &'a mut Renderer,
-                    encoder: &'a mut wgpu::CommandEncoder,
-                    profiler: &'a mut crate::profiler::Profiler,
-                    half: (u32, u32),
-                    p22: f32,
-                    p32: f32,
-                }
-
-                let mut g: Graph<HizCtx> = Graph::new();
-                g.push(
-                    PassNode::new(
-                        "hiz_build",
-                        Box::new(|ctx: &mut HizCtx| {
-                            let (hw, hh) = ctx.half;
-                            ctx.r.record_hiz_chain(ctx.encoder, ctx.profiler, hw, hh, ctx.p22, ctx.p32);
-                        }),
-                    )
-                    .with_reads(&[PassInput::SceneDepth])
-                    .with_writes(&[PassOutput::Transient(HIZ_PYRAMID)]),
-                );
-                // Max-reduce the linearized depth into the 64x64 occlusion
-                // grid and queue its readback; scene.prepare consumes it
-                // next frame (one-frame latency, no stall).
-                g.push(
-                    PassNode::new(
-                        "occlusion_capture",
-                        Box::new(|ctx: &mut HizCtx| {
-                            let vp = ctx.r.vp_matrix();
-                            let (hw, hh) = ctx.half;
-                            // Split borrows: occlusion is a sibling field
-                            // of device/queue; record() also needs the
-                            // hiz view.
-                            let occlusion = &mut ctx.r.occlusion as *mut OcclusionCuller;
-                            unsafe {
-                                (*occlusion).record(
-                                    &ctx.r.device,
-                                    &ctx.r.queue,
-                                    ctx.encoder,
-                                    &ctx.r.hiz_views[0],
-                                    (hw, hh),
-                                    vp,
-                                );
-                            }
-                        }),
-                    )
-                    .with_reads(&[PassInput::Transient(HIZ_PYRAMID)]),
-                );
-                let mut ctx = HizCtx {
-                    r: self,
-                    encoder: &mut encoder,
-                    profiler,
-                    half: (half_w, half_h),
-                    p22,
-                    p32,
-                };
-                if let Err(e) = g.execute(&mut ctx) {
-                    eprintln!("[graph] hiz/occlusion cluster failed: {:?}", e);
-                }
-            }
-
-            // GTAO compute (samples the Hi-Z pyramid) — see
-            // record_gtao in hiz.rs.
-            self.record_gtao(&mut encoder, profiler, half_w, half_h, p00, p11, p20, p21);
-        }
-
-        // GTAO bilateral blur (or disabled-clear) — see hiz.rs.
-        self.record_ssao_blur(&mut encoder, surf_w, surf_h);
-
-        // SSR ray march — see record_ssr_march in ssr_pass.rs.
-        self.record_ssr_march(&mut encoder, profiler);
-
-        // SSR temporal denoiser — see record_ssr_temporal in ssr_pass.rs.
-        self.record_ssr_temporal(&mut encoder);
-
-        // The compose pass reads denoised SSR from the current history
-        // texture when ssr_enabled; otherwise the raw ssr_rt (which was
-        // cleared to transparent above) so it contributes nothing.
-        // Lumen-style screen-probe SSGI (place/trace/temporal/resolve)
-        // or disabled-clear — see record_ssgi_passes in ssgi_pass.rs.
-        self.record_ssgi_passes(&mut encoder, profiler, surf_w, surf_h);
-
-
-        // The resolve pass writes directly into `ssgi_rt_view`, so
-        // downstream composite + TAA reads are unchanged from the
-        // legacy path.
-        // Bloom chain (Karis-thresholded downsample + additive upsample)
-        // — see record_bloom_chain in postfx_chain.rs.
-        self.record_bloom_chain(&mut encoder, profiler, surf_w, surf_h);
-
-
-        // Scene compose (HDR + SSR + SSGI*albedo + bloom + fog + shafts
-        // -> composed_rt) — see record_scene_compose in postfx_chain.rs.
-        self.record_scene_compose(&mut encoder);
-        // Post-FX tail: upscale/TAA/DoF/motion-blur/SSS/CAS, each
-        // reading the previous enabled stage — see
-        // record_postfx_tail in postfx_chain.rs.
-        self.record_postfx_tail(&mut encoder, profiler);
-
-
-        // ============================================================
-        // Auto-exposure update pass (runs only when auto_exposure is
-        // on; otherwise the composite reads the old exposure texture
-        // which is fine since manual_exposure bypasses the read).
-        // ============================================================
         let exposure_src_idx = self.exposure_current_idx;
         let exposure_dst_idx = 1 - self.exposure_current_idx;
-        // Measurement + adaptation — see record_auto_exposure in
-        // postfx_chain.rs. Composite reads exposure_views[dst].
-        self.record_auto_exposure(&mut encoder, exposure_src_idx, exposure_dst_idx);
+
+        // ============================================================
+        // Frame render graph (RFC 0001 Phase 2b — complete).
+        //
+        // Every render pass between geometry upload and the terminal
+        // composite runs as a PassNode. Reads/writes document the real
+        // data dependencies; in addition, each node carries a with_after
+        // pin to its predecessor so the schedule reproduces the
+        // hand-tuned order exactly. Loosening those pins (to let the
+        // scheduler interleave independent passes) is the documented
+        // next refinement — do it dependency-by-dependency with the
+        // golden tests watching.
+        //
+        // The context owns &mut Renderer, so node closures borrow
+        // nothing at build time and can call the record_* methods.
+        // Feature toggles (ssao/ssr/ssgi/bloom) are checked inside the
+        // closures (or inside the methods), never by omitting nodes —
+        // with_after on a missing node is a schedule error.
+        // ============================================================
+        {
+            use graph::{Graph, PassInput, PassNode, PassOutput};
+            // Transient ordering tokens for resources the enum doesn't
+            // name. The textures themselves are persistent renderer
+            // fields; these ids only express producer→consumer edges.
+            const HIZ_PYRAMID: u32 = 0;
+            const SSAO_TEX: u32 = 1;
+            const SSR_TEX: u32 = 2;
+            const SSGI_TEX: u32 = 3;
+            const BLOOM_CHAIN: u32 = 4;
+            const COMPOSED: u32 = 5;
+            const LDR_FINAL: u32 = 6;
+
+            struct FrameCtx2<'a> {
+                r: &'a mut Renderer,
+                encoder: &'a mut wgpu::CommandEncoder,
+                profiler: &'a mut crate::profiler::Profiler,
+                scene: &'a mut crate::scene::SceneGraph,
+                surf: (u32, u32),
+                exposure_idx: (usize, usize),
+            }
+
+            let mut g: Graph<FrameCtx2> = Graph::new();
+            g.push(
+                PassNode::new("shadow", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_shadow_pass(c.encoder, c.profiler, c.scene);
+                }))
+                .with_writes(&[PassOutput::Shadow(0), PassOutput::Shadow(1), PassOutput::Shadow(2)]),
+            );
+            g.push(
+                PassNode::new("hdr_scene", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_hdr_scene_pass(c.encoder, c.profiler, c.scene);
+                }))
+                .with_reads(&[PassInput::Shadow(0), PassInput::Shadow(1), PassInput::Shadow(2)])
+                .with_writes(&[
+                    PassOutput::HdrColor,
+                    PassOutput::MaterialRt,
+                    PassOutput::VelocityRt,
+                    PassOutput::AlbedoRt,
+                    PassOutput::Depth,
+                ])
+                .with_after(&["shadow"]),
+            );
+            g.push(
+                PassNode::new("translucent", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_translucent_pass(c.encoder, c.profiler);
+                }))
+                // Reads the opaque HDR + depth and alpha-blends back into
+                // HdrColor; the pin (not a second HdrColor write) keeps a
+                // single declared writer per resource.
+                .with_after(&["hdr_scene"]),
+            );
+            g.push(
+                PassNode::new("hiz_build", Box::new(|c: &mut FrameCtx2| {
+                    if !c.r.ssao_enabled {
+                        return;
+                    }
+                    let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
+                    let p22 = c.r.current_proj_matrix[2][2];
+                    let p32 = c.r.current_proj_matrix[3][2];
+                    c.r.record_hiz_chain(c.encoder, c.profiler, hw, hh, p22, p32);
+                }))
+                .with_reads(&[PassInput::SceneDepth])
+                .with_writes(&[PassOutput::Transient(HIZ_PYRAMID)])
+                .with_after(&["translucent"]),
+            );
+            g.push(
+                PassNode::new("occlusion_capture", Box::new(|c: &mut FrameCtx2| {
+                    if !c.r.ssao_enabled {
+                        return;
+                    }
+                    let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
+                    let vp = c.r.vp_matrix();
+                    let occlusion = &mut c.r.occlusion as *mut OcclusionCuller;
+                    unsafe {
+                        (*occlusion).record(&c.r.device, &c.r.queue, c.encoder, &c.r.hiz_views[0], (hw, hh), vp);
+                    }
+                }))
+                .with_reads(&[PassInput::Transient(HIZ_PYRAMID)])
+                .with_after(&["hiz_build"]),
+            );
+            g.push(
+                PassNode::new("gtao", Box::new(|c: &mut FrameCtx2| {
+                    if !c.r.ssao_enabled {
+                        return;
+                    }
+                    let (hw, hh) = ((c.surf.0 / 2).max(1), (c.surf.1 / 2).max(1));
+                    let p = &c.r.current_proj_matrix;
+                    let (p00, p11, p20, p21) = (p[0][0], p[1][1], p[2][0], p[2][1]);
+                    c.r.record_gtao(c.encoder, c.profiler, hw, hh, p00, p11, p20, p21);
+                }))
+                .with_reads(&[PassInput::Transient(HIZ_PYRAMID)])
+                .with_after(&["occlusion_capture"]),
+            );
+            g.push(
+                PassNode::new("ssao_blur", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_ssao_blur(c.encoder, c.surf.0, c.surf.1);
+                }))
+                .with_writes(&[PassOutput::Transient(SSAO_TEX)])
+                .with_after(&["gtao"]),
+            );
+            g.push(
+                PassNode::new("ssr_march", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_ssr_march(c.encoder, c.profiler);
+                }))
+                .with_reads(&[PassInput::SceneColor, PassInput::SceneDepth])
+                .with_after(&["ssao_blur"]),
+            );
+            g.push(
+                PassNode::new("ssr_temporal", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_ssr_temporal(c.encoder);
+                }))
+                .with_writes(&[PassOutput::Transient(SSR_TEX)])
+                .with_after(&["ssr_march"]),
+            );
+            g.push(
+                PassNode::new("ssgi", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_ssgi_passes(c.encoder, c.profiler, c.surf.0, c.surf.1);
+                }))
+                .with_reads(&[PassInput::SceneColor, PassInput::SceneDepth])
+                .with_writes(&[PassOutput::Transient(SSGI_TEX)])
+                .with_after(&["ssr_temporal"]),
+            );
+            g.push(
+                PassNode::new("bloom", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_bloom_chain(c.encoder, c.profiler, c.surf.0, c.surf.1);
+                }))
+                .with_reads(&[PassInput::SceneColor])
+                .with_writes(&[PassOutput::Transient(BLOOM_CHAIN)])
+                .with_after(&["ssgi"]),
+            );
+            g.push(
+                PassNode::new("compose", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_scene_compose(c.encoder);
+                }))
+                .with_reads(&[
+                    PassInput::SceneColor,
+                    PassInput::Transient(SSAO_TEX),
+                    PassInput::Transient(SSR_TEX),
+                    PassInput::Transient(SSGI_TEX),
+                    PassInput::Transient(BLOOM_CHAIN),
+                ])
+                .with_writes(&[PassOutput::Transient(COMPOSED)])
+                .with_after(&["bloom"]),
+            );
+            g.push(
+                PassNode::new("postfx_tail", Box::new(|c: &mut FrameCtx2| {
+                    c.r.record_postfx_tail(c.encoder, c.profiler);
+                }))
+                .with_reads(&[PassInput::Transient(COMPOSED), PassInput::MotionVectors])
+                .with_writes(&[PassOutput::Transient(LDR_FINAL)])
+                .with_after(&["compose"]),
+            );
+            g.push(
+                PassNode::new("auto_exposure", Box::new(|c: &mut FrameCtx2| {
+                    let (src, dst) = c.exposure_idx;
+                    c.r.record_auto_exposure(c.encoder, src, dst);
+                }))
+                .with_reads(&[PassInput::Transient(LDR_FINAL)])
+                .with_after(&["postfx_tail"]),
+            );
+
+            let mut ctx = FrameCtx2 {
+                r: self,
+                encoder: &mut encoder,
+                profiler,
+                scene,
+                surf: (surf_w, surf_h),
+                exposure_idx: (exposure_src_idx, exposure_dst_idx),
+            };
+            if let Err(e) = g.execute(&mut ctx) {
+                // A schedule error means a malformed graph (cycle /
+                // unknown pin) — a programming error, not a runtime
+                // condition. Surface loudly; the frame still presents
+                // whatever was encoded before the failure.
+                eprintln!("[graph] frame graph failed: {:?}", e);
+            }
+        }
 
         let composite_src_view = self.composite_source_view();
 
