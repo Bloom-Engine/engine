@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 mod shaders;
 mod texture_store;
+mod draw2d;
 mod hiz;
 mod occlusion;
 pub use occlusion::OcclusionCuller;
@@ -641,7 +642,10 @@ struct CachedModelDraw {
 pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    pub surface: wgpu::Surface<'static>,
+    /// None in headless mode (golden tests, server rendering): frames
+    /// render into `headless_target` instead of a swapchain.
+    pub surface: Option<wgpu::Surface<'static>>,
+    headless_target: Option<wgpu::Texture>,
     pub surface_config: wgpu::SurfaceConfiguration,
 
     // Logical (points / CSS px) size — what user code addresses via
@@ -1504,6 +1508,39 @@ impl Renderer {
         device: wgpu::Device,
         queue: wgpu::Queue,
         surface: wgpu::Surface<'static>,
+        surface_config: wgpu::SurfaceConfiguration,
+        logical_width: u32,
+        logical_height: u32,
+    ) -> Self {
+        Self::new_impl(device, queue, Some(surface), surface_config, logical_width, logical_height)
+    }
+
+    /// Headless renderer: no swapchain; frames render into an offscreen
+    /// texture readable via the screenshot path. Used by the golden-image
+    /// tests and available for server-side rendering.
+    pub fn new_headless(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        Self::new_impl(device, queue, None, surface_config, width, height)
+    }
+
+    fn new_impl(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface: Option<wgpu::Surface<'static>>,
         surface_config: wgpu::SurfaceConfiguration,
         logical_width: u32,
         logical_height: u32,
@@ -5846,6 +5883,26 @@ impl Renderer {
         });
 
         Self {
+            headless_target: if surface.is_none() {
+                Some(device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("headless_swapchain"),
+                    size: wgpu::Extent3d {
+                        width: surface_config.width,
+                        height: surface_config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: surface_config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                }))
+            } else {
+                None
+            },
             device,
             queue,
             surface,
@@ -6319,7 +6376,28 @@ impl Renderer {
             self.surface_config.height = height;
             self.logical_width = logical_width.max(1);
             self.logical_height = logical_height.max(1);
-            self.surface.configure(&self.device, &self.surface_config);
+            match &self.surface {
+                Some(surface) => surface.configure(&self.device, &self.surface_config),
+                None => {
+                    // Recreate the offscreen target at the new size.
+                    self.headless_target = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("headless_swapchain"),
+                        size: wgpu::Extent3d {
+                            width: self.surface_config.width,
+                            height: self.surface_config.height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: self.surface_config.format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    }));
+                }
+            }
 
             // Render-resolution RTs (G-buffer + composed), sized to
             // `surface * render_scale`. TAA (or the upscale pass)
@@ -8888,11 +8966,10 @@ impl Renderer {
         let surface_output = if using_rt {
             None
         } else {
-            match self.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
-                _ => {
-                    self.surface.configure(&self.device, &self.surface_config);
-                    // Restore RT views if they were set.
+            match self.acquire_frame() {
+                Some(t) => Some(t),
+                None => {
+                    // Swapchain lost+reconfigured. Restore RT views if set.
                     self.rt_color_view = rt_color;
                     self.rt_depth_view = rt_depth;
                     return;
@@ -8907,7 +8984,7 @@ impl Renderer {
             view = rt_view.clone();
             owned_depth_view = rt_depth.as_ref().unwrap().clone();
         } else {
-            view = surface_output.as_ref().unwrap().texture.create_view(&wgpu::TextureViewDescriptor::default());
+            view = self.frame_texture(surface_output.as_ref().unwrap()).create_view(&wgpu::TextureViewDescriptor::default());
             owned_depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
         }
 
@@ -9059,7 +9136,7 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        if let Some(out) = surface_output { out.present(); }
+        if let Some(out) = surface_output { self.present_frame(out); }
     }
 
     /// Like end_frame, but also renders retained scene graph nodes.
@@ -9069,16 +9146,15 @@ impl Renderer {
         profiler.end("joint_flush");
 
         profiler.begin("surface_acquire");
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            _ => {
-                self.surface.configure(&self.device, &self.surface_config);
+        let output = match self.acquire_frame() {
+            Some(t) => t,
+            None => {
                 profiler.end("surface_acquire");
                 return;
             }
         };
         profiler.end("surface_acquire");
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = self.frame_texture(&output).create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("bloom_encoder"),
@@ -11352,7 +11428,7 @@ impl Renderer {
         #[cfg(not(target_arch = "wasm32"))]
         if self.screenshot_requested {
             // Use actual texture dimensions (accounts for Retina/DPI scaling)
-            let tex_size = output.texture.size();
+            let tex_size = self.frame_texture(&output).size();
             let width = tex_size.width;
             let height = tex_size.height;
             let bytes_per_pixel = 4u32;
@@ -11369,7 +11445,7 @@ impl Renderer {
 
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &output.texture,
+                    texture: self.frame_texture(&output),
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -11452,7 +11528,7 @@ impl Renderer {
         }
 
         profiler.begin("swap_present");
-        output.present();
+        self.present_frame(output);
         profiler.end("swap_present");
 
         // After present: swap TAA ping-pong + advance the jitter
@@ -11514,87 +11590,6 @@ impl Renderer {
         [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32]
     }
 
-    // ============================================================
-    // 2D shape drawing (uses white texture at index 0)
-    // ============================================================
-
-    pub fn draw_rect(&mut self, x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64, a: f64) {
-        self.ensure_draw_state(0);
-        let color = Self::color_to_f32(r, g, b, a);
-        let base = self.vertices_2d.len() as u32;
-        let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
-
-        self.vertices_2d.push(Vertex2D { position: [x, y], uv: [0.0, 0.0], color });
-        self.vertices_2d.push(Vertex2D { position: [x + w, y], uv: [0.0, 0.0], color });
-        self.vertices_2d.push(Vertex2D { position: [x + w, y + h], uv: [0.0, 0.0], color });
-        self.vertices_2d.push(Vertex2D { position: [x, y + h], uv: [0.0, 0.0], color });
-
-        self.indices_2d.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    pub fn draw_rect_lines(&mut self, x: f64, y: f64, w: f64, h: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
-        let t = thickness;
-        self.draw_rect(x, y, w, t, r, g, b, a);
-        self.draw_rect(x, y + h - t, w, t, r, g, b, a);
-        self.draw_rect(x, y + t, t, h - 2.0 * t, r, g, b, a);
-        self.draw_rect(x + w - t, y + t, t, h - 2.0 * t, r, g, b, a);
-    }
-
-    pub fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
-        self.ensure_draw_state(0);
-        let color = Self::color_to_f32(r, g, b, a);
-        let dx = (x2 - x1) as f32;
-        let dy = (y2 - y1) as f32;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len == 0.0 { return; }
-        let half_t = (thickness as f32) * 0.5;
-        let nx = -dy / len * half_t;
-        let ny = dx / len * half_t;
-        let (x1, y1, x2, y2) = (x1 as f32, y1 as f32, x2 as f32, y2 as f32);
-        let base = self.vertices_2d.len() as u32;
-
-        self.vertices_2d.push(Vertex2D { position: [x1 + nx, y1 + ny], uv: [0.0, 0.0], color });
-        self.vertices_2d.push(Vertex2D { position: [x1 - nx, y1 - ny], uv: [0.0, 0.0], color });
-        self.vertices_2d.push(Vertex2D { position: [x2 - nx, y2 - ny], uv: [0.0, 0.0], color });
-        self.vertices_2d.push(Vertex2D { position: [x2 + nx, y2 + ny], uv: [0.0, 0.0], color });
-
-        self.indices_2d.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    pub fn draw_circle(&mut self, cx: f64, cy: f64, radius: f64, r: f64, g: f64, b: f64, a: f64) {
-        self.ensure_draw_state(0);
-        let color = Self::color_to_f32(r, g, b, a);
-        let segments = 36u32;
-        let base = self.vertices_2d.len() as u32;
-        let (cx, cy, radius) = (cx as f32, cy as f32, radius as f32);
-
-        self.vertices_2d.push(Vertex2D { position: [cx, cy], uv: [0.0, 0.0], color });
-        for i in 0..segments {
-            let angle = (i as f32) / (segments as f32) * std::f32::consts::TAU;
-            self.vertices_2d.push(Vertex2D {
-                position: [cx + radius * angle.cos(), cy + radius * angle.sin()],
-                uv: [0.0, 0.0],
-                color,
-            });
-        }
-        for i in 0..segments {
-            let next = if i + 1 < segments { i + 1 } else { 0 };
-            self.indices_2d.extend_from_slice(&[base, base + 1 + i, base + 1 + next]);
-        }
-    }
-
-    pub fn draw_circle_lines(&mut self, cx: f64, cy: f64, radius: f64, r: f64, g: f64, b: f64, a: f64) {
-        let segments = 36;
-        for i in 0..segments {
-            let a1 = (i as f64) / (segments as f64) * std::f64::consts::TAU;
-            let a2 = ((i + 1) as f64) / (segments as f64) * std::f64::consts::TAU;
-            self.draw_line(
-                cx + radius * a1.cos(), cy + radius * a1.sin(),
-                cx + radius * a2.cos(), cy + radius * a2.sin(),
-                1.0, r, g, b, a,
-            );
-        }
-    }
 
     pub fn draw_triangle(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64, r: f64, g: f64, b: f64, a: f64) {
         self.ensure_draw_state(0);
@@ -12212,7 +12207,11 @@ impl Renderer {
             for v in verts {
                 self.vertices_3d.push(Vertex3D { position: *v, normal: *normal, color, uv: [0.0, 0.0], joints: [0.0; 4], weights: [0.0; 4], tangent: [0.0; 4] });
             }
-            self.indices_3d.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+            // Outward winding (matches the declared normals). The old
+            // order wound every face inward: with back-face culling you
+            // saw each cube's interior — same bug that made draw_plane
+            // invisible from above.
+            self.indices_3d.extend_from_slice(&[base, base+2, base+1, base, base+3, base+2]);
         }
     }
 
@@ -12350,7 +12349,10 @@ impl Renderer {
         self.vertices_3d.push(Vertex3D { position: [cx+hw, cy, cz-hd], normal, color, uv: [1.0, 0.0], joints: [0.0; 4], weights: [0.0; 4], tangent: [0.0; 4] });
         self.vertices_3d.push(Vertex3D { position: [cx+hw, cy, cz+hd], normal, color, uv: [1.0, 1.0], joints: [0.0; 4], weights: [0.0; 4], tangent: [0.0; 4] });
         self.vertices_3d.push(Vertex3D { position: [cx-hw, cy, cz+hd], normal, color, uv: [0.0, 1.0], joints: [0.0; 4], weights: [0.0; 4], tangent: [0.0; 4] });
-        self.indices_3d.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+        // Wind so the +Y-normal side is the front face when seen from
+        // above — the previous order back-face-culled the plane from
+        // every camera above it (only visible from underneath).
+        self.indices_3d.extend_from_slice(&[base, base+2, base+1, base, base+3, base+2]);
     }
 
     pub fn draw_grid(&mut self, slices: i32, spacing: f64) {
@@ -12581,11 +12583,11 @@ impl Renderer {
         let buffer_size = (padded_bytes_per_row * height) as u64;
 
         // Render one frame to a texture we can copy from
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            _ => return None,
+        let output = match self.acquire_frame() {
+            Some(t) => t,
+            None => return None,
         };
-        let texture = &output.texture;
+        let texture = self.frame_texture(&output);
 
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("screenshot_staging"),
@@ -12640,7 +12642,7 @@ impl Renderer {
         }
         drop(data);
         staging_buffer.unmap();
-        output.present();
+        self.present_frame(output);
 
         Some((width, height, rgba))
     }
@@ -13596,3 +13598,4 @@ impl Renderer {
         self.material_system.update_frame_uniforms(&self.queue, &per_frame, &per_view);
     }
 }
+

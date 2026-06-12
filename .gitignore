@@ -71,3 +71,6 @@ tools/unreal_reference/
 tools/dump_dds/target/
 tools/dump_dds/Cargo.lock
 examples/intel-sponza/assets/outdoor.hdr
+
+# Golden-test failure artifacts (written next to the golden on mismatch)
+*.actual.png
