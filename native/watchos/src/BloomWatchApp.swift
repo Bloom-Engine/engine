@@ -22,6 +22,7 @@ import ImageIO
 @_silgen_name("bloom_watchos_touch") func bloom_watchos_touch(_ idx: Int64, _ x: Double, _ y: Double, _ active: Int64)
 @_silgen_name("bloom_watchos_set_screen") func bloom_watchos_set_screen(_ w: Double, _ h: Double)
 @_silgen_name("bloom_watchos_set_bundle_path") func bloom_watchos_set_bundle_path(_ path: UnsafePointer<CChar>)
+@_silgen_name("bloom_watchos_set_language") func bloom_watchos_set_language(_ code: Double)
 
 // Outbound (Rust → Swift) — draw list snapshot
 @_silgen_name("bloom_watchos_frame_count") func bloom_watchos_frame_count() -> UInt64
@@ -237,6 +238,15 @@ struct BloomWatchApp: App {
         // starts loading anything.
         if let res = Bundle.main.resourcePath {
             res.withCString { bloom_watchos_set_bundle_path($0) }
+        }
+        // Report the user's preferred language before the game thread starts:
+        // packed 2-letter primary subtag (c0*256 + c1, lowercased; script
+        // subtags dropped, zh-Hans -> "zh") per the bloom_get_language contract.
+        let lang = Locale.preferredLanguages.first ?? "en"
+        let primary = lang.split(separator: "-").first.map(String.init) ?? "en"
+        let scalars = Array(primary.lowercased().unicodeScalars)
+        if scalars.count >= 2, scalars[0].isASCII, scalars[1].isASCII {
+            bloom_watchos_set_language(Double(scalars[0].value * 256 + scalars[1].value))
         }
         // Spawn the game thread. _perry_user_main blocks in runGame's while
         // loop, so this must not run on the main thread.
