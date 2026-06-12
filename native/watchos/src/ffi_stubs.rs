@@ -662,7 +662,7 @@
 }
 #[no_mangle] pub extern "C" fn bloom_physics_soft_body_set_vertex_inv_mass(_p0: f64, _p1: f64, _p2: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_physics_vehicle_create(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64, _p18: f64, _p19: f64, _p20: f64, _p21: f64, _p22: f64, _p23: f64, _p24: f64, _p25: f64, _p26: f64, _p27: f64, _p28: f64, _p29: f64, _p30: f64, _p31: f64, _p32: f64, _p33: f64, _p34: f64, _p35: f64, _p36: f64, _p37: f64) -> f64 {
+#[no_mangle] pub extern "C" fn bloom_physics_vehicle_create(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64, _p18: f64, _p19: f64, _p20: f64, _p21: f64, _p22: f64, _p23: f64, _p24: f64, _p25: f64, _p26: f64, _p27: f64, _p28: f64, _p29: f64, _p30: f64, _p31: f64, _p32: f64, _p33: f64, _p34: f64, _p35: f64, _p36: f64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_physics_vehicle_destroy(_p0: f64) {

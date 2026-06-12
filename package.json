@@ -3229,8 +3229,7 @@
         {
           "name": "bloom_physics_vehicle_create",
           "params": [
-            "f64",
-            "f64",
+                        "f64",
             "f64",
             "f64",
             "f64",

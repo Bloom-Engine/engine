@@ -45,6 +45,16 @@ pub struct EngineState {
 
     pub should_close: bool,
 
+    // Read-back state for the split FFI getters: bloom_scene_pick /
+    // bloom_scene_pick_all / bloom_project_to_screen store here, and the
+    // bloom_pick_hit_* / bloom_pick_all_* / bloom_project_screen_y getters
+    // read the components back one f64 at a time (Perry FFI returns are
+    // scalar). Lived in per-crate `static mut`s before the FFI
+    // unification.
+    pub last_pick: Option<crate::picking::PickResult>,
+    pub last_pick_all: Vec<crate::picking::PickResult>,
+    pub last_project: (f64, f64),
+
     // When true, end_frame() takes a direct-to-swapchain path that skips
     // scene graph prep, shadow maps, HDR/post-FX, SDF/WSRC bakes, etc.
     // Intended for pure-2D games that only need the batched 2D pipeline.
@@ -88,6 +98,9 @@ impl EngineState {
             current_fps: 0.0,
             start_time: now,
             should_close: false,
+            last_pick: None,
+            last_pick_all: Vec::new(),
+            last_project: (0.0, 0.0),
             direct_2d_mode: false,
             #[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
             jolt: JoltPhysics::new(),

@@ -72,6 +72,21 @@ jobs:
         run: cargo test --release
 
   # ---------------------------------------------------------------------------
+  # FFI parity: every function in package.json's perry.nativeLibrary manifest
+  # must be exported with matching arity by every platform crate (hand-written
+  # or via define_core_ffi!/define_physics_ffi!). This is the check whose
+  # absence let Android ship 60 functions behind (#59) and Windows ship the
+  # whole scene-graph surface as silent no-op stubs. Cheap (pure text parse),
+  # runs everywhere, gates merges.
+  # ---------------------------------------------------------------------------
+  ffi-parity:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate-ffi
+        run: node tools/validate-ffi.js
+
+  # ---------------------------------------------------------------------------
   # Lint: rustfmt + clippy. Advisory while the codebase is still in flux.
   # Flip `continue-on-error: false` once the lint baseline is clean.
   # ---------------------------------------------------------------------------

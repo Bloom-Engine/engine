@@ -61,14 +61,6 @@
 #[macro_export]
 macro_rules! define_core_ffi {
     () => {
-        // --- shared FFI-local state ------------------------------------
-        // Single-threaded by the same argument as the engine cell: Perry
-        // calls all bloom_* functions from the run-loop thread.
-
-        static mut LAST_PICK: Option<$crate::picking::PickResult> = None;
-        static mut LAST_PICK_ALL: Vec<$crate::picking::PickResult> = Vec::new();
-        static mut LAST_PROJECT: (f64, f64) = (0.0, 0.0);
-
         // --- game loop hooks --------------------------------------------
 
         // No-op on native: the TypeScript runGame() helper drives the
@@ -2188,7 +2180,7 @@ macro_rules! define_core_ffi {
                 );
                 let results = $crate::picking::raycast_scene_all(&eng.scene, &origin, &direction, max_results as usize);
                 let count = results.len();
-                unsafe { LAST_PICK_ALL = results; }
+                eng.last_pick_all = results;
                 count as f64
         })
         }
@@ -2198,7 +2190,7 @@ macro_rules! define_core_ffi {
         pub extern "C" fn bloom_pick_all_handle(index: f64) -> f64 {
             $crate::ffi::guard("bloom_pick_all_handle", move || {
                 let i = index as usize;
-                unsafe { LAST_PICK_ALL.get(i).map(|r| r.handle).unwrap_or(0.0) }
+                engine().last_pick_all.get(i).map(|r| r.handle).unwrap_or(0.0)
         })
         }
 
@@ -2207,7 +2199,7 @@ macro_rules! define_core_ffi {
         pub extern "C" fn bloom_pick_all_distance(index: f64) -> f64 {
             $crate::ffi::guard("bloom_pick_all_distance", move || {
                 let i = index as usize;
-                unsafe { LAST_PICK_ALL.get(i).map(|r| r.distance as f64).unwrap_or(0.0) }
+                engine().last_pick_all.get(i).map(|r| r.distance as f64).unwrap_or(0.0)
         })
         }
 
@@ -2590,7 +2582,7 @@ macro_rules! define_core_ffi {
                 let clip_w = vp[0][3]*x + vp[1][3]*y + vp[2][3]*z + vp[3][3];
 
                 if clip_w <= 0.0 {
-                    unsafe { LAST_PROJECT = (-9999.0, -9999.0); }
+                    engine().last_project = (-9999.0, -9999.0);
                     return -9999.0;
                 }
 
@@ -2600,7 +2592,7 @@ macro_rules! define_core_ffi {
                 let screen_x = ((ndc_x + 1.0) * 0.5 * w) as f64;
                 let screen_y = ((1.0 - ndc_y) * 0.5 * h) as f64;
 
-                unsafe { LAST_PROJECT = (screen_x, screen_y); }
+                engine().last_project = (screen_x, screen_y);
                 screen_x
         })
         }
@@ -2609,7 +2601,7 @@ macro_rules! define_core_ffi {
         #[no_mangle]
         pub extern "C" fn bloom_project_screen_y() -> f64 {
             $crate::ffi::guard("bloom_project_screen_y", move || {
-                unsafe { LAST_PROJECT.1 }
+                engine().last_project.1
         })
         }
 
@@ -2630,7 +2622,7 @@ macro_rules! define_core_ffi {
 
                 let result = $crate::picking::raycast_scene(&eng.scene, &origin, &direction);
                 let hit = result.hit;
-                unsafe { LAST_PICK = Some(result); }
+                engine().last_pick = Some(result);
                 if hit { 1.0 } else { 0.0 }
         })
         }
@@ -2639,7 +2631,7 @@ macro_rules! define_core_ffi {
         #[no_mangle]
         pub extern "C" fn bloom_pick_hit_handle() -> f64 {
             $crate::ffi::guard("bloom_pick_hit_handle", move || {
-                unsafe { LAST_PICK.as_ref().map(|r| r.handle).unwrap_or(0.0) }
+                engine().last_pick.as_ref().map(|r| r.handle).unwrap_or(0.0)
         })
         }
 
@@ -2647,7 +2639,7 @@ macro_rules! define_core_ffi {
         #[no_mangle]
         pub extern "C" fn bloom_pick_hit_distance() -> f64 {
             $crate::ffi::guard("bloom_pick_hit_distance", move || {
-                unsafe { LAST_PICK.as_ref().map(|r| r.distance as f64).unwrap_or(0.0) }
+                engine().last_pick.as_ref().map(|r| r.distance as f64).unwrap_or(0.0)
         })
         }
 
@@ -2655,7 +2647,7 @@ macro_rules! define_core_ffi {
         #[no_mangle]
         pub extern "C" fn bloom_pick_hit_x() -> f64 {
             $crate::ffi::guard("bloom_pick_hit_x", move || {
-                unsafe { LAST_PICK.as_ref().map(|r| r.point[0] as f64).unwrap_or(0.0) }
+                engine().last_pick.as_ref().map(|r| r.point[0] as f64).unwrap_or(0.0)
         })
         }
 
@@ -2663,7 +2655,7 @@ macro_rules! define_core_ffi {
         #[no_mangle]
         pub extern "C" fn bloom_pick_hit_y() -> f64 {
             $crate::ffi::guard("bloom_pick_hit_y", move || {
-                unsafe { LAST_PICK.as_ref().map(|r| r.point[1] as f64).unwrap_or(0.0) }
+                engine().last_pick.as_ref().map(|r| r.point[1] as f64).unwrap_or(0.0)
         })
         }
 
@@ -2671,7 +2663,7 @@ macro_rules! define_core_ffi {
         #[no_mangle]
         pub extern "C" fn bloom_pick_hit_z() -> f64 {
             $crate::ffi::guard("bloom_pick_hit_z", move || {
-                unsafe { LAST_PICK.as_ref().map(|r| r.point[2] as f64).unwrap_or(0.0) }
+                engine().last_pick.as_ref().map(|r| r.point[2] as f64).unwrap_or(0.0)
         })
         }
 
@@ -2679,7 +2671,7 @@ macro_rules! define_core_ffi {
         #[no_mangle]
         pub extern "C" fn bloom_pick_hit_normal_x() -> f64 {
             $crate::ffi::guard("bloom_pick_hit_normal_x", move || {
-                unsafe { LAST_PICK.as_ref().map(|r| r.normal[0] as f64).unwrap_or(0.0) }
+                engine().last_pick.as_ref().map(|r| r.normal[0] as f64).unwrap_or(0.0)
         })
         }
 
@@ -2687,7 +2679,7 @@ macro_rules! define_core_ffi {
         #[no_mangle]
         pub extern "C" fn bloom_pick_hit_normal_y() -> f64 {
             $crate::ffi::guard("bloom_pick_hit_normal_y", move || {
-                unsafe { LAST_PICK.as_ref().map(|r| r.normal[1] as f64).unwrap_or(0.0) }
+                engine().last_pick.as_ref().map(|r| r.normal[1] as f64).unwrap_or(0.0)
         })
         }
 
@@ -2695,7 +2687,7 @@ macro_rules! define_core_ffi {
         #[no_mangle]
         pub extern "C" fn bloom_pick_hit_normal_z() -> f64 {
             $crate::ffi::guard("bloom_pick_hit_normal_z", move || {
-                unsafe { LAST_PICK.as_ref().map(|r| r.normal[2] as f64).unwrap_or(0.0) }
+                engine().last_pick.as_ref().map(|r| r.normal[2] as f64).unwrap_or(0.0)
         })
         }
 
