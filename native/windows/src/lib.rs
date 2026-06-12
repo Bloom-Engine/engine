@@ -488,8 +488,11 @@ pub extern "C" fn bloom_init_audio() {
         use std::sync::atomic::Ordering;
         AUDIO_RUNNING.store(true, Ordering::SeqCst);
 
-        std::thread::spawn(|| {
-            unsafe { wasapi_audio_thread(); }
+        // Move the render half into the audio thread; the engine keeps
+        // only the command-producing control half.
+        let renderer = engine().audio.take_renderer();
+        std::thread::spawn(move || {
+            unsafe { wasapi_audio_thread(renderer); }
         });
     }
 }
