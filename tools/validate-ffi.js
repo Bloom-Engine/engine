@@ -165,13 +165,26 @@ for (const platform of PLATFORMS) {
   for (const m of webSrc.matchAll(/pub (?:async )?fn (bloom_[a-z0-9_]+)/g)) names.add(m[1]);
   const bridge = fs.readFileSync(path.join(ROOT, 'native/web/jolt_bridge.js'), 'utf8');
   for (const m of bridge.matchAll(/(bloom_physics_[a-z0-9_]+)\s*[:(=]/g)) names.add(m[1]);
-  let missing = 0;
+  // Functions whose web story is structurally different and tracked:
+  // pointer-taking geometry (cross-module WASM memory TODO) and
+  // filesystem captures (no fs on wasm; need _bytes/_str designs).
+  const WEB_GAP_ALLOWLIST = new Set([
+    'bloom_scene_set_lod',          // Perry-WASM linear-memory bridge TODO
+    'bloom_take_screenshot',        // no fs — needs a bytes-returning design
+    'bloom_set_env_clear_from_hdr', // no fs — needs a _bytes variant
+    'bloom_dump_shadow_map',        // debug capture, no fs on wasm
+  ]);
+  const missing = [];
   for (const name of manifest.keys()) {
     // web exposes some functions only as _str/_bytes variants
-    if (!names.has(name) && !names.has(name + '_str') && !names.has(name + '_bytes')) missing++;
+    if (!names.has(name) && !names.has(name + '_str') && !names.has(name + '_bytes')
+        && !WEB_GAP_ALLOWLIST.has(name)) missing.push(name);
   }
-  if (missing) warn(`web: ${missing} manifest functions have no direct/_str/_bytes export (JS-glue mapped or missing — tightened by the web FFI workstream)`);
-  else console.log(`ok    web: full name coverage`);
+  if (missing.length) {
+    for (const name of missing) fail(`web: manifest function ${name} not exported (and not in the documented gap allowlist)`);
+  } else {
+    console.log(`ok    web: full coverage (${WEB_GAP_ALLOWLIST.size} documented gaps)`);
+  }
 }
 
 console.log(`\n${failures} failures, ${warnings} warnings`);
