@@ -345,3 +345,29 @@ fn cooked_bc7_texture_matches_raw() {
         "cooked render diverges from raw render: max channel diff {max_diff}"
     );
 }
+
+#[test]
+fn golden_lit_primitives_taa() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    // Same scene as lit_primitives_3d but with TAA ON: pins the TAA
+    // branch of the post-FX cascade (reprojection, neighborhood clamp,
+    // Catmull-Rom upscale path) that the TAA-off goldens never touch.
+    // The Halton jitter sequence is indexed by frame number, so a fixed
+    // frame count renders deterministically.
+    eng.renderer.set_taa_enabled(true);
+    let (w, h, rgba) = render(&mut eng, 10, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(13.0, 18.0, 26.0, 255.0);
+        r.begin_mode_3d(4.0, 3.0, 6.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+        r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.95, 0.9, 1.2);
+        r.add_point_light(2.0, 2.0, 2.0, 10.0, 0.2, 0.4, 1.0, 2.0);
+        r.draw_plane(0.0, 0.0, 0.0, 10.0, 10.0, 120.0, 120.0, 125.0, 255.0);
+        r.draw_cube(-1.2, 0.5, 0.0, 1.0, 1.0, 1.0, 230.0, 41.0, 55.0, 255.0);
+        r.draw_sphere(1.2, 0.75, 0.5, 0.75, 0.0, 228.0, 48.0, 255.0);
+        r.draw_cube(0.0, 1.6, -1.0, 0.8, 0.8, 0.8, 253.0, 249.0, 0.0, 255.0);
+    });
+    compare_or_update("lit_primitives_taa", w, h, &rgba);
+}
