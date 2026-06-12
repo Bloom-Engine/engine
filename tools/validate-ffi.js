@@ -100,7 +100,7 @@ const manifest = new Map(); // name -> param count
 for (const f of pkg.perry.nativeLibrary.functions) manifest.set(f.name, f.params.length);
 
 // 2. shared macros
-const coreSrc = fs.readFileSync(path.join(ROOT, 'native/shared/src/ffi_core.rs'), 'utf8');
+const coreSrc = readDirRust(path.join(ROOT, 'native/shared/src/ffi_core'));
 const coreFns = extractRustFns(coreSrc);
 const physSrc = fs.readFileSync(path.join(ROOT, 'native/shared/src/physics_jolt.rs'), 'utf8');
 const physFns = extractRustFns(physSrc);

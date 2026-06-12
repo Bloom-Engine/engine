@@ -85,6 +85,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: validate-ffi
         run: node tools/validate-ffi.js
+      - name: file line limit (2000, ratcheting baseline)
+        run: node tools/check-file-lines.js
 
   # ---------------------------------------------------------------------------
   # Lint: rustfmt + clippy. Advisory while the codebase is still in flux.
