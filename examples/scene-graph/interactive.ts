@@ -52,7 +52,7 @@ let selectedWallId: string | null = null;
 const floorHandle = createSceneNode();
 const floorPolygon = [-10, -10, 10, -10, 10, 10, -10, 10];
 extrudePolygon(floorHandle, floorPolygon, 0.02);
-setSceneNodeColor(floorHandle, 0.85, 0.85, 0.82, 1.0);
+setSceneNodeColor(floorHandle, 217, 217, 209, 255);
 setSceneNodePbr(floorHandle, 0.7, 0.0);
 
 // Handle → wall ID lookup (for picking)
@@ -112,9 +112,9 @@ function wallSystem(dt: number): void {
 
     // Color based on selection
     if (wall.id === selectedWallId) {
-      setSceneNodeColor(wall.handle, 0.3, 0.6, 1.0, 1.0);
+      setSceneNodeColor(wall.handle, 77, 153, 255, 255);
     } else {
-      setSceneNodeColor(wall.handle, 0.95, 0.95, 0.92, 1.0);
+      setSceneNodeColor(wall.handle, 242, 242, 235, 255);
     }
     setSceneNodePbr(wall.handle, 0.8, 0.0);
 

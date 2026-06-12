@@ -2,6 +2,12 @@
 // Physics v2 — Jolt-backed API
 // ============================================================================
 //
+// Coordinate system: right-handed, Y-up (same as glTF and the renderer).
+// Units are SI: meters, seconds, kilograms — default gravity is
+// { x: 0, y: -9.81, z: 0 }. Keep dynamic bodies roughly in the 0.1–10 m
+// range and within ~1 km of the origin (f32 precision falls off beyond).
+// Rotations are quaternions; angular quantities are radians/sec.
+//
 // Shape/body separation: shapes are reusable geometry; bodies hold motion
 // state + reference a shape. Matches Jolt's model.
 //

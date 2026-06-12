@@ -22,26 +22,34 @@ export const FILTER_LINEAR = 0;
 export const FILTER_NEAREST = 1;
 
 export function setTextureFilter(texture: Texture, mode: number): void {
-  bloom_set_texture_filter(texture.id, mode);
+  bloom_set_texture_filter(texture.handle, mode);
 }
 
+/**
+ * Load a texture from a PNG/JPEG/BMP/TGA file.
+ *
+ * On failure (missing file, undecodable data) returns a Texture with
+ * `handle === 0` and zero dimensions — drawing it is a safe no-op and the
+ * engine logs the failure once. Check `tex.handle !== 0` when you need to
+ * react to missing assets.
+ */
 export function loadTexture(path: string): Texture {
   const id = bloom_load_texture(path as any);
   const width = bloom_get_texture_width(id);
   const height = bloom_get_texture_height(id);
-  return { id, width, height };
+  return { handle: id, width, height };
 }
 
 export function unloadTexture(texture: Texture): void {
-  bloom_unload_texture(texture.id);
+  bloom_unload_texture(texture.handle);
 }
 
 export function drawTexture(texture: Texture, x: number, y: number, tint: Color): void {
-  bloom_draw_texture(texture.id, x, y, tint.r, tint.g, tint.b, tint.a);
+  bloom_draw_texture(texture.handle, x, y, tint.r, tint.g, tint.b, tint.a);
 }
 
 export function drawTextureRec(texture: Texture, source: Rect, position: { x: number; y: number }, tint: Color): void {
-  bloom_draw_texture_rec(texture.id, source.x, source.y, source.width, source.height, position.x, position.y, tint.r, tint.g, tint.b, tint.a);
+  bloom_draw_texture_rec(texture.handle, source.x, source.y, source.width, source.height, position.x, position.y, tint.r, tint.g, tint.b, tint.a);
 }
 
 export function drawTexturePro(
@@ -49,7 +57,7 @@ export function drawTexturePro(
   origin: { x: number; y: number }, rotation: number, tint: Color,
 ): void {
   bloom_draw_texture_pro(
-    texture.id,
+    texture.handle,
     source.x, source.y, source.width, source.height,
     dest.x, dest.y, dest.width, dest.height,
     origin.x, origin.y, rotation,
@@ -101,11 +109,11 @@ export function loadTextureFromImage(imageHandle: number): Texture {
   const id = bloom_load_texture_from_image(imageHandle);
   const width = bloom_get_texture_width(id);
   const height = bloom_get_texture_height(id);
-  return { id, width, height };
+  return { handle: id, width, height };
 }
 
 export function genTextureMipmaps(texture: Texture): void {
-  bloom_gen_texture_mipmaps(texture.id);
+  bloom_gen_texture_mipmaps(texture.handle);
 }
 
 // Async / threaded loading
@@ -123,7 +131,7 @@ export async function loadTextureAsync(path: string): Promise<Texture> {
   const id = bloom_commit_texture(stagingHandle);
   const width = bloom_get_texture_width(id);
   const height = bloom_get_texture_height(id);
-  return { id, width, height };
+  return { handle: id, width, height };
 }
 
 export function stageTextures(paths: string[]): number[] {
@@ -134,7 +142,7 @@ export function commitTexture(stagingHandle: number): Texture {
   const id = bloom_commit_texture(stagingHandle);
   const width = bloom_get_texture_width(id);
   const height = bloom_get_texture_height(id);
-  return { id, width, height };
+  return { handle: id, width, height };
 }
 
 // ============================================================

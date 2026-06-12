@@ -195,7 +195,7 @@ for (let row = 0; row < GRID_N; row = row + 1) {
 
     const node = createSceneNode();
     attachModelToNode(node, sphereHandle, 0);
-    setSceneNodeColor(node, BASE_R, BASE_G, BASE_B);
+    setSceneNodeColor(node, BASE_R * 255, BASE_G * 255, BASE_B * 255);
     setSceneNodePbr(node, roughness, metallic);
     setSceneNodeCastShadow(node, false);
     setSceneNodeReceiveShadow(node, false);

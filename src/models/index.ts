@@ -158,6 +158,11 @@ export function drawModel(model: Model, position: Vec3, scale: number, tint: Col
 /// Draw a model with a Y-axis rotation (radians). RGBA is packed into
 /// a single f64 (ARGB byte order) to keep the FFI to 7 args, dodging
 /// the Perry-ARM64 9th-arg quirk.
+/**
+ * Draw a model with a Y-axis rotation in DEGREES (engine-wide angle
+ * convention, matching Camera2D.rotation and raylib; was radians before
+ * v0.5). Tint components are 0-255.
+ */
 export function drawModelRotated(
   model: Model, position: Vec3, scale: number, rotY: number, tint: Color,
 ): void {
@@ -168,7 +173,7 @@ export function drawModelRotated(
   const b =  tint.b & 0xff;
   // Use unsigned-shift-zero to keep the value positive when stored as f64.
   const packed = (a | r | g | b) >>> 0;
-  bloom_draw_model_rotated(model.handle, position.x, position.y, position.z, scale, rotY, packed);
+  bloom_draw_model_rotated(model.handle, position.x, position.y, position.z, scale, rotY * Math.PI / 180, packed);
 }
 
 export function unloadModel(model: Model): void {

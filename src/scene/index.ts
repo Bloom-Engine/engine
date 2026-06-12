@@ -5,6 +5,14 @@
  * persistent meshes that survive across frames. Systems update geometry and
  * transforms; the renderer draws all visible nodes each frame automatically.
  *
+ * Use immediate-mode for prototypes and small scenes; use the scene graph
+ * when you need persistence, picking, per-node materials, or hundreds of
+ * objects (nodes are frustum- and occlusion-culled automatically).
+ *
+ * Coordinate system: right-handed, Y-up, world units are meters.
+ * Surface colors are 0-255 per channel; light colors are 0-1 floats with
+ * a separate intensity (see addDirectionalLight).
+ *
  * Designed for architecture/CAD editors compiled natively via Perry.
  */
 
@@ -206,8 +214,16 @@ export function updateSceneNodeGeometry(
  * Set the material color and opacity of a scene node.
  * Color components are 0-1 (not 0-255).
  */
-export function setSceneNodeColor(handle: SceneNodeHandle, r: number, g: number, b: number, a: number = 1): void {
-  bloom_scene_set_material_color(handle, r, g, b, a);
+/**
+ * Set a node's material base color.
+ *
+ * Color components are 0-255 (the engine-wide convention — same scale as
+ * the `Colors` presets and every draw* call). Before v0.5 this function
+ * alone took 0-1 floats; passing a `Colors` constant silently rendered
+ * white. Values are clamped; alpha defaults to opaque.
+ */
+export function setSceneNodeColor(handle: SceneNodeHandle, r: number, g: number, b: number, a: number = 255): void {
+  bloom_scene_set_material_color(handle, r / 255, g / 255, b / 255, a / 255);
 }
 
 /**
@@ -261,6 +277,12 @@ export function unregisterFrameCallback(id: number): void {
 /**
  * Add a directional light. Color is 0-1 range. Up to 4 additional directional lights.
  * Called each frame (lights are cleared at frame start).
+ */
+/**
+ * Add a directional light. Light color is a 0-1 float per channel with a
+ * separate intensity multiplier (radiometric convention, like Unity and
+ * Unreal — light colors are not surface colors and may meaningfully
+ * exceed 1.0 via intensity). Direction need not be normalized.
  */
 export function addDirectionalLight(
   dx: number, dy: number, dz: number,
@@ -338,8 +360,9 @@ export function setPostFxHovered(handle: SceneNodeHandle): void {
 /**
  * Set the outline color for selected objects (0-1 range).
  */
-export function setOutlineColor(r: number, g: number, b: number, a: number = 1): void {
-  bloom_postfx_set_outline_color(r, g, b, a);
+/** Selection-outline color, 0-255 per channel (engine-wide convention). */
+export function setOutlineColor(r: number, g: number, b: number, a: number = 255): void {
+  bloom_postfx_set_outline_color(r / 255, g / 255, b / 255, a / 255);
 }
 
 /**
@@ -553,12 +576,16 @@ export function pickSceneAll(screenX: number, screenY: number, maxResults: numbe
  * low roughness. The wave parameters are stored for a future animated
  * water shader; currently they're visual-only placeholders.
  */
+/**
+ * Water surface material. Color is 0-255 per channel (engine-wide
+ * convention; was 0-1 before v0.5).
+ */
 export function setSceneNodeWaterMaterial(
   handle: SceneNodeHandle,
   waveAmplitude: number, waveSpeed: number,
   r: number, g: number, b: number, a: number,
 ): void {
-  bloom_scene_set_material_water(handle, waveAmplitude, waveSpeed, r, g, b, a);
+  bloom_scene_set_material_water(handle, waveAmplitude, waveSpeed, r / 255, g / 255, b / 255, a / 255);
 }
 
 export function addPointLight(

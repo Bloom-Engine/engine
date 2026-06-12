@@ -324,7 +324,9 @@ export function trsToMat4(t: TransformData): Mat4 {
 // by prefab expansion (where children inherit the parent entity's tint unless
 // they override it).
 function applyTint(node: SceneNodeHandle, tint: Vec4Lit): void {
-  setSceneNodeColor(node, tint[0], tint[1], tint[2], tint[3]);
+  // World-format tints stay 0-1 floats (serialized data, unchanged);
+  // the runtime API takes 0-255.
+  setSceneNodeColor(node, tint[0] * 255, tint[1] * 255, tint[2] * 255, tint[3] * 255);
 }
 
 // ---- factory helpers used by the editor to create new data ----------------

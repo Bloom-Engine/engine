@@ -231,7 +231,7 @@ function placeSphere(
   roughness: number, metalness: number,
 ): number {
   const node = placeNode(sphereHandle, 0, px, py, pz, scale, scale, scale);
-  setSceneNodeColor(node, cr, cg, cb);
+  setSceneNodeColor(node, cr * 255, cg * 255, cb * 255);
   setSceneNodePbr(node, roughness, metalness);
   return node;
 }
@@ -243,7 +243,7 @@ function placeCube(
   roughness: number, metalness: number,
 ): number {
   const node = placeNode(cubeHandle, 0, px, py, pz, sx, sy, sz);
-  setSceneNodeColor(node, cr, cg, cb);
+  setSceneNodeColor(node, cr * 255, cg * 255, cb * 255);
   setSceneNodePbr(node, roughness, metalness);
   // Thin horizontal slabs (floors) should receive but not cast
   // shadows — otherwise they fill the shadow map with their own
@@ -374,7 +374,7 @@ function setupWater(): void {
   updateSceneNodeGeometry(waterNode, wv, wi);
   const wm = mat4Translate(mat4Identity(), { x: 0, y: 0.2, z: cz });
   setSceneNodeTransform(waterNode, wm);
-  setSceneNodeWaterMaterial(waterNode, 0.15, 1.5, 0.1, 0.3, 0.5, 0.6);
+  setSceneNodeWaterMaterial(waterNode, 0.15, 1.5, 26, 77, 128, 153);
   setSceneNodeReceiveShadow(waterNode, true);
 
   // Rocks / objects sticking out of water
@@ -457,7 +457,7 @@ function setupThinGeometry(): void {
     const x = cx - 5.5 + i * 1.0;
     const node = createSceneNode();
     attachModelToNode(node, cubeHandle, 0);
-    setSceneNodeColor(node, 0.6, 0.6, 0.62);
+    setSceneNodeColor(node, 153, 153, 158);
     setSceneNodePbr(node, 0.3, 1.0);
     setSceneNodeCastShadow(node, true);
     setSceneNodeReceiveShadow(node, true);
