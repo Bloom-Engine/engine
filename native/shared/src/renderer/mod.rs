@@ -9395,7 +9395,6 @@ impl Renderer {
         // record_postfx_tail in postfx_chain.rs.
         self.record_postfx_tail(&mut encoder, profiler);
 
-        let composite_src_view = self.composite_source_view();
 
         // ============================================================
         // Auto-exposure update pass (runs only when auto_exposure is
@@ -9404,53 +9403,11 @@ impl Renderer {
         // ============================================================
         let exposure_src_idx = self.exposure_current_idx;
         let exposure_dst_idx = 1 - self.exposure_current_idx;
-        if self.auto_exposure {
-            let ep = ExposureParams {
-                params: [
-                    self.auto_exposure_key,
-                    self.auto_exposure_rate,
-                    // Wide clamp — without SSGI, Sponza's shadowed
-                    // corridors have ~7× less average luma than its
-                    // sunlit courtyard, so exposure needs to span
-                    // the same range to keep perceived brightness
-                    // stable across rotations.
-                    0.1,
-                    10.0,
-                ],
-            };
-            self.queue.write_buffer(&self.exposure_uniform_buffer, 0, bytemuck::bytes_of(&ep));
+        // Measurement + adaptation — see record_auto_exposure in
+        // postfx_chain.rs. Composite reads exposure_views[dst].
+        self.record_auto_exposure(&mut encoder, exposure_src_idx, exposure_dst_idx);
 
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("exposure_bg"),
-                layout: &self.exposure_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.exposure_uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(composite_src_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.exposure_views[exposure_src_idx]) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
-                ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("exposure_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.exposure_views[exposure_dst_idx],
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.exposure_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        let composite_src_view = self.composite_source_view();
 
         // composite_uniform_buffer carries per-frame composite state.
         // x = tonemap kind (0 ACES / 1 AgX)
