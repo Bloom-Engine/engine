@@ -4,6 +4,9 @@
 #![allow(static_mut_refs)]
 
 pub mod string_header;
+pub mod ffi;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ffi_core;
 pub mod handles;
 pub mod input;
 pub mod renderer;

@@ -7912,6 +7912,38 @@ impl Renderer {
     }
 
     /// Upload an HDR equirectangular environment map. The `data` is
+    /// Load an environment from a `.hdr` file on disk and install it as
+    /// the clear environment. Decode errors and I/O errors are silently
+    /// ignored (the previous env stays active), matching the historical
+    /// per-platform FFI behavior.
+    ///
+    /// Hoisted out of the per-platform `bloom_set_env_clear_from_hdr`
+    /// wrappers so the shared FFI macro stays free of `image` codec
+    /// details; gated on `image-extras` because the HDR codec is.
+    #[cfg(all(feature = "image-extras", not(target_arch = "wasm32")))]
+    pub fn set_env_clear_from_hdr_file(&mut self, path: &str) {
+        use image::ImageDecoder;
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let decoder = match image::codecs::hdr::HdrDecoder::new(std::io::BufReader::new(file)) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let (w, h) = decoder.dimensions();
+        let byte_len = (w as usize) * (h as usize) * 3 * 4;
+        let mut buf = vec![0u8; byte_len];
+        if decoder.read_image(&mut buf).is_err() {
+            return;
+        }
+        let rgb_f32: Vec<f32> = buf
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        self.load_env_from_hdr(w, h, &rgb_f32);
+    }
+
     /// `width * height * 3` packed f32 RGB triples in linear space —
     /// the output of `image::codecs::hdr::HdrDecoder::read_image()`
     /// laid out row-major. Replaces any previously-loaded env.

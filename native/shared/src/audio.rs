@@ -361,3 +361,41 @@ pub fn parse_ogg(data: &[u8]) -> Option<SoundData> {
     if samples.is_empty() { return None; }
     Some(SoundData { samples, sample_rate, channels })
 }
+
+/// Decode an audio file by extension, falling back to format sniffing.
+///
+/// Unifies the two historical platform behaviors: extension dispatch
+/// (macOS/iOS/tvOS) and try-every-parser (Linux/Windows/Android). The
+/// extension picks the first parser; if it fails — or the extension is
+/// unrecognized — the remaining parsers run in turn, so a mislabelled
+/// file still decodes.
+pub fn decode_audio(path: &str, data: &[u8]) -> Option<SoundData> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".ogg") {
+        if let Some(s) = parse_ogg(data) {
+            return Some(s);
+        }
+    } else if lower.ends_with(".mp3") {
+        #[cfg(feature = "mp3")]
+        if let Some(s) = parse_mp3(data) {
+            return Some(s);
+        }
+    } else if lower.ends_with(".wav") {
+        if let Some(s) = parse_wav(data) {
+            return Some(s);
+        }
+    }
+    // Sniff: wav first (cheap header check), then ogg, then mp3 (no
+    // reliable magic — minimp3 will chew on almost anything, keep it last).
+    if let Some(s) = parse_wav(data) {
+        return Some(s);
+    }
+    if let Some(s) = parse_ogg(data) {
+        return Some(s);
+    }
+    #[cfg(feature = "mp3")]
+    if let Some(s) = parse_mp3(data) {
+        return Some(s);
+    }
+    None
+}
