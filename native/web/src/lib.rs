@@ -1379,7 +1379,7 @@ pub fn bloom_set_sound_volume(handle: f64, volume: f64) {
 
 #[wasm_bindgen]
 pub fn bloom_set_master_volume(volume: f64) {
-    engine().audio.master_volume = volume as f32;
+    engine().audio.set_master_volume(volume as f32);
 }
 
 #[wasm_bindgen]

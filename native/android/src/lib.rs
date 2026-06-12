@@ -340,8 +340,11 @@ pub extern "C" fn bloom_end_drawing() {
 #[no_mangle]
 pub extern "C" fn bloom_init_audio() {
     AUDIO_RUNNING.store(true, Ordering::SeqCst);
-    std::thread::spawn(|| {
-        android_audio_thread();
+    // Move the render half into the audio thread; the engine keeps only
+    // the command-producing control half.
+    let renderer = engine().audio.take_renderer();
+    std::thread::spawn(move || {
+        android_audio_thread(renderer);
     });
 }
 
@@ -351,11 +354,16 @@ pub extern "C" fn bloom_close_audio() {
     std::thread::sleep(std::time::Duration::from_millis(50));
 }
 
-fn android_audio_thread() {
+fn android_audio_thread(renderer: Option<bloom_shared::audio::AudioRenderer>) {
     // Use oboe (AAudio/OpenSL ES wrapper) for audio output
     use oboe::*;
 
-    struct BloomAudioCallback;
+    // The render half is owned by the oboe callback — AAudio invokes
+    // on_audio_ready from its own realtime thread, and the callback never
+    // touches shared engine state (see audio/mod.rs contract).
+    struct BloomAudioCallback {
+        renderer: Option<bloom_shared::audio::AudioRenderer>,
+    }
 
     impl AudioOutputCallback for BloomAudioCallback {
         type FrameType = (f32, Stereo);
@@ -366,8 +374,8 @@ fn android_audio_thread() {
             let ptr = frames.as_mut_ptr() as *mut f32;
             let interleaved = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
             for s in interleaved.iter_mut() { *s = 0.0; }
-            unsafe {
-                ENGINE.get_mut().map(|eng| { eng.audio.mix_output(interleaved); });
+            if let Some(r) = self.renderer.as_mut() {
+                r.mix(interleaved);
             }
             if AUDIO_RUNNING.load(Ordering::SeqCst) {
                 DataCallbackResult::Continue
@@ -383,7 +391,7 @@ fn android_audio_thread() {
         .set_format::<f32>()
         .set_channel_count::<Stereo>()
         .set_sample_rate(44100)
-        .set_callback(BloomAudioCallback)
+        .set_callback(BloomAudioCallback { renderer })
         .open_stream();
 
     match stream {

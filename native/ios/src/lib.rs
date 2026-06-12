@@ -909,6 +909,10 @@ unsafe impl Send for AudioUnitInstance {}
 unsafe impl Sync for AudioUnitInstance {}
 
 static mut AUDIO_UNIT: Option<AudioUnitInstance> = None;
+// Render half of the audio system — owned by the CoreAudio render thread
+// after bloom_init_audio hands it off via AudioMixer::take_renderer.
+// See native/shared/src/audio/mod.rs for the threading contract.
+static mut AUDIO_RENDERER: Option<bloom_shared::audio::AudioRenderer> = None;
 
 unsafe extern "C" fn audio_render_callback(
     _in_ref_con: *mut c_void,
@@ -922,13 +926,21 @@ unsafe extern "C" fn audio_render_callback(
     let buffer = &mut buffer_list.buffers[0];
     let num_samples = in_number_frames as usize * 2;
     let output = std::slice::from_raw_parts_mut(buffer.data as *mut f32, num_samples);
-    ENGINE.get_mut().map(|eng| { eng.audio.mix_output(output); });
+    match AUDIO_RENDERER.as_mut() {
+        Some(r) => r.mix(output),
+        None => output.iter_mut().for_each(|s| *s = 0.0),
+    }
     0
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_init_audio() {
     unsafe {
+        // Hand the render half to the audio thread before the callback
+        // can fire. Idempotent: a second init keeps the existing renderer.
+        if AUDIO_RENDERER.is_none() {
+            AUDIO_RENDERER = engine().audio.take_renderer();
+        }
         let desc = AudioComponentDescription {
             component_type: K_AUDIO_UNIT_TYPE_OUTPUT,
             component_sub_type: K_AUDIO_UNIT_SUB_TYPE_REMOTE_IO,

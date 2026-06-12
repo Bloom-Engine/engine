@@ -719,8 +719,11 @@ pub extern "C" fn bloom_init_audio() {
     {
         use std::sync::atomic::Ordering;
         AUDIO_RUNNING.store(true, Ordering::SeqCst);
-        std::thread::spawn(|| {
-            alsa_audio_thread();
+        // Move the render half into the audio thread; the engine keeps
+        // only the command-producing control half.
+        let renderer = engine().audio.take_renderer();
+        std::thread::spawn(move || {
+            alsa_audio_thread(renderer);
         });
     }
 }
@@ -732,7 +735,7 @@ pub extern "C" fn bloom_close_audio() {
 }
 
 #[cfg(target_os = "linux")]
-fn alsa_audio_thread() {
+fn alsa_audio_thread(mut renderer: Option<bloom_shared::audio::AudioRenderer>) {
     use alsa::pcm::*;
     use alsa::{Direction, ValueOr};
     use std::sync::atomic::Ordering;
@@ -765,10 +768,10 @@ fn alsa_audio_thread() {
     while AUDIO_RUNNING.load(Ordering::SeqCst) {
         for s in mix_buf.iter_mut() { *s = 0.0; }
 
-        unsafe {
-            ENGINE.get_mut().map(|eng| {
-                eng.audio.mix_output(&mut mix_buf);
-            });
+        // Renderer is moved into this thread at spawn — no shared
+        // engine state is touched from here (see audio/mod.rs contract).
+        if let Some(r) = renderer.as_mut() {
+            r.mix(&mut mix_buf);
         }
 
         let io = pcm.io_f32().unwrap();

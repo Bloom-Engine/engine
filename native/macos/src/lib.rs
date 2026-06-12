@@ -26,6 +26,12 @@ static mut WINDOW: Option<Retained<NSWindow>> = None;
 // completion.
 static mut HEADLESS: bool = false;
 static mut AUDIO_UNIT: Option<AudioUnitInstance> = None;
+// Render half of the audio system. Moved here from EngineState by
+// bloom_init_audio (AudioMixer::take_renderer) BEFORE the CoreAudio
+// callback starts; after that it is owned exclusively by the audio
+// render thread. The old design mixed through ENGINE from the callback —
+// a cross-thread data race with every play/stop call on the main thread.
+static mut AUDIO_RENDERER: Option<bloom_shared::audio::AudioRenderer> = None;
 
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
@@ -245,9 +251,10 @@ unsafe extern "C" fn audio_render_callback(
         num_samples,
     );
 
-    ENGINE.get_mut().map(|eng| {
-        eng.audio.mix_output(output);
-    });
+    match AUDIO_RENDERER.as_mut() {
+        Some(r) => r.mix(output),
+        None => output.iter_mut().for_each(|s| *s = 0.0),
+    }
 
     0 // noErr
 }
@@ -701,6 +708,11 @@ pub extern "C" fn bloom_end_drawing() {
 #[no_mangle]
 pub extern "C" fn bloom_init_audio() {
     unsafe {
+        // Hand the render half to the audio thread before the callback
+        // can fire. Idempotent: a second init keeps the existing renderer.
+        if AUDIO_RENDERER.is_none() {
+            AUDIO_RENDERER = engine().audio.take_renderer();
+        }
         let desc = AudioComponentDescription {
             component_type: K_AUDIO_UNIT_TYPE_OUTPUT,
             component_sub_type: K_AUDIO_UNIT_SUB_TYPE_DEFAULT_OUTPUT,

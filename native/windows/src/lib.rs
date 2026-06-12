@@ -501,7 +501,7 @@ pub extern "C" fn bloom_close_audio() {
 }
 
 #[cfg(windows)]
-unsafe fn wasapi_audio_thread() {
+unsafe fn wasapi_audio_thread(mut renderer: Option<bloom_shared::audio::AudioRenderer>) {
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
     use windows::core::*;
@@ -583,9 +583,11 @@ unsafe fn wasapi_audio_thread() {
         // Mix audio
         let mix_samples = available * 2; // stereo
         for i in 0..mix_samples { mix_buf[i] = 0.0; }
-        ENGINE.get_mut().map(|eng| {
-            eng.audio.mix_output(&mut mix_buf[..mix_samples]);
-        });
+        // Renderer is moved into this thread at spawn — no shared
+        // engine state is touched from here (see audio/mod.rs contract).
+        if let Some(r) = renderer.as_mut() {
+            r.mix(&mut mix_buf[..mix_samples]);
+        }
 
         // Write to WASAPI buffer (format is typically f32 or i16, assume float since we requested shared mode)
         let bits = mix_format.wBitsPerSample;

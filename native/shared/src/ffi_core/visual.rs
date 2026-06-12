@@ -54,7 +54,7 @@ macro_rules! __bloom_ffi_visual {
         #[no_mangle]
         pub extern "C" fn bloom_set_master_volume(volume: f64) {
             $crate::ffi::guard("bloom_set_master_volume", move || {
-                engine().audio.master_volume = volume as f32;
+                engine().audio.set_master_volume(volume as f32);
         })
         }
 
