@@ -6261,37 +6261,6 @@ impl Renderer {
     }
 
     /// Q1: Create a render texture and register it for sampling via drawTexture.
-    /// Returns (bind_group_index, texture_vec_index).
-    pub fn create_render_texture(&mut self, width: u32, height: u32) -> (u32, usize) {
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("render_texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.surface_config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let tex_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rt_bg"), layout: &self.texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&tex_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        });
-        let idx = self.texture_bind_groups.len() as u32;
-        let tex_idx = self.textures.len();
-        self.texture_bind_groups.push(bind_group);
-        self.textures.push(texture);
-        self.texture_sizes.push((width, height));
-        (idx, tex_idx)
-    }
-
-    /// Q1: Get a reference to an internal texture by index.
-    pub fn get_texture_ref(&self, index: usize) -> Option<&wgpu::Texture> {
-        self.textures.get(index)
-    }
 
     /// Q1: Clear the render target override.
     pub fn end_texture_mode(&mut self) {
@@ -9671,6 +9640,10 @@ impl Renderer {
         // scene_color_tex for the dispatch. Free after the pass so
         // the transient pool reuses on the next frame.
         if !self.material_system.translucent_commands.is_empty() {
+            // Back-to-front by view depth — required for correct alpha
+            // compositing; submission order is only kept between
+            // equal-depth draws (stable sort).
+            self.material_system.sort_translucent();
             profiler.begin("translucent_pass");
             let swap_w = self.surface_config.width;
             let swap_h = self.surface_config.height;
