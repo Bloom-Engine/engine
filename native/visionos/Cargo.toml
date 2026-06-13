@@ -1,0 +1,40 @@
+[package]
+name = "bloom-visionos"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bloom_visionos"
+crate-type = ["staticlib"]
+
+[features]
+default = ["jolt", "models3d", "image-extras"]
+jolt = ["bloom-shared/jolt"]
+# EN-014 — see native/shared/Cargo.toml. Default-on so existing games are
+# unaffected; pure-2D games opt out via Perry feature forwarding.
+models3d = ["bloom-shared/models3d"]
+image-extras = ["bloom-shared/image-extras"]
+
+# Match perry-runtime's panic strategy so the final perry-driven link
+# doesn't see two copies of rust_eh_personality (and friends) from two
+# independent Rust staticlibs. ld64.lld flags these as duplicate symbols;
+# GNU ld silently tolerates them, which is why only Apple targets break.
+# Mirrors the same setting in native/watchos/Cargo.toml.
+[profile.release]
+panic = "abort"
+
+[dependencies]
+bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop", "NSString", "NSThread", "NSObject", "NSLocale", "NSArray"] }
+raw-window-handle = "0.6"
+wgpu = "29"
+# Needed by bloom_set_env_clear_from_hdr (HDR env-map decode); mirrors macOS.
+image = { version = "0.25", default-features = false, features = ["hdr"] }
+
+[patch.crates-io]
+# visionOS shares tvOS's vendored Metal crate (it already carries the
+# target_os = "visionos" cfg arms). Referenced as a sibling to avoid
+# duplicating the large vendored crate; the published package ships
+# native/tvos/metal-patched, so this relative path resolves there too.
+metal = { path = "../tvos/metal-patched" }
