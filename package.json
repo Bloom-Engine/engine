@@ -40,6 +40,9 @@
     "native/tvos/metal-patched/src/**",
     "native/tvos/metal-patched/LICENSE-APACHE",
     "native/tvos/metal-patched/LICENSE-MIT",
+    "native/visionos/Cargo.toml",
+    "native/visionos/Cargo.lock",
+    "native/visionos/src/**",
     "native/watchos/Cargo.toml",
     "native/watchos/Cargo.lock",
     "native/watchos/src/**",
@@ -3422,6 +3425,25 @@
         "tvos": {
           "crate": "native/tvos/",
           "lib": "libbloom_tvos.a",
+          "frameworks": [
+            "Metal",
+            "QuartzCore",
+            "UIKit",
+            "CoreGraphics",
+            "CoreText",
+            "CoreFoundation",
+            "CoreAudio",
+            "AudioToolbox",
+            "AVFoundation",
+            "GameController"
+          ],
+          "libs": [
+            "c++"
+          ]
+        },
+        "visionos": {
+          "crate": "native/visionos/",
+          "lib": "libbloom_visionos.a",
           "frameworks": [
             "Metal",
             "QuartzCore",
