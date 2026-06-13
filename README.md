@@ -116,6 +116,7 @@ setting the bar. ([full design rationale](docs/design-api.md))
 | Linux | Vulkan / OpenGL | Keyboard + mouse |
 | iOS | Metal | Touch + gamepad |
 | tvOS | Metal | Siri Remote + gamepad |
+| watchOS | SwiftUI Canvas (no Metal) | Digital Crown + taps ([docs](docs/watchos-target.md)) |
 | Android | Vulkan / OpenGL ES | Touch + gamepad |
 | **Web** | **WebGPU / WebGL** | **Keyboard + mouse + touch + gamepad** |
 
