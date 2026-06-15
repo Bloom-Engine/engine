@@ -373,6 +373,47 @@ macro_rules! __bloom_ffi_visual {
         })
         }
 
+        // bloom_set_bloom_intensity  [source: art-direction]
+        // Scales the bloom contribution added to the HDR scene before tonemap
+        // (0 = none, ~0.04 subtle default, higher = stronger glow).
+        #[no_mangle]
+        pub extern "C" fn bloom_set_bloom_intensity(value: f64) {
+            $crate::ffi::guard("bloom_set_bloom_intensity", move || {
+                engine().renderer.set_bloom_intensity(value as f32);
+        })
+        }
+
+        // bloom_set_tonemap  [source: art-direction]
+        // Selects the tonemap operator: 0 = ACES (default), 1 = AgX (more
+        // filmic, better highlight desaturation + a punchier look).
+        #[no_mangle]
+        pub extern "C" fn bloom_set_tonemap(kind: f64) {
+            $crate::ffi::guard("bloom_set_tonemap", move || {
+                engine().renderer.set_tonemap_kind(kind as u32);
+        })
+        }
+
+        // bloom_set_auto_exposure_key  [source: art-direction]
+        // Target scene-average luma for auto-exposure. Lower = the auto-
+        // exposure aims for a darker, more saturated midpoint (less wash-out);
+        // higher = brighter.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_auto_exposure_key(key: f64) {
+            $crate::ffi::guard("bloom_set_auto_exposure_key", move || {
+                engine().renderer.set_auto_exposure_key(key as f32);
+        })
+        }
+
+        // bloom_set_auto_exposure_rate  [source: art-direction]
+        // Per-frame adaptation rate for auto-exposure (0 = frozen, ~0.05 = a
+        // smooth eye-adaptation feel, 1 = instant).
+        #[no_mangle]
+        pub extern "C" fn bloom_set_auto_exposure_rate(rate: f64) {
+            $crate::ffi::guard("bloom_set_auto_exposure_rate", move || {
+                engine().renderer.set_auto_exposure_rate(rate as f32);
+        })
+        }
+
         // bloom_set_ssao_enabled  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_ssao_enabled(on: f64) {

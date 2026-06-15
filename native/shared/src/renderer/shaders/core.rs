@@ -229,6 +229,7 @@ struct Lighting {
     shadow_cascade_vps: array<mat4x4<f32>, 3>,
     shadow_cascade_splits: vec4<f32>,
     shadow_view_matrix: mat4x4<f32>,
+    wind: vec4<f32>,   // xy=dir, z=amplitude, w=time (foliage sway)
 };
 
 struct MaterialFactors {
@@ -318,7 +319,21 @@ fn env_sample(dir: vec3<f32>) -> vec3<f32> {
 @vertex
 fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
     var out: VertexOutputScene;
-    let pos4 = vec4<f32>(in.position, 1.0);
+    var local = in.position;
+    // Foliage wind sway — only for alpha-cut materials (leaf cards), so the
+    // opaque trunk and the rest of the world stay rigid. Sway grows with the
+    // vertex's height up the plant and its phase varies by world position so
+    // cards don't move in lockstep. lighting.wind = (dir.x, dir.z, amp, time).
+    if (material.metal_rough.w > 0.0 && lighting.wind.z > 0.0) {
+        let wp0 = (u.model * vec4<f32>(in.position, 1.0)).xyz;
+        let t = lighting.wind.w;
+        let sway = lighting.wind.z * (0.25 + max(in.position.y, 0.0) * 0.16);
+        let phase = t * 1.6 + wp0.x * 0.5 + wp0.z * 0.5;
+        local.x = local.x + lighting.wind.x * sway * sin(phase);
+        local.z = local.z + lighting.wind.y * sway * sin(phase * 1.3 + 1.1);
+        local.y = local.y + sway * 0.12 * sin(phase * 0.9 + 2.0);
+    }
+    let pos4 = vec4<f32>(local, 1.0);
     let curr = u.mvp * pos4;
     out.clip_position = curr;
     out.curr_clip = curr;
@@ -757,6 +772,15 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
                      lighting.light_dir.w, base_color, metallic, roughness)
          * direct_shadow;
+
+    // Foliage backlit transmission — sun bleeding THROUGH alpha-cut leaf cards
+    // (the bright rim glow when the sun is behind a tree). Gated on the
+    // alpha-cutoff so only cut-out foliage materials get it; opaque surfaces
+    // (cutoff == 0) are unaffected. Matches shade_foliage's transmission term.
+    if (alpha_cutoff > 0.0) {
+        let trans = pow(max(dot(v, -legacy_dir), 0.0), 3.0) * 0.85;
+        lit += base_color * lighting.light_color.rgb * lighting.light_dir.w * trans;
+    }
 
     let dir_count = u32(lighting.dir_light_count.x);
     for (var i = 0u; i < dir_count; i++) {

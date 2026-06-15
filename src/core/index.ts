@@ -38,6 +38,10 @@ declare function bloom_set_quality_preset(preset: number): void;
 declare function bloom_set_shadows_enabled(on: number): void;
 declare function bloom_set_shadows_always_fresh(on: number): void;
 declare function bloom_set_bloom_enabled(on: number): void;
+declare function bloom_set_bloom_intensity(value: number): void;
+declare function bloom_set_tonemap(kind: number): void;
+declare function bloom_set_auto_exposure_key(key: number): void;
+declare function bloom_set_auto_exposure_rate(rate: number): void;
 declare function bloom_set_ssao_enabled(on: number): void;
 declare function bloom_set_post_pass(source: number): number;
 declare function bloom_clear_post_pass(): void;
@@ -345,6 +349,41 @@ export function setShadowsAlwaysFresh(on: boolean): void {
 /** Toggle the bloom down/upsample chain (~10 passes). Default on. */
 export function setBloomEnabled(on: boolean): void {
   bloom_set_bloom_enabled(on ? 1 : 0);
+}
+
+/**
+ * Bloom contribution strength added to the HDR scene before tonemap.
+ * 0 = none, ~0.04 subtle default, higher = stronger glow around bright pixels.
+ */
+export function setBloomIntensity(intensity: number): void {
+  bloom_set_bloom_intensity(intensity);
+}
+
+/** Tonemap operator selection. */
+export enum Tonemap {
+  /** Filmic ACES (default). */
+  ACES = 0,
+  /** AgX — more filmic highlight roll-off + a punchier, better-saturated look. */
+  AgX = 1,
+}
+
+/** Choose the tonemap operator applied in the composite pass. */
+export function setTonemap(kind: Tonemap): void {
+  bloom_set_tonemap(kind);
+}
+
+/**
+ * Auto-exposure target (scene-average luma key). Lower aims for a darker,
+ * more saturated midpoint (counteracts wash-out from very bright skies);
+ * higher aims brighter. Only affects frames where auto-exposure is on.
+ */
+export function setAutoExposureKey(key: number): void {
+  bloom_set_auto_exposure_key(key);
+}
+
+/** Auto-exposure adaptation rate per frame (0 = frozen, ~0.05 smooth, 1 = instant). */
+export function setAutoExposureRate(rate: number): void {
+  bloom_set_auto_exposure_rate(rate);
 }
 
 /** Toggle screen-space ambient occlusion + its bilateral blur. Default on. */

@@ -374,6 +374,62 @@ macro_rules! __bloom_ffi_models {
             0.0
         }
 
+        // Array-free mesh upload (Perry 0.5.1171 rejects number[] -> i64 pointer
+        // params; see ModelManager::scratch_f32). Push the 12-float vertex
+        // records + u32 indices one scalar at a time (all-f64 ABI), then build.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_mesh_scratch_reset() {
+            $crate::ffi::guard("bloom_mesh_scratch_reset", move || {
+                engine().models.mesh_scratch_reset();
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_mesh_scratch_reset() {
+            $crate::ffi::feature_off_warn_once("bloom_mesh_scratch_reset", "models3d");
+        }
+
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_mesh_scratch_push_f32(v: f64) {
+            $crate::ffi::guard("bloom_mesh_scratch_push_f32", move || {
+                engine().models.mesh_scratch_push_f32(v as f32);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_mesh_scratch_push_f32(_v: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_mesh_scratch_push_f32", "models3d");
+        }
+
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_mesh_scratch_push_u32(v: f64) {
+            $crate::ffi::guard("bloom_mesh_scratch_push_u32", move || {
+                engine().models.mesh_scratch_push_u32(v as u32);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_mesh_scratch_push_u32(_v: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_mesh_scratch_push_u32", "models3d");
+        }
+
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_create_mesh_scratch(vertex_count: f64, index_count: f64) -> f64 {
+            $crate::ffi::guard("bloom_create_mesh_scratch", move || {
+                engine().models.create_mesh_from_scratch(vertex_count as u32, index_count as u32)
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_create_mesh_scratch(_vertex_count: f64, _index_count: f64) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_create_mesh_scratch", "models3d");
+            0.0
+        }
+
         // bloom_get_model_mesh_count  [source: linux; gated: models3d]
         #[cfg(feature = "models3d")]
         #[no_mangle]

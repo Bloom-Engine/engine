@@ -8,20 +8,31 @@ name = "bloom_windows"
 crate-type = ["staticlib"]
 
 [features]
-# Jolt is opt-in on Windows because Perry's native-library build pipeline
-# does not forward cargo `--features` to nativeLibrary crates, and bundling
-# Jolt's static archives into bloom_windows.lib leaves the final lld-link
-# step unable to resolve `JPH::*` symbols (the staticlib has no embedded
-# search path and the C++ library lives off cargo's normal lib search).
-# Games that need bloom/physics on Windows must opt in explicitly until the
-# perry side gains a way to thread `cargo:rustc-link-search` through to the
-# final link line.
-default = ["models3d", "image-extras"]
+# Jolt defaults ON, matching the macOS/iOS targets, so `bloom/physics`
+# works out of the box on Windows. The historical blocker — the
+# `bloom_windows.lib` staticlib can't carry the cmake-built Jolt archives'
+# search path into perry's final lld-link step — is solved at the manifest
+# level: `package.json`'s `perry.nativeLibrary.targets.windows` declares a
+# `libDirs` entry pointing at the stable Jolt build output
+# (`native/third_party/bloom_jolt/build/windows-x86_64/lib`) plus `Jolt` /
+# `bloom_jolt` in `libs`, which perry turns into `/LIBPATH:` + `*.lib` on the
+# link line (perry >= 0.5.1126 manifest libDirs support). Pure-2D Windows
+# games opt out via Perry feature forwarding in perry.toml:
+#   [native-library."@bloomengine/engine"]
+#   default-features = false
+default = ["jolt", "models3d", "image-extras"]
 jolt = ["bloom-shared/jolt"]
 # EN-014 — see native/shared/Cargo.toml. Default-on so existing games are
 # unaffected; pure-2D games opt out via Perry feature forwarding.
 models3d = ["bloom-shared/models3d"]
 image-extras = ["bloom-shared/image-extras"]
+
+# Match perry-runtime's panic strategy so perry's final lld-link doesn't see
+# two copies of `rust_eh_personality` (and friends) from two independent Rust
+# staticlibs (perry_runtime.lib + bloom_windows.lib). Mirrors the same setting
+# in native/macos/Cargo.toml.
+[profile.release]
+panic = "abort"
 
 [dependencies]
 bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }

@@ -96,11 +96,22 @@ fn build_jolt() {
         .join(format!("{}Jolt.{}", lib_prefix, lib_ext));
 
     if !(bloom_jolt_lib.exists() && jolt_lib.exists()) {
-        let _ = cmake::Config::new(&shim_dir)
-            .out_dir(&dst)
+        let mut cfg = cmake::Config::new(&shim_dir);
+        cfg.out_dir(&dst)
             .profile("Release")
-            .define("CMAKE_BUILD_TYPE", "Release")
-            .build();
+            .define("CMAKE_BUILD_TYPE", "Release");
+        if target_os == "windows" {
+            // perry links the prebuilt Jolt archive with lld-link, which
+            // cannot read MSVC `/GL` (whole-program-optimization) object
+            // files — they're LTCG intermediates, not native COFF, and the
+            // link fails with "is not a native COFF file. Recompile without
+            // /GL?". Turn off Jolt's interprocedural optimization so the
+            // archive holds ordinary COFF objects perry can consume. (Costs
+            // a little Jolt codegen perf; physics is not the bottleneck.)
+            cfg.define("INTERPROCEDURAL_OPTIMIZATION", "OFF")
+                .define("CMAKE_INTERPROCEDURAL_OPTIMIZATION", "OFF");
+        }
+        let _ = cfg.build();
     }
 
     println!("cargo:rustc-link-search=native={}", dst.join("lib").display());

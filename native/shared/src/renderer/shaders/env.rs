@@ -706,6 +706,49 @@ fn dir_to_sky_uv(dir: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(u_norm, v_norm);
 }
 
+// --- Procedural cloud layer (value-noise fBm) ---------------------------
+fn cloud_hash(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+fn cloud_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let uu = f * f * (3.0 - 2.0 * f);
+    let a = cloud_hash(i);
+    let b = cloud_hash(i + vec2<f32>(1.0, 0.0));
+    let c = cloud_hash(i + vec2<f32>(0.0, 1.0));
+    let d = cloud_hash(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, uu.x), mix(c, d, uu.x), uu.y);
+}
+fn cloud_fbm(p0: vec2<f32>) -> f32 {
+    var s = 0.0;
+    var amp = 0.5;
+    var q = p0;
+    for (var i = 0; i < 5; i = i + 1) {
+        s = s + amp * cloud_noise(q);
+        q = q * 2.03;
+        amp = amp * 0.5;
+    }
+    return s;
+}
+// Analytic cloud cover for a view ray. Projects the ray onto a virtual cloud
+// plane (perspective convergence toward the horizon), samples fBm for puffy
+// coverage, fades near the horizon, and thins around the sun so the disk shows
+// through. Returns (coverage, sunlit-amount).
+fn cloud_cover(dir: vec3<f32>, sun_dir: vec3<f32>, time: f32) -> vec2<f32> {
+    if (dir.y <= 0.02) { return vec2<f32>(0.0, 0.0); }
+    let p = (dir.xz / dir.y) * 2.0;
+    // Slow wind drift + a slower second octave shift so the puffs also evolve.
+    let drift = vec2<f32>(time * 0.006, time * 0.0025);
+    var cov = cloud_fbm(p * 0.55 + vec2<f32>(23.0, 11.0) + drift);
+    cov = smoothstep(0.56, 1.04, cov);
+    let horizon_fade = smoothstep(0.03, 0.24, dir.y);
+    let near_sun = smoothstep(0.90, 0.999, dot(dir, sun_dir));
+    cov = cov * horizon_fade * (1.0 - near_sun * 0.8) * 0.9;
+    let sun_amt = clamp(dot(dir, sun_dir) * 0.5 + 0.5, 0.0, 1.0);
+    return vec2<f32>(cov, sun_amt);
+}
+
 fn sample_transmittance(r: f32, mu: f32) -> vec3<f32> {
     let v = clamp((r - GROUND_R) / (ATMOS_TOP - GROUND_R), 0.0, 1.0);
     let uu = clamp((mu + 1.0) * 0.5, 0.0, 1.0);
@@ -744,6 +787,16 @@ fn sky_fs(in: VsOut) -> SkyOut {
     }
 
     radiance = radiance * u.intensity.x;
+
+    // Procedural cloud layer, composited over the scaled sky radiance. Cloud
+    // colour is absolute HDR (puffy white in sun, cool grey in shadow) so the
+    // clouds read brighter than the sky behind them regardless of env intensity.
+    let cc = cloud_cover(dir, sun_dir, u.intensity.y);
+    if (cc.x > 0.0) {
+        let lit = cc.y * cc.y;
+        let cloud_col = mix(vec3<f32>(0.62, 0.66, 0.76), vec3<f32>(2.6, 2.5, 2.35), lit);
+        radiance = mix(radiance, cloud_col, cc.x);
+    }
 
     // EN-005 Phase 4 — sub-LSB dither to break up the banding that
     // Rgba16Float storage produces in low-frequency regions like the

@@ -86,7 +86,12 @@ impl Renderer {
             || self.shadow_map.dirty
             || vps_changed
             || light_changed
-            || self.shadow_map.rendered_scene_version != scene_ver;
+            || self.shadow_map.rendered_scene_version != scene_ver
+            // Immediate-mode + cached-model draws aren't tracked by the scene
+            // version, and they're re-submitted (and usually move) every frame,
+            // so re-render the shadow map whenever any are present.
+            || !self.indices_3d.is_empty()
+            || !self.model_draw_commands.is_empty();
 
         if should_render {
         // Build a shared caster list + buffer-ref vectors, then
@@ -122,6 +127,47 @@ impl Renderer {
                 wmin: node.world_bounds_min,
                 wmax: node.world_bounds_max,
             });
+        }
+
+        // Immediate-mode 3D batch (drawCube/drawSphere/non-cached models).
+        // These verts are already in WORLD space, so the model matrix is
+        // identity. wmin > wmax marks "no bounds" → included in every cascade.
+        // Games that draw in immediate mode create no scene nodes, so without
+        // this nothing they draw would cast a shadow.
+        if !self.indices_3d.is_empty() {
+            let vb_idx = shadow_vbs.len();
+            shadow_vbs.push(&self.persistent_vb_3d);
+            shadow_ibs.push(&self.persistent_ib_3d);
+            shadow_nodes.push(ShadowDrawEntry {
+                vb_idx,
+                ib_idx: vb_idx,
+                index_count: self.indices_3d.len() as u32,
+                transform: IDENTITY_MAT4,
+                wmin: [1.0, 1.0, 1.0],
+                wmax: [-1.0, -1.0, -1.0],
+            });
+        }
+
+        // Cached models (drawModel: trees, characters, etc.) — each is a
+        // GpuMesh plus its object→world matrix. Skinned models cast their
+        // rest-pose shadow (vs_shadow doesn't skin) — acceptable.
+        for cmd in self.model_draw_commands.iter() {
+            if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
+                if cmd.mesh_idx < meshes.len() {
+                    let mesh = &meshes[cmd.mesh_idx];
+                    let vb_idx = shadow_vbs.len();
+                    shadow_vbs.push(&mesh.vb);
+                    shadow_ibs.push(&mesh.ib);
+                    shadow_nodes.push(ShadowDrawEntry {
+                        vb_idx,
+                        ib_idx: vb_idx,
+                        index_count: mesh.index_count,
+                        transform: cmd.model,
+                        wmin: [1.0, 1.0, 1.0],
+                        wmax: [-1.0, -1.0, -1.0],
+                    });
+                }
+            }
         }
 
         let cascade_planes: [[[f32; 4]; 6]; crate::shadows::NUM_CASCADES] =

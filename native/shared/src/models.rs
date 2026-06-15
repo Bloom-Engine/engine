@@ -68,6 +68,14 @@ pub struct ModelAnimation {
 pub struct ModelManager {
     pub models: HandleRegistry<ModelData>,
     pub animations: HandleRegistry<ModelAnimation>,
+    /// Scratch buffers for the array-free mesh-upload path. Perry 0.5.1171
+    /// rejects passing a JS `number[]` to a native `i64` pointer param
+    /// (strict safe-integer check), so `createMesh` instead pushes vertex
+    /// floats / indices one scalar at a time through `mesh_scratch_push_*`
+    /// (all `f64` ABI) and then builds the mesh from these. Mirrors the
+    /// physics subsystem's `scratch_*` shape-upload path.
+    pub scratch_f32: Vec<f32>,
+    pub scratch_u32: Vec<u32>,
 }
 
 impl ModelManager {
@@ -75,7 +83,30 @@ impl ModelManager {
         Self {
             models: HandleRegistry::new(),
             animations: HandleRegistry::new(),
+            scratch_f32: Vec::new(),
+            scratch_u32: Vec::new(),
         }
+    }
+
+    pub fn mesh_scratch_reset(&mut self) {
+        self.scratch_f32.clear();
+        self.scratch_u32.clear();
+    }
+    pub fn mesh_scratch_push_f32(&mut self, v: f32) { self.scratch_f32.push(v); }
+    pub fn mesh_scratch_push_u32(&mut self, v: u32) { self.scratch_u32.push(v); }
+
+    /// Build a mesh from the scratch buffers: `vertex_count` vertices of 12
+    /// floats each in `scratch_f32`, `index_count` indices in `scratch_u32`.
+    pub fn create_mesh_from_scratch(&mut self, vertex_count: u32, index_count: u32) -> f64 {
+        let need_f = vertex_count as usize * 12;
+        let need_u = index_count as usize;
+        if vertex_count == 0 || self.scratch_f32.len() < need_f || self.scratch_u32.len() < need_u {
+            return 0.0;
+        }
+        // Clone out so create_mesh's &self borrow doesn't alias scratch.
+        let verts: Vec<f32> = self.scratch_f32[..need_f].to_vec();
+        let inds: Vec<u32> = self.scratch_u32[..need_u].to_vec();
+        self.create_mesh(&verts, &inds)
     }
 
     pub fn load_model(&mut self, file_data: &[u8]) -> f64 {

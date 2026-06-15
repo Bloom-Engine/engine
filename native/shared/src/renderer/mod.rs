@@ -641,6 +641,9 @@ struct CachedModelDraw {
     uniform_slot: usize,
     cache_handle: u64,
     mesh_idx: usize,
+    /// Object→world model matrix for this draw, kept CPU-side so the
+    /// shadow pass can render the model depth-only from the light.
+    model: [[f32; 4]; 4],
 }
 
 // ============================================================
@@ -2829,7 +2832,10 @@ impl Renderer {
                 tex_entry(6),  samp_entry(7),
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // VERTEX_FRAGMENT: the vertex stage reads metal_rough.w
+                    // (alpha-cutoff) to gate foliage wind sway; fragment reads
+                    // the full MaterialFactors.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -8662,7 +8668,8 @@ impl Renderer {
             ],
             up: [up_world[0] * tan_half, up_world[1] * tan_half, up_world[2] * tan_half, 0.0],
             forward: [forward_world[0], forward_world[1], forward_world[2], 0.0],
-            intensity: [intensity, 0.0, 0.0, 0.0],
+            // .y carries current time (seconds) so the cloud layer can drift.
+            intensity: [intensity, self.lighting_uniforms.wind[3], 0.0, 0.0],
         };
         self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -10215,6 +10222,7 @@ impl Renderer {
                 uniform_slot: slot,
                 cache_handle: handle_bits,
                 mesh_idx,
+                model: model_matrix,
             });
         }
     }
@@ -11724,6 +11732,10 @@ impl Renderer {
     /// FFI callers drive this from their frame boundary so `PerFrame.time`
     /// reflects the real process-uptime clock.
     pub fn material_system_begin_frame(&mut self, time_seconds: f32, delta_time: f32) {
+        // Feed wind + time to the built-in scene shader (foliage sway). Set
+        // here each frame so it's current before the per-frame lighting upload.
+        self.lighting_uniforms.wind =
+            [self.wind[0], self.wind[1], self.wind[2], time_seconds];
         let screen_w = self.surface_config.width as f32;
         let screen_h = self.surface_config.height as f32;
         let (rw, rh) = self.render_extent();

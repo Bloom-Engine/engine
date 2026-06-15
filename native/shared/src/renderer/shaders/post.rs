@@ -604,9 +604,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let mean_t = aerial.a;
             color = color * mean_t + in_scatter;
         }
-    } else {
+    }
+    // Manual height fog. Runs additively *after* the procedural-sky aerial
+    // perspective (not just as its `else`), because that LUT is km-scaled and
+    // contributes ~nothing over a small (tens-of-metres) arena. This march is
+    // world-scale, so a low density gives controllable near-ground haze that
+    // adds aerial depth and softens the distant terrain edge. Skips sky pixels
+    // (depth == 1.0) so the procedural sky isn't double-tinted/washed.
+    {
     let fog_density = u.fog_color_density.w;
-    if (fog_density > 0.0) {
+    if (fog_density > 0.0 && depth < 1.0) {
         let height_ref = u.fog_params.x;
         let height_falloff = u.fog_params.y;
         let cam_pos = vec3<f32>(

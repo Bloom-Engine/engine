@@ -128,6 +128,11 @@ pub(super) struct LightingUniforms {
     /// can compute view-space Z for cascade selection without an extra
     /// buffer binding.
     pub(super) shadow_view_matrix: [[f32; 4]; 4],
+    /// Wind for foliage sway in the built-in scene vertex shader:
+    /// xy = wind direction in the XZ plane (magnitude scales sway),
+    /// z = amplitude, w = elapsed time (seconds) for the sway phase.
+    /// Appended last so existing field offsets stay stable.
+    pub(super) wind: [f32; 4],
 }
 
 impl LightingUniforms {
@@ -147,6 +152,7 @@ impl LightingUniforms {
             shadow_cascade_vps: [IDENTITY_MAT4; 3],
             shadow_cascade_splits: [8.0, 25.0, 80.0, 0.0],
             shadow_view_matrix: IDENTITY_MAT4,
+            wind: [0.0, 0.0, 0.0, 0.0],
         }
     }
 }

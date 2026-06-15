@@ -1047,6 +1047,33 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_mesh_scratch_reset",
+          "params": [],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_mesh_scratch_push_f32",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_mesh_scratch_push_u32",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_create_mesh_scratch",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_joint_test",
           "params": [
             "f64",
@@ -1274,6 +1301,34 @@
         },
         {
           "name": "bloom_set_bloom_enabled",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_bloom_intensity",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_tonemap",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_auto_exposure_key",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_auto_exposure_rate",
           "params": [
             "f64"
           ],
@@ -3490,7 +3545,12 @@
             "dxguid",
             "xinput",
             "opengl32",
-            "d3dcompiler"
+            "d3dcompiler",
+            "Jolt",
+            "bloom_jolt"
+          ],
+          "libDirs": [
+            "native/third_party/bloom_jolt/build/windows-x86_64/lib"
           ]
         },
         "linux": {
