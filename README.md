@@ -205,6 +205,14 @@ Key functions:
 
 For the full pipeline (Blender export, pitfalls, architecture), see [docs/skeletal-animation.md](docs/skeletal-animation.md).
 
+## Made with Bloom
+
+**[Bloom Jump](https://apps.apple.com/us/app/bloom-jump/id6761447092)** — our first shipped game and a proof point for the engine. A free retro pixel platformer with five hand-crafted levels, 60 FPS, and an original chiptune soundtrack, built entirely with Bloom from one TypeScript codebase running natively on every target.
+
+- [App Store](https://apps.apple.com/us/app/bloom-jump/id6761447092) — iOS, macOS, tvOS, and visionOS
+- [App Store (watchOS)](https://apps.apple.com/us/app/bloom-jump-watch/id6779528549) — Apple Watch
+- [Google Play](https://play.google.com/store/apps/details?id=com.bloom.jump) — Android
+
 ## Links
 
 - [bloomengine.dev](https://bloomengine.dev)
