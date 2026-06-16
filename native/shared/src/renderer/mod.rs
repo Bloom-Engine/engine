@@ -635,6 +635,12 @@ struct GpuMesh {
     /// its lifetime matches (bind groups reference buffers internally
     /// via Arc, but we also want the strong ref for future updates).
     _material_uniform: wgpu::Buffer,
+    /// Alpha-tested shadow bind group (base-colour tex + sampler + cutoff),
+    /// built only for cutout materials (alpha_cutoff > 0). When present, the
+    /// shadow pass renders this mesh with the cutout pipeline so foliage casts
+    /// its real shape. `None` → opaque caster, uses the plain shadow pipeline.
+    shadow_cutout_bg: Option<wgpu::BindGroup>,
+    _shadow_cutoff_buf: Option<wgpu::Buffer>,
 }
 
 struct CachedModelDraw {
@@ -10177,12 +10183,43 @@ impl Renderer {
             let material_bg = self.create_scene_material_bg(
                 base_color_idx, normal_idx, mr_idx, em_idx, occ_idx, &material_uniform,
             );
+            // Cutout casters get an alpha-test shadow bind group (base colour +
+            // sampler + cutoff). wgpu keeps the buffer alive via the bind group,
+            // but we hold the strong ref too (matches _material_uniform).
+            let (shadow_cutout_bg, shadow_cutoff_buf) = if mesh.alpha_cutoff > 0.0 {
+                let cutoff_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("shadow_cutout_cutoff"),
+                    contents: bytemuck::cast_slice(&[mesh.alpha_cutoff, 0.0f32, 0.0, 0.0]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let bi = base_color_idx as usize;
+                let base_tex = if base_color_idx == 0 || bi >= self.textures.len() {
+                    &self.textures[0]
+                } else {
+                    &self.textures[bi]
+                };
+                let base_view = base_tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shadow_cutout_bg"),
+                    layout: &self.shadow_map.cutout_tex_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&base_view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                        wgpu::BindGroupEntry { binding: 2, resource: cutoff_buf.as_entire_binding() },
+                    ],
+                });
+                (Some(bg), Some(cutoff_buf))
+            } else {
+                (None, None)
+            };
             GpuMesh {
                 vb,
                 ib,
                 index_count: mesh.indices.len() as u32,
                 material_bg,
                 _material_uniform: material_uniform,
+                shadow_cutout_bg,
+                _shadow_cutoff_buf: shadow_cutoff_buf,
             }
         }).collect();
 
