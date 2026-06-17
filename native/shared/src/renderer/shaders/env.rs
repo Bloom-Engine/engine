@@ -818,3 +818,67 @@ fn sky_fs(in: VsOut) -> SkyOut {
 }
 ";
 
+/// EN-011 — single-target reflection shader for rendering cached models
+/// (trees, house, etc.) into a planar-reflection probe with a mirrored
+/// view-projection. Deliberately lightweight (base colour × sun N·L + ambient,
+/// alpha-cutout discard) — a water reflection doesn't need the full deferred
+/// PBR/SSAO stack, and a single HDR colour target (vs the main 4-target MRT)
+/// lets it draw straight into the probe RT. Group layouts are owned by the
+/// renderer: g0 = dynamic per-draw model uniform, g1 = sun/ambient, g2 = the
+/// scene material bind group (we only sample base colour + alpha).
+pub(in crate::renderer) const REFLECT_SCENE_WGSL: &str = "
+struct ReflectModelU { mvp: mat4x4<f32>, model: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> u: ReflectModelU;
+
+struct ReflectLight {
+    sun_dir: vec4<f32>,    // xyz dir (travel), w = intensity
+    sun_color: vec4<f32>,  // rgb, w unused
+    ambient: vec4<f32>,    // rgb, w = intensity
+};
+@group(1) @binding(0) var<uniform> light: ReflectLight;
+
+@group(2) @binding(0) var base_tex: texture_2d<f32>;
+@group(2) @binding(1) var base_samp: sampler;
+
+struct VsIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+};
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) n: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) col: vec4<f32>,
+};
+
+@vertex
+fn vs_reflect(in: VsIn) -> VsOut {
+    var o: VsOut;
+    o.pos = u.mvp * vec4<f32>(in.position, 1.0);
+    o.n = normalize((u.model * vec4<f32>(in.normal, 0.0)).xyz);
+    o.uv = in.uv;
+    o.col = in.color;
+    return o;
+}
+
+fn srgb_lin(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow(max((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(0.0)), vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+@fragment
+fn fs_reflect(in: VsOut) -> @location(0) vec4<f32> {
+    let tex = textureSample(base_tex, base_samp, in.uv);
+    if (tex.a < 0.5) { discard; }   // alpha-cutout foliage reflects its shape
+    let base = srgb_lin(tex.rgb) * in.col.rgb;
+    let n = normalize(in.n);
+    let ndl = max(dot(n, -normalize(light.sun_dir.xyz)), 0.0);
+    let lit = base * (light.ambient.rgb * light.ambient.w
+                      + light.sun_color.rgb * light.sun_dir.w * ndl);
+    return vec4<f32>(lit, 1.0);   // alpha 1 = 'real reflection here' for the water blend
+}
+";
+
