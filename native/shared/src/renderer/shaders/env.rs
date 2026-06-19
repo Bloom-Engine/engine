@@ -875,7 +875,8 @@ fn fs_reflect(in: VsOut) -> @location(0) vec4<f32> {
     if (tex.a < 0.5) { discard; }   // alpha-cutout foliage reflects its shape
     let base = srgb_lin(tex.rgb) * in.col.rgb;
     let n = normalize(in.n);
-    let ndl = max(dot(n, -normalize(light.sun_dir.xyz)), 0.0);
+    // sun_dir is direction-TO-sun (engine convention), so N.L uses +sun_dir.
+    let ndl = max(dot(n, normalize(light.sun_dir.xyz)), 0.0);
     let lit = base * (light.ambient.rgb * light.ambient.w
                       + light.sun_color.rgb * light.sun_dir.w * ndl);
     return vec4<f32>(lit, 1.0);   // alpha 1 = 'real reflection here' for the water blend
