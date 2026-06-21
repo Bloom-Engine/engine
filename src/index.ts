@@ -1,5 +1,5 @@
 export {
-  initWindow, closeWindow, windowShouldClose,
+  initWindow, closeWindow, windowShouldClose, attachToHwnd, resize,
   beginDrawing, endDrawing, takeScreenshot, clearBackground, setEnvClearFromHdr,
   setTargetFPS, getDeltaTime, getFPS, getTime,
   getScreenWidth, getScreenHeight,
