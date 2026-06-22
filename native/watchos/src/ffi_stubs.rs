@@ -6,6 +6,9 @@
 
 #![allow(unused_variables, non_snake_case)]
 
+#[no_mangle] pub extern "C" fn bloom_attach_native(_p0: i64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_take_screenshot(_p0: i64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_env_clear_from_hdr(_p0: i64) {

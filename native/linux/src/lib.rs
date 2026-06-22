@@ -632,6 +632,23 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     panic!("bloom-linux can only run on Linux");
 }
 
+/// Attach the engine to a host-owned surface (PerryTS/perry#5519).
+///
+/// Not yet wired on Linux: Perry UI's GTK4 `BloomView` hands out a
+/// `GtkWidget*`, and turning that into a wgpu surface needs the widget
+/// realized/mapped and its `GdkSurface` bridged to an X11 `Window` (or a
+/// Wayland `wl_surface`) — the GTK4 dmabuf/`GtkGLArea` path the issue
+/// calls out as the larger follow-up. Until that lands this returns 0.0
+/// (failure) so hosts fall back to the windowed `bloom_init_window`
+/// path. The symbol exists so the FFI surface is uniform across
+/// platforms (the shared bring-up is `bloom_shared::attach::attach_engine`,
+/// already used by the Apple/Android/Windows attach paths).
+#[no_mangle]
+pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f64 {
+    let _ = (handle, width, height);
+    0.0
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_close_window() {}
 

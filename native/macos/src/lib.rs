@@ -7,7 +7,6 @@
 #![allow(static_mut_refs)]
 
 use bloom_shared::engine::EngineState;
-use bloom_shared::renderer::Renderer;
 use bloom_shared::string_header::{str_from_header, alloc_perry_string};
 
 use objc2::rc::Retained;
@@ -349,125 +348,43 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         let _: () = msg_send![&content_view, setWantsLayer: true];
     }
 
-    // Create wgpu surface and renderer
-    // wgpu expects the NSView pointer (not NSWindow) for AppKit
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::METAL,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-
-    let surface = unsafe {
-        let view_ptr = Retained::as_ptr(&content_view) as *mut std::ffi::c_void;
-        let handle = AppKitWindowHandle::new(
-            std::ptr::NonNull::new(view_ptr).unwrap()
-        );
-        let raw = RawWindowHandle::AppKit(handle);
-        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(raw_window_handle::RawDisplayHandle::AppKit(raw_window_handle::AppKitDisplayHandle::new())),
-            raw_window_handle: raw,
-        }).expect("Failed to create surface")
-    };
-
-    let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        compatible_surface: Some(&surface),
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    })).expect("No adapter found");
-
-    // Request TIMESTAMP_QUERY when the adapter supports it so the profiler
-    // can collect GPU timings. It's optional — profiler falls back to CPU
-    // only when the feature isn't available.
-    let supported = adapter.features();
-    let mut required_features = wgpu::Features::empty();
-    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-        required_features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-    // Cooked BC7 textures (bloom-cook) upload compressed when the
-    // adapter has BC support; without it they CPU-decode at load.
-    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-    }
-    // Ticket 007b: request ray-query + BLAS/TLAS where the adapter
-    // supports both (Apple Silicon Metal, DXR 1.1, VK_KHR_ray_query).
-    // `BLOOM_FORCE_SW_GI=1` forces the SW fallback for testing parity
-    // with non-RT adapters.
-    let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    // wgpu 29 gates BLAS/TLAS creation + ray-query WGSL on a single
-    // feature bit; there's no separate "acceleration structure" flag.
-    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-    if !force_sw_gi && supported.contains(rt_mask) {
-        required_features |= rt_mask;
-    }
-    // wgpu 29 requires an explicit `ExperimentalFeatures::enabled()` token
-    // when requesting any `EXPERIMENTAL_*` feature (ray query in our case).
-    // The token is constructed through an `unsafe` API acknowledging that
-    // experimental paths may hit undefined behavior — Apple Silicon's Metal
-    // ray-query path has been stable in wgpu releases since v25 so we're
-    // willing to take that risk here.
-    let experimental_features = if required_features.intersects(rt_mask) {
-        unsafe { wgpu::ExperimentalFeatures::enabled() }
-    } else {
-        wgpu::ExperimentalFeatures::disabled()
-    };
-    // Acceleration-structure limits default to 0 when RT is disabled.
-    // `using_minimum_supported_acceleration_structure_values` bumps
-    // them to the spec minimums (2^24 BLAS geometries / TLAS instances,
-    // etc.) whenever ray query was granted.
-    let mut required_limits = wgpu::Limits::default();
-    // Phase 1c: the material ABI declares 5 bind groups (PerFrame,
-    // PerView, PerMaterial, PerDraw, SceneInputs). wgpu's default
-    // limit is 4. Metal / Vulkan / D3D12 support at least 7, so 5 is
-    // safely within every real backend's capabilities.
-    required_limits.max_bind_groups = 5;
-    if required_features.intersects(rt_mask) {
-        required_limits = required_limits
-            .using_minimum_supported_acceleration_structure_values();
-    }
-    let (device, queue) = pollster_block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("bloom_device"),
-            required_features,
-            required_limits,
-            experimental_features,
-            ..Default::default()
-        },
-    )).expect("Failed to create device");
-
-    let surface_caps = surface.get_capabilities(&adapter);
-    let format = surface_caps.formats.iter()
-        .find(|f| f.is_srgb())
-        .copied()
-        .unwrap_or(surface_caps.formats[0]);
-
-    // Retina/HiDPI: AppKit reports window dimensions in points, but
-    // CAMetalLayer's drawable needs to be sized in physical pixels or
-    // AppKit will bilinearly upscale a low-res image to the display.
-    // `backingScaleFactor` is typically 2.0 on Retina Macs, 1.0
-    // otherwise; on mixed-DPI setups it tracks whichever screen the
-    // window is on.
+    // Build the wgpu Metal surface on the content view and bring up the
+    // engine. Surface / adapter / device / swapchain creation is shared
+    // with the host-attach path (PerryTS/perry#5519) — see
+    // `bloom_shared::attach::attach_engine`; the only macOS-specific work
+    // here is producing the AppKit raw-window-handle and the HiDPI scale.
+    //
+    // Retina/HiDPI: AppKit reports window dimensions in points, but the
+    // CAMetalLayer drawable needs physical pixels or AppKit bilinearly
+    // upscales a low-res image. `backingScaleFactor` is 2.0 on Retina,
+    // 1.0 otherwise (tracks the window's current screen).
     let scale: f64 = unsafe { msg_send![&*window, backingScaleFactor] };
     let scale = if scale > 0.0 { scale } else { 1.0 };
-    let logical_w = width as u32;
-    let logical_h = height as u32;
-    let physical_w = ((width * scale) as u32).max(1);
-    let physical_h = ((height * scale) as u32).max(1);
 
-    let surface_config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        format,
-        width: physical_w,
-        height: physical_h,
-        present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: surface_caps.alpha_modes[0],
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
+    let target = {
+        let view_ptr = Retained::as_ptr(&content_view) as *mut std::ffi::c_void;
+        let handle = AppKitWindowHandle::new(std::ptr::NonNull::new(view_ptr).unwrap());
+        wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(raw_window_handle::RawDisplayHandle::AppKit(
+                raw_window_handle::AppKitDisplayHandle::new(),
+            )),
+            raw_window_handle: RawWindowHandle::AppKit(handle),
+        }
     };
-    surface.configure(&device, &surface_config);
-
-    let renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
-    let engine_state = EngineState::new(renderer);
+    let engine_state = unsafe {
+        bloom_shared::attach::attach_engine(
+            target,
+            bloom_shared::attach::AttachParams {
+                backends: wgpu::Backends::METAL,
+                logical_w: width as u32,
+                logical_h: height as u32,
+                physical_w: ((width * scale) as u32).max(1),
+                physical_h: ((height * scale) as u32).max(1),
+                format: bloom_shared::attach::FormatPreference::Srgb,
+            },
+        )
+        .expect("Failed to attach engine")
+    };
 
     unsafe {
         let _ = ENGINE.set(engine_state);
@@ -480,6 +397,90 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     if fullscreen != 0.0 {
         bloom_toggle_fullscreen();
     }
+}
+
+/// Attach the engine to a host-owned `NSView` instead of creating an
+/// NSWindow (PerryTS/perry#5519). The host (e.g. Perry UI's `BloomView`)
+/// passes the raw `NSView*` as `handle`; `width`/`height` are the view's
+/// size in points. The engine builds its Metal surface on the view's
+/// CAMetalLayer and stores its singleton, after which the normal
+/// `bloom_begin_drawing` / `bloom_end_drawing` loop renders into it.
+///
+/// Returns 1.0 on success, 0.0 on failure (null/invalid handle, called
+/// off the main thread, or surface bring-up failed). Idempotent: a second
+/// call is a no-op once the engine exists.
+#[no_mangle]
+pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f64 {
+    if handle == 0 {
+        return 0.0;
+    }
+    // wgpu's Metal surface + AppKit msg_sends require the main thread.
+    if MainThreadMarker::new().is_none() {
+        return 0.0;
+    }
+    if unsafe { ENGINE.get() }.is_some() {
+        return 1.0; // already attached
+    }
+
+    let view_ptr = handle as *mut std::ffi::c_void;
+    let Some(view_nn) = std::ptr::NonNull::new(view_ptr) else {
+        return 0.0;
+    };
+
+    // Ensure the host view is layer-backed (CAMetalLayer) and resolve the
+    // backing scale from its window — or the main screen if it isn't in a
+    // window yet — so the drawable is sized in physical pixels.
+    let scale: f64 = unsafe {
+        let view: &objc2::runtime::AnyObject = &*(view_ptr as *const objc2::runtime::AnyObject);
+        let _: () = msg_send![view, setWantsLayer: true];
+        let window: *mut objc2::runtime::AnyObject = msg_send![view, window];
+        let s: f64 = if !window.is_null() {
+            msg_send![window, backingScaleFactor]
+        } else {
+            let screen: *mut objc2::runtime::AnyObject =
+                msg_send![objc2::class!(NSScreen), mainScreen];
+            if !screen.is_null() {
+                msg_send![screen, backingScaleFactor]
+            } else {
+                1.0
+            }
+        };
+        if s > 0.0 { s } else { 1.0 }
+    };
+
+    let target = {
+        let handle = AppKitWindowHandle::new(view_nn);
+        wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(raw_window_handle::RawDisplayHandle::AppKit(
+                raw_window_handle::AppKitDisplayHandle::new(),
+            )),
+            raw_window_handle: RawWindowHandle::AppKit(handle),
+        }
+    };
+    let engine_state = match unsafe {
+        bloom_shared::attach::attach_engine(
+            target,
+            bloom_shared::attach::AttachParams {
+                backends: wgpu::Backends::METAL,
+                logical_w: width as u32,
+                logical_h: height as u32,
+                physical_w: ((width * scale) as u32).max(1),
+                physical_h: ((height * scale) as u32).max(1),
+                format: bloom_shared::attach::FormatPreference::Srgb,
+            },
+        )
+    } {
+        Ok(es) => es,
+        Err(_) => return 0.0,
+    };
+
+    unsafe {
+        let _ = ENGINE.set(engine_state);
+    }
+    // Host owns the run loop in embedded mode; there is no NSWindow to
+    // store. Register the screenshot hook as the windowed path does.
+    bloom_register_geisterhand_screenshot();
+    1.0
 }
 
 #[no_mangle]
@@ -973,32 +974,9 @@ pub extern "C" fn bloom_get_language() -> f64 {
 // Thread-safe staging (for async asset loading via Perry threads)
 // ============================================================
 
-// ============================================================
-// Simple blocking executor for wgpu async calls
-// ============================================================
-
-fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
-    // Minimal block_on implementation using std::task
-    use std::task::{Context, Poll, Wake, Waker};
-    use std::pin::Pin;
-    use std::sync::Arc;
-
-    struct NoopWaker;
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    let waker = Waker::from(Arc::new(NoopWaker));
-    let mut cx = Context::from_waker(&waker);
-    let mut future = unsafe { Pin::new_unchecked(Box::new(future)) };
-
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(result) => return result,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
-}
+// The blocking executor for wgpu's async adapter/device requests now
+// lives in `bloom_shared::attach` (used by both bloom_init_window and
+// bloom_attach_native via attach_engine).
 
 // ============================================================
 // Geisterhand screenshot integration

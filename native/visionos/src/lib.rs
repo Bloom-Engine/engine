@@ -1535,6 +1535,53 @@ pub extern "C" fn bloom_init_window(_width: f64, _height: f64, title_ptr: *const
     setup_game_controllers();
 }
 
+/// Attach the engine to a host-owned `UIView*` instead of creating its
+/// own UIWindow (PerryTS/perry#5519). `handle` is the raw `UIView*` the
+/// host owns; `width`/`height` are its size in points. Returns 1.0 on
+/// success, 0.0 on a null/invalid handle or surface bring-up failure.
+/// Idempotent once attached. visionOS uses a non-sRGB swapchain to match
+/// its windowed path.
+#[no_mangle]
+pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f64 {
+    if handle == 0 {
+        return 0.0;
+    }
+    if unsafe { ENGINE.get() }.is_some() {
+        return 1.0;
+    }
+    let Some(view_nn) = std::ptr::NonNull::new(handle as *mut c_void) else {
+        return 0.0;
+    };
+    let target = {
+        let h = UiKitWindowHandle::new(view_nn);
+        wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(RawDisplayHandle::UiKit(UiKitDisplayHandle::new())),
+            raw_window_handle: RawWindowHandle::UiKit(h),
+        }
+    };
+    match unsafe {
+        bloom_shared::attach::attach_engine(
+            target,
+            bloom_shared::attach::AttachParams {
+                backends: wgpu::Backends::METAL,
+                logical_w: width as u32,
+                logical_h: height as u32,
+                physical_w: (width as u32).max(1),
+                physical_h: (height as u32).max(1),
+                format: bloom_shared::attach::FormatPreference::NonSrgb,
+            },
+        )
+    } {
+        Ok(es) => {
+            unsafe {
+                let _ = ENGINE.set(es);
+            }
+            1.0
+        }
+        Err(_) => 0.0,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_close_window() {
     unsafe { UI_VIEW = None; UI_WINDOW = None; }
