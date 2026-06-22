@@ -7,6 +7,8 @@ export { Key, MouseButton } from './keys';
 // FFI declarations
 declare function bloom_init_window(width: number, height: number, title: number, fullscreen: number): void;
 declare function bloom_close_window(): void;
+declare function bloom_attach_hwnd(hwnd: number, width: number, height: number): void;
+declare function bloom_resize(physW: number, physH: number, logW: number, logH: number): void;
 declare function bloom_window_should_close(): number;
 declare function bloom_begin_drawing(): void;
 declare function bloom_end_drawing(): void;
@@ -135,6 +137,24 @@ export function initWindow(width: number, height: number, title: string, fullscr
 
 export function closeWindow(): void {
   bloom_close_window();
+}
+
+/**
+ * Embed Bloom inside a host-provided native window — e.g. a Perry UI
+ * `BloomView` widget. Pass the window handle from `bloomViewGetHwnd(view)`
+ * and the logical viewport size. Bloom builds its render surface on that
+ * window and subclasses it for resize/input; the host owns the message loop,
+ * so drive frames yourself with `beginDrawing()` / `update` / `endDrawing()`
+ * (do NOT call `runGame`, which blocks). Call once, after the host window is
+ * shown and laid out (e.g. on the first `onFrame` tick).
+ */
+export function attachToHwnd(hwnd: number, width: number, height: number): void {
+  bloom_attach_hwnd(hwnd, width, height);
+}
+
+/** Resize the embedded surface explicitly (physical + logical pixels). */
+export function resize(physW: number, physH: number, logW: number, logH: number): void {
+  bloom_resize(physW, physH, logW, logH);
 }
 
 export function windowShouldClose(): boolean {

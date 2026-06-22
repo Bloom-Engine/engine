@@ -7,6 +7,13 @@ use std::sync::OnceLock;
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 
+/// True when the engine renders into a host-provided child window (a Perry UI
+/// `BloomView`) rather than a Bloom-owned top-level window. In embedded mode
+/// the host owns the Win32 message loop, so `bloom_begin_drawing` must not pump
+/// messages itself and `bloom_window_should_close` always reports "stay open".
+#[cfg(windows)]
+static mut EMBEDDED: bool = false;
+
 fn engine() -> &'static mut EngineState {
     unsafe { ENGINE.get_mut().expect("Engine not initialized") }
 }
@@ -319,6 +326,68 @@ mod win32 {
             }
         }
     }
+
+    // ---- Embedded mode (Perry UI BloomView host window) ----
+    //
+    // When Bloom renders into a Perry UI child window, that window already has
+    // Perry's own WNDPROC. We classic-subclass it so Bloom sees the WM_SIZE /
+    // keyboard / mouse it needs (its own `wndproc` above never runs for a
+    // foreign-class window), then chain to the original proc. The host's
+    // message loop dispatches these — Bloom never pumps in embedded mode.
+    static mut EMBED_ORIG_WNDPROC: isize = 0;
+
+    unsafe extern "system" fn embedded_wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            0x0005 /* WM_SIZE */ => {
+                let phys_w = (lparam.0 & 0xFFFF) as u32;
+                let phys_h = ((lparam.0 >> 16) & 0xFFFF) as u32;
+                if phys_w > 0 && phys_h > 0 {
+                    if let Some(eng) = ENGINE.get_mut() {
+                        if phys_w != eng.renderer.physical_width()
+                            || phys_h != eng.renderer.physical_height()
+                        {
+                            let scale = dpi_scale(hwnd);
+                            let log_w = ((phys_w as f64) / scale).round() as u32;
+                            let log_h = ((phys_h as f64) / scale).round() as u32;
+                            eng.renderer.resize(phys_w, phys_h, log_w, log_h);
+                        }
+                    }
+                }
+            }
+            WM_KEYDOWN => {
+                let k = map_keycode(wparam.0 as u32);
+                if k > 0 { if let Some(eng) = ENGINE.get_mut() { eng.input.set_key_down(k); } }
+            }
+            WM_KEYUP => {
+                let k = map_keycode(wparam.0 as u32);
+                if k > 0 { if let Some(eng) = ENGINE.get_mut() { eng.input.set_key_up(k); } }
+            }
+            WM_MOUSEMOVE => {
+                let x = (lparam.0 & 0xFFFF) as i16 as f64;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f64;
+                if let Some(eng) = ENGINE.get_mut() { eng.input.set_mouse_position(x, y); }
+            }
+            WM_LBUTTONDOWN => { if let Some(eng) = ENGINE.get_mut() { eng.input.set_mouse_button_down(0); } }
+            WM_LBUTTONUP   => { if let Some(eng) = ENGINE.get_mut() { eng.input.set_mouse_button_up(0);   } }
+            WM_RBUTTONDOWN => { if let Some(eng) = ENGINE.get_mut() { eng.input.set_mouse_button_down(1); } }
+            WM_RBUTTONUP   => { if let Some(eng) = ENGINE.get_mut() { eng.input.set_mouse_button_up(1);   } }
+            _ => {}
+        }
+        let orig: WNDPROC = std::mem::transmute(EMBED_ORIG_WNDPROC);
+        CallWindowProcW(orig, hwnd, msg, wparam, lparam)
+    }
+
+    /// Subclass a host-provided child window so Bloom receives resize/input.
+    pub unsafe fn attach_subclass(hwnd: HWND) {
+        let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, embedded_wndproc as usize as isize);
+        EMBED_ORIG_WNDPROC = prev;
+        HWND_GLOBAL = Some(hwnd);
+    }
 }
 
 #[no_mangle]
@@ -328,7 +397,31 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     #[cfg(windows)]
     {
         let (hwnd, phys_w, phys_h) = win32::create_window(width, height, title);
+        unsafe { init_engine_for_hwnd(hwnd, width as u32, height as u32, phys_w, phys_h); }
+        if fullscreen != 0.0 {
+            win32::set_fullscreen(true);
+        }
+    }
 
+    #[cfg(not(windows))]
+    {
+        let _ = (width, height, title, fullscreen);
+        panic!("bloom-windows can only run on Windows");
+    }
+}
+
+/// Build the wgpu surface + engine on an existing HWND (top-level window or
+/// host-provided child). Shared by `bloom_init_window` (Bloom owns the window)
+/// and `bloom_attach_hwnd` (a Perry UI `BloomView` child window). `logical_*`
+/// are DPI-independent sizes; `phys_*` are the surface's physical client size.
+#[cfg(windows)]
+unsafe fn init_engine_for_hwnd(
+    hwnd: windows::Win32::Foundation::HWND,
+    logical_w: u32,
+    logical_h: u32,
+    phys_w: u32,
+    phys_h: u32,
+) {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -429,25 +522,58 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = Renderer::new(device, queue, surface, surface_config, width as u32, height as u32);
-        unsafe { let _ = ENGINE.set(EngineState::new(renderer)); }
-
-        if fullscreen != 0.0 {
-            win32::set_fullscreen(true);
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        panic!("bloom-windows can only run on Windows");
-    }
+        let renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
+        let _ = ENGINE.set(EngineState::new(renderer));
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_close_window() {}
 
+/// Attach the engine to a host-provided child window (a Perry UI `BloomView`).
+/// `hwnd_bits` is the raw HWND value as an integer (from `bloomViewGetHwnd`).
+/// `width`/`height` are the logical viewport size. The engine builds its wgpu
+/// surface on this window and subclasses it for resize/input; the host drives
+/// frames via `bloom_begin_drawing` / `bloom_end_drawing`.
+#[no_mangle]
+pub extern "C" fn bloom_attach_hwnd(hwnd_bits: f64, width: f64, height: f64) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+        let hwnd = HWND(hwnd_bits as i64 as isize as *mut core::ffi::c_void);
+        let mut rect = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rect);
+        let phys_w = (rect.right - rect.left).max(1) as u32;
+        let phys_h = (rect.bottom - rect.top).max(1) as u32;
+        if ENGINE.get().is_none() {
+            init_engine_for_hwnd(hwnd, width as u32, height as u32, phys_w, phys_h);
+        }
+        EMBEDDED = true;
+        win32::attach_subclass(hwnd);
+    }
+    #[cfg(not(windows))]
+    { let _ = (hwnd_bits, width, height); }
+}
+
+/// Resize the engine's surface. `phys_*` are physical pixels, `log_*` logical.
+/// Embedded `BloomView`s resize automatically via the subclassed WM_SIZE; this
+/// is exposed for hosts that need to drive the size explicitly.
+#[no_mangle]
+pub extern "C" fn bloom_resize(phys_w: f64, phys_h: f64, log_w: f64, log_h: f64) {
+    #[cfg(windows)]
+    unsafe {
+        if let Some(eng) = ENGINE.get_mut() {
+            eng.renderer.resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
+        }
+    }
+    #[cfg(not(windows))]
+    { let _ = (phys_w, phys_h, log_w, log_h); }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_window_should_close() -> f64 {
+    #[cfg(windows)]
+    unsafe { if EMBEDDED { return 0.0; } }
     if engine().should_close { 1.0 } else { 0.0 }
 }
 
@@ -508,7 +634,10 @@ fn poll_xinput_gamepad() {
 pub extern "C" fn bloom_begin_drawing() {
     #[cfg(windows)]
     {
-        win32::poll_events();
+        // In embedded mode the host (Perry UI) owns the message loop and
+        // dispatches our subclassed window's messages — pumping here would
+        // steal messages from the host. Only poll when Bloom owns the window.
+        unsafe { if !EMBEDDED { win32::poll_events(); } }
         poll_xinput_gamepad();
     }
     engine().begin_frame();
