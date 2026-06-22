@@ -635,12 +635,21 @@ struct GpuMesh {
     /// its lifetime matches (bind groups reference buffers internally
     /// via Arc, but we also want the strong ref for future updates).
     _material_uniform: wgpu::Buffer,
+    /// Alpha-tested shadow bind group (base-colour tex + sampler + cutoff),
+    /// built only for cutout materials (alpha_cutoff > 0). When present, the
+    /// shadow pass renders this mesh with the cutout pipeline so foliage casts
+    /// its real shape. `None` → opaque caster, uses the plain shadow pipeline.
+    shadow_cutout_bg: Option<wgpu::BindGroup>,
+    _shadow_cutoff_buf: Option<wgpu::Buffer>,
 }
 
 struct CachedModelDraw {
     uniform_slot: usize,
     cache_handle: u64,
     mesh_idx: usize,
+    /// Object→world model matrix for this draw, kept CPU-side so the
+    /// shadow pass can render the model depth-only from the light.
+    model: [[f32; 4]; 4],
 }
 
 // ============================================================
@@ -1475,6 +1484,15 @@ pub struct Renderer {
     /// alongside the probe in `create_planar_reflection`.
     pub planar_probe_view_buffers: Vec<Option<wgpu::Buffer>>,
     pub planar_probe_view_bgs:     Vec<Option<wgpu::BindGroup>>,
+    /// EN-011 — lazily-built resources for rendering cached models (trees,
+    /// house) into the planar probe with a mirrored VP. Single-target HDR
+    /// pipeline + a dynamic per-draw model uniform + a sun/ambient uniform.
+    /// `None` until the first `dispatch_planar_reflections` with a probe.
+    pub reflect_scene_pipeline: Option<wgpu::RenderPipeline>,
+    pub reflect_model_buf:      Option<wgpu::Buffer>,
+    pub reflect_model_bg:       Option<wgpu::BindGroup>,
+    pub reflect_light_buf:      Option<wgpu::Buffer>,
+    pub reflect_light_bg:       Option<wgpu::BindGroup>,
 
     /// Phase 6 — hot-reload registry for file-backed materials. Each
     /// frame we drain pending file-change events and recompile any
@@ -2829,7 +2847,10 @@ impl Renderer {
                 tex_entry(6),  samp_entry(7),
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // VERTEX_FRAGMENT: the vertex stage reads metal_rough.w
+                    // (alpha-cutoff) to gate foliage wind sway; fragment reads
+                    // the full MaterialFactors.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -6227,6 +6248,11 @@ impl Renderer {
             transient_pool,
             impulse_field,
             planar_probes: Vec::new(),
+            reflect_scene_pipeline: None,
+            reflect_model_buf: None,
+            reflect_model_bg: None,
+            reflect_light_buf: None,
+            reflect_light_bg: None,
             planar_probe_view_buffers: Vec::new(),
             planar_probe_view_bgs: Vec::new(),
             material_hot_reload,
@@ -8662,7 +8688,8 @@ impl Renderer {
             ],
             up: [up_world[0] * tan_half, up_world[1] * tan_half, up_world[2] * tan_half, 0.0],
             forward: [forward_world[0], forward_world[1], forward_world[2], 0.0],
-            intensity: [intensity, 0.0, 0.0, 0.0],
+            // .y carries current time (seconds) so the cloud layer can drift.
+            intensity: [intensity, self.lighting_uniforms.wind[3], 0.0, 0.0],
         };
         self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -10170,12 +10197,43 @@ impl Renderer {
             let material_bg = self.create_scene_material_bg(
                 base_color_idx, normal_idx, mr_idx, em_idx, occ_idx, &material_uniform,
             );
+            // Cutout casters get an alpha-test shadow bind group (base colour +
+            // sampler + cutoff). wgpu keeps the buffer alive via the bind group,
+            // but we hold the strong ref too (matches _material_uniform).
+            let (shadow_cutout_bg, shadow_cutoff_buf) = if mesh.alpha_cutoff > 0.0 {
+                let cutoff_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("shadow_cutout_cutoff"),
+                    contents: bytemuck::cast_slice(&[mesh.alpha_cutoff, 0.0f32, 0.0, 0.0]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let bi = base_color_idx as usize;
+                let base_tex = if base_color_idx == 0 || bi >= self.textures.len() {
+                    &self.textures[0]
+                } else {
+                    &self.textures[bi]
+                };
+                let base_view = base_tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shadow_cutout_bg"),
+                    layout: &self.shadow_map.cutout_tex_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&base_view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                        wgpu::BindGroupEntry { binding: 2, resource: cutoff_buf.as_entire_binding() },
+                    ],
+                });
+                (Some(bg), Some(cutoff_buf))
+            } else {
+                (None, None)
+            };
             GpuMesh {
                 vb,
                 ib,
                 index_count: mesh.indices.len() as u32,
                 material_bg,
                 _material_uniform: material_uniform,
+                shadow_cutout_bg,
+                _shadow_cutoff_buf: shadow_cutoff_buf,
             }
         }).collect();
 
@@ -10215,6 +10273,7 @@ impl Renderer {
                 uniform_slot: slot,
                 cache_handle: handle_bits,
                 mesh_idx,
+                model: model_matrix,
             });
         }
     }
@@ -11497,7 +11556,116 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
     ) {
         if self.planar_probes.iter().all(|p| p.is_none()) { return; }
-        if self.material_system.commands.is_empty() { return; }
+        if self.material_system.commands.is_empty() && self.model_draw_commands.is_empty() { return; }
+
+        // EN-011 — lazily build the single-target reflection pipeline + buffers
+        // used to render cached models (trees/house) into the probe with a
+        // mirrored VP. Owned layouts: g0 dynamic per-draw model uniform, g1
+        // sun/ambient; g2 reuses the scene material layout for base colour.
+        const REFLECT_STRIDE: u64 = 256;
+        const REFLECT_MAX_DRAWS: usize = 600;
+        if self.reflect_scene_pipeline.is_none() {
+            let model_dyn_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("reflect_model_dyn_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: std::num::NonZeroU64::new(128),
+                    },
+                    count: None,
+                }],
+            });
+            let light_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("reflect_light_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("reflect_scene_shader"),
+                source: wgpu::ShaderSource::Wgsl(REFLECT_SCENE_WGSL.into()),
+            });
+            let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("reflect_scene_pl"),
+                bind_group_layouts: &[Some(&model_dyn_layout), Some(&light_layout), Some(&self.scene_material_layout)],
+                immediate_size: 0,
+            });
+            let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("reflect_scene_pipeline"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader, entry_point: Some("vs_reflect"),
+                    buffers: &[Vertex3D::desc()], compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader, entry_point: Some("fs_reflect"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None, ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT, depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(), bias: Default::default(),
+                }),
+                multisample: Default::default(), multiview_mask: None, cache: None,
+            });
+            let model_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("reflect_model_buf"),
+                size: REFLECT_STRIDE * REFLECT_MAX_DRAWS as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let model_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("reflect_model_bg"), layout: &model_dyn_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &model_buf, offset: 0, size: std::num::NonZeroU64::new(128),
+                    }),
+                }],
+            });
+            let light_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("reflect_light_buf"), size: 48,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let light_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("reflect_light_bg"), layout: &light_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: light_buf.as_entire_binding() }],
+            });
+            self.reflect_scene_pipeline = Some(pipeline);
+            self.reflect_model_buf = Some(model_buf);
+            self.reflect_model_bg = Some(model_bg);
+            self.reflect_light_buf = Some(light_buf);
+            self.reflect_light_bg = Some(light_bg);
+        }
+        // Sun/ambient for the reflection shading (same as the main directional).
+        {
+            let ld = self.lighting_uniforms.light_dir;
+            let lc = self.lighting_uniforms.light_color;
+            let amb = self.lighting_uniforms.ambient;
+            let light_data: [f32; 12] = [
+                ld[0], ld[1], ld[2], ld[3],
+                lc[0], lc[1], lc[2], 0.0,
+                amb[0], amb[1], amb[2], amb[3],
+            ];
+            if let Some(buf) = &self.reflect_light_buf {
+                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&light_data));
+            }
+        }
 
         // Build the V1 exclude set: every material linked to any
         // probe. The water material itself shouldn't appear in its
@@ -11654,21 +11822,34 @@ impl Renderer {
                 ],
             });
 
-            // The fog colour is a sensible "sky colour" approximation
-            // for the cleared reflection RT. Materials sampling the
-            // probe RT outside the rendered frustum (top of the
-            // texture for a horizontal water plane) get fog tinting
-            // instead of pure black.
-            let clear_color = wgpu::Color {
-                r: self.fog_color[0] as f64,
-                g: self.fog_color[1] as f64,
-                b: self.fog_color[2] as f64,
-                a: 1.0,
-            };
+            // Write each cached-model draw's [mirror_mvp, model] into the
+            // dynamic reflection uniform buffer up front (queue writes
+            // happen-before the encoded pass), and record the draw list.
+            let mut reflect_draws: Vec<(u64, usize, u32)> = Vec::new();
+            if let Some(model_buf) = &self.reflect_model_buf {
+                for cmd in self.model_draw_commands.iter() {
+                    let slot = reflect_draws.len();
+                    if slot >= REFLECT_MAX_DRAWS { break; }
+                    let mirror_mvp = mat4_multiply(mirror_vp, cmd.model);
+                    let mut data = [0u8; 128];
+                    data[0..64].copy_from_slice(bytemuck::bytes_of(&mirror_mvp));
+                    data[64..128].copy_from_slice(bytemuck::bytes_of(&cmd.model));
+                    self.queue.write_buffer(model_buf, slot as u64 * REFLECT_STRIDE, &data);
+                    reflect_draws.push((cmd.cache_handle, cmd.mesh_idx, slot as u32));
+                }
+            }
+
+            // Clear the probe to transparent black. Geometry fragments write
+            // alpha 1, so the water shader can blend the probe over its analytic
+            // sky by alpha (a=0 → no reflected geometry → show the sky dome).
+            let clear_color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 
             let view_bg = &probe_view_bg;
             let cache   = &self.model_gpu_cache;
             let mat_sys = &self.material_system;
+            let refl_pipeline = self.reflect_scene_pipeline.as_ref();
+            let refl_model_bg = self.reflect_model_bg.as_ref();
+            let refl_light_bg = self.reflect_light_bg.as_ref();
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("bloom_planar_reflection_pass"),
@@ -11716,6 +11897,31 @@ impl Renderer {
                         None
                     },
                 );
+
+                // Render cached models (trees/house/foliage) mirrored into the
+                // probe so the water reflects the actual world, not just an
+                // analytic sky. Single-target lit pipeline; cutout alpha is
+                // discarded so foliage reflects its real shape.
+                if let (Some(rp), Some(rmbg), Some(rlbg)) =
+                    (refl_pipeline, refl_model_bg, refl_light_bg)
+                {
+                    if !reflect_draws.is_empty() {
+                        pass.set_pipeline(rp);
+                        pass.set_bind_group(1, rlbg, &[]);
+                        for (handle, midx, slot) in &reflect_draws {
+                            if let Some(Some(meshes)) = cache.get(handle) {
+                                if *midx < meshes.len() {
+                                    let mesh = &meshes[*midx];
+                                    pass.set_bind_group(0, rmbg, &[*slot * REFLECT_STRIDE as u32]);
+                                    pass.set_bind_group(2, &mesh.material_bg, &[]);
+                                    pass.set_vertex_buffer(0, mesh.vb.slice(..));
+                                    pass.set_index_buffer(mesh.ib.slice(..), wgpu::IndexFormat::Uint32);
+                                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -11724,6 +11930,10 @@ impl Renderer {
     /// FFI callers drive this from their frame boundary so `PerFrame.time`
     /// reflects the real process-uptime clock.
     pub fn material_system_begin_frame(&mut self, time_seconds: f32, delta_time: f32) {
+        // Feed wind + time to the built-in scene shader (foliage sway). Set
+        // here each frame so it's current before the per-frame lighting upload.
+        self.lighting_uniforms.wind =
+            [self.wind[0], self.wind[1], self.wind[2], time_seconds];
         let screen_w = self.surface_config.width as f32;
         let screen_h = self.surface_config.height as f32;
         let (rw, rh) = self.render_extent();

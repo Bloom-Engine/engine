@@ -40,6 +40,10 @@ declare function bloom_draw_material(material: number, meshHandle: number, meshI
 declare function bloom_load_model_animation(path: number): number;
 declare function bloom_update_model_animation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotY: number): void;
 declare function bloom_create_mesh(vertexPtr: number, vertexCount: number, indexPtr: number, indexCount: number): number;
+declare function bloom_mesh_scratch_reset(): void;
+declare function bloom_mesh_scratch_push_f32(v: number): void;
+declare function bloom_mesh_scratch_push_u32(v: number): void;
+declare function bloom_create_mesh_scratch(vertexCount: number, indexCount: number): number;
 declare function bloom_set_ambient_light(r: number, g: number, b: number, intensity: number): void;
 declare function bloom_set_directional_light(dx: number, dy: number, dz: number, r: number, g: number, b: number, intensity: number): void;
 declare function bloom_set_procedural_sky(enabled: number, rayleighDensity: number, mieDensity: number, groundAlbedo: number): void;
@@ -135,13 +139,10 @@ export function loadModel(path: string): Model {
     if (text) {
       const parsed = parseOBJ(text);
       if (parsed) {
-        const handle = bloom_create_mesh(
-          parsed.vertices as any,
-          parsed.vertices.length / 12,
-          parsed.indices as any,
-          parsed.indices.length,
+        return uploadMeshScratch(
+          parsed.vertices, parsed.vertices.length / 12,
+          parsed.indices, parsed.indices.length,
         );
-        return makeModel(handle, 1, 1);
       }
     }
     return makeModel(0);
@@ -650,16 +651,29 @@ export function updateModelAnimation(handle: number, animIndex: number, time: nu
   bloom_update_model_animation(handle, animIndex, time, scale, px, py, pz, rotY);
 }
 
+// Upload a mesh via the scratch buffer (array-free). Perry 0.5.1171 rejects
+// passing a `number[]` to a native `i64` pointer param (strict safe-integer
+// check), so we push each vertex float + index scalar through the all-f64
+// scratch FFI and then build. One-time init cost; fine for static meshes.
+function uploadMeshScratch(
+  vertices: number[], vertexCount: number,
+  indices: number[], indexCount: number,
+): Model {
+  bloom_mesh_scratch_reset();
+  const vfloats = vertexCount * 12;
+  for (let i = 0; i < vfloats; i++) bloom_mesh_scratch_push_f32(vertices[i]);
+  for (let i = 0; i < indexCount; i++) bloom_mesh_scratch_push_u32(indices[i]);
+  const handle = bloom_create_mesh_scratch(vertexCount, indexCount);
+  return makeModel(handle, 1, 1);
+}
+
 export function createMesh(vertices: number[], indices: number[]): Model {
   // vertices: flat array of [x,y,z, nx,ny,nz, r,g,b,a, u,v] per vertex (12 floats each)
-  // NOTE: `vertices.length` and `indices.length` here only return the
-  // correct value for arrays built via literals or `new Array(N)` +
-  // index assignment. Arrays built via `.push()` reflect the LITERAL
-  // initialization size as `.length`, not the post-push size (a
-  // Perry codegen bug). For `.push`-built data, use createMeshExplicit
-  // and pass the counts manually.
-  const handle = bloom_create_mesh(vertices as any, vertices.length / 12, indices as any, indices.length);
-  return makeModel(handle, 1, 1);
+  // NOTE: `vertices.length` / `indices.length` are correct only for arrays
+  // built via literals or `new Array(N)` + index assignment. Arrays built via
+  // `.push()` report the literal-init size (a Perry codegen bug) — use
+  // createMeshExplicit and pass the counts manually for those.
+  return uploadMeshScratch(vertices, vertices.length / 12, indices, indices.length);
 }
 
 /// Explicit-count variant of createMesh — pass `vertexCount` (number
@@ -670,8 +684,7 @@ export function createMeshExplicit(
   vertices: number[], vertexCount: number,
   indices: number[], indexCount: number,
 ): Model {
-  const handle = bloom_create_mesh(vertices as any, vertexCount, indices as any, indexCount);
-  return makeModel(handle, 1, 1);
+  return uploadMeshScratch(vertices, vertexCount, indices, indexCount);
 }
 
 export function setAmbientLight(color: Color, intensity: number): void {

@@ -50,6 +50,52 @@ fn vs_shadow(in: ShadowVertexInput) -> @builtin(position) vec4<f32> {
 }
 ";
 
+/// Alpha-tested shadow shader for cutout foliage (trees, grass, leaves). Same
+/// depth-only output as SHADOW_SHADER but samples the caster's base-colour
+/// alpha and discards below the material cutoff, so cutout cards cast their
+/// real shape (dappled light) instead of an opaque billboard blob. Used by a
+/// dedicated pipeline; the opaque shadow path stays untouched.
+pub const SHADOW_SHADER_CUTOUT: &str = "
+struct ShadowUniforms {
+    light_vp: mat4x4<f32>,
+    model: mat4x4<f32>,
+};
+@group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
+
+struct CutoutUniforms { cutoff: vec4<f32> };   // x = alpha cutoff
+@group(1) @binding(0) var base_tex: texture_2d<f32>;
+@group(1) @binding(1) var base_samp: sampler;
+@group(1) @binding(2) var<uniform> cut: CutoutUniforms;
+
+struct ShadowVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) joints: vec4<f32>,
+    @location(5) weights: vec4<f32>,
+};
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_shadow_cutout(in: ShadowVertexInput) -> VsOut {
+    var o: VsOut;
+    let world_pos = shadow_u.model * vec4<f32>(in.position, 1.0);
+    o.pos = shadow_u.light_vp * world_pos;
+    o.uv = in.uv;
+    return o;
+}
+
+@fragment
+fn fs_shadow_cutout(in: VsOut) {
+    let a = textureSample(base_tex, base_samp, in.uv).a;
+    if (a < cut.cutoff.x) { discard; }
+}
+";
+
 /// Uniform data for the shadow pass.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -66,6 +112,13 @@ pub struct ShadowMap {
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
     pub pipeline: wgpu::RenderPipeline,
+    /// Alpha-tested variant for cutout foliage casters. Opaque casters keep
+    /// using `pipeline` (byte-identical to before this was added).
+    pub pipeline_cutout: wgpu::RenderPipeline,
+    /// Group-1 layout for `pipeline_cutout`: base-colour tex + sampler + a
+    /// cutoff uniform. Per-mesh bind groups are built against this in
+    /// `cache_model_if_static`.
+    pub cutout_tex_layout: wgpu::BindGroupLayout,
     pub uniform_buffer: wgpu::Buffer,
     pub uniform_bind_group: wgpu::BindGroup,
     pub uniform_layout: wgpu::BindGroupLayout,
@@ -269,7 +322,7 @@ impl ShadowMap {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_shadow"),
-                buffers: &[vertex_layout],
+                buffers: &[vertex_layout.clone()],
                 compilation_options: Default::default(),
             },
             fragment: None, // depth only
@@ -295,6 +348,78 @@ impl ShadowMap {
             cache: None,
         });
 
+        // Cutout (alpha-tested) shadow pipeline. Separate so the opaque path
+        // above is untouched. Adds a group-1 texture/sampler/cutoff layout and
+        // a fragment stage that discards below the alpha cutoff. Still depth-
+        // only (no colour targets).
+        let cutout_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow_shader_cutout"),
+            source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER_CUTOUT.into()),
+        });
+        let cutout_tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow_cutout_tex_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let cutout_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow_cutout_pipeline_layout"),
+            bind_group_layouts: &[Some(&uniform_layout), Some(&cutout_tex_layout)],
+            immediate_size: 0,
+        });
+        let pipeline_cutout = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow_pipeline_cutout"),
+            layout: Some(&cutout_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &cutout_shader,
+                entry_point: Some("vs_shadow_cutout"),
+                buffers: &[vertex_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &cutout_shader,
+                entry_point: Some("fs_shadow_cutout"),
+                targets: &[],   // depth only
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 1, slope_scale: 1.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Self {
             depth_textures,
             depth_views,
@@ -302,6 +427,8 @@ impl ShadowMap {
             bind_group_layout,
             bind_group,
             pipeline,
+            pipeline_cutout,
+            cutout_tex_layout,
             uniform_buffer,
             uniform_bind_group,
             uniform_layout,

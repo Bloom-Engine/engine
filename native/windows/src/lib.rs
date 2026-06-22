@@ -146,7 +146,28 @@ mod win32 {
                 let x = (lparam.0 & 0xFFFF) as i16 as f64;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f64;
                 if let Some(eng) = ENGINE.get_mut() {
-                    eng.input.set_mouse_position(x, y);
+                    if eng.input.cursor_disabled {
+                        // FPS-style capture: accumulate the movement away from
+                        // the window centre as a raw delta, then snap the OS
+                        // cursor back to centre so look never hits the screen
+                        // edge. (begin_frame consumes raw_delta when the cursor
+                        // is disabled.) The recenter generates another
+                        // WM_MOUSEMOVE at the centre with zero delta — no loop.
+                        let mut rect = RECT::default();
+                        let _ = GetClientRect(hwnd, &mut rect);
+                        let cx = ((rect.right - rect.left) / 2) as f64;
+                        let cy = ((rect.bottom - rect.top) / 2) as f64;
+                        let dx = x - cx;
+                        let dy = y - cy;
+                        if dx != 0.0 || dy != 0.0 {
+                            eng.input.accumulate_mouse_delta(dx, dy);
+                            let mut pt = POINT { x: cx as i32, y: cy as i32 };
+                            let _ = ClientToScreen(hwnd, &mut pt);
+                            let _ = SetCursorPos(pt.x, pt.y);
+                        }
+                    } else {
+                        eng.input.set_mouse_position(x, y);
+                    }
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -364,6 +385,18 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         // limit is 4. Metal / Vulkan / D3D12 support at least 7, so 5 is
         // safely within every real backend's capabilities.
         required_limits.max_bind_groups = 5;
+        // The refractive/translucent material profile binds up to 19
+        // sampled textures in the fragment stage (5 material maps + env/
+        // BRDF/3 shadow cascades/env-diffuse + planar reflection + 3 texture
+        // arrays + the group-4 scene_color/scene_depth/impulse/motion inputs).
+        // wgpu's default is 16. Raise to whatever the adapter actually
+        // supports — every real D3D12/Vulkan/Metal GPU exposes ≥128 — so
+        // opaque/transparent materials are unaffected and refractive ones link.
+        let adapter_limits = adapter.limits();
+        required_limits.max_sampled_textures_per_shader_stage =
+            adapter_limits.max_sampled_textures_per_shader_stage;
+        required_limits.max_samplers_per_shader_stage =
+            adapter_limits.max_samplers_per_shader_stage;
         if required_features.intersects(rt_mask) {
             required_limits = required_limits
                 .using_minimum_supported_acceleration_structure_values();
@@ -671,11 +704,14 @@ pub extern "C" fn bloom_set_window_icon(path_ptr: *const u8) { let _ = str_from_
 #[no_mangle]
 pub extern "C" fn bloom_disable_cursor() {
     engine().input.cursor_disabled = true;
+    // Hide the OS cursor (ShowCursor keeps a counter; loop until it's hidden).
+    unsafe { while windows::Win32::UI::WindowsAndMessaging::ShowCursor(false) >= 0 {} }
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_enable_cursor() {
     engine().input.cursor_disabled = false;
+    unsafe { while windows::Win32::UI::WindowsAndMessaging::ShowCursor(true) < 0 {} }
 }
 
 // E4: Clipboard (stub on this platform)

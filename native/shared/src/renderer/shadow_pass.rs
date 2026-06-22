@@ -86,7 +86,12 @@ impl Renderer {
             || self.shadow_map.dirty
             || vps_changed
             || light_changed
-            || self.shadow_map.rendered_scene_version != scene_ver;
+            || self.shadow_map.rendered_scene_version != scene_ver
+            // Immediate-mode + cached-model draws aren't tracked by the scene
+            // version, and they're re-submitted (and usually move) every frame,
+            // so re-render the shadow map whenever any are present.
+            || !self.indices_3d.is_empty()
+            || !self.model_draw_commands.is_empty();
 
         if should_render {
         // Build a shared caster list + buffer-ref vectors, then
@@ -101,10 +106,14 @@ impl Renderer {
             transform: [[f32; 4]; 4],
             wmin: [f32; 3],
             wmax: [f32; 3],
+            // Index into `cutout_bgs` for an alpha-tested caster (cutout
+            // foliage), or -1 for an opaque caster (plain depth pipeline).
+            cutout_idx: i32,
         }
         let mut shadow_nodes: Vec<ShadowDrawEntry> = Vec::new();
         let mut shadow_vbs: Vec<&wgpu::Buffer> = Vec::new();
         let mut shadow_ibs: Vec<&wgpu::Buffer> = Vec::new();
+        let mut cutout_bgs: Vec<&wgpu::BindGroup> = Vec::new();
         for (_handle, node) in scene.nodes.iter() {
             if !node.visible || !node.cast_shadow || node.indices.is_empty() {
                 continue;
@@ -121,7 +130,56 @@ impl Renderer {
                 transform: node.transform,
                 wmin: node.world_bounds_min,
                 wmax: node.world_bounds_max,
+                cutout_idx: -1,
             });
+        }
+
+        // Immediate-mode 3D batch (drawCube/drawSphere/non-cached models).
+        // These verts are already in WORLD space, so the model matrix is
+        // identity. wmin > wmax marks "no bounds" → included in every cascade.
+        // Games that draw in immediate mode create no scene nodes, so without
+        // this nothing they draw would cast a shadow.
+        if !self.indices_3d.is_empty() {
+            let vb_idx = shadow_vbs.len();
+            shadow_vbs.push(&self.persistent_vb_3d);
+            shadow_ibs.push(&self.persistent_ib_3d);
+            shadow_nodes.push(ShadowDrawEntry {
+                vb_idx,
+                ib_idx: vb_idx,
+                index_count: self.indices_3d.len() as u32,
+                transform: IDENTITY_MAT4,
+                wmin: [1.0, 1.0, 1.0],
+                wmax: [-1.0, -1.0, -1.0],
+                cutout_idx: -1,
+            });
+        }
+
+        // Cached models (drawModel: trees, characters, etc.) — each is a
+        // GpuMesh plus its object→world matrix. Skinned models cast their
+        // rest-pose shadow (vs_shadow doesn't skin) — acceptable.
+        for cmd in self.model_draw_commands.iter() {
+            if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
+                if cmd.mesh_idx < meshes.len() {
+                    let mesh = &meshes[cmd.mesh_idx];
+                    let vb_idx = shadow_vbs.len();
+                    shadow_vbs.push(&mesh.vb);
+                    shadow_ibs.push(&mesh.ib);
+                    // Cutout foliage → alpha-tested shadow pipeline.
+                    let cutout_idx = match &mesh.shadow_cutout_bg {
+                        Some(bg) => { let i = cutout_bgs.len(); cutout_bgs.push(bg); i as i32 }
+                        None => -1,
+                    };
+                    shadow_nodes.push(ShadowDrawEntry {
+                        vb_idx,
+                        ib_idx: vb_idx,
+                        index_count: mesh.index_count,
+                        transform: cmd.model,
+                        wmin: [1.0, 1.0, 1.0],
+                        wmax: [-1.0, -1.0, -1.0],
+                        cutout_idx,
+                    });
+                }
+            }
         }
 
         let cascade_planes: [[[f32; 4]; 6]; crate::shadows::NUM_CASCADES] =
@@ -188,12 +246,28 @@ impl Renderer {
                     multiview_mask: None,
                 });
 
+                // Track the bound pipeline so we only switch when a caster's
+                // opaque/cutout kind changes (cutout casters are typically
+                // grouped at the tail, so this is usually one switch).
+                let mut cur_cutout = false;
                 shadow_pass.set_pipeline(&self.shadow_map.pipeline);
 
                 for (slot, &ei) in entries.iter().take(count).enumerate() {
                     let entry = &shadow_nodes[ei];
                     let offset = (slot * stride) as u32;
+                    let is_cutout = entry.cutout_idx >= 0;
+                    if is_cutout != cur_cutout {
+                        shadow_pass.set_pipeline(if is_cutout {
+                            &self.shadow_map.pipeline_cutout
+                        } else {
+                            &self.shadow_map.pipeline
+                        });
+                        cur_cutout = is_cutout;
+                    }
                     shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[offset]);
+                    if is_cutout {
+                        shadow_pass.set_bind_group(1, cutout_bgs[entry.cutout_idx as usize], &[]);
+                    }
                     shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
                     shadow_pass.set_index_buffer(shadow_ibs[entry.ib_idx].slice(..), wgpu::IndexFormat::Uint32);
                     shadow_pass.draw_indexed(0..entry.index_count, 0, 0..1);

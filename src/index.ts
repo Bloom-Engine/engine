@@ -66,7 +66,7 @@ export {
 } from './textures/index';
 
 export {
-  loadModel, drawModel, unloadModel, getModelBounds, genMeshSplineRibbon,
+  loadModel, drawModel, drawModelRotated, unloadModel, getModelBounds, genMeshSplineRibbon,
   drawCube, drawCubeWires, drawSphere, drawSphereWires,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,
   loadShader, compileMaterial, drawMeshWithMaterial,
@@ -74,6 +74,7 @@ export {
   compileMaterialCutout,
   compileMaterialInstanced, createInstanceBuffer,
   drawMeshWithMaterialInstanced, destroyInstanceBuffer,
+  createPlanarReflection, setMaterialReflectionProbe,
   compileMaterialFromFile, loadMaterial,
   createMeshExplicit,
   loadModelAnimation, updateModelAnimation, createMesh,

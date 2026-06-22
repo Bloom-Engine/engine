@@ -31,10 +31,11 @@ pub(super) fn create_lighting_layout(
     };
     let frag = wgpu::ShaderStages::FRAGMENT;
     let mut entries = vec![
-        // 0: Lighting UBO
+        // 0: Lighting UBO. VERTEX_FRAGMENT so the scene vertex shader can read
+        // `wind` (foliage sway); the fragment stage uses the full struct.
         wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: frag,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,

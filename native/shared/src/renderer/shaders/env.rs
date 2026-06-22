@@ -706,6 +706,49 @@ fn dir_to_sky_uv(dir: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(u_norm, v_norm);
 }
 
+// --- Procedural cloud layer (value-noise fBm) ---------------------------
+fn cloud_hash(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+fn cloud_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let uu = f * f * (3.0 - 2.0 * f);
+    let a = cloud_hash(i);
+    let b = cloud_hash(i + vec2<f32>(1.0, 0.0));
+    let c = cloud_hash(i + vec2<f32>(0.0, 1.0));
+    let d = cloud_hash(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, uu.x), mix(c, d, uu.x), uu.y);
+}
+fn cloud_fbm(p0: vec2<f32>) -> f32 {
+    var s = 0.0;
+    var amp = 0.5;
+    var q = p0;
+    for (var i = 0; i < 5; i = i + 1) {
+        s = s + amp * cloud_noise(q);
+        q = q * 2.03;
+        amp = amp * 0.5;
+    }
+    return s;
+}
+// Analytic cloud cover for a view ray. Projects the ray onto a virtual cloud
+// plane (perspective convergence toward the horizon), samples fBm for puffy
+// coverage, fades near the horizon, and thins around the sun so the disk shows
+// through. Returns (coverage, sunlit-amount).
+fn cloud_cover(dir: vec3<f32>, sun_dir: vec3<f32>, time: f32) -> vec2<f32> {
+    if (dir.y <= 0.02) { return vec2<f32>(0.0, 0.0); }
+    let p = (dir.xz / dir.y) * 2.0;
+    // Slow wind drift + a slower second octave shift so the puffs also evolve.
+    let drift = vec2<f32>(time * 0.006, time * 0.0025);
+    var cov = cloud_fbm(p * 0.55 + vec2<f32>(23.0, 11.0) + drift);
+    cov = smoothstep(0.56, 1.04, cov);
+    let horizon_fade = smoothstep(0.03, 0.24, dir.y);
+    let near_sun = smoothstep(0.90, 0.999, dot(dir, sun_dir));
+    cov = cov * horizon_fade * (1.0 - near_sun * 0.8) * 0.9;
+    let sun_amt = clamp(dot(dir, sun_dir) * 0.5 + 0.5, 0.0, 1.0);
+    return vec2<f32>(cov, sun_amt);
+}
+
 fn sample_transmittance(r: f32, mu: f32) -> vec3<f32> {
     let v = clamp((r - GROUND_R) / (ATMOS_TOP - GROUND_R), 0.0, 1.0);
     let uu = clamp((mu + 1.0) * 0.5, 0.0, 1.0);
@@ -745,6 +788,16 @@ fn sky_fs(in: VsOut) -> SkyOut {
 
     radiance = radiance * u.intensity.x;
 
+    // Procedural cloud layer, composited over the scaled sky radiance. Cloud
+    // colour is absolute HDR (puffy white in sun, cool grey in shadow) so the
+    // clouds read brighter than the sky behind them regardless of env intensity.
+    let cc = cloud_cover(dir, sun_dir, u.intensity.y);
+    if (cc.x > 0.0) {
+        let lit = cc.y * cc.y;
+        let cloud_col = mix(vec3<f32>(0.62, 0.66, 0.76), vec3<f32>(2.6, 2.5, 2.35), lit);
+        radiance = mix(radiance, cloud_col, cc.x);
+    }
+
     // EN-005 Phase 4 — sub-LSB dither to break up the banding that
     // Rgba16Float storage produces in low-frequency regions like the
     // zenith (where sky color changes < 1 lsb across many pixels).
@@ -762,6 +815,71 @@ fn sky_fs(in: VsOut) -> SkyOut {
     out.velocity = vec2<f32>(0.0, 0.0);
     out.albedo = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     return out;
+}
+";
+
+/// EN-011 — single-target reflection shader for rendering cached models
+/// (trees, house, etc.) into a planar-reflection probe with a mirrored
+/// view-projection. Deliberately lightweight (base colour × sun N·L + ambient,
+/// alpha-cutout discard) — a water reflection doesn't need the full deferred
+/// PBR/SSAO stack, and a single HDR colour target (vs the main 4-target MRT)
+/// lets it draw straight into the probe RT. Group layouts are owned by the
+/// renderer: g0 = dynamic per-draw model uniform, g1 = sun/ambient, g2 = the
+/// scene material bind group (we only sample base colour + alpha).
+pub(in crate::renderer) const REFLECT_SCENE_WGSL: &str = "
+struct ReflectModelU { mvp: mat4x4<f32>, model: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> u: ReflectModelU;
+
+struct ReflectLight {
+    sun_dir: vec4<f32>,    // xyz dir (travel), w = intensity
+    sun_color: vec4<f32>,  // rgb, w unused
+    ambient: vec4<f32>,    // rgb, w = intensity
+};
+@group(1) @binding(0) var<uniform> light: ReflectLight;
+
+@group(2) @binding(0) var base_tex: texture_2d<f32>;
+@group(2) @binding(1) var base_samp: sampler;
+
+struct VsIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+};
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) n: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) col: vec4<f32>,
+};
+
+@vertex
+fn vs_reflect(in: VsIn) -> VsOut {
+    var o: VsOut;
+    o.pos = u.mvp * vec4<f32>(in.position, 1.0);
+    o.n = normalize((u.model * vec4<f32>(in.normal, 0.0)).xyz);
+    o.uv = in.uv;
+    o.col = in.color;
+    return o;
+}
+
+fn srgb_lin(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow(max((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(0.0)), vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+@fragment
+fn fs_reflect(in: VsOut) -> @location(0) vec4<f32> {
+    let tex = textureSample(base_tex, base_samp, in.uv);
+    if (tex.a < 0.5) { discard; }   // alpha-cutout foliage reflects its shape
+    let base = srgb_lin(tex.rgb) * in.col.rgb;
+    let n = normalize(in.n);
+    // sun_dir is direction-TO-sun (engine convention), so N.L uses +sun_dir.
+    let ndl = max(dot(n, normalize(light.sun_dir.xyz)), 0.0);
+    let lit = base * (light.ambient.rgb * light.ambient.w
+                      + light.sun_color.rgb * light.sun_dir.w * ndl);
+    return vec4<f32>(lit, 1.0);   // alpha 1 = 'real reflection here' for the water blend
 }
 ";
 
