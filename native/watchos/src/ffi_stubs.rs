@@ -9,6 +9,10 @@
 #[no_mangle] pub extern "C" fn bloom_attach_native(_p0: i64, _p1: f64, _p2: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_attach_hwnd(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_resize(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_take_screenshot(_p0: i64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_env_clear_from_hdr(_p0: i64) {
@@ -122,6 +126,15 @@
 #[no_mangle] pub extern "C" fn bloom_create_mesh(_p0: i64, _p1: f64, _p2: i64, _p3: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_mesh_scratch_reset() {
+}
+#[no_mangle] pub extern "C" fn bloom_mesh_scratch_push_f32(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_mesh_scratch_push_u32(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_create_mesh_scratch(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_joint_test(_p0: f64, _p1: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_ambient_light(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
@@ -172,6 +185,14 @@
 #[no_mangle] pub extern "C" fn bloom_set_shadows_always_fresh(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_bloom_enabled(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_bloom_intensity(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_tonemap(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_auto_exposure_key(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_auto_exposure_rate(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssao_enabled(_p0: f64) {
 }

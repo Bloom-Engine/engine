@@ -783,6 +783,20 @@ pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f
     }
 }
 
+/// Resize the engine's surface (#70 parity; used by host-driven
+/// BloomViews on layout changes). `phys_*` physical px, `log_*` logical.
+#[no_mangle]
+pub extern "C" fn bloom_resize(phys_w: f64, phys_h: f64, log_w: f64, log_h: f64) {
+    if let Some(eng) = unsafe { ENGINE.get_mut() } {
+        eng.renderer.resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
+    }
+}
+
+/// HWND host-embed (#70) — Windows only; a no-op here for FFI-manifest
+/// parity. Non-Windows hosts attach via `bloom_attach_native`.
+#[no_mangle]
+pub extern "C" fn bloom_attach_hwnd(_hwnd_bits: f64, _width: f64, _height: f64) {}
+
 #[no_mangle]
 pub extern "C" fn bloom_close_window() {
     unsafe { UI_VIEW = None; UI_WINDOW = None; }
