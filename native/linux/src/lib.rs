@@ -632,6 +632,37 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     panic!("bloom-linux can only run on Linux");
 }
 
+/// Attach the engine to a host-owned surface (PerryTS/perry#5519).
+///
+/// Not yet wired on Linux: Perry UI's GTK4 `BloomView` hands out a
+/// `GtkWidget*`, and turning that into a wgpu surface needs the widget
+/// realized/mapped and its `GdkSurface` bridged to an X11 `Window` (or a
+/// Wayland `wl_surface`) — the GTK4 dmabuf/`GtkGLArea` path the issue
+/// calls out as the larger follow-up. Until that lands this returns 0.0
+/// (failure) so hosts fall back to the windowed `bloom_init_window`
+/// path. The symbol exists so the FFI surface is uniform across
+/// platforms (the shared bring-up is `bloom_shared::attach::attach_engine`,
+/// already used by the Apple/Android/Windows attach paths).
+#[no_mangle]
+pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f64 {
+    let _ = (handle, width, height);
+    0.0
+}
+
+/// Resize the engine's surface (#70 parity; used by host-driven
+/// BloomViews on layout changes). `phys_*` physical px, `log_*` logical.
+#[no_mangle]
+pub extern "C" fn bloom_resize(phys_w: f64, phys_h: f64, log_w: f64, log_h: f64) {
+    if let Some(eng) = unsafe { ENGINE.get_mut() } {
+        eng.renderer.resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
+    }
+}
+
+/// HWND host-embed (#70) — Windows only; a no-op here for FFI-manifest
+/// parity. Non-Windows hosts attach via `bloom_attach_native`.
+#[no_mangle]
+pub extern "C" fn bloom_attach_hwnd(_hwnd_bits: f64, _width: f64, _height: f64) {}
+
 #[no_mangle]
 pub extern "C" fn bloom_close_window() {}
 

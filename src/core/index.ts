@@ -6,6 +6,7 @@ export { Key, MouseButton } from './keys';
 
 // FFI declarations
 declare function bloom_init_window(width: number, height: number, title: number, fullscreen: number): void;
+declare function bloom_attach_native(handle: number, width: number, height: number): number;
 declare function bloom_close_window(): void;
 declare function bloom_attach_hwnd(hwnd: number, width: number, height: number): void;
 declare function bloom_resize(physW: number, physH: number, logW: number, logH: number): void;
@@ -133,6 +134,44 @@ declare function bloom_run_game(callback: number): void;
 
 export function initWindow(width: number, height: number, title: string, fullscreen: boolean = false): void {
   bloom_init_window(width, height, title as any, fullscreen ? 1.0 : 0.0);
+}
+
+/**
+ * Attach the engine to a host-owned native render surface instead of
+ * creating its own window (PerryTS/perry#5519). `handle` is the
+ * platform's native view / window / surface pointer — e.g. the `NSView*`
+ * / `UIView*` / `GtkWidget*` / `ANativeWindow*` / `HWND` returned by
+ * Perry UI's `bloomViewGetNativeHandle`. `width`/`height` are the host
+ * view's size in logical points. On success the host owns the run loop
+ * and drives frames with `beginDrawing()` / `endDrawing()` as usual.
+ *
+ * Returns `true` if the engine attached and built its surface, `false`
+ * on a null/invalid handle or if surface bring-up failed. Idempotent: a
+ * second call once attached is a no-op that returns `true`.
+ *
+ * The platform-named aliases below forward to this same entry point; use
+ * whichever reads clearest for the target you're building.
+ */
+export function attachToNativeView(handle: number, width: number, height: number): boolean {
+  return bloom_attach_native(handle, width, height) !== 0;
+}
+
+/** macOS — attach to a host `NSView*`. See {@link attachToNativeView}. */
+export function attachToNSView(view: number, width: number, height: number): boolean {
+  return bloom_attach_native(view, width, height) !== 0;
+}
+
+/** iOS / tvOS / visionOS — attach to a host `UIView*`. See {@link attachToNativeView}. */
+export function attachToUIView(view: number, width: number, height: number): boolean {
+  return bloom_attach_native(view, width, height) !== 0;
+}
+
+/**
+ * Linux/GTK4 (`GtkWidget*`), Android (`ANativeWindow*`), Windows (`HWND`)
+ * — attach to a host surface handle. See {@link attachToNativeView}.
+ */
+export function attachToSurface(handle: number, width: number, height: number): boolean {
+  return bloom_attach_native(handle, width, height) !== 0;
 }
 
 export function closeWindow(): void {

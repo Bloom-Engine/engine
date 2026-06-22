@@ -262,6 +262,76 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     }
 }
 
+/// Attach the engine to a host-owned `ANativeWindow*` instead of pulling
+/// it from the global set by `bloom_android_set_native_window`
+/// (PerryTS/perry#5519). `handle` is the `ANativeWindow*` the host
+/// (Perry UI's `BloomView`, backed by a `SurfaceView`/`TextureView`)
+/// owns; `width`/`height` are the surface size in physical pixels.
+/// Returns 1.0 on success, 0.0 on a null/invalid handle or surface
+/// bring-up failure. Idempotent once attached.
+#[no_mangle]
+pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f64 {
+    if handle == 0 {
+        return 0.0;
+    }
+    if unsafe { ENGINE.get() }.is_some() {
+        return 1.0;
+    }
+    let window = handle as *mut libc::c_void;
+    let Some(win_nn) = std::ptr::NonNull::new(window) else {
+        return 0.0;
+    };
+    // Hold a reference for as long as the engine renders into it.
+    unsafe {
+        ANativeWindow_acquire(window);
+        NATIVE_WINDOW = window;
+    }
+    let target = {
+        let h = raw_window_handle::AndroidNdkWindowHandle::new(win_nn);
+        wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Android(
+                raw_window_handle::AndroidDisplayHandle::new(),
+            )),
+            raw_window_handle: raw_window_handle::RawWindowHandle::AndroidNdk(h),
+        }
+    };
+    match unsafe {
+        bloom_shared::attach::attach_engine(
+            target,
+            bloom_shared::attach::AttachParams {
+                backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+                logical_w: (width as u32).max(1),
+                logical_h: (height as u32).max(1),
+                physical_w: (width as u32).max(1),
+                physical_h: (height as u32).max(1),
+                format: bloom_shared::attach::FormatPreference::Srgb,
+            },
+        )
+    } {
+        Ok(es) => {
+            unsafe {
+                let _ = ENGINE.set(es);
+            }
+            1.0
+        }
+        Err(_) => 0.0,
+    }
+}
+
+/// Resize the engine's surface (#70 parity; used by host-driven
+/// BloomViews on layout changes). `phys_*` physical px, `log_*` logical.
+#[no_mangle]
+pub extern "C" fn bloom_resize(phys_w: f64, phys_h: f64, log_w: f64, log_h: f64) {
+    if let Some(eng) = unsafe { ENGINE.get_mut() } {
+        eng.renderer.resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
+    }
+}
+
+/// HWND host-embed (#70) — Windows only; a no-op here for FFI-manifest
+/// parity. Non-Windows hosts attach via `bloom_attach_native`.
+#[no_mangle]
+pub extern "C" fn bloom_attach_hwnd(_hwnd_bits: f64, _width: f64, _height: f64) {}
+
 #[no_mangle]
 pub extern "C" fn bloom_close_window() {
     unsafe {

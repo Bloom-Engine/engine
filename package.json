@@ -108,6 +108,15 @@
           "returns": "void"
         },
         {
+          "name": "bloom_attach_native",
+          "params": [
+            "i64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_close_window",
           "params": [],
           "returns": "void"
