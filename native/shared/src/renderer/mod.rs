@@ -6384,48 +6384,56 @@ impl Renderer {
             self.composed_rt_view = cmp_v;
             self.albedo_rt_texture = alb_t;
             self.albedo_rt_view = alb_v;
-            let (bt, bm, bf) = create_bloom_chain(&self.device, width, height, BLOOM_MIP_COUNT);
+            // The screen-space stack (bloom, GTAO, HiZ pyramid, SSR, SSGI,
+            // probe grid) reads render-resolution inputs (depth/normals/HDR)
+            // and is consumed by UV sampling, so it lives at RENDER
+            // resolution too. Building it surface-sized (the old behaviour)
+            // made GTAO/bloom cost the same at render_scale 0.5 as at 1.0 —
+            // ~4 ms/frame of pure waste at 4K output.
+            let (bt, bm, bf) = create_bloom_chain(&self.device, rw, rh, BLOOM_MIP_COUNT);
             self.bloom_chain_textures = bt;
             self.bloom_mip_views = bm;
             self.bloom_full_view = bf;
-            let (st, sv) = create_ssao_rt(&self.device, width, height);
+            let (st, sv) = create_ssao_rt(&self.device, rw, rh);
             self.ssao_rt_texture = st;
             self.ssao_rt_view = sv;
-            let (sht, shv) = create_ssao_history_textures(&self.device, width, height);
+            let (sht, shv) = create_ssao_history_textures(&self.device, rw, rh);
             self.ssao_history_textures = sht;
             self.ssao_history_views = shv;
             self.ssao_history_idx = 0;
             self.ssao_history_frame = 0;
-            let (sbt, sbv) = create_ssao_blur_rt(&self.device, width, height);
+            let (sbt, sbv) = create_ssao_blur_rt(&self.device, rw, rh);
             self.ssao_blur_rt_texture = sbt;
             self.ssao_blur_rt_view = sbv;
-            let (hiz_t, hiz_v) = create_linear_depth_hiz_chain(&self.device, width, height);
+            let (hiz_t, hiz_v) = create_linear_depth_hiz_chain(&self.device, rw, rh);
             self.hiz_textures = hiz_t;
             self.hiz_views = hiz_v;
+            // TAA history/output live at SURFACE size — the TAA pass is
+            // also the TSR upscaler (render res in, output res out).
             let (taa_t, taa_v) = create_taa_textures(&self.device, width, height);
             self.taa_textures = taa_t;
             self.taa_views = taa_v;
             self.taa_frame_index = 0; // reset jitter sequence on resize
-            let (sr_t, sr_v) = create_ssr_rt(&self.device, width, height);
+            let (sr_t, sr_v) = create_ssr_rt(&self.device, rw, rh);
             self.ssr_rt_texture = sr_t;
             self.ssr_rt_view = sr_v;
-            let (ssr_ht, ssr_hv) = create_ssr_history_textures(&self.device, width, height);
+            let (ssr_ht, ssr_hv) = create_ssr_history_textures(&self.device, rw, rh);
             self.ssr_history_textures = ssr_ht;
             self.ssr_history_views = ssr_hv;
             self.ssr_history_idx = 0;
-            let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, width, height);
+            let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, rw, rh);
             self.ssgi_rt_texture = ssgi_t;
             self.ssgi_rt_view = ssgi_v;
             // Ticket 007a: rebuild the probe grid + 3D radiance textures
-            // whenever the surface size changes. Probe count scales with
+            // whenever the render size changes. Probe count scales with
             // half-res resolution, so the header buffer is resized too.
-            let (pg_w, pg_h) = probe_grid_dims(width, height);
+            let (pg_w, pg_h) = probe_grid_dims(rw, rh);
             self.probe_grid_w = pg_w;
             self.probe_grid_h = pg_h;
-            let (ptr, pvr) = create_probe_trace_tex(&self.device, width, height);
+            let (ptr, pvr) = create_probe_trace_tex(&self.device, rw, rh);
             self.probe_trace_tex = ptr;
             self.probe_trace_view = pvr;
-            let (pht, phv) = create_probe_history_textures(&self.device, width, height);
+            let (pht, phv) = create_probe_history_textures(&self.device, rw, rh);
             self.probe_history_textures = pht;
             self.probe_history_views = phv;
             self.probe_history_idx = 0;
@@ -9197,8 +9205,12 @@ impl Renderer {
         }
         profiler.end("upload_geometry");
 
-        let surf_w = self.surface_config.width;
-        let surf_h = self.surface_config.height;
+        // Every graph node that consumes `surf` (Hi-Z, occlusion, GTAO,
+        // SSAO blur, SSGI, bloom) operates on render-resolution inputs
+        // and render-resolution RTs, so hand them the render extent —
+        // NOT the swapchain size. The output-res passes (TSR upscale,
+        // DoF/MB/SSS, composite) size themselves off their own targets.
+        let (surf_w, surf_h) = self.render_extent();
         let exposure_src_idx = self.exposure_current_idx;
         let exposure_dst_idx = 1 - self.exposure_current_idx;
 

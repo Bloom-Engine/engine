@@ -1269,25 +1269,29 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // --- Sharpen (post-tonemap unsharp mask) ---
     // Subtle lens-like crispening. Samples 4 neighbour HDR values,
-    // applies the same AO + exposure + tonemap path as the centre,
-    // averages them in LDR, and adds the (centre - avg) difference
-    // back scaled by `sharpen_strength`. Operating in LDR post-tonemap
-    // avoids the classic problem of HDR sharpen blowing out highlights
-    // (the unsharp of a bright pixel against a dark one gets amplified
-    // into an ugly rim). The cost is 4 extra tonemap calls, which on
-    // Metal is trivially cheap.
+    // averages them in HDR, then runs ONE tonemap on the average and
+    // adds the (centre - avg) difference back scaled by
+    // `sharpen_strength`. Operating in LDR post-tonemap avoids the
+    // classic problem of HDR sharpen blowing out highlights (the
+    // unsharp of a bright pixel against a dark one gets amplified
+    // into an ugly rim). tonemap(avg) instead of avg(tonemap) is a
+    // deliberate approximation: for a 1-px cross kernel the two agree
+    // to well under a percent except on hard HDR edges — where the
+    // clamp bounds the difference anyway — and it turns 4 extra
+    // tonemap evaluations per pixel into 1. At 4K output the exact
+    // version measurably dominated the whole composite pass.
     let sharpen_strength = u.misc.y;
     if (sharpen_strength > 0.0) {
         let dims = vec2<f32>(textureDimensions(hdr_tex));
         let t = vec2<f32>(1.0 / dims.x, 1.0 / dims.y);
         let ox = vec2<f32>(t.x, 0.0);
         let oy = vec2<f32>(0.0, t.y);
-        let h_r = textureSample(hdr_tex, hdr_samp, sample_uv + ox).rgb * ao_weighted * exposure;
-        let h_l = textureSample(hdr_tex, hdr_samp, sample_uv - ox).rgb * ao_weighted * exposure;
-        let h_d = textureSample(hdr_tex, hdr_samp, sample_uv + oy).rgb * ao_weighted * exposure;
-        let h_u = textureSample(hdr_tex, hdr_samp, sample_uv - oy).rgb * ao_weighted * exposure;
-        let avg = (tonemap_select(h_r) + tonemap_select(h_l)
-                 + tonemap_select(h_d) + tonemap_select(h_u)) * 0.25;
+        let h_r = textureSample(hdr_tex, hdr_samp, sample_uv + ox).rgb;
+        let h_l = textureSample(hdr_tex, hdr_samp, sample_uv - ox).rgb;
+        let h_d = textureSample(hdr_tex, hdr_samp, sample_uv + oy).rgb;
+        let h_u = textureSample(hdr_tex, hdr_samp, sample_uv - oy).rgb;
+        let h_avg = (h_r + h_l + h_d + h_u) * 0.25 * ao_weighted * exposure;
+        let avg = tonemap_select(h_avg);
         let detail = ldr - avg;
         ldr = clamp(ldr + detail * sharpen_strength, vec3<f32>(0.0), vec3<f32>(1.0));
     }

@@ -335,11 +335,16 @@ impl Renderer {
                 .map(|p| p.reads_scene)
                 .unwrap_or(false));
 
+        // The snapshots mirror hdr_rt/depth, which live at RENDER
+        // resolution (surface × render_scale) — not swapchain size.
+        // Sizing them from the swapchain overruns the source copy
+        // whenever render_scale < 1 (TSR upscaling).
+        let (render_w, render_h) = self.render_extent();
         let scene_color_tid = if needs_scene {
             let desc = transient::TransientDesc::new(
                 formats::HDR_FORMAT,
                 wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-                transient::SizePolicy::Swapchain,
+                transient::SizePolicy::Fixed(render_w, render_h),
             );
             Some(self.transient_pool.acquire(&self.device, desc))
         } else {
@@ -358,7 +363,7 @@ impl Renderer {
             let desc = transient::TransientDesc::new(
                 formats::DEPTH_FORMAT,
                 wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-                transient::SizePolicy::Swapchain,
+                transient::SizePolicy::Fixed(render_w, render_h),
             );
             Some(self.transient_pool.acquire(&self.device, desc))
         } else {
@@ -381,7 +386,7 @@ impl Renderer {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::Extent3d { width: swap_w, height: swap_h, depth_or_array_layers: 1 },
+                wgpu::Extent3d { width: render_w, height: render_h, depth_or_array_layers: 1 },
             );
             let depth_tex = self.transient_pool.texture(dtid).expect("fresh depth transient");
             encoder.copy_texture_to_texture(
@@ -397,7 +402,7 @@ impl Renderer {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::DepthOnly,
                 },
-                wgpu::Extent3d { width: swap_w, height: swap_h, depth_or_array_layers: 1 },
+                wgpu::Extent3d { width: render_w, height: render_h, depth_or_array_layers: 1 },
             );
             let color_view = self.transient_pool.view(ctid).unwrap();
             let depth_view = self.transient_pool.view(dtid).unwrap();

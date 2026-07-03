@@ -11,12 +11,13 @@ use crate::renderer::IDENTITY_MAT4;
 
 /// Number of shadow cascades.
 pub const NUM_CASCADES: usize = 3;
-/// Per-cascade shadow map resolution. 1024 (down from 2048) quarters
-/// the fragment work per cascade and cuts the whole shadow pass from
-/// ~14 ms to ~4 ms on Sponza. Softness is retained by the PCF kernel
-/// + cascade splits; sharpness loss on near-field edges is minor and
-/// can be tuned back by bumping this when targeting high-end GPUs.
-pub const CASCADE_MAP_SIZE: u32 = 1024;
+/// Per-cascade shadow map resolution. Back to 2048 for desktop targets:
+/// the 1024 cut was made chasing 60 fps on the Sponza benchmark machine
+/// (integrated GPU); discrete desktop GPUs have shadow-pass headroom, and
+/// at fullscreen native resolutions 1024 maps read visibly soft on
+/// near-field edges. The normal-offset receiver bias and PCF radius are
+/// texel-proportional, so both adapt to the size automatically.
+pub const CASCADE_MAP_SIZE: u32 = 2048;
 pub const SHADOW_NEAR: f32 = 0.1;
 pub const SHADOW_FAR: f32 = 100.0;
 /// Dynamic-uniform buffer stride for per-node shadow uniforms. Must
