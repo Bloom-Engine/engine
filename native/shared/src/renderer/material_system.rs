@@ -142,6 +142,10 @@ pub struct MaterialDrawCommand {
     /// instance buffer and emits draw_indexed with `0..count` instances.
     /// `None` means a single-instance draw (the legacy path).
     pub instance:    Option<InstanceDrawInfo>,
+    /// CPU-side copy of the model matrix (the GPU one lives in the
+    /// per-draw UBO slot). The shadow pass needs it to re-render these
+    /// draws into the sun cascades without reading buffers back.
+    pub model:       [[f32; 4]; 4],
 }
 
 /// Reference to an instance buffer for an instanced draw command.
@@ -1411,6 +1415,7 @@ impl MaterialSystem {
             material, mesh_handle, mesh_idx, draw_slot: slot,
             view_depth: mvp[3][3],
             instance: None,
+            model,
         };
         if bucket.is_translucent() {
             self.translucent_commands.push(cmd);
@@ -1470,6 +1475,7 @@ impl MaterialSystem {
                 buffer_handle: instance_buffer,
                 count:         instance_count,
             }),
+            model,
         };
         if bucket.is_translucent() {
             self.translucent_commands.push(cmd);
