@@ -790,7 +790,6 @@ pub struct Renderer {
     pub bloom_pipeline_downsample: wgpu::RenderPipeline,
     pub bloom_pipeline_upsample: wgpu::RenderPipeline,
     pub bloom_layout: wgpu::BindGroupLayout,
-    pub bloom_uniform_buffer: wgpu::Buffer,
     /// Composite-shader uniform — bloom intensity etc. Written each
     /// frame from the renderer's `bloom_intensity` field.
     pub composite_uniform_buffer: wgpu::Buffer,
@@ -3389,12 +3388,9 @@ impl Renderer {
             bind_group_layouts: &[Some(&bloom_layout)],
             immediate_size: 0,
         });
-        let bloom_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bloom_uniform_buffer"),
-            size: std::mem::size_of::<BloomParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // NOTE: bloom params are per-pass create_buffer_init uniforms now
+        // (postfx_chain.rs) — a single shared buffer written once per pass
+        // aliased to the last write at submit.
 
         let make_bloom_pipeline = |entry: &str, blend: Option<wgpu::BlendState>| -> wgpu::RenderPipeline {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -5939,7 +5935,6 @@ impl Renderer {
             bloom_pipeline_downsample,
             bloom_pipeline_upsample,
             bloom_layout,
-            bloom_uniform_buffer,
             bloom_intensity: 0.04,
             wind: [0.0, 0.0, 0.0, 0.0],
             ssao_rt_texture,
@@ -10022,11 +10017,17 @@ impl Renderer {
         // in end_frame_with_scene) so the scene shader's CSM lookup
         // lands on the right cascade map.
         self.lighting_uniforms.shadow_cascade_vps = self.shadow_map.light_vps;
+        // .w carries the shadows-enabled flag. sample_shadow() early-returns
+        // fully-lit when it is 0 — without the gate, disabled shadows left
+        // the shader projecting through stale/identity cascade VPs, whose
+        // NaN/garbage NDC slipped past the bounds check and read as
+        // "occluded": turning shadows OFF visibly DARKENED ambient
+        // (measured on the shooter's house wall, 127 → 83 luma).
         self.lighting_uniforms.shadow_cascade_splits = [
             self.shadow_map.cascade_splits[0],
             self.shadow_map.cascade_splits[1],
             self.shadow_map.cascade_splits[2],
-            0.0,
+            if self.shadow_map.enabled { 1.0 } else { 0.0 },
         ];
         self.lighting_uniforms.shadow_view_matrix = self.current_view_matrix;
         self.queue.write_buffer(

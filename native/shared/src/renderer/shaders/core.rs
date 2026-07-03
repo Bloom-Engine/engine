@@ -465,6 +465,13 @@ fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
 // cascade's VP, and performs PCF. Blends between cascades at boundaries
 // for smooth transitions.
 fn sample_shadow(world_pos: vec3<f32>) -> f32 {
+    // shadows disabled → fully lit. splits.w carries the enabled flag;
+    // without this gate the projection below runs through identity/stale
+    // cascade VPs and the garbage NDC reads as 'occluded', so turning
+    // shadows OFF used to DARKEN ambient instead of removing shadows.
+    if (lighting.shadow_cascade_splits.w < 0.5) {
+        return 1.0;
+    }
     // Select cascade by world-space DISTANCE from camera (not
     // view-space Z). Distance is rotation-independent — spinning
     // the camera doesn't change which cascade a surface falls in.

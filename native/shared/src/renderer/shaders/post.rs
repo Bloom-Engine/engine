@@ -113,19 +113,20 @@ fn downsample_13(uv: vec2<f32>, src_size: vec2<f32>, do_threshold: bool) -> vec3
         // First extract HDR brights via soft threshold, then Karis
         // weight to keep fireflies from poking through.
         //
-        // threshold = 2.5, knee = 0.5 (fade-in band 2..3). Raised
-        // slightly from the original 1.5/0.3 because Sponza uses
-        // setManualExposure(1.0) — the comment below was written
-        // for auto-exposure normalised HDR (mid-gray at 0.18).
-        // The 'glitter on the floor' bug that briefly pushed this
-        // to 8.0 turned out to be the irradiance-convolution
-        // firefly leak (see fix_ibl commit), not bloom at all, so
-        // the aggressive threshold is no longer needed. 2.5 leaves
-        // diffuse sunlit stone (luma 2-3) right at the knee —
-        // barely blooming — while sky / emissive / specular
-        // peaks still get a proper halo.
-        let thr = 2.5;
-        let knee = 0.5;
+        // Threshold arrives in params.w (pre-exposure HDR units),
+        // computed CPU-side as 2.5 / manual_exposure so bloom keeps
+        // triggering at the same DISPLAY brightness whatever the
+        // game's exposure (2.5 was tuned at Sponza's exposure 1.0;
+        // auto-exposure keeps the plain 2.5). Knee stays at the
+        // reference 2.5:0.5 ratio. History: the 'glitter on the
+        // floor' bug that briefly pushed the constant to 8.0 turned
+        // out to be the irradiance-convolution firefly leak (see
+        // fix_ibl commit), not bloom. At the reference exposure,
+        // diffuse sunlit stone (luma 2-3) sits right at the knee —
+        // barely blooming — while sky / emissive / specular peaks
+        // still get a proper halo.
+        let thr = max(u.params.w, 0.05);
+        let knee = thr * 0.2;
         for (var n = 0u; n < 5u; n = n + 1u) {
             let bright = extract_brights(groups[n].rgb, thr, knee);
             let weighted = karis_average(vec4<f32>(bright, 1.0));
