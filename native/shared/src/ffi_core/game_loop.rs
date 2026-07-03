@@ -71,6 +71,24 @@ macro_rules! __bloom_ffi_game_loop {
         })
         }
 
+        // bloom_create_instance_buffer_scratch — instance data arrives via
+        // the mesh scratch (bloom_mesh_scratch_reset + push_f32 × 9·N)
+        // instead of the i64-array pointer above, which Perry 0.5.x rejects
+        // ("Expected safe integer for native i64 parameter"). Same idiom as
+        // bloom_create_mesh_scratch. 9 f32 slots per instance.
+        #[no_mangle]
+        pub extern "C" fn bloom_create_instance_buffer_scratch(instance_count: f64) -> f64 {
+            $crate::ffi::guard("bloom_create_instance_buffer_scratch", move || {
+                let eng = engine();
+                let count = instance_count as u32;
+                let need = (count as usize) * 9;
+                if count == 0 || eng.models.scratch_f32.len() < need { return 0.0; }
+                let data: Vec<f32> = eng.models.scratch_f32[..need].to_vec();
+                eng.models.mesh_scratch_reset();
+                eng.renderer.create_instance_buffer(&data, count) as f64
+        })
+        }
+
         // bloom_destroy_instance_buffer  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_destroy_instance_buffer(handle: f64) {

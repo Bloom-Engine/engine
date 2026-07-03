@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 0,
+  "workspaces": {
+    "": {
+      "name": "pong",
+      "dependencies": {
+        "bloom": "file:../../",
+      },
+    },
+  },
+  "packages": {
+    "bloom": ["bloom@file:../..", {}],
+  }
+}

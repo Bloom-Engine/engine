@@ -23,10 +23,12 @@
 declare function bloom_scene_create_node(): number;
 declare function bloom_scene_destroy_node(handle: number): void;
 declare function bloom_scene_set_visible(handle: number, visible: number): void;
+declare function bloom_scene_set_gi_only(handle: number, gi_only: number): void;
 declare function bloom_scene_set_cast_shadow(handle: number, cast: number): void;
 declare function bloom_scene_set_receive_shadow(handle: number, receive: number): void;
 declare function bloom_scene_set_parent(handle: number, parent: number): void;
 declare function bloom_scene_set_transform(handle: number, matrix: number): void;
+declare function bloom_scene_set_trs(handle: number, px: number, py: number, pz: number, yaw: number, scale: number): void;
 declare function bloom_scene_update_geometry(
   handle: number,
   vertices: number,
@@ -175,6 +177,22 @@ export function setSceneNodeReceiveShadow(handle: SceneNodeHandle, receive: bool
 }
 
 /**
+ * Mark a node as a GI proxy: it feeds the global-illumination inputs
+ * (ray-tracing BLAS/TLAS, mesh cards, SDF clipmap) but is skipped by the
+ * main render, planar reflections, and the sun-shadow pass.
+ *
+ * Use this when your world renders through the material system (custom
+ * WGSL materials, no scene nodes): register invisible duplicates of the
+ * big static geometry — terrain, buildings, tree trunks — so SSGI picks
+ * up bounce light from surfaces that are off-screen. Set an approximate
+ * flat base colour via setSceneNodeMaterialPbr so the bounce carries the
+ * right hue; leave the node visible (the flag handles exclusion).
+ */
+export function setSceneNodeGiOnly(handle: SceneNodeHandle, giOnly: boolean): void {
+  bloom_scene_set_gi_only(handle, giOnly ? 1 : 0);
+}
+
+/**
  * Set the parent of a scene node. Pass 0 for no parent (root node).
  */
 export function setSceneNodeParent(handle: SceneNodeHandle, parent: SceneNodeHandle): void {
@@ -184,9 +202,29 @@ export function setSceneNodeParent(handle: SceneNodeHandle, parent: SceneNodeHan
 /**
  * Set the 4x4 transform matrix for a scene node.
  * Matrix is in column-major order (same as Three.js/glm).
+ *
+ * NOTE: this crosses the FFI as an array-into-i64-pointer, which Perry
+ * 0.5.x rejects at runtime ("Expected safe integer for native i64
+ * parameter"). Until the scratch-buffer migration lands, prefer
+ * `setSceneNodeTrs` for position/yaw/scale placement — it is all-scalar
+ * and works on every Perry.
  */
 export function setSceneNodeTransform(handle: SceneNodeHandle, matrix: number[]): void {
   bloom_scene_set_transform(handle, matrix as any);
+}
+
+/**
+ * Place a scene node with position + Y-axis rotation + uniform scale.
+ * All-scalar FFI (Perry 0.5.x safe). Yaw is radians, same convention as
+ * `drawModelRotated`.
+ */
+export function setSceneNodeTrs(
+  handle: SceneNodeHandle,
+  x: number, y: number, z: number,
+  yaw: number = 0,
+  scale: number = 1,
+): void {
+  bloom_scene_set_trs(handle, x, y, z, yaw, scale);
 }
 
 /**

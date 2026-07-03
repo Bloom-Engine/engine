@@ -64,6 +64,9 @@ declare function bloom_profiler_overlay_text(): string;
 declare function bloom_profiler_frame_history(): string;
 declare function bloom_splat_impulse(x: number, z: number, radius: number, strength: number): void;
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
+declare function bloom_set_material_params_scratch(handle: number, paramCount: number): void;
+declare function bloom_mesh_scratch_reset(): void;
+declare function bloom_mesh_scratch_push_f32(v: number): void;
 declare function bloom_set_target_fps(fps: number): void;
 declare function bloom_set_direct_2d_mode(on: number): void;
 declare function bloom_get_delta_time(): number;
@@ -587,7 +590,13 @@ export function splatImpulse(x: number, z: number, radius: number, strength: num
  * lets game code change colour per-zone without recompiling WGSL.
  */
 export function setMaterialParams(handle: number, params: number[]): void {
-  bloom_set_material_params(handle, params as any, params.length);
+  // Perry 0.5.x rejects JS arrays passed into pointer params, so the floats
+  // go through the all-f64 mesh scratch (same fix as createMesh /
+  // createInstanceBuffer). ≤ 64 floats per the 256-byte UBO cap, so the
+  // per-float FFI cost is negligible.
+  bloom_mesh_scratch_reset();
+  for (let i = 0; i < params.length; i++) bloom_mesh_scratch_push_f32(params[i]);
+  bloom_set_material_params_scratch(handle, params.length);
 }
 
 /**

@@ -790,7 +790,6 @@ pub struct Renderer {
     pub bloom_pipeline_downsample: wgpu::RenderPipeline,
     pub bloom_pipeline_upsample: wgpu::RenderPipeline,
     pub bloom_layout: wgpu::BindGroupLayout,
-    pub bloom_uniform_buffer: wgpu::Buffer,
     /// Composite-shader uniform — bloom intensity etc. Written each
     /// frame from the renderer's `bloom_intensity` field.
     pub composite_uniform_buffer: wgpu::Buffer,
@@ -1956,9 +1955,26 @@ impl Renderer {
             ..Default::default()
         });
 
+        // Joint-matrix bind group layout for GPU skinning. Created here (ahead
+        // of its buffer/bind group below) because the shadow map's skinned
+        // caster pipeline needs this layout at construction time.
+        let joint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("joint_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         // Shadow map needs to be created before the lighting bind
         // group since the bind group binds the shadow depth view.
-        let shadow_map = crate::shadows::ShadowMap::new(&device, Vertex3D::desc());
+        let shadow_map = crate::shadows::ShadowMap::new(&device, Vertex3D::desc(), &joint_layout);
 
         let lighting_bind_group = lighting::create_lighting_bind_group(
             &device,
@@ -2151,19 +2167,8 @@ impl Renderer {
         });
 
         // --- Joint matrix buffer for GPU skinning ---
-        let joint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("joint_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        // (`joint_layout` is created earlier, above the shadow map, because the
+        // skinned shadow pipeline needs it at construction time.)
         // 1024 joints × 64 bytes per mat4 = 65536 bytes.
         // Sized so multiple skinned models can coexist in one frame —
         // each updateModelAnimation stages its pose into a slice of
@@ -3383,12 +3388,9 @@ impl Renderer {
             bind_group_layouts: &[Some(&bloom_layout)],
             immediate_size: 0,
         });
-        let bloom_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bloom_uniform_buffer"),
-            size: std::mem::size_of::<BloomParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // NOTE: bloom params are per-pass create_buffer_init uniforms now
+        // (postfx_chain.rs) — a single shared buffer written once per pass
+        // aliased to the last write at submit.
 
         let make_bloom_pipeline = |entry: &str, blend: Option<wgpu::BlendState>| -> wgpu::RenderPipeline {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -5933,7 +5935,6 @@ impl Renderer {
             bloom_pipeline_downsample,
             bloom_pipeline_upsample,
             bloom_layout,
-            bloom_uniform_buffer,
             bloom_intensity: 0.04,
             wind: [0.0, 0.0, 0.0, 0.0],
             ssao_rt_texture,
@@ -6383,48 +6384,56 @@ impl Renderer {
             self.composed_rt_view = cmp_v;
             self.albedo_rt_texture = alb_t;
             self.albedo_rt_view = alb_v;
-            let (bt, bm, bf) = create_bloom_chain(&self.device, width, height, BLOOM_MIP_COUNT);
+            // The screen-space stack (bloom, GTAO, HiZ pyramid, SSR, SSGI,
+            // probe grid) reads render-resolution inputs (depth/normals/HDR)
+            // and is consumed by UV sampling, so it lives at RENDER
+            // resolution too. Building it surface-sized (the old behaviour)
+            // made GTAO/bloom cost the same at render_scale 0.5 as at 1.0 —
+            // ~4 ms/frame of pure waste at 4K output.
+            let (bt, bm, bf) = create_bloom_chain(&self.device, rw, rh, BLOOM_MIP_COUNT);
             self.bloom_chain_textures = bt;
             self.bloom_mip_views = bm;
             self.bloom_full_view = bf;
-            let (st, sv) = create_ssao_rt(&self.device, width, height);
+            let (st, sv) = create_ssao_rt(&self.device, rw, rh);
             self.ssao_rt_texture = st;
             self.ssao_rt_view = sv;
-            let (sht, shv) = create_ssao_history_textures(&self.device, width, height);
+            let (sht, shv) = create_ssao_history_textures(&self.device, rw, rh);
             self.ssao_history_textures = sht;
             self.ssao_history_views = shv;
             self.ssao_history_idx = 0;
             self.ssao_history_frame = 0;
-            let (sbt, sbv) = create_ssao_blur_rt(&self.device, width, height);
+            let (sbt, sbv) = create_ssao_blur_rt(&self.device, rw, rh);
             self.ssao_blur_rt_texture = sbt;
             self.ssao_blur_rt_view = sbv;
-            let (hiz_t, hiz_v) = create_linear_depth_hiz_chain(&self.device, width, height);
+            let (hiz_t, hiz_v) = create_linear_depth_hiz_chain(&self.device, rw, rh);
             self.hiz_textures = hiz_t;
             self.hiz_views = hiz_v;
+            // TAA history/output live at SURFACE size — the TAA pass is
+            // also the TSR upscaler (render res in, output res out).
             let (taa_t, taa_v) = create_taa_textures(&self.device, width, height);
             self.taa_textures = taa_t;
             self.taa_views = taa_v;
             self.taa_frame_index = 0; // reset jitter sequence on resize
-            let (sr_t, sr_v) = create_ssr_rt(&self.device, width, height);
+            let (sr_t, sr_v) = create_ssr_rt(&self.device, rw, rh);
             self.ssr_rt_texture = sr_t;
             self.ssr_rt_view = sr_v;
-            let (ssr_ht, ssr_hv) = create_ssr_history_textures(&self.device, width, height);
+            let (ssr_ht, ssr_hv) = create_ssr_history_textures(&self.device, rw, rh);
             self.ssr_history_textures = ssr_ht;
             self.ssr_history_views = ssr_hv;
             self.ssr_history_idx = 0;
-            let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, width, height);
+            let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, rw, rh);
             self.ssgi_rt_texture = ssgi_t;
             self.ssgi_rt_view = ssgi_v;
             // Ticket 007a: rebuild the probe grid + 3D radiance textures
-            // whenever the surface size changes. Probe count scales with
+            // whenever the render size changes. Probe count scales with
             // half-res resolution, so the header buffer is resized too.
-            let (pg_w, pg_h) = probe_grid_dims(width, height);
+            let (pg_w, pg_h) = probe_grid_dims(rw, rh);
             self.probe_grid_w = pg_w;
             self.probe_grid_h = pg_h;
-            let (ptr, pvr) = create_probe_trace_tex(&self.device, width, height);
+            let (ptr, pvr) = create_probe_trace_tex(&self.device, rw, rh);
             self.probe_trace_tex = ptr;
             self.probe_trace_view = pvr;
-            let (pht, phv) = create_probe_history_textures(&self.device, width, height);
+            let (pht, phv) = create_probe_history_textures(&self.device, rw, rh);
             self.probe_history_textures = pht;
             self.probe_history_views = phv;
             self.probe_history_idx = 0;
@@ -8756,6 +8765,36 @@ impl Renderer {
         })
     }
 
+    /// Alpha-tested shadow-caster bind group (base colour + sampler +
+    /// cutoff) for the shadow pass's cutout pipeline. Same construction the
+    /// cached-model path uses; exposed so scene-graph nodes with MASK
+    /// materials cast dappled shadows instead of solid card silhouettes.
+    /// The cutoff uniform buffer stays alive via the bind group.
+    pub fn create_shadow_cutout_bg(&self, base_color_idx: u32, cutoff: f32) -> wgpu::BindGroup {
+        use wgpu::util::DeviceExt;
+        let cutoff_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shadow_cutout_cutoff"),
+            contents: bytemuck::cast_slice(&[cutoff, 0.0f32, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bi = base_color_idx as usize;
+        let base_tex = if base_color_idx == 0 || bi >= self.textures.len() {
+            &self.textures[0]
+        } else {
+            &self.textures[bi]
+        };
+        let base_view = base_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow_cutout_bg"),
+            layout: &self.shadow_map.cutout_tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&base_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: cutoff_buf.as_entire_binding() },
+            ],
+        })
+    }
+
     /// Build a scene-pipeline material bind group.
     ///
     /// Each of the four texture indices can be zero to mean 'not
@@ -9166,8 +9205,12 @@ impl Renderer {
         }
         profiler.end("upload_geometry");
 
-        let surf_w = self.surface_config.width;
-        let surf_h = self.surface_config.height;
+        // Every graph node that consumes `surf` (Hi-Z, occlusion, GTAO,
+        // SSAO blur, SSGI, bloom) operates on render-resolution inputs
+        // and render-resolution RTs, so hand them the render extent —
+        // NOT the swapchain size. The output-res passes (TSR upscale,
+        // DoF/MB/SSS, composite) size themselves off their own targets.
+        let (surf_w, surf_h) = self.render_extent();
         let exposure_src_idx = self.exposure_current_idx;
         let exposure_dst_idx = 1 - self.exposure_current_idx;
 
@@ -10016,6 +10059,11 @@ impl Renderer {
         // in end_frame_with_scene) so the scene shader's CSM lookup
         // lands on the right cascade map.
         self.lighting_uniforms.shadow_cascade_vps = self.shadow_map.light_vps;
+        // .w is the TSR mip-LOD bias slot — owned by the shadow pass's
+        // per-frame upload (shadow_pass.rs), which overwrites this struct
+        // later in the frame anyway. Keep 0.0 here so a frame without a
+        // shadow pass reads a neutral bias. The shadows-enabled flag lives
+        // in dir_light_count.y (see clear_additional_lights), NOT here.
         self.lighting_uniforms.shadow_cascade_splits = [
             self.shadow_map.cascade_splits[0],
             self.shadow_map.cascade_splits[1],
@@ -10383,7 +10431,14 @@ impl Renderer {
 
     /// Clear all additional lights (called at begin_frame).
     pub fn clear_additional_lights(&mut self) {
-        self.lighting_uniforms.dir_light_count = [0.0; 4];
+        // dir_light_count.y carries the shadows-enabled flag for the shadow
+        // samplers (core sample_shadow + material-path sample_sun_shadow).
+        // Written here because this runs unconditionally every frame before
+        // any lighting upload; .x stays the actual additional-light count.
+        // (shadow_cascade_splits.w is NOT usable for this — it carries the
+        // TSR mip-LOD bias, written by the shadow pass each frame.)
+        let shadows_flag = if self.shadow_map.enabled { 1.0 } else { 0.0 };
+        self.lighting_uniforms.dir_light_count = [0.0, shadows_flag, 0.0, 0.0];
         self.lighting_uniforms.point_light_count = [0.0; 4];
     }
 
@@ -11554,16 +11609,23 @@ impl Renderer {
     pub fn dispatch_planar_reflections(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
+        scene: &crate::scene::SceneGraph,
     ) {
         if self.planar_probes.iter().all(|p| p.is_none()) { return; }
-        if self.material_system.commands.is_empty() && self.model_draw_commands.is_empty() { return; }
+        // Scene-graph nodes render into the probe too (they share the
+        // Vertex3D layout and the scene material bind-group layout), so a
+        // fully retained-mode game gets real water reflections as well.
+        let scene_draws = scene.reflect_draw_list();
+        if self.material_system.commands.is_empty()
+            && self.model_draw_commands.is_empty()
+            && scene_draws.is_empty() { return; }
 
         // EN-011 — lazily build the single-target reflection pipeline + buffers
         // used to render cached models (trees/house) into the probe with a
         // mirrored VP. Owned layouts: g0 dynamic per-draw model uniform, g1
         // sun/ambient; g2 reuses the scene material layout for base colour.
         const REFLECT_STRIDE: u64 = 256;
-        const REFLECT_MAX_DRAWS: usize = 600;
+        const REFLECT_MAX_DRAWS: usize = 1024;
         if self.reflect_scene_pipeline.is_none() {
             let model_dyn_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("reflect_model_dyn_layout"),
@@ -11577,16 +11639,39 @@ impl Renderer {
                     count: None,
                 }],
             });
+            let shadow_tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+                binding, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            };
             let light_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("reflect_light_layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false, min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false, min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    // Shadow cascades + comparison sampler so the mirrored
+                    // scene is sun-shadowed like the real one (the probe
+                    // previously rendered everything fully lit, which made
+                    // water reflections disagree with the scene above them).
+                    shadow_tex_entry(1),
+                    shadow_tex_entry(2),
+                    shadow_tex_entry(3),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                ],
             });
             let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("reflect_scene_shader"),
@@ -11637,14 +11722,22 @@ impl Renderer {
                     }),
                 }],
             });
+            // sun_dir + sun_color + ambient + cam_pos + shadow_splits (5 vec4)
+            // + 3 cascade mat4s = 80 + 192 = 272 bytes.
             let light_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("reflect_light_buf"), size: 48,
+                label: Some("reflect_light_buf"), size: 272,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             let light_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("reflect_light_bg"), layout: &light_layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: light_buf.as_entire_binding() }],
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: light_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                ],
             });
             self.reflect_scene_pipeline = Some(pipeline);
             self.reflect_model_buf = Some(model_buf);
@@ -11652,16 +11745,31 @@ impl Renderer {
             self.reflect_light_buf = Some(light_buf);
             self.reflect_light_bg = Some(light_bg);
         }
-        // Sun/ambient for the reflection shading (same as the main directional).
+        // Sun/ambient + shadow data for the reflection shading (same values
+        // as the main pass, so the mirrored scene is lit AND shadowed like
+        // the real one). shadow_splits.w carries the shadows-enabled flag —
+        // in THIS struct .w is free (no LOD-bias tenant).
         {
             let ld = self.lighting_uniforms.light_dir;
             let lc = self.lighting_uniforms.light_color;
             let amb = self.lighting_uniforms.ambient;
-            let light_data: [f32; 12] = [
-                ld[0], ld[1], ld[2], ld[3],
-                lc[0], lc[1], lc[2], 0.0,
-                amb[0], amb[1], amb[2], amb[3],
-            ];
+            let cam = self.current_camera_pos;
+            let sp = self.lighting_uniforms.shadow_cascade_splits;
+            let shadows_flag = if self.shadow_map.enabled { 1.0 } else { 0.0 };
+            let mut light_data = [0.0f32; 68];
+            light_data[0..4].copy_from_slice(&[ld[0], ld[1], ld[2], ld[3]]);
+            light_data[4..8].copy_from_slice(&[lc[0], lc[1], lc[2], 0.0]);
+            light_data[8..12].copy_from_slice(&[amb[0], amb[1], amb[2], amb[3]]);
+            light_data[12..16].copy_from_slice(&[cam[0], cam[1], cam[2], 0.0]);
+            light_data[16..20].copy_from_slice(&[sp[0], sp[1], sp[2], shadows_flag]);
+            let vps = &self.lighting_uniforms.shadow_cascade_vps;
+            for c in 0..3 {
+                for col in 0..4 {
+                    for row in 0..4 {
+                        light_data[20 + c * 16 + col * 4 + row] = vps[c][col][row];
+                    }
+                }
+            }
             if let Some(buf) = &self.reflect_light_buf {
                 self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&light_data));
             }
@@ -11825,7 +11933,11 @@ impl Renderer {
             // Write each cached-model draw's [mirror_mvp, model] into the
             // dynamic reflection uniform buffer up front (queue writes
             // happen-before the encoded pass), and record the draw list.
+            // Scene-graph nodes append after the cached models in the same
+            // slot space — creation order decides who survives the cap, so
+            // games should create hero geometry before filler (grass).
             let mut reflect_draws: Vec<(u64, usize, u32)> = Vec::new();
+            let mut node_slots: Vec<(usize, u32)> = Vec::new();
             if let Some(model_buf) = &self.reflect_model_buf {
                 for cmd in self.model_draw_commands.iter() {
                     let slot = reflect_draws.len();
@@ -11836,6 +11948,16 @@ impl Renderer {
                     data[64..128].copy_from_slice(bytemuck::bytes_of(&cmd.model));
                     self.queue.write_buffer(model_buf, slot as u64 * REFLECT_STRIDE, &data);
                     reflect_draws.push((cmd.cache_handle, cmd.mesh_idx, slot as u32));
+                }
+                for (i, (_vb, _ib, _ic, _bg, model)) in scene_draws.iter().enumerate() {
+                    let slot = reflect_draws.len() + node_slots.len();
+                    if slot >= REFLECT_MAX_DRAWS { break; }
+                    let mirror_mvp = mat4_multiply(mirror_vp, *model);
+                    let mut data = [0u8; 128];
+                    data[0..64].copy_from_slice(bytemuck::bytes_of(&mirror_mvp));
+                    data[64..128].copy_from_slice(bytemuck::bytes_of(model));
+                    self.queue.write_buffer(model_buf, slot as u64 * REFLECT_STRIDE, &data);
+                    node_slots.push((i, slot as u32));
                 }
             }
 
@@ -11905,7 +12027,7 @@ impl Renderer {
                 if let (Some(rp), Some(rmbg), Some(rlbg)) =
                     (refl_pipeline, refl_model_bg, refl_light_bg)
                 {
-                    if !reflect_draws.is_empty() {
+                    if !reflect_draws.is_empty() || !node_slots.is_empty() {
                         pass.set_pipeline(rp);
                         pass.set_bind_group(1, rlbg, &[]);
                         for (handle, midx, slot) in &reflect_draws {
@@ -11919,6 +12041,17 @@ impl Renderer {
                                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                                 }
                             }
+                        }
+                        // Scene-graph nodes: same pipeline — node geometry is
+                        // Vertex3D and node material bind groups share the
+                        // scene material layout the pipeline's g2 expects.
+                        for (i, slot) in &node_slots {
+                            let (vb, ib, index_count, mat_bg, _model) = &scene_draws[*i];
+                            pass.set_bind_group(0, rmbg, &[*slot * REFLECT_STRIDE as u32]);
+                            pass.set_bind_group(2, *mat_bg, &[]);
+                            pass.set_vertex_buffer(0, vb.slice(..));
+                            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..*index_count, 0, 0..1);
                         }
                     }
                 }

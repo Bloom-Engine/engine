@@ -34,11 +34,34 @@ macro_rules! __bloom_ffi_scene {
         })
         }
 
+        // bloom_scene_set_trs — position + Y-rotation + uniform scale as six
+        // f64 scalars. The full-matrix bloom_scene_set_transform passes a JS
+        // array into an i64 pointer param, which Perry 0.5.x rejects; this
+        // covers the common placement case without touching that ABI.
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_set_trs(handle: f64, px: f64, py: f64, pz: f64, yaw: f64, scale: f64) {
+            $crate::ffi::guard("bloom_scene_set_trs", move || {
+                engine().scene.set_trs(handle, px as f32, py as f32, pz as f32, yaw as f32, scale as f32);
+        })
+        }
+
         // bloom_scene_set_cast_shadow  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_scene_set_cast_shadow(handle: f64, cast: f64) {
             $crate::ffi::guard("bloom_scene_set_cast_shadow", move || {
                 engine().scene.set_cast_shadow(handle, cast != 0.0);
+        })
+        }
+
+        // bloom_scene_set_gi_only — mark a node as a GI proxy: it feeds
+        // BLAS/TLAS, mesh cards, and the SDF clipmap (SSGI off-screen
+        // bounce) but is skipped by the main render, planar reflections,
+        // and the sun-shadow pass. For material-system games whose world
+        // never becomes scene nodes.
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_set_gi_only(handle: f64, gi_only: f64) {
+            $crate::ffi::guard("bloom_scene_set_gi_only", move || {
+                engine().scene.set_gi_only(handle, gi_only != 0.0);
         })
         }
 
@@ -401,6 +424,9 @@ macro_rules! __bloom_ffi_scene {
                 let mr_tex = mesh.metallic_roughness_texture_idx;
                 let emissive_tex = mesh.emissive_texture_idx;
                 let emissive_factor = mesh.emissive_factor;
+                let roughness_factor = mesh.roughness_factor;
+                let metallic_factor = mesh.metallic_factor;
+                let alpha_cutoff = mesh.alpha_cutoff;
                 eng.scene.update_geometry(node_handle, vertices, indices);
 
                 if let Some(tex_idx) = base_color_tex {
@@ -421,6 +447,12 @@ macro_rules! __bloom_ffi_scene {
                     emissive_factor[1],
                     emissive_factor[2],
                 );
+                // Carry the glTF material factors + MASK cutoff too —
+                // previously dropped, which left attached foliage opaque
+                // (solid cards) and every attached mesh at the default
+                // roughness 0.8 regardless of its authored material.
+                eng.scene.set_material_pbr(node_handle, roughness_factor, metallic_factor);
+                eng.scene.set_material_alpha_cutoff(node_handle, alpha_cutoff);
         })
         }
         #[cfg(not(feature = "models3d"))]

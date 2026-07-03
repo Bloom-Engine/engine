@@ -1404,15 +1404,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let depth = textureSample(depth_tex, depth_samp, in.uv);
     if (depth >= 0.9999) { return vec4<f32>(0.0); } // sky
 
-    // Metals-only SSR (see pre-stochastic history for the rationale).
-    // The metallic and low-roughness gates are kept: dielectric
-    // specular stays with the prefiltered IBL chain, and very rough
-    // metals fade out to the IBL cubemap where SSR noise would
-    // dominate even after temporal accumulation.
+    // SSR for every smooth-enough surface — the metals-only gate is gone.
+    // Rationale: the scene shader deliberately starves polished DIELECTRICS
+    // of IBL specular (dielectric_spec_amp rolls to zero on smooth surfaces
+    // because the visibility-less prefiltered env produced bright stripes),
+    // so screen-space hits are the only grounded reflections a wet floor or
+    // polished stone can receive — no double-counting by construction. The
+    // F0 = 0.04 Fresnel below keeps dielectric contribution physically
+    // small except at grazing angles. Very rough surfaces still fade out
+    // to IBL where one-ray-per-pixel SSR noise would dominate even after
+    // temporal accumulation.
     let mat = textureSample(mat_tex, mat_samp, in.uv).rg;
     let metallic = mat.r;
     let roughness = mat.g;
-    if (metallic < 0.2) { return vec4<f32>(0.0); }
     let albedo = textureSample(albedo_tex, albedo_samp, in.uv).rgb;
     let roughness_fade = 1.0 - smoothstep(0.5, 0.85, roughness);
     if (roughness_fade <= 0.001) { return vec4<f32>(0.0); }

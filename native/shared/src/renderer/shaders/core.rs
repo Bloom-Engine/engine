@@ -190,8 +190,15 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
     let vel = (curr_ndc - prev_ndc) * 0.5;
     // Immediate-mode 3D draws (drawCube etc.) aren't PBR — output
     // 0 metallic / 1 roughness so SSR doesn't try to reflect them.
+    //
+    // Alpha comes from the TINT only. Game textures routinely carry a
+    // non-opacity alpha channel (Unvanquished armor packs a gloss mask
+    // there), and this batch also renders CPU-skinned characters — the
+    // player turned semi-transparent through its gloss mask when texture
+    // alpha fed the blend. Deliberate fades still work via tint alpha;
+    // untextured effect quads bind the white texture (alpha 1) anyway.
     return Fs3DOut(
-        vec4<f32>(tex_color.rgb * in.color.rgb * lit, tex_color.a * in.color.a),
+        vec4<f32>(tex_color.rgb * in.color.rgb * lit, in.color.a),
         vec2<f32>(0.0, 1.0),
         vel,
         vec4<f32>(0.0),
@@ -464,7 +471,15 @@ fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
 // belongs to based on its view-space depth, projects through that
 // cascade's VP, and performs PCF. Blends between cascades at boundaries
 // for smooth transitions.
-fn sample_shadow(world_pos: vec3<f32>) -> f32 {
+fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
+    // shadows disabled → fully lit. dir_light_count.y carries the enabled
+    // flag (splits.w is the TSR mip-LOD bias — do NOT gate on it); without
+    // this gate the projection below runs through identity/stale cascade
+    // VPs and the garbage NDC reads as 'occluded', so turning shadows OFF
+    // used to DARKEN ambient instead of removing shadows.
+    if (lighting.dir_light_count.y < 0.5) {
+        return 1.0;
+    }
     // Select cascade by world-space DISTANCE from camera (not
     // view-space Z). Distance is rotation-independent — spinning
     // the camera doesn't change which cascade a surface falls in.
@@ -478,8 +493,30 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
         cascade = 1;
     }
 
+    // Normal-offset receiver bias: push the receiver position off the
+    // surface along its geometric normal by ~1.5 shadow texels of the
+    // selected cascade before projecting. The fixed depth bias alone
+    // (0.001 ≈ 8 cm across cascade 2's depth range) is SMALLER than the
+    // per-texel depth slope of steep receivers — a vertical wall under a
+    // 40°-elevation sun changes ~12 cm of light-space depth per shadow
+    // texel — so entire sun-facing faces used to self-shadow into a
+    // uniform ~50% PCF dimming (measured 68 vs 127 luma on the shooter's
+    // stone house). Offsetting the receiver sidesteps the slope entirely;
+    // the offset is texel-proportional (≈2 cm near, ≈23 cm at cascade 2),
+    // far below visible peter-panning at each cascade's viewing distance.
+    // The cascade fit radius ≈ its split distance (compute_cascade_vps
+    // fits a camera-centred sphere), so texel ≈ 2·split / map_dim.
+    let map_dim = f32(textureDimensions(shadow_tex_0).x);
+    var fit_r = lighting.shadow_cascade_splits.z;
+    if (cascade == 0) {
+        fit_r = lighting.shadow_cascade_splits.x;
+    } else if (cascade == 1) {
+        fit_r = lighting.shadow_cascade_splits.y;
+    }
+    let recv_pos = world_pos + geo_n * (2.0 * fit_r / map_dim) * 1.5;
+
     // Project through the selected cascade's VP
-    let light_clip = lighting.shadow_cascade_vps[cascade] * vec4<f32>(world_pos, 1.0);
+    let light_clip = lighting.shadow_cascade_vps[cascade] * vec4<f32>(recv_pos, 1.0);
     let light_ndc = light_clip.xyz / light_clip.w;
     if (light_ndc.x < -1.0 || light_ndc.x > 1.0 ||
         light_ndc.y < -1.0 || light_ndc.y > 1.0 ||
@@ -506,9 +543,16 @@ fn sample_shadow(world_pos: vec3<f32>) -> f32 {
     let dist_to_edge = split_far - dist;
 
     if (dist_to_edge < blend_zone && cascade < 2) {
-        // In the blend zone: sample the next cascade too and lerp
+        // In the blend zone: sample the next cascade too and lerp.
+        // Same normal-offset receiver bias, scaled to the NEXT cascade's
+        // texel size (it is coarser, so the offset grows accordingly).
         let next_cascade = cascade + 1;
-        let next_clip = lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(world_pos, 1.0);
+        var next_fit = lighting.shadow_cascade_splits.z;
+        if (next_cascade == 1) {
+            next_fit = lighting.shadow_cascade_splits.y;
+        }
+        let next_pos = world_pos + geo_n * (2.0 * next_fit / map_dim) * 1.5;
+        let next_clip = lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(next_pos, 1.0);
         let next_ndc = next_clip.xyz / next_clip.w;
         let next_uv = vec2<f32>(next_ndc.x * 0.5 + 0.5, 1.0 - (next_ndc.y * 0.5 + 0.5));
         let next_depth_ref = next_ndc.z - bias;
@@ -674,6 +718,16 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         discard;
     }
 
+    // Two-sided foliage normal. Alpha-cutout cards (leaves, grass blades)
+    // are seen from both sides, but the geometric normal only faces one
+    // way — the back side otherwise shades with N pointing away from the
+    // sun AND from the sky irradiance, which is why grass tufts rendered
+    // as solid black cards from one side. Flip the shading normal toward
+    // the viewer for cutout materials only; opaque geometry is untouched.
+    if (alpha_cutoff > 0.0 && dot(n, lighting.camera_pos.xyz - in.world_pos) < 0.0) {
+        n = -n;
+    }
+
     // glTF metallicRoughnessTexture: G=roughness, B=metallic (linear).
     // When the material has no MR texture (metal_rough.z == 0), the
     // binding falls back to an arbitrary scene texture (whatever lives
@@ -763,15 +817,42 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // mapped: only this primary light casts because we currently
     // render a single shadow map. Multi-cascade or multi-light
     // shadowing is a future addition.
-    let shadow_factor = sample_shadow(in.world_pos);
+    // Geometric (pre-normal-map, pre-foliage-flip) normal for the receiver
+    // offset — the mapped normal can point anywhere per-texel and would
+    // dither the offset; the flipped foliage normal would push the sample
+    // through the card.
+    let shadow_factor = sample_shadow(in.world_pos, normalize(in.normal));
     // Never fully zero direct light — a 10% floor simulates
     // ambient bounce from surrounding surfaces and keeps shadows
     // from going pitch-black regardless of IBL intensity.
     let direct_shadow = mix(0.03, 1.0, shadow_factor);
     let legacy_dir = normalize(lighting.light_dir.xyz);
-    lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
-                     lighting.light_dir.w, base_color, metallic, roughness)
-         * direct_shadow;
+    if (alpha_cutoff > 0.0) {
+        // Foliage wrap-lambert (energy-conserving wrap, w = 0.45): a leaf
+        // turning from the sun rolls off softly — light transmits and
+        // inter-scatters through a canopy — instead of clipping to black
+        // at the terminator like an opaque wall. Specular is skipped:
+        // foliage cards are rough and the viewer-flipped normal would
+        // produce false sparkle.
+        let wrap = 0.45;
+        let ndl_wrap = clamp((dot(n, legacy_dir) + wrap) / ((1.0 + wrap) * (1.0 + wrap)),
+                             0.0, 1.0);
+        lit += base_color / PI * lighting.light_color.rgb * lighting.light_dir.w
+             * ndl_wrap * direct_shadow;
+    } else {
+        lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
+                         lighting.light_dir.w, base_color, metallic, roughness)
+             * direct_shadow;
+    }
+
+    // Foliage backlit transmission — sun bleeding THROUGH alpha-cut leaf cards
+    // (the bright rim glow when the sun is behind a tree). Gated on the
+    // alpha-cutoff so only cut-out foliage materials get it; opaque surfaces
+    // (cutoff == 0) are unaffected. Matches shade_foliage's transmission term.
+    if (alpha_cutoff > 0.0) {
+        let trans = pow(max(dot(v, -legacy_dir), 0.0), 3.0) * 0.85;
+        lit += base_color * lighting.light_color.rgb * lighting.light_dir.w * trans;
+    }
 
     // Foliage backlit transmission — sun bleeding THROUGH alpha-cut leaf cards
     // (the bright rim glow when the sun is behind a tree). Gated on the
@@ -1001,8 +1082,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let prev_ndc = in.prev_clip.xy / in.prev_clip.w;
     let vel = (curr_ndc - prev_ndc) * 0.5;
 
+    // glTF OPAQUE materials (alpha_cutoff == 0) ignore texture alpha by
+    // spec — armor/gloss masks stored in .a must not make the mesh
+    // translucent. MASK materials keep the sampled alpha (post-discard)
+    // for soft edges. Tint alpha survives so games can fade models.
+    let out_alpha = select(in.color.a, base_alpha, alpha_cutoff > 0.0);
+
     return SceneOut(
-        vec4<f32>(hdr, base_alpha),
+        vec4<f32>(hdr, out_alpha),
         vec2<f32>(metallic, roughness),
         vel,
         // albedo.rgb: base color (SSGI bounce modulation).

@@ -74,3 +74,8 @@ examples/intel-sponza/assets/outdoor.hdr
 
 # Golden-test failure artifacts (written next to the golden on mismatch)
 *.actual.png
+
+# Compiled example binaries — build artifacts, never commit.
+examples/**/main.exe
+examples/**/main
+examples/**/main.app

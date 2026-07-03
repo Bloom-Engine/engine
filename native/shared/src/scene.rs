@@ -20,6 +20,10 @@ pub struct PbrMaterial {
     pub opacity: f32,
     pub emissive: [f32; 3],
     pub double_sided: bool,
+    /// glTF MASK alpha cutoff. 0.0 = OPAQUE. Non-zero routes the node
+    /// through the scene shader's alpha-cutout path (discard below the
+    /// cutoff, two-sided foliage shading, wind sway).
+    pub alpha_cutoff: f32,
     pub texture_idx: u32,
     /// Normal-map texture. 0 means "no normal map" — scene shader falls
     /// back to the geometric normal. Stored as a texture index rather
@@ -40,6 +44,7 @@ impl Default for PbrMaterial {
             opacity: 1.0,
             emissive: [0.0, 0.0, 0.0],
             double_sided: false,
+            alpha_cutoff: 0.0,
             texture_idx: 0,
             normal_texture_idx: 0,
             metallic_roughness_texture_idx: 0,
@@ -81,6 +86,16 @@ pub struct SceneNode {
     pub visible: bool,
     pub cast_shadow: bool,
     pub receive_shadow: bool,
+    /// GI-proxy flag: the node feeds every global-illumination input
+    /// (BLAS/TLAS, mesh cards, SDF clipmap, world triangles) but is
+    /// skipped by the raster consumers — main scene render, planar
+    /// reflections, and the sun-shadow pass. Games whose world renders
+    /// through the material system (no scene nodes) register invisible
+    /// duplicates of their big static geometry with this flag so SSGI
+    /// picks up off-screen bounce from walls/terrain the screen-space
+    /// trace can't see. Keep `visible = true` on such nodes — the GI
+    /// feeds all filter on `visible`.
+    pub gi_only: bool,
     pub parent: f64,
     // Editor user data — an arbitrary i64 attached to the node. The editor
     // uses this to store the entity id directly on the scene node so picking
@@ -165,6 +180,11 @@ pub struct SceneNode {
     /// changes (tracked via `mat_dirty`).
     pub gpu_material_bg: Option<wgpu::BindGroup>,
     pub gpu_material_uniform_buf: Option<wgpu::Buffer>,
+    /// Alpha-tested shadow-caster bind group for MASK materials (base
+    /// colour + sampler + cutoff). None for opaque casters. Built with
+    /// the material bind group; consumed by the shadow pass's cutout
+    /// pipeline so scene-node foliage casts dappled, not solid, shadows.
+    pub gpu_shadow_cutout_bg: Option<wgpu::BindGroup>,
     pub mat_dirty: bool,
     geo_dirty: bool,
     /// Reduced-detail geometry variants, ordered coarser and coarser
@@ -202,6 +222,7 @@ impl SceneNode {
             visible: true,
             cast_shadow: true,
             receive_shadow: true,
+            gi_only: false,
             parent: 0.0,
             user_data: 0,
             bounds_min: [0.0; 3],
@@ -226,6 +247,7 @@ impl SceneNode {
             occluded: false,
             gpu_material_bg: None,
             gpu_material_uniform_buf: None,
+            gpu_shadow_cutout_bg: None,
             mat_dirty: true,
             geo_dirty: true,
             lods: Vec::new(),
@@ -356,6 +378,23 @@ impl SceneGraph {
         self.nodes.free(handle);
     }
 
+    /// Position + Y-rotation + uniform-scale convenience setter. Exists
+    /// because the full-matrix `set_transform` crosses the FFI as an
+    /// i64 pointer parameter, which Perry 0.5.x rejects for JS arrays;
+    /// six f64 scalars stay register-friendly on every ABI. The yaw
+    /// convention matches `draw_model_rotated`:
+    /// world.x = c·x + s·z, world.z = −s·x + c·z.
+    pub fn set_trs(&mut self, handle: f64, px: f32, py: f32, pz: f32, yaw: f32, scale: f32) {
+        let (s, c) = yaw.sin_cos();
+        let m = [
+            [c * scale, 0.0, -s * scale, 0.0],
+            [0.0, scale, 0.0, 0.0],
+            [s * scale, 0.0, c * scale, 0.0],
+            [px, py, pz, 1.0],
+        ];
+        self.set_transform(handle, m);
+    }
+
     pub fn set_transform(&mut self, handle: f64, matrix: [[f32; 4]; 4]) {
         if let Some(node) = self.nodes.get_mut(handle) {
             // Only dirty shadows when the transform actually changed on
@@ -382,6 +421,19 @@ impl SceneGraph {
                 self.shadow_version = self.shadow_version.wrapping_add(1);
             }
             node.visible = visible;
+        }
+    }
+
+    pub fn set_gi_only(&mut self, handle: f64, gi_only: bool) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            if node.gi_only != gi_only {
+                // Raster participation changes: the shadow map must
+                // re-render without (or with) this caster.
+                if node.cast_shadow && node.visible {
+                    self.shadow_version = self.shadow_version.wrapping_add(1);
+                }
+                node.gi_only = gi_only;
+            }
         }
     }
 
@@ -553,7 +605,16 @@ impl SceneGraph {
         let mut bmax = [f32::MIN; 3];
         let mut any = false;
         for (_h, node) in self.nodes.iter() {
-            if !node.visible || !node.cast_shadow {
+            if !node.visible {
+                continue;
+            }
+            // gi_only proxies never render into the cascades themselves
+            // (see the shadow pass), but they stand in for material-path
+            // geometry that DOES cast — so their bounds must extend the
+            // pancake Z-range. Without this, casters behind the camera's
+            // cascade slice clip out of the ortho volume and their
+            // shadows flicker with camera movement.
+            if !node.gi_only && !node.cast_shadow {
                 continue;
             }
             if node.bounds_min[0] > node.bounds_max[0] {
@@ -612,6 +673,19 @@ impl SceneGraph {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.material.roughness = roughness;
             node.material.metalness = metalness;
+            // Factors live in the material uniform, which is only rebuilt
+            // together with the bind group — without dirtying, factor
+            // changes after the first render never applied.
+            node.mat_dirty = true;
+        }
+    }
+
+    /// glTF MASK alpha cutoff for the node's material (0 = opaque).
+    /// Routes the node through the scene shader's alpha-cutout path.
+    pub fn set_material_alpha_cutoff(&mut self, handle: f64, cutoff: f32) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            node.material.alpha_cutoff = cutoff;
+            node.mat_dirty = true;
         }
     }
 
@@ -1078,10 +1152,11 @@ impl SceneGraph {
                     node.material.roughness,
                     node.material.emissive,
                     node.material.metallic_roughness_texture_idx != 0,
-                    // Scene-graph materials don't yet carry an alpha
-                    // mode — user code builds them via setMaterial(),
-                    // not from glTF. Default to OPAQUE.
-                    0.0,
+                    // MASK cutoff from the node material (0 = opaque).
+                    // attach_model carries it over from the glTF mesh so
+                    // foliage cards keep their cutout + two-sided shading
+                    // + wind sway on the scene-graph path.
+                    node.material.alpha_cutoff,
                 );
                 let bg = renderer.create_scene_material_bg(
                     node.material.texture_idx,
@@ -1093,6 +1168,17 @@ impl SceneGraph {
                 );
                 node.gpu_material_bg = Some(bg);
                 node.gpu_material_uniform_buf = Some(uniform);
+                // MASK materials also get an alpha-tested shadow-caster
+                // bind group so foliage casts dappled shadows on the
+                // scene-graph path (mirrors the cached-model path).
+                node.gpu_shadow_cutout_bg = if node.material.alpha_cutoff > 0.0 {
+                    Some(renderer.create_shadow_cutout_bg(
+                        node.material.texture_idx,
+                        node.material.alpha_cutoff,
+                    ))
+                } else {
+                    None
+                };
                 node.mat_dirty = false;
             }
         }
@@ -1105,7 +1191,7 @@ impl SceneGraph {
         pass: &mut wgpu::RenderPass<'a>,
     ) {
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.indices.is_empty() || !node.in_view_frustum || node.occluded {
+            if !node.visible || node.gi_only || node.indices.is_empty() || !node.in_view_frustum || node.occluded {
                 continue;
             }
             // Active LOD overrides the base buffers for the camera pass
@@ -1135,6 +1221,28 @@ impl SceneGraph {
 
     pub fn node_count(&self) -> usize {
         self.nodes.iter().count()
+    }
+
+    /// Draw list for the planar-reflection probe: every visible node with
+    /// uploaded geometry as (vb, ib, index_count, material_bg, transform).
+    /// Frustum / occlusion flags are intentionally ignored — they were
+    /// computed for the MAIN camera and the mirrored probe camera sees a
+    /// different set. Base geometry only (no LOD swap): the probe is
+    /// half-res and consumed through a perturbed water lookup, where a
+    /// LOD pop would be more visible than the detail it saves.
+    /// (Treats node.transform as world — flat hierarchies.)
+    pub fn reflect_draw_list(&self)
+        -> Vec<(&wgpu::Buffer, &wgpu::Buffer, u32, &wgpu::BindGroup, [[f32; 4]; 4])>
+    {
+        let mut out = Vec::new();
+        for (_handle, node) in self.nodes.iter() {
+            if !node.visible || node.gi_only || node.indices.is_empty() { continue; }
+            let Some(vb) = &node.gpu_vb else { continue };
+            let Some(ib) = &node.gpu_ib else { continue };
+            let Some(mat_bg) = &node.gpu_material_bg else { continue };
+            out.push((vb, ib, node.gpu_index_count, mat_bg, node.transform));
+        }
+        out
     }
 }
 

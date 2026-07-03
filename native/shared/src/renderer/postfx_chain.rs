@@ -4,6 +4,7 @@
 //! cluster by cluster.
 
 use super::*;
+use wgpu::util::DeviceExt;
 
 impl Renderer {
     /// Bloom: progressive downsample (Karis-thresholded first tap)
@@ -44,16 +45,35 @@ impl Renderer {
             (prev, pw as f32, ph as f32, false)
         };
 
-        let bp = BloomParams {
-            params: [1.0 / src_w, 1.0 / src_h, bloom_filter_radius, 1.0],
+        // Threshold in pre-exposure HDR units. The 2.5 reference was tuned
+        // at exposure 1.0 (Sponza), so scale it inversely with the game's
+        // manual exposure to keep bloom triggering at the same DISPLAY
+        // brightness regardless of exposure. Auto-exposure keeps the legacy
+        // constant — 2.5 was tuned against auto-normalised HDR originally.
+        let thr = if self.auto_exposure {
+            2.5
+        } else {
+            2.5 / self.manual_exposure.max(0.05)
         };
-        self.queue.write_buffer(&self.bloom_uniform_buffer, 0, bytemuck::bytes_of(&bp));
+        let bp = BloomParams {
+            params: [1.0 / src_w, 1.0 / src_h, bloom_filter_radius, thr],
+        };
+        // Per-pass uniform buffer. A single shared buffer written with
+        // queue.write_buffer once per pass does NOT work here: all writes
+        // land before the encoder executes at submit, so every pass in the
+        // chain read the LAST write (wrong texel sizes for every mip, and
+        // it would clobber the threshold above).
+        let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bloom_downsample_params"),
+            contents: bytemuck::bytes_of(&bp),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom_downsample_bg"),
             layout: &self.bloom_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.bloom_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],
@@ -102,13 +122,19 @@ impl Renderer {
         let bp = BloomParams {
             params: [1.0 / sw as f32, 1.0 / sh as f32, bloom_filter_radius, 0.0],
         };
-        self.queue.write_buffer(&self.bloom_uniform_buffer, 0, bytemuck::bytes_of(&bp));
+        // Per-pass uniform buffer — see the downsample loop note: a shared
+        // buffer + write_buffer per pass aliases to the LAST write at submit.
+        let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bloom_upsample_params"),
+            contents: bytemuck::bytes_of(&bp),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom_upsample_bg"),
             layout: &self.bloom_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.bloom_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
             ],

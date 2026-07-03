@@ -75,7 +75,7 @@ struct PerView {
   sun_color:      vec4<f32>,    // rgb + 0
 
   // Arrayed lights
-  dir_light_count:   vec4<f32>, // x = count, yzw = 0
+  dir_light_count:   vec4<f32>, // x = count, y = shadows-enabled flag, zw = 0
   dir_lights:        array<DirLight,  8>,
   point_light_count: vec4<f32>,
   point_lights:     array<PointLight, 256>,
