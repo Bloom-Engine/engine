@@ -831,11 +831,18 @@ struct ReflectModelU { mvp: mat4x4<f32>, model: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> u: ReflectModelU;
 
 struct ReflectLight {
-    sun_dir: vec4<f32>,    // xyz dir (travel), w = intensity
+    sun_dir: vec4<f32>,    // xyz dir (TO-sun), w = intensity
     sun_color: vec4<f32>,  // rgb, w unused
     ambient: vec4<f32>,    // rgb, w = intensity
+    cam_pos: vec4<f32>,    // xyz = MAIN camera pos (cascade selection), w unused
+    shadow_splits: vec4<f32>,   // xyz = cascade split distances, w = shadows-enabled
+    shadow_cascades: array<mat4x4<f32>, 3>,
 };
 @group(1) @binding(0) var<uniform> light: ReflectLight;
+@group(1) @binding(1) var refl_shadow_0: texture_depth_2d;
+@group(1) @binding(2) var refl_shadow_1: texture_depth_2d;
+@group(1) @binding(3) var refl_shadow_2: texture_depth_2d;
+@group(1) @binding(4) var refl_shadow_samp: sampler_comparison;
 
 @group(2) @binding(0) var base_tex: texture_2d<f32>;
 @group(2) @binding(1) var base_samp: sampler;
@@ -851,6 +858,7 @@ struct VsOut {
     @location(0) n: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) col: vec4<f32>,
+    @location(3) wpos: vec3<f32>,
 };
 
 @vertex
@@ -860,6 +868,7 @@ fn vs_reflect(in: VsIn) -> VsOut {
     o.n = normalize((u.model * vec4<f32>(in.normal, 0.0)).xyz);
     o.uv = in.uv;
     o.col = in.color;
+    o.wpos = (u.model * vec4<f32>(in.position, 1.0)).xyz;
     return o;
 }
 
@@ -867,6 +876,36 @@ fn srgb_lin(c: vec3<f32>) -> vec3<f32> {
     let lo = c / 12.92;
     let hi = pow(max((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(0.0)), vec3<f32>(2.4));
     return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+// Single-tap cascade shadow for the reflection pass. Cascade selection uses
+// distance from the MAIN camera (the cascades were fit around it; reflected
+// geometry is the same world geometry). Same normal-offset receiver bias as
+// the main pass — texel-proportional push along the surface normal — so the
+// mirrored scene doesn't acne. One tap (no PCF) is enough: the probe is
+// consumed through the water's perturbed half-res lookup.
+fn refl_sun_shadow(wp: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (light.shadow_splits.w < 0.5) { return 1.0; }
+    let dist = length(wp - light.cam_pos.xyz);
+    var c = 2;
+    if (dist <= light.shadow_splits.x) { c = 0; }
+    else if (dist <= light.shadow_splits.y) { c = 1; }
+    var fit = light.shadow_splits.z;
+    if (c == 0) { fit = light.shadow_splits.x; }
+    else if (c == 1) { fit = light.shadow_splits.y; }
+    let dim = f32(textureDimensions(refl_shadow_0).x);
+    let p = wp + n * (2.0 * fit / dim) * 1.5;
+    let clip = light.shadow_cascades[c] * vec4<f32>(p, 1.0);
+    let ndc = clip.xyz / clip.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    let ref_d = ndc.z - 0.001;
+    if (c == 0) { return textureSampleCompareLevel(refl_shadow_0, refl_shadow_samp, uv, ref_d); }
+    if (c == 1) { return textureSampleCompareLevel(refl_shadow_1, refl_shadow_samp, uv, ref_d); }
+    return textureSampleCompareLevel(refl_shadow_2, refl_shadow_samp, uv, ref_d);
 }
 
 @fragment
@@ -877,8 +916,11 @@ fn fs_reflect(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.n);
     // sun_dir is direction-TO-sun (engine convention), so N.L uses +sun_dir.
     let ndl = max(dot(n, normalize(light.sun_dir.xyz)), 0.0);
-    let lit = base * (light.ambient.rgb * light.ambient.w
-                      + light.sun_color.rgb * light.sun_dir.w * ndl);
+    let shadow = refl_sun_shadow(in.wpos, n);
+    // Hemisphere tint on the ambient: up-facing surfaces see more sky.
+    let hemi = 0.75 + 0.25 * clamp(n.y, -1.0, 1.0);
+    let lit = base * (light.ambient.rgb * light.ambient.w * hemi
+                      + light.sun_color.rgb * light.sun_dir.w * ndl * shadow);
     return vec4<f32>(lit, 1.0);   // alpha 1 = 'real reflection here' for the water blend
 }
 ";

@@ -10017,17 +10017,16 @@ impl Renderer {
         // in end_frame_with_scene) so the scene shader's CSM lookup
         // lands on the right cascade map.
         self.lighting_uniforms.shadow_cascade_vps = self.shadow_map.light_vps;
-        // .w carries the shadows-enabled flag. sample_shadow() early-returns
-        // fully-lit when it is 0 — without the gate, disabled shadows left
-        // the shader projecting through stale/identity cascade VPs, whose
-        // NaN/garbage NDC slipped past the bounds check and read as
-        // "occluded": turning shadows OFF visibly DARKENED ambient
-        // (measured on the shooter's house wall, 127 → 83 luma).
+        // .w is the TSR mip-LOD bias slot — owned by the shadow pass's
+        // per-frame upload (shadow_pass.rs), which overwrites this struct
+        // later in the frame anyway. Keep 0.0 here so a frame without a
+        // shadow pass reads a neutral bias. The shadows-enabled flag lives
+        // in dir_light_count.y (see clear_additional_lights), NOT here.
         self.lighting_uniforms.shadow_cascade_splits = [
             self.shadow_map.cascade_splits[0],
             self.shadow_map.cascade_splits[1],
             self.shadow_map.cascade_splits[2],
-            if self.shadow_map.enabled { 1.0 } else { 0.0 },
+            0.0,
         ];
         self.lighting_uniforms.shadow_view_matrix = self.current_view_matrix;
         self.queue.write_buffer(
@@ -10390,7 +10389,14 @@ impl Renderer {
 
     /// Clear all additional lights (called at begin_frame).
     pub fn clear_additional_lights(&mut self) {
-        self.lighting_uniforms.dir_light_count = [0.0; 4];
+        // dir_light_count.y carries the shadows-enabled flag for the shadow
+        // samplers (core sample_shadow + material-path sample_sun_shadow).
+        // Written here because this runs unconditionally every frame before
+        // any lighting upload; .x stays the actual additional-light count.
+        // (shadow_cascade_splits.w is NOT usable for this — it carries the
+        // TSR mip-LOD bias, written by the shadow pass each frame.)
+        let shadows_flag = if self.shadow_map.enabled { 1.0 } else { 0.0 };
+        self.lighting_uniforms.dir_light_count = [0.0, shadows_flag, 0.0, 0.0];
         self.lighting_uniforms.point_light_count = [0.0; 4];
     }
 
@@ -11584,16 +11590,39 @@ impl Renderer {
                     count: None,
                 }],
             });
+            let shadow_tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+                binding, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            };
             let light_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("reflect_light_layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false, min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false, min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    // Shadow cascades + comparison sampler so the mirrored
+                    // scene is sun-shadowed like the real one (the probe
+                    // previously rendered everything fully lit, which made
+                    // water reflections disagree with the scene above them).
+                    shadow_tex_entry(1),
+                    shadow_tex_entry(2),
+                    shadow_tex_entry(3),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                ],
             });
             let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("reflect_scene_shader"),
@@ -11644,14 +11673,22 @@ impl Renderer {
                     }),
                 }],
             });
+            // sun_dir + sun_color + ambient + cam_pos + shadow_splits (5 vec4)
+            // + 3 cascade mat4s = 80 + 192 = 272 bytes.
             let light_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("reflect_light_buf"), size: 48,
+                label: Some("reflect_light_buf"), size: 272,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             let light_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("reflect_light_bg"), layout: &light_layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: light_buf.as_entire_binding() }],
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: light_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                ],
             });
             self.reflect_scene_pipeline = Some(pipeline);
             self.reflect_model_buf = Some(model_buf);
@@ -11659,16 +11696,31 @@ impl Renderer {
             self.reflect_light_buf = Some(light_buf);
             self.reflect_light_bg = Some(light_bg);
         }
-        // Sun/ambient for the reflection shading (same as the main directional).
+        // Sun/ambient + shadow data for the reflection shading (same values
+        // as the main pass, so the mirrored scene is lit AND shadowed like
+        // the real one). shadow_splits.w carries the shadows-enabled flag —
+        // in THIS struct .w is free (no LOD-bias tenant).
         {
             let ld = self.lighting_uniforms.light_dir;
             let lc = self.lighting_uniforms.light_color;
             let amb = self.lighting_uniforms.ambient;
-            let light_data: [f32; 12] = [
-                ld[0], ld[1], ld[2], ld[3],
-                lc[0], lc[1], lc[2], 0.0,
-                amb[0], amb[1], amb[2], amb[3],
-            ];
+            let cam = self.current_camera_pos;
+            let sp = self.lighting_uniforms.shadow_cascade_splits;
+            let shadows_flag = if self.shadow_map.enabled { 1.0 } else { 0.0 };
+            let mut light_data = [0.0f32; 68];
+            light_data[0..4].copy_from_slice(&[ld[0], ld[1], ld[2], ld[3]]);
+            light_data[4..8].copy_from_slice(&[lc[0], lc[1], lc[2], 0.0]);
+            light_data[8..12].copy_from_slice(&[amb[0], amb[1], amb[2], amb[3]]);
+            light_data[12..16].copy_from_slice(&[cam[0], cam[1], cam[2], 0.0]);
+            light_data[16..20].copy_from_slice(&[sp[0], sp[1], sp[2], shadows_flag]);
+            let vps = &self.lighting_uniforms.shadow_cascade_vps;
+            for c in 0..3 {
+                for col in 0..4 {
+                    for row in 0..4 {
+                        light_data[20 + c * 16 + col * 4 + row] = vps[c][col][row];
+                    }
+                }
+            }
             if let Some(buf) = &self.reflect_light_buf {
                 self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&light_data));
             }

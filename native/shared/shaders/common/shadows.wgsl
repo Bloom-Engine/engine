@@ -67,10 +67,11 @@ fn sample_shadow_cascade(
 // one line. Requires `view` (PerView) to be in scope — any shader that
 // includes material_abi.wgsl already has it.
 fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
-  // shadow_splits.w carries the shadows-enabled flag (mirrors the core
-  // path's sample_shadow gate): disabled shadows must read fully lit, not
+  // dir_light_count.y carries the shadows-enabled flag (mirrors the core
+  // path's sample_shadow gate; shadow_splits.w is the TSR mip-LOD bias, so
+  // it can't double as a flag): disabled shadows must read fully lit, not
   // project through stale cascade VPs whose garbage NDC reads as occluded.
-  if (view.shadow_splits.w < 0.5) {
+  if (view.dir_light_count.y < 0.5) {
     return 1.0;
   }
   let cam = view.camera_pos.xyz;
