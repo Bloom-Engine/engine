@@ -25,6 +25,7 @@ declare function bloom_compile_material_additive(source: number): number;
 declare function bloom_compile_material_cutout(source: number): number;
 declare function bloom_compile_material_instanced(source: number): number;
 declare function bloom_create_instance_buffer(dataPtr: any, instanceCount: number): number;
+declare function bloom_create_instance_buffer_scratch(instanceCount: number): number;
 declare function bloom_submit_material_draw_instanced(material: number, meshHandle: number, meshIdx: number, instanceBuffer: number, instanceCount: number): void;
 declare function bloom_destroy_instance_buffer(handle: number): void;
 declare function bloom_create_planar_reflection(planeY: number, normalX: number, normalY: number, normalZ: number, resolution: number): number;
@@ -362,7 +363,14 @@ export function compileMaterialInstanced(wgslSource: string): number {
 /// `.length` reports the literal-init size, not the post-push count
 /// (a Perry codegen bug — see `feedback_perry_array_push.md`).
 export function createInstanceBuffer(data: number[], instanceCount: number): number {
-  return bloom_create_instance_buffer(data as any, instanceCount);
+  // Perry 0.5.x rejects JS arrays passed into i64 pointer params, so the
+  // instance data goes through the all-f64 mesh scratch instead (same fix
+  // as createMesh). 9 floats per instance; instance buffers are built once
+  // at startup, so the per-float FFI calls are a one-time cost.
+  bloom_mesh_scratch_reset();
+  const n = instanceCount * 9;
+  for (let i = 0; i < n; i++) bloom_mesh_scratch_push_f32(data[i]);
+  return bloom_create_instance_buffer_scratch(instanceCount);
 }
 
 /// EN-001 — draw `mesh` (a single primitive at `meshIdx`)
