@@ -1956,9 +1956,26 @@ impl Renderer {
             ..Default::default()
         });
 
+        // Joint-matrix bind group layout for GPU skinning. Created here (ahead
+        // of its buffer/bind group below) because the shadow map's skinned
+        // caster pipeline needs this layout at construction time.
+        let joint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("joint_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         // Shadow map needs to be created before the lighting bind
         // group since the bind group binds the shadow depth view.
-        let shadow_map = crate::shadows::ShadowMap::new(&device, Vertex3D::desc());
+        let shadow_map = crate::shadows::ShadowMap::new(&device, Vertex3D::desc(), &joint_layout);
 
         let lighting_bind_group = lighting::create_lighting_bind_group(
             &device,
@@ -2151,19 +2168,8 @@ impl Renderer {
         });
 
         // --- Joint matrix buffer for GPU skinning ---
-        let joint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("joint_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        // (`joint_layout` is created earlier, above the shadow map, because the
+        // skinned shadow pipeline needs it at construction time.)
         // 1024 joints × 64 bytes per mat4 = 65536 bytes.
         // Sized so multiple skinned models can coexist in one frame —
         // each updateModelAnimation stages its pose into a slice of

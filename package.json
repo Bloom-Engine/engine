@@ -113,6 +113,25 @@
           "returns": "void"
         },
         {
+          "name": "bloom_attach_hwnd",
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_resize",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_window_should_close",
           "params": [],
           "returns": "f64"

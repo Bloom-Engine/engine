@@ -96,6 +96,56 @@ fn fs_shadow_cutout(in: VsOut) {
 }
 ";
 
+/// Skinned shadow shader for animated characters (player, enemies). Skinned
+/// models can't be cached (the model cache stores rest-pose GPU buffers), so
+/// they're submitted through the immediate-mode 3D batch storing *rest-pose*
+/// vertices, with world placement living entirely in the per-frame joint
+/// matrices. The plain `vs_shadow` doesn't skin, so it would render those
+/// characters as a rest pose at the world origin — i.e. no shadow under their
+/// feet. This variant skins per-vertex (same math as the main scene shader) so
+/// characters cast a real, posed shadow. The branch on total weight means the
+/// non-skinned verts that share the immediate-mode batch (ground cube, baked
+/// static models) still transform by the model matrix as before.
+pub const SHADOW_SHADER_SKINNED: &str = "
+struct ShadowUniforms {
+    light_vp: mat4x4<f32>,
+    model: mat4x4<f32>,
+};
+@group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
+
+struct JointMatrices { matrices: array<mat4x4<f32>, 1024> };
+@group(1) @binding(0) var<uniform> joints: JointMatrices;
+
+struct ShadowVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) joints: vec4<f32>,
+    @location(5) weights: vec4<f32>,
+};
+
+@vertex
+fn vs_shadow_skinned(in: ShadowVertexInput) -> @builtin(position) vec4<f32> {
+    let total_weight = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
+    var pos = vec4<f32>(in.position, 1.0);
+    if (total_weight > 0.01) {
+        let j0 = u32(in.joints.x); let j1 = u32(in.joints.y);
+        let j2 = u32(in.joints.z); let j3 = u32(in.joints.w);
+        // Joint matrices already bake scale + world position + rotation, so the
+        // skinned result is world-space; the model matrix is identity for the
+        // immediate-mode batch and is intentionally not re-applied here.
+        pos = joints.matrices[j0] * pos * in.weights.x
+            + joints.matrices[j1] * pos * in.weights.y
+            + joints.matrices[j2] * pos * in.weights.z
+            + joints.matrices[j3] * pos * in.weights.w;
+        return shadow_u.light_vp * pos;
+    }
+    let world_pos = shadow_u.model * pos;
+    return shadow_u.light_vp * world_pos;
+}
+";
+
 /// Uniform data for the shadow pass.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -115,6 +165,10 @@ pub struct ShadowMap {
     /// Alpha-tested variant for cutout foliage casters. Opaque casters keep
     /// using `pipeline` (byte-identical to before this was added).
     pub pipeline_cutout: wgpu::RenderPipeline,
+    /// Skinning-aware variant for the immediate-mode batch (animated
+    /// characters). Binds the joint-matrix buffer at group 1 and skins
+    /// per-vertex so player/enemies cast a real posed shadow.
+    pub pipeline_skinned: wgpu::RenderPipeline,
     /// Group-1 layout for `pipeline_cutout`: base-colour tex + sampler + a
     /// cutoff uniform. Per-mesh bind groups are built against this in
     /// `cache_model_if_static`.
@@ -157,7 +211,11 @@ pub struct ShadowMap {
 }
 
 impl ShadowMap {
-    pub fn new(device: &wgpu::Device, vertex_layout: wgpu::VertexBufferLayout<'static>) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        vertex_layout: wgpu::VertexBufferLayout<'static>,
+        joint_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         // Create NUM_CASCADES depth textures
         let mut depth_textures_vec: Vec<wgpu::Texture> = Vec::new();
         let mut depth_views_vec: Vec<wgpu::TextureView> = Vec::new();
@@ -393,7 +451,7 @@ impl ShadowMap {
             vertex: wgpu::VertexState {
                 module: &cutout_shader,
                 entry_point: Some("vs_shadow_cutout"),
-                buffers: &[vertex_layout],
+                buffers: &[vertex_layout.clone()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -420,6 +478,46 @@ impl ShadowMap {
             cache: None,
         });
 
+        // Skinned (animated-character) shadow pipeline. Group 0 = the shared
+        // shadow uniforms (light_vp + model, dynamic offset); group 1 = the
+        // joint-matrix buffer. Depth-only, same bias as the opaque path.
+        let skinned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow_shader_skinned"),
+            source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER_SKINNED.into()),
+        });
+        let skinned_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow_skinned_pipeline_layout"),
+            bind_group_layouts: &[Some(&uniform_layout), Some(joint_layout)],
+            immediate_size: 0,
+        });
+        let pipeline_skinned = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow_pipeline_skinned"),
+            layout: Some(&skinned_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &skinned_shader,
+                entry_point: Some("vs_shadow_skinned"),
+                buffers: &[vertex_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: None, // depth only
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 1, slope_scale: 1.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Self {
             depth_textures,
             depth_views,
@@ -428,6 +526,7 @@ impl ShadowMap {
             bind_group,
             pipeline,
             pipeline_cutout,
+            pipeline_skinned,
             cutout_tex_layout,
             uniform_buffer,
             uniform_bind_group,

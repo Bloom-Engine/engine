@@ -109,6 +109,12 @@ impl Renderer {
             // Index into `cutout_bgs` for an alpha-tested caster (cutout
             // foliage), or -1 for an opaque caster (plain depth pipeline).
             cutout_idx: i32,
+            // True only for the immediate-mode batch, which may contain skinned
+            // characters. Rendered with the skinning-aware shadow pipeline so
+            // animated player/enemies cast a posed shadow instead of a rest
+            // pose at the origin. (Mixed batch: non-skinned verts in it still
+            // transform by the model matrix via the shader's weight branch.)
+            skinned: bool,
         }
         let mut shadow_nodes: Vec<ShadowDrawEntry> = Vec::new();
         let mut shadow_vbs: Vec<&wgpu::Buffer> = Vec::new();
@@ -131,6 +137,7 @@ impl Renderer {
                 wmin: node.world_bounds_min,
                 wmax: node.world_bounds_max,
                 cutout_idx: -1,
+                skinned: false,
             });
         }
 
@@ -151,6 +158,7 @@ impl Renderer {
                 wmin: [1.0, 1.0, 1.0],
                 wmax: [-1.0, -1.0, -1.0],
                 cutout_idx: -1,
+                skinned: true,
             });
         }
 
@@ -177,6 +185,7 @@ impl Renderer {
                         wmin: [1.0, 1.0, 1.0],
                         wmax: [-1.0, -1.0, -1.0],
                         cutout_idx,
+                        skinned: false,
                     });
                 }
             }
@@ -246,27 +255,34 @@ impl Renderer {
                     multiview_mask: None,
                 });
 
-                // Track the bound pipeline so we only switch when a caster's
-                // opaque/cutout kind changes (cutout casters are typically
-                // grouped at the tail, so this is usually one switch).
-                let mut cur_cutout = false;
+                // Pipeline kind per caster: 0 opaque, 1 cutout, 2 skinned.
+                // Track the bound kind so we only switch when it changes
+                // (cutout/skinned casters are grouped at the tail, so this is
+                // usually one or two switches).
+                let mut cur_kind: u8 = 0;
                 shadow_pass.set_pipeline(&self.shadow_map.pipeline);
 
                 for (slot, &ei) in entries.iter().take(count).enumerate() {
                     let entry = &shadow_nodes[ei];
                     let offset = (slot * stride) as u32;
-                    let is_cutout = entry.cutout_idx >= 0;
-                    if is_cutout != cur_cutout {
-                        shadow_pass.set_pipeline(if is_cutout {
-                            &self.shadow_map.pipeline_cutout
-                        } else {
-                            &self.shadow_map.pipeline
+                    let kind: u8 = if entry.skinned { 2 }
+                        else if entry.cutout_idx >= 0 { 1 }
+                        else { 0 };
+                    if kind != cur_kind {
+                        shadow_pass.set_pipeline(match kind {
+                            1 => &self.shadow_map.pipeline_cutout,
+                            2 => &self.shadow_map.pipeline_skinned,
+                            _ => &self.shadow_map.pipeline,
                         });
-                        cur_cutout = is_cutout;
+                        cur_kind = kind;
                     }
                     shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[offset]);
-                    if is_cutout {
+                    if kind == 1 {
                         shadow_pass.set_bind_group(1, cutout_bgs[entry.cutout_idx as usize], &[]);
+                    } else if kind == 2 {
+                        // Joint matrices for skinning the animated characters in
+                        // the immediate-mode batch.
+                        shadow_pass.set_bind_group(1, &self.joint_bind_group, &[]);
                     }
                     shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
                     shadow_pass.set_index_buffer(shadow_ibs[entry.ib_idx].slice(..), wgpu::IndexFormat::Uint32);
