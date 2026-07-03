@@ -1817,6 +1817,18 @@
           "returns": "void"
         },
         {
+          "name": "bloom_scene_set_trs",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_scene_update_geometry",
           "params": [
             "f64",

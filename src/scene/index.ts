@@ -27,6 +27,7 @@ declare function bloom_scene_set_cast_shadow(handle: number, cast: number): void
 declare function bloom_scene_set_receive_shadow(handle: number, receive: number): void;
 declare function bloom_scene_set_parent(handle: number, parent: number): void;
 declare function bloom_scene_set_transform(handle: number, matrix: number): void;
+declare function bloom_scene_set_trs(handle: number, px: number, py: number, pz: number, yaw: number, scale: number): void;
 declare function bloom_scene_update_geometry(
   handle: number,
   vertices: number,
@@ -184,9 +185,29 @@ export function setSceneNodeParent(handle: SceneNodeHandle, parent: SceneNodeHan
 /**
  * Set the 4x4 transform matrix for a scene node.
  * Matrix is in column-major order (same as Three.js/glm).
+ *
+ * NOTE: this crosses the FFI as an array-into-i64-pointer, which Perry
+ * 0.5.x rejects at runtime ("Expected safe integer for native i64
+ * parameter"). Until the scratch-buffer migration lands, prefer
+ * `setSceneNodeTrs` for position/yaw/scale placement — it is all-scalar
+ * and works on every Perry.
  */
 export function setSceneNodeTransform(handle: SceneNodeHandle, matrix: number[]): void {
   bloom_scene_set_transform(handle, matrix as any);
+}
+
+/**
+ * Place a scene node with position + Y-axis rotation + uniform scale.
+ * All-scalar FFI (Perry 0.5.x safe). Yaw is radians, same convention as
+ * `drawModelRotated`.
+ */
+export function setSceneNodeTrs(
+  handle: SceneNodeHandle,
+  x: number, y: number, z: number,
+  yaw: number = 0,
+  scale: number = 1,
+): void {
+  bloom_scene_set_trs(handle, x, y, z, yaw, scale);
 }
 
 /**

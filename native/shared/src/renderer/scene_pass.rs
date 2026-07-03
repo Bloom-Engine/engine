@@ -183,7 +183,7 @@ impl Renderer {
     // sampleable when materials run. No-op when no probes are
     // registered or no opaque material draws are queued.
     profiler.begin("planar_reflections");
-    self.dispatch_planar_reflections(&mut *encoder);
+    self.dispatch_planar_reflections(&mut *encoder, scene);
     profiler.end("planar_reflections");
 
     // Phase 2c — schedule the material pass through the render

@@ -8757,6 +8757,36 @@ impl Renderer {
         })
     }
 
+    /// Alpha-tested shadow-caster bind group (base colour + sampler +
+    /// cutoff) for the shadow pass's cutout pipeline. Same construction the
+    /// cached-model path uses; exposed so scene-graph nodes with MASK
+    /// materials cast dappled shadows instead of solid card silhouettes.
+    /// The cutoff uniform buffer stays alive via the bind group.
+    pub fn create_shadow_cutout_bg(&self, base_color_idx: u32, cutoff: f32) -> wgpu::BindGroup {
+        use wgpu::util::DeviceExt;
+        let cutoff_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shadow_cutout_cutoff"),
+            contents: bytemuck::cast_slice(&[cutoff, 0.0f32, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bi = base_color_idx as usize;
+        let base_tex = if base_color_idx == 0 || bi >= self.textures.len() {
+            &self.textures[0]
+        } else {
+            &self.textures[bi]
+        };
+        let base_view = base_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow_cutout_bg"),
+            layout: &self.shadow_map.cutout_tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&base_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: cutoff_buf.as_entire_binding() },
+            ],
+        })
+    }
+
     /// Build a scene-pipeline material bind group.
     ///
     /// Each of the four texture indices can be zero to mean 'not
@@ -11567,16 +11597,23 @@ impl Renderer {
     pub fn dispatch_planar_reflections(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
+        scene: &crate::scene::SceneGraph,
     ) {
         if self.planar_probes.iter().all(|p| p.is_none()) { return; }
-        if self.material_system.commands.is_empty() && self.model_draw_commands.is_empty() { return; }
+        // Scene-graph nodes render into the probe too (they share the
+        // Vertex3D layout and the scene material bind-group layout), so a
+        // fully retained-mode game gets real water reflections as well.
+        let scene_draws = scene.reflect_draw_list();
+        if self.material_system.commands.is_empty()
+            && self.model_draw_commands.is_empty()
+            && scene_draws.is_empty() { return; }
 
         // EN-011 — lazily build the single-target reflection pipeline + buffers
         // used to render cached models (trees/house) into the probe with a
         // mirrored VP. Owned layouts: g0 dynamic per-draw model uniform, g1
         // sun/ambient; g2 reuses the scene material layout for base colour.
         const REFLECT_STRIDE: u64 = 256;
-        const REFLECT_MAX_DRAWS: usize = 600;
+        const REFLECT_MAX_DRAWS: usize = 1024;
         if self.reflect_scene_pipeline.is_none() {
             let model_dyn_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("reflect_model_dyn_layout"),
@@ -11884,7 +11921,11 @@ impl Renderer {
             // Write each cached-model draw's [mirror_mvp, model] into the
             // dynamic reflection uniform buffer up front (queue writes
             // happen-before the encoded pass), and record the draw list.
+            // Scene-graph nodes append after the cached models in the same
+            // slot space — creation order decides who survives the cap, so
+            // games should create hero geometry before filler (grass).
             let mut reflect_draws: Vec<(u64, usize, u32)> = Vec::new();
+            let mut node_slots: Vec<(usize, u32)> = Vec::new();
             if let Some(model_buf) = &self.reflect_model_buf {
                 for cmd in self.model_draw_commands.iter() {
                     let slot = reflect_draws.len();
@@ -11895,6 +11936,16 @@ impl Renderer {
                     data[64..128].copy_from_slice(bytemuck::bytes_of(&cmd.model));
                     self.queue.write_buffer(model_buf, slot as u64 * REFLECT_STRIDE, &data);
                     reflect_draws.push((cmd.cache_handle, cmd.mesh_idx, slot as u32));
+                }
+                for (i, (_vb, _ib, _ic, _bg, model)) in scene_draws.iter().enumerate() {
+                    let slot = reflect_draws.len() + node_slots.len();
+                    if slot >= REFLECT_MAX_DRAWS { break; }
+                    let mirror_mvp = mat4_multiply(mirror_vp, *model);
+                    let mut data = [0u8; 128];
+                    data[0..64].copy_from_slice(bytemuck::bytes_of(&mirror_mvp));
+                    data[64..128].copy_from_slice(bytemuck::bytes_of(model));
+                    self.queue.write_buffer(model_buf, slot as u64 * REFLECT_STRIDE, &data);
+                    node_slots.push((i, slot as u32));
                 }
             }
 
@@ -11964,7 +12015,7 @@ impl Renderer {
                 if let (Some(rp), Some(rmbg), Some(rlbg)) =
                     (refl_pipeline, refl_model_bg, refl_light_bg)
                 {
-                    if !reflect_draws.is_empty() {
+                    if !reflect_draws.is_empty() || !node_slots.is_empty() {
                         pass.set_pipeline(rp);
                         pass.set_bind_group(1, rlbg, &[]);
                         for (handle, midx, slot) in &reflect_draws {
@@ -11978,6 +12029,17 @@ impl Renderer {
                                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                                 }
                             }
+                        }
+                        // Scene-graph nodes: same pipeline — node geometry is
+                        // Vertex3D and node material bind groups share the
+                        // scene material layout the pipeline's g2 expects.
+                        for (i, slot) in &node_slots {
+                            let (vb, ib, index_count, mat_bg, _model) = &scene_draws[*i];
+                            pass.set_bind_group(0, rmbg, &[*slot * REFLECT_STRIDE as u32]);
+                            pass.set_bind_group(2, *mat_bg, &[]);
+                            pass.set_vertex_buffer(0, vb.slice(..));
+                            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..*index_count, 0, 0..1);
                         }
                     }
                 }

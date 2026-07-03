@@ -129,6 +129,12 @@ impl Renderer {
             let vb_idx = shadow_vbs.len();
             shadow_vbs.push(vb);
             shadow_ibs.push(ib);
+            // MASK-material nodes carry an alpha-test shadow bind group so
+            // foliage casts dappled shadows (same as the cached-model path).
+            let cutout_idx = match &node.gpu_shadow_cutout_bg {
+                Some(bg) => { let i = cutout_bgs.len(); cutout_bgs.push(bg); i as i32 }
+                None => -1,
+            };
             shadow_nodes.push(ShadowDrawEntry {
                 vb_idx,
                 ib_idx: vb_idx,
@@ -136,7 +142,7 @@ impl Renderer {
                 transform: node.transform,
                 wmin: node.world_bounds_min,
                 wmax: node.world_bounds_max,
-                cutout_idx: -1,
+                cutout_idx,
                 skinned: false,
             });
         }
