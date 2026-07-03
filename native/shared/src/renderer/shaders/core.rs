@@ -190,8 +190,15 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
     let vel = (curr_ndc - prev_ndc) * 0.5;
     // Immediate-mode 3D draws (drawCube etc.) aren't PBR — output
     // 0 metallic / 1 roughness so SSR doesn't try to reflect them.
+    //
+    // Alpha comes from the TINT only. Game textures routinely carry a
+    // non-opacity alpha channel (Unvanquished armor packs a gloss mask
+    // there), and this batch also renders CPU-skinned characters — the
+    // player turned semi-transparent through its gloss mask when texture
+    // alpha fed the blend. Deliberate fades still work via tint alpha;
+    // untextured effect quads bind the white texture (alpha 1) anyway.
     return Fs3DOut(
-        vec4<f32>(tex_color.rgb * in.color.rgb * lit, tex_color.a * in.color.a),
+        vec4<f32>(tex_color.rgb * in.color.rgb * lit, in.color.a),
         vec2<f32>(0.0, 1.0),
         vel,
         vec4<f32>(0.0),
@@ -1075,8 +1082,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let prev_ndc = in.prev_clip.xy / in.prev_clip.w;
     let vel = (curr_ndc - prev_ndc) * 0.5;
 
+    // glTF OPAQUE materials (alpha_cutoff == 0) ignore texture alpha by
+    // spec — armor/gloss masks stored in .a must not make the mesh
+    // translucent. MASK materials keep the sampled alpha (post-discard)
+    // for soft edges. Tint alpha survives so games can fade models.
+    let out_alpha = select(in.color.a, base_alpha, alpha_cutoff > 0.0);
+
     return SceneOut(
-        vec4<f32>(hdr, base_alpha),
+        vec4<f32>(hdr, out_alpha),
         vec2<f32>(metallic, roughness),
         vel,
         // albedo.rgb: base color (SSGI bounce modulation).
