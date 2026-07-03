@@ -1845,6 +1845,14 @@
           "returns": "void"
         },
         {
+          "name": "bloom_scene_set_gi_only",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_scene_set_receive_shadow",
           "params": [
             "f64",

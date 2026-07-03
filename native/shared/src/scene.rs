@@ -86,6 +86,16 @@ pub struct SceneNode {
     pub visible: bool,
     pub cast_shadow: bool,
     pub receive_shadow: bool,
+    /// GI-proxy flag: the node feeds every global-illumination input
+    /// (BLAS/TLAS, mesh cards, SDF clipmap, world triangles) but is
+    /// skipped by the raster consumers — main scene render, planar
+    /// reflections, and the sun-shadow pass. Games whose world renders
+    /// through the material system (no scene nodes) register invisible
+    /// duplicates of their big static geometry with this flag so SSGI
+    /// picks up off-screen bounce from walls/terrain the screen-space
+    /// trace can't see. Keep `visible = true` on such nodes — the GI
+    /// feeds all filter on `visible`.
+    pub gi_only: bool,
     pub parent: f64,
     // Editor user data — an arbitrary i64 attached to the node. The editor
     // uses this to store the entity id directly on the scene node so picking
@@ -212,6 +222,7 @@ impl SceneNode {
             visible: true,
             cast_shadow: true,
             receive_shadow: true,
+            gi_only: false,
             parent: 0.0,
             user_data: 0,
             bounds_min: [0.0; 3],
@@ -413,6 +424,19 @@ impl SceneGraph {
         }
     }
 
+    pub fn set_gi_only(&mut self, handle: f64, gi_only: bool) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            if node.gi_only != gi_only {
+                // Raster participation changes: the shadow map must
+                // re-render without (or with) this caster.
+                if node.cast_shadow && node.visible {
+                    self.shadow_version = self.shadow_version.wrapping_add(1);
+                }
+                node.gi_only = gi_only;
+            }
+        }
+    }
+
     pub fn set_cast_shadow(&mut self, handle: f64, cast: bool) {
         if let Some(node) = self.nodes.get_mut(handle) {
             if node.visible && node.cast_shadow != cast {
@@ -581,7 +605,16 @@ impl SceneGraph {
         let mut bmax = [f32::MIN; 3];
         let mut any = false;
         for (_h, node) in self.nodes.iter() {
-            if !node.visible || !node.cast_shadow {
+            if !node.visible {
+                continue;
+            }
+            // gi_only proxies never render into the cascades themselves
+            // (see the shadow pass), but they stand in for material-path
+            // geometry that DOES cast — so their bounds must extend the
+            // pancake Z-range. Without this, casters behind the camera's
+            // cascade slice clip out of the ortho volume and their
+            // shadows flicker with camera movement.
+            if !node.gi_only && !node.cast_shadow {
                 continue;
             }
             if node.bounds_min[0] > node.bounds_max[0] {
@@ -1158,7 +1191,7 @@ impl SceneGraph {
         pass: &mut wgpu::RenderPass<'a>,
     ) {
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.indices.is_empty() || !node.in_view_frustum || node.occluded {
+            if !node.visible || node.gi_only || node.indices.is_empty() || !node.in_view_frustum || node.occluded {
                 continue;
             }
             // Active LOD overrides the base buffers for the camera pass
@@ -1203,7 +1236,7 @@ impl SceneGraph {
     {
         let mut out = Vec::new();
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.indices.is_empty() { continue; }
+            if !node.visible || node.gi_only || node.indices.is_empty() { continue; }
             let Some(vb) = &node.gpu_vb else { continue };
             let Some(ib) = &node.gpu_ib else { continue };
             let Some(mat_bg) = &node.gpu_material_bg else { continue };

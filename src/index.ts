@@ -116,6 +116,7 @@ export type { VirtualJoystick, VirtualButton } from './mobile/index';
 export {
   createSceneNode, destroySceneNode,
   setSceneNodeVisible, setSceneNodeCastShadow, setSceneNodeReceiveShadow,
+  setSceneNodeGiOnly,
   setSceneNodeParent, setSceneNodeTransform,
   updateSceneNodeGeometry,
   setSceneNodeColor, setSceneNodePbr, setSceneNodeTexture, setSceneNodeWaterMaterial, pickSceneAll,

@@ -23,6 +23,7 @@
 declare function bloom_scene_create_node(): number;
 declare function bloom_scene_destroy_node(handle: number): void;
 declare function bloom_scene_set_visible(handle: number, visible: number): void;
+declare function bloom_scene_set_gi_only(handle: number, gi_only: number): void;
 declare function bloom_scene_set_cast_shadow(handle: number, cast: number): void;
 declare function bloom_scene_set_receive_shadow(handle: number, receive: number): void;
 declare function bloom_scene_set_parent(handle: number, parent: number): void;
@@ -173,6 +174,22 @@ export function setSceneNodeCastShadow(handle: SceneNodeHandle, cast: boolean): 
  */
 export function setSceneNodeReceiveShadow(handle: SceneNodeHandle, receive: boolean): void {
   bloom_scene_set_receive_shadow(handle, receive ? 1 : 0);
+}
+
+/**
+ * Mark a node as a GI proxy: it feeds the global-illumination inputs
+ * (ray-tracing BLAS/TLAS, mesh cards, SDF clipmap) but is skipped by the
+ * main render, planar reflections, and the sun-shadow pass.
+ *
+ * Use this when your world renders through the material system (custom
+ * WGSL materials, no scene nodes): register invisible duplicates of the
+ * big static geometry — terrain, buildings, tree trunks — so SSGI picks
+ * up bounce light from surfaces that are off-screen. Set an approximate
+ * flat base colour via setSceneNodeMaterialPbr so the bounce carries the
+ * right hue; leave the node visible (the flag handles exclusion).
+ */
+export function setSceneNodeGiOnly(handle: SceneNodeHandle, giOnly: boolean): void {
+  bloom_scene_set_gi_only(handle, giOnly ? 1 : 0);
 }
 
 /**

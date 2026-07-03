@@ -53,6 +53,18 @@ macro_rules! __bloom_ffi_scene {
         })
         }
 
+        // bloom_scene_set_gi_only — mark a node as a GI proxy: it feeds
+        // BLAS/TLAS, mesh cards, and the SDF clipmap (SSGI off-screen
+        // bounce) but is skipped by the main render, planar reflections,
+        // and the sun-shadow pass. For material-system games whose world
+        // never becomes scene nodes.
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_set_gi_only(handle: f64, gi_only: f64) {
+            $crate::ffi::guard("bloom_scene_set_gi_only", move || {
+                engine().scene.set_gi_only(handle, gi_only != 0.0);
+        })
+        }
+
         // bloom_scene_set_receive_shadow  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_scene_set_receive_shadow(handle: f64, receive: f64) {
