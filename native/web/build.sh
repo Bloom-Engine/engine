@@ -22,6 +22,18 @@ WEB_CRATE="$SCRIPT_DIR"
 OUTPUT_DIR="${2:-$ENGINE_DIR/dist/web}"
 GAME_FILE="$1"
 
+# Resolve the game file to an absolute path NOW, while still in the caller's
+# working directory — the build cd's into the web crate before compiling, so a
+# relative path like `examples/pong/main.ts` would otherwise no longer resolve.
+if [ -n "$GAME_FILE" ]; then
+  if [ -f "$GAME_FILE" ]; then
+    GAME_FILE="$(cd "$(dirname "$GAME_FILE")" && pwd)/$(basename "$GAME_FILE")"
+  else
+    echo "ERROR: game file not found: $GAME_FILE"
+    exit 1
+  fi
+fi
+
 echo "=== Bloom Web Build ==="
 echo ""
 
@@ -45,6 +57,7 @@ else
 fi
 
 # 3. Compile game (if provided)
+PERRY_HTML=""
 if [ -n "$GAME_FILE" ] && [ -f "$GAME_FILE" ]; then
   echo "[3/4] Compiling game: $GAME_FILE"
 
@@ -59,8 +72,14 @@ if [ -n "$GAME_FILE" ] && [ -f "$GAME_FILE" ]; then
     exit 1
   fi
 
-  $PERRY "$GAME_FILE" --target wasm -o "/tmp/bloom_game.html"
-  echo "  Game compiled to WASM"
+  # Perry emits a self-contained HTML carrying the game WASM (base64) plus its
+  # full runtime bridge (the ~280 `rt`-namespace host functions + NaN-boxing +
+  # closure dispatch). build.sh later splices the Bloom engine bootstrap into it.
+  # Use a temp dir (portable across GNU/BSD mktemp) so cleanup is a single rm.
+  PERRY_TMP="$(mktemp -d)"
+  PERRY_HTML="$PERRY_TMP/game.html"
+  $PERRY "$GAME_FILE" --target wasm -o "$PERRY_HTML"
+  echo "  Game compiled to WASM ($PERRY_HTML)"
 else
   echo "[3/4] No game file specified, skipping game compilation"
 fi
@@ -72,10 +91,21 @@ mkdir -p "$OUTPUT_DIR"
 # Copy Bloom WASM package
 cp -r "$WEB_CRATE/pkg" "$OUTPUT_DIR/pkg"
 
-# Copy HTML template and glue
-cp "$WEB_CRATE/index.html" "$OUTPUT_DIR/index.html"
+# Engine bootstrap + Jolt bridge are needed by both the game and engine-only pages.
 cp "$WEB_CRATE/bloom_glue.js" "$OUTPUT_DIR/bloom_glue.js"
 cp "$WEB_CRATE/jolt_bridge.js" "$OUTPUT_DIR/jolt_bridge.js"
+
+if [ -n "$PERRY_HTML" ]; then
+  # Game build: splice the Bloom bootstrap into Perry's HTML and gate the game's
+  # bootPerryWasm() call on engine readiness → dist/web/index.html.
+  python3 "$WEB_CRATE/splice_game.py" "$PERRY_HTML" "$OUTPUT_DIR/index.html"
+  rm -rf "$PERRY_TMP"
+  echo "  Spliced game + engine into index.html"
+else
+  # No game: ship the engine-only standalone page.
+  cp "$WEB_CRATE/index.html" "$OUTPUT_DIR/index.html"
+  echo "  Copied engine-only index.html (no game compiled)"
+fi
 
 # Copy game assets (if game directory has an assets/ folder)
 if [ -n "$GAME_FILE" ]; then

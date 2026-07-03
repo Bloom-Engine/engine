@@ -35,6 +35,16 @@ pub fn bloom_is_initialized() -> f64 {
     unsafe { if ENGINE.get().is_some() { 1.0 } else { 0.0 } }
 }
 
+/// Host-surface attach (PerryTS/perry#5519). Not applicable on web: the
+/// engine builds its surface from the `bloom-canvas` DOM element in
+/// `bloom_init_window`, and a wasm module can't be handed a native view
+/// pointer. Present for FFI-surface uniformity; always returns 0.0 so web
+/// hosts use the canvas-based `bloom_init_window` path instead.
+#[wasm_bindgen]
+pub fn bloom_attach_native(_handle: f64, _width: f64, _height: f64) -> f64 {
+    0.0
+}
+
 #[wasm_bindgen]
 pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) {
     // Set up panic hook for better error messages in the browser console

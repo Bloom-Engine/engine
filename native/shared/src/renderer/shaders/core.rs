@@ -847,6 +847,15 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         lit += base_color * lighting.light_color.rgb * lighting.light_dir.w * trans;
     }
 
+    // Foliage backlit transmission — sun bleeding THROUGH alpha-cut leaf cards
+    // (the bright rim glow when the sun is behind a tree). Gated on the
+    // alpha-cutoff so only cut-out foliage materials get it; opaque surfaces
+    // (cutoff == 0) are unaffected. Matches shade_foliage's transmission term.
+    if (alpha_cutoff > 0.0) {
+        let trans = pow(max(dot(v, -legacy_dir), 0.0), 3.0) * 0.85;
+        lit += base_color * lighting.light_color.rgb * lighting.light_dir.w * trans;
+    }
+
     let dir_count = u32(lighting.dir_light_count.x);
     for (var i = 0u; i < dir_count; i++) {
         let dl = lighting.dir_lights[i];

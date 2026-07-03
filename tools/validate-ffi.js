@@ -173,6 +173,20 @@ for (const platform of PLATFORMS) {
     'bloom_take_screenshot',        // no fs — needs a bytes-returning design
     'bloom_set_env_clear_from_hdr', // no fs — needs a _bytes variant
     'bloom_dump_shadow_map',        // debug capture, no fs on wasm
+    // Native host-window embed (#70) — N/A on web (no HWND; web builds its
+    // surface from the canvas id). bloom_attach_native has a web no-op stub.
+    'bloom_attach_hwnd',
+    // Pointer-taking mesh scratch buffers (#69) — same cross-module WASM
+    // linear-memory bridge TODO as bloom_scene_set_lod.
+    'bloom_create_mesh_scratch',
+    'bloom_mesh_scratch_reset',
+    'bloom_mesh_scratch_push_f32',
+    'bloom_mesh_scratch_push_u32',
+    // Art-direction post-FX controls (#69) not yet wired in the web crate.
+    'bloom_set_bloom_intensity',
+    'bloom_set_tonemap',
+    'bloom_set_auto_exposure_key',
+    'bloom_set_auto_exposure_rate',
   ]);
   const missing = [];
   for (const name of manifest.keys()) {

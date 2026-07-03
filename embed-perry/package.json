@@ -1,0 +1,14 @@
+{
+  "name": "bloom-embed-perry",
+  "version": "1.0.0",
+  "description": "Demo: the Bloom engine rendering inside a normal Perry UI app (issue #2395)",
+  "main": "src/main.ts",
+  "dependencies": {
+    "bloom": "file:../engine/"
+  },
+  "perry": {
+    "allow": {
+      "nativeLibrary": ["bloom"]
+    }
+  }
+}

@@ -526,6 +526,65 @@ unsafe fn init_engine_for_hwnd(
         let _ = ENGINE.set(EngineState::new(renderer));
 }
 
+/// Attach the engine to a host-owned `HWND` instead of creating its own
+/// top-level window (PerryTS/perry#5519). `handle` is the child `HWND`
+/// the host (Perry UI's `BloomView`) owns; `width`/`height` are its
+/// client size in physical pixels. Returns 1.0 on success, 0.0 on a
+/// null/invalid handle or surface bring-up failure. Idempotent once
+/// attached.
+#[no_mangle]
+pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f64 {
+    if handle == 0 {
+        return 0.0;
+    }
+    if unsafe { ENGINE.get() }.is_some() {
+        return 1.0;
+    }
+
+    #[cfg(windows)]
+    {
+        let Some(hwnd_nz) = std::num::NonZeroIsize::new(handle as isize) else {
+            return 0.0;
+        };
+        let target = {
+            let h = raw_window_handle::Win32WindowHandle::new(hwnd_nz);
+            wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Windows(
+                    raw_window_handle::WindowsDisplayHandle::new(),
+                )),
+                raw_window_handle: raw_window_handle::RawWindowHandle::Win32(h),
+            }
+        };
+        match unsafe {
+            bloom_shared::attach::attach_engine(
+                target,
+                bloom_shared::attach::AttachParams {
+                    backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+                    logical_w: (width as u32).max(1),
+                    logical_h: (height as u32).max(1),
+                    physical_w: (width as u32).max(1),
+                    physical_h: (height as u32).max(1),
+                    format: bloom_shared::attach::FormatPreference::First,
+                },
+            )
+        } {
+            Ok(es) => {
+                unsafe {
+                    let _ = ENGINE.set(es);
+                }
+                1.0
+            }
+            Err(_) => 0.0,
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (width, height);
+        0.0
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_close_window() {}
 
