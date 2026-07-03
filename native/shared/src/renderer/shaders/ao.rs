@@ -42,11 +42,23 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let uv = (vec2<f32>(px) + vec2<f32>(0.5)) * u.params.xy;
     let d = textureSampleLevel(depth_tex, depth_samp, uv, 0);
     var linear_z: f32;
-    if (d >= 0.9999) {
+    // Sky = the cleared depth (exactly 1.0; one-ulp slack for driver
+    // rounding). The previous 0.9999 threshold was calibrated for a
+    // reversed-Z mindset: with this forward-Z projection, depth crams
+    // toward 1.0 so fast that 0.9999 already fires at ~35 m — every
+    // mid/far surface was written as 'sky' (10000).
+    if (d >= 0.99999994) {
         linear_z = HIZ_SKY_Z;
     } else {
-        // view_z = -p32 / (d + p22); store |view_z|.
-        linear_z = -u.params.w / (d + u.params.z);
+        // view_z = p32 / (d + p22); store |view_z|. For this projection
+        // (p22 = far/(near-far), p32 = near*far/(near-far), both negative)
+        // the numerator and denominator are BOTH negative for geometry, so
+        // the quotient is the positive view depth. The previous leading
+        // minus flipped every geometry pixel negative, and the max() then
+        // clamped the whole depth pyramid to 0.0001 — GTAO's horizon scan
+        // and the occlusion grid have been reading a flat 0.0001/10000
+        // two-value field instead of real depth.
+        linear_z = u.params.w / (d + u.params.z);
         linear_z = max(linear_z, 0.0001);
     }
     textureStore(hiz_out, vec2<i32>(px), vec4<f32>(linear_z, 0.0, 0.0, 0.0));
