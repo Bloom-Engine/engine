@@ -467,6 +467,10 @@ struct WsrcBakeParams {
     shadow_splits: [f32; 4],
     /// x = shadow bias, y = shadows_enabled (0/1), zw unused.
     flags: [f32; 4],
+    /// EN-023 — xyz = scene-average albedo (mean of card-instance flat
+    /// albedos) for the SW bake's ground-bounce term; w unused. The HW
+    /// bake ignores it (it traces real geometry).
+    ground_albedo: [f32; 4],
 }
 
 /// Uniform struct for the card-lighting compute pass. Matches
@@ -532,10 +536,20 @@ struct InstanceGiDataCpu {
     /// `card_slot.w` = flag (1.0 = card captured, 0.0 = no card → fall
     /// back to `albedo` flat value).
     card_slot: [f32; 4],
-    /// Object-space AABB min (xyz) + unused pad (w).
+    /// Object-space AABB min (xyz) + unused pad (w). The HW paths
+    /// transform hits into object space (hit.world_to_object) and
+    /// compare against THESE — do not world-ify them.
     card_aabb_min: [f32; 4],
     /// Object-space AABB max (xyz) + unused pad (w).
     card_aabb_max: [f32; 4],
+    /// EN-023 — WORLD-space AABB min/max. The SDF trace has no
+    /// world_to_object (it marches a world-space clipmap), so its
+    /// broad-phase compares the world hit against these. With the old
+    /// object-space-only bounds, every transformed instance fell
+    /// through to the flat-gray analytic fallback — zero colored
+    /// bounce on non-RT adapters (round-2 audit F4).
+    world_aabb_min: [f32; 4],
+    world_aabb_max: [f32; 4],
 }
 
 #[repr(C)]
@@ -979,6 +993,10 @@ pub struct Renderer {
     pub ssgi_radius: f32,
     /// SSGI master switch.
     pub ssgi_enabled: bool,
+    /// EN-023 — mean flat albedo over the card instances; feeds the SW
+    /// WSRC bake's ground-bounce term. Neutral mid-gray until the first
+    /// instance-data upload computes the real scene average.
+    pub gi_scene_avg_albedo: [f32; 3],
     /// One-shot log guard: which SSGI trace backend was last reported to
     /// stderr (hw-ray-query / sdf-clipmap / hiz-screen). The silent HW→SW
     /// fallback made "why is bounce gray?" a debugger question during the
@@ -6028,6 +6046,7 @@ impl Renderer {
             ssgi_radius: 20.0,
             ssgi_enabled: true,
             ssgi_backend_logged: None,
+            gi_scene_avg_albedo: [0.35, 0.35, 0.35],
             probe_grid_w,
             probe_grid_h,
             probe_header_buffer,
@@ -7190,6 +7209,12 @@ impl Renderer {
                     c as f32,
                     0.0,
                 ],
+                ground_albedo: [
+                    self.gi_scene_avg_albedo[0],
+                    self.gi_scene_avg_albedo[1],
+                    self.gi_scene_avg_albedo[2],
+                    0.0,
+                ],
             };
             self.queue.write_buffer(
                 &self.wsrc_bake_uniform,
@@ -7527,6 +7552,9 @@ impl Renderer {
 
         let mut instance_data: Vec<InstanceGiDataCpu> =
             Vec::with_capacity(instance_count as usize);
+        // EN-023 — running mean of instance albedos feeds the SW WSRC
+        // bake's ground-bounce term.
+        let mut albedo_sum = [0.0f32; 3];
         for &h in instance_handles {
             let n = scene.nodes.get(h).unwrap();
             let e = n.material.emissive;
@@ -7534,6 +7562,18 @@ impl Renderer {
                 Some(s) => (s as f32, 1.0_f32),
                 None => (0.0, 0.0),
             };
+            // EN-023 — world AABB for the SDF broad-phase. The scene's
+            // bounds pass keeps world_bounds fresh; the sentinel
+            // (min.x > max.x = not yet computed) falls back to the local
+            // box, which matches the old behaviour for identity nodes.
+            let (wmin, wmax) = if n.world_bounds_min[0] <= n.world_bounds_max[0] {
+                (n.world_bounds_min, n.world_bounds_max)
+            } else {
+                (n.bounds_min, n.bounds_max)
+            };
+            albedo_sum[0] += n.flat_albedo[0];
+            albedo_sum[1] += n.flat_albedo[1];
+            albedo_sum[2] += n.flat_albedo[2];
             instance_data.push(InstanceGiDataCpu {
                 albedo: n.flat_albedo,
                 emissive_luma: (e[0] + e[1] + e[2]) * (1.0 / 3.0),
@@ -7542,7 +7582,17 @@ impl Renderer {
                 card_slot: [first_slot, 0.0, 0.0, has_card],
                 card_aabb_min: [n.bounds_min[0], n.bounds_min[1], n.bounds_min[2], 0.0],
                 card_aabb_max: [n.bounds_max[0], n.bounds_max[1], n.bounds_max[2], 0.0],
+                world_aabb_min: [wmin[0], wmin[1], wmin[2], 0.0],
+                world_aabb_max: [wmax[0], wmax[1], wmax[2], 0.0],
             });
+        }
+        if !instance_data.is_empty() {
+            let inv = 1.0 / instance_data.len() as f32;
+            self.gi_scene_avg_albedo = [
+                albedo_sum[0] * inv,
+                albedo_sum[1] * inv,
+                albedo_sum[2] * inv,
+            ];
         }
         if !instance_data.is_empty() {
             self.queue.write_buffer(

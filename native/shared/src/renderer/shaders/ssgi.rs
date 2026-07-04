@@ -402,6 +402,9 @@ struct InstanceGiData {
     // Object-space AABB min (xyz) / max (xyz).
     card_aabb_min: vec4<f32>,
     card_aabb_max: vec4<f32>,
+    // EN-023 — world-space AABB (SDF path only; layout mirror).
+    world_aabb_min: vec4<f32>,
+    world_aabb_max: vec4<f32>,
 };
 
 const CARD_SLOTS_PER_ROW: f32 = 64.0;
@@ -715,6 +718,12 @@ struct SdfInstanceGiData {
     card_slot: vec4<f32>,
     card_aabb_min: vec4<f32>,
     card_aabb_max: vec4<f32>,
+    // EN-023 — world-space AABB. This trace marches a WORLD-space
+    // clipmap and has no world_to_object; comparing world hits against
+    // the object-space box above only ever worked for identity-
+    // transform assets (Sponza).
+    world_aabb_min: vec4<f32>,
+    world_aabb_max: vec4<f32>,
 };
 
 const SDF_CARD_SLOTS_PER_ROW: f32 = 64.0;
@@ -913,16 +922,29 @@ fn cs_main(
         // geometry, etc.).
         let count = arrayLength(&instance_data);
         var picked: i32 = -1;
+        var picked_vol: f32 = 1e30;
         for (var i: u32 = 0u; i < count; i = i + 1u) {
             let ad = instance_data[i];
             if (ad.card_slot.w < 0.5) { continue; }
-            let bmin = ad.card_aabb_min.xyz - vec3<f32>(0.05);
-            let bmax = ad.card_aabb_max.xyz + vec3<f32>(0.05);
+            // EN-023 — compare the WORLD hit against the WORLD AABB.
+            // The old object-space comparison only matched assets whose
+            // vertices were already in world space; every transformed
+            // instance fell through to the gray analytic fallback.
+            // Pick the SMALLEST containing box, not the first: a scene-
+            // spanning instance (the shooter's ±140 m terrain proxy)
+            // otherwise swallows every hit — walls and trees included —
+            // and its mostly-empty side cards darken the bounce.
+            let bmin = ad.world_aabb_min.xyz - vec3<f32>(0.05);
+            let bmax = ad.world_aabb_max.xyz + vec3<f32>(0.05);
             if (hit_pos.x >= bmin.x && hit_pos.x <= bmax.x &&
                 hit_pos.y >= bmin.y && hit_pos.y <= bmax.y &&
                 hit_pos.z >= bmin.z && hit_pos.z <= bmax.z) {
-                picked = i32(i);
-                break;
+                let ext = bmax - bmin;
+                let vol = ext.x * ext.y * ext.z;
+                if (vol < picked_vol) {
+                    picked = i32(i);
+                    picked_vol = vol;
+                }
             }
         }
 
@@ -947,13 +969,13 @@ fn cs_main(
             let slot_x = slot % 64u;
             let slot_y = slot / 64u;
 
-            let bmin = ad.card_aabb_min.xyz;
-            let bmax = ad.card_aabb_max.xyz;
-            // Hit is in world space and Sponza meshes are in world
-            // space too (no per-instance transform beyond identity on
-            // the Sponza asset). For now use world-space hit directly;
-            // instances with a non-identity transform would need the
-            // transform stored on `instance_data` to round-trip.
+            // EN-023 — project against the WORLD AABB, consistent with
+            // the world-space hit. Exact for the translate+scale (yaw-0)
+            // instances the GI proxies use; a yaw-rotated instance would
+            // sample its card with rotated UVs — hue still right, which
+            // is what the probe integral actually consumes at 64² cards.
+            let bmin = ad.world_aabb_min.xyz;
+            let bmax = ad.world_aabb_max.xyz;
             var u_os: f32;
             var v_os: f32;
             var u_lo: f32; var u_hi: f32;
