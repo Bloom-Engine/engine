@@ -656,6 +656,16 @@ struct CachedModelDraw {
 // Renderer
 // ============================================================
 
+/// 0-255 sRGB channel → linear f32. The 2D pass renders into an sRGB
+/// swapchain view whose hardware encode expects LINEAR shader output;
+/// passing the sRGB byte value straight through double-encoded every 2D
+/// color (washed-bright HUD, gamma-skewed AA edges — round-2 audit F5).
+/// Alpha stays linear by definition and is NOT decoded.
+pub(crate) fn srgb_u8_to_linear(c: f64) -> f32 {
+    let c = (c / 255.0).clamp(0.0, 1.0);
+    (if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }) as f32
+}
+
 pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -7851,6 +7861,14 @@ impl Renderer {
         self.grain_strength = strength.max(0.0);
     }
 
+    /// Composite-pass unsharp mask. Default 0.8; 0 disables the 4 extra
+    /// HDR taps + extra tonemap entirely. Round-2 audit: this was
+    /// hardcoded with no runtime control while visibly haloing
+    /// silhouettes at 4K output (F3/F8).
+    pub fn set_sharpen_strength(&mut self, strength: f32) {
+        self.sharpen_strength = strength.max(0.0);
+    }
+
     /// Sun shaft (screen-space god ray) strength. 0 (default) = off.
     /// 0.4 = subtle haze, 1.0+ = obvious cinematic shafts. The
     /// shafts are sampled from the depth buffer along a screen-space
@@ -9841,14 +9859,24 @@ impl Renderer {
         }
     }
 
+    /// Raw 0-255 → 0-1, no gamma. Used by the 3D immediate batch and
+    /// model tints, whose values feed the linear HDR pipeline directly —
+    /// changing their interpretation would silently re-tint every
+    /// existing drawCube/drawModel call in shipped games.
     fn color_to_f32(r: f64, g: f64, b: f64, a: f64) -> [f32; 4] {
         [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32]
+    }
+
+    /// 2D variant: sRGB-decodes rgb so the sRGB swapchain view's hardware
+    /// encode does not double-encode (see `srgb_u8_to_linear`).
+    fn color_to_f32_srgb(r: f64, g: f64, b: f64, a: f64) -> [f32; 4] {
+        [srgb_u8_to_linear(r), srgb_u8_to_linear(g), srgb_u8_to_linear(b), (a / 255.0) as f32]
     }
 
 
     pub fn draw_triangle(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64, r: f64, g: f64, b: f64, a: f64) {
         self.ensure_draw_state(0);
-        let color = Self::color_to_f32(r, g, b, a);
+        let color = Self::color_to_f32_srgb(r, g, b, a);
         let base = self.vertices_2d.len() as u32;
 
         self.vertices_2d.push(Vertex2D { position: [x1 as f32, y1 as f32], uv: [0.0, 0.0], color });
@@ -9860,7 +9888,7 @@ impl Renderer {
 
     pub fn draw_poly(&mut self, cx: f64, cy: f64, sides: f64, radius: f64, rotation: f64, r: f64, g: f64, b: f64, a: f64) {
         self.ensure_draw_state(0);
-        let color = Self::color_to_f32(r, g, b, a);
+        let color = Self::color_to_f32_srgb(r, g, b, a);
         let n = sides as u32;
         if n < 3 { return; }
         let base = self.vertices_2d.len() as u32;
@@ -9905,7 +9933,7 @@ impl Renderer {
     pub fn draw_texture(&mut self, bind_group_idx: u32, x: f64, y: f64, tint_r: f64, tint_g: f64, tint_b: f64, tint_a: f64) {
         let (tw, th) = self.texture_sizes.get(bind_group_idx as usize).copied().unwrap_or((0, 0));
         if tw == 0 { return; }
-        let color = Self::color_to_f32(tint_r, tint_g, tint_b, tint_a);
+        let color = Self::color_to_f32_srgb(tint_r, tint_g, tint_b, tint_a);
         self.draw_textured_quad(x as f32, y as f32, tw as f32, th as f32, 0.0, 0.0, 1.0, 1.0, color, bind_group_idx);
     }
 
@@ -9917,7 +9945,7 @@ impl Renderer {
     ) {
         let (tw, th) = self.texture_sizes.get(bind_group_idx as usize).copied().unwrap_or((0, 0));
         if tw == 0 { return; }
-        let color = Self::color_to_f32(tint_r, tint_g, tint_b, tint_a);
+        let color = Self::color_to_f32_srgb(tint_r, tint_g, tint_b, tint_a);
         let u0 = src_x as f32 / tw as f32;
         let v0 = src_y as f32 / th as f32;
         let u1 = (src_x + src_w) as f32 / tw as f32;
@@ -9934,7 +9962,7 @@ impl Renderer {
     ) {
         let (tw, th) = self.texture_sizes.get(bind_group_idx as usize).copied().unwrap_or((0, 0));
         if tw == 0 { return; }
-        let color = Self::color_to_f32(tint_r, tint_g, tint_b, tint_a);
+        let color = Self::color_to_f32_srgb(tint_r, tint_g, tint_b, tint_a);
         let u0 = src_x as f32 / tw as f32;
         let v0 = src_y as f32 / th as f32;
         let u1 = (src_x + src_w) as f32 / tw as f32;

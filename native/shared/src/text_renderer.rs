@@ -270,10 +270,13 @@ impl TextRenderer {
             None => return,
         };
 
+        // sRGB-decode to linear like every other 2D vertex color — the
+        // swapchain view's hardware encode expects linear shader output
+        // (see renderer::srgb_u8_to_linear).
         let color = [
-            (r / 255.0) as f32,
-            (g / 255.0) as f32,
-            (b / 255.0) as f32,
+            crate::renderer::srgb_u8_to_linear(r),
+            crate::renderer::srgb_u8_to_linear(g),
+            crate::renderer::srgb_u8_to_linear(b),
             (a / 255.0) as f32,
         ];
 
@@ -419,10 +422,13 @@ impl TextRenderer {
             None => return,
         };
 
+        // sRGB-decode to linear like every other 2D vertex color — the
+        // swapchain view's hardware encode expects linear shader output
+        // (see renderer::srgb_u8_to_linear).
         let color = [
-            (r / 255.0) as f32,
-            (g / 255.0) as f32,
-            (b / 255.0) as f32,
+            crate::renderer::srgb_u8_to_linear(r),
+            crate::renderer::srgb_u8_to_linear(g),
+            crate::renderer::srgb_u8_to_linear(b),
             (a / 255.0) as f32,
         ];
 

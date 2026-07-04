@@ -689,3 +689,54 @@ symbolized stack; fix then.
 (profiler overlay/history strings are the heaviest string traffic in the
 crashing runs), or an engine-side heap read overrun in a small shared
 helper. Audit report: `shooter/docs/audit-round2.md` finding F1.
+
+## EN-021 — SSR + IBL specular exclusive ownership 🟡
+
+**Why.** Round-2 audit (B): compose is `hdr + ssr` and `fs_main_scene`
+already adds IBL specular into hdr for metals — pixels with an SSR hit
+double-count specular for roughness ≈0.05–0.85, worst for metals at
+r≈0.55–0.75 (in the shooter: alien carapaces / weapon per their glTF
+factors). Dielectrics are largely starved of IBL spec by design and are
+fine; the shooter's custom world materials never call ibl() and are
+unaffected.
+
+**Why not a one-liner.** Scaling `ibl_spec` by the complement of the SSR
+fade must be PAIRED with an env fallback on SSR miss (today miss = black,
+ssgi.rs:1495) or off-screen-reflection pixels lose their specular
+entirely — a worse artifact than the double-count. The fallback needs the
+env cubemap bound into the SSR pass (bind-group layout change).
+
+**Sketch.** (1) Bind env_tex into the SSR march; on miss return
+`sample_env(r, r*max_mip) * fresnel * roughness_fade * strength` instead
+of black. (2) In `fs_main_scene`, scale `ibl_spec` by
+`1 − (1 − smoothstep(0.5, 0.85, r)) * ssr_strength` (the exact
+complement of the SSR shader's own fade). (3) Regenerate goldens; verify
+with the audit's metal-ROI protocol (on-hit vs panned-off luma converge
+<5%).
+
+**Interim calibration option:** `set_ssr_strength(0.25–0.35)` halves the
+overlap engine-wide with zero shader work.
+
+## EN-022 — Motion vectors for material-system draws 🔴
+
+**Why.** Round-2 audit (F8): every material-path draw writes velocity = 0
+(terrain/tree/grass/building — the whole static world plus wind sway),
+so TAA's motion adaptation (`post.rs` motion_alpha ramp) never engages
+for the world: camera translation is covered only by depth reprojection
+and object sway not at all. This is the primary mechanism behind TSR 0.5
+shimmer on thin grass + sway ghosting, and it blocks any future
+motion-blur quality on the world.
+
+**Scope.** Per-draw previous-frame model matrix (the per-draw UBO slot
+already carries the current one; the shadow path already keeps a CPU
+copy in `MaterialDrawCommand.model`), previous view-proj in PerView (the
+core path has it), and a velocity write in the material ABI's OpaqueOut
+path — plus the wind displacement evaluated at previous-frame time in
+foliage vertex shaders so sway produces real motion vectors. Roughly:
+ABI struct + material_system plumbing + 4 world materials + goldens.
+
+**Acceptance.** Strafe at the audit's S7 pose: thin-grass shimmer index
+(frame-diff metric) drops materially; wind sway no longer ghosts;
+`post.rs` motion clamp engages on world pixels (debug: motion_alpha
+visualization).
+

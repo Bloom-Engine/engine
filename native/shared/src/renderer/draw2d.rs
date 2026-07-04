@@ -10,7 +10,7 @@ impl Renderer {
 
     pub fn draw_rect(&mut self, x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64, a: f64) {
         self.ensure_draw_state(0);
-        let color = Self::color_to_f32(r, g, b, a);
+        let color = Self::color_to_f32_srgb(r, g, b, a);
         let base = self.vertices_2d.len() as u32;
         let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
 
@@ -32,7 +32,7 @@ impl Renderer {
 
     pub fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
         self.ensure_draw_state(0);
-        let color = Self::color_to_f32(r, g, b, a);
+        let color = Self::color_to_f32_srgb(r, g, b, a);
         let dx = (x2 - x1) as f32;
         let dy = (y2 - y1) as f32;
         let len = (dx * dx + dy * dy).sqrt();
@@ -53,7 +53,7 @@ impl Renderer {
 
     pub fn draw_circle(&mut self, cx: f64, cy: f64, radius: f64, r: f64, g: f64, b: f64, a: f64) {
         self.ensure_draw_state(0);
-        let color = Self::color_to_f32(r, g, b, a);
+        let color = Self::color_to_f32_srgb(r, g, b, a);
         let segments = 36u32;
         let base = self.vertices_2d.len() as u32;
         let (cx, cy, radius) = (cx as f32, cy as f32, radius as f32);
