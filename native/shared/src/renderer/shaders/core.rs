@@ -1021,8 +1021,18 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let cap2_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
     let cap2 = 1.0 / (1.0 + cap2_luma / 0.3);
     let roughness_amp = smoothstep(0.05, 0.75, roughness);
+    // EN-021 exclusive ownership: where SSR is active it owns specular —
+    // hit (traced colour) or miss (env fallback inside the SSR shader).
+    // Scale IBL specular by the complement of SSR's own roughness fade
+    // × its strength (dir_light_count.z, written per frame; 0 when SSR
+    // is disabled so the full IBL term returns). Kills the metal
+    // double-count on hits (round-2 audit F10) without darkening
+    // off-screen reflections.
+    let ssr_own = clamp(
+        lighting.dir_light_count.z * (1.0 - smoothstep(0.5, 0.85, roughness)),
+        0.0, 1.0);
     let ibl_spec = ibl_spec_raw
-        * dielectric_scale * spec_occ * roughness_amp * cap2;
+        * dielectric_scale * spec_occ * roughness_amp * cap2 * (1.0 - ssr_own);
 
     // Indirect-shadow attenuation. 0.15 — deep enough that windows
     // Shadow darkening floor. Prior 0.15 matched Cycles path-
