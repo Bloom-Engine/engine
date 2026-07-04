@@ -689,3 +689,27 @@ symbolized stack; fix then.
 (profiler overlay/history strings are the heaviest string traffic in the
 crashing runs), or an engine-side heap read overrun in a small shared
 helper. Audit report: `shooter/docs/audit-round2.md` finding F1.
+
+## EN-023 — GI software path: colored bounce is unreachable 🟡
+
+**Why.** Round-2 audit (F4): on adapters without EXPERIMENTAL_RAY_QUERY
+(the dev box's Radeon 760M reports none — see the new boot log), the
+probe trace runs the SDF path, where the mesh-card lookup compares
+world-space hits against OBJECT-space AABBs (ssgi.rs broad phase) — every
+transformed instance falls through to the flat gray 0.55 analytic — and
+the software WSRC bake is analytic sun+sky with no geometry at all.
+Measured in-game: SSGI on/off is ≤2.5% achromatic luma, hue ratio
+unchanged to 4 decimals. The ~267 gi_only proxies feed a pipeline whose
+colored output cannot reach the screen on SW adapters, at ~1.6 ms GPU in
+combat.
+
+**Sketch.** (1) Transform SDF hits into instance object space (or
+instance AABBs into world space) in the card broad-phase so textured/
+tinted cards resolve. (2) Make the SW WSRC bake sample cards (or at
+least sun-shadowed ground/albedo bounce) instead of pure analytic.
+(3) Re-run the audit's GI A/B: acceptance = G/R hue shift at the
+building base and ≥8-10% luma in shaded receivers.
+
+**Interim option** (decision D2-B in the shooter audit): boot-time
+`setSsgiEnabled(false)` on SW adapters banks the ~1.6 ms until this
+lands; needs a backend query FFI or the game reading the new boot log.

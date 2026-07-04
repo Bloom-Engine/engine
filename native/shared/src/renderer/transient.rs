@@ -187,6 +187,21 @@ impl TransientPool {
         }
 
         // Nothing matched — allocate a new slot.
+        //
+        // Leak watchdog: a steady-state frame needs a handful of slots.
+        // A count that keeps growing means some caller acquires without
+        // releasing (the pool has no auto-reclaim by design) — exactly
+        // the depth-snapshot leak the round-2 audit spent a day tracing
+        // from the profiler side. Warn at every power of two past 64 so
+        // the log stays quiet but the failure mode is named.
+        let n = self.slots.len();
+        if n >= 64 && n.is_power_of_two() {
+            eprintln!(
+                "bloom transient pool: {} slots allocated and growing — \
+                 an acquire without a matching release is leaking textures",
+                n
+            );
+        }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("transient"),
             size: wgpu::Extent3d {
