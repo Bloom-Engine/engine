@@ -61,6 +61,114 @@ fn map_keycode(vk: u32) -> usize {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Crash reporting (title-freeze / EN-020 investigation): the game was dying
+// with empty stderr, no WER event, and no dump — i.e. invisibly. Catch
+// unhandled SEH exceptions, print code + module-relative address
+// (symbolizable against main.pdb via llvm-symbolizer), and write our own
+// minidump. Fast-fail (0xC0000409) bypasses this filter by design, so a
+// death with no output at all narrows to fail-fast / TerminateProcess.
+#[cfg(windows)]
+mod crash_report {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use windows::core::{s, w};
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::System::Diagnostics::Debug::{
+        SetUnhandledExceptionFilter, EXCEPTION_POINTERS, MINIDUMP_EXCEPTION_INFORMATION,
+    };
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
+    };
+
+    // dbghelp.dll is loaded at crash time — its import lib is not on
+    // perry's link line, and adding manifest libs would force a
+    // .perry-cache clear for every consumer of the engine.
+    type MiniDumpWriteDumpFn = unsafe extern "system" fn(
+        hprocess: *mut core::ffi::c_void,
+        processid: u32,
+        hfile: *mut core::ffi::c_void,
+        dumptype: i32,
+        exceptionparam: *const MINIDUMP_EXCEPTION_INFORMATION,
+        userstreamparam: *const core::ffi::c_void,
+        callbackparam: *const core::ffi::c_void,
+    ) -> i32;
+
+    // MiniDumpNormal | MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo
+    const DUMP_FLAGS: i32 = 0x0000_0040 | 0x0000_1000;
+
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+    pub fn install() {
+        if INSTALLED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        unsafe {
+            SetUnhandledExceptionFilter(Some(filter));
+        }
+        eprintln!("bloom: crash filter installed (dumps -> tools/.testout/dumps)");
+    }
+
+    unsafe extern "system" fn filter(info: *const EXCEPTION_POINTERS) -> i32 {
+        let (code, addr) = {
+            let mut c = 0u32;
+            let mut a = 0usize;
+            if !info.is_null() {
+                let rec = (*info).ExceptionRecord;
+                if !rec.is_null() {
+                    c = (*rec).ExceptionCode.0 as u32;
+                    a = (*rec).ExceptionAddress as usize;
+                }
+            }
+            (c, a)
+        };
+        let base = GetModuleHandleW(None).map(|m| m.0 as usize).unwrap_or(0);
+        let rel = addr.wrapping_sub(base);
+        eprintln!("bloom: FATAL unhandled exception {code:#010x} at {addr:#x} (main.exe+{rel:#x})");
+
+        let _ = std::fs::create_dir_all("tools/.testout/dumps");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = format!(
+            "tools/.testout/dumps/crash_main_{}_{stamp:x}.dmp",
+            GetCurrentProcessId()
+        );
+        let write_dump = LoadLibraryW(w!("dbghelp.dll"))
+            .ok()
+            .and_then(|h| GetProcAddress(h, s!("MiniDumpWriteDump")))
+            .map(|p| std::mem::transmute::<_, MiniDumpWriteDumpFn>(p));
+        match (std::fs::File::create(&path), write_dump) {
+            (Ok(f), Some(dump_fn)) => {
+                let exc = MINIDUMP_EXCEPTION_INFORMATION {
+                    ThreadId: GetCurrentThreadId(),
+                    ExceptionPointers: info as *mut EXCEPTION_POINTERS,
+                    ClientPointers: BOOL(0),
+                };
+                let ok = dump_fn(
+                    GetCurrentProcess().0,
+                    GetCurrentProcessId(),
+                    f.as_raw_handle() as *mut core::ffi::c_void,
+                    DUMP_FLAGS,
+                    &exc,
+                    core::ptr::null(),
+                    core::ptr::null(),
+                );
+                if ok != 0 {
+                    eprintln!("bloom: minidump written: {path}");
+                } else {
+                    eprintln!("bloom: minidump FAILED (MiniDumpWriteDump returned FALSE)");
+                }
+            }
+            (Err(e), _) => eprintln!("bloom: minidump file create failed: {e}"),
+            (_, None) => eprintln!("bloom: minidump unavailable (dbghelp load failed)"),
+        }
+        1 // EXCEPTION_EXECUTE_HANDLER — let the process die
+    }
+}
+
 // Win32 windowing implementation
 #[cfg(windows)]
 mod win32 {
@@ -124,7 +232,13 @@ mod win32 {
 
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         match msg {
+            WM_CLOSE => {
+                // Diagnostic (title-freeze investigation): who closes us?
+                eprintln!("bloom: WM_CLOSE received");
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_DESTROY => {
+                eprintln!("bloom: WM_DESTROY — should_close set, main loop will exit cleanly");
                 PostQuitMessage(0);
                 if let Some(eng) = ENGINE.get_mut() {
                     eng.should_close = true;
@@ -396,6 +510,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
 
     #[cfg(windows)]
     {
+        crash_report::install();
         let (hwnd, phys_w, phys_h) = win32::create_window(width, height, title);
         unsafe { init_engine_for_hwnd(hwnd, width as u32, height as u32, phys_w, phys_h); }
         if fullscreen != 0.0 {

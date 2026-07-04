@@ -121,6 +121,17 @@ pub fn str_from_header(ptr: *const u8) -> &'static str {
 /// Perry's 0.5.x runtime read 8 bytes into the payload. Always go through
 /// this helper — the layout comes from the `StringHeader` type, which the
 /// compile-time assertions above pin to the documented ABI.
+/// EN-020 — Perry's string scanners (`split`, `indexOf`, …) step
+/// word-at-a-time and may read up to a word past `byte_len`. With an
+/// exactly-sized allocation that lands flush against an unmapped page,
+/// that overread is an access violation (observed 3/3 in the shooter as
+/// `perry_fn_…getProfilerOverlay` / `…getProfilerFrameHistory`, faulting
+/// reads at page ends; historical EN-020 signature `main.exe+0xe8e5`,
+/// read at `0x…FFF8`). Every string this function returns is scanned by
+/// Perry, so keep a zeroed tail pad behind the payload — `capacity`
+/// still reports `byte_len`, so Perry never writes into the pad.
+const TAIL_PAD: usize = 16;
+
 pub fn alloc_perry_string(s: &str) -> *const u8 {
     let bytes = s.as_bytes();
     let byte_len = bytes.len();
@@ -130,7 +141,7 @@ pub fn alloc_perry_string(s: &str) -> *const u8 {
     } else {
         s.encode_utf16().count()
     };
-    let total = std::mem::size_of::<StringHeader>() + byte_len;
+    let total = std::mem::size_of::<StringHeader>() + byte_len + TAIL_PAD;
     let layout = std::alloc::Layout::from_size_align(total, 4).unwrap();
     unsafe {
         let ptr = std::alloc::alloc(layout);
@@ -148,6 +159,11 @@ pub fn alloc_perry_string(s: &str) -> *const u8 {
             bytes.as_ptr(),
             ptr.add(std::mem::size_of::<StringHeader>()),
             byte_len,
+        );
+        std::ptr::write_bytes(
+            ptr.add(std::mem::size_of::<StringHeader>() + byte_len),
+            0,
+            TAIL_PAD,
         );
         ptr
     }
@@ -194,6 +210,17 @@ mod tests {
             (buf.as_mut_ptr() as *mut StringHeader).write(bogus);
         }
         assert_eq!(str_from_header(buf.as_ptr()), "");
+    }
+
+    #[test]
+    fn tail_pad_present_and_zeroed() {
+        // EN-020 regression guard: a word-stepping scanner may read past
+        // byte_len; the pad must exist and read as NULs.
+        let p = alloc_perry_string("abc");
+        let payload_end = std::mem::size_of::<StringHeader>() + 3;
+        for i in 0..TAIL_PAD {
+            assert_eq!(unsafe { *p.add(payload_end + i) }, 0, "pad byte {i} not zero");
+        }
     }
 
     #[test]

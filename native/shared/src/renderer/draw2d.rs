@@ -103,6 +103,19 @@ impl Renderer {
                 wgpu::CurrentSurfaceTexture::Success(t)
                 | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(FrameTarget::Surface(t)),
                 _ => {
+                    // Diagnostic (title-freeze investigation): this path used
+                    // to fail silently; an eternal acquire failure looks like
+                    // a frozen game (headless spin, last frame stays on
+                    // screen). One-shot + periodic so a wedged swapchain is
+                    // visible in stderr.
+                    static ACQ_FAILS: std::sync::atomic::AtomicU32 =
+                        std::sync::atomic::AtomicU32::new(0);
+                    let n = ACQ_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if n == 1 || n % 300 == 0 {
+                        crate::ffi::log_error(&format!(
+                            "bloom: surface acquire failed (count={n}) — reconfiguring and skipping frame"
+                        ));
+                    }
                     surface.configure(&self.device, &self.surface_config);
                     None
                 }
