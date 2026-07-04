@@ -662,7 +662,7 @@ test.
 (or a VM forwarding DPI), and a Linux dev with X11. Web checks
 can be done from any modern browser on the macOS dev box.
 
-## EN-020 — Native AV: heap read overrun, layout-sensitive 🔴
+## EN-020 — Native AV: heap read overrun, layout-sensitive ✅ root-caused 2026-07-04
 
 **Symptom.** Bloom Shooter round-2 audit (2026-07-04): three scripted runs
 crashed with c0000005 at the same instruction (`main.exe+0xe8e5` on the
@@ -671,24 +671,42 @@ No Rust panic output (engine builds `panic = "abort"`, which would print),
 so this is raw UB: something reads past the end of a heap allocation and
 faults only when the allocation abuts an unmapped page.
 
-**What is ruled out.** Runtime feature toggles alone (a 19-transition
-ssgi/shadows/profiler gauntlet under combat load survived); profiler
-string churn alone (one crash happened with only ~8 small prints);
-specific stages (three different ones). The fault did not reproduce after
-a relink (two 60 s fishing runs) — consistent with layout sensitivity,
-not with a fixed trigger.
+**Root cause (found via the title-freeze report on the round-2
+integration build).** Perry 0.5.x runtime string scanning: `split()`
+slices and `parseFloat()` read past the end of Perry's own exact-sized
+string allocations. Any TS that runs a packed FFI text blob through
+`split`+`parseFloat` every frame — exactly what `getProfilerOverlay` /
+`getProfilerFrameHistory` did — crashes within seconds once a slice lands
+flush against an unmapped page. Reproduced 6/6 across two different link
+layouts (faults in `perry_fn_…getProfilerOverlay` at `+0xe925` and
+`…getProfilerFrameHistory` at `+0xf0a3`, 7–29 s of overlay time each);
+engine-side tail-padding of `alloc_perry_string` alone did NOT fix it,
+proving the overread is on Perry-internal allocations. Minidumps
+archived in `shooter/tools/.testout/dumps/crash_main_*.dmp`.
 
-**Standing kit.** WER LocalDumps armed on the dev box (dumps →
-`shooter/tools/.testout/dumps/`, dialog suppressed), line tables in the
-staticlib (`debug = "line-tables-only"`), `perry compile --debug-symbols`
-emits `main.pdb`, LLVM symbolizer available. See
-[crash-triage-windows.md](crash-triage-windows.md). Next occurrence =
-symbolized stack; fix then.
+**Fix shipped (2026-07-04, `fix(EN-020)` commits).**
+1. Numeric profiler ABI: `bloom_profiler_row_count/_label/_cpu_us/_gpu_us`
+   + `_hist_*` — f64s cross the FFI; the label crosses whole and is only
+   drawn, never parsed. `getProfilerOverlay`/`getProfilerFrameHistory`
+   rewritten on top; the packed-text FFIs remain for back-compat but
+   per-frame consumers must not parse them.
+2. Defense-in-depth: `alloc_perry_string` now zero-pads 16 bytes after
+   every payload (word-stepping scanners on ENGINE-allocated strings stay
+   in bounds), regression test included.
+3. Observability: unhandled-exception filter in `native/windows` prints
+   code + `main.exe+RVA` and writes a minidump via runtime-loaded dbghelp;
+   WM_CLOSE/WM_DESTROY and surface-acquire failures now log to stderr.
+   Silent deaths are structurally impossible for AV-class faults now.
 
-**Suspect space.** Perry-runtime heap/string handling at the FFI boundary
-(profiler overlay/history strings are the heaviest string traffic in the
-crashing runs), or an engine-side heap read overrun in a small shared
-helper. Audit report: `shooter/docs/audit-round2.md` finding F1.
+Validated: 3/3 runs × 90 s gameplay with the overlay ON continuously —
+zero faults, overlay data correct (previously 6/6 dead in ≤29 s).
+
+**Remaining.** File the scanner overread upstream against Perry 0.5.x
+(repro: return a `"1.23|4.56\n"…` blob from an FFI, split+parseFloat it
+per frame; dumps + offsets above). The OBJ text loader
+(`engine/src/models/index.ts`) uses the same split/parseFloat pattern at
+LOAD time — one-shot exposure, worth migrating when touched. Audit
+report: `shooter/docs/audit-round2.md` finding F1.
 
 ## EN-021 — SSR + IBL specular exclusive ownership 🟡
 
