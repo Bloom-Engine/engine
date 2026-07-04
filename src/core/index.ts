@@ -20,6 +20,7 @@ declare function bloom_set_fog(r: number, g: number, b: number, density: number,
 declare function bloom_set_chromatic_aberration(strength: number): void;
 declare function bloom_set_vignette(strength: number, softness: number): void;
 declare function bloom_set_film_grain(strength: number): void;
+declare function bloom_set_present_mode(mode: number): void;
 declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): void;
 declare function bloom_set_auto_exposure(on: number): void;
 declare function bloom_set_taa_enabled(on: number): void;
@@ -263,6 +264,16 @@ export function setVignette(strength: number, softness: number): void {
 /** Animated film grain post-tonemap. 0 = off. */
 export function setFilmGrain(strength: number): void {
   bloom_set_film_grain(strength);
+}
+
+/**
+ * Swapchain present mode: 0 = Fifo (vsync, default), 1 = Mailbox
+ * (uncapped, no tearing), 2 = Immediate (uncapped, tearing allowed).
+ * With a non-vsync mode active, `setTargetFPS`'s sleep-based cap
+ * becomes effective — under Fifo it is inert by design.
+ */
+export function setPresentMode(mode: number): void {
+  bloom_set_present_mode(mode);
 }
 
 /** Screen-space sun shafts (god rays). strength 0 = off. */

@@ -218,6 +218,14 @@ macro_rules! __bloom_ffi_visual {
         })
         }
 
+        // bloom_set_present_mode  [round-2 audit F6]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_present_mode(mode: f64) {
+            $crate::ffi::guard("bloom_set_present_mode", move || {
+                engine().renderer.set_present_mode(mode as u32);
+        })
+        }
+
         // bloom_set_sun_shafts  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_sun_shafts(strength: f64, decay: f64, r: f64, g: f64, b: f64) {
