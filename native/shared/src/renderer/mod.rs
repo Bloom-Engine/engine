@@ -550,8 +550,13 @@ struct SsrTemporalParams {
 struct SsrParams {
     inv_proj: [[f32; 4]; 4],
     proj: [[f32; 4]; 4],
-    /// x=strength, y=max_dist, z=n_steps, w=padding
+    /// x=strength, y=max_dist, z=n_steps, w=frame index
     params: [f32; 4],
+    /// EN-021 — view→world rotation (transpose of the view 3×3) for the
+    /// env-miss fallback's direction lookup.
+    inv_view_rot: [[f32; 4]; 4],
+    /// EN-021 — x = env max LOD, y = env intensity, zw unused.
+    params2: [f32; 4],
 }
 
 #[repr(C)]
@@ -4115,6 +4120,19 @@ impl Renderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 8, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // EN-021 — env panorama for the miss fallback.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                    }, count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10, visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
@@ -8204,6 +8222,9 @@ impl Renderer {
         self.sky_bind_group = Some(bg);
         self.env_diffuse_texture = Some(diffuse_texture);
         self.lighting_bind_group = new_lighting_bg;
+        // EN-021 — the SSR bind group holds an env view; rebuild it when
+        // a new HDR panorama is uploaded.
+        self.ssr_bg_cache = None;
     }
 
     /// Whether a sky env map has been uploaded — controls whether
@@ -8514,6 +8535,9 @@ impl Renderer {
         let new_bg = self.make_lighting_bind_group("lighting_bg_panorama", &env_view, &diffuse_view);
         self.lighting_bind_group = new_bg;
         self.lighting_bg_is_procedural = false;
+        // EN-021 — the SSR bind group holds an env view; rebuild it when
+        // the env source swaps.
+        self.ssr_bg_cache = None;
     }
 
     /// EN-005 Phase 3 — rebuild `lighting_bind_group` so PBR materials
@@ -8530,6 +8554,11 @@ impl Renderer {
         );
         self.lighting_bind_group = new_bg;
         self.lighting_bg_is_procedural = true;
+        // EN-021 — the SSR env-fallback binding should track the active
+        // env source. (SSR keeps sampling sky_texture today; nulling the
+        // cache here at least rebuilds against the current state on the
+        // next frame.)
+        self.ssr_bg_cache = None;
     }
 
     /// Sample the transmittance LUT for the current sun direction
@@ -10449,7 +10478,11 @@ impl Renderer {
         // (shadow_cascade_splits.w is NOT usable for this — it carries the
         // TSR mip-LOD bias, written by the shadow pass each frame.)
         let shadows_flag = if self.shadow_map.enabled { 1.0 } else { 0.0 };
-        self.lighting_uniforms.dir_light_count = [0.0, shadows_flag, 0.0, 0.0];
+        // dir_light_count.z carries SSR's ownership share for EN-021's
+        // IBL-specular complement in fs_main_scene: strength while SSR
+        // runs, 0 when disabled (full IBL specular returns).
+        let ssr_share = if self.ssr_enabled { self.ssr_strength } else { 0.0 };
+        self.lighting_uniforms.dir_light_count = [0.0, shadows_flag, ssr_share, 0.0];
         self.lighting_uniforms.point_light_count = [0.0; 4];
     }
 
