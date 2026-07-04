@@ -171,7 +171,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         };
         let pv = bytemuck::Zeroable::zeroed();
         sys.update_frame_uniforms(&queue, &pf, &pv);
-        sys.reset_draw_slot();
+        sys.reset_draw_slot(crate::renderer::IDENTITY_MAT4);
 
         // MVP = identity so the fullscreen tri stays in NDC.
         let identity = [

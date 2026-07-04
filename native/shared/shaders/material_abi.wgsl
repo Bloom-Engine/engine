@@ -215,6 +215,22 @@ struct JointMatrices {
 @group(3) @binding(0) var<uniform> draw:   PerDraw;
 @group(3) @binding(1) var<uniform> joints: JointMatrices;
 
+// EN-022 — standard motion vector from current/previous clip positions.
+// Matches the core path's convention exactly (NDC delta × 0.5). Vertex
+// shaders pass their clip position plus a previous-frame clip position:
+// static geometry uses `draw.prev_mvp * local` (or
+// `view.prev_view_proj * world` — for static models the two agree);
+// procedurally displaced geometry (wind sway) re-evaluates the
+// displacement at `frame.time - frame.delta_time` and projects with
+// `view.prev_view_proj`. Write the result to OpaqueOut.velocity — a
+// zero write disables TAA's motion-adaptive clamp for that surface
+// (the round-2 audit's primary TSR-shimmer mechanism, F8).
+fn abi_motion_vector(curr_clip: vec4<f32>, prev_clip: vec4<f32>) -> vec2<f32> {
+  let c = curr_clip.xy / curr_clip.w;
+  let p = prev_clip.xy / prev_clip.w;
+  return (c - p) * 0.5;
+}
+
 // =====================================================================
 // Group 4 — SceneInputs (optional; `reads_scene = true` materials only)
 // =====================================================================
