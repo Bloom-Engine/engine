@@ -8885,10 +8885,12 @@ impl Renderer {
         self.uniform_slot_count = 0;
         self.render_mode = RenderMode::ScreenSpace;
         // Phase 1c — clear last frame's material draws so the new
-        // frame's submissions start from an empty list.
+        // frame's submissions start from an empty list. EN-022: the
+        // reset also rotates the per-slot model history and pins the
+        // previous frame's VP for motion-vector reconstruction.
         self.material_system.commands.clear();
         self.material_system.translucent_commands.clear();
-        self.material_system.reset_draw_slot();
+        self.material_system.reset_draw_slot(self.prev_vp_matrix);
 
         // Write identity uniforms to slot 0 (2D uses logical points,
         // not physical pixels — see Renderer::new).

@@ -294,6 +294,19 @@ pub struct MaterialSystem {
     pub translucent_commands:  Vec<MaterialDrawCommand>,  // Transparent + Refractive + Additive
     next_draw_slot: usize,
 
+    /// EN-022 — per-slot model matrices from the PREVIOUS frame, keyed
+    /// by draw slot (= submission order, which is stable frame-to-frame
+    /// for immediate-mode games; the cached-model path relies on the
+    /// same convention). `submit_draw` composes prev_vp × prev_model
+    /// into PerDraw.prev_mvp so materials can output real motion
+    /// vectors — the ABI field existed since day one but was filled
+    /// with the CURRENT mvp, making world velocity identically zero
+    /// (round-2 audit F8).
+    prev_models: Vec<[[f32; 4]; 4]>,
+    cur_models:  Vec<[[f32; 4]; 4]>,
+    /// Previous frame's view-projection (set in reset_draw_slot).
+    prev_vp: [[f32; 4]; 4],
+
     /// EN-001 — instance buffers, indexed by InstanceBufferHandle
     /// (1-based; 0 = invalid). Each entry owns a wgpu Buffer + element
     /// count. Created via `create_instance_buffer`, consumed by
@@ -622,6 +635,9 @@ impl MaterialSystem {
             commands: Vec::new(),
             translucent_commands: Vec::new(),
             next_draw_slot: 0,
+            prev_models: Vec::new(),
+            cur_models: Vec::new(),
+            prev_vp: super::IDENTITY_MAT4,
             instance_buffers: Vec::new(),
             texture_arrays: Vec::new(),
             material_texture_arrays: Vec::new(),
@@ -694,8 +710,15 @@ impl MaterialSystem {
     /// Reset the per-draw slot cursor. Commands lists are cleared by
     /// the Renderer from its own `begin_frame` so the order of reset
     /// vs. submit is deterministic.
-    pub fn reset_draw_slot(&mut self) {
+    ///
+    /// EN-022 — also rotates the per-slot model history: this frame's
+    /// models become the previous frame's, and `prev_vp` is set to the
+    /// VP that was current when those models were submitted.
+    pub fn reset_draw_slot(&mut self, prev_vp: [[f32; 4]; 4]) {
         self.next_draw_slot = 0;
+        std::mem::swap(&mut self.prev_models, &mut self.cur_models);
+        self.cur_models.clear();
+        self.prev_vp = prev_vp;
     }
 
     /// Phase 5 — set/replace `user_params` for a specific material. The
@@ -1393,7 +1416,10 @@ impl MaterialSystem {
         mesh_idx: usize,
         mvp: [[f32; 4]; 4],
         model: [[f32; 4]; 4],
-        prev_mvp: [[f32; 4]; 4],
+        // EN-022: ignored — callers historically passed the CURRENT mvp
+        // here, zeroing every motion vector. The real previous-frame
+        // transform is reconstructed from the per-slot model history.
+        _legacy_prev_mvp: [[f32; 4]; 4],
         tint: [f32; 4],
         skin_info: [u32; 4],
     ) {
@@ -1407,6 +1433,17 @@ impl MaterialSystem {
         let slot = self.next_draw_slot;
         self.next_draw_slot += 1;
         self.ensure_draw_slot(device, joint_buffer, slot);
+
+        // EN-022 — draw identity is the submission slot (stable order
+        // frame-to-frame, same convention the cached-model path uses).
+        // A fresh slot (first frame, or the frame after a draw-count
+        // change) falls back to the current model = zero object motion.
+        let prev_model = self.prev_models.get(slot).copied().unwrap_or(model);
+        let prev_mvp = super::mat4_multiply(self.prev_vp, prev_model);
+        if self.cur_models.len() <= slot {
+            self.cur_models.resize(slot + 1, model);
+        }
+        self.cur_models[slot] = model;
 
         let per_draw = PerDrawUniforms { mvp, model, prev_mvp, model_tint: tint, skin_info };
         queue.write_buffer(&self.per_draw_buffers[slot], 0, bytemuck::bytes_of(&per_draw));
@@ -1447,7 +1484,8 @@ impl MaterialSystem {
         instance_count: u32,
         mvp: [[f32; 4]; 4],
         model: [[f32; 4]; 4],
-        prev_mvp: [[f32; 4]; 4],
+        // EN-022: ignored — see submit_draw.
+        _legacy_prev_mvp: [[f32; 4]; 4],
         tint: [f32; 4],
         skin_info: [u32; 4],
     ) {
@@ -1461,6 +1499,18 @@ impl MaterialSystem {
         let slot = self.next_draw_slot;
         self.next_draw_slot += 1;
         self.ensure_draw_slot(device, joint_buffer, slot);
+
+        // EN-022 — same slot-history reconstruction as submit_draw.
+        // Instance transforms live in the (static) instance buffer, so
+        // prev vs current only differ by the fallback model + camera;
+        // per-instance wind sway derives its own previous position in
+        // the vertex shader from frame.time - frame.delta_time.
+        let prev_model = self.prev_models.get(slot).copied().unwrap_or(model);
+        let prev_mvp = super::mat4_multiply(self.prev_vp, prev_model);
+        if self.cur_models.len() <= slot {
+            self.cur_models.resize(slot + 1, model);
+        }
+        self.cur_models[slot] = model;
 
         let per_draw = PerDrawUniforms { mvp, model, prev_mvp, model_tint: tint, skin_info };
         queue.write_buffer(&self.per_draw_buffers[slot], 0, bytemuck::bytes_of(&per_draw));
