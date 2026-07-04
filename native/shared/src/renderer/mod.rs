@@ -7937,6 +7937,28 @@ impl Renderer {
         self.sharpen_strength = strength.max(0.0);
     }
 
+    /// Present mode: 0 = Fifo (vsync), 1 = Mailbox (uncapped, no tearing),
+    /// 2 = Immediate (uncapped, tearing allowed). Round-2 audit F6: the
+    /// mode was hardcoded Fifo, which also made `set_target_fps` inert
+    /// (its sleep-based cap only engages when vsync is off). All three
+    /// modes are supported by DXGI on Windows; on other backends an
+    /// unsupported request falls back to Fifo at configure time.
+    pub fn set_present_mode(&mut self, mode: u32) {
+        let requested = match mode {
+            1 => wgpu::PresentMode::Mailbox,
+            2 => wgpu::PresentMode::Immediate,
+            _ => wgpu::PresentMode::Fifo,
+        };
+        if self.surface_config.present_mode == requested {
+            return;
+        }
+        self.surface_config.present_mode = requested;
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.surface_config);
+        }
+        eprintln!("bloom: present mode = {:?}", requested);
+    }
+
     /// Sun shaft (screen-space god ray) strength. 0 (default) = off.
     /// 0.4 = subtle haze, 1.0+ = obvious cinematic shafts. The
     /// shafts are sampled from the depth buffer along a screen-space

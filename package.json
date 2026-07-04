@@ -1237,6 +1237,13 @@
           "returns": "void"
         },
         {
+          "name": "bloom_set_present_mode",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_set_sun_shafts",
           "params": [
             "f64",
