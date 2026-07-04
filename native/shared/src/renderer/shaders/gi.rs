@@ -340,6 +340,8 @@ struct WsrcBakeParams {
     // output z-slice so this pipeline can be dispatched once per
     // cascade with the same layout.
     flags: vec4<f32>,
+    // EN-023 — xyz = scene-average albedo for the ground-bounce term.
+    ground_albedo: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: WsrcBakeParams;
@@ -441,7 +443,17 @@ fn cs_main(
     let up = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     let sky = u.sky_color.xyz * up * up;
 
-    let radiance = sun + sky;
+    // EN-023 — ground bounce for below-horizon octels. This envelope
+    // was light-source-only: any miss ray pointing downward returned
+    // ~black, so shaded receivers lost the strongest real bounce
+    // source (sunlit ground). Approximate it as the scene-average
+    // albedo lit by the sun (shadowed at the probe) + half the sky.
+    let down = clamp(-dir.y, 0.0, 1.0);
+    let ground_irr = u.sun_color.xyz * max(u.sun_dir.y, 0.0) * shadow
+                   + u.sky_color.xyz * 0.5;
+    let ground = u.ground_albedo.xyz * ground_irr * down * down;
+
+    let radiance = sun + sky + ground;
 
     // V13 — cascade index in flags.z offsets the output z-slice.
     let cascade_idx = u32(u.flags.z);
@@ -485,6 +497,9 @@ struct WsrcBakeParams {
     shadow_vps: array<mat4x4<f32>, 3>,
     shadow_splits: vec4<f32>,
     flags: vec4<f32>,
+    // EN-023 — layout mirror; the HW bake traces real geometry and
+    // ignores the scene-average ground albedo.
+    ground_albedo: vec4<f32>,
 };
 
 struct HwBakeInstanceGiData {
@@ -495,6 +510,9 @@ struct HwBakeInstanceGiData {
     card_slot: vec4<f32>,
     card_aabb_min: vec4<f32>,
     card_aabb_max: vec4<f32>,
+    // EN-023 — world-space AABB (SDF path only; layout mirror).
+    world_aabb_min: vec4<f32>,
+    world_aabb_max: vec4<f32>,
 };
 
 const HW_BAKE_CARD_SLOTS_PER_ROW: f32 = 64.0;
