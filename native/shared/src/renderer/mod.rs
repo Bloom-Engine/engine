@@ -979,6 +979,11 @@ pub struct Renderer {
     pub ssgi_radius: f32,
     /// SSGI master switch.
     pub ssgi_enabled: bool,
+    /// One-shot log guard: which SSGI trace backend was last reported to
+    /// stderr (hw-ray-query / sdf-clipmap / hiz-screen). The silent HW→SW
+    /// fallback made "why is bounce gray?" a debugger question during the
+    /// round-2 audit — keep it answerable from the log.
+    pub ssgi_backend_logged: Option<&'static str>,
 
     // --- Ticket 007a: Lumen-style screen-probe SSGI ---
 
@@ -6022,6 +6027,7 @@ impl Renderer {
             ssgi_intensity: 1.0,
             ssgi_radius: 20.0,
             ssgi_enabled: true,
+            ssgi_backend_logged: None,
             probe_grid_w,
             probe_grid_h,
             probe_header_buffer,
@@ -9426,6 +9432,11 @@ impl Renderer {
             }
         }
 
+        // CPU bracket over the composite + custom post-pass encode tail.
+        // The matching `end("post_fx")` below predates this begin — it was
+        // orphaned (a no-op) for months while comments claimed the phase
+        // covered scene_compose's cost.
+        profiler.begin("post_fx");
         let composite_src_view = self.composite_source_view();
 
         // composite_uniform_buffer carries per-frame composite state.

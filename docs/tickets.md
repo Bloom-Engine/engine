@@ -661,3 +661,31 @@ test.
 **Blocked on:** access to a Windows 11 box with a HiDPI display
 (or a VM forwarding DPI), and a Linux dev with X11. Web checks
 can be done from any modern browser on the macOS dev box.
+
+## EN-020 — Native AV: heap read overrun, layout-sensitive 🔴
+
+**Symptom.** Bloom Shooter round-2 audit (2026-07-04): three scripted runs
+crashed with c0000005 at the same instruction (`main.exe+0xe8e5` on the
+af98dbe-era link), reading `0x…FFF8` — 8 bytes below a page boundary.
+No Rust panic output (engine builds `panic = "abort"`, which would print),
+so this is raw UB: something reads past the end of a heap allocation and
+faults only when the allocation abuts an unmapped page.
+
+**What is ruled out.** Runtime feature toggles alone (a 19-transition
+ssgi/shadows/profiler gauntlet under combat load survived); profiler
+string churn alone (one crash happened with only ~8 small prints);
+specific stages (three different ones). The fault did not reproduce after
+a relink (two 60 s fishing runs) — consistent with layout sensitivity,
+not with a fixed trigger.
+
+**Standing kit.** WER LocalDumps armed on the dev box (dumps →
+`shooter/tools/.testout/dumps/`, dialog suppressed), line tables in the
+staticlib (`debug = "line-tables-only"`), `perry compile --debug-symbols`
+emits `main.pdb`, LLVM symbolizer available. See
+[crash-triage-windows.md](crash-triage-windows.md). Next occurrence =
+symbolized stack; fix then.
+
+**Suspect space.** Perry-runtime heap/string handling at the FFI boundary
+(profiler overlay/history strings are the heaviest string traffic in the
+crashing runs), or an engine-side heap read overrun in a small shared
+helper. Audit report: `shooter/docs/audit-round2.md` finding F1.

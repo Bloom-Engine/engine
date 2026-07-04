@@ -446,6 +446,20 @@ unsafe fn init_engine_for_hwnd(
             ..Default::default()
         })).expect("No adapter found");
 
+        {
+            // One line of boot truth: which GPU we got and whether the
+            // features that silently reshape the frame (HW ray query for
+            // GI, timestamps for the profiler) are available on it.
+            let info = adapter.get_info();
+            eprintln!(
+                "bloom: adapter '{}' ({:?}), ray_query={}, timestamps={}",
+                info.name,
+                info.backend,
+                adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
+                adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY),
+            );
+        }
+
         // Ticket 007b: HW ray-query via DXR 1.1 / VK_KHR_ray_query.
         let supported = adapter.features();
         let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")

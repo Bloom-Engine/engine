@@ -189,6 +189,14 @@ impl Renderer {
         let use_sdf = !use_hw
             && self.scene_sdf_clipmap_built
             && self.tlas_instance_data_buffer.is_some();
+        // Log the backend once (and again if it changes, e.g. clipmap
+        // finishing its first bake promotes hiz → sdf). Nothing else in
+        // the engine reveals which tier actually runs.
+        let backend = if use_hw { "hw-ray-query" } else if use_sdf { "sdf-clipmap" } else { "hiz-screen" };
+        if self.ssgi_backend_logged != Some(backend) {
+            self.ssgi_backend_logged = Some(backend);
+            eprintln!("bloom: ssgi trace backend = {}", backend);
+        }
 
         if use_hw {
             // Build the HW bind group lazily. V3 uses a per-

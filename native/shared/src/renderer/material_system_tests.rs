@@ -378,6 +378,13 @@ mod translucent_sort_tests {
             draw_slot: 0,
             view_depth,
             instance: None,
+            // Identity — the sort under test only reads view_depth.
+            model: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
         }
     }
 

@@ -57,6 +57,8 @@ pub struct Profiler {
     next_query: u32,
     // label -> (begin_index, end_index)
     pending_gpu: Vec<(&'static str, u32, u32)>,
+    /// One-shot warning guard for GPU timestamp-pair exhaustion.
+    budget_warned: bool,
 
     /// Phase 8 — last `ROLLING_FRAMES` frame totals (sum of all
     /// samples in `frame` at frame_end), in microseconds. Ring
@@ -74,11 +76,15 @@ struct RollingStats {
     has_gpu: bool,
     idx: usize,
     filled: usize,
+    /// Frame index of the most recent sample. A pass that stops running
+    /// (feature toggled off) must drop out of the readouts instead of
+    /// showing its frozen average forever.
+    last_frame: u64,
 }
 
 impl RollingStats {
     fn new() -> Self {
-        Self { cpu: [0.0; ROLLING_FRAMES], gpu: [0.0; ROLLING_FRAMES], has_gpu: false, idx: 0, filled: 0 }
+        Self { cpu: [0.0; ROLLING_FRAMES], gpu: [0.0; ROLLING_FRAMES], has_gpu: false, idx: 0, filled: 0, last_frame: 0 }
     }
     fn push(&mut self, cpu: f64, gpu: Option<f64>) {
         self.cpu[self.idx] = cpu;
@@ -113,6 +119,7 @@ impl Profiler {
             timestamp_period_ns: 1.0,
             next_query: 0,
             pending_gpu: Vec::new(),
+            budget_warned: false,
             frame_total_cpu_us: [0.0; ROLLING_FRAMES],
             frame_total_gpu_us: [0.0; ROLLING_FRAMES],
             histogram_idx: 0,
@@ -151,7 +158,20 @@ impl Profiler {
         self.gpu_enabled = true;
     }
 
-    pub fn set_enabled(&mut self, on: bool) { self.enabled = on; }
+    pub fn set_enabled(&mut self, on: bool) {
+        if on && !self.enabled {
+            // Fresh measuring session: without this, stats captured before
+            // a disable (potentially under a different feature set) show
+            // until the rolling window refills and skew the first seconds
+            // of every new session.
+            self.rolling.clear();
+            self.frame_total_cpu_us = [0.0; ROLLING_FRAMES];
+            self.frame_total_gpu_us = [0.0; ROLLING_FRAMES];
+            self.histogram_idx = 0;
+            self.histogram_filled = 0;
+        }
+        self.enabled = on;
+    }
     pub fn is_enabled(&self) -> bool { self.enabled }
     pub fn has_gpu(&self) -> bool { self.gpu_enabled }
 
@@ -175,7 +195,16 @@ impl Profiler {
     pub fn reserve_gpu_pair(&mut self, label: &'static str) -> Option<(u32, u32)> {
         if !self.enabled || !self.gpu_enabled { return None; }
         self.query_set.as_ref()?;
-        if self.next_query + 2 > MAX_GPU_PAIRS * 2 { return None; }
+        if self.next_query + 2 > MAX_GPU_PAIRS * 2 {
+            if !self.budget_warned {
+                self.budget_warned = true;
+                eprintln!(
+                    "bloom profiler: GPU timestamp budget ({} pairs) exhausted — later passes report CPU time only",
+                    MAX_GPU_PAIRS
+                );
+            }
+            return None;
+        }
         let begin = self.next_query;
         let end = self.next_query + 1;
         self.next_query += 2;
@@ -223,9 +252,11 @@ impl Profiler {
         }
     }
 
-    /// End-of-frame bookkeeping. Reads back GPU timestamps from the
-    /// previous frame (non-blocking map), folds samples into rolling
-    /// stats, and clears per-frame state for the next frame.
+    /// End-of-frame bookkeeping. Resolves this frame's GPU timestamps via
+    /// a BLOCKING map (map_async + poll(Wait) — serialises CPU⇄GPU, so
+    /// wall-clock fps is pessimistic while the profiler is enabled; see
+    /// docs/crash-triage-windows.md), folds samples into rolling stats,
+    /// and clears per-frame state for the next frame.
     pub fn frame_end(&mut self, device: &wgpu::Device) {
         if !self.enabled {
             self.frame.clear();
@@ -287,10 +318,15 @@ impl Profiler {
         self.histogram_idx = (self.histogram_idx + 1) % ROLLING_FRAMES;
         self.histogram_filled = (self.histogram_filled + 1).min(ROLLING_FRAMES);
 
+        let fc = self.frame_count;
         for s in self.frame.drain(..) {
             let entry = self.rolling.entry(s.label).or_insert_with(RollingStats::new);
             entry.push(s.cpu_us, s.gpu_us);
+            entry.last_frame = fc;
         }
+        // Drop entries that have not reported for several windows so a
+        // disabled feature's passes leave the map instead of lingering.
+        self.rolling.retain(|_, s| fc.saturating_sub(s.last_frame) <= (4 * ROLLING_FRAMES) as u64);
         self.open_cpu.clear();
         self.next_query = 0;
         self.pending_gpu.clear();
@@ -316,7 +352,9 @@ impl Profiler {
         if !self.enabled {
             return String::from("profiler: disabled\n");
         }
+        let fc = self.frame_count;
         let mut entries: Vec<(&&str, &RollingStats)> = self.rolling.iter()
+            .filter(|(_, s)| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
             .map(|(k, v)| (k, v))
             .collect();
         entries.sort_by(|a, b| b.1.avg_cpu().partial_cmp(&a.1.avg_cpu()).unwrap_or(std::cmp::Ordering::Equal));
@@ -338,12 +376,18 @@ impl Profiler {
     /// Average total CPU frame time across the rolling window (sum of
     /// all phases). Useful for a single headline number.
     pub fn avg_frame_cpu_us(&self) -> f64 {
-        self.rolling.values().map(|s| s.avg_cpu()).sum()
+        let fc = self.frame_count;
+        self.rolling.values()
+            .filter(|s| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
+            .map(|s| s.avg_cpu()).sum()
     }
 
     /// Average total GPU frame time where available.
     pub fn avg_frame_gpu_us(&self) -> f64 {
-        self.rolling.values().filter_map(|s| s.avg_gpu()).sum()
+        let fc = self.frame_count;
+        self.rolling.values()
+            .filter(|s| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
+            .filter_map(|s| s.avg_gpu()).sum()
     }
 
     /// Snapshot the rolling averages in a stable, CPU-time-descending
@@ -351,7 +395,9 @@ impl Profiler {
     /// label/cpu/gpu out via the accessors below — HashMap iteration
     /// order would jitter the overlay otherwise.
     pub fn snapshot(&mut self) -> Vec<(&'static str, f64, Option<f64>)> {
+        let fc = self.frame_count;
         let mut v: Vec<(&'static str, f64, Option<f64>)> = self.rolling.iter()
+            .filter(|(_, s)| fc.saturating_sub(s.last_frame) <= ROLLING_FRAMES as u64)
             .map(|(k, s)| (*k, s.avg_cpu(), s.avg_gpu()))
             .collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -392,6 +438,36 @@ mod tests {
         assert_eq!(h.len(), 5);
         assert_eq!(h[0].0, 100.0);
         assert_eq!(h[4].0, 500.0);
+    }
+
+    #[test]
+    fn stale_labels_drop_out_of_snapshot_and_evict() {
+        let mut p = Profiler::new();
+        p.set_enabled(true);
+        // One label reports once, another keeps reporting.
+        p.frame.push(FrameSample { label: "once", cpu_us: 5.0, gpu_us: None });
+        p.frame_end_cpu();
+        for _ in 0..(ROLLING_FRAMES + 1) { fake_frame(&mut p, 1.0); }
+        let snap = p.snapshot();
+        assert!(snap.iter().any(|(l, _, _)| *l == "fake"));
+        assert!(
+            !snap.iter().any(|(l, _, _)| *l == "once"),
+            "a pass that stopped reporting must leave the snapshot"
+        );
+        for _ in 0..(4 * ROLLING_FRAMES) { fake_frame(&mut p, 1.0); }
+        assert!(!p.rolling.contains_key("once"), "stale label must eventually evict");
+    }
+
+    #[test]
+    fn reenable_starts_fresh_session() {
+        let mut p = Profiler::new();
+        p.set_enabled(true);
+        fake_frame(&mut p, 100.0);
+        assert!(!p.frame_history().is_empty());
+        p.set_enabled(false);
+        p.set_enabled(true);
+        assert!(p.frame_history().is_empty(), "histogram must clear on re-enable");
+        assert!(p.snapshot().is_empty(), "rolling stats must clear on re-enable");
     }
 
     #[test]
