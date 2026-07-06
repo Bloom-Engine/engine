@@ -209,6 +209,15 @@ pub struct ShadowMap {
     /// node's transform / cast_shadow / visibility / geometry changes;
     /// a mismatch here forces a re-render.
     pub rendered_scene_version: u64,
+    /// Shadow-flicker fix — per-cascade accepted pancake extents
+    /// (back, far). Animated caster bounds drift a few centimetres per
+    /// frame, and the raw 1/16 m ceil() quantization made the fitted VP
+    /// toggle between two matrices whenever that drift straddled a
+    /// step. The accepted extent grows immediately (casters must stay
+    /// inside the volume) but shrinks only when the raw need has
+    /// dropped well below it — so idle animations stop re-fitting the
+    /// cascades every few frames.
+    pancake_hysteresis: [[f32; 2]; NUM_CASCADES],
 }
 
 impl ShadowMap {
@@ -540,6 +549,7 @@ impl ShadowMap {
             rendered_light_vps: None,
             rendered_light_dir: None,
             rendered_scene_version: 0,
+            pancake_hysteresis: [[0.0; 2]; NUM_CASCADES],
         }
     }
 
@@ -725,9 +735,36 @@ impl ShadowMap {
                     if -along_d     > pancake_far  { pancake_far  = -along_d; }
                 }
             }
-            // Quantize Z range so tiny scene-bounds drift doesn't shift depths.
-            let pancake_back = (pancake_back * 16.0).ceil() / 16.0;
-            let pancake_far  = (pancake_far  * 16.0).ceil() / 16.0;
+            // Quantize Z range so scene-bounds drift doesn't shift depths.
+            // Flicker fix: animated casters (idle anims, wind-swayed
+            // proxies) drift the raw pancake need by centimetres-to-
+            // decimetres every cycle, and every resulting VP change
+            // re-rolls the acne pattern on grazing receivers — visible
+            // as periodic banding bursts. Quantize UP to whole 2 m steps
+            // and only shrink after a full 2-step (4 m) drop, so the
+            // fitted VP is byte-stable against anything short of a
+            // structural scene change. The cost is a few metres of extra
+            // ortho depth range on a Depth32Float target — irrelevant —
+            // and coverage stays correct: the accepted extent is never
+            // below the raw need.
+            const PANCAKE_STEP: f32 = 2.0;
+            let quantize = |v: f32| (v / PANCAKE_STEP).ceil() * PANCAKE_STEP;
+            let prev = self.pancake_hysteresis[c];
+            let pancake_back = if pancake_back > prev[0]
+                || pancake_back < prev[0] - 2.0 * PANCAKE_STEP
+            {
+                quantize(pancake_back)
+            } else {
+                prev[0]
+            };
+            let pancake_far = if pancake_far > prev[1]
+                || pancake_far < prev[1] - 2.0 * PANCAKE_STEP
+            {
+                quantize(pancake_far)
+            } else {
+                prev[1]
+            };
+            self.pancake_hysteresis[c] = [pancake_back, pancake_far];
 
             // Place light eye at the far-back edge of the Z range so
             // ortho near=0 exactly touches the top of the pancake volume.

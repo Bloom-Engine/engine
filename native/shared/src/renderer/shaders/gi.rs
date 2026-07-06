@@ -171,6 +171,114 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
+/// Fullscreen-lag fix — scene-clipmap variant of the SDF bake.
+///
+/// The original clipmap bake reused `SDF_BAKE_WGSL`: every one of the
+/// 64³ voxels looped over EVERY scene triangle, and the whole volume
+/// baked in a single dispatch. On integrated GPUs that one dispatch
+/// stalled the end-of-frame submit for seconds whenever the camera
+/// drifted 10 m. This variant fixes both axes of that cost:
+///
+/// - Triangles are binned on the CPU into `counts.x` cells per axis,
+///   each cell's list pre-expanded by one cell in every direction. A
+///   voxel only tests its own cell's list. Distances are clamped at
+///   one cell width (`band`); because of the one-cell expansion the
+///   clamp never OVERestimates the distance to the nearest surface,
+///   which keeps sphere-trace steps conservative. Empty-air cells skip
+///   the triangle loop entirely.
+/// - `counts.z` carries a voxel Z offset so the caller can bake a few
+///   Z-layers per frame into a staging texture instead of the whole
+///   volume at once.
+pub(in crate::renderer) const SDF_CLIPMAP_BAKE_WGSL: &str = "
+struct SdfClipmapBakeParams {
+    aabb_min: vec4<f32>,
+    aabb_max: vec4<f32>,
+    // x = bin cells per axis, y = sdf resolution,
+    // z = voxel Z offset of this slice batch, w unused
+    counts: vec4<u32>,
+};
+
+@group(0) @binding(0) var<uniform> u: SdfClipmapBakeParams;
+@group(0) @binding(1) var<storage, read> vertex_buf: array<f32>;
+@group(0) @binding(2) var<storage, read> index_buf: array<u32>;
+@group(0) @binding(3) var sdf_out: texture_storage_3d<r32float, write>;
+@group(0) @binding(4) var<storage, read> cell_offsets: array<u32>;
+@group(0) @binding(5) var<storage, read> cell_tris: array<u32>;
+
+const VERTEX_STRIDE_F32: u32 = 12u;  // Vertex3D: pos(3) + normal(3) + color(4) + uv(2)
+
+fn vtx_pos(idx: u32) -> vec3<f32> {
+    let base = idx * VERTEX_STRIDE_F32;
+    return vec3<f32>(vertex_buf[base], vertex_buf[base + 1u], vertex_buf[base + 2u]);
+}
+
+// Point-triangle distance, clamped-edge form (Ericson).
+fn point_triangle_distance(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> f32 {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = p - a;
+    let d1 = dot(ab, ap);
+    let d2 = dot(ac, ap);
+    if (d1 <= 0.0 && d2 <= 0.0) { return length(ap); }
+    let bp = p - b;
+    let d3 = dot(ab, bp);
+    let d4 = dot(ac, bp);
+    if (d3 >= 0.0 && d4 <= d3) { return length(bp); }
+    let vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+        let v = d1 / (d1 - d3);
+        return length(p - (a + v * ab));
+    }
+    let cp = p - c;
+    let d5 = dot(ab, cp);
+    let d6 = dot(ac, cp);
+    if (d6 >= 0.0 && d5 <= d6) { return length(cp); }
+    let vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+        let w = d2 / (d2 - d6);
+        return length(p - (a + w * ac));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return length(p - (b + w * (c - b)));
+    }
+    let denom = 1.0 / (va + vb + vc);
+    let v = vb * denom;
+    let w = vc * denom;
+    return length(p - (a + ab * v + ac * w));
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let res = u.counts.y;
+    let vox = vec3<u32>(gid.x, gid.y, gid.z + u.counts.z);
+    if (vox.x >= res || vox.y >= res || vox.z >= res) { return; }
+
+    let uvw = (vec3<f32>(vox) + vec3<f32>(0.5)) / f32(res);
+    let voxel_ws = mix(u.aabb_min.xyz, u.aabb_max.xyz, uvw);
+
+    let cells = u.counts.x;
+    let vpc = res / cells;
+    let cell = vox / vpc;
+    let ci = (cell.z * cells + cell.y) * cells + cell.x;
+    let start = cell_offsets[ci];
+    let end = cell_offsets[ci + 1u];
+
+    let band = (u.aabb_max.x - u.aabb_min.x) / f32(cells);
+    var min_dist = band;
+    for (var k: u32 = start; k < end; k = k + 1u) {
+        let t = cell_tris[k];
+        let a = vtx_pos(index_buf[t * 3u + 0u]);
+        let b = vtx_pos(index_buf[t * 3u + 1u]);
+        let c = vtx_pos(index_buf[t * 3u + 2u]);
+        min_dist = min(min_dist, point_triangle_distance(voxel_ws, a, b, c));
+    }
+
+    textureStore(sdf_out, vec3<i32>(vox), vec4<f32>(min_dist, 0.0, 0.0, 0.0));
+}
+";
+
 /// Ticket 013 V3 — per-frame card-lighting compute pass with
 /// shadow-cascade sampling + emissive contribution.
 ///

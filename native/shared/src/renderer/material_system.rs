@@ -707,6 +707,38 @@ impl MaterialSystem {
         queue.write_buffer(&self.per_view_buffer,  0, bytemuck::bytes_of(per_view));
     }
 
+    /// Shadow-flicker fix — re-upload just PerView's trailing shadow
+    /// fields. `update_frame_uniforms` runs BEFORE the shadow pass fits
+    /// this frame's cascade VPs, so PerView otherwise carries the
+    /// PREVIOUS frame's matrices while the depth maps hold this frame's
+    /// content — a one-frame mismatch that flashes acne bands across
+    /// material-path receivers whenever the fit moves (the deferred path
+    /// reads the freshly-written lighting buffer and never had this).
+    /// Called from `record_shadow_pass` after the fit; queued buffer
+    /// writes all apply before any of this frame's draws execute, so
+    /// this patch wins over the earlier stale upload.
+    pub fn refresh_shadow_uniforms(
+        &self,
+        queue: &wgpu::Queue,
+        shadow_splits: [f32; 4],
+        shadow_view: [[f32; 4]; 4],
+        shadow_cascades: [[[f32; 4]; 4]; 3],
+    ) {
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct ShadowTail {
+            shadow_splits: [f32; 4],
+            shadow_view: [[f32; 4]; 4],
+            shadow_cascades: [[[f32; 4]; 4]; 3],
+        }
+        let tail = ShadowTail { shadow_splits, shadow_view, shadow_cascades };
+        // The shadow fields are the last three in PerViewUniforms; Pod
+        // guarantees no padding, so the tail offset is exact.
+        let offset = (std::mem::size_of::<PerViewUniforms>()
+            - std::mem::size_of::<ShadowTail>()) as u64;
+        queue.write_buffer(&self.per_view_buffer, offset, bytemuck::bytes_of(&tail));
+    }
+
     /// Reset the per-draw slot cursor. Commands lists are cleared by
     /// the Renderer from its own `begin_frame` so the order of reset
     /// vs. submit is deterministic.
@@ -719,6 +751,15 @@ impl MaterialSystem {
         std::mem::swap(&mut self.prev_models, &mut self.cur_models);
         self.cur_models.clear();
         self.prev_vp = prev_vp;
+    }
+
+    /// EN-022 fix — `begin_mode_3d` overrides the velocity reference
+    /// with the previous frame's UNJITTERED VP re-jittered with the
+    /// CURRENT frame's offsets, so prev_mvp cancels the TAA jitter
+    /// exactly. (reset_draw_slot runs at begin_frame, before the
+    /// current frame's jitter is known.)
+    pub fn set_velocity_reference_vp(&mut self, vp: [[f32; 4]; 4]) {
+        self.prev_vp = vp;
     }
 
     /// Phase 5 — set/replace `user_params` for a specific material. The

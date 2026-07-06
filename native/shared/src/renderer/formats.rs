@@ -111,7 +111,9 @@ pub(super) fn create_exposure_textures(device: &wgpu::Device) -> ([wgpu::Texture
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R16Float,
+            // Rg16Float (was R16Float): .r = smoothed exposure, .g = the
+            // anchored AE target (flicker fix — see EXPOSURE_SHADER_WGSL).
+            format: wgpu::TextureFormat::Rg16Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                  | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
@@ -333,12 +335,51 @@ pub(super) const SCENE_SDF_CLIPMAP_EXTENT: f32 = 40.0;
 /// of the full extent. 0.25 = rebake when the camera has moved more
 /// than 10 m from the clipmap centre on a 40 m clipmap.
 pub(super) const SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD: f32 = 0.25;
+/// Amortized-rebake fix: triangles are binned on the CPU into this many
+/// cells per axis (must divide SCENE_SDF_CLIPMAP_RES) so each voxel only
+/// tests triangles from its own pre-expanded cell instead of the whole
+/// scene. One cell width (extent / cells = 2.5 m) is also the narrow-band
+/// clamp the bake shader writes for empty cells.
+pub(super) const SCENE_SDF_CLIPMAP_BIN_CELLS: u32 = 16;
+/// Amortized-rebake fix: voxel Z-layers baked per frame into the staging
+/// texture (must be a multiple of the 4-deep workgroup). 16 layers →
+/// a full 64³ rebake spreads over 4 frames while traces keep sampling
+/// the live clipmap.
+pub(super) const SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME: u32 = 16;
 
 pub(super) fn create_scene_sdf_clipmap(
     device: &wgpu::Device,
 ) -> (wgpu::Texture, wgpu::TextureView) {
+    // COPY_DST: the amortized rebake bakes into a staging clone and
+    // copies over the live texture when the last slice lands.
+    create_scene_sdf_clipmap_tex(
+        device,
+        "scene_sdf_clipmap",
+        wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
+    )
+}
+
+/// Amortized-rebake fix: staging clone the sliced bake writes into while
+/// the live clipmap keeps serving traces.
+pub(super) fn create_scene_sdf_clipmap_staging(
+    device: &wgpu::Device,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    create_scene_sdf_clipmap_tex(
+        device,
+        "scene_sdf_clipmap_staging",
+        wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+    )
+}
+
+fn create_scene_sdf_clipmap_tex(
+    device: &wgpu::Device,
+    label: &str,
+    usage: wgpu::TextureUsages,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("scene_sdf_clipmap"),
+        label: Some(label),
         size: wgpu::Extent3d {
             width: SCENE_SDF_CLIPMAP_RES,
             height: SCENE_SDF_CLIPMAP_RES,
@@ -348,8 +389,7 @@ pub(super) fn create_scene_sdf_clipmap(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format: wgpu::TextureFormat::R32Float,
-        usage: wgpu::TextureUsages::STORAGE_BINDING
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

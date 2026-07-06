@@ -166,7 +166,11 @@ impl EngineState {
                 &self.renderer.device,
                 &self.renderer.queue,
                 &self.renderer.vp_matrix(),
-                &self.renderer.prev_vp_matrix,
+                // EN-022 fix: the velocity reference (prev unjittered VP
+                // + current jitter) — NOT the raw jittered prev VP — so
+                // static scene nodes get true zero velocity instead of
+                // jitter-delta noise that flickers TAA history.
+                &self.renderer.velocity_ref_vp,
                 self.renderer.uniform_3d_layout(),
                 Some(&self.renderer.occlusion),
             );

@@ -640,7 +640,11 @@ unsafe fn init_engine_for_hwnd(
         // caller's logical size separately so screenWidth() etc. keep
         // returning DPI-independent numbers.
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // COPY_SRC: bloom_take_screenshot reads the swapchain back;
+            // without it the readback copy is a swallowed validation
+            // error and screenshots silently produce nothing on Windows.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
             format,
             width: phys_w,
             height: phys_h,
@@ -651,7 +655,15 @@ unsafe fn init_engine_for_hwnd(
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
+        let mut renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
+        // Route initial target creation through the same resize path a
+        // WM_SIZE takes. Without this, windowed mode (which never gets a
+        // resize, unlike the borderless-fullscreen transition) keeps
+        // construction-time render targets that ignore render_scale —
+        // the depth-snapshot copy then spans a partial depth texture,
+        // which wgpu rejects (fatal validation error on the first frame
+        // with a scene-reading translucent material in view).
+        renderer.resize(phys_w, phys_h, logical_w, logical_h);
         let _ = ENGINE.set(EngineState::new(renderer));
 }
 

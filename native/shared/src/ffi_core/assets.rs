@@ -15,6 +15,7 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_take_screenshot(path_ptr: *const u8) {
             $crate::ffi::guard("bloom_take_screenshot", move || {
                 let path = $crate::string_header::str_from_header(path_ptr).to_string();
+                eprintln!("bloom: screenshot requested -> '{}'", path);
                 let eng = engine();
                 eng.renderer.screenshot_requested = true;
                 eng.renderer.pending_screenshot_path = Some(path);

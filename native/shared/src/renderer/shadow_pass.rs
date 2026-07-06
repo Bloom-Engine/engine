@@ -68,6 +68,24 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&self.lighting_uniforms),
         );
+        // Shadow-flicker fix: the material system's PerView buffer was
+        // uploaded before this fit ran and still carries LAST frame's
+        // cascade VPs. Patch its shadow fields so material-path
+        // receivers sample the depth maps with the same matrices the
+        // maps are rendered with this frame. Keep .w at 0.0 — that slot
+        // is the TSR mip-LOD bias, which the material path historically
+        // never received (begin_mode_3d resets it before the material
+        // PerView upload); delivering -1.0 here makes hardware mip
+        // selection flip per-panel under TAA jitter (visible texture
+        // detail popping).
+        let mut splits = self.lighting_uniforms.shadow_cascade_splits;
+        splits[3] = 0.0;
+        self.material_system.refresh_shadow_uniforms(
+            &self.queue,
+            splits,
+            self.lighting_uniforms.shadow_view_matrix,
+            self.shadow_map.light_vps,
+        );
 
         // Cache gate. Skip if nothing that affects shadow-map
         // content has changed since last render. Texel-snap +

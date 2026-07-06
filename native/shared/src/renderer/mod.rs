@@ -59,8 +59,10 @@ use formats::{
     create_mesh_card_radiance_atlas,
     CARD_ATLAS_SIZE, CARD_SLOT_SIZE, CARD_SLOTS_PER_ROW, CARD_MAX_SLOTS,
     CARD_AXES_PER_MESH, MESH_SDF_RES,
-    create_scene_sdf_clipmap, SCENE_SDF_CLIPMAP_RES,
+    create_scene_sdf_clipmap, create_scene_sdf_clipmap_staging,
+    SCENE_SDF_CLIPMAP_RES,
     SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD,
+    SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME,
     create_wsrc_atlas, WSRC_GRID_RES, WSRC_CASCADE_COUNT,
     WSRC_CASCADE_EXTENTS, WSRC_REBAKE_THRESHOLD,
     create_taa_textures,
@@ -443,6 +445,21 @@ struct SdfBakeParams {
     aabb_max: [f32; 4],
     /// x = triangle_count, y = sdf_resolution (32), zw unused
     counts: [u32; 4],
+}
+
+/// Fullscreen-lag fix — an in-flight amortized scene-SDF-clipmap bake.
+/// A job bakes `SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME` voxel Z-layers per
+/// frame into the staging texture; when the last slice lands the staging
+/// contents are copied over the live clipmap and the origin flips
+/// atomically, so traces never observe a half-baked field. The bind
+/// group keeps the job's transient buffers alive.
+struct SdfClipmapBakeJob {
+    origin: [f32; 3],
+    aabb_min: [f32; 4],
+    aabb_max: [f32; 4],
+    uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    next_z: u32,
 }
 
 /// Ticket 014 V6 — uniform for `WSRC_BAKE_WGSL`. Analytic sun × shadow
@@ -937,6 +954,21 @@ pub struct Renderer {
     /// removing ghosting under camera motion. Updated at the end
     /// of each frame from current_vp_matrix.
     pub prev_vp_matrix: [[f32; 4]; 4],
+    /// EN-022 fix — previous frame's UNJITTERED projection + view,
+    /// kept separately so `begin_mode_3d` can compose the velocity
+    /// reference VP (prev unjittered proj + CURRENT jitter × prev
+    /// view). Building prev_mvp from the raw jittered prev VP gave
+    /// every static pixel a one-texel velocity wobble (the jitter
+    /// delta), which cycled TAA history between converged and
+    /// rejected — periodic sharp/soft flicker on detailed surfaces.
+    prev_proj_matrix_unjittered: [[f32; 4]; 4],
+    prev_view_matrix: [[f32; 4]; 4],
+    /// Current frame's TAA jitter as NDC offsets (0,0 when TAA off).
+    current_jitter_ndc: [f32; 2],
+    /// The composed velocity-reference VP for this frame — what all
+    /// prev_mvp compositions must use so jitter cancels in the
+    /// shader's (curr_ndc - prev_ndc).
+    pub(crate) velocity_ref_vp: [[f32; 4]; 4],
     /// Fog color (rgb) — blended into scene where fog factor > 0.
     pub fog_color: [f32; 3],
     /// EN-005 Phase 4 — `true` once the user has called
@@ -1139,6 +1171,17 @@ pub struct Renderer {
     /// snapped camera position at last bake). Read every frame by the
     /// trace uniform; updated at bake time.
     pub scene_sdf_clipmap_origin: [f32; 3],
+    /// Fullscreen-lag fix — dedicated binned+sliced clipmap bake
+    /// pipeline (the per-mesh `sdf_bake_pipeline` stays brute-force;
+    /// its 32³ per-mesh volumes are already rate-limited).
+    sdf_clipmap_bake_pipeline: wgpu::ComputePipeline,
+    sdf_clipmap_bake_layout: wgpu::BindGroupLayout,
+    scene_sdf_clipmap_staging_tex: wgpu::Texture,
+    scene_sdf_clipmap_staging_view: wgpu::TextureView,
+    /// Camera drifted past the rebake threshold — start a new bake job
+    /// as soon as the previous one (if any) completes.
+    scene_sdf_clipmap_rebake_needed: bool,
+    sdf_clipmap_job: Option<SdfClipmapBakeJob>,
 
     // --- Ticket 014 V6/V10: World-Space Radiance Cache ---
     pub wsrc_atlas_tex: wgpu::Texture,
@@ -1594,7 +1637,11 @@ impl Renderer {
         height: u32,
     ) -> Self {
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // COPY_SRC: bloom_take_screenshot reads the swapchain back;
+            // without it the readback copy is a swallowed validation
+            // error and screenshots silently produce nothing.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
             format: wgpu::TextureFormat::Bgra8UnormSrgb,
             width,
             height,
@@ -5143,9 +5190,66 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Fullscreen-lag fix — binned + sliced clipmap bake pipeline.
+        // Same first four bindings as sdf_bake_layout, plus the two
+        // triangle-bin buffers (cell offsets + per-cell tri indices).
+        let sdf_clipmap_bake_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sdf_clipmap_bake_shader"),
+            source: wgpu::ShaderSource::Wgsl(SDF_CLIPMAP_BAKE_WGSL.into()),
+        });
+        let storage_ro = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let sdf_clipmap_bake_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sdf_clipmap_bake_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
+                storage_ro(1),
+                storage_ro(2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::R32Float,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    }, count: None,
+                },
+                storage_ro(4),
+                storage_ro(5),
+            ],
+        });
+        let sdf_clipmap_bake_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sdf_clipmap_bake_pl_layout"),
+            bind_group_layouts: &[Some(&sdf_clipmap_bake_layout)],
+            immediate_size: 0,
+        });
+        let sdf_clipmap_bake_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("sdf_clipmap_bake_pipeline"),
+            layout: Some(&sdf_clipmap_bake_pl_layout),
+            module: &sdf_clipmap_bake_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- Ticket 014 V2: scene clipmap ---
         let (scene_sdf_clipmap_tex, scene_sdf_clipmap_view) =
             create_scene_sdf_clipmap(&device);
+        let (scene_sdf_clipmap_staging_tex, scene_sdf_clipmap_staging_view) =
+            create_scene_sdf_clipmap_staging(&device);
 
         // --- Ticket 014 V6: WSRC ---
         let (wsrc_atlas_tex, wsrc_atlas_view) = create_wsrc_atlas(&device);
@@ -5846,9 +5950,11 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &exposure_shader, entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::R16Float,
+                    // Rg16Float: .g carries the anchored AE target
+                    // (flicker fix — see EXPOSURE_SHADER_WGSL).
+                    format: wgpu::TextureFormat::Rg16Float,
                     blend: None,
-                    write_mask: wgpu::ColorWrites::RED,
+                    write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
                 })],
                 compilation_options: Default::default(),
             }),
@@ -6040,6 +6146,10 @@ impl Renderer {
             render_scale: 0.5,
             render_scale_explicit: false,
             prev_vp_matrix: IDENTITY_MAT4,
+            prev_proj_matrix_unjittered: IDENTITY_MAT4,
+            prev_view_matrix: IDENTITY_MAT4,
+            current_jitter_ndc: [0.0, 0.0],
+            velocity_ref_vp: IDENTITY_MAT4,
             fog_color: [0.7, 0.75, 0.82],
             fog_color_user_override: false,
             fog_density: 0.0,
@@ -6128,6 +6238,12 @@ impl Renderer {
             scene_sdf_clipmap_view,
             scene_sdf_clipmap_built: false,
             scene_sdf_clipmap_origin: [0.0, 0.0, 0.0],
+            sdf_clipmap_bake_pipeline,
+            sdf_clipmap_bake_layout,
+            scene_sdf_clipmap_staging_tex,
+            scene_sdf_clipmap_staging_view,
+            scene_sdf_clipmap_rebake_needed: true,
+            sdf_clipmap_job: None,
             wsrc_atlas_tex,
             wsrc_atlas_view,
             wsrc_atlas_sampler,
@@ -6936,13 +7052,17 @@ impl Renderer {
         self.current_camera_pos
     }
 
-    /// Ticket 014 V5 — invalidate the SDF clipmap if the camera has
-    /// moved past the rebake threshold from the current clipmap
-    /// centre. Called at the top of every frame before the bake
-    /// check, so a moving camera triggers exactly one re-bake per
-    /// `threshold × extent` chunk of travel.
+    /// Ticket 014 V5 — flag the SDF clipmap for a re-bake if the camera
+    /// has moved past the rebake threshold from the current clipmap
+    /// centre. Fullscreen-lag fix: instead of clearing `built` (which
+    /// used to fire a full-volume single-dispatch rebake that stalled
+    /// weak GPUs for seconds), this only raises `rebake_needed`; the
+    /// live clipmap keeps serving traces while the amortized job bakes
+    /// the re-centred volume a few Z-slices per frame.
     fn maybe_invalidate_sdf_clipmap(&mut self) {
-        if !self.scene_sdf_clipmap_built {
+        // A job in flight already re-centres on its own origin — let it
+        // land before measuring drift again.
+        if !self.scene_sdf_clipmap_built || self.sdf_clipmap_job.is_some() {
             return;
         }
         let cam = self.current_camera_world_pos();
@@ -6952,7 +7072,7 @@ impl Renderer {
         let dist_sq = dx * dx + dy * dy + dz * dz;
         let threshold = SCENE_SDF_CLIPMAP_EXTENT * SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD;
         if dist_sq > threshold * threshold {
-            self.scene_sdf_clipmap_built = false;
+            self.scene_sdf_clipmap_rebake_needed = true;
         }
     }
 
@@ -6961,7 +7081,12 @@ impl Renderer {
         scene: &crate::scene::SceneGraph,
         encoder: &mut wgpu::CommandEncoder,
     ) {
-        if self.scene_sdf_clipmap_built {
+        // Continue an in-flight job first: one slice batch per frame.
+        if let Some(job) = self.sdf_clipmap_job.take() {
+            self.encode_clipmap_bake_slices(job, encoder);
+            return;
+        }
+        if !self.scene_sdf_clipmap_rebake_needed {
             return;
         }
         // Wait for all per-mesh queues to drain — builds the clipmap
@@ -6980,10 +7105,91 @@ impl Renderer {
             return;
         }
 
-        // Upload the unified vertex + index buffers. STORAGE usage so
-        // the bake shader can bind them directly. These are transient
-        // — dropped at the end of this function once the dispatch is
-        // encoded. (The encoder keeps them alive until the submit.)
+        // V5 — centre the clipmap on the current camera position,
+        // voxel-snapped for sampling stability (sub-voxel shifts
+        // would change which voxel each sphere-trace step reads).
+        // The live origin flips only when the job completes.
+        let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
+        let voxel = SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_RES as f32;
+        let cam = self.current_camera_world_pos();
+        let origin = [
+            (cam[0] / voxel).round() * voxel,
+            (cam[1] / voxel).round() * voxel,
+            (cam[2] / voxel).round() * voxel,
+        ];
+        let aabb_min = [origin[0] - half, origin[1] - half, origin[2] - half, 0.0];
+        let aabb_max = [origin[0] + half, origin[1] + half, origin[2] + half, 0.0];
+
+        // Bin triangles into BIN_CELLS³ cells, each list expanded by one
+        // cell (the shader's narrow band) so the per-cell clamp stays a
+        // conservative lower bound for sphere tracing. Two-pass counting
+        // sort: count, prefix-sum, fill.
+        let cells = SCENE_SDF_CLIPMAP_BIN_CELLS as usize;
+        let cell_size = SCENE_SDF_CLIPMAP_EXTENT / cells as f32;
+        let grid_min = [aabb_min[0], aabb_min[1], aabb_min[2]];
+        let cell_range = |tri: usize| -> Option<([usize; 3], [usize; 3])> {
+            let i0 = indices[tri * 3] as usize * 12;
+            let i1 = indices[tri * 3 + 1] as usize * 12;
+            let i2 = indices[tri * 3 + 2] as usize * 12;
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for base in [i0, i1, i2] {
+                for a in 0..3 {
+                    let v = vertices[base + a];
+                    lo[a] = lo[a].min(v);
+                    hi[a] = hi[a].max(v);
+                }
+            }
+            let mut c_lo = [0usize; 3];
+            let mut c_hi = [0usize; 3];
+            for a in 0..3 {
+                // Expand by one cell width (= the shader's band).
+                let lo_c = ((lo[a] - cell_size - grid_min[a]) / cell_size).floor();
+                let hi_c = ((hi[a] + cell_size - grid_min[a]) / cell_size).floor();
+                if hi_c < 0.0 || lo_c >= cells as f32 {
+                    return None; // entirely outside the clipmap volume
+                }
+                c_lo[a] = lo_c.max(0.0) as usize;
+                c_hi[a] = hi_c.min(cells as f32 - 1.0) as usize;
+            }
+            Some((c_lo, c_hi))
+        };
+        let cell_count = cells * cells * cells;
+        let mut counts = vec![0u32; cell_count];
+        for t in 0..tri_count as usize {
+            if let Some((lo, hi)) = cell_range(t) {
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            counts[(z * cells + y) * cells + x] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let mut offsets = vec![0u32; cell_count + 1];
+        for i in 0..cell_count {
+            offsets[i + 1] = offsets[i] + counts[i];
+        }
+        let total_refs = offsets[cell_count] as usize;
+        let mut cursor: Vec<u32> = offsets[..cell_count].to_vec();
+        // wgpu rejects zero-sized buffers — keep one dummy entry when no
+        // triangle touches the volume (all cells then read empty ranges).
+        let mut tri_refs = vec![0u32; total_refs.max(1)];
+        for t in 0..tri_count as usize {
+            if let Some((lo, hi)) = cell_range(t) {
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            let ci = (z * cells + y) * cells + x;
+                            tri_refs[cursor[ci] as usize] = t as u32;
+                            cursor[ci] += 1;
+                        }
+                    }
+                }
+            }
+        }
+
         let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_sdf_bake_vbuf"),
             contents: bytemuck::cast_slice(&vertices),
@@ -6994,57 +7200,96 @@ impl Renderer {
             contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::STORAGE,
         });
-
-        // V5 — centre the clipmap on the current camera position,
-        // voxel-snapped for sampling stability (sub-voxel shifts
-        // would change which voxel each sphere-trace step reads).
-        let half = SCENE_SDF_CLIPMAP_EXTENT * 0.5;
-        let voxel = SCENE_SDF_CLIPMAP_EXTENT / SCENE_SDF_CLIPMAP_RES as f32;
-        let cam = self.current_camera_world_pos();
-        let origin = [
-            (cam[0] / voxel).round() * voxel,
-            (cam[1] / voxel).round() * voxel,
-            (cam[2] / voxel).round() * voxel,
-        ];
-        self.scene_sdf_clipmap_origin = origin;
-        let aabb_min = [origin[0] - half, origin[1] - half, origin[2] - half, 0.0];
-        let aabb_max = [origin[0] + half, origin[1] + half, origin[2] + half, 0.0];
-        let params = SdfBakeParams {
-            aabb_min,
-            aabb_max,
-            counts: [tri_count, SCENE_SDF_CLIPMAP_RES, 0, 0],
-        };
-        self.queue.write_buffer(
-            &self.sdf_bake_uniform,
-            0,
-            bytemuck::bytes_of(&params),
-        );
-
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let cell_offsets_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_sdf_bake_cell_offsets"),
+            contents: bytemuck::cast_slice(&offsets),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let cell_tris_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_sdf_bake_cell_tris"),
+            contents: bytemuck::cast_slice(&tri_refs),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        // Per-job uniform: sharing sdf_bake_uniform would alias with the
+        // per-mesh bakes — queue.write_buffer applies before any of this
+        // frame's commands, so the last write would win for every pass.
+        let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene_sdf_clipmap_bake_uniform"),
+            size: std::mem::size_of::<SdfBakeParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene_sdf_clipmap_bake_bg"),
-            layout: &self.sdf_bake_layout,
+            layout: &self.sdf_clipmap_bake_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.sdf_bake_uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: vbuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: ibuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.scene_sdf_clipmap_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.scene_sdf_clipmap_staging_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: cell_offsets_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: cell_tris_buf.as_entire_binding() },
             ],
         });
+
+        self.scene_sdf_clipmap_rebake_needed = false;
+        let job = SdfClipmapBakeJob {
+            origin,
+            aabb_min,
+            aabb_max,
+            uniform,
+            bind_group,
+            next_z: 0,
+        };
+        // Encode the first slice batch right away so a full rebake takes
+        // exactly RES / LAYERS_PER_FRAME frames end to end.
+        self.encode_clipmap_bake_slices(job, encoder);
+    }
+
+    /// Fullscreen-lag fix — encode this frame's slice batch of the
+    /// in-flight clipmap bake. On the final batch, copy the staging
+    /// volume over the live clipmap and flip the origin — the copy is
+    /// encoded before this frame's probe traces, so the swap is atomic
+    /// from the tracer's point of view.
+    fn encode_clipmap_bake_slices(
+        &mut self,
+        mut job: SdfClipmapBakeJob,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        let res = SCENE_SDF_CLIPMAP_RES;
+        let layers = SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME.min(res - job.next_z);
+        let params = SdfBakeParams {
+            aabb_min: job.aabb_min,
+            aabb_max: job.aabb_max,
+            counts: [SCENE_SDF_CLIPMAP_BIN_CELLS, res, job.next_z, 0],
+        };
+        self.queue.write_buffer(&job.uniform, 0, bytemuck::bytes_of(&params));
+
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("scene_sdf_clipmap_bake"),
+            label: Some("scene_sdf_clipmap_bake_slice"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.sdf_bake_pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        // 64³ voxels → 16³ workgroups at 4×4×4 threads each.
-        pass.dispatch_workgroups(
-            SCENE_SDF_CLIPMAP_RES / 4,
-            SCENE_SDF_CLIPMAP_RES / 4,
-            SCENE_SDF_CLIPMAP_RES / 4,
-        );
+        pass.set_pipeline(&self.sdf_clipmap_bake_pipeline);
+        pass.set_bind_group(0, &job.bind_group, &[]);
+        pass.dispatch_workgroups(res / 4, res / 4, layers / 4);
         drop(pass);
 
-        self.scene_sdf_clipmap_built = true;
+        job.next_z += layers;
+        if job.next_z >= res {
+            encoder.copy_texture_to_texture(
+                self.scene_sdf_clipmap_staging_tex.as_image_copy(),
+                self.scene_sdf_clipmap_tex.as_image_copy(),
+                wgpu::Extent3d {
+                    width: res,
+                    height: res,
+                    depth_or_array_layers: res,
+                },
+            );
+            self.scene_sdf_clipmap_origin = job.origin;
+            self.scene_sdf_clipmap_built = true;
+        } else {
+            self.sdf_clipmap_job = Some(job);
+        }
     }
 
     /// Ticket 014 V6/V7/V12/V13 — invalidate WSRC cascades on
@@ -7211,8 +7456,15 @@ impl Renderer {
 
         let cam = self.current_camera_world_pos();
 
+        // At most ONE cascade per frame. Besides amortizing the cost,
+        // this fixes a params-aliasing bug: all cascades share
+        // `wsrc_bake_uniform`, and `queue.write_buffer` applies every
+        // write before any of this frame's dispatches execute — baking
+        // two cascades in one frame made both dispatches read the last
+        // cascade's params (wrong extent + wrong atlas slice flag).
+        let mut baked_one = false;
         for c in 0..WSRC_CASCADE_COUNT as usize {
-            if self.wsrc_built[c] {
+            if self.wsrc_built[c] || baked_one {
                 continue;
             }
             let extent = WSRC_CASCADE_EXTENTS[c];
@@ -7270,6 +7522,7 @@ impl Renderer {
             self.wsrc_last_sun_dir[c] = ld;
             self.wsrc_last_sun_color[c] = [sun_color[0], sun_color[1], sun_color[2]];
             self.wsrc_last_sky_color[c] = [sky_color[0], sky_color[1], sky_color[2]];
+            baked_one = true;
         }
     }
 
@@ -9803,6 +10056,7 @@ impl Renderer {
         // Synchronous GPU readback is not available on WASM (device.poll(Wait) blocks).
         #[cfg(not(target_arch = "wasm32"))]
         if self.screenshot_requested {
+            eprintln!("bloom: screenshot readback branch running");
             // Use actual texture dimensions (accounts for Retina/DPI scaling)
             let tex_size = self.frame_texture(&output).size();
             let width = tex_size.width;
@@ -9868,8 +10122,18 @@ impl Renderer {
                         rgb.push(chunk[1]);
                         rgb.push(chunk[0]);
                     }
-                    if let Some(png) = encode_png_simple(width, height, &rgb) {
-                        let _ = std::fs::write(&path, &png);
+                    // Failures were silently swallowed here for months —
+                    // takeScreenshot "worked" while writing nothing.
+                    match encode_png_simple(width, height, &rgb) {
+                        Some(png) => {
+                            if let Err(e) = std::fs::write(&path, &png) {
+                                eprintln!("bloom: screenshot write '{}' failed: {}", path, e);
+                            }
+                        }
+                        None => eprintln!(
+                            "bloom: screenshot PNG encode failed ({}x{})",
+                            width, height
+                        ),
                     }
                 }
                 self.screenshot_data = Some((width, height, rgba));
@@ -9917,6 +10181,10 @@ impl Renderer {
             self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
             self.prev_vp_matrix = self.current_vp_matrix;
         }
+        // EN-022 fix — velocity reference inputs roll over every frame
+        // regardless of TAA state (velocity also feeds motion blur).
+        self.prev_proj_matrix_unjittered = self.current_proj_matrix_unjittered;
+        self.prev_view_matrix = self.current_view_matrix;
         // Swap probe-history ping-pong so next frame reads what we
         // just blended as the "previous" history and writes to the
         // other buffer. Ticket 007a.
@@ -10177,6 +10445,9 @@ impl Renderer {
             // offset there shifts the whole frustum by jitter px.
             proj[2][0] += (jx * 2.0) / render_w;
             proj[2][1] += (jy * 2.0) / render_h;
+            self.current_jitter_ndc = [(jx * 2.0) / render_w, (jy * 2.0) / render_h];
+        } else {
+            self.current_jitter_ndc = [0.0, 0.0];
         }
 
         let view = mat4_look_at(
@@ -10191,6 +10462,21 @@ impl Renderer {
         self.current_inv_proj_matrix = mat4_invert(proj);
         self.current_inv_vp_matrix = mat4_invert(vp);
         self.current_camera_pos = [pos_x, pos_y, pos_z];
+
+        // EN-022 fix — compose the velocity reference VP: the previous
+        // frame's UNJITTERED projection with the CURRENT frame's jitter
+        // re-applied, times the previous view. Every prev_mvp built
+        // from this cancels the jitter term exactly in the shader's
+        // (curr_ndc - prev_ndc), so static geometry gets a true zero
+        // velocity instead of one-texel jitter-delta noise (which
+        // wobbled TAA history reprojection and cycled fine detail
+        // between sharp and soft — the periodic material-surface
+        // flicker).
+        let mut prev_proj_j = self.prev_proj_matrix_unjittered;
+        prev_proj_j[2][0] += self.current_jitter_ndc[0];
+        prev_proj_j[2][1] += self.current_jitter_ndc[1];
+        self.velocity_ref_vp = mat4_multiply(prev_proj_j, self.prev_view_matrix);
+        self.material_system.set_velocity_reference_vp(self.velocity_ref_vp);
 
         // Mirror camera pos into lighting uniforms so the scene shader
         // can compute V for GGX specular. Preserve the .w slot — it
@@ -10222,7 +10508,7 @@ impl Renderer {
         self.queue.write_buffer(
             &self.uniform_buffer_3d,
             0,
-            bytemuck::bytes_of(&Uniforms3D { mvp: vp, model: IDENTITY_MAT4, prev_mvp: self.prev_vp_matrix, model_tint: [1.0, 1.0, 1.0, 1.0] }),
+            bytemuck::bytes_of(&Uniforms3D { mvp: vp, model: IDENTITY_MAT4, prev_mvp: self.velocity_ref_vp, model_tint: [1.0, 1.0, 1.0, 1.0] }),
         );
         self.render_mode = RenderMode::Mode3D;
     }
@@ -11945,7 +12231,11 @@ impl Renderer {
             view:           main_view,
             proj,
             view_proj:      self.current_vp_matrix,
-            prev_view_proj: self.prev_vp_matrix,
+            // EN-022 fix: velocity reference (prev unjittered VP +
+            // current jitter), so material shaders computing
+            // `prev_view_proj * world` get true zero velocity on
+            // static geometry instead of TAA jitter-delta noise.
+            prev_view_proj: self.velocity_ref_vp,
             inv_proj:       self.current_inv_proj_matrix,
             camera_pos: [
                 cam_pos[0], cam_pos[1], cam_pos[2],
@@ -12231,7 +12521,9 @@ impl Renderer {
             view:           self.current_view_matrix,
             proj:           self.current_proj_matrix,
             view_proj:      self.current_vp_matrix,
-            prev_view_proj: self.prev_vp_matrix,
+            // EN-022 fix: velocity reference — see the main PerView
+            // build above.
+            prev_view_proj: self.velocity_ref_vp,
             inv_proj:       self.current_inv_proj_matrix,
             camera_pos: [
                 self.current_camera_pos[0],
