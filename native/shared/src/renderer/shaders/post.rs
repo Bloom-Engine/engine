@@ -1341,7 +1341,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let h_u = textureSample(hdr_tex, hdr_samp, sample_uv - oy).rgb;
         let h_avg = (h_r + h_l + h_d + h_u) * 0.25 * ao_weighted * exposure;
         let avg = tonemap_select(h_avg);
-        let detail = ldr - avg;
+        // Flicker fix: cap the unsharp detail term. On a high-contrast
+        // silhouette (building roofline vs sky) detail is huge, and at
+        // half-res TSR the reconstructed edge wobbles a sub-pixel every
+        // frame — a strong unsharp turns that wobble into a crawling
+        // bright/dark line (the reported gray lines on the building).
+        // Fine texture detail has small local contrast and passes
+        // through untouched; only the extreme edge overshoot is bounded,
+        // which also removes the silhouette halo the 0.8 default caused.
+        let detail = clamp(ldr - avg, vec3<f32>(-0.12), vec3<f32>(0.12));
         ldr = clamp(ldr + detail * sharpen_strength, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 

@@ -6077,7 +6077,11 @@ impl Renderer {
             vignette_strength: 0.0,
             vignette_softness: 0.25,
             grain_strength: 0.0,
-            sharpen_strength: 0.8,
+            // Was 0.8 — that haloed and, under half-res TSR, made the
+            // silhouette edge shimmer read as crawling gray lines. 0.5
+            // keeps the crispness that covers TSR softness; the detail
+            // clamp in COMPOSITE_SHADER_WGSL bounds the edge overshoot.
+            sharpen_strength: 0.5,
             exposure_textures,
             exposure_views,
             exposure_current_idx: 0,
