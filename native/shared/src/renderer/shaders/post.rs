@@ -874,7 +874,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     let history_ycocg = rgb_to_ycocg(history);
     let history_y_clamped = clamp(history_ycocg.x, y_min, y_max);
-    let clamped_history = ycocg_to_rgb(vec3<f32>(history_y_clamped, history_ycocg.yz));
+    // Chroma is clamped too, but at 3x the luma band (flicker fix).
+    // Fully unclamped chroma let stale history colour bleed through on
+    // high-contrast edges — green terrain fringing crawling along cloud
+    // and canopy silhouettes during camera motion. The loose band keeps
+    // the anti-sparkle intent of the luma-only design (a hard
+    // per-channel clamp caused chromatic sparkle on grazing stone)
+    // while bounding gross cross-object colour bleed.
+    let c_gamma = gamma * 3.0;
+    let co_clamped = clamp(history_ycocg.y,
+        mean.y - c_gamma * stddev.y, mean.y + c_gamma * stddev.y);
+    let cg_clamped = clamp(history_ycocg.z,
+        mean.z - c_gamma * stddev.z, mean.z + c_gamma * stddev.z);
+    let clamped_history = ycocg_to_rgb(vec3<f32>(history_y_clamped, co_clamped, cg_clamped));
 
     // Per-pixel disocclusion reject. If the history (already
     // variance-clamped) still sits far from the current
