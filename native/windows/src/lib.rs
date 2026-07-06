@@ -252,6 +252,26 @@ mod win32 {
                         eng.input.set_key_down(bloom_key);
                     }
                 }
+                // F12 — native screenshot hotkey. Perry currently drops
+                // the game-side takeScreenshot FFI call entirely
+                // (PerryTS/perry#6087), so the capture is triggered here
+                // where no compiler sits in the path. Initial press only
+                // (lparam bit 30 = previous key state) so holding the key
+                // doesn't machine-gun PNGs. The file lands in the working
+                // directory with a timestamped name; the readback runs at
+                // this frame's end_frame.
+                if wparam.0 as u32 == 0x7B && (lparam.0 as u32 >> 30) & 1 == 0 {
+                    if let Some(eng) = ENGINE.get_mut() {
+                        let ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let path = format!("screenshot_{}.png", ms);
+                        eprintln!("bloom: F12 screenshot -> {}", path);
+                        eng.renderer.screenshot_requested = true;
+                        eng.renderer.pending_screenshot_path = Some(path);
+                    }
+                }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_KEYUP => {
