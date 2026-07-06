@@ -658,9 +658,15 @@ test.
   the initial window create. If this becomes a real-world issue
   add `GetDeviceCaps(hdc, LOGPIXELSX)` as a third fallback.
 
-**Blocked on:** access to a Windows 11 box with a HiDPI display
-(or a VM forwarding DPI), and a Linux dev with X11. Web checks
-can be done from any modern browser on the macOS dev box.
+**Blocked on:** ~~access to a Windows 11 box with a HiDPI display~~ —
+**the Windows half is field-validated as of 2026-07**: the shooter dev
+box is exactly the canonical setup (Windows 11, 4K @ 150%), and months
+of round-1/round-2 work ran on it — physical 3840×2160 vs logical
+2560×1440 split correct end-to-end (borderless fullscreen at native
+res, PMv2 capture tooling, and the 2D text physical-res work all depend
+on it). Still untested: WM_DPICHANGED monitor-drag (single-monitor
+box), Linux X11, Web Retina. Web checks can be done from any modern
+browser on the macOS dev box.
 
 ## EN-020 — Native AV: heap read overrun, layout-sensitive ✅ root-caused 2026-07-04
 
@@ -708,7 +714,15 @@ per frame; dumps + offsets above). The OBJ text loader
 LOAD time — one-shot exposure, worth migrating when touched. Audit
 report: `shooter/docs/audit-round2.md` finding F1.
 
-## EN-021 — SSR + IBL specular exclusive ownership 🟡
+## EN-021 — SSR + IBL specular exclusive ownership ✅ implemented (PR #78)
+
+**Status 2026-07-04.** Landed on `feat/en021-ssr-ibl-ownership` (PR #78,
+pending merge): env-cubemap fallback bound into the SSR pass (miss
+returns filtered env instead of black, `env_fallback()` in ssgi.rs;
+fresnel applied before the facing check so both miss paths agree), and
+`fs_main_scene` scales `ibl_spec` by the exact complement of the SSR
+fade (`ssr_own` via `dir_light_count.z`, plumbed through
+`clear_additional_lights`). Design notes below kept for review context.
 
 **Why.** Round-2 audit (B): compose is `hdr + ssr` and `fs_main_scene`
 already adds IBL specular into hdr for metals — pixels with an SSR hit
@@ -735,7 +749,18 @@ with the audit's metal-ROI protocol (on-hit vs panned-off luma converge
 **Interim calibration option:** `set_ssr_strength(0.25–0.35)` halves the
 overlap engine-wide with zero shader work.
 
-## EN-022 — Motion vectors for material-system draws 🔴
+## EN-022 — Motion vectors for material-system draws ✅ implemented (PR #82 + shooter PR #4)
+
+**Status 2026-07-04.** Landed on `feat/en022-material-velocity` (PR #82,
+pending merge) + shooter PR #4: per-slot model history in
+MaterialSystem (`prev_models`/`cur_models` rotated in
+`reset_draw_slot(prev_vp)`, slot = submission order), `prev_mvp`
+reconstructed engine-side (the legacy caller-supplied param is
+ignored), `abi_motion_vector()` in material_abi.wgsl, and all four
+shooter world materials (terrain/building/tree/grass — incl. the inline
+grass copy in main.ts) write real velocity with wind sway evaluated at
+`frame.time - frame.delta_time`. Smoke-validated: no TSR tearing,
+sway ghosting gone. Design notes below kept for review context.
 
 **Why.** Round-2 audit (F8): every material-path draw writes velocity = 0
 (terrain/tree/grass/building — the whole static world plus wind sway),
@@ -758,7 +783,17 @@ ABI struct + material_system plumbing + 4 world materials + goldens.
 `post.rs` motion clamp engages on world pixels (debug: motion_alpha
 visualization).
 
-## EN-023 — GI software path: colored bounce is unreachable 🟡
+## EN-023 — GI software path: colored bounce is unreachable 🟡 partially landed (PR #79), still open
+
+**Status 2026-07-04.** `feat/en023-gi-sw-cards` (PR #79, pending merge)
+fixed the data path: world-space AABBs carried per instance
+(`world_aabb_min/max` in InstanceGiData, both HW and SDF struct
+mirrors), smallest-containing-box broad-phase pick (a scene-spanning
+terrain proxy no longer swallows every hit), and the SW WSRC bake got a
+`ground_albedo` bounce term. Measured payoff on the 760M is still ≤2%
+achromatic even at 4× intensity — the bottleneck moved downstream to
+probe resolve/AO integration, so the ticket STAYS OPEN pointed there.
+Interim option D2-B (disable SSGI on SW adapters) remains reasonable.
 
 **Why.** Round-2 audit (F4): on adapters without EXPERIMENTAL_RAY_QUERY
 (the dev box's Radeon 760M reports none — see the new boot log), the
