@@ -464,6 +464,15 @@ impl Renderer {
         if let Some(tid) = scene_color_tid {
             self.transient_pool.release(tid);
         }
+        // Round-2 audit: the depth snapshot was acquired every frame but
+        // NEVER released — the pool (which has no auto-reclaim by design)
+        // allocated a brand-new render-res Depth32Float every frame with
+        // refractive water on screen. ~8 MB/frame of texture creation plus
+        // an ever-growing slot scan; measured as translucent_pass CPU
+        // climbing 0.4 ms → 6.7 ms over ~50 s of play, in every session.
+        if let Some(tid) = scene_depth_tid {
+            self.transient_pool.release(tid);
+        }
         profiler.end("translucent_pass");
     }
     }

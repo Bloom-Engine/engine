@@ -395,5 +395,76 @@ macro_rules! __bloom_ffi_game_loop {
         })
         }
 
+        // EN-020 — numeric profiler ABI. The packed-text FFIs above stay
+        // for back-compat, but Perry 0.5.x's split()/parseFloat() overread
+        // their own slice allocations, so per-frame consumers must use
+        // these instead: f64s cross the FFI clean and the label is only
+        // ever drawn, never parsed. Row/hist indices address the same
+        // snapshot the text FFIs serialize; rows are few (≤ MAX_GPU_PAIRS)
+        // so the per-call snapshot() is negligible overlay-only cost.
+
+        // bloom_profiler_row_count  [source: windows]
+        #[no_mangle]
+        pub extern "C" fn bloom_profiler_row_count() -> f64 {
+            $crate::ffi::guard("bloom_profiler_row_count", move || {
+                engine().profiler.snapshot().len() as f64
+        })
+        }
+
+        // bloom_profiler_row_label  [source: windows]
+        #[no_mangle]
+        pub extern "C" fn bloom_profiler_row_label(i: f64) -> *const u8 {
+            $crate::ffi::guard("bloom_profiler_row_label", move || {
+                let snap = engine().profiler.snapshot();
+                match snap.get(i as usize) {
+                    Some((label, _, _)) => $crate::string_header::alloc_perry_string(label),
+                    None => $crate::string_header::alloc_perry_string(""),
+                }
+        })
+        }
+
+        // bloom_profiler_row_cpu_us  [source: windows]
+        #[no_mangle]
+        pub extern "C" fn bloom_profiler_row_cpu_us(i: f64) -> f64 {
+            $crate::ffi::guard("bloom_profiler_row_cpu_us", move || {
+                engine().profiler.snapshot().get(i as usize).map(|r| r.1).unwrap_or(0.0)
+        })
+        }
+
+        // bloom_profiler_row_gpu_us  [source: windows]
+        #[no_mangle]
+        pub extern "C" fn bloom_profiler_row_gpu_us(i: f64) -> f64 {
+            $crate::ffi::guard("bloom_profiler_row_gpu_us", move || {
+                match engine().profiler.snapshot().get(i as usize) {
+                    Some((_, _, Some(g))) => *g,
+                    _ => -1.0,
+                }
+        })
+        }
+
+        // bloom_profiler_hist_count  [source: windows]
+        #[no_mangle]
+        pub extern "C" fn bloom_profiler_hist_count() -> f64 {
+            $crate::ffi::guard("bloom_profiler_hist_count", move || {
+                engine().profiler.frame_history().len() as f64
+        })
+        }
+
+        // bloom_profiler_hist_cpu_us  [source: windows]
+        #[no_mangle]
+        pub extern "C" fn bloom_profiler_hist_cpu_us(i: f64) -> f64 {
+            $crate::ffi::guard("bloom_profiler_hist_cpu_us", move || {
+                engine().profiler.frame_history().get(i as usize).map(|h| h.0).unwrap_or(0.0)
+        })
+        }
+
+        // bloom_profiler_hist_gpu_us  [source: windows]
+        #[no_mangle]
+        pub extern "C" fn bloom_profiler_hist_gpu_us(i: f64) -> f64 {
+            $crate::ffi::guard("bloom_profiler_hist_gpu_us", move || {
+                engine().profiler.frame_history().get(i as usize).map(|h| h.1).unwrap_or(0.0)
+        })
+        }
+
     };
 }

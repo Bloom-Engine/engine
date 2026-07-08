@@ -74,6 +74,8 @@ pub struct TextRenderer {
     atlas_row_height: u32,
     atlas_bind_group_idx: Option<u32>,
     atlas_dirty: bool,
+    /// One-shot guard for the atlas-full warning.
+    atlas_overflow_warned: bool,
     // SDF atlas (separate from bitmap atlas)
     sdf_glyph_cache: HashMap<(usize, char), GlyphInfo>,
     sdf_atlas_data: Vec<u8>,
@@ -99,6 +101,7 @@ impl TextRenderer {
             atlas_row_height: 0,
             atlas_bind_group_idx: None,
             atlas_dirty: false,
+            atlas_overflow_warned: false,
             sdf_glyph_cache: HashMap::new(),
             sdf_atlas_data: Vec::new(),
             sdf_atlas_cursor_x: 0,
@@ -127,6 +130,7 @@ impl TextRenderer {
             atlas_row_height: 0,
             atlas_bind_group_idx: None,
             atlas_dirty: true,
+            atlas_overflow_warned: false,
             sdf_glyph_cache: HashMap::new(),
             sdf_atlas_data: vec![0u8; (atlas_width * atlas_height * 4) as usize],
             sdf_atlas_cursor_x: 0,
@@ -160,6 +164,19 @@ impl TextRenderer {
             self.atlas_cursor_x = 0;
             self.atlas_cursor_y += self.atlas_row_height;
             self.atlas_row_height = 0;
+        }
+
+        // Round-2 audit F5: the atlas used to overflow SILENTLY — writes
+        // were clipped by the bounds check below and the quads then
+        // sampled wrapped UVs (garbage glyphs). Warn once so the failure
+        // mode is named; grow-or-evict is the durable follow-up.
+        if self.atlas_cursor_y + gh > self.atlas_height && !self.atlas_overflow_warned {
+            self.atlas_overflow_warned = true;
+            eprintln!(
+                "bloom text: glyph atlas ({}x{}) is full — new glyphs will render corrupted \
+                 until eviction lands (too many distinct size/char combinations)",
+                self.atlas_width, self.atlas_height
+            );
         }
 
         let ax = self.atlas_cursor_x;
@@ -257,9 +274,26 @@ impl TextRenderer {
     ) {
         let idx = if font_idx < self.fonts.len() { font_idx } else { 0 };
 
+        // Round-2 audit F5: glyphs were rasterized at LOGICAL pixel size
+        // and stretched ×dpi by the 2D projection — a soft, bilinear-
+        // magnified HUD at 150% display scaling. Rasterize at PHYSICAL
+        // size and divide the layout metrics back to logical. fontdue
+        // advances are exactly linear in pixel size, so measureText
+        // (which stays in logical units) remains consistent with the
+        // drawn advances.
+        let dpi = if renderer.logical_width > 0 {
+            (renderer.surface_config.width as f32 / renderer.logical_width as f32).max(0.25)
+        } else {
+            1.0
+        };
+        let phys_size = (((size as f32) * dpi).round().max(1.0)) as u32;
+        // Exact logical/physical ratio actually in use (phys_size is
+        // rounded, so derive from it rather than from dpi).
+        let inv_dpi = size as f32 / phys_size as f32;
+
         // Ensure all glyphs are rasterized first
         for ch in text.chars() {
-            self.rasterize_glyph(idx, ch, size);
+            self.rasterize_glyph(idx, ch, phys_size);
         }
 
         // Upload atlas if dirty
@@ -270,10 +304,13 @@ impl TextRenderer {
             None => return,
         };
 
+        // sRGB-decode to linear like every other 2D vertex color — the
+        // swapchain view's hardware encode expects linear shader output
+        // (see renderer::srgb_u8_to_linear).
         let color = [
-            (r / 255.0) as f32,
-            (g / 255.0) as f32,
-            (b / 255.0) as f32,
+            crate::renderer::srgb_u8_to_linear(r),
+            crate::renderer::srgb_u8_to_linear(g),
+            crate::renderer::srgb_u8_to_linear(b),
             (a / 255.0) as f32,
         ];
 
@@ -287,12 +324,18 @@ impl TextRenderer {
                 cursor_x += spacing;
             }
             first = false;
-            let key = (idx, ch, size);
+            let key = (idx, ch, phys_size);
             if let Some(glyph) = self.glyph_cache.get(&key) {
-                let gx = cursor_x + glyph.x_offset;
-                let gy = y as f32 - glyph.y_offset - glyph.height as f32 + size as f32;
-                let gw = glyph.width as f32;
-                let gh = glyph.height as f32;
+                // Physical-res glyph metrics, scaled back to the logical
+                // coordinate space the 2D pass works in. The projection's
+                // ×dpi stretch then lands the bitmap 1:1 on physical
+                // pixels instead of magnifying a logical-res raster.
+                let gx = cursor_x + glyph.x_offset * inv_dpi;
+                let gy = y as f32
+                    - (glyph.y_offset + glyph.height as f32) * inv_dpi
+                    + size as f32;
+                let gw = glyph.width as f32 * inv_dpi;
+                let gh = glyph.height as f32 * inv_dpi;
 
                 if gw > 0.0 && gh > 0.0 {
                     let u0 = glyph.atlas_x as f32 / aw;
@@ -303,7 +346,7 @@ impl TextRenderer {
                     renderer.draw_textured_quad(gx, gy, gw, gh, u0, v0, u1, v1, color, atlas_bg);
                 }
 
-                cursor_x += glyph.advance;
+                cursor_x += glyph.advance * inv_dpi;
             }
         }
     }
@@ -419,10 +462,13 @@ impl TextRenderer {
             None => return,
         };
 
+        // sRGB-decode to linear like every other 2D vertex color — the
+        // swapchain view's hardware encode expects linear shader output
+        // (see renderer::srgb_u8_to_linear).
         let color = [
-            (r / 255.0) as f32,
-            (g / 255.0) as f32,
-            (b / 255.0) as f32,
+            crate::renderer::srgb_u8_to_linear(r),
+            crate::renderer::srgb_u8_to_linear(g),
+            crate::renderer::srgb_u8_to_linear(b),
             (a / 255.0) as f32,
         ];
 

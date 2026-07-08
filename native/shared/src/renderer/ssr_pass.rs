@@ -17,6 +17,17 @@ impl Renderer {
     // ============================================================
     if self.ssr_enabled {
         let inv_proj = self.current_inv_proj_matrix;
+        // EN-021 — view→world rotation for the env-miss fallback: the
+        // transpose of the view matrix's 3×3 (rigid view ⇒ inverse
+        // rotation = transpose). Column j of the inverse is row j of
+        // the view rotation.
+        let v = self.current_view_matrix;
+        let inv_view_rot = [
+            [v[0][0], v[1][0], v[2][0], 0.0],
+            [v[0][1], v[1][1], v[2][1], 0.0],
+            [v[0][2], v[1][2], v[2][2], 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
         let sp = SsrParams {
             inv_proj,
             proj: self.current_proj_matrix,
@@ -28,10 +39,26 @@ impl Renderer {
             // step_size so the relative-error reject heuristic
             // still works with the larger strides.
             params: [self.ssr_strength, 8.0, 8.0, self.taa_frame_index as f32],
+            inv_view_rot,
+            // Env max LOD 6.0 matches the material path's roughness×6
+            // mip ramp; intensity rides lighting camera_pos.w exactly
+            // like sample_env does.
+            params2: [6.0, self.lighting_uniforms.camera_pos[3], 0.0, 0.0],
         };
         self.queue.write_buffer(&self.ssr_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
         if self.ssr_bg_cache.is_none() {
+            // EN-021 — env panorama (or the 1×1 default) for the miss
+            // fallback. The cache is invalidated wherever the lighting
+            // bind group swaps env sources.
+            let env_view = self
+                .sky_texture
+                .as_ref()
+                .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()))
+                .unwrap_or_else(|| {
+                    self._scene_env_default_texture
+                        .create_view(&wgpu::TextureViewDescriptor::default())
+                });
             self.ssr_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ssr_bg"),
                 layout: &self.ssr_layout,
@@ -45,6 +72,8 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
                     wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&env_view) },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&self.composite_sampler) },
                 ],
             }));
         }

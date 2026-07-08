@@ -402,6 +402,9 @@ struct InstanceGiData {
     // Object-space AABB min (xyz) / max (xyz).
     card_aabb_min: vec4<f32>,
     card_aabb_max: vec4<f32>,
+    // EN-023 — world-space AABB (SDF path only; layout mirror).
+    world_aabb_min: vec4<f32>,
+    world_aabb_max: vec4<f32>,
 };
 
 const CARD_SLOTS_PER_ROW: f32 = 64.0;
@@ -715,6 +718,12 @@ struct SdfInstanceGiData {
     card_slot: vec4<f32>,
     card_aabb_min: vec4<f32>,
     card_aabb_max: vec4<f32>,
+    // EN-023 — world-space AABB. This trace marches a WORLD-space
+    // clipmap and has no world_to_object; comparing world hits against
+    // the object-space box above only ever worked for identity-
+    // transform assets (Sponza).
+    world_aabb_min: vec4<f32>,
+    world_aabb_max: vec4<f32>,
 };
 
 const SDF_CARD_SLOTS_PER_ROW: f32 = 64.0;
@@ -913,16 +922,29 @@ fn cs_main(
         // geometry, etc.).
         let count = arrayLength(&instance_data);
         var picked: i32 = -1;
+        var picked_vol: f32 = 1e30;
         for (var i: u32 = 0u; i < count; i = i + 1u) {
             let ad = instance_data[i];
             if (ad.card_slot.w < 0.5) { continue; }
-            let bmin = ad.card_aabb_min.xyz - vec3<f32>(0.05);
-            let bmax = ad.card_aabb_max.xyz + vec3<f32>(0.05);
+            // EN-023 — compare the WORLD hit against the WORLD AABB.
+            // The old object-space comparison only matched assets whose
+            // vertices were already in world space; every transformed
+            // instance fell through to the gray analytic fallback.
+            // Pick the SMALLEST containing box, not the first: a scene-
+            // spanning instance (the shooter's ±140 m terrain proxy)
+            // otherwise swallows every hit — walls and trees included —
+            // and its mostly-empty side cards darken the bounce.
+            let bmin = ad.world_aabb_min.xyz - vec3<f32>(0.05);
+            let bmax = ad.world_aabb_max.xyz + vec3<f32>(0.05);
             if (hit_pos.x >= bmin.x && hit_pos.x <= bmax.x &&
                 hit_pos.y >= bmin.y && hit_pos.y <= bmax.y &&
                 hit_pos.z >= bmin.z && hit_pos.z <= bmax.z) {
-                picked = i32(i);
-                break;
+                let ext = bmax - bmin;
+                let vol = ext.x * ext.y * ext.z;
+                if (vol < picked_vol) {
+                    picked = i32(i);
+                    picked_vol = vol;
+                }
             }
         }
 
@@ -947,13 +969,13 @@ fn cs_main(
             let slot_x = slot % 64u;
             let slot_y = slot / 64u;
 
-            let bmin = ad.card_aabb_min.xyz;
-            let bmax = ad.card_aabb_max.xyz;
-            // Hit is in world space and Sponza meshes are in world
-            // space too (no per-instance transform beyond identity on
-            // the Sponza asset). For now use world-space hit directly;
-            // instances with a non-identity transform would need the
-            // transform stored on `instance_data` to round-trip.
+            // EN-023 — project against the WORLD AABB, consistent with
+            // the world-space hit. Exact for the translate+scale (yaw-0)
+            // instances the GI proxies use; a yaw-rotated instance would
+            // sample its card with rotated UVs — hue still right, which
+            // is what the probe integral actually consumes at 64² cards.
+            let bmin = ad.world_aabb_min.xyz;
+            let bmax = ad.world_aabb_max.xyz;
             var u_os: f32;
             var v_os: f32;
             var u_lo: f32; var u_hi: f32;
@@ -1330,6 +1352,13 @@ struct SsrParams {
     /// z = number of march steps
     /// w = frame index (Hammersley rotation + march jitter)
     params: vec4<f32>,
+    /// EN-021 — view→world ROTATION (inverse of the view matrix's 3×3)
+    /// so the env-miss fallback can turn the view-space reflection ray
+    /// into a world direction for the equirect lookup.
+    inv_view_rot: mat4x4<f32>,
+    /// EN-021 — x = env max LOD (matches the material path's
+    /// roughness×6 mip ramp), y = env intensity, zw unused.
+    params2: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: SsrParams;
@@ -1341,6 +1370,8 @@ struct SsrParams {
 @group(0) @binding(6) var mat_samp: sampler;
 @group(0) @binding(7) var albedo_tex: texture_2d<f32>;
 @group(0) @binding(8) var albedo_samp: sampler;
+@group(0) @binding(9) var env_tex: texture_2d<f32>;
+@group(0) @binding(10) var env_samp: sampler;
 
 const PI: f32 = 3.14159265;
 
@@ -1363,6 +1394,22 @@ fn view_pos_from_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let ndc = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
     let view_h = u.inv_proj * ndc;
     return view_h.xyz / view_h.w;
+}
+
+/// EN-021 — env-miss fallback. The scene shader scales its IBL specular
+/// down by SSR's ownership share (lighting.dir_light_count.z × the same
+/// roughness fade this shader uses), so a miss MUST return the env
+/// sample instead of black or off-screen reflections go dark. Same
+/// equirect mapping as common/pbr.wgsl's sample_env; explicit-LOD
+/// sampling needs no seam handling.
+fn env_fallback(r_view: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let d = normalize((u.inv_view_rot * vec4<f32>(r_view, 0.0)).xyz);
+    let theta = acos(clamp(d.y, -1.0, 1.0));
+    let phi   = atan2(d.z, d.x);
+    let uu    = phi / (2.0 * PI);
+    let uv    = vec2<f32>(uu - floor(uu), theta / PI);
+    return textureSampleLevel(env_tex, env_samp, uv, roughness * u.params2.x).rgb
+         * u.params2.y;
 }
 
 /// Interleaved gradient noise — per-pixel pseudo-random in [0, 1).
@@ -1405,15 +1452,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (depth >= 0.9999) { return vec4<f32>(0.0); } // sky
 
     // SSR for every smooth-enough surface — the metals-only gate is gone.
-    // Rationale: the scene shader deliberately starves polished DIELECTRICS
-    // of IBL specular (dielectric_spec_amp rolls to zero on smooth surfaces
-    // because the visibility-less prefiltered env produced bright stripes),
-    // so screen-space hits are the only grounded reflections a wet floor or
-    // polished stone can receive — no double-counting by construction. The
-    // F0 = 0.04 Fresnel below keeps dielectric contribution physically
-    // small except at grazing angles. Very rough surfaces still fade out
-    // to IBL where one-ray-per-pixel SSR noise would dominate even after
-    // temporal accumulation.
+    // EN-021 EXCLUSIVE OWNERSHIP: within this shader's roughness_fade
+    // range, SSR owns specular reflections outright — the scene shader
+    // scales its IBL specular by the complement of the same fade
+    // (× strength, piped through lighting.dir_light_count.z), and a
+    // march MISS falls back to the env sample here instead of black.
+    // Metals previously double-counted on hit (IBL spec in hdr + full
+    // SSR on top, round-2 audit F10); dielectrics were starved of IBL
+    // spec by design and now get the coherent hit-or-env behaviour too.
+    // Very rough surfaces still fade to pure IBL where one-ray-per-pixel
+    // SSR noise would dominate even after temporal accumulation.
     let mat = textureSample(mat_tex, mat_samp, in.uv).rg;
     let metallic = mat.r;
     let roughness = mat.g;
@@ -1444,11 +1492,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let h = importance_sample_ggx(xi, n, roughness);
     let r = reflect(-v, h);
 
-    if (r.z > 0.0) { return vec4<f32>(0.0); }
-
     let n_dot_v = max(dot(n, v), 0.0);
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
     let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - n_dot_v, 5.0);
+
+    // Camera-facing rays can't be marched — env fallback (EN-021).
+    if (r.z > 0.0) {
+        let fb = env_fallback(r, roughness) * fresnel * roughness_fade * u.params.x;
+        let fb_safe = select(vec3<f32>(0.0), fb, fb == fb);
+        return vec4<f32>(fb_safe, 0.0);
+    }
 
     let max_dist = u.params.y;
     let n_steps_f = u.params.z;
@@ -1492,7 +1545,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         prev_t = t;
         t = t + step_size;
     }
-    if (!hit_found) { return vec4<f32>(0.0); }
+    if (!hit_found) {
+        // March left the screen or found nothing — env fallback (EN-021).
+        let fb = env_fallback(r, roughness) * fresnel * roughness_fade * u.params.x;
+        let fb_safe = select(vec3<f32>(0.0), fb, fb == fb);
+        return vec4<f32>(fb_safe, 0.0);
+    }
 
     let edge_fade = min(
         min(hit_uv.x, 1.0 - hit_uv.x),

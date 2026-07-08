@@ -1,6 +1,34 @@
 # Bloom Engine Renderer — v2 Spec (UE5-Tier Target)
 
-**Supersedes (in ambition):** `bloom-renderer-spec.md` — the 12-month "2019 AAA" plan. That document is still correct about the wedge and the taste bottleneck; read §4 of it before this one.
+**This is the only renderer spec.** It absorbed and replaced
+`bloom-renderer-spec.md` (the 12-month "2019 AAA" plan — its still-true
+§4 "Strategic Framing" survives as §6 below) and
+`Surreal_Engine_Spec_v01.md` (the pre-rename founding draft; its API
+philosophy lives on in `README.md` and the raylib-modeled `src/` API).
+Both were removed 2026-07-06; git history has them.
+
+## Status vs. plan (as-built, 2026-07-06)
+
+This document is the *plan*; the code has made choices where the plan
+offered options, and diverged where reality was cheaper:
+
+- **API/backends:** wgpu 29 (DX12/Metal/Vulkan/WebGPU through one
+  crate), not hand-built per-API backends. Shaders are **WGSL strings
+  in `native/shared/src/renderer/shaders/`**, not Slang.
+- **Architecture:** deferred MRT (hdr/material/velocity/albedo), not
+  clustered forward+ and not (yet) a visibility buffer. No bindless,
+  no mesh shaders yet.
+- **Landed from the tracks:** Lumen-class GI (screen probes; HW
+  ray-query / SDF-clipmap / Hi-Z tiers, mesh cards, WSRC — see
+  `docs/perf/007a/007b/013/014/016/017` + `docs/perf/lumen-roadmap.md`),
+  TSR with real motion vectors incl. material-system draws (EN-022),
+  SSR with env fallback + IBL ownership (EN-021), cascaded shadow maps
+  with material-path casters/receivers, material system with a stable
+  5-bind-group ABI (`material_abi.wgsl`), CPU+GPU pass profiler with
+  overlay, planar-reflection water, physical-resolution 2D text.
+- **Live status lives in** `docs/perf/lumen-roadmap.md` (GI),
+  `docs/tickets.md` (EN-xxx work items), and per-ticket docs in
+  `docs/perf/`. When this spec and those disagree, those win.
 
 **Target:** As close to UE5 (Lumen + Nanite + VSM + Substrate + TSR) as a small orchestrated-agent team can pragmatically reach. The goal is *not* to beat UE5. The goal is that a technical art director looking at Bloom screenshots cannot name a specific rendering subsystem where Bloom is obviously behind modern AAA.
 

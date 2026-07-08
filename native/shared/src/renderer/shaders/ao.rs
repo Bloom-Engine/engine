@@ -240,7 +240,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // in the 0..π range so every frame covers roughly the full
     // horizon and history doesn't bias toward one hemisphere between
     // refreshes. Over 4 frames the full 8-direction set is sampled.
-    let phase = u.size.z;
+    // Flicker fix: dither the phase spatially in a 2×2 pixel quad so
+    // every quad covers all 4 phases EVERY frame. With a globally
+    // shared phase, the per-frame direction bias was identical across
+    // whole surfaces — when a phase pair landed badly on
+    // high-frequency geometry, the entire surface's AO pulsed in
+    // lockstep once per 4-frame cycle (periodic wall-wide flicker).
+    // Dithered, the same bias becomes 2×2 spatial noise that the
+    // bilateral blur and the EMA absorb completely.
+    let quad_offset = (px.x & 1u) + ((px.y & 1u) << 1u);
+    let phase = (u.size.z + quad_offset) % N_PHASES;
     for (var k = 0u; k < N_DIRS_PER_FRAME; k = k + 1u) {
         let d = phase + k * N_PHASES;
         let angle = (f32(d) / f32(N_DIRS_TOTAL)) * PI + jitter_angle;
@@ -357,15 +366,25 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         history_ao = textureSampleLevel(history_in, filt_samp, prev_uv, 0.0).r;
     }
 
-    // Disocclusion protection via AO delta: if the reprojected
-    // history deviates from the current raw sample by more than
-    // 0.35 we treat it as a hard break and refresh to `ao_raw`.
-    // Cheaper than a spatial neighborhood clamp and sufficient
-    // given the 4-frame EMA absorbs short-term drift.
-    let ao_delta = abs(ao_raw - history_ao);
-    let force_refresh = reproj_oob || u.size.w != 0u || ao_delta > 0.35;
+    // Temporal stability (flicker fix). The old `ao_delta > 0.35 →
+    // alpha 1` HARD refresh fired on a perfectly static camera: each
+    // frame samples only 2 of 8 directions, and when that pair lands
+    // badly on high-frequency geometry the delta spikes across the
+    // whole surface at once (the direction phase is shared by every
+    // pixel) — converged history got replaced with the noisiest
+    // possible single-frame estimate, a region-wide AO pulse that read
+    // as periodic flicker on detailed walls. On a static scene the
+    // HISTORY is the trustworthy estimate, so instead: clamp how far a
+    // single frame's raw sample can pull (±0.15 around history) and
+    // keep the plain EMA. A sustained true occlusion change still
+    // tracks at ~0.04 AO/frame (0.35 in ~10 frames — imperceptible
+    // lag), while correlated sampling spikes are capped at an
+    // invisible single-frame step. Hard refresh only on real
+    // reprojection breaks (off-screen history / first frames).
+    let force_refresh = reproj_oob || u.size.w != 0u;
+    let ao_in = clamp(ao_raw, history_ao - 0.15, history_ao + 0.15);
     let alpha = select(u.temporal.x, 1.0, force_refresh);
-    let ao = mix(history_ao, ao_raw, alpha);
+    let ao = mix(history_ao, select(ao_in, ao_raw, force_refresh), alpha);
 
     // Contrast + floor (exact curve preserved).
     let ao_contrasted = pow(ao, 2.0);

@@ -658,6 +658,162 @@ test.
   the initial window create. If this becomes a real-world issue
   add `GetDeviceCaps(hdc, LOGPIXELSX)` as a third fallback.
 
-**Blocked on:** access to a Windows 11 box with a HiDPI display
-(or a VM forwarding DPI), and a Linux dev with X11. Web checks
-can be done from any modern browser on the macOS dev box.
+**Blocked on:** ~~access to a Windows 11 box with a HiDPI display~~ —
+**the Windows half is field-validated as of 2026-07**: the shooter dev
+box is exactly the canonical setup (Windows 11, 4K @ 150%), and months
+of round-1/round-2 work ran on it — physical 3840×2160 vs logical
+2560×1440 split correct end-to-end (borderless fullscreen at native
+res, PMv2 capture tooling, and the 2D text physical-res work all depend
+on it). Still untested: WM_DPICHANGED monitor-drag (single-monitor
+box), Linux X11, Web Retina. Web checks can be done from any modern
+browser on the macOS dev box.
+
+## EN-020 — Native AV: heap read overrun, layout-sensitive ✅ root-caused 2026-07-04
+
+**Symptom.** Bloom Shooter round-2 audit (2026-07-04): three scripted runs
+crashed with c0000005 at the same instruction (`main.exe+0xe8e5` on the
+af98dbe-era link), reading `0x…FFF8` — 8 bytes below a page boundary.
+No Rust panic output (engine builds `panic = "abort"`, which would print),
+so this is raw UB: something reads past the end of a heap allocation and
+faults only when the allocation abuts an unmapped page.
+
+**Root cause (found via the title-freeze report on the round-2
+integration build).** Perry 0.5.x runtime string scanning: `split()`
+slices and `parseFloat()` read past the end of Perry's own exact-sized
+string allocations. Any TS that runs a packed FFI text blob through
+`split`+`parseFloat` every frame — exactly what `getProfilerOverlay` /
+`getProfilerFrameHistory` did — crashes within seconds once a slice lands
+flush against an unmapped page. Reproduced 6/6 across two different link
+layouts (faults in `perry_fn_…getProfilerOverlay` at `+0xe925` and
+`…getProfilerFrameHistory` at `+0xf0a3`, 7–29 s of overlay time each);
+engine-side tail-padding of `alloc_perry_string` alone did NOT fix it,
+proving the overread is on Perry-internal allocations. Minidumps
+archived in `shooter/tools/.testout/dumps/crash_main_*.dmp`.
+
+**Fix shipped (2026-07-04, `fix(EN-020)` commits).**
+1. Numeric profiler ABI: `bloom_profiler_row_count/_label/_cpu_us/_gpu_us`
+   + `_hist_*` — f64s cross the FFI; the label crosses whole and is only
+   drawn, never parsed. `getProfilerOverlay`/`getProfilerFrameHistory`
+   rewritten on top; the packed-text FFIs remain for back-compat but
+   per-frame consumers must not parse them.
+2. Defense-in-depth: `alloc_perry_string` now zero-pads 16 bytes after
+   every payload (word-stepping scanners on ENGINE-allocated strings stay
+   in bounds), regression test included.
+3. Observability: unhandled-exception filter in `native/windows` prints
+   code + `main.exe+RVA` and writes a minidump via runtime-loaded dbghelp;
+   WM_CLOSE/WM_DESTROY and surface-acquire failures now log to stderr.
+   Silent deaths are structurally impossible for AV-class faults now.
+
+Validated: 3/3 runs × 90 s gameplay with the overlay ON continuously —
+zero faults, overlay data correct (previously 6/6 dead in ≤29 s).
+
+**Remaining.** File the scanner overread upstream against Perry 0.5.x
+(repro: return a `"1.23|4.56\n"…` blob from an FFI, split+parseFloat it
+per frame; dumps + offsets above). The OBJ text loader
+(`engine/src/models/index.ts`) uses the same split/parseFloat pattern at
+LOAD time — one-shot exposure, worth migrating when touched. Audit
+report: `shooter/docs/audit-round2.md` finding F1.
+
+## EN-021 — SSR + IBL specular exclusive ownership ✅ implemented (PR #78)
+
+**Status 2026-07-04.** Landed on `feat/en021-ssr-ibl-ownership` (PR #78,
+pending merge): env-cubemap fallback bound into the SSR pass (miss
+returns filtered env instead of black, `env_fallback()` in ssgi.rs;
+fresnel applied before the facing check so both miss paths agree), and
+`fs_main_scene` scales `ibl_spec` by the exact complement of the SSR
+fade (`ssr_own` via `dir_light_count.z`, plumbed through
+`clear_additional_lights`). Design notes below kept for review context.
+
+**Why.** Round-2 audit (B): compose is `hdr + ssr` and `fs_main_scene`
+already adds IBL specular into hdr for metals — pixels with an SSR hit
+double-count specular for roughness ≈0.05–0.85, worst for metals at
+r≈0.55–0.75 (in the shooter: alien carapaces / weapon per their glTF
+factors). Dielectrics are largely starved of IBL spec by design and are
+fine; the shooter's custom world materials never call ibl() and are
+unaffected.
+
+**Why not a one-liner.** Scaling `ibl_spec` by the complement of the SSR
+fade must be PAIRED with an env fallback on SSR miss (today miss = black,
+ssgi.rs:1495) or off-screen-reflection pixels lose their specular
+entirely — a worse artifact than the double-count. The fallback needs the
+env cubemap bound into the SSR pass (bind-group layout change).
+
+**Sketch.** (1) Bind env_tex into the SSR march; on miss return
+`sample_env(r, r*max_mip) * fresnel * roughness_fade * strength` instead
+of black. (2) In `fs_main_scene`, scale `ibl_spec` by
+`1 − (1 − smoothstep(0.5, 0.85, r)) * ssr_strength` (the exact
+complement of the SSR shader's own fade). (3) Regenerate goldens; verify
+with the audit's metal-ROI protocol (on-hit vs panned-off luma converge
+<5%).
+
+**Interim calibration option:** `set_ssr_strength(0.25–0.35)` halves the
+overlap engine-wide with zero shader work.
+
+## EN-022 — Motion vectors for material-system draws ✅ implemented (PR #82 + shooter PR #4)
+
+**Status 2026-07-04.** Landed on `feat/en022-material-velocity` (PR #82,
+pending merge) + shooter PR #4: per-slot model history in
+MaterialSystem (`prev_models`/`cur_models` rotated in
+`reset_draw_slot(prev_vp)`, slot = submission order), `prev_mvp`
+reconstructed engine-side (the legacy caller-supplied param is
+ignored), `abi_motion_vector()` in material_abi.wgsl, and all four
+shooter world materials (terrain/building/tree/grass — incl. the inline
+grass copy in main.ts) write real velocity with wind sway evaluated at
+`frame.time - frame.delta_time`. Smoke-validated: no TSR tearing,
+sway ghosting gone. Design notes below kept for review context.
+
+**Why.** Round-2 audit (F8): every material-path draw writes velocity = 0
+(terrain/tree/grass/building — the whole static world plus wind sway),
+so TAA's motion adaptation (`post.rs` motion_alpha ramp) never engages
+for the world: camera translation is covered only by depth reprojection
+and object sway not at all. This is the primary mechanism behind TSR 0.5
+shimmer on thin grass + sway ghosting, and it blocks any future
+motion-blur quality on the world.
+
+**Scope.** Per-draw previous-frame model matrix (the per-draw UBO slot
+already carries the current one; the shadow path already keeps a CPU
+copy in `MaterialDrawCommand.model`), previous view-proj in PerView (the
+core path has it), and a velocity write in the material ABI's OpaqueOut
+path — plus the wind displacement evaluated at previous-frame time in
+foliage vertex shaders so sway produces real motion vectors. Roughly:
+ABI struct + material_system plumbing + 4 world materials + goldens.
+
+**Acceptance.** Strafe at the audit's S7 pose: thin-grass shimmer index
+(frame-diff metric) drops materially; wind sway no longer ghosts;
+`post.rs` motion clamp engages on world pixels (debug: motion_alpha
+visualization).
+
+## EN-023 — GI software path: colored bounce is unreachable 🟡 partially landed (PR #79), still open
+
+**Status 2026-07-04.** `feat/en023-gi-sw-cards` (PR #79, pending merge)
+fixed the data path: world-space AABBs carried per instance
+(`world_aabb_min/max` in InstanceGiData, both HW and SDF struct
+mirrors), smallest-containing-box broad-phase pick (a scene-spanning
+terrain proxy no longer swallows every hit), and the SW WSRC bake got a
+`ground_albedo` bounce term. Measured payoff on the 760M is still ≤2%
+achromatic even at 4× intensity — the bottleneck moved downstream to
+probe resolve/AO integration, so the ticket STAYS OPEN pointed there.
+Interim option D2-B (disable SSGI on SW adapters) remains reasonable.
+
+**Why.** Round-2 audit (F4): on adapters without EXPERIMENTAL_RAY_QUERY
+(the dev box's Radeon 760M reports none — see the new boot log), the
+probe trace runs the SDF path, where the mesh-card lookup compares
+world-space hits against OBJECT-space AABBs (ssgi.rs broad phase) — every
+transformed instance falls through to the flat gray 0.55 analytic — and
+the software WSRC bake is analytic sun+sky with no geometry at all.
+Measured in-game: SSGI on/off is ≤2.5% achromatic luma, hue ratio
+unchanged to 4 decimals. The ~267 gi_only proxies feed a pipeline whose
+colored output cannot reach the screen on SW adapters, at ~1.6 ms GPU in
+combat.
+
+**Sketch.** (1) Transform SDF hits into instance object space (or
+instance AABBs into world space) in the card broad-phase so textured/
+tinted cards resolve. (2) Make the SW WSRC bake sample cards (or at
+least sun-shadowed ground/albedo bounce) instead of pure analytic.
+(3) Re-run the audit's GI A/B: acceptance = G/R hue shift at the
+building base and ≥8-10% luma in shaded receivers.
+
+**Interim option** (decision D2-B in the shooter audit): boot-time
+`setSsgiEnabled(false)` on SW adapters banks the ~1.6 ms until this
+lands; needs a backend query FFI or the game reading the new boot log.
+

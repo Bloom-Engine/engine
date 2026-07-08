@@ -171,7 +171,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         };
         let pv = bytemuck::Zeroable::zeroed();
         sys.update_frame_uniforms(&queue, &pf, &pv);
-        sys.reset_draw_slot();
+        sys.reset_draw_slot(crate::renderer::IDENTITY_MAT4);
 
         // MVP = identity so the fullscreen tri stays in NDC.
         let identity = [
@@ -378,6 +378,13 @@ mod translucent_sort_tests {
             draw_slot: 0,
             view_depth,
             instance: None,
+            // Identity — the sort under test only reads view_depth.
+            model: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
         }
     }
 

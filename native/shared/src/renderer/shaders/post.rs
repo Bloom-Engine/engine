@@ -874,7 +874,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     let history_ycocg = rgb_to_ycocg(history);
     let history_y_clamped = clamp(history_ycocg.x, y_min, y_max);
-    let clamped_history = ycocg_to_rgb(vec3<f32>(history_y_clamped, history_ycocg.yz));
+    // Chroma is clamped too, but at 3x the luma band (flicker fix).
+    // Fully unclamped chroma let stale history colour bleed through on
+    // high-contrast edges — green terrain fringing crawling along cloud
+    // and canopy silhouettes during camera motion. The loose band keeps
+    // the anti-sparkle intent of the luma-only design (a hard
+    // per-channel clamp caused chromatic sparkle on grazing stone)
+    // while bounding gross cross-object colour bleed.
+    let c_gamma = gamma * 3.0;
+    let co_clamped = clamp(history_ycocg.y,
+        mean.y - c_gamma * stddev.y, mean.y + c_gamma * stddev.y);
+    let cg_clamped = clamp(history_ycocg.z,
+        mean.z - c_gamma * stddev.z, mean.z + c_gamma * stddev.z);
+    let clamped_history = ycocg_to_rgb(vec3<f32>(history_y_clamped, co_clamped, cg_clamped));
 
     // Per-pixel disocclusion reject. If the history (already
     // variance-clamped) still sits far from the current
@@ -882,6 +894,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // different world point and should be dropped. Absolute
     // threshold keyed to stddev so tight-gradient regions
     // reject aggressively; flat regions stay accumulating.
+    // NOTE: do not gate this by motion — the luma-only variance clamp
+    // deliberately leaves chroma unbounded, and this reject is what
+    // flushes chroma-poisoned history on static pixels (weakening it
+    // green-tints the whole frame within seconds).
     let history_dist = abs(history_y_clamped - mean.x);
     let disocclusion = smoothstep(stddev.x * 0.25, stddev.x * 1.0, history_dist);
 
@@ -968,7 +984,21 @@ fn fs_main() -> @location(0) vec4<f32> {
             break;
         }
     }
-    let median_log = log_min + (f32(median_bin) + 0.5) / 64.0 * log_range;
+    // Interpolate the percentile position WITHIN the bin (flicker fix).
+    // Bin centres quantized the target in whole-bin (~0.22 log2 ≈ 16%)
+    // steps, so histogram noise flipping the median across a bin
+    // boundary stepped the exposure hard enough for TAA to reject its
+    // history — a visible sharp/soft convergence cycle on detailed
+    // surfaces. The cumulative counts turn the bin index into a
+    // continuous position instead.
+    let below = accum - bins[median_bin];
+    var frac = 0.5;
+    if (bins[median_bin] > 0u) {
+        frac = clamp(
+            (f32(target_count) - f32(below)) / f32(bins[median_bin]),
+            0.0, 1.0);
+    }
+    let median_log = log_min + (f32(median_bin) + frac) / 64.0 * log_range;
     let median_luma = exp2(median_log);
 
     let key = u.params.x;
@@ -976,14 +1006,33 @@ fn fs_main() -> @location(0) vec4<f32> {
     let min_e = u.params.z;
     let max_e = u.params.w;
 
-    let target_exp = clamp(key / max(median_luma, 0.01), min_e, max_e);
-    let prev = textureSample(prev_exposure_tex, prev_exposure_samp, vec2<f32>(0.5, 0.5)).r;
-    // First frame: prev is 0; snap to target instead of crawling up.
-    var smoothed = mix(prev, target_exp, rate);
-    if (prev < min_e * 0.5) {
-        smoothed = target_exp;
+    let raw_target = clamp(key / max(median_luma, 0.01), min_e, max_e);
+    let prev = textureSample(prev_exposure_tex, prev_exposure_samp, vec2<f32>(0.5, 0.5));
+    // Anchored deadband (flicker fix): once converged, the exposure must
+    // not chase sub-2% measurement noise (TAA jitter, foliage sway).
+    // .g holds the anchored target; it only re-anchors when the raw
+    // measurement strays more than 2% from it, so a static scene gets a
+    // byte-stable exposure while real lighting changes re-anchor at
+    // once and adapt at the normal rate.
+    var anchor = prev.g;
+    if (anchor < min_e * 0.5 || abs(raw_target - anchor) > anchor * 0.02) {
+        anchor = raw_target;
     }
-    return vec4<f32>(smoothed, 0.0, 0.0, 1.0);
+    // Proportional adaptation speed (flicker fix): the measurement is
+    // downstream of TAA, so its residual wiggle produces small target
+    // corrections; ramping them at full rate reads as a visible
+    // brightness sweep that the tonemap + sharpen chain amplifies on
+    // fine texture. Small gaps close glacially (imperceptible per
+    // frame); a real scene change (>25% luminance) adapts at the full
+    // authored rate.
+    let gap = abs(anchor - prev.r) / max(prev.r, 1e-3);
+    let rate_scale = smoothstep(0.0, 0.25, gap);
+    // First frame: prev is 0; snap to target instead of crawling up.
+    var smoothed = mix(prev.r, anchor, rate * rate_scale);
+    if (prev.r < min_e * 0.5) {
+        smoothed = anchor;
+    }
+    return vec4<f32>(smoothed, anchor, 0.0, 1.0);
 }
 ";
 
@@ -1292,7 +1341,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let h_u = textureSample(hdr_tex, hdr_samp, sample_uv - oy).rgb;
         let h_avg = (h_r + h_l + h_d + h_u) * 0.25 * ao_weighted * exposure;
         let avg = tonemap_select(h_avg);
-        let detail = ldr - avg;
+        // Flicker fix: cap the unsharp detail term. On a high-contrast
+        // silhouette (building roofline vs sky) detail is huge, and at
+        // half-res TSR the reconstructed edge wobbles a sub-pixel every
+        // frame — a strong unsharp turns that wobble into a crawling
+        // bright/dark line (the reported gray lines on the building).
+        // Fine texture detail has small local contrast and passes
+        // through untouched; only the extreme edge overshoot is bounded,
+        // which also removes the silhouette halo the 0.8 default caused.
+        let detail = clamp(ldr - avg, vec3<f32>(-0.12), vec3<f32>(0.12));
         ldr = clamp(ldr + detail * sharpen_strength, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 

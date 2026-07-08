@@ -20,6 +20,8 @@ declare function bloom_set_fog(r: number, g: number, b: number, density: number,
 declare function bloom_set_chromatic_aberration(strength: number): void;
 declare function bloom_set_vignette(strength: number, softness: number): void;
 declare function bloom_set_film_grain(strength: number): void;
+declare function bloom_set_sharpen_strength(strength: number): void;
+declare function bloom_set_present_mode(mode: number): void;
 declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): void;
 declare function bloom_set_auto_exposure(on: number): void;
 declare function bloom_set_taa_enabled(on: number): void;
@@ -62,6 +64,18 @@ declare function bloom_get_profiler_frame_gpu_us(): number;
 declare function bloom_print_profiler_summary(): void;
 declare function bloom_profiler_overlay_text(): string;
 declare function bloom_profiler_frame_history(): string;
+// EN-020 — numeric profiler ABI. Perry 0.5.x's split()/parseFloat()
+// overread their own exact-sized slice allocations; parsing a packed
+// text blob every overlay frame crashes within seconds once a slice
+// lands at the end of a heap page. Numbers cross as f64, labels cross
+// whole and are only ever drawn, never parsed.
+declare function bloom_profiler_row_count(): number;
+declare function bloom_profiler_row_label(i: number): string;
+declare function bloom_profiler_row_cpu_us(i: number): number;
+declare function bloom_profiler_row_gpu_us(i: number): number;
+declare function bloom_profiler_hist_count(): number;
+declare function bloom_profiler_hist_cpu_us(i: number): number;
+declare function bloom_profiler_hist_gpu_us(i: number): number;
 declare function bloom_splat_impulse(x: number, z: number, radius: number, strength: number): void;
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_set_material_params_scratch(handle: number, paramCount: number): void;
@@ -263,6 +277,25 @@ export function setVignette(strength: number, softness: number): void {
 /** Animated film grain post-tonemap. 0 = off. */
 export function setFilmGrain(strength: number): void {
   bloom_set_film_grain(strength);
+}
+
+/**
+ * Composite unsharp-mask strength. Engine default 0.8; 0 disables the
+ * sharpen taps entirely. At high output resolutions the default visibly
+ * halos high-contrast silhouettes — tune per game.
+ */
+export function setSharpenStrength(strength: number): void {
+  bloom_set_sharpen_strength(strength);
+}
+
+/**
+ * Swapchain present mode: 0 = Fifo (vsync, default), 1 = Mailbox
+ * (uncapped, no tearing), 2 = Immediate (uncapped, tearing allowed).
+ * With a non-vsync mode active, `setTargetFPS`'s sleep-based cap
+ * becomes effective — under Fifo it is inert by design.
+ */
+export function setPresentMode(mode: number): void {
+  bloom_set_present_mode(mode);
 }
 
 /** Screen-space sun shafts (god rays). strength 0 = off. */
@@ -607,19 +640,15 @@ export function setMaterialParams(handle: number, params: number[]): void {
  * render one `drawText` per entry.
  */
 export function getProfilerOverlay(): { label: string, cpuUs: number, gpuUs: number }[] {
-  const raw = bloom_profiler_overlay_text();
-  if (!raw || raw.length === 0) return [];
+  // EN-020: per-row numeric FFI — do NOT reintroduce a packed-text +
+  // split()/parseFloat() path here (Perry runtime overread, crashes).
   const out: { label: string, cpuUs: number, gpuUs: number }[] = [];
-  const lines = raw.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.length === 0) continue;
-    const parts = line.split('|');
-    if (parts.length < 3) continue;
+  const n = bloom_profiler_row_count();
+  for (let i = 0; i < n; i++) {
     out.push({
-      label: parts[0],
-      cpuUs: parseFloat(parts[1]),
-      gpuUs: parseFloat(parts[2]),
+      label: bloom_profiler_row_label(i),
+      cpuUs: bloom_profiler_row_cpu_us(i),
+      gpuUs: bloom_profiler_row_gpu_us(i),
     });
   }
   return out;
@@ -631,16 +660,14 @@ export function getProfilerOverlay(): { label: string, cpuUs: number, gpuUs: num
  * is 0 when the device lacks TIMESTAMP_QUERY.
  */
 export function getProfilerFrameHistory(): { cpuUs: number, gpuUs: number }[] {
-  const raw = bloom_profiler_frame_history();
-  if (!raw || raw.length === 0) return [];
+  // EN-020: numeric FFI — see getProfilerOverlay.
   const out: { cpuUs: number, gpuUs: number }[] = [];
-  const lines = raw.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.length === 0) continue;
-    const parts = line.split('|');
-    if (parts.length < 2) continue;
-    out.push({ cpuUs: parseFloat(parts[0]), gpuUs: parseFloat(parts[1]) });
+  const n = bloom_profiler_hist_count();
+  for (let i = 0; i < n; i++) {
+    out.push({
+      cpuUs: bloom_profiler_hist_cpu_us(i),
+      gpuUs: bloom_profiler_hist_gpu_us(i),
+    });
   }
   return out;
 }

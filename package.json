@@ -948,6 +948,51 @@
           "returns": "string"
         },
         {
+          "name": "bloom_profiler_row_count",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_profiler_row_label",
+          "params": [
+            "f64"
+          ],
+          "returns": "string"
+        },
+        {
+          "name": "bloom_profiler_row_cpu_us",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_profiler_row_gpu_us",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_profiler_hist_count",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_profiler_hist_cpu_us",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_profiler_hist_gpu_us",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_create_instance_buffer",
           "params": [
             "i64",
@@ -1224,6 +1269,20 @@
         },
         {
           "name": "bloom_set_film_grain",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_sharpen_strength",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_present_mode",
           "params": [
             "f64"
           ],

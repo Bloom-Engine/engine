@@ -33,6 +33,10 @@ image-extras = ["bloom-shared/image-extras"]
 # in native/macos/Cargo.toml.
 [profile.release]
 panic = "abort"
+# Line tables in the staticlib objects so `perry compile --debug-symbols`
+# can emit a usable PDB for crash triage (negligible runtime cost; the
+# symbols stay out of the exe unless /DEBUG is requested at link).
+debug = "line-tables-only"
 
 [dependencies]
 bloom-shared = { path = "../shared", default-features = false, features = ["mp3"] }
@@ -49,6 +53,10 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Memory",
     "Win32_Media_Audio",
     "Win32_System_Com",
     "Win32_System_Threading",
