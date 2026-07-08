@@ -82,6 +82,43 @@
 #[no_mangle] pub extern "C" fn bloom_compile_material_instanced(_p0: i64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_create_instance_buffer_scratch(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_material_params_scratch(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_compile_material_from_file(_p0: i64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_splat_impulse(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_profiler_overlay_text() -> i64 {
+    0
+}
+#[no_mangle] pub extern "C" fn bloom_profiler_frame_history() -> i64 {
+    0
+}
+#[no_mangle] pub extern "C" fn bloom_profiler_row_count() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_profiler_row_label(_p0: f64) -> i64 {
+    0
+}
+#[no_mangle] pub extern "C" fn bloom_profiler_row_cpu_us(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_profiler_row_gpu_us(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_profiler_hist_count() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_profiler_hist_cpu_us(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_profiler_hist_gpu_us(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_create_instance_buffer(_p0: i64, _p1: f64) -> f64 {
     0.0
 }
@@ -146,6 +183,10 @@
 #[no_mangle] pub extern "C" fn bloom_set_sun_direction(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_fog(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_sharpen_strength(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_present_mode(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_p0: f64) {
 }
@@ -268,6 +309,10 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_unregister_frame_callback(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_gi_only(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_trs(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_scene_set_lod(_p0: f64, _p1: f64, _p2: i64, _p3: f64, _p4: i64, _p5: f64, _p6: f64) {
 }
