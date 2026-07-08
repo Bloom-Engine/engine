@@ -187,6 +187,32 @@ for (const platform of PLATFORMS) {
     'bloom_set_tonemap',
     'bloom_set_auto_exposure_key',
     'bloom_set_auto_exposure_rate',
+    'bloom_set_sharpen_strength',    // same post-FX group; web port TODO
+    // Profiler ABI (round-2 EN-011 / EN-020) — GPU-timestamp profiling
+    // needs TIMESTAMP_QUERY, which WebGPU does not expose, so neither the
+    // numeric row/history accessors nor the text overlay have a web port.
+    'bloom_profiler_overlay_text',
+    'bloom_profiler_frame_history',
+    'bloom_profiler_row_count',
+    'bloom_profiler_row_label',
+    'bloom_profiler_row_cpu_us',
+    'bloom_profiler_row_gpu_us',
+    'bloom_profiler_hist_count',
+    'bloom_profiler_hist_cpu_us',
+    'bloom_profiler_hist_gpu_us',
+    // Present mode (round-2 #80) — the browser owns swap/vsync; the
+    // Fifo/Mailbox/Immediate selector is a no-op on web.
+    'bloom_set_present_mode',
+    // Scene-node setters (round-2) — same Perry-WASM linear-memory bridge
+    // TODO as bloom_scene_set_lod above.
+    'bloom_scene_set_gi_only',
+    'bloom_scene_set_trs',
+    // Pointer-taking scratch buffers (round-2) — same cross-module WASM
+    // linear-memory bridge TODO as the mesh scratch group above.
+    'bloom_create_instance_buffer_scratch',
+    'bloom_set_material_params_scratch',
+    // Water-ripple impulse (round-2 splat compute) — not yet wired on web.
+    'bloom_splat_impulse',
   ]);
   const missing = [];
   for (const name of manifest.keys()) {
