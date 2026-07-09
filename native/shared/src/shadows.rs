@@ -630,41 +630,37 @@ impl ShadowMap {
             let c_near = splits[c];
             let c_far = splits[c + 1];
 
-            // Build a sub-projection that matches the camera's projection
-            // but with the near/far planes replaced by cascade limits.
-            // For a perspective projection, that means re-deriving the
-            // z-mapping while keeping the x/y fields intact.
-            let mut sub_proj = camera_proj;
-            // camera_proj is column-major, standard wgpu perspective layout:
-            //   col2 row2 = (far+near)/(near-far)
-            //   col3 row2 = 2*far*near/(near-far)
-            //   col2 row3 = -1
-            let nf = 1.0 / (c_near - c_far);
-            sub_proj[2][2] = (c_far + c_near) * nf;
-            sub_proj[3][2] = 2.0 * c_far * c_near * nf;
-
-            let sub_inv_vp = crate::renderer::mat4_invert(
-                crate::renderer::mat4_multiply(sub_proj, camera_view),
-            );
-
-            // The 8 NDC corners of a clip cube. wgpu uses z in [0,1].
-            let ndc_corners: [[f32; 4]; 8] = [
-                [-1.0, -1.0, 0.0, 1.0],
-                [ 1.0, -1.0, 0.0, 1.0],
-                [-1.0,  1.0, 0.0, 1.0],
-                [ 1.0,  1.0, 0.0, 1.0],
-                [-1.0, -1.0, 1.0, 1.0],
-                [ 1.0, -1.0, 1.0, 1.0],
-                [-1.0,  1.0, 1.0, 1.0],
-                [ 1.0,  1.0, 1.0, 1.0],
-            ];
-
-            // Unproject to world space
+            // Frustum-slice corners for [c_near, c_far], computed DIRECTLY in
+            // view space from the camera FOV, then transformed to world by the
+            // (affine, well-conditioned) view inverse.
+            //
+            // We deliberately do NOT invert the perspective projection here.
+            // `mat4_perspective` uses the OpenGL [-1,1] NDC-z convention, so
+            // unprojecting its NDC clip corners handed the near plane a NEGATIVE
+            // homogeneous w — every corner then divided down onto the z=-1 plane
+            // and the frustum bounding sphere collapsed to ~0.12 m. The cascade
+            // ortho covered almost nothing, so terrain a few metres from the
+            // camera projected outside the shadow frustum and self-shadowed:
+            // the reported "moving dark patch" that scaled disproportionately
+            // with the camera. Half-extents per unit view depth come straight
+            // from the projection (no inversion, no convention hazard):
+            //   tan(fovy/2)          = 1 / proj[1][1]
+            //   tan(fovy/2) * aspect = 1 / proj[0][0]
+            let inv_view = crate::renderer::mat4_invert(camera_view);
+            let half_w_per_d = 1.0 / camera_proj[0][0];
+            let half_h_per_d = 1.0 / camera_proj[1][1];
             let mut world_corners = [[0.0f32; 3]; 8];
-            for i in 0..8 {
-                let h = crate::renderer::mat4_mul_vec4(&sub_inv_vp, &ndc_corners[i]);
-                let w = if h[3].abs() > 1e-8 { h[3] } else { 1.0 };
-                world_corners[i] = [h[0] / w, h[1] / w, h[2] / w];
+            let mut ci = 0usize;
+            for &d in [c_near, c_far].iter() {
+                let hw = d * half_w_per_d;
+                let hh = d * half_h_per_d;
+                for &(sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].iter() {
+                    // View space looks down -Z, so this slice sits at z = -d.
+                    let vp = [sx * hw, sy * hh, -d, 1.0];
+                    let wc = crate::renderer::mat4_mul_vec4(&inv_view, &vp);
+                    world_corners[ci] = [wc[0], wc[1], wc[2]];
+                    ci += 1;
+                }
             }
 
             // Bounding sphere of this cascade's frustum slice. Sphere

@@ -885,8 +885,10 @@ pub struct Renderer {
     pub ssao_blur_uniform_buffer: wgpu::Buffer,
     /// Strength multiplier for SSAO (0 = off, 1 = full). Default 1.0.
     pub ssao_strength: f32,
-    /// Sample radius in UV units (default ~0.005, gives a soft AO
-    /// signal a few pixels wide on a 1024-tall surface).
+    /// Sample radius in WORLD-SPACE METERS (default 2.0; the shader
+    /// projects it to a screen radius per pixel via depth and clamps the
+    /// result — see `clamped_radius` in ao.rs). NOTE: earlier docs called
+    /// this "UV units ~0.005" — stale from before the world-space refactor.
     pub ssao_radius: f32,
     /// Skip the SSAO + bilateral-blur passes entirely when false; the
     /// blur RT gets a WHITE clear (no occlusion) so composite stays
@@ -6122,7 +6124,10 @@ impl Renderer {
             ssao_blur_pipeline,
             ssao_blur_layout,
             ssao_blur_uniform_buffer,
-            ssao_strength: 1.0,
+            // 0.7, not full 1.0: with the screen-radius now capped to a
+            // local contact term (see ao.rs), full strength read as harsh
+            // near-black creases. 0.7 keeps AO as a grounding cue.
+            ssao_strength: 0.7,
             ssao_enabled: true,
             bloom_enabled: true,
             ssao_bg_cache: [None, None],
@@ -6706,9 +6711,10 @@ impl Renderer {
         self.ssao_strength = strength.max(0.0);
     }
 
-    /// SSAO sample radius in UV units. 0.006 (~0.6% of viewport
-    /// height) is the default — wider radius catches larger AO
-    /// features but also blurs detail and increases halo risk.
+    /// SSAO sample radius in WORLD-SPACE METERS (default 2.0). The shader
+    /// converts it to a per-pixel screen radius (scaled by depth) and caps
+    /// that at 0.05 of the viewport, so a large world radius still stays a
+    /// local contact term rather than a scene-wide dimming wash.
     pub fn set_ssao_radius(&mut self, radius: f32) {
         self.ssao_radius = radius.max(0.0001);
     }
