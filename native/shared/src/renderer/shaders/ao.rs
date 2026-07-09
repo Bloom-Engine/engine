@@ -153,6 +153,14 @@ const N_PHASES: u32 = 4u;
 const N_STEPS: u32 = 8u;
 const PI: f32 = 3.14159265;
 const HIZ_MAX_MIP: i32 = 4;
+// Screen-space contact shadows (the SSAO 'G' channel). Disabled: this
+// 12-step march is half-res, unblurred, and — unlike the horizon AO — has
+// NO temporal accumulation, so over the dense wind-animated grass it hits
+// swaying blades a little differently every frame, producing a sharp,
+// pixelated, dark flickering layer. It is also independent of ssao_radius /
+// ssao_strength, which is why tuning those changed nothing. Off until it can
+// be gated to exclude foliage. Flip to true to restore.
+const CONTACT_SHADOWS_ENABLED: bool = false;
 
 
 fn hiz_sample(uv: vec2<f32>, mip: i32) -> f32 {
@@ -220,7 +228,13 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let proj_scale_x = abs(u.proj_row01.x);
     let proj_scale_y = abs(u.proj_row01.y);
     let screen_radius = radius_ws * 0.5 * (proj_scale_x + proj_scale_y) / abs(P.z);
-    let clamped_radius = clamp(screen_radius, 2.0 * max(inv_sz.x, inv_sz.y), 0.25);
+    // Cap the screen-space radius. The old 0.25 ceiling let a near-field
+    // pixel gather horizon occlusion across a QUARTER of the screen — over
+    // dense instanced grass that pulls thousands of blades into every AO
+    // sample, painting a broad, blotchy dark layer that also shimmers with
+    // the grass wind. 0.05 keeps AO a local contact/crevice term (what it's
+    // for) instead of a scene-wide dimming wash.
+    let clamped_radius = clamp(screen_radius, 2.0 * max(inv_sz.x, inv_sz.y), 0.05);
 
     var ao_sum = 0.0;
     let step_size = clamped_radius / f32(N_STEPS);
@@ -320,7 +334,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let light_vs = normalize(u.light_dir_vs.xyz);
     var contact = 1.0;
     let n_dot_l = dot(N, light_vs);
-    if (n_dot_l > 0.1) {
+    if (CONTACT_SHADOWS_ENABLED && n_dot_l > 0.1) {
         let cs_steps = 12u;
         let cs_max_dist = 0.2;
         let cs_step = cs_max_dist / f32(cs_steps);
