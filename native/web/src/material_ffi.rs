@@ -1,0 +1,456 @@
+//! Material-system FFI surface for web: material compile/param/
+//! draw-submission exports plus instance buffers, texture arrays and
+//! reflection-probe wiring. Split from lib.rs (2000-line file policy).
+
+use crate::engine;
+use wasm_bindgen::prelude::*;
+
+// ============================================================
+// Phase 1c — material system FFI
+// ============================================================
+
+#[wasm_bindgen]
+pub fn bloom_set_material_params(_handle: f64, _params_ptr: f64, _param_count: f64) {
+    // No-op: JS glue calls bloom_set_material_params_floats instead
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_material_params_floats(handle: f64, params: &[f32]) {
+    let count = params.len();
+    if count > 64 {
+        web_sys::console::error_1(&format!(
+            "[material] set_material_params: param_count {} > 64 (256-byte UBO cap)",
+            count
+        ).into());
+        return;
+    }
+    let mut bytes = vec![0u8; count * 4];
+    for (i, &v) in params.iter().enumerate() {
+        bytes[i*4..i*4+4].copy_from_slice(&v.to_le_bytes());
+    }
+    let eng = engine();
+    if let Err(e) = eng.renderer.material_system.set_user_params(
+        &eng.renderer.device, &eng.renderer.queue,
+        handle as u32, &bytes,
+    ) {
+        web_sys::console::error_1(&format!("[material] set_material_params failed: {}", e).into());
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_str(source: &str) -> f64 {
+    match engine().renderer.compile_material(source) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_refractive(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_refractive_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_refractive_str(source: &str) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Refractive, true, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[refractive] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_transparent(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_transparent_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_transparent_str(source: &str) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Transparent, false, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_additive(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_additive_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_additive_str(source: &str) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Translucent, Bucket::Additive, false, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_cutout(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_cutout_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_cutout_str(source: &str) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    match engine().renderer.compile_material_with_options(
+        source, FragmentProfile::Opaque, Bucket::Cutout, false, false,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_instanced(_source: f64) -> f64 {
+    // No-op: JS glue calls bloom_compile_material_instanced_str instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_instanced_str(source: &str) -> f64 {
+    match engine().renderer.compile_material_instanced(source) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] instanced compile failed: {:?}", e).into());
+            0.0
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_create_instance_buffer(_data_ptr: f64, _instance_count: f64) -> f64 {
+    // No-op: JS glue calls bloom_create_instance_buffer_floats instead
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_create_instance_buffer_floats(data: &[f32], instance_count: f64) -> f64 {
+    if instance_count <= 0.0 { return 0.0; }
+    let count = instance_count as u32;
+    engine().renderer.create_instance_buffer(data, count) as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_submit_material_draw_instanced(
+    material: f64, mesh_handle: f64, mesh_idx: f64,
+    instance_buffer: f64, instance_count: f64,
+) {
+    let eng = engine();
+    let handle_bits = mesh_handle.to_bits();
+    if let Some(model) = eng.models.get(mesh_handle) {
+        eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+    }
+    eng.renderer.submit_material_draw_instanced(
+        material as u32,
+        handle_bits,
+        mesh_idx as usize,
+        instance_buffer as u32,
+        instance_count as u32,
+    );
+}
+
+#[wasm_bindgen]
+pub fn bloom_destroy_instance_buffer(handle: f64) {
+    engine().renderer.destroy_instance_buffer(handle as u32);
+}
+
+/// EN-011 — create a planar reflection probe. See macOS lib.rs for the
+/// full doc comment. Web ports the same FFI surface so a TypeScript
+/// game targets one API across native + browser.
+#[wasm_bindgen]
+pub fn bloom_create_planar_reflection(
+    plane_y: f64, nx: f64, ny: f64, nz: f64, resolution: f64,
+) -> f64 {
+    engine().renderer.create_planar_reflection(
+        plane_y as f32,
+        [nx as f32, ny as f32, nz as f32],
+        resolution as u32,
+    ) as f64
+}
+
+/// EN-011 — link a material to a planar reflection probe. `probe = 0`
+/// reverts the binding to the engine's default 1×1 black texture.
+#[wasm_bindgen]
+pub fn bloom_set_material_reflection_probe(
+    material: f64, probe: f64,
+) {
+    engine().renderer.set_material_reflection_probe(material as u32, probe as u32);
+}
+
+/// EN-014 — pointer-shaped variant exists only so the FFI manifest
+/// validates against the Perry surface; JS glue calls
+/// `bloom_create_texture_array_bytes` with a `Uint8Array` instead.
+/// Same precedent as `bloom_create_instance_buffer` (see EN-001).
+#[wasm_bindgen]
+pub fn bloom_create_texture_array(
+    _data_ptr: f64, _data_len: f64, _width: f64, _height: f64, _layer_count: f64,
+) -> f64 {
+    0.0
+}
+
+/// EN-014 — create a texture array from concatenated RGBA8 bytes.
+/// JS glue passes a `Uint8Array` of `layer_count × width × height × 4`
+/// bytes (each layer back-to-back). Layer count is capped at 16; the
+/// rest are silently dropped. Returns a 1-based handle (0 on failure).
+#[wasm_bindgen]
+pub fn bloom_create_texture_array_bytes(
+    data: &[u8],
+    width: f64, height: f64, layer_count: f64,
+) -> f64 {
+    // EN-014 V2 — V1 forwards to _ex with default sRGB / no mips.
+    bloom_create_texture_array_ex_bytes(data, width, height, layer_count, 0.0, 1.0)
+}
+
+/// EN-014 V2 — pointer-shaped Ex variant exists only so the FFI manifest
+/// validates against the Perry surface; JS glue uses the `_bytes` form.
+#[wasm_bindgen]
+pub fn bloom_create_texture_array_ex(
+    _data_ptr: f64, _data_len: f64, _width: f64, _height: f64,
+    _layer_count: f64, _format: f64, _mip_levels: f64,
+) -> f64 {
+    0.0
+}
+
+/// EN-014 V2 — bytes form of `_ex`. See `MaterialSystem::create_texture_array_ex`
+/// for `format` (0 = sRGB, 1 = linear) and `mip_levels` (1 = none, 0 =
+/// auto-generate via point-sample copies) semantics.
+#[wasm_bindgen]
+pub fn bloom_create_texture_array_ex_bytes(
+    data: &[u8],
+    width: f64, height: f64, layer_count: f64,
+    format: f64, mip_levels: f64,
+) -> f64 {
+    let w = width as u32;
+    let h = height as u32;
+    if w == 0 || h == 0 { return 0.0; }
+    let layers_count = (layer_count as u32)
+        .min(bloom_shared::renderer::material_system::MAX_TEXTURE_ARRAY_LAYERS);
+    if layers_count == 0 { return 0.0; }
+    let layer_size = (w as usize) * (h as usize) * 4;
+    let mut layers: Vec<(&[u8], u32, u32)> = Vec::with_capacity(layers_count as usize);
+    for i in 0..(layers_count as usize) {
+        let start = i * layer_size;
+        let end   = start + layer_size;
+        if end > data.len() { break; }
+        layers.push((&data[start..end], w, h));
+    }
+    engine().renderer.create_texture_array_ex(&layers, format as u32, mip_levels as u32) as f64
+}
+
+/// EN-014 — link a texture-array handle to a material slot
+/// (0 = albedo / 1 = normal / 2 = MR). `array = 0` reverts to the
+/// engine's 1×1×1 stub.
+#[wasm_bindgen]
+pub fn bloom_set_material_texture_array(
+    material: f64, slot: f64, array: f64,
+) {
+    engine().renderer.set_material_texture_array(
+        material as u32, slot as u32, array as u32,
+    );
+}
+
+/// EN-012 — set the shading model for a material (0=default lit,
+/// 1=foliage, 2=subsurface V2 stub).
+#[wasm_bindgen]
+pub fn bloom_set_material_shading_model(
+    material: f64, model: f64,
+) {
+    engine().renderer.set_material_shading_model(material as u32, model as u32);
+}
+
+/// Whether a material's draws render into planar-reflection probes
+/// (default true). Authoring control for content that is sub-pixel at
+/// probe resolution (e.g. instanced grass).
+#[wasm_bindgen]
+pub fn bloom_set_material_probe_visible(
+    material: f64, visible: f64,
+) {
+    engine().renderer.set_material_probe_visible(material as u32, visible != 0.0);
+}
+
+/// EN-012 — set the foliage shading parameters for a material.
+/// Only takes effect when shading_model == 1 (foliage).
+#[wasm_bindgen]
+pub fn bloom_set_material_foliage(
+    material: f64,
+    trans_r: f64, trans_g: f64, trans_b: f64,
+    trans_amount: f64, wrap_factor: f64,
+) {
+    engine().renderer.set_material_foliage(
+        material as u32,
+        [trans_r as f32, trans_g as f32, trans_b as f32],
+        trans_amount as f32, wrap_factor as f32,
+    );
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_from_file(_path: f64, _bucket_kind: f64) -> f64 {
+    // No-op: web has no filesystem — JS glue would have to fetch + call
+    // bloom_compile_material_from_file_str instead.
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_from_file_str(path: &str, bucket_kind: f64) -> f64 {
+    use bloom_shared::renderer::material_pipeline::{FragmentProfile, Bucket};
+    let (profile, bucket, reads_scene) = match bucket_kind as u32 {
+        0 => (FragmentProfile::Opaque,      Bucket::Opaque,      false),
+        1 => (FragmentProfile::Translucent, Bucket::Transparent, false),
+        2 => (FragmentProfile::Translucent, Bucket::Refractive,  true),
+        3 => (FragmentProfile::Translucent, Bucket::Additive,    false),
+        4 => (FragmentProfile::Opaque,      Bucket::Cutout,      false),
+        _ => {
+            web_sys::console::error_1(&format!(
+                "[material] from_file: unknown bucket_kind {}", bucket_kind
+            ).into());
+            return 0.0;
+        }
+    };
+    match engine().renderer.compile_material_from_file(
+        std::path::Path::new(path), profile, bucket, reads_scene,
+    ) {
+        Ok(handle) => handle as f64,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[material] from_file failed: {}", e).into());
+            0.0
+        }
+    }
+}
+
+/// EN-017 — stub: JS glue calls `bloom_set_post_pass_str` instead.
+#[wasm_bindgen]
+pub fn bloom_set_post_pass(_source: f64) -> f64 { 0.0 }
+
+/// EN-017 — compile + install a fullscreen post-pass material on web.
+/// See `bloom-macos::bloom_set_post_pass` for the full ABI. Returns
+/// 1.0 on success, 0.0 on compile failure.
+#[wasm_bindgen]
+pub fn bloom_set_post_pass_str(source: &str) -> f64 {
+    match engine().renderer.set_post_pass(source) {
+        Ok(()) => 1.0,
+        Err(e) => {
+            web_sys::console::error_1(
+                &format!("[post_pass] compile failed: {:?}", e).into(),
+            );
+            0.0
+        }
+    }
+}
+
+/// EN-017 — uninstall the active post-pass.
+#[wasm_bindgen]
+pub fn bloom_clear_post_pass() {
+    engine().renderer.clear_post_pass();
+}
+
+/// EN-017 V2 — stub: JS glue calls `bloom_add_post_pass_str` instead.
+#[wasm_bindgen]
+pub fn bloom_add_post_pass(_source: f64) -> f64 { 0.0 }
+
+/// EN-017 V2 — append a fullscreen post-pass to the stack on web.
+/// See `bloom-macos::bloom_add_post_pass` for the full ABI. Returns
+/// 1-based handle on success, 0.0 on compile failure.
+#[wasm_bindgen]
+pub fn bloom_add_post_pass_str(source: &str) -> f64 {
+    match engine().renderer.add_post_pass(source) {
+        Ok(h) => h as f64,
+        Err(e) => {
+            web_sys::console::error_1(
+                &format!("[post_pass] compile failed: {:?}", e).into(),
+            );
+            0.0
+        }
+    }
+}
+
+/// EN-017 V2 — wipe the entire post-pass stack.
+#[wasm_bindgen]
+pub fn bloom_clear_all_post_passes() {
+    engine().renderer.clear_all_post_passes();
+}
+
+#[wasm_bindgen]
+pub fn bloom_draw_material(
+    material: f64,
+    mesh_handle: f64,
+    mesh_idx: f64,
+    x: f64, y: f64, z: f64, scale: f64,
+    r: f64, g: f64, b: f64, a: f64,
+) {
+    let eng = engine();
+    let handle_bits = mesh_handle.to_bits();
+    if let Some(model) = eng.models.get(mesh_handle) {
+        eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+    }
+    eng.renderer.submit_material_draw(
+        material as u32,
+        handle_bits,
+        mesh_idx as usize,
+        [x as f32, y as f32, z as f32],
+        scale as f32,
+        [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32],
+    );
+}
+
+#[wasm_bindgen]
+pub fn bloom_load_model_animation(_path: f64) -> f64 { 0.0 }
+
+#[wasm_bindgen]
+pub fn bloom_load_model_animation_bytes(data: &[u8]) -> f64 {
+    engine().models.load_model_animation(data)
+}
+
+#[wasm_bindgen]
+pub fn bloom_update_model_animation(_handle: f64, _anim_index: f64, _time: f64, _scale: f64, _px: f64, _py: f64, _pz: f64, _rot_sin: f64, _rot_cos: f64) {
+    // TODO: Phase 4 — depends on bloom_load_model_animation
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_model_mesh_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64,
+        None => 0.0,
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_model_material_count(handle: f64) -> f64 {
+    match engine().models.get(handle) {
+        Some(model) => model.meshes.len() as f64,
+        None => 0.0,
+    }
+}
