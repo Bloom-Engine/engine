@@ -743,6 +743,16 @@ pub struct Renderer {
     joint_buffer: wgpu::Buffer,
     joint_bind_group: wgpu::BindGroup,
 
+    // False until the material system's per-view bind group has been
+    // rebuilt with the LIVE env/BRDF/shadow resources. The group is
+    // created at init with 1×1 stubs (the renderer's real textures
+    // don't exist yet at that point); sampling the zero-init stub
+    // depth views made every material-path surface read "occluded"
+    // for any in-frustum fragment — i.e. no sun shadows (and no HDR
+    // ambient) on terrain/grass/water, ever. Reset by
+    // `load_env_from_hdr` so a late HDR load re-wires the env slots.
+    material_per_view_bg_live: bool,
+
     // Texture management
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
     texture_bind_groups: Vec<wgpu::BindGroup>,
@@ -6040,6 +6050,7 @@ impl Renderer {
             lighting_bind_group,
             joint_buffer,
             joint_bind_group,
+            material_per_view_bg_live: false,
             texture_bind_group_layout,
             texture_bind_groups,
             textures,
@@ -7974,6 +7985,10 @@ impl Renderer {
         // EN-021 — the SSR bind group holds an env view; rebuild it when
         // a new HDR panorama is uploaded.
         self.ssr_bg_cache = None;
+        // The material path's per-view bind group holds env/diffuse views
+        // too — re-wire it next frame so material surfaces pick up the
+        // new panorama (and the live shadow views on first load).
+        self.material_per_view_bg_live = false;
     }
 
     /// Whether a sky env map has been uploaded — controls whether
@@ -8699,7 +8714,53 @@ impl Renderer {
         // self.set_joint_test(5, (angle * 1.5).sin() * 0.5);
     }
 
+    /// Rebuild the material system's per-view bind group with the LIVE
+    /// env / BRDF / shadow resources. The group created at material-system
+    /// init binds 1×1 stubs ("Phase 2 wires them" — this is that wiring):
+    /// the zero-init stub depth views read 0.0 at every texel, so any
+    /// in-frustum fragment compared as "occluded" and the whole material
+    /// path (terrain, grass, water) rendered sunless and shadowless while
+    /// the planar-probe path — which builds a live group per frame —
+    /// showed correct shadows in reflections. Mirrors that probe group
+    /// exactly (mod.rs "planar_probe_per_view_bg_live").
+    fn refresh_material_per_view_bg(&mut self) {
+        let sky_view_owned: Option<wgpu::TextureView> = self.sky_texture
+            .as_ref()
+            .map(|t| t.create_view(&Default::default()));
+        let env_view: &wgpu::TextureView = sky_view_owned
+            .as_ref()
+            .unwrap_or(&self.scene_env_default_view);
+        let diffuse_view_owned: Option<wgpu::TextureView> = self.env_diffuse_texture
+            .as_ref()
+            .map(|t| t.create_view(&Default::default()));
+        let env_diffuse_view: &wgpu::TextureView = diffuse_view_owned
+            .as_ref()
+            .unwrap_or(&self.scene_env_default_view);
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material_per_view_bg_live"),
+            layout: &self.material_system.layouts.per_view,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.material_system.per_view_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(env_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(env_diffuse_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+            ],
+        });
+        self.material_system.per_view_bg = bg;
+        self.material_per_view_bg_live = true;
+    }
+
     pub fn end_frame(&mut self) {
+        if !self.material_per_view_bg_live {
+            self.refresh_material_per_view_bg();
+        }
         // Flush pending joint matrices to GPU right before rendering
         self.flush_joint_matrices();
 
@@ -8888,6 +8949,9 @@ impl Renderer {
 
     /// Like end_frame, but also renders retained scene graph nodes.
     pub fn end_frame_with_scene(&mut self, scene: &mut crate::scene::SceneGraph, profiler: &mut crate::profiler::Profiler) {
+        if !self.material_per_view_bg_live {
+            self.refresh_material_per_view_bg();
+        }
         profiler.begin("joint_flush");
         self.flush_joint_matrices();
         profiler.end("joint_flush");
@@ -10160,6 +10224,61 @@ impl Renderer {
         }
     }
 
+    /// `draw_model_cached` with a Y-axis rotation folded into the model
+    /// matrix (translate ∘ rotY ∘ scale). Backs `bloom_draw_model_rotated`
+    /// for static models — previously that FFI only had the immediate-mode
+    /// vertex path, which bypasses the scene pipeline entirely (no alpha
+    /// cutout, no normal/MR maps, no foliage wind or transmission, no
+    /// cutout shadows) and re-transforms every vertex on the CPU each
+    /// frame. Alpha-cutout foliage drawn through it rendered its cards'
+    /// transparent texels as opaque.
+    pub fn draw_model_cached_rotated(
+        &mut self,
+        handle_bits: u64,
+        position: [f32; 3],
+        scale: f32,
+        rot_y: f32,
+        tint: [f32; 4],
+    ) {
+        let mesh_count = match self.model_gpu_cache.get(&handle_bits) {
+            Some(Some(meshes)) => meshes.len(),
+            _ => return,
+        };
+
+        let (s, c) = rot_y.sin_cos();
+        // Column-major rotY (matches mat4_translate / mat4_scale layout).
+        let rot: [[f32; 4]; 4] = [
+            [c, 0.0, -s, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [s, 0.0, c, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let model_matrix = mat4_multiply(
+            mat4_translate(IDENTITY_MAT4, position),
+            mat4_multiply(rot, mat4_scale(IDENTITY_MAT4, [scale, scale, scale])),
+        );
+
+        for mesh_idx in 0..mesh_count {
+            let slot = self.next_model_uniform_slot;
+            self.next_model_uniform_slot += 1;
+            self.ensure_model_uniform_slot(slot);
+
+            let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
+            self.queue.write_buffer(
+                &self.model_uniform_buffers[slot],
+                0,
+                bytemuck::bytes_of(&Uniforms3D { mvp: model_mvp, model: model_matrix, prev_mvp: model_mvp, model_tint: tint }),
+            );
+
+            self.model_draw_commands.push(CachedModelDraw {
+                uniform_slot: slot,
+                cache_handle: handle_bits,
+                mesh_idx,
+                model: model_matrix,
+            });
+        }
+    }
+
     fn ensure_model_uniform_slot(&mut self, slot: usize) {
         while self.model_uniform_buffers.len() <= slot {
             let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -10504,6 +10623,41 @@ impl Renderer {
         self.draw_model_mesh_tinted(vertices, indices, position, scale, [1.0, 1.0, 1.0, 1.0], 0);
     }
 
+    /// True if any vertex carries skin weights (same test the cache and
+    /// the per-vertex draw loops use).
+    fn mesh_has_skin(vertices: &[Vertex3D]) -> bool {
+        vertices.iter().any(|v|
+            v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01)
+    }
+
+    /// Pop the next staged skin pose (FIFO) and pack it into the frame
+    /// joint accumulator, returning the base slot offset its matrices
+    /// were packed at. `None` when nothing is staged.
+    ///
+    /// drawModel-level callers must call this ONCE per model and share
+    /// the offset across every primitive: when each primitive popped its
+    /// own entry, the second primitive of a multi-primitive skinned model
+    /// (marauder, tyrant) found the FIFO empty, fell back to offset 0 and
+    /// got skinned by whatever pose lives at the start of the joint
+    /// buffer — the player's — rendering as a giant mangled blob glued to
+    /// the player's position.
+    pub fn take_staged_skin_offset(&mut self) -> Option<f32> {
+        if self.pending_skin_groups.is_empty() {
+            return None;
+        }
+        let group = self.pending_skin_groups.remove(0);
+        let start = self.frame_joint_data.len();
+        // Cap at the 1024-slot buffer. Overflowing poses land at offset 0,
+        // which at least avoids an out-of-range read — the model will look
+        // mis-posed but not corrupt memory.
+        if start + group.len() <= 1024 {
+            self.frame_joint_data.extend_from_slice(&group);
+            Some(start as f32)
+        } else {
+            Some(0.0)
+        }
+    }
+
     /// Same as `draw_model_mesh_tinted` but applies a Y-axis rotation
     /// (radians) to the mesh local space before scale + translate.
     /// Skinned meshes ignore the rotation here — pose joints already
@@ -10511,24 +10665,24 @@ impl Renderer {
     /// path so callers can mix rotated and unrotated draws freely
     /// without extra GPU state.
     pub fn draw_model_mesh_tinted_rotated(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32, rot_y: f32) {
-        self.ensure_draw_state_3d(texture_idx);
-
         // Mirror the joint-pose plumbing in the non-rotated path so a
         // skinned mesh drawn here still consumes its pending pose.
-        let mesh_skinned = vertices.iter().any(|v|
-            v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01);
-        let joint_offset: f32 = if mesh_skinned && !self.pending_skin_groups.is_empty() {
-            let group = self.pending_skin_groups.remove(0);
-            let start = self.frame_joint_data.len();
-            if start + group.len() <= 1024 {
-                self.frame_joint_data.extend_from_slice(&group);
-                start as f32
-            } else {
-                0.0
-            }
+        let joint_offset = if Self::mesh_has_skin(vertices) {
+            self.take_staged_skin_offset()
         } else {
-            0.0
+            None
         };
+        self.draw_model_mesh_tinted_rotated_with_joints(
+            vertices, indices, position, scale, tint, texture_idx, rot_y, joint_offset);
+    }
+
+    /// Rotated-path body with an explicit joint-buffer offset. Callers
+    /// that draw multiple primitives of ONE skinned model pop the staged
+    /// pose once (`take_staged_skin_offset`) and pass the same offset to
+    /// every primitive.
+    pub fn draw_model_mesh_tinted_rotated_with_joints(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32, rot_y: f32, joint_offset: Option<f32>) {
+        self.ensure_draw_state_3d(texture_idx);
+        let joint_offset: f32 = joint_offset.unwrap_or(0.0);
 
         let cos_y = rot_y.cos();
         let sin_y = rot_y.sin();
@@ -10597,31 +10751,28 @@ impl Renderer {
     }
 
     pub fn draw_model_mesh_tinted(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32) {
-        self.ensure_draw_state_3d(texture_idx);
-
         // If this mesh is skinned, consume the next pending pose
         // (FIFO) and pack its matrices into the frame accumulator at
         // the current cursor. Each vertex's joint indices then get
         // shifted by that cursor so the shader samples this mesh's
         // slice of the shared joint buffer. With a 1024-slot buffer,
         // multiple skinned models can coexist in one frame.
-        let mesh_skinned = vertices.iter().any(|v|
-            v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01);
-        let joint_offset: f32 = if mesh_skinned && !self.pending_skin_groups.is_empty() {
-            let group = self.pending_skin_groups.remove(0);
-            let start = self.frame_joint_data.len();
-            // Cap at the 1024-slot buffer. Overflowing poses land at
-            // offset 0, which at least avoids an out-of-range read —
-            // the model will look mis-posed but not corrupt memory.
-            if start + group.len() <= 1024 {
-                self.frame_joint_data.extend_from_slice(&group);
-                start as f32
-            } else {
-                0.0
-            }
+        let joint_offset = if Self::mesh_has_skin(vertices) {
+            self.take_staged_skin_offset()
         } else {
-            0.0
+            None
         };
+        self.draw_model_mesh_tinted_with_joints(
+            vertices, indices, position, scale, tint, texture_idx, joint_offset);
+    }
+
+    /// Body of `draw_model_mesh_tinted` with an explicit joint-buffer
+    /// offset. Callers that draw multiple primitives of ONE skinned model
+    /// pop the staged pose once (`take_staged_skin_offset`) and pass the
+    /// same offset to every primitive.
+    pub fn draw_model_mesh_tinted_with_joints(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32, joint_offset: Option<f32>) {
+        self.ensure_draw_state_3d(texture_idx);
+        let joint_offset: f32 = joint_offset.unwrap_or(0.0);
 
         let base = self.vertices_3d.len() as u32;
         for v in vertices {
@@ -11671,10 +11822,14 @@ impl Renderer {
         // commands view while iterating, so collect the work first.
         let probe_count = self.planar_probes.len();
         for i in 0..probe_count {
-            let (plane_y, normal, color_view, depth_view) = match &self.planar_probes[i] {
-                Some(p) => (p.plane_y, p.normal, p.color_view.clone(), p.depth_view.clone()),
-                None => continue,
-            };
+            let (plane_y, normal, color_view, depth_view,
+                 aux_material_view, aux_velocity_view, aux_albedo_view) =
+                match &self.planar_probes[i] {
+                    Some(p) => (p.plane_y, p.normal, p.color_view.clone(), p.depth_view.clone(),
+                                p.aux_material_view.clone(), p.aux_velocity_view.clone(),
+                                p.aux_albedo_view.clone()),
+                    None => continue,
+                };
             let view_buf = match self.planar_probe_view_buffers[i].as_ref() {
                 Some(b) => b, None => continue,
             };
@@ -11814,18 +11969,48 @@ impl Renderer {
             let refl_pipeline = self.reflect_scene_pipeline.as_ref();
             let refl_model_bg = self.reflect_model_bg.as_ref();
             let refl_light_bg = self.reflect_light_bg.as_ref();
+            // Pass A — user materials. Opaque-profile material pipelines
+            // (and their `_reflection` siblings) target the full opaque
+            // G-buffer layout, so this pass presents the same four
+            // attachments; the three aux targets are probe-resolution
+            // dummies cleared here and discarded at store. Only the hdr
+            // attachment (and depth, which pass B tests against) is kept.
             {
+                let aux_ops = wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Discard,
+                };
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("bloom_planar_reflection_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &color_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear_color),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
+                    label: Some("bloom_planar_reflection_materials"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &color_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(clear_color),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &aux_material_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: aux_ops,
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &aux_velocity_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: aux_ops,
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &aux_albedo_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: aux_ops,
+                        }),
+                    ],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &depth_view,
                         depth_ops: Some(wgpu::Operations {
@@ -11846,10 +12031,13 @@ impl Renderer {
                     // Reflection mirrors world-space, which inverts
                     // triangle winding; without the flip, single-
                     // sided opaque geometry renders inside-out in
-                    // the probe's RT. Translucent / cutout materials
-                    // have `reflection_pipeline = None` and gracefully
-                    // fall back to the main pipeline (no cull change
-                    // needed since they're already double-sided).
+                    // the probe's RT. Cutout materials have
+                    // `reflection_pipeline = None` and gracefully fall
+                    // back to the main pipeline (no cull change needed
+                    // since they're already double-sided); translucent-
+                    // profile materials are skipped inside (their
+                    // single-target pipelines can't render into this
+                    // 4-target pass).
                     true,
                     |handle, idx| {
                         if let Some(Some(meshes)) = cache.get(&handle) {
@@ -11861,11 +12049,36 @@ impl Renderer {
                         None
                     },
                 );
+            }
 
-                // Render cached models (trees/house/foliage) mirrored into the
-                // probe so the water reflects the actual world, not just an
-                // analytic sky. Single-target lit pipeline; cutout alpha is
-                // discarded so foliage reflects its real shape.
+            // Pass B — cached models (trees/house/foliage) + scene-graph
+            // nodes with the single-target REFLECT_SCENE pipeline. Loads
+            // pass A's color + depth so the two batches depth-test
+            // against each other.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bloom_planar_reflection_models"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
                 if let (Some(rp), Some(rmbg), Some(rlbg)) =
                     (refl_pipeline, refl_model_bg, refl_light_bg)
                 {
