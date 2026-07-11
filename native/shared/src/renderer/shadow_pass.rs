@@ -294,10 +294,16 @@ impl Renderer {
                     .copy_from_slice(bytemuck::bytes_of(&uniforms));
             }
 
+            // Each cascade owns its own slice of the uniform buffer — all
+            // three write_buffer calls execute at submit, BEFORE any of the
+            // encoded passes run, so sharing one region would leave every
+            // cascade rendering with the last cascade's matrices (the
+            // no-near-shadows bug: player/enemies sample cascade 0).
+            let cascade_base = cascade * stride * max;
             if count > 0 {
                 self.queue.write_buffer(
                     &self.shadow_map.uniform_buffer,
-                    0,
+                    cascade_base as u64,
                     &uniform_data[..count * stride],
                 );
             }
@@ -329,7 +335,7 @@ impl Renderer {
 
                 for (slot, &ei) in entries.iter().take(count).enumerate() {
                     let entry = &shadow_nodes[ei];
-                    let offset = (slot * stride) as u32;
+                    let offset = (cascade_base + slot * stride) as u32;
                     let kind: u8 = if entry.skinned { 2 }
                         else if entry.cutout_idx >= 0 { 1 }
                         else { 0 };

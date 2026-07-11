@@ -350,9 +350,16 @@ impl ShadowMap {
             }],
         });
 
+        // One region PER CASCADE. The pass encodes all three cascades before
+        // the queue submits, and `queue.write_buffer` executes at submit —
+        // sharing one region meant every cascade rendered with the LAST
+        // cascade's light_vp + models, killing shadows for everything that
+        // sampled cascades 0/1 (i.e. all near-camera receivers: the player
+        // and enemies never had shadows; distant trees kept theirs because
+        // cascade 2's write happened to be the surviving one).
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shadow_uniform_buf"),
-            size: (SHADOW_UNIFORM_STRIDE * SHADOW_MAX_NODES) as u64,
+            size: (SHADOW_UNIFORM_STRIDE * SHADOW_MAX_NODES * NUM_CASCADES as u32) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
