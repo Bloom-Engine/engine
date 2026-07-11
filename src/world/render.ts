@@ -12,12 +12,32 @@
 
 import {
   createSceneNode, setSceneNodeVisible, setSceneNodeWaterMaterial,
-  attachModelToNode, setSceneNodeColor,
+  attachModelToNode, setSceneNodeColor, addPointLight,
   SceneNodeHandle,
 } from '../scene/index';
 import { genMeshCube, genMeshSplineRibbon } from '../models/index';
 import { setSceneNodeTransform } from '../scene/index';
-import { WaterVolume, RiverSpline } from './types';
+import { WorldData, WaterVolume, RiverSpline } from './types';
+
+// Re-submit the world's point lights.
+//
+// MUST be called every frame, not once at load: the renderer clears its
+// lighting block in begin_frame (the same reason games re-apply sun and ambient
+// each frame). Calling it once at startup produces a world that is lit for
+// exactly one frame and then goes dark.
+//
+// Colour components are 0-1 in both the schema and `addPointLight`.
+export function applyWorldLights(world: WorldData): void {
+  for (let i = 0; i < world.lights.length; i++) {
+    const l = world.lights[i];
+    addPointLight(
+      l.position[0], l.position[1], l.position[2],
+      l.range,
+      l.color[0], l.color[1], l.color[2],
+      l.intensity,
+    );
+  }
+}
 
 // A water volume renders as a box whose *top face* sits at `surfaceHeight`
 // (the schema's `center.y` positions the body of water; the surface is what the

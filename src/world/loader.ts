@@ -40,6 +40,7 @@ import {
 import { Mat4, Vec3 } from '../core/types';
 import { spawnWaterVolume, spawnRiver } from './render';
 import {
+  WORLD_SCHEMA_VERSION,
   WorldData,
   EntityData,
   TransformData,
@@ -355,7 +356,7 @@ function applyTint(node: SceneNodeHandle, tint: Vec4Lit): void {
 // File -> New. Games should prefer `loadWorld` from a file on disk.
 export function createEmptyWorld(id: string, name: string): WorldData {
   return {
-    schemaVersion: 1,
+    schemaVersion: WORLD_SCHEMA_VERSION,
     name: name,
     id: id,
     bounds: { min: [-50, -10, -50], max: [50, 50, 50] },
@@ -373,6 +374,7 @@ export function createEmptyWorld(id: string, name: string): WorldData {
     },
     terrain: null,
     entities: [],
+    lights: [],
     water: [],
     rivers: [],
     metadata: {},

@@ -5,7 +5,13 @@
 // The engine's runtime `Vec3` / `Mat4` / `BoundingBox` types (in `core/types.ts`)
 // use a different shape; the loader in `./loader.ts` does the conversion.
 
-export const WORLD_SCHEMA_VERSION = 1;
+// v2 (2026-07-11) — lights became a first-class top-level array. Before that,
+// games carried them as entities tagged `userData.kind === "point_light"`, so
+// only the game knew they were lights: the editor could not light its preview,
+// and every game re-invented the same convention. Sun/ambient/fog were already
+// first-class in `environment`; point lights now sit beside them.
+// `migrateWorldData` converts v1 point_light entities automatically.
+export const WORLD_SCHEMA_VERSION = 2;
 
 // Literal types for JSON-friendly serialization.
 // Use `Vec3Lit` in serialized data; convert to engine `Vec3` at load time.
@@ -25,9 +31,27 @@ export interface WorldData {
   environment: EnvironmentData;
   terrain: TerrainData | null;      // null for games that don't use terrain.
   entities: EntityData[];
+  lights: LightData[];              // Point lights. Sun/ambient live in `environment`.
   water: WaterVolume[];
   rivers: RiverSpline[];
   metadata: Record<string, string>; // Game-specific extensibility (e.g. "gameId").
+}
+
+// A placed light. Only point lights for now — the sun and ambient are
+// environment-wide and live in `EnvironmentData`, and spot lights are not yet
+// in the renderer.
+//
+// Lights are engine-universal (every renderer knows what a point light is),
+// which is why they are schema rather than `userData`: a spawner or a wave plan
+// means nothing without the game, but a light means the same thing everywhere.
+export interface LightData {
+  id: string;                 // Stable within the world file, e.g. "light_0001".
+  name: string;               // Display name.
+  kind: "point";
+  position: Vec3Lit;
+  color: Vec3Lit;             // 0..1 RGB (the runtime API takes 0-255; loader converts).
+  intensity: number;
+  range: number;              // World units; beyond this the light contributes nothing.
 }
 
 export interface Bounds {
