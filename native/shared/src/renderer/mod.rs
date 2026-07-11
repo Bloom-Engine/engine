@@ -694,11 +694,22 @@ struct CachedModelDraw {
     /// Object→world model matrix for this draw, kept CPU-side so the
     /// shadow pass can render the model depth-only from the light.
     model: [[f32; 4]; 4],
+    /// Skinned cached draw: the VS skins from the shared joint buffer
+    /// (uniform misc.y = 1.0). The shadow pass renders it through the
+    /// skinning pipeline as a dynamic caster; planar reflections skip it.
+    skinned: bool,
+    /// Base slot of this draw's pose in the frame joint buffer (mirrors
+    /// uniform misc.x, kept here for the shadow pass's ShadowUniforms).
+    joint_offset: f32,
+    /// Pre-computed world AABB for skinned draws (union of every joint
+    /// matrix × rest AABB — see `draw_model_cached_skinned`). `None` for
+    /// static draws, whose bounds derive from mesh AABB × model matrix.
+    bounds_override: Option<([f32; 3], [f32; 3])>,
 }
 
 /// Uniform-pool stride for cached-model per-draw uniforms (256 = safe
 /// min_uniform_buffer_offset_alignment on every backend; Uniforms3D is
-/// 208 B).
+/// 224 B).
 pub(crate) const MODEL_UNIFORM_STRIDE: usize = 256;
 
 /// World AABB of a local AABB under an affine model matrix: transform the 8
@@ -1404,8 +1415,13 @@ pub struct Renderer {
     persistent_vb_3d_capacity: usize,
     persistent_ib_3d_capacity: usize,
 
-    // Cached model GPU buffers (static models only)
+    // Cached model GPU buffers (static AND skinned — skinned VBs keep
+    // raw bind-pose joint indices; the scene VS skins them per draw)
     model_gpu_cache: HashMap<u64, Option<Vec<GpuMesh>>>,
+    /// Handles whose cached meshes carry skin weights, recorded at cache
+    /// time so `bloom_draw_model` can pick the skinned cached path
+    /// without rescanning vertices every frame.
+    model_skinned: std::collections::HashSet<u64>,
     model_draw_commands: Vec<CachedModelDraw>,
     /// Pooled per-draw uniforms for cached-model draws: ONE buffer with
     /// per-slot bind groups at 256 B offsets. Draw submission packs each
@@ -1838,7 +1854,7 @@ impl Renderer {
         // --- 3D uniform buffer ---
         let uniform_buffer_3d = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("uniform_3d"),
-            contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, prev_mvp: IDENTITY_MAT4, model_tint: [1.0, 1.0, 1.0, 1.0] }),
+            contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, prev_mvp: IDENTITY_MAT4, model_tint: [1.0, 1.0, 1.0, 1.0], misc: [0.0; 4] }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let uniform_bind_group_3d = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -6401,6 +6417,7 @@ impl Renderer {
             persistent_vb_3d_capacity: vb_3d_cap,
             persistent_ib_3d_capacity: ib_3d_cap,
             model_gpu_cache: HashMap::new(),
+            model_skinned: std::collections::HashSet::new(),
             model_draw_commands: Vec::with_capacity(64),
             model_uniform_pool,
             model_uniform_pool_capacity: model_uniform_count,
@@ -10071,7 +10088,7 @@ impl Renderer {
         self.queue.write_buffer(
             &self.uniform_buffer_3d,
             0,
-            bytemuck::bytes_of(&Uniforms3D { mvp: vp, model: IDENTITY_MAT4, prev_mvp: self.velocity_ref_vp, model_tint: [1.0, 1.0, 1.0, 1.0] }),
+            bytemuck::bytes_of(&Uniforms3D { mvp: vp, model: IDENTITY_MAT4, prev_mvp: self.velocity_ref_vp, model_tint: [1.0, 1.0, 1.0, 1.0], misc: [0.0; 4] }),
         );
         self.render_mode = RenderMode::Mode3D;
     }
@@ -10193,21 +10210,32 @@ impl Renderer {
         self.model_gpu_cache.contains_key(&handle_bits)
     }
 
+    /// True if a cached model carries skin weights (recorded at cache
+    /// time by `cache_model_if_static`). Drives the FFI routing between
+    /// `draw_model_cached` and `draw_model_cached_skinned` without a
+    /// per-frame vertex rescan.
+    pub fn is_model_skinned(&self, handle_bits: u64) -> bool {
+        self.model_skinned.contains(&handle_bits)
+    }
+
     /// Returns true if the model was cached successfully (static model).
-    /// Returns false if the model is skinned (uncacheable).
+    /// Skinned models cache too — their VBs keep the RAW bind-pose joint
+    /// indices and the scene VS skins them via the per-draw uniform's
+    /// joint offset (see `draw_model_cached_skinned`). The name + bool
+    /// stay for the callers; skinned-ness is remembered separately so
+    /// the FFI can route to the skinned cached draw in O(1).
     #[cfg(feature = "models3d")]
     pub fn cache_model_if_static(&mut self, handle_bits: u64, meshes: &[crate::models::MeshData]) -> bool {
         if let Some(entry) = self.model_gpu_cache.get(&handle_bits) {
             return entry.is_some();
         }
 
-        // Check if any vertex is skinned
+        // Check if any vertex is skinned — cached alongside the meshes so
+        // per-frame draws don't rescan every vertex.
         let is_skinned = meshes.iter().any(|m|
             m.vertices.iter().any(|v| v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01));
-
         if is_skinned {
-            self.model_gpu_cache.insert(handle_bits, None);
-            return false;
+            self.model_skinned.insert(handle_bits);
         }
 
         let gpu_meshes: Vec<GpuMesh> = meshes.iter().map(|mesh| {
@@ -11818,6 +11846,11 @@ impl Renderer {
                 let stride = REFLECT_STRIDE as usize;
                 let mut staged: Vec<u8> = Vec::with_capacity(stride * 128);
                 for cmd in self.model_draw_commands.iter() {
+                    // REFLECT_SCENE_WGSL can't skin — a skinned draw would
+                    // mirror its bind pose at the origin. Skinned models
+                    // (enemies) were never reflected on the old immediate
+                    // path either, so skipping preserves that.
+                    if cmd.skinned { continue; }
                     let slot = reflect_draws.len();
                     if slot >= REFLECT_MAX_DRAWS { break; }
                     let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) else { continue };

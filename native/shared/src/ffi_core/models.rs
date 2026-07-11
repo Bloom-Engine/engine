@@ -45,17 +45,17 @@ macro_rules! __bloom_ffi_models {
                     let position = [x as f32, y as f32, z as f32];
                     let handle_bits = handle.to_bits();
                     if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
-                        eng.renderer.draw_model_cached(handle_bits, position, scale as f32, tint);
-                    } else {
-                        // Skinned model (uncacheable): ONE staged pose per
-                        // drawModel call, shared by every primitive. Letting
-                        // each primitive pop its own pose starved the second
-                        // primitive of multi-primitive models onto joint
-                        // offset 0 — another model's matrices.
-                        let joint_offset = eng.renderer.take_staged_skin_offset();
-                        for mesh in &model.meshes {
-                            let tex_idx = mesh.texture_idx.unwrap_or(0);
-                            eng.renderer.draw_model_mesh_tinted_with_joints(&mesh.vertices, &mesh.indices, position, scale as f32, tint, tex_idx, joint_offset);
+                        // Skinned models cache too now (bind-pose VB with raw
+                        // joint indices, skinned in the scene VS) — routed to
+                        // the skinned cached draw, which pops the staged pose
+                        // ONCE for the whole model and shares the offset
+                        // across every primitive (per-primitive pops starved
+                        // multi-primitive models onto joint offset 0 —
+                        // another model's matrices).
+                        if eng.renderer.is_model_skinned(handle_bits) {
+                            eng.renderer.draw_model_cached_skinned(handle_bits, position, scale as f32, tint);
+                        } else {
+                            eng.renderer.draw_model_cached(handle_bits, position, scale as f32, tint);
                         }
                     }
                 }
@@ -90,23 +90,19 @@ macro_rules! __bloom_ffi_models {
                     // Static models go through the cached scene pipeline
                     // (alpha cutout, normal/MR maps, foliage wind +
                     // transmission, cutout shadows, planar reflections) —
-                    // the immediate path below has none of that and used
+                    // the old immediate path had none of that and used
                     // to render cutout foliage as opaque cards. Skinned
-                    // models stay on the immediate fallback, matching
-                    // bloom_draw_model.
+                    // models take the skinned cached draw and IGNORE the
+                    // rotation — their joint matrices bake orientation,
+                    // exactly as the old immediate fallback behaved.
                     if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
-                        eng.renderer.draw_model_cached_rotated(
-                            handle_bits, position, scale, rot_y as f32, tint,
-                        );
-                    } else {
-                        // Same one-pose-per-model rule as bloom_draw_model
-                        // (see there) — primitives of a skinned model share
-                        // the staged pose.
-                        let joint_offset = eng.renderer.take_staged_skin_offset();
-                        for mesh in &model.meshes {
-                            let tex_idx = mesh.texture_idx.unwrap_or(0);
-                            eng.renderer.draw_model_mesh_tinted_rotated_with_joints(
-                                &mesh.vertices, &mesh.indices, position, scale, tint, tex_idx, rot_y as f32, joint_offset,
+                        if eng.renderer.is_model_skinned(handle_bits) {
+                            eng.renderer.draw_model_cached_skinned(
+                                handle_bits, position, scale, tint,
+                            );
+                        } else {
+                            eng.renderer.draw_model_cached_rotated(
+                                handle_bits, position, scale, rot_y as f32, tint,
                             );
                         }
                     }

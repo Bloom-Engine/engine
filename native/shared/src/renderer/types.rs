@@ -37,6 +37,12 @@ pub(super) struct Uniforms3D {
     pub(super) model: [[f32; 4]; 4],
     pub(super) prev_mvp: [[f32; 4]; 4],
     pub(super) model_tint: [f32; 4],
+    /// x = joint-buffer base offset for this draw (added to vertex joint
+    /// indices by the scene VS), y = 1.0 for skinned cached draws else
+    /// 0.0, zw unused. Lets GPU-resident skinned models share the static
+    /// cached-model path: the VB keeps RAW joint indices and the per-draw
+    /// uniform carries the frame's pose offset instead.
+    pub(super) misc: [f32; 4],
 }
 
 /// Scene-pipeline per-material factors — the scalar parts of a glTF

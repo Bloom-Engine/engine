@@ -57,6 +57,10 @@ struct Uniforms3D {
     model: mat4x4<f32>,
     prev_mvp: mat4x4<f32>,
     model_tint: vec4<f32>,
+    // x = joint-buffer offset, y = skinned flag (cached skinned draws).
+    // Always zero on the immediate path — its verts arrive with joint
+    // indices pre-offset CPU-side, so vs_main_3d ignores this field.
+    misc: vec4<f32>,
 };
 
 struct DirLight {
@@ -212,6 +216,13 @@ struct Uniforms3D {
     model: mat4x4<f32>,
     prev_mvp: mat4x4<f32>,
     model_tint: vec4<f32>,
+    // x = joint-buffer offset for this draw, y = 1.0 for skinned cached
+    // draws (vs_main_scene then skins in the VS), zw unused.
+    misc: vec4<f32>,
+};
+
+struct JointMatrices {
+    matrices: array<mat4x4<f32>, 1024>,
 };
 
 struct DirLight {
@@ -287,6 +298,7 @@ struct VertexOutputScene {
 @group(2) @binding(8) var<uniform> material: MaterialFactors;
 @group(2) @binding(9) var occ_tex: texture_2d<f32>;
 @group(2) @binding(10) var occ_samp: sampler;
+@group(3) @binding(0) var<uniform> joints: JointMatrices;
 
 const PI: f32 = 3.14159265;
 
@@ -325,6 +337,52 @@ fn env_sample(dir: vec3<f32>) -> vec3<f32> {
 
 @vertex
 fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
+    if (u.misc.y > 0.5) {
+        // Skinned draw: u.mvp/u.prev_mvp are the bare view-projection;
+        // joint matrices bake world placement for weighted verts, and
+        // u.model places the rare rigid (weightless) verts. No wind
+        // sway here — characters aren't foliage.
+        let total_weight = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
+        var world4: vec4<f32>;
+        var nrm4: vec4<f32>;
+        var tan4: vec4<f32>;
+        let pos4l = vec4<f32>(in.position, 1.0);
+        let nrm4l = vec4<f32>(in.normal, 0.0);
+        let tan4l = vec4<f32>(in.tangent.xyz, 0.0);
+        if (total_weight > 0.01) {
+            // The cached VB keeps RAW joint indices; misc.x is this
+            // draw's base slot in the shared 1024-entry joint buffer.
+            let j0 = u32(in.joints.x + u.misc.x); let j1 = u32(in.joints.y + u.misc.x);
+            let j2 = u32(in.joints.z + u.misc.x); let j3 = u32(in.joints.w + u.misc.x);
+            world4 = joints.matrices[j0] * pos4l * in.weights.x
+                   + joints.matrices[j1] * pos4l * in.weights.y
+                   + joints.matrices[j2] * pos4l * in.weights.z
+                   + joints.matrices[j3] * pos4l * in.weights.w;
+            nrm4 = joints.matrices[j0] * nrm4l * in.weights.x
+                 + joints.matrices[j1] * nrm4l * in.weights.y
+                 + joints.matrices[j2] * nrm4l * in.weights.z
+                 + joints.matrices[j3] * nrm4l * in.weights.w;
+            tan4 = joints.matrices[j0] * tan4l * in.weights.x
+                 + joints.matrices[j1] * tan4l * in.weights.y
+                 + joints.matrices[j2] * tan4l * in.weights.z
+                 + joints.matrices[j3] * tan4l * in.weights.w;
+        } else {
+            world4 = u.model * pos4l;
+            nrm4 = u.model * nrm4l;
+            tan4 = u.model * tan4l;
+        }
+        var o: VertexOutputScene;
+        let c = u.mvp * world4;
+        o.clip_position = c;
+        o.curr_clip = c;
+        o.prev_clip = u.prev_mvp * world4;
+        o.world_pos = world4.xyz;
+        o.normal = normalize(nrm4.xyz);
+        o.color = in.color * u.model_tint;
+        o.uv = in.uv;
+        o.tangent = vec4<f32>(normalize(tan4.xyz), in.tangent.w);
+        return o;
+    }
     var out: VertexOutputScene;
     var local = in.position;
     // Foliage wind sway — only for alpha-cut materials (leaf cards), so the

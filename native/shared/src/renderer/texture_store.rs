@@ -336,6 +336,7 @@ impl Renderer {
     /// would render the stale cached geometry.
     pub fn evict_model_cache(&mut self, handle_bits: u64) {
         self.model_gpu_cache.remove(&handle_bits);
+        self.model_skinned.remove(&handle_bits);
     }
 
     pub fn set_texture_filter(&mut self, idx: u32, nearest: bool) {

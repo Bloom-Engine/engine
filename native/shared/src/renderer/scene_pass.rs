@@ -176,9 +176,12 @@ impl Renderer {
                     if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
                         if cmd.mesh_idx < meshes.len() {
                             let mesh = &meshes[cmd.mesh_idx];
-                            let (wmin, wmax) = transform_aabb(
-                                &cmd.model, mesh.local_min, mesh.local_max,
-                            );
+                            // Skinned draws carry a pre-computed joint-union
+                            // AABB (their rest AABB × model matrix would be
+                            // wrong once posed); static draws derive theirs.
+                            let (wmin, wmax) = cmd.bounds_override.unwrap_or_else(|| {
+                                transform_aabb(&cmd.model, mesh.local_min, mesh.local_max)
+                            });
                             if wmin[0] <= wmax[0]
                                 && crate::scene::aabb_outside_frustum(&cam_planes, wmin, wmax)
                             {

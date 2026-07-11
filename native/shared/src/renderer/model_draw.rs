@@ -31,6 +31,7 @@ impl Renderer {
             self.stage_model_uniform(slot, &Uniforms3D {
                 mvp: model_mvp, model: model_matrix,
                 prev_mvp: model_mvp, model_tint: tint,
+                misc: [0.0; 4],
             });
 
             self.model_draw_commands.push(CachedModelDraw {
@@ -38,6 +39,9 @@ impl Renderer {
                 cache_handle: handle_bits,
                 mesh_idx,
                 model: model_matrix,
+                skinned: false,
+                joint_offset: 0.0,
+                bounds_override: None,
             });
         }
     }
@@ -85,6 +89,7 @@ impl Renderer {
             self.stage_model_uniform(slot, &Uniforms3D {
                 mvp: model_mvp, model: model_matrix,
                 prev_mvp: model_mvp, model_tint: tint,
+                misc: [0.0; 4],
             });
 
             self.model_draw_commands.push(CachedModelDraw {
@@ -92,6 +97,105 @@ impl Renderer {
                 cache_handle: handle_bits,
                 mesh_idx,
                 model: model_matrix,
+                skinned: false,
+                joint_offset: 0.0,
+                bounds_override: None,
+            });
+        }
+    }
+
+    /// Cached-path draw for a SKINNED model: the bind-pose VB/IB stay
+    /// GPU-resident (raw joint indices) and the scene VS skins from the
+    /// shared joint buffer — replacing the immediate path's per-frame
+    /// CPU re-transform + whole-batch vertex re-upload. Consumes the
+    /// staged pose ONCE for the whole model and shares its joint-buffer
+    /// offset across every primitive via the per-draw uniform's misc.x
+    /// (per-primitive pops starved multi-primitive models onto offset 0
+    /// — the marauder/tyrant blob; see `take_staged_skin_offset`).
+    ///
+    /// Rotation-less by design: joint matrices already bake the model's
+    /// world orientation (same contract as the old immediate path).
+    pub fn draw_model_cached_skinned(
+        &mut self,
+        handle_bits: u64,
+        position: [f32; 3],
+        scale: f32,
+        tint: [f32; 4],
+    ) {
+        // Union of the cached meshes' local AABBs = the model's rest-pose
+        // AABB (sentinel min > max when every mesh is empty).
+        let (mesh_count, rest_min, rest_max) = match self.model_gpu_cache.get(&handle_bits) {
+            Some(Some(meshes)) => {
+                let mut rmin = [f32::MAX; 3];
+                let mut rmax = [f32::MIN; 3];
+                for mesh in meshes.iter() {
+                    if mesh.local_min[0] > mesh.local_max[0] { continue; }
+                    for a in 0..3 {
+                        if mesh.local_min[a] < rmin[a] { rmin[a] = mesh.local_min[a]; }
+                        if mesh.local_max[a] > rmax[a] { rmax[a] = mesh.local_max[a]; }
+                    }
+                }
+                (meshes.len(), rmin, rmax)
+            }
+            _ => return,
+        };
+        if mesh_count == 0 { return; }
+
+        let joint_offset = self.take_staged_skin_offset().unwrap_or(0.0);
+
+        // Model matrix places the rare rigid (weightless) verts; weighted
+        // verts get their world placement from the joint matrices.
+        let model_matrix = mat4_multiply(
+            mat4_translate(IDENTITY_MAT4, position),
+            mat4_scale(IDENTITY_MAT4, [scale, scale, scale]),
+        );
+
+        // Rigorous world AABB: a skinned vertex is a convex blend of its
+        // per-joint transforms of ONE rest position, so the union of every
+        // joint matrix applied to the rest AABB bounds all weighted verts
+        // (same argument as `finish_model_segment`). Union in the plain
+        // model-matrix transform too so rigid verts are covered. The
+        // model's joints occupy frame_joint_data[joint_offset..len] right
+        // now: its group was staged just above and the next model's group
+        // hasn't been staged yet.
+        let (mut wmin, mut wmax) = super::transform_aabb(&model_matrix, rest_min, rest_max);
+        let jstart = (joint_offset.max(0.0) as usize).min(self.frame_joint_data.len());
+        for j in jstart..self.frame_joint_data.len() {
+            let (m0, m1) = super::transform_aabb(
+                &self.frame_joint_data[j], rest_min, rest_max,
+            );
+            for a in 0..3 {
+                if m0[a] < wmin[a] { wmin[a] = m0[a]; }
+                if m1[a] > wmax[a] { wmax[a] = m1[a]; }
+            }
+        }
+        // Sentinel (min > max) → no bounds; the passes treat the draw as
+        // uncullable rather than culling it away.
+        let bounds_override = if wmin[0] <= wmax[0] { Some((wmin, wmax)) } else { None };
+
+        let vp = self.current_vp_matrix;
+        for mesh_idx in 0..mesh_count {
+            let slot = self.next_model_uniform_slot;
+            self.next_model_uniform_slot += 1;
+            self.ensure_model_uniform_slot(slot);
+
+            // Skinned draws: mvp/prev_mvp are the BARE view-projection —
+            // the joint matrices bake world placement, so the VS goes
+            // joint-space → world → clip without a model term.
+            self.stage_model_uniform(slot, &Uniforms3D {
+                mvp: vp, model: model_matrix,
+                prev_mvp: vp, model_tint: tint,
+                misc: [joint_offset, 1.0, 0.0, 0.0],
+            });
+
+            self.model_draw_commands.push(CachedModelDraw {
+                uniform_slot: slot,
+                cache_handle: handle_bits,
+                mesh_idx,
+                model: model_matrix,
+                skinned: true,
+                joint_offset,
+                bounds_override,
             });
         }
     }

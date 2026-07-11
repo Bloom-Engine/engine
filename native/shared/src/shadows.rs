@@ -21,7 +21,7 @@ pub const CASCADE_MAP_SIZE: u32 = 2048;
 pub const SHADOW_NEAR: f32 = 0.1;
 pub const SHADOW_FAR: f32 = 100.0;
 /// Dynamic-uniform buffer stride for per-node shadow uniforms. Must
-/// be >= sizeof(ShadowUniforms) (128B) and a multiple of the device's
+/// be >= sizeof(ShadowUniforms) (144B) and a multiple of the device's
 /// min_uniform_buffer_offset_alignment. 256 is safe on every platform.
 pub const SHADOW_UNIFORM_STRIDE: u32 = 256;
 pub const SHADOW_MAX_NODES: u32 = 1024;
@@ -38,6 +38,7 @@ pub const SHADOW_SHADER: &str = "
 struct ShadowUniforms {
     light_vp: mat4x4<f32>,
     model: mat4x4<f32>,
+    misc: vec4<f32>,   // x = joint offset (used by the skinned variant)
 };
 
 @group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
@@ -67,6 +68,7 @@ pub const SHADOW_SHADER_CUTOUT: &str = "
 struct ShadowUniforms {
     light_vp: mat4x4<f32>,
     model: mat4x4<f32>,
+    misc: vec4<f32>,   // x = joint offset (used by the skinned variant)
 };
 @group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
 
@@ -104,20 +106,21 @@ fn fs_shadow_cutout(in: VsOut) {
 }
 ";
 
-/// Skinned shadow shader for animated characters (player, enemies). Skinned
-/// models can't be cached (the model cache stores rest-pose GPU buffers), so
-/// they're submitted through the immediate-mode 3D batch storing *rest-pose*
-/// vertices, with world placement living entirely in the per-frame joint
-/// matrices. The plain `vs_shadow` doesn't skin, so it would render those
-/// characters as a rest pose at the world origin — i.e. no shadow under their
-/// feet. This variant skins per-vertex (same math as the main scene shader) so
-/// characters cast a real, posed shadow. The branch on total weight means the
-/// non-skinned verts that share the immediate-mode batch (ground cube, baked
-/// static models) still transform by the model matrix as before.
+/// Skinned shadow shader for animated characters (player, enemies). Their
+/// vertices are *rest-pose* (cached model VBs with raw joint indices, or the
+/// immediate-mode batch with pre-offset ones), with world placement living
+/// entirely in the per-frame joint matrices. The plain `vs_shadow` doesn't
+/// skin, so it would render those characters as a rest pose at the world
+/// origin — i.e. no shadow under their feet. This variant skins per-vertex
+/// (same math as the main scene shader) so characters cast a real, posed
+/// shadow. The branch on total weight means the non-skinned verts sharing a
+/// batch (ground cube, rigid accessories) still transform by the model
+/// matrix as before.
 pub const SHADOW_SHADER_SKINNED: &str = "
 struct ShadowUniforms {
     light_vp: mat4x4<f32>,
     model: mat4x4<f32>,
+    misc: vec4<f32>,   // x = joint offset for cached skinned casters
 };
 @group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
 
@@ -138,8 +141,10 @@ fn vs_shadow_skinned(in: ShadowVertexInput) -> @builtin(position) vec4<f32> {
     let total_weight = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
     var pos = vec4<f32>(in.position, 1.0);
     if (total_weight > 0.01) {
-        let j0 = u32(in.joints.x); let j1 = u32(in.joints.y);
-        let j2 = u32(in.joints.z); let j3 = u32(in.joints.w);
+        // misc.x = joint-buffer base offset for cached skinned casters
+        // (raw VB indices); 0 for the immediate batch (pre-offset).
+        let j0 = u32(in.joints.x + shadow_u.misc.x); let j1 = u32(in.joints.y + shadow_u.misc.x);
+        let j2 = u32(in.joints.z + shadow_u.misc.x); let j3 = u32(in.joints.w + shadow_u.misc.x);
         // Joint matrices already bake scale + world position + rotation, so the
         // skinned result is world-space; the model matrix is identity for the
         // immediate-mode batch and is intentionally not re-applied here.
@@ -160,6 +165,11 @@ fn vs_shadow_skinned(in: ShadowVertexInput) -> @builtin(position) vec4<f32> {
 pub struct ShadowUniforms {
     pub light_vp: [[f32; 4]; 4],
     pub model: [[f32; 4]; 4],
+    /// x = joint-buffer base offset for skinned CACHED casters (their
+    /// VBs keep raw joint indices; `vs_shadow_skinned` adds this before
+    /// indexing). 0 for everything else, including the immediate batch
+    /// whose vertex joints are pre-offset CPU-side. yzw unused.
+    pub misc: [f32; 4],
 }
 
 /// Shadow map resources for cascaded shadow mapping.

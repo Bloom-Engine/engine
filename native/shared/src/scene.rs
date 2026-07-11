@@ -65,6 +65,11 @@ struct NodeUniforms {
     model: [[f32; 4]; 4],
     prev_mvp: [[f32; 4]; 4],
     model_tint: [f32; 4],
+    /// Mirrors Uniforms3D.misc (joint offset + skinned flag for cached
+    /// skinned model draws). Scene nodes are never skinned — always zero
+    /// here — but the field must exist so the buffer binding satisfies
+    /// the scene shader's grown struct size.
+    misc: [f32; 4],
 }
 
 // ============================================================
@@ -261,7 +266,7 @@ impl SceneNode {
 // ============================================================
 
 /// Stride between per-node uniform slots in the shared pool buffer.
-/// Must be >= sizeof(NodeUniforms) (208B) and a multiple of the device's
+/// Must be >= sizeof(NodeUniforms) (224B) and a multiple of the device's
 /// `min_uniform_buffer_offset_alignment`. 256 is safe on every platform.
 const NODE_UNIFORM_STRIDE: u64 = 256;
 
@@ -1103,7 +1108,7 @@ impl SceneGraph {
                 node.material.color[2],
                 opacity,
             ];
-            let uniforms = NodeUniforms { mvp, model: node.transform, prev_mvp, model_tint: tint };
+            let uniforms = NodeUniforms { mvp, model: node.transform, prev_mvp, model_tint: tint, misc: [0.0; 4] };
             node.prev_transform = node.transform;
 
             let off = (slot as usize) * stride;

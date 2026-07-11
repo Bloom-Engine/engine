@@ -134,6 +134,12 @@ impl Renderer {
             // texture every frame on top of the cached static depth;
             // they never invalidate the static cache.
             dynamic: bool,
+            // Base slot of a skinned cached draw's pose in the shared
+            // joint buffer (the cached VB keeps RAW joint indices, so
+            // vs_shadow_skinned adds this via ShadowUniforms.misc.x).
+            // 0.0 for everything else — including immediate-batch
+            // skinned segments, whose vertex joints are pre-offset.
+            joint_offset: f32,
         }
         fn entry_sig(kind: u8, id: u64, idx: u64, transform: &[[f32; 4]; 4]) -> u64 {
             let mut h = FNV_OFFSET;
@@ -142,6 +148,13 @@ impl Renderer {
             h = fnv1a_bytes(h, &idx.to_le_bytes());
             fnv1a_bytes(h, bytemuck::bytes_of(transform))
         }
+        // Per-frame nonce for animated casters' signatures. Bumped
+        // whenever shadows render — skinned CACHED model draws need it
+        // even when the immediate batch is empty, which is the norm now
+        // that skinned models draw through the cache.
+        self.shadow_map.frame_nonce = self.shadow_map.frame_nonce.wrapping_add(1);
+        let nonce = self.shadow_map.frame_nonce;
+
         let mut shadow_nodes: Vec<ShadowDrawEntry> = Vec::new();
         let mut shadow_vbs: Vec<&wgpu::Buffer> = Vec::new();
         let mut shadow_ibs: Vec<&wgpu::Buffer> = Vec::new();
@@ -176,6 +189,7 @@ impl Renderer {
                 skinned: false,
                 sig: entry_sig(0, i as u64, node.gpu_index_count as u64, &node.transform),
                 dynamic: false,
+                joint_offset: 0.0,
             });
         }
 
@@ -189,8 +203,6 @@ impl Renderer {
         // segments hash their vertex positions, so e.g. pickups
         // re-submitted identically each frame don't dirty their cascades.
         if !self.indices_3d.is_empty() {
-            self.shadow_map.frame_nonce = self.shadow_map.frame_nonce.wrapping_add(1);
-            let nonce = self.shadow_map.frame_nonce;
             self.scan_unbounded_segments_3d();
             let vb_idx = shadow_vbs.len();
             shadow_vbs.push(&self.persistent_vb_3d);
@@ -210,6 +222,7 @@ impl Renderer {
                     skinned: true,
                     sig: nonce,
                     dynamic: true,
+                    joint_offset: 0.0,
                 });
             } else {
                 let num_calls = self.draw_calls_3d.len();
@@ -234,17 +247,20 @@ impl Renderer {
                         skinned: call.has_skinned,
                         sig: if call.has_skinned { nonce } else { call.content_hash },
                         dynamic: true,
+                        joint_offset: 0.0,
                     });
                 }
             }
         }
 
         // Cached models (drawModel: trees, characters, etc.) — each is a
-        // GpuMesh plus its object→world matrix. Skinned models cast their
-        // rest-pose shadow (vs_shadow doesn't skin) — acceptable. World
-        // AABB from the cache-time local AABB so per-cascade culling
-        // rejects casters outside a cascade's ortho frustum (the forest
-        // was previously re-drawn into every cascade every frame).
+        // GpuMesh plus its object→world matrix. World AABB from the
+        // cache-time local AABB so per-cascade culling rejects casters
+        // outside a cascade's ortho frustum (the forest was previously
+        // re-drawn into every cascade every frame). Skinned cached draws
+        // render through the skinning pipeline as dynamic casters (pose
+        // changes every frame → nonce signature) with the joint-union
+        // AABB computed at submit time.
         for cmd in self.model_draw_commands.iter() {
             if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
                 if cmd.mesh_idx < meshes.len() {
@@ -257,21 +273,43 @@ impl Renderer {
                         Some(bg) => { let i = cutout_bgs.len(); cutout_bgs.push(bg); i as i32 }
                         None => -1,
                     };
-                    let (wmin, wmax) =
-                        transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
-                    shadow_nodes.push(ShadowDrawEntry {
-                        vb_idx,
-                        ib_idx: vb_idx,
-                        index_start: 0,
-                        index_count: mesh.index_count,
-                        transform: cmd.model,
-                        wmin,
-                        wmax,
-                        cutout_idx,
-                        skinned: false,
-                        sig: entry_sig(1, cmd.cache_handle, cmd.mesh_idx as u64, &cmd.model),
-                        dynamic: false,
-                    });
+                    if cmd.skinned {
+                        // Sentinel bounds (min > max) when the submit-time
+                        // AABB was empty → uncullable, never lost.
+                        let (wmin, wmax) = cmd.bounds_override
+                            .unwrap_or(([1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]));
+                        shadow_nodes.push(ShadowDrawEntry {
+                            vb_idx,
+                            ib_idx: vb_idx,
+                            index_start: 0,
+                            index_count: mesh.index_count,
+                            transform: cmd.model,
+                            wmin,
+                            wmax,
+                            cutout_idx,
+                            skinned: true,
+                            sig: nonce,
+                            dynamic: true,
+                            joint_offset: cmd.joint_offset,
+                        });
+                    } else {
+                        let (wmin, wmax) =
+                            transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
+                        shadow_nodes.push(ShadowDrawEntry {
+                            vb_idx,
+                            ib_idx: vb_idx,
+                            index_start: 0,
+                            index_count: mesh.index_count,
+                            transform: cmd.model,
+                            wmin,
+                            wmax,
+                            cutout_idx,
+                            skinned: false,
+                            sig: entry_sig(1, cmd.cache_handle, cmd.mesh_idx as u64, &cmd.model),
+                            dynamic: false,
+                            joint_offset: 0.0,
+                        });
+                    }
                 }
             }
         }
@@ -312,6 +350,7 @@ impl Renderer {
                         skinned: false,
                         sig: entry_sig(2, cmd.mesh_handle, cmd.mesh_idx as u64, &cmd.model),
                         dynamic: false,
+                        joint_offset: 0.0,
                     });
                 }
             }
@@ -390,6 +429,7 @@ impl Renderer {
                     let uniforms = crate::shadows::ShadowUniforms {
                         light_vp: cascade_vp,
                         model: shadow_nodes[ei].transform,
+                        misc: [shadow_nodes[ei].joint_offset, 0.0, 0.0, 0.0],
                     };
                     let off = slot * stride;
                     uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
@@ -484,6 +524,7 @@ impl Renderer {
                     let uniforms = crate::shadows::ShadowUniforms {
                         light_vp: cascade_vp,
                         model: shadow_nodes[ei].transform,
+                        misc: [shadow_nodes[ei].joint_offset, 0.0, 0.0, 0.0],
                     };
                     let off = slot * stride;
                     uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
