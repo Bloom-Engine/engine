@@ -137,8 +137,31 @@ pub unsafe fn attach_engine(
 
     // The material ABI declares 5 bind groups; wgpu defaults to 4. Every
     // real backend supports >= 7.
+    let adapter_limits = adapter.limits();
     let mut required_limits = wgpu::Limits::default();
     required_limits.max_bind_groups = 5;
+
+    // A user material's fragment stage binds more sampled textures than
+    // wgpu's default permits — 19 against a default cap of 16, once the
+    // scene/GI inputs sit alongside the material's own maps.
+    //
+    // Only the fallback below ever picked up the adapter's real limits, and
+    // it runs solely when request_device *fails*. On macOS the default
+    // request succeeds at 16, so the shortfall surfaced much later, as an
+    // abort inside create_pipeline_layout('user_material') — the shooter
+    // could not open on macOS at all. (iOS escaped it by luck: its first
+    // request fails on an unrelated limit, so it always retried with the
+    // adapter's limits and got the headroom as a side effect.)
+    //
+    // Ask for what the adapter actually offers on the limits the material
+    // system leans on, never dropping below wgpu's defaults.
+    required_limits.max_sampled_textures_per_shader_stage = required_limits
+        .max_sampled_textures_per_shader_stage
+        .max(adapter_limits.max_sampled_textures_per_shader_stage);
+    required_limits.max_samplers_per_shader_stage = required_limits
+        .max_samplers_per_shader_stage
+        .max(adapter_limits.max_samplers_per_shader_stage);
+
     if required_features.intersects(rt_mask) {
         required_limits =
             required_limits.using_minimum_supported_acceleration_structure_values();
