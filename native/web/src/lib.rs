@@ -953,6 +953,16 @@ pub fn bloom_set_material_shading_model(
     engine().renderer.set_material_shading_model(material as u32, model as u32);
 }
 
+/// Whether a material's draws render into planar-reflection probes
+/// (default true). Authoring control for content that is sub-pixel at
+/// probe resolution (e.g. instanced grass).
+#[wasm_bindgen]
+pub fn bloom_set_material_probe_visible(
+    material: f64, visible: f64,
+) {
+    engine().renderer.set_material_probe_visible(material as u32, visible != 0.0);
+}
+
 /// EN-012 — set the foliage shading parameters for a material.
 /// Only takes effect when shading_model == 1 (foliage).
 #[wasm_bindgen]

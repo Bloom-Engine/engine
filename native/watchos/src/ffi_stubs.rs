@@ -141,6 +141,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_material_shading_model(_p0: f64, _p1: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_material_probe_visible(_p0: f64, _p1: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_set_material_foliage(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_post_pass(_p0: i64) -> f64 {
