@@ -1709,6 +1709,19 @@ impl MaterialSystem {
                     Some(Some(m)) => m,
                     _ => continue,
                 };
+                // Probe passes (use_reflection_pipeline) present the
+                // 4-attachment opaque G-buffer layout. Translucent-
+                // profile pipelines are single-target — binding one
+                // there is a wgpu validation panic — and reads_scene
+                // materials expect a group-4 bind the probe pass never
+                // provides. Skip both; `last_material` stays latched on
+                // the previously bound material, which is correct
+                // because no pipeline/bind state changes here.
+                if use_reflection_pipeline
+                    && (matches!(mat.profile, FragmentProfile::Translucent) || mat.reads_scene)
+                {
+                    continue;
+                }
                 let pipeline = if use_reflection_pipeline {
                     mat.reflection_pipeline.as_ref().unwrap_or(&mat.pipeline)
                 } else {

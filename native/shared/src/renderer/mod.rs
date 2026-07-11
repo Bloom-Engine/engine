@@ -9,6 +9,7 @@ mod occlusion;
 mod ssr_pass;
 mod ssgi_pass;
 mod shadow_pass;
+mod model_draw;
 mod postfx_chain;
 mod scene_pass;
 mod gi_bake;
@@ -742,6 +743,16 @@ pub struct Renderer {
     // Joint matrices for GPU skinning (64 joints × 4x4 matrix)
     joint_buffer: wgpu::Buffer,
     joint_bind_group: wgpu::BindGroup,
+
+    // False until the material system's per-view bind group has been
+    // rebuilt with the LIVE env/BRDF/shadow resources. The group is
+    // created at init with 1×1 stubs (the renderer's real textures
+    // don't exist yet at that point); sampling the zero-init stub
+    // depth views made every material-path surface read "occluded"
+    // for any in-frustum fragment — i.e. no sun shadows (and no HDR
+    // ambient) on terrain/grass/water, ever. Reset by
+    // `load_env_from_hdr` so a late HDR load re-wires the env slots.
+    material_per_view_bg_live: bool,
 
     // Texture management
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -6040,6 +6051,7 @@ impl Renderer {
             lighting_bind_group,
             joint_buffer,
             joint_bind_group,
+            material_per_view_bg_live: false,
             texture_bind_group_layout,
             texture_bind_groups,
             textures,
@@ -7974,6 +7986,10 @@ impl Renderer {
         // EN-021 — the SSR bind group holds an env view; rebuild it when
         // a new HDR panorama is uploaded.
         self.ssr_bg_cache = None;
+        // The material path's per-view bind group holds env/diffuse views
+        // too — re-wire it next frame so material surfaces pick up the
+        // new panorama (and the live shadow views on first load).
+        self.material_per_view_bg_live = false;
     }
 
     /// Whether a sky env map has been uploaded — controls whether
@@ -8699,7 +8715,53 @@ impl Renderer {
         // self.set_joint_test(5, (angle * 1.5).sin() * 0.5);
     }
 
+    /// Rebuild the material system's per-view bind group with the LIVE
+    /// env / BRDF / shadow resources. The group created at material-system
+    /// init binds 1×1 stubs ("Phase 2 wires them" — this is that wiring):
+    /// the zero-init stub depth views read 0.0 at every texel, so any
+    /// in-frustum fragment compared as "occluded" and the whole material
+    /// path (terrain, grass, water) rendered sunless and shadowless while
+    /// the planar-probe path — which builds a live group per frame —
+    /// showed correct shadows in reflections. Mirrors that probe group
+    /// exactly (mod.rs "planar_probe_per_view_bg_live").
+    fn refresh_material_per_view_bg(&mut self) {
+        let sky_view_owned: Option<wgpu::TextureView> = self.sky_texture
+            .as_ref()
+            .map(|t| t.create_view(&Default::default()));
+        let env_view: &wgpu::TextureView = sky_view_owned
+            .as_ref()
+            .unwrap_or(&self.scene_env_default_view);
+        let diffuse_view_owned: Option<wgpu::TextureView> = self.env_diffuse_texture
+            .as_ref()
+            .map(|t| t.create_view(&Default::default()));
+        let env_diffuse_view: &wgpu::TextureView = diffuse_view_owned
+            .as_ref()
+            .unwrap_or(&self.scene_env_default_view);
+
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material_per_view_bg_live"),
+            layout: &self.material_system.layouts.per_view,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.material_system.per_view_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(env_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(env_diffuse_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+            ],
+        });
+        self.material_system.per_view_bg = bg;
+        self.material_per_view_bg_live = true;
+    }
+
     pub fn end_frame(&mut self) {
+        if !self.material_per_view_bg_live {
+            self.refresh_material_per_view_bg();
+        }
         // Flush pending joint matrices to GPU right before rendering
         self.flush_joint_matrices();
 
@@ -8888,6 +8950,9 @@ impl Renderer {
 
     /// Like end_frame, but also renders retained scene graph nodes.
     pub fn end_frame_with_scene(&mut self, scene: &mut crate::scene::SceneGraph, profiler: &mut crate::profiler::Profiler) {
+        if !self.material_per_view_bg_live {
+            self.refresh_material_per_view_bg();
+        }
         profiler.begin("joint_flush");
         self.flush_joint_matrices();
         profiler.end("joint_flush");
@@ -10123,63 +10188,6 @@ impl Renderer {
         true
     }
 
-    /// Record a cached model draw command. The actual rendering happens in end_frame().
-    pub fn draw_model_cached(&mut self, handle_bits: u64, position: [f32; 3], scale: f32, tint: [f32; 4]) {
-        let mesh_count = match self.model_gpu_cache.get(&handle_bits) {
-            Some(Some(meshes)) => meshes.len(),
-            _ => return,
-        };
-
-        for mesh_idx in 0..mesh_count {
-            let slot = self.next_model_uniform_slot;
-            self.next_model_uniform_slot += 1;
-
-            // Grow uniform pool if needed
-            self.ensure_model_uniform_slot(slot);
-
-            // Compute model MVP: VP * translate(position) * scale(s)
-            let model_matrix = mat4_multiply(
-                mat4_translate(IDENTITY_MAT4, position),
-                mat4_scale(IDENTITY_MAT4, [scale, scale, scale]),
-            );
-            let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
-
-            // Write uniform for this draw
-            self.queue.write_buffer(
-                &self.model_uniform_buffers[slot],
-                0,
-                bytemuck::bytes_of(&Uniforms3D { mvp: model_mvp, model: model_matrix, prev_mvp: model_mvp, model_tint: tint }),
-            );
-
-            self.model_draw_commands.push(CachedModelDraw {
-                uniform_slot: slot,
-                cache_handle: handle_bits,
-                mesh_idx,
-                model: model_matrix,
-            });
-        }
-    }
-
-    fn ensure_model_uniform_slot(&mut self, slot: usize) {
-        while self.model_uniform_buffers.len() <= slot {
-            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("model_uniform"),
-                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, prev_mvp: IDENTITY_MAT4, model_tint: [1.0; 4] }),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("model_uniform_bg"),
-                layout: &self.uniform_3d_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf.as_entire_binding(),
-                }],
-            });
-            self.model_uniform_buffers.push(buf);
-            self.model_uniform_bind_groups.push(bg);
-        }
-    }
-
     fn flush_joint_matrices(&mut self) {
         // Accumulator = all skinned poses staged by skinned drawModel
         // calls this frame, packed consecutively. Each draw's vertex
@@ -10498,170 +10506,6 @@ impl Renderer {
         let start = [origin_x as f32, origin_y as f32, origin_z as f32];
         let end = [(origin_x + dir_x) as f32, (origin_y + dir_y) as f32, (origin_z + dir_z) as f32];
         self.add_line_3d(start, end, color, 0.02);
-    }
-
-    pub fn draw_model_mesh(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32) {
-        self.draw_model_mesh_tinted(vertices, indices, position, scale, [1.0, 1.0, 1.0, 1.0], 0);
-    }
-
-    /// Same as `draw_model_mesh_tinted` but applies a Y-axis rotation
-    /// (radians) to the mesh local space before scale + translate.
-    /// Skinned meshes ignore the rotation here — pose joints already
-    /// drive their orientation. CPU-side baking mirrors the unrotated
-    /// path so callers can mix rotated and unrotated draws freely
-    /// without extra GPU state.
-    pub fn draw_model_mesh_tinted_rotated(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32, rot_y: f32) {
-        self.ensure_draw_state_3d(texture_idx);
-
-        // Mirror the joint-pose plumbing in the non-rotated path so a
-        // skinned mesh drawn here still consumes its pending pose.
-        let mesh_skinned = vertices.iter().any(|v|
-            v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01);
-        let joint_offset: f32 = if mesh_skinned && !self.pending_skin_groups.is_empty() {
-            let group = self.pending_skin_groups.remove(0);
-            let start = self.frame_joint_data.len();
-            if start + group.len() <= 1024 {
-                self.frame_joint_data.extend_from_slice(&group);
-                start as f32
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-
-        let cos_y = rot_y.cos();
-        let sin_y = rot_y.sin();
-        let base = self.vertices_3d.len() as u32;
-        for v in vertices {
-            let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
-            let pos = if is_skinned {
-                v.position
-            } else {
-                // Rotate local-space position around Y, then scale + translate.
-                let lx = v.position[0];
-                let ly = v.position[1];
-                let lz = v.position[2];
-                let rx =  cos_y * lx + sin_y * lz;
-                let rz = -sin_y * lx + cos_y * lz;
-                [rx * scale + position[0],
-                 ly * scale + position[1],
-                 rz * scale + position[2]]
-            };
-            // Rotate the surface normal too so lighting matches the new
-            // orientation. Y-axis rotation leaves normal.y untouched.
-            let n = v.normal;
-            let normal = if is_skinned {
-                n
-            } else {
-                [ cos_y * n[0] + sin_y * n[2],
-                  n[1],
-                 -sin_y * n[0] + cos_y * n[2] ]
-            };
-            // Rotate tangent.xyz the same way; preserve handedness in w.
-            let t = v.tangent;
-            let tangent = if is_skinned {
-                t
-            } else {
-                [ cos_y * t[0] + sin_y * t[2],
-                  t[1],
-                 -sin_y * t[0] + cos_y * t[2],
-                  t[3] ]
-            };
-            let joints_out = if is_skinned {
-                [v.joints[0] + joint_offset,
-                 v.joints[1] + joint_offset,
-                 v.joints[2] + joint_offset,
-                 v.joints[3] + joint_offset]
-            } else {
-                v.joints
-            };
-            self.vertices_3d.push(Vertex3D {
-                position: pos,
-                normal,
-                color: [
-                    v.color[0] * tint[0],
-                    v.color[1] * tint[1],
-                    v.color[2] * tint[2],
-                    v.color[3] * tint[3],
-                ],
-                uv: v.uv,
-                joints: joints_out,
-                weights: v.weights,
-                tangent,
-            });
-        }
-        for &idx in indices {
-            self.indices_3d.push(base + idx);
-        }
-    }
-
-    pub fn draw_model_mesh_tinted(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32) {
-        self.ensure_draw_state_3d(texture_idx);
-
-        // If this mesh is skinned, consume the next pending pose
-        // (FIFO) and pack its matrices into the frame accumulator at
-        // the current cursor. Each vertex's joint indices then get
-        // shifted by that cursor so the shader samples this mesh's
-        // slice of the shared joint buffer. With a 1024-slot buffer,
-        // multiple skinned models can coexist in one frame.
-        let mesh_skinned = vertices.iter().any(|v|
-            v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01);
-        let joint_offset: f32 = if mesh_skinned && !self.pending_skin_groups.is_empty() {
-            let group = self.pending_skin_groups.remove(0);
-            let start = self.frame_joint_data.len();
-            // Cap at the 1024-slot buffer. Overflowing poses land at
-            // offset 0, which at least avoids an out-of-range read —
-            // the model will look mis-posed but not corrupt memory.
-            if start + group.len() <= 1024 {
-                self.frame_joint_data.extend_from_slice(&group);
-                start as f32
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-
-        let base = self.vertices_3d.len() as u32;
-        for v in vertices {
-            // Check if vertex is skinned (has non-zero weights)
-            let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
-            let pos = if is_skinned {
-                // Skinned: pass raw bind-pose positions — joint matrices handle transform
-                v.position
-            } else {
-                // Unskinned: apply CPU-side position + scale
-                [v.position[0] * scale + position[0],
-                 v.position[1] * scale + position[1],
-                 v.position[2] * scale + position[2]]
-            };
-            let joints_out = if is_skinned {
-                [v.joints[0] + joint_offset,
-                 v.joints[1] + joint_offset,
-                 v.joints[2] + joint_offset,
-                 v.joints[3] + joint_offset]
-            } else {
-                v.joints
-            };
-            self.vertices_3d.push(Vertex3D {
-                position: pos,
-                normal: v.normal,
-                color: [
-                    v.color[0] * tint[0],
-                    v.color[1] * tint[1],
-                    v.color[2] * tint[2],
-                    v.color[3] * tint[3],
-                ],
-                uv: v.uv,
-                joints: joints_out,
-                weights: v.weights,
-                tangent: v.tangent,
-            });
-        }
-        for &idx in indices {
-            self.indices_3d.push(base + idx);
-        }
     }
 
     // ============================================================
@@ -11671,10 +11515,14 @@ impl Renderer {
         // commands view while iterating, so collect the work first.
         let probe_count = self.planar_probes.len();
         for i in 0..probe_count {
-            let (plane_y, normal, color_view, depth_view) = match &self.planar_probes[i] {
-                Some(p) => (p.plane_y, p.normal, p.color_view.clone(), p.depth_view.clone()),
-                None => continue,
-            };
+            let (plane_y, normal, color_view, depth_view,
+                 aux_material_view, aux_velocity_view, aux_albedo_view) =
+                match &self.planar_probes[i] {
+                    Some(p) => (p.plane_y, p.normal, p.color_view.clone(), p.depth_view.clone(),
+                                p.aux_material_view.clone(), p.aux_velocity_view.clone(),
+                                p.aux_albedo_view.clone()),
+                    None => continue,
+                };
             let view_buf = match self.planar_probe_view_buffers[i].as_ref() {
                 Some(b) => b, None => continue,
             };
@@ -11814,18 +11662,48 @@ impl Renderer {
             let refl_pipeline = self.reflect_scene_pipeline.as_ref();
             let refl_model_bg = self.reflect_model_bg.as_ref();
             let refl_light_bg = self.reflect_light_bg.as_ref();
+            // Pass A — user materials. Opaque-profile material pipelines
+            // (and their `_reflection` siblings) target the full opaque
+            // G-buffer layout, so this pass presents the same four
+            // attachments; the three aux targets are probe-resolution
+            // dummies cleared here and discarded at store. Only the hdr
+            // attachment (and depth, which pass B tests against) is kept.
             {
+                let aux_ops = wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Discard,
+                };
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("bloom_planar_reflection_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &color_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear_color),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
+                    label: Some("bloom_planar_reflection_materials"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &color_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(clear_color),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &aux_material_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: aux_ops,
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &aux_velocity_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: aux_ops,
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &aux_albedo_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: aux_ops,
+                        }),
+                    ],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &depth_view,
                         depth_ops: Some(wgpu::Operations {
@@ -11846,10 +11724,13 @@ impl Renderer {
                     // Reflection mirrors world-space, which inverts
                     // triangle winding; without the flip, single-
                     // sided opaque geometry renders inside-out in
-                    // the probe's RT. Translucent / cutout materials
-                    // have `reflection_pipeline = None` and gracefully
-                    // fall back to the main pipeline (no cull change
-                    // needed since they're already double-sided).
+                    // the probe's RT. Cutout materials have
+                    // `reflection_pipeline = None` and gracefully fall
+                    // back to the main pipeline (no cull change needed
+                    // since they're already double-sided); translucent-
+                    // profile materials are skipped inside (their
+                    // single-target pipelines can't render into this
+                    // 4-target pass).
                     true,
                     |handle, idx| {
                         if let Some(Some(meshes)) = cache.get(&handle) {
@@ -11861,11 +11742,36 @@ impl Renderer {
                         None
                     },
                 );
+            }
 
-                // Render cached models (trees/house/foliage) mirrored into the
-                // probe so the water reflects the actual world, not just an
-                // analytic sky. Single-target lit pipeline; cutout alpha is
-                // discarded so foliage reflects its real shape.
+            // Pass B — cached models (trees/house/foliage) + scene-graph
+            // nodes with the single-target REFLECT_SCENE pipeline. Loads
+            // pass A's color + depth so the two batches depth-test
+            // against each other.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bloom_planar_reflection_models"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
                 if let (Some(rp), Some(rmbg), Some(rlbg)) =
                     (refl_pipeline, refl_model_bg, refl_light_bg)
                 {
