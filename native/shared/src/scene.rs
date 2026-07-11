@@ -1232,7 +1232,7 @@ impl SceneGraph {
     /// LOD pop would be more visible than the detail it saves.
     /// (Treats node.transform as world — flat hierarchies.)
     pub fn reflect_draw_list(&self)
-        -> Vec<(&wgpu::Buffer, &wgpu::Buffer, u32, &wgpu::BindGroup, [[f32; 4]; 4])>
+        -> Vec<(&wgpu::Buffer, &wgpu::Buffer, u32, &wgpu::BindGroup, [[f32; 4]; 4], [f32; 3], [f32; 3])>
     {
         let mut out = Vec::new();
         for (_handle, node) in self.nodes.iter() {
@@ -1240,7 +1240,14 @@ impl SceneGraph {
             let Some(vb) = &node.gpu_vb else { continue };
             let Some(ib) = &node.gpu_ib else { continue };
             let Some(mat_bg) = &node.gpu_material_bg else { continue };
-            out.push((vb, ib, node.gpu_index_count, mat_bg, node.transform));
+            // World bounds ride along so the probe pass can frustum-cull
+            // against the MIRRORED camera (main-camera cull flags don't
+            // apply there). Sentinel (min > max) = not yet computed →
+            // never culled.
+            out.push((
+                vb, ib, node.gpu_index_count, mat_bg, node.transform,
+                node.world_bounds_min, node.world_bounds_max,
+            ));
         }
         out
     }

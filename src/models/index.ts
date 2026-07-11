@@ -34,6 +34,7 @@ declare function bloom_create_texture_array(dataPtr: any, dataLen: number, width
 declare function bloom_create_texture_array_ex(dataPtr: any, dataLen: number, width: number, height: number, layerCount: number, format: number, mipLevels: number): number;
 declare function bloom_set_material_texture_array(material: number, slot: number, array: number): void;
 declare function bloom_set_material_shading_model(material: number, model: number): void;
+declare function bloom_set_material_probe_visible(material: number, visible: number): void;
 declare function bloom_set_material_foliage(material: number, transR: number, transG: number, transB: number, transAmount: number, wrapFactor: number): void;
 declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
@@ -445,6 +446,15 @@ export function createPlanarReflection(
 /// every probe's render — the water surface doesn't reflect itself.
 export function setMaterialReflectionProbe(material: number, probe: number): void {
   bloom_set_material_reflection_probe(material, probe);
+}
+
+/// Whether this material's draws render into planar-reflection probes
+/// (default true). Turn off for content that is sub-pixel at probe
+/// resolution — e.g. an instanced grass field in a 512-px water probe —
+/// where it costs full vertex + raster work and contributes nothing
+/// resolvable to the reflection.
+export function setMaterialProbeVisible(material: number, visible: boolean): void {
+  bloom_set_material_probe_visible(material, visible ? 1 : 0);
 }
 
 /// EN-014 — slot indices for `setMaterialTextureArray`.

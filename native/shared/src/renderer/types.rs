@@ -262,6 +262,40 @@ pub(super) struct DrawCall2D {
 pub(super) struct DrawCall3D {
     pub(super) texture_idx: u32,
     pub(super) index_start: u32,
+    /// First vertex of this segment in `vertices_3d` — lets the shadow
+    /// pass lazily scan primitive-only segments for bounds.
+    pub(super) vertex_start: u32,
+    /// World AABB of the segment's content. Non-skinned verts contribute
+    /// their (already world-space) positions; skinned model draws
+    /// contribute the union of their joint-transformed rest AABBs (a
+    /// rigorous conservative bound: a skinned vertex is a convex blend
+    /// of per-joint transforms of the same rest position).
+    /// `wmin[0] > wmax[0]` = not yet computed.
+    pub(super) wmin: [f32; 3],
+    pub(super) wmax: [f32; 3],
+    /// Segment contains skinned (animated) vertices → its rendered
+    /// output changes every frame, so shadow caching must treat it as
+    /// always-dirty for the cascades it touches.
+    pub(super) has_skinned: bool,
+    /// FNV-1a over the non-skinned vertex positions appended to this
+    /// segment — a cheap content identity so static immediate geometry
+    /// (e.g. pickups re-submitted identically every frame) doesn't
+    /// dirty the shadow cascades it sits in.
+    pub(super) content_hash: u64,
+    /// True when bounds/hash were maintained inline (model draws).
+    /// False → primitive-only segment, scanned on demand.
+    pub(super) bounded: bool,
+}
+
+pub(super) const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+
+#[inline]
+pub(super) fn fnv1a_bytes(mut h: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 #[derive(PartialEq, Clone, Copy)]

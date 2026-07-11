@@ -78,7 +78,7 @@ pub use types::{Vertex2D, Vertex3D, SceneMaterialUniforms, RenderMode};
 use types::{
     MAX_UNIFORM_SLOTS, MAX_DIR_LIGHTS, MAX_POINT_LIGHTS,
     Uniforms2D, Uniforms3D, DirLight, PointLight, LightingUniforms,
-    DrawCall2D, DrawCall3D,
+    DrawCall2D, DrawCall3D, FNV_OFFSET, fnv1a_bytes,
 };
 
 
@@ -663,6 +663,12 @@ struct GpuMesh {
     vb: wgpu::Buffer,
     ib: wgpu::Buffer,
     index_count: u32,
+    /// Object-space AABB of the mesh, captured at cache time. The shadow /
+    /// main / probe passes transform it by the draw's model matrix to get a
+    /// world AABB for frustum culling. `local_min[0] > local_max[0]` marks
+    /// "no bounds" (empty mesh) → never culled.
+    local_min: [f32; 3],
+    local_max: [f32; 3],
     /// Pre-built scene material bind group (base color + normal +
     /// metallic-roughness + emissive + material factors). Cached at
     /// model-upload time so draw_model_cached doesn't build one per
@@ -688,6 +694,40 @@ struct CachedModelDraw {
     /// Object→world model matrix for this draw, kept CPU-side so the
     /// shadow pass can render the model depth-only from the light.
     model: [[f32; 4]; 4],
+}
+
+/// Uniform-pool stride for cached-model per-draw uniforms (256 = safe
+/// min_uniform_buffer_offset_alignment on every backend; Uniforms3D is
+/// 208 B).
+pub(crate) const MODEL_UNIFORM_STRIDE: usize = 256;
+
+/// World AABB of a local AABB under an affine model matrix: transform the 8
+/// corners and take component-wise min/max. Returns the "no bounds" sentinel
+/// unchanged so callers can keep treating it as "never cull".
+pub(crate) fn transform_aabb(
+    model: &[[f32; 4]; 4],
+    lmin: [f32; 3],
+    lmax: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    if lmin[0] > lmax[0] {
+        return (lmin, lmax);
+    }
+    let mut wmin = [f32::MAX; 3];
+    let mut wmax = [f32::MIN; 3];
+    for i in 0..8 {
+        let corner = [
+            if i & 1 == 0 { lmin[0] } else { lmax[0] },
+            if i & 2 == 0 { lmin[1] } else { lmax[1] },
+            if i & 4 == 0 { lmin[2] } else { lmax[2] },
+            1.0,
+        ];
+        let wc = mat4_mul_vec4(model, &corner);
+        for a in 0..3 {
+            if wc[a] < wmin[a] { wmin[a] = wc[a]; }
+            if wc[a] > wmax[a] { wmax[a] = wc[a]; }
+        }
+    }
+    (wmin, wmax)
 }
 
 // ============================================================
@@ -1161,6 +1201,15 @@ pub struct Renderer {
     pub card_light_layout: wgpu::BindGroupLayout,
     pub card_light_uniform: wgpu::Buffer,
     card_light_bg_cache: Option<wgpu::BindGroup>,
+    /// Dirty-gate for `light_mesh_cards`: hash of every lighting-relevant
+    /// input at the last relight (sun, sky, cascade VPs, slot count,
+    /// card content version). The relight repaints the entire card atlas
+    /// (~7 MTexels for a forest scene) and used to run every frame for a
+    /// sun that never moves. 0 = never relit.
+    card_light_input_hash: u64,
+    /// Bumped whenever pending card captures drain (card albedo/emissive
+    /// content changed) so the relight gate can't go stale.
+    card_content_version: u64,
 
     // --- Ticket 014: per-mesh UDF bake ---
     pub sdf_bake_pipeline: wgpu::ComputePipeline,
@@ -1358,7 +1407,15 @@ pub struct Renderer {
     // Cached model GPU buffers (static models only)
     model_gpu_cache: HashMap<u64, Option<Vec<GpuMesh>>>,
     model_draw_commands: Vec<CachedModelDraw>,
-    model_uniform_buffers: Vec<wgpu::Buffer>,
+    /// Pooled per-draw uniforms for cached-model draws: ONE buffer with
+    /// per-slot bind groups at 256 B offsets. Draw submission packs each
+    /// slot's Uniforms3D into `model_uniform_scratch` CPU-side; end-frame
+    /// flushes the whole range with a single `write_buffer`. (Previously
+    /// one buffer + one 208 B write per MESH per frame — ~450 calls/frame
+    /// for the forest. Same pooling pattern as scene.rs node uniforms.)
+    model_uniform_pool: wgpu::Buffer,
+    model_uniform_pool_capacity: usize,
+    model_uniform_scratch: Vec<u8>,
     model_uniform_bind_groups: Vec<wgpu::BindGroup>,
     next_model_uniform_slot: usize,
     current_vp_matrix: [[f32; 4]; 4],
@@ -1577,6 +1634,10 @@ pub struct Renderer {
     /// Parallel to `planar_probes` (1-based index minus one). Allocated
     /// alongside the probe in `create_planar_reflection`.
     pub planar_probe_view_buffers: Vec<Option<wgpu::Buffer>>,
+    /// Cached per-probe PerView bind group (live env/BRDF/shadow views).
+    /// Rebuilding one per probe per frame was measurable churn — the
+    /// inputs only change on env (re)load or probe creation, both of
+    /// which clear the cache slot.
     pub planar_probe_view_bgs:     Vec<Option<wgpu::BindGroup>>,
     /// EN-011 — lazily-built resources for rendering cached models (trees,
     /// house) into the planar probe with a mirrored VP. Single-target HDR
@@ -2367,27 +2428,21 @@ impl Renderer {
             cache: None,
         });
 
-        // --- Pre-allocate model uniform buffer pool (64 slots for cached model draws) ---
-        let model_uniform_count = 64;
-        let mut model_uniform_buffers = Vec::with_capacity(model_uniform_count);
-        let mut model_uniform_bind_groups = Vec::with_capacity(model_uniform_count);
-        for _ in 0..model_uniform_count {
-            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("model_uniform"),
-                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, prev_mvp: IDENTITY_MAT4, model_tint: [1.0; 4] }),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("model_uniform_bg"),
-                layout: &uniform_3d_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf.as_entire_binding(),
-                }],
-            });
-            model_uniform_buffers.push(buf);
-            model_uniform_bind_groups.push(bg);
-        }
+        // --- Pooled model uniform buffer (cached model draws) ---
+        // 1024 slots × 256 B = 256 KB; grows by doubling if a scene
+        // submits more cached draws than that.
+        let model_uniform_count = 1024;
+        let model_uniform_pool = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("model_uniform_pool"),
+            size: (model_uniform_count * MODEL_UNIFORM_STRIDE) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let model_uniform_bind_groups: Vec<wgpu::BindGroup> = (0..model_uniform_count)
+            .map(|slot| Self::model_uniform_bg_for_slot(
+                &device, &uniform_3d_layout, &model_uniform_pool, slot,
+            ))
+            .collect();
 
         // (shadow_map already created above before lighting bind group.)
 
@@ -6252,6 +6307,8 @@ impl Renderer {
             card_light_layout,
             card_light_uniform,
             card_light_bg_cache: None,
+            card_light_input_hash: 0,
+            card_content_version: 0,
             sdf_bake_pipeline,
             sdf_bake_layout,
             sdf_bake_uniform,
@@ -6345,7 +6402,9 @@ impl Renderer {
             persistent_ib_3d_capacity: ib_3d_cap,
             model_gpu_cache: HashMap::new(),
             model_draw_commands: Vec::with_capacity(64),
-            model_uniform_buffers,
+            model_uniform_pool,
+            model_uniform_pool_capacity: model_uniform_count,
+            model_uniform_scratch: Vec::new(),
             model_uniform_bind_groups,
             next_model_uniform_slot: 0,
             current_vp_matrix: IDENTITY_MAT4,
@@ -6872,6 +6931,9 @@ impl Renderer {
         const CAPTURE_MAX_PER_FRAME: usize = 20;
         let take = scene.pending_card_captures.len().min(CAPTURE_MAX_PER_FRAME);
         let pending: Vec<f64> = scene.pending_card_captures.drain(..take).collect();
+        // Card albedo/emissive content changes → the relight gate must
+        // re-run even if the lighting itself didn't move.
+        self.card_content_version = self.card_content_version.wrapping_add(1);
 
         // Pre-compute per-slot world-space normals for the whole batch.
         // `slot_meta` is a Vec<[f32;4]> where entry `first_slot + axis`
@@ -7154,6 +7216,30 @@ impl Renderer {
         } else {
             [f32::INFINITY, f32::INFINITY, f32::INFINITY, 0.0]
         };
+
+        // Dirty gate: relight only when a lighting-relevant input
+        // changed. The view matrix is deliberately EXCLUDED — it only
+        // shifts which cascade a card texel samples for its shadow term
+        // (resolution, not occlusion), and including it would re-trigger
+        // the full-atlas repaint on every camera move. Cascade VPs are
+        // included: they are byte-stable under the shadow re-fit slack
+        // and change only when the cascades actually re-fit. Dynamic
+        // casters' shadows on GI cards may lag until the next relight —
+        // a coarse-GI-feed approximation that is not visually
+        // resolvable.
+        let mut input_hash = types::FNV_OFFSET;
+        input_hash = types::fnv1a_bytes(input_hash, bytemuck::bytes_of(&sun_dir_ws));
+        input_hash = types::fnv1a_bytes(input_hash, bytemuck::bytes_of(&sun_color));
+        input_hash = types::fnv1a_bytes(input_hash, bytemuck::bytes_of(&sky_color));
+        input_hash = types::fnv1a_bytes(input_hash, bytemuck::bytes_of(&shadow_vps));
+        input_hash = types::fnv1a_bytes(input_hash, bytemuck::bytes_of(&shadow_splits));
+        input_hash = types::fnv1a_bytes(input_hash, &[shadows_enabled as u8]);
+        input_hash = types::fnv1a_bytes(input_hash, &scene.next_card_slot.to_le_bytes());
+        input_hash = types::fnv1a_bytes(input_hash, &self.card_content_version.to_le_bytes());
+        if input_hash == self.card_light_input_hash {
+            return;
+        }
+        self.card_light_input_hash = input_hash;
 
         let params = CardLightParams {
             sun_dir: sun_dir_ws,
@@ -7979,6 +8065,8 @@ impl Renderer {
         let diffuse_view_bg = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let new_lighting_bg = self.make_lighting_bind_group("lighting_bg", &view, &diffuse_view_bg);
 
+        // Env textures feed the cached per-probe PerView bind groups.
+        for bg in self.planar_probe_view_bgs.iter_mut() { *bg = None; }
         self.sky_texture = Some(texture);
         self.sky_bind_group = Some(bg);
         self.env_diffuse_texture = Some(diffuse_texture);
@@ -8764,6 +8852,8 @@ impl Renderer {
         }
         // Flush pending joint matrices to GPU right before rendering
         self.flush_joint_matrices();
+        // One pooled upload for every cached-model draw's uniforms.
+        self.flush_model_uniforms();
 
         // Q1: If rendering to a texture, use the RT view. Otherwise use the surface.
         // We take ownership of the RT views (via Option::take) to avoid holding a
@@ -8955,6 +9045,8 @@ impl Renderer {
         }
         profiler.begin("joint_flush");
         self.flush_joint_matrices();
+        // One pooled upload for every cached-model draw's uniforms.
+        self.flush_model_uniforms();
         profiler.end("joint_flush");
 
         profiler.begin("surface_acquire");
@@ -10119,6 +10211,20 @@ impl Renderer {
         }
 
         let gpu_meshes: Vec<GpuMesh> = meshes.iter().map(|mesh| {
+            // Object-space AABB for per-pass frustum culling. Sentinel
+            // (min > max) when the mesh has no vertices.
+            let mut local_min = [f32::MAX; 3];
+            let mut local_max = [f32::MIN; 3];
+            for v in mesh.vertices.iter() {
+                for a in 0..3 {
+                    if v.position[a] < local_min[a] { local_min[a] = v.position[a]; }
+                    if v.position[a] > local_max[a] { local_max[a] = v.position[a]; }
+                }
+            }
+            if mesh.vertices.is_empty() {
+                local_min = [1.0; 3];
+                local_max = [-1.0; 3];
+            }
             let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("cached_model_vb"),
                 contents: bytemuck::cast_slice(&mesh.vertices),
@@ -10177,6 +10283,8 @@ impl Renderer {
                 vb,
                 ib,
                 index_count: mesh.indices.len() as u32,
+                local_min,
+                local_max,
                 material_bg,
                 _material_uniform: material_uniform,
                 shadow_cutout_bg,
@@ -10215,10 +10323,71 @@ impl Renderer {
         let needs_new = self.draw_calls_3d.is_empty()
             || self.draw_calls_3d.last().unwrap().texture_idx != texture_idx;
         if needs_new {
-            self.draw_calls_3d.push(DrawCall3D {
-                texture_idx,
-                index_start: self.indices_3d.len() as u32,
-            });
+            self.push_draw_call_3d(texture_idx, false);
+        }
+    }
+
+    /// Start a NEW 3D segment even when the texture matches the current
+    /// one. Model draws use this (with `bounded = true`) so each model
+    /// gets its own segment with its own world AABB + content identity —
+    /// the shadow pass then culls/caches per segment instead of treating
+    /// the whole immediate batch as one unbounded, always-dirty caster.
+    fn push_draw_call_3d(&mut self, texture_idx: u32, bounded: bool) {
+        self.draw_calls_3d.push(DrawCall3D {
+            texture_idx,
+            index_start: self.indices_3d.len() as u32,
+            vertex_start: self.vertices_3d.len() as u32,
+            wmin: [f32::MAX; 3],
+            wmax: [f32::MIN; 3],
+            has_skinned: false,
+            content_hash: FNV_OFFSET,
+            bounded,
+        });
+    }
+
+    /// Fill bounds + content hash for primitive-only 3D segments
+    /// (drawCube/drawSphere/…, whose ~20 inline push sites aren't
+    /// instrumented). Their verts are world-space, so a min/max +
+    /// position hash over the segment's vertex range is exact. Skinned
+    /// verts can't be bounded from vertex data (rest-pose positions) —
+    /// a segment containing any keeps the "no bounds" sentinel and is
+    /// treated as always-dirty, which reproduces the old conservative
+    /// behavior. Idempotent per frame via the `bounded` flag.
+    pub(crate) fn scan_unbounded_segments_3d(&mut self) {
+        let num_calls = self.draw_calls_3d.len();
+        for ci in 0..num_calls {
+            if self.draw_calls_3d[ci].bounded { continue; }
+            let vstart = self.draw_calls_3d[ci].vertex_start as usize;
+            let vend = if ci + 1 < num_calls {
+                self.draw_calls_3d[ci + 1].vertex_start as usize
+            } else {
+                self.vertices_3d.len()
+            };
+            let mut wmin = [f32::MAX; 3];
+            let mut wmax = [f32::MIN; 3];
+            let mut hash = FNV_OFFSET;
+            let mut has_skinned = false;
+            for v in &self.vertices_3d[vstart.min(vend)..vend] {
+                let is_skinned =
+                    v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
+                if is_skinned {
+                    has_skinned = true;
+                    continue;
+                }
+                for a in 0..3 {
+                    if v.position[a] < wmin[a] { wmin[a] = v.position[a]; }
+                    if v.position[a] > wmax[a] { wmax[a] = v.position[a]; }
+                }
+                hash = fnv1a_bytes(hash, bytemuck::bytes_of(&v.position));
+            }
+            let call = &mut self.draw_calls_3d[ci];
+            call.has_skinned = has_skinned;
+            if !has_skinned && wmin[0] <= wmax[0] {
+                call.wmin = wmin;
+                call.wmax = wmax;
+            }
+            call.content_hash = hash;
+            call.bounded = true;
         }
     }
 
@@ -11269,6 +11438,13 @@ impl Renderer {
         }
     }
 
+    /// Authoring control: whether a material's draws render into
+    /// planar-reflection probes (default true). Use for content that
+    /// is sub-pixel at probe resolution (e.g. instanced grass).
+    pub fn set_material_probe_visible(&mut self, material: u32, visible: bool) {
+        self.material_system.set_probe_visible(material, visible);
+    }
+
     /// EN-011 — render every registered probe's RT for this frame.
     /// Called from `end_frame_with_scene` BEFORE the main material
     /// pass so the probe textures are ready when materials sample
@@ -11292,6 +11468,7 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         scene: &crate::scene::SceneGraph,
+        profiler: &mut crate::profiler::Profiler,
     ) {
         if self.planar_probes.iter().all(|p| p.is_none()) { return; }
         // Scene-graph nodes render into the probe too (they share the
@@ -11584,70 +11761,99 @@ impl Renderer {
             // on a struct field (it's owned by `sky_bind_group`), so
             // we build fresh views here each frame; that's a cheap
             // Arc bump on the underlying wgpu Texture.
-            let sky_view_owned: Option<wgpu::TextureView> = self.sky_texture
-                .as_ref()
-                .map(|t| t.create_view(&Default::default()));
-            let env_view: &wgpu::TextureView = sky_view_owned
-                .as_ref()
-                .unwrap_or(&self.scene_env_default_view);
-            let diffuse_view_owned: Option<wgpu::TextureView> = self.env_diffuse_texture
-                .as_ref()
-                .map(|t| t.create_view(&Default::default()));
-            let env_diffuse_view: &wgpu::TextureView = diffuse_view_owned
-                .as_ref()
-                .unwrap_or(&self.scene_env_default_view);
+            // Cached per-probe PerView bind group — inputs (env, BRDF,
+            // shadow views, the per-probe UBO) are all stable objects;
+            // env (re)loads and probe creation clear the cache slot.
+            if self.planar_probe_view_bgs[i].is_none() {
+                let sky_view_owned: Option<wgpu::TextureView> = self.sky_texture
+                    .as_ref()
+                    .map(|t| t.create_view(&Default::default()));
+                let env_view: &wgpu::TextureView = sky_view_owned
+                    .as_ref()
+                    .unwrap_or(&self.scene_env_default_view);
+                let diffuse_view_owned: Option<wgpu::TextureView> = self.env_diffuse_texture
+                    .as_ref()
+                    .map(|t| t.create_view(&Default::default()));
+                let env_diffuse_view: &wgpu::TextureView = diffuse_view_owned
+                    .as_ref()
+                    .unwrap_or(&self.scene_env_default_view);
+                self.planar_probe_view_bgs[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("planar_probe_per_view_bg_live"),
+                    layout: &self.material_system.layouts.per_view,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: view_buf.as_entire_binding() },
+                        // env (specular) tex + sampler
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(env_view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
+                        // env diffuse tex
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(env_diffuse_view) },
+                        // BRDF LUT tex + sampler
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
+                        // 3 shadow cascades — same depth views the main
+                        // pass binds, so the reflection picks up sun
+                        // shadows without re-rendering the cascades.
+                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                    ],
+                }));
+            }
+            let probe_view_bg = self.planar_probe_view_bgs[i].as_ref().unwrap();
 
-            let probe_view_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("planar_probe_per_view_bg_live"),
-                layout: &self.material_system.layouts.per_view,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: view_buf.as_entire_binding() },
-                    // env (specular) tex + sampler
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(env_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.env_sampler) },
-                    // env diffuse tex
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(env_diffuse_view) },
-                    // BRDF LUT tex + sampler
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.brdf_lut_view) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.brdf_lut_sampler) },
-                    // 3 shadow cascades — same depth views the main
-                    // pass binds, so the reflection picks up sun
-                    // shadows without re-rendering the cascades.
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                ],
-            });
-
-            // Write each cached-model draw's [mirror_mvp, model] into the
-            // dynamic reflection uniform buffer up front (queue writes
-            // happen-before the encoded pass), and record the draw list.
-            // Scene-graph nodes append after the cached models in the same
-            // slot space — creation order decides who survives the cap, so
-            // games should create hero geometry before filler (grass).
+            // Stage each surviving draw's [mirror_mvp, model] into ONE
+            // batched upload (this was ~450 individual 128 B
+            // `write_buffer` calls per probe per frame), and record the
+            // draw list. Draws are culled against the MIRRORED frustum —
+            // the oblique near plane doubles as the water-plane clip, so
+            // below-plane geometry culls here too. Scene-graph nodes
+            // append after the cached models in the same slot space —
+            // creation order decides who survives the cap, so games
+            // should create hero geometry before filler (grass).
+            let mirror_planes = crate::scene::extract_frustum_planes(&mirror_vp);
             let mut reflect_draws: Vec<(u64, usize, u32)> = Vec::new();
             let mut node_slots: Vec<(usize, u32)> = Vec::new();
             if let Some(model_buf) = &self.reflect_model_buf {
+                let stride = REFLECT_STRIDE as usize;
+                let mut staged: Vec<u8> = Vec::with_capacity(stride * 128);
                 for cmd in self.model_draw_commands.iter() {
                     let slot = reflect_draws.len();
                     if slot >= REFLECT_MAX_DRAWS { break; }
+                    let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) else { continue };
+                    if cmd.mesh_idx >= meshes.len() { continue; }
+                    let mesh = &meshes[cmd.mesh_idx];
+                    let (wmin, wmax) =
+                        transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
+                    if wmin[0] <= wmax[0]
+                        && crate::scene::aabb_outside_frustum(&mirror_planes, wmin, wmax)
+                    {
+                        continue;
+                    }
                     let mirror_mvp = mat4_multiply(mirror_vp, cmd.model);
-                    let mut data = [0u8; 128];
-                    data[0..64].copy_from_slice(bytemuck::bytes_of(&mirror_mvp));
-                    data[64..128].copy_from_slice(bytemuck::bytes_of(&cmd.model));
-                    self.queue.write_buffer(model_buf, slot as u64 * REFLECT_STRIDE, &data);
+                    let base = staged.len();
+                    staged.resize(base + stride, 0);
+                    staged[base..base + 64].copy_from_slice(bytemuck::bytes_of(&mirror_mvp));
+                    staged[base + 64..base + 128].copy_from_slice(bytemuck::bytes_of(&cmd.model));
                     reflect_draws.push((cmd.cache_handle, cmd.mesh_idx, slot as u32));
                 }
-                for (i, (_vb, _ib, _ic, _bg, model)) in scene_draws.iter().enumerate() {
+                for (i, (_vb, _ib, _ic, _bg, model, wmin, wmax)) in scene_draws.iter().enumerate() {
                     let slot = reflect_draws.len() + node_slots.len();
                     if slot >= REFLECT_MAX_DRAWS { break; }
+                    if wmin[0] <= wmax[0]
+                        && crate::scene::aabb_outside_frustum(&mirror_planes, *wmin, *wmax)
+                    {
+                        continue;
+                    }
                     let mirror_mvp = mat4_multiply(mirror_vp, *model);
-                    let mut data = [0u8; 128];
-                    data[0..64].copy_from_slice(bytemuck::bytes_of(&mirror_mvp));
-                    data[64..128].copy_from_slice(bytemuck::bytes_of(model));
-                    self.queue.write_buffer(model_buf, slot as u64 * REFLECT_STRIDE, &data);
+                    let base = staged.len();
+                    staged.resize(base + stride, 0);
+                    staged[base..base + 64].copy_from_slice(bytemuck::bytes_of(&mirror_mvp));
+                    staged[base + 64..base + 128].copy_from_slice(bytemuck::bytes_of(model));
                     node_slots.push((i, slot as u32));
+                }
+                if !staged.is_empty() {
+                    self.queue.write_buffer(model_buf, 0, &staged);
                 }
             }
 
@@ -11656,7 +11862,7 @@ impl Renderer {
             // sky by alpha (a=0 → no reflected geometry → show the sky dome).
             let clear_color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 
-            let view_bg = &probe_view_bg;
+            let view_bg = probe_view_bg;
             let cache   = &self.model_gpu_cache;
             let mat_sys = &self.material_system;
             let refl_pipeline = self.reflect_scene_pipeline.as_ref();
@@ -11712,13 +11918,18 @@ impl Renderer {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: profiler.pass_timestamp_writes("planar_probe_materials"),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
                 mat_sys.dispatch_with_view(
                     &mut pass, view_bg,
-                    |handle| !excluded.contains(&handle),
+                    // Excluded: probe-linked materials (the water plane
+                    // itself) and anything flagged not-probe-visible
+                    // (authoring control — e.g. sub-pixel instanced
+                    // grass in a 512² probe).
+                    |handle| !excluded.contains(&handle)
+                        && mat_sys.material_probe_visible(handle),
                     // EN-011 V2 — swap to each material's sibling
                     // pipeline with cull_mode flipped Front→Back.
                     // Reflection mirrors world-space, which inverts
@@ -11768,7 +11979,7 @@ impl Renderer {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: profiler.pass_timestamp_writes("planar_probe_models"),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -11794,7 +12005,8 @@ impl Renderer {
                         // Vertex3D and node material bind groups share the
                         // scene material layout the pipeline's g2 expects.
                         for (i, slot) in &node_slots {
-                            let (vb, ib, index_count, mat_bg, _model) = &scene_draws[*i];
+                            let (vb, ib, index_count, mat_bg, _model, _wmin, _wmax) =
+                                &scene_draws[*i];
                             pass.set_bind_group(0, rmbg, &[*slot * REFLECT_STRIDE as u32]);
                             pass.set_bind_group(2, *mat_bg, &[]);
                             pass.set_vertex_buffer(0, vb.slice(..));

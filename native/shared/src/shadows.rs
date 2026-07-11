@@ -25,6 +25,13 @@ pub const SHADOW_FAR: f32 = 100.0;
 /// min_uniform_buffer_offset_alignment. 256 is safe on every platform.
 pub const SHADOW_UNIFORM_STRIDE: u32 = 256;
 pub const SHADOW_MAX_NODES: u32 = 1024;
+/// Slots at the TAIL of each cascade's uniform region reserved for
+/// dynamic (immediate-batch) casters, which re-render every frame while
+/// static casters keep their cached depth. Disjoint slot ranges keep the
+/// every-frame dynamic writes from clobbering the uniforms the static
+/// render was encoded against (all `write_buffer`s land at submit,
+/// before any pass executes).
+pub const SHADOW_MAX_DYNAMIC: u32 = 64;
 
 /// Depth-only shader for shadow pass.
 pub const SHADOW_SHADER: &str = "
@@ -159,6 +166,15 @@ pub struct ShadowUniforms {
 pub struct ShadowMap {
     pub depth_textures: [wgpu::Texture; NUM_CASCADES],
     pub depth_views: [wgpu::TextureView; NUM_CASCADES],
+    /// Cached static-caster depth per cascade ("cached whole-scene
+    /// shadows"): scene nodes / cached models / material draws render in
+    /// here only when the cascade's VP or static content changes. Every
+    /// frame the live cascade texture starts as a copy of this and only
+    /// dynamic casters (the immediate batch: animated characters,
+    /// moving primitives) are drawn on top — so one animated model no
+    /// longer forces the whole forest to re-render three times.
+    pub static_depth_textures: [wgpu::Texture; NUM_CASCADES],
+    pub static_depth_views: [wgpu::TextureView; NUM_CASCADES],
     pub sampler: wgpu::Sampler,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
@@ -218,7 +234,52 @@ pub struct ShadowMap {
     /// dropped well below it — so idle animations stop re-fitting the
     /// cascades every few frames.
     pancake_hysteresis: [[f32; 2]; NUM_CASCADES],
+    /// Per-cascade STATIC caster-content signature at the last render
+    /// of that cascade's static depth texture (hash of every
+    /// non-immediate caster that passed its frustum filter: identity +
+    /// transform). 0 = never rendered. Together with a per-cascade VP
+    /// compare this decides when the static cache must re-render — the
+    /// whole-pass cache above only ever hit for fully-retained scenes.
+    pub rendered_cascade_sig: [u64; NUM_CASCADES],
+    /// Whether the live cascade texture currently contains dynamic
+    /// casters. A cascade whose dynamics all left still needs one
+    /// refresh copy to clear their stale shadows.
+    pub had_dynamic: [bool; NUM_CASCADES],
+    /// Monotonic counter folded into animated casters' signatures so
+    /// any cascade containing one re-renders every frame.
+    pub frame_nonce: u64,
+    /// Cascade re-fit slack — the accepted ortho fit per cascade
+    /// (cascades ≥ 1). While the freshly-required bounding sphere and
+    /// pancake extents still fit inside the accepted volume, the
+    /// cascade keeps its previous VP byte-for-byte, so camera travel
+    /// of a few metres no longer invalidates the far cascades' cached
+    /// depth. Accepted fits are inflated by `REFIT_SLACK` (the
+    /// resolution cost of that inflation is bounded and uniform; the
+    /// near cascade is exempt and stays exact-fit).
+    accepted_fit: [Option<AcceptedFit>; NUM_CASCADES],
+    accepted_light_dir: Option<[f32; 3]>,
 }
+
+/// Accepted (slack-inflated) ortho fit for one cascade. `ls_x`/`ls_y`
+/// are the snapped center in the light-plane basis; `radius` is the
+/// final ortho half-extent; `back`/`far` the accepted pancake extents
+/// along the light axis relative to `center`.
+#[derive(Copy, Clone)]
+struct AcceptedFit {
+    ls_x: f32,
+    ls_y: f32,
+    center: [f32; 3],
+    radius: f32,
+    back: f32,
+    far: f32,
+}
+
+/// Re-fit slack factor for cascades ≥ 1. 15% larger ortho extent buys
+/// ~0.15 × radius of camera travel between re-fits (≈ 4-5 m on a far
+/// cascade) at the cost of ~15% coarser texels on the mid/far cascades
+/// only. PCF radius and the normal-offset receiver bias are
+/// texel-proportional, so the softening stays coherent (no acne).
+const REFIT_SLACK: f32 = 1.15;
 
 impl ShadowMap {
     pub fn new(
@@ -226,9 +287,11 @@ impl ShadowMap {
         vertex_layout: wgpu::VertexBufferLayout<'static>,
         joint_layout: &wgpu::BindGroupLayout,
     ) -> Self {
-        // Create NUM_CASCADES depth textures
+        // Create NUM_CASCADES depth textures (live + static cache).
         let mut depth_textures_vec: Vec<wgpu::Texture> = Vec::new();
         let mut depth_views_vec: Vec<wgpu::TextureView> = Vec::new();
+        let mut static_textures_vec: Vec<wgpu::Texture> = Vec::new();
+        let mut static_views_vec: Vec<wgpu::TextureView> = Vec::new();
         for i in 0..NUM_CASCADES {
             let tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("shadow_depth_cascade_{}", i)),
@@ -243,12 +306,33 @@ impl ShadowMap {
                 format: wgpu::TextureFormat::Depth32Float,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
+                    | wgpu::TextureUsages::COPY_SRC
+                    // Refreshed from the static cache before dynamic
+                    // casters draw on top.
+                    | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
             depth_textures_vec.push(tex);
             depth_views_vec.push(view);
+            let stex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("shadow_static_depth_cascade_{}", i)),
+                size: wgpu::Extent3d {
+                    width: CASCADE_MAP_SIZE,
+                    height: CASCADE_MAP_SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let sview = stex.create_view(&wgpu::TextureViewDescriptor::default());
+            static_textures_vec.push(stex);
+            static_views_vec.push(sview);
         }
 
         // Convert Vecs to fixed-size arrays
@@ -256,6 +340,10 @@ impl ShadowMap {
             depth_textures_vec.try_into().unwrap_or_else(|_| panic!("cascade texture count mismatch"));
         let depth_views: [wgpu::TextureView; NUM_CASCADES] =
             depth_views_vec.try_into().unwrap_or_else(|_| panic!("cascade view count mismatch"));
+        let static_depth_textures: [wgpu::Texture; NUM_CASCADES] =
+            static_textures_vec.try_into().unwrap_or_else(|_| panic!("static cascade texture count mismatch"));
+        let static_depth_views: [wgpu::TextureView; NUM_CASCADES] =
+            static_views_vec.try_into().unwrap_or_else(|_| panic!("static cascade view count mismatch"));
 
         // Comparison sampler for PCF
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -538,6 +626,8 @@ impl ShadowMap {
         Self {
             depth_textures,
             depth_views,
+            static_depth_textures,
+            static_depth_views,
             sampler,
             bind_group_layout,
             bind_group,
@@ -557,6 +647,11 @@ impl ShadowMap {
             rendered_light_dir: None,
             rendered_scene_version: 0,
             pancake_hysteresis: [[0.0; 2]; NUM_CASCADES],
+            rendered_cascade_sig: [0; NUM_CASCADES],
+            had_dynamic: [false; NUM_CASCADES],
+            frame_nonce: 0,
+            accepted_fit: [None; NUM_CASCADES],
+            accepted_light_dir: None,
         }
     }
 
@@ -567,6 +662,9 @@ impl ShadowMap {
         self.dirty = true;
         self.rendered_light_vps = None;
         self.rendered_light_dir = None;
+        self.rendered_cascade_sig = [0; NUM_CASCADES];
+        self.had_dynamic = [false; NUM_CASCADES];
+        self.accepted_fit = [None; NUM_CASCADES];
     }
 
     /// Compute cascade view-projection matrices by splitting the camera
@@ -614,6 +712,13 @@ impl ShadowMap {
         // cascade_splits[i] = far edge of cascade i.
         for i in 0..NUM_CASCADES {
             self.cascade_splits[i] = splits[i + 1];
+        }
+
+        // A light-direction change invalidates every accepted fit (the
+        // light-plane basis itself moves).
+        if self.accepted_light_dir != Some(d) {
+            self.accepted_fit = [None; NUM_CASCADES];
+            self.accepted_light_dir = Some(d);
         }
 
         // Light-space basis vectors for texel snapping
@@ -691,6 +796,57 @@ impl ShadowMap {
                 if r2 > radius { radius = r2; }
             }
             radius = radius.sqrt();
+
+            // Re-fit slack (cascades ≥ 1): if the required sphere and
+            // pancake extents still fit inside the previously accepted
+            // (slack-inflated) ortho volume, keep the previous VP
+            // byte-identical. The per-cascade shadow cache compares VPs
+            // exactly, so a kept VP means the cascade's cached depth
+            // stays valid while the camera travels within the slack.
+            if c > 0 {
+                if let Some(acc) = self.accepted_fit[c] {
+                    let ls_x = dot3(center, right);
+                    let ls_y = dot3(center, ortho_up);
+                    let fits_xy = (ls_x - acc.ls_x).abs() + radius <= acc.radius
+                        && (ls_y - acc.ls_y).abs() + radius <= acc.radius;
+                    // Required extents along the light axis, relative to
+                    // the ACCEPTED center: the slice sphere plus the
+                    // scene AABB corners (same needs the pancake fit
+                    // below covers, measured against the old volume).
+                    let rel = [
+                        center[0] - acc.center[0],
+                        center[1] - acc.center[1],
+                        center[2] - acc.center[2],
+                    ];
+                    let along = dot3(rel, d);
+                    let mut req_back = along + radius;
+                    let mut req_far = radius - along;
+                    if let Some((bmin, bmax)) = scene_bounds {
+                        for i in 0..8 {
+                            let p = [
+                                if i & 1 == 0 { bmin[0] } else { bmax[0] },
+                                if i & 2 == 0 { bmin[1] } else { bmax[1] },
+                                if i & 4 == 0 { bmin[2] } else { bmax[2] },
+                            ];
+                            let a = dot3(
+                                [
+                                    p[0] - acc.center[0],
+                                    p[1] - acc.center[1],
+                                    p[2] - acc.center[2],
+                                ],
+                                d,
+                            );
+                            if a > req_back { req_back = a; }
+                            if -a > req_far { req_far = -a; }
+                        }
+                    }
+                    if fits_xy && req_back <= acc.back && req_far <= acc.far {
+                        // Keep light_vps[c] from the accepted fit.
+                        continue;
+                    }
+                }
+            }
+            let radius = if c > 0 { radius * REFIT_SLACK } else { radius };
             // Quantize radius so subpixel camera movement can't shift
             // the texel grid.
             let radius = (radius * 16.0).ceil() / 16.0;
@@ -787,6 +943,19 @@ impl ShadowMap {
             );
 
             self.light_vps[c] = crate::renderer::mat4_multiply(light_proj, snapped_view);
+
+            // Record the accepted fit so subsequent frames can keep this
+            // VP while their requirements stay inside it (cascades ≥ 1).
+            if c > 0 {
+                self.accepted_fit[c] = Some(AcceptedFit {
+                    ls_x: dot3(snapped_center, right),
+                    ls_y: dot3(snapped_center, ortho_up),
+                    center: snapped_center,
+                    radius,
+                    back: pancake_back,
+                    far: pancake_far,
+                });
+            }
         }
     }
 

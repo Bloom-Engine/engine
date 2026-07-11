@@ -74,7 +74,7 @@ export {
   compileMaterialCutout,
   compileMaterialInstanced, createInstanceBuffer,
   drawMeshWithMaterialInstanced, destroyInstanceBuffer,
-  createPlanarReflection, setMaterialReflectionProbe,
+  createPlanarReflection, setMaterialReflectionProbe, setMaterialProbeVisible,
   compileMaterialFromFile, loadMaterial,
   createMeshExplicit,
   loadModelAnimation, updateModelAnimation, createMesh,

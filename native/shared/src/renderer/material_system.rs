@@ -210,6 +210,13 @@ pub struct MaterialSystem {
     // Compiled pipelines, indexed by MaterialHandle (1-based; 0 = invalid).
     pub pipelines: Vec<Option<MaterialPipeline>>,
 
+    // Per-material "render into planar reflection probes" flag (1-based
+    // like `pipelines`, default true). Authoring control for content
+    // that is sub-pixel or irrelevant at probe resolution — e.g. a 20k-
+    // instance grass field in a 512² water probe — mirroring the
+    // "visible in reflections" toggle every major engine exposes.
+    pub probe_visible: Vec<bool>,
+
     // Per-frame UBO + bind group (rewritten at the start of every frame).
     pub per_frame_buffer: wgpu::Buffer,
     pub per_frame_bg:     wgpu::BindGroup,
@@ -606,6 +613,7 @@ impl MaterialSystem {
         Self {
             layouts,
             pipelines: Vec::new(),
+            probe_visible: Vec::new(),
             per_frame_buffer,
             per_frame_bg,
             per_view_buffer,
@@ -687,7 +695,23 @@ impl MaterialSystem {
         };
         let pipeline = compile_material(device, &self.layouts, &desc)?;
         self.pipelines.push(Some(pipeline));
+        self.probe_visible.push(true);
         Ok(self.pipelines.len() as MaterialHandle)
+    }
+
+    /// Set whether a material's draws render into planar-reflection
+    /// probes (default true). See `probe_visible` field docs.
+    pub fn set_probe_visible(&mut self, material: MaterialHandle, visible: bool) {
+        if material >= 1 {
+            if let Some(slot) = self.probe_visible.get_mut(material as usize - 1) {
+                *slot = visible;
+            }
+        }
+    }
+
+    pub fn material_probe_visible(&self, material: MaterialHandle) -> bool {
+        if material < 1 { return true; }
+        self.probe_visible.get(material as usize - 1).copied().unwrap_or(true)
     }
 
     // --- Frame lifecycle ----------------------------------------------

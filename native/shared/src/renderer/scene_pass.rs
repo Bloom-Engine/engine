@@ -159,10 +159,31 @@ impl Renderer {
             pass.set_bind_group(3, &self.joint_bind_group, &[]);
 
             if has_cached_models {
+                // Frustum-cull cached-model draws against the camera. These
+                // commands (the forest: ~400 draws/frame) previously had no
+                // culling in any pass — everything behind the camera still
+                // paid bind-group switches + a full VS pass. AABBs are
+                // conservative (cache-time local bounds × model matrix), and
+                // the unjittered projection is used so TAA's sub-pixel
+                // jitter can't flicker a borderline caster (the AABB slop
+                // exceeds jitter by orders of magnitude).
+                let cam_vp = mat4_multiply(
+                    self.current_proj_matrix_unjittered,
+                    self.current_view_matrix,
+                );
+                let cam_planes = crate::scene::extract_frustum_planes(&cam_vp);
                 for cmd in &self.model_draw_commands {
                     if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
                         if cmd.mesh_idx < meshes.len() {
                             let mesh = &meshes[cmd.mesh_idx];
+                            let (wmin, wmax) = transform_aabb(
+                                &cmd.model, mesh.local_min, mesh.local_max,
+                            );
+                            if wmin[0] <= wmax[0]
+                                && crate::scene::aabb_outside_frustum(&cam_planes, wmin, wmax)
+                            {
+                                continue;
+                            }
                             pass.set_bind_group(0, &self.model_uniform_bind_groups[cmd.uniform_slot], &[]);
                             pass.set_bind_group(2, &mesh.material_bg, &[]);
                             pass.set_vertex_buffer(0, mesh.vb.slice(..));
@@ -183,7 +204,7 @@ impl Renderer {
     // sampleable when materials run. No-op when no probes are
     // registered or no opaque material draws are queued.
     profiler.begin("planar_reflections");
-    self.dispatch_planar_reflections(&mut *encoder, scene);
+    self.dispatch_planar_reflections(&mut *encoder, scene, profiler);
     profiler.end("planar_reflections");
 
     // Phase 2c — schedule the material pass through the render

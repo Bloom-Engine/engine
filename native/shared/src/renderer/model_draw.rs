@@ -27,12 +27,11 @@ impl Renderer {
             );
             let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
 
-            // Write uniform for this draw
-            self.queue.write_buffer(
-                &self.model_uniform_buffers[slot],
-                0,
-                bytemuck::bytes_of(&Uniforms3D { mvp: model_mvp, model: model_matrix, prev_mvp: model_mvp, model_tint: tint }),
-            );
+            // Stage uniform for this draw (flushed in one write at end-frame)
+            self.stage_model_uniform(slot, &Uniforms3D {
+                mvp: model_mvp, model: model_matrix,
+                prev_mvp: model_mvp, model_tint: tint,
+            });
 
             self.model_draw_commands.push(CachedModelDraw {
                 uniform_slot: slot,
@@ -83,11 +82,10 @@ impl Renderer {
             self.ensure_model_uniform_slot(slot);
 
             let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
-            self.queue.write_buffer(
-                &self.model_uniform_buffers[slot],
-                0,
-                bytemuck::bytes_of(&Uniforms3D { mvp: model_mvp, model: model_matrix, prev_mvp: model_mvp, model_tint: tint }),
-            );
+            self.stage_model_uniform(slot, &Uniforms3D {
+                mvp: model_mvp, model: model_matrix,
+                prev_mvp: model_mvp, model_tint: tint,
+            });
 
             self.model_draw_commands.push(CachedModelDraw {
                 uniform_slot: slot,
@@ -98,24 +96,78 @@ impl Renderer {
         }
     }
 
-    fn ensure_model_uniform_slot(&mut self, slot: usize) {
-        while self.model_uniform_buffers.len() <= slot {
-            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("model_uniform"),
-                contents: bytemuck::bytes_of(&Uniforms3D { mvp: IDENTITY_MAT4, model: IDENTITY_MAT4, prev_mvp: IDENTITY_MAT4, model_tint: [1.0; 4] }),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("model_uniform_bg"),
-                layout: &self.uniform_3d_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf.as_entire_binding(),
-                }],
-            });
-            self.model_uniform_buffers.push(buf);
-            self.model_uniform_bind_groups.push(bg);
+    /// Bind group for one 256 B slot of the pooled model uniform buffer.
+    pub(super) fn model_uniform_bg_for_slot(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        pool: &wgpu::Buffer,
+        slot: usize,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("model_uniform_bg"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: pool,
+                    offset: (slot * MODEL_UNIFORM_STRIDE) as u64,
+                    size: std::num::NonZeroU64::new(
+                        std::mem::size_of::<Uniforms3D>() as u64,
+                    ),
+                }),
+            }],
+        })
+    }
+
+    /// Pack a draw's uniforms into the CPU scratch; `flush_model_uniforms`
+    /// uploads the whole used range in one `write_buffer` at end-frame.
+    fn stage_model_uniform(&mut self, slot: usize, uniforms: &Uniforms3D) {
+        self.ensure_model_uniform_slot(slot);
+        let off = slot * MODEL_UNIFORM_STRIDE;
+        if self.model_uniform_scratch.len() < off + MODEL_UNIFORM_STRIDE {
+            self.model_uniform_scratch.resize(off + MODEL_UNIFORM_STRIDE, 0);
         }
+        self.model_uniform_scratch[off..off + std::mem::size_of::<Uniforms3D>()]
+            .copy_from_slice(bytemuck::bytes_of(uniforms));
+    }
+
+    /// Upload every staged cached-model uniform in one write. Called once
+    /// per frame from the end-frame paths, before passes execute (queued
+    /// writes land at submit, ahead of all encoded passes).
+    pub(super) fn flush_model_uniforms(&mut self) {
+        if self.next_model_uniform_slot == 0 { return; }
+        let used = (self.next_model_uniform_slot * MODEL_UNIFORM_STRIDE)
+            .min(self.model_uniform_scratch.len());
+        if used > 0 {
+            self.queue.write_buffer(
+                &self.model_uniform_pool,
+                0,
+                &self.model_uniform_scratch[..used],
+            );
+        }
+    }
+
+    fn ensure_model_uniform_slot(&mut self, slot: usize) {
+        if slot < self.model_uniform_pool_capacity {
+            return;
+        }
+        // Grow by doubling: new pool + rebuild every slot bind group
+        // (rare — only when a scene exceeds the previous high-water mark).
+        let new_cap = (slot + 1)
+            .next_power_of_two()
+            .max(self.model_uniform_pool_capacity * 2);
+        self.model_uniform_pool = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("model_uniform_pool"),
+            size: (new_cap * MODEL_UNIFORM_STRIDE) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.model_uniform_bind_groups = (0..new_cap)
+            .map(|s| Self::model_uniform_bg_for_slot(
+                &self.device, &self.uniform_3d_layout, &self.model_uniform_pool, s,
+            ))
+            .collect();
+        self.model_uniform_pool_capacity = new_cap;
     }
 
     pub fn draw_model_mesh(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32) {
@@ -180,12 +232,15 @@ impl Renderer {
     /// pose once (`take_staged_skin_offset`) and pass the same offset to
     /// every primitive.
     pub fn draw_model_mesh_tinted_rotated_with_joints(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32, rot_y: f32, joint_offset: Option<f32>) {
-        self.ensure_draw_state_3d(texture_idx);
+        // Own bounded segment (even if the texture matches) so the shadow
+        // pass can cull + cache this draw independently of neighbours.
+        self.push_draw_call_3d(texture_idx, true);
         let joint_offset: f32 = joint_offset.unwrap_or(0.0);
 
         let cos_y = rot_y.cos();
         let sin_y = rot_y.sin();
         let base = self.vertices_3d.len() as u32;
+        let mut seg = SegBounds::new();
         for v in vertices {
             let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
             let pos = if is_skinned {
@@ -229,6 +284,7 @@ impl Renderer {
             } else {
                 v.joints
             };
+            seg.note(is_skinned, if is_skinned { v.position } else { pos });
             self.vertices_3d.push(Vertex3D {
                 position: pos,
                 normal,
@@ -247,6 +303,7 @@ impl Renderer {
         for &idx in indices {
             self.indices_3d.push(base + idx);
         }
+        self.finish_model_segment(seg, joint_offset);
     }
 
     pub fn draw_model_mesh_tinted(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32) {
@@ -270,10 +327,12 @@ impl Renderer {
     /// pop the staged pose once (`take_staged_skin_offset`) and pass the
     /// same offset to every primitive.
     pub fn draw_model_mesh_tinted_with_joints(&mut self, vertices: &[Vertex3D], indices: &[u32], position: [f32; 3], scale: f32, tint: [f32; 4], texture_idx: u32, joint_offset: Option<f32>) {
-        self.ensure_draw_state_3d(texture_idx);
+        // Own bounded segment — see the rotated variant.
+        self.push_draw_call_3d(texture_idx, true);
         let joint_offset: f32 = joint_offset.unwrap_or(0.0);
 
         let base = self.vertices_3d.len() as u32;
+        let mut seg = SegBounds::new();
         for v in vertices {
             // Check if vertex is skinned (has non-zero weights)
             let is_skinned = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3] > 0.01;
@@ -294,6 +353,7 @@ impl Renderer {
             } else {
                 v.joints
             };
+            seg.note(is_skinned, if is_skinned { v.position } else { pos });
             self.vertices_3d.push(Vertex3D {
                 position: pos,
                 normal: v.normal,
@@ -311,6 +371,86 @@ impl Renderer {
         }
         for &idx in indices {
             self.indices_3d.push(base + idx);
+        }
+        self.finish_model_segment(seg, joint_offset);
+    }
+
+    /// Fold a model draw's accumulated bounds into its (freshly-pushed)
+    /// segment. Skinned content is bounded by the union of its joint
+    /// matrices applied to the rest-pose AABB — rigorous, because a
+    /// skinned vertex is a convex combination of its per-joint
+    /// transforms of one rest position, and a convex combination of
+    /// points inside a set of AABBs stays inside their union AABB.
+    fn finish_model_segment(&mut self, seg: SegBounds, joint_offset: f32) {
+        let mut wmin = seg.world_min;
+        let mut wmax = seg.world_max;
+        if seg.any_skinned && seg.rest_min[0] <= seg.rest_max[0] {
+            // The model's joints occupy frame_joint_data[joint_offset..len]
+            // at this point: its group was staged immediately before its
+            // primitives and the next model's group hasn't been staged yet.
+            let jstart = (joint_offset.max(0.0) as usize).min(self.frame_joint_data.len());
+            for j in jstart..self.frame_joint_data.len() {
+                let (m0, m1) = super::transform_aabb(
+                    &self.frame_joint_data[j], seg.rest_min, seg.rest_max,
+                );
+                for a in 0..3 {
+                    if m0[a] < wmin[a] { wmin[a] = m0[a]; }
+                    if m1[a] > wmax[a] { wmax[a] = m1[a]; }
+                }
+            }
+        }
+        let call = self.draw_calls_3d.last_mut()
+            .expect("finish_model_segment: segment was pushed at fn start");
+        call.has_skinned = seg.any_skinned;
+        call.content_hash = seg.hash;
+        // Sentinel stays (min > max) when nothing contributed bounds —
+        // the shadow pass then treats the segment as uncullable.
+        if wmin[0] <= wmax[0] {
+            call.wmin = wmin;
+            call.wmax = wmax;
+        }
+    }
+}
+
+/// Per-model-draw bounds accumulator: world AABB + content hash for the
+/// non-skinned verts (already world-space at append time), rest-pose
+/// AABB for the skinned ones (their world placement lives in the joint
+/// matrices — see `finish_model_segment`).
+struct SegBounds {
+    world_min: [f32; 3],
+    world_max: [f32; 3],
+    rest_min: [f32; 3],
+    rest_max: [f32; 3],
+    any_skinned: bool,
+    hash: u64,
+}
+
+impl SegBounds {
+    fn new() -> Self {
+        SegBounds {
+            world_min: [f32::MAX; 3],
+            world_max: [f32::MIN; 3],
+            rest_min: [f32::MAX; 3],
+            rest_max: [f32::MIN; 3],
+            any_skinned: false,
+            hash: super::types::FNV_OFFSET,
+        }
+    }
+
+    #[inline]
+    fn note(&mut self, is_skinned: bool, pos: [f32; 3]) {
+        if is_skinned {
+            self.any_skinned = true;
+            for a in 0..3 {
+                if pos[a] < self.rest_min[a] { self.rest_min[a] = pos[a]; }
+                if pos[a] > self.rest_max[a] { self.rest_max[a] = pos[a]; }
+            }
+        } else {
+            for a in 0..3 {
+                if pos[a] < self.world_min[a] { self.world_min[a] = pos[a]; }
+                if pos[a] > self.world_max[a] { self.world_max[a] = pos[a]; }
+            }
+            self.hash = super::types::fnv1a_bytes(self.hash, bytemuck::bytes_of(&pos));
         }
     }
 }

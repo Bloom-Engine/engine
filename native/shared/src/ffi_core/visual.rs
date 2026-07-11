@@ -110,6 +110,16 @@ macro_rules! __bloom_ffi_visual {
         })
         }
 
+        // bloom_set_material_probe_visible  [source: shared]
+        #[no_mangle]
+        pub extern "C" fn bloom_set_material_probe_visible(
+            material: f64, visible: f64,
+        ) {
+            $crate::ffi::guard("bloom_set_material_probe_visible", move || {
+                engine().renderer.set_material_probe_visible(material as u32, visible != 0.0);
+        })
+        }
+
         // bloom_set_material_foliage  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_material_foliage(

@@ -87,33 +87,22 @@ impl Renderer {
             self.shadow_map.light_vps,
         );
 
-        // Cache gate. Skip if nothing that affects shadow-map
-        // content has changed since last render. Texel-snap +
-        // radius quantization in `compute_cascade_vps` makes this
-        // check exact: identical scenes + identical poses (within
-        // one cascade texel) produce byte-identical light_vps.
+        // Cache gate, stage 1 — whole-pass invalidators. Per-cascade
+        // staleness (VP compare + caster-content signature) is decided
+        // after the caster lists are built. Texel-snap + radius
+        // quantization + re-fit slack in `compute_cascade_vps` make the
+        // per-cascade VP compare exact, so a kept VP + unchanged content
+        // means the cascade's cached depth texture is still valid.
         let scene_ver = scene.shadow_version;
-        let vps_changed = self.shadow_map.rendered_light_vps
-            .as_ref()
-            .map(|cached| *cached != self.shadow_map.light_vps)
-            .unwrap_or(true);
         let light_changed = self.shadow_map.rendered_light_dir
             .map(|cached| cached != light_dir)
             .unwrap_or(true);
-        let should_render = self.shadow_map.always_fresh
+        let force_all = self.shadow_map.always_fresh
             || self.shadow_map.dirty
-            || vps_changed
             || light_changed
-            || self.shadow_map.rendered_scene_version != scene_ver
-            // Immediate-mode + cached-model + material-system draws aren't
-            // tracked by the scene version, and they're re-submitted (and
-            // usually move) every frame, so re-render the shadow map
-            // whenever any are present.
-            || !self.indices_3d.is_empty()
-            || !self.model_draw_commands.is_empty()
-            || !self.material_system.commands.is_empty();
+            || self.shadow_map.rendered_light_vps.is_none()
+            || self.shadow_map.rendered_scene_version != scene_ver;
 
-        if should_render {
         // Build a shared caster list + buffer-ref vectors, then
         // filter per cascade against that cascade's ortho frustum.
         // A caster outside cascade N's frustum can't write pixels
@@ -122,6 +111,7 @@ impl Renderer {
         struct ShadowDrawEntry {
             vb_idx: usize,
             ib_idx: usize,
+            index_start: u32,
             index_count: u32,
             transform: [[f32; 4]; 4],
             wmin: [f32; 3],
@@ -129,18 +119,34 @@ impl Renderer {
             // Index into `cutout_bgs` for an alpha-tested caster (cutout
             // foliage), or -1 for an opaque caster (plain depth pipeline).
             cutout_idx: i32,
-            // True only for the immediate-mode batch, which may contain skinned
-            // characters. Rendered with the skinning-aware shadow pipeline so
-            // animated player/enemies cast a posed shadow instead of a rest
-            // pose at the origin. (Mixed batch: non-skinned verts in it still
+            // Immediate-mode segment containing skinned characters —
+            // rendered with the skinning-aware shadow pipeline so animated
+            // player/enemies cast a posed shadow instead of a rest pose at
+            // the origin. (Mixed segments: non-skinned verts still
             // transform by the model matrix via the shader's weight branch.)
             skinned: bool,
+            // Content identity for the per-cascade cache: stable across
+            // frames for static casters, salted with `frame_nonce` for
+            // animated ones so their cascades re-render every frame.
+            sig: u64,
+            // Immediate-batch content (animated characters, per-frame
+            // primitives). Dynamic casters render into the live cascade
+            // texture every frame on top of the cached static depth;
+            // they never invalidate the static cache.
+            dynamic: bool,
+        }
+        fn entry_sig(kind: u8, id: u64, idx: u64, transform: &[[f32; 4]; 4]) -> u64 {
+            let mut h = FNV_OFFSET;
+            h = fnv1a_bytes(h, &[kind]);
+            h = fnv1a_bytes(h, &id.to_le_bytes());
+            h = fnv1a_bytes(h, &idx.to_le_bytes());
+            fnv1a_bytes(h, bytemuck::bytes_of(transform))
         }
         let mut shadow_nodes: Vec<ShadowDrawEntry> = Vec::new();
         let mut shadow_vbs: Vec<&wgpu::Buffer> = Vec::new();
         let mut shadow_ibs: Vec<&wgpu::Buffer> = Vec::new();
         let mut cutout_bgs: Vec<&wgpu::BindGroup> = Vec::new();
-        for (_handle, node) in scene.nodes.iter() {
+        for (i, (_handle, node)) in scene.nodes.iter().enumerate() {
             // gi_only proxies duplicate geometry that already casts through
             // the material-command path below — including them would
             // double-render every caster.
@@ -161,39 +167,84 @@ impl Renderer {
             shadow_nodes.push(ShadowDrawEntry {
                 vb_idx,
                 ib_idx: vb_idx,
+                index_start: 0,
                 index_count: node.gpu_index_count,
                 transform: node.transform,
                 wmin: node.world_bounds_min,
                 wmax: node.world_bounds_max,
                 cutout_idx,
                 skinned: false,
+                sig: entry_sig(0, i as u64, node.gpu_index_count as u64, &node.transform),
+                dynamic: false,
             });
         }
 
-        // Immediate-mode 3D batch (drawCube/drawSphere/non-cached models).
-        // These verts are already in WORLD space, so the model matrix is
-        // identity. wmin > wmax marks "no bounds" → included in every cascade.
-        // Games that draw in immediate mode create no scene nodes, so without
-        // this nothing they draw would cast a shadow.
+        // Immediate-mode 3D batch (drawCube/drawSphere/non-cached models),
+        // one entry per segment. These verts are already in WORLD space, so
+        // the model matrix is identity. Model draws maintain per-segment
+        // bounds inline (skinned via joint-transformed rest AABBs);
+        // primitive-only segments are scanned here. Segments with skinned
+        // content take a per-frame nonce as their signature (animation
+        // means their rendered output changes every frame); static
+        // segments hash their vertex positions, so e.g. pickups
+        // re-submitted identically each frame don't dirty their cascades.
         if !self.indices_3d.is_empty() {
+            self.shadow_map.frame_nonce = self.shadow_map.frame_nonce.wrapping_add(1);
+            let nonce = self.shadow_map.frame_nonce;
+            self.scan_unbounded_segments_3d();
             let vb_idx = shadow_vbs.len();
             shadow_vbs.push(&self.persistent_vb_3d);
             shadow_ibs.push(&self.persistent_ib_3d);
-            shadow_nodes.push(ShadowDrawEntry {
-                vb_idx,
-                ib_idx: vb_idx,
-                index_count: self.indices_3d.len() as u32,
-                transform: IDENTITY_MAT4,
-                wmin: [1.0, 1.0, 1.0],
-                wmax: [-1.0, -1.0, -1.0],
-                cutout_idx: -1,
-                skinned: true,
-            });
+            if self.draw_calls_3d.is_empty() {
+                // Fallback: vertices without segment tracking — one
+                // unbounded, always-dirty entry (pre-segmentation shape).
+                shadow_nodes.push(ShadowDrawEntry {
+                    vb_idx,
+                    ib_idx: vb_idx,
+                    index_start: 0,
+                    index_count: self.indices_3d.len() as u32,
+                    transform: IDENTITY_MAT4,
+                    wmin: [1.0, 1.0, 1.0],
+                    wmax: [-1.0, -1.0, -1.0],
+                    cutout_idx: -1,
+                    skinned: true,
+                    sig: nonce,
+                    dynamic: true,
+                });
+            } else {
+                let num_calls = self.draw_calls_3d.len();
+                for ci in 0..num_calls {
+                    let call = &self.draw_calls_3d[ci];
+                    let next_start = if ci + 1 < num_calls {
+                        self.draw_calls_3d[ci + 1].index_start
+                    } else {
+                        self.indices_3d.len() as u32
+                    };
+                    let count = next_start - call.index_start;
+                    if count == 0 { continue; }
+                    shadow_nodes.push(ShadowDrawEntry {
+                        vb_idx,
+                        ib_idx: vb_idx,
+                        index_start: call.index_start,
+                        index_count: count,
+                        transform: IDENTITY_MAT4,
+                        wmin: call.wmin,
+                        wmax: call.wmax,
+                        cutout_idx: -1,
+                        skinned: call.has_skinned,
+                        sig: if call.has_skinned { nonce } else { call.content_hash },
+                        dynamic: true,
+                    });
+                }
+            }
         }
 
         // Cached models (drawModel: trees, characters, etc.) — each is a
         // GpuMesh plus its object→world matrix. Skinned models cast their
-        // rest-pose shadow (vs_shadow doesn't skin) — acceptable.
+        // rest-pose shadow (vs_shadow doesn't skin) — acceptable. World
+        // AABB from the cache-time local AABB so per-cascade culling
+        // rejects casters outside a cascade's ortho frustum (the forest
+        // was previously re-drawn into every cascade every frame).
         for cmd in self.model_draw_commands.iter() {
             if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
                 if cmd.mesh_idx < meshes.len() {
@@ -206,15 +257,20 @@ impl Renderer {
                         Some(bg) => { let i = cutout_bgs.len(); cutout_bgs.push(bg); i as i32 }
                         None => -1,
                     };
+                    let (wmin, wmax) =
+                        transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
                     shadow_nodes.push(ShadowDrawEntry {
                         vb_idx,
                         ib_idx: vb_idx,
+                        index_start: 0,
                         index_count: mesh.index_count,
                         transform: cmd.model,
-                        wmin: [1.0, 1.0, 1.0],
-                        wmax: [-1.0, -1.0, -1.0],
+                        wmin,
+                        wmax,
                         cutout_idx,
                         skinned: false,
+                        sig: entry_sig(1, cmd.cache_handle, cmd.mesh_idx as u64, &cmd.model),
+                        dynamic: false,
                     });
                 }
             }
@@ -242,15 +298,20 @@ impl Renderer {
                         Some(bg) => { let i = cutout_bgs.len(); cutout_bgs.push(bg); i as i32 }
                         None => -1,
                     };
+                    let (wmin, wmax) =
+                        transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
                     shadow_nodes.push(ShadowDrawEntry {
                         vb_idx,
                         ib_idx: vb_idx,
+                        index_start: 0,
                         index_count: mesh.index_count,
                         transform: cmd.model,
-                        wmin: [1.0, 1.0, 1.0],
-                        wmax: [-1.0, -1.0, -1.0],
+                        wmin,
+                        wmax,
                         cutout_idx,
                         skinned: false,
+                        sig: entry_sig(2, cmd.mesh_handle, cmd.mesh_idx as u64, &cmd.model),
+                        dynamic: false,
                     });
                 }
             }
@@ -273,102 +334,227 @@ impl Renderer {
                 cascade_indices[c].push(i);
             }
         }
+        // Per-cascade STATIC content signature: fold every surviving
+        // non-dynamic caster's identity, in draw order. The static depth
+        // cache re-renders only when its cascade's VP changed, this
+        // signature changed, or a whole-pass invalidator fired. Dynamic
+        // casters are excluded — they draw on top of the cached static
+        // depth every frame and never invalidate it.
+        let mut cascade_sigs = [0u64; crate::shadows::NUM_CASCADES];
+        for c in 0..crate::shadows::NUM_CASCADES {
+            let mut h = FNV_OFFSET;
+            for &ei in cascade_indices[c].iter() {
+                if shadow_nodes[ei].dynamic { continue; }
+                h = fnv1a_bytes(h, &shadow_nodes[ei].sig.to_le_bytes());
+            }
+            cascade_sigs[c] = h;
+        }
 
-        // Render each cascade
+        // Render each cascade. Static casters live in a cached depth
+        // texture ("cached whole-scene shadows") re-rendered only when
+        // the cascade's VP or static content changes; every frame the
+        // live texture is refreshed by copy and the few dynamic casters
+        // draw on top with Load. A cascade with no change is skipped
+        // entirely. Uniform slots: static casters use the head of the
+        // cascade's region, dynamic casters the reserved tail — the
+        // ranges are disjoint because every write_buffer lands at
+        // submit, before any encoded pass executes.
         for cascade in 0..crate::shadows::NUM_CASCADES {
             let stride = crate::shadows::SHADOW_UNIFORM_STRIDE as usize;
             let max = crate::shadows::SHADOW_MAX_NODES as usize;
-            let entries = &cascade_indices[cascade];
-            let count = entries.len().min(max);
-            let mut uniform_data: Vec<u8> = vec![0u8; stride * count.max(1)];
+            let max_dynamic = crate::shadows::SHADOW_MAX_DYNAMIC as usize;
+            let max_static = max - max_dynamic;
+            let cascade_base = cascade * stride * max;
             let cascade_vp = self.shadow_map.light_vps[cascade];
+            let entries = &cascade_indices[cascade];
 
-            for (slot, &ei) in entries.iter().take(count).enumerate() {
-                let entry = &shadow_nodes[ei];
-                let uniforms = crate::shadows::ShadowUniforms {
-                    light_vp: cascade_vp,
-                    model: entry.transform,
-                };
-                let off = slot * stride;
-                uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
-                    .copy_from_slice(bytemuck::bytes_of(&uniforms));
+            let vp_changed = self.shadow_map.rendered_light_vps
+                .map(|vps| vps[cascade] != self.shadow_map.light_vps[cascade])
+                .unwrap_or(true);
+            let static_stale = force_all || vp_changed
+                || self.shadow_map.rendered_cascade_sig[cascade] != cascade_sigs[cascade];
+            let dyn_now = entries.iter().any(|&ei| shadow_nodes[ei].dynamic);
+            if !static_stale && !dyn_now && !self.shadow_map.had_dynamic[cascade] {
+                // Live texture already holds exactly this content.
+                continue;
             }
 
-            // Each cascade owns its own slice of the uniform buffer — all
-            // three write_buffer calls execute at submit, BEFORE any of the
-            // encoded passes run, so sharing one region would leave every
-            // cascade rendering with the last cascade's matrices (the
-            // no-near-shadows bug: player/enemies sample cascade 0).
-            let cascade_base = cascade * stride * max;
-            if count > 0 {
+            if static_stale {
+                let static_entries: Vec<usize> = entries.iter().copied()
+                    .filter(|&ei| !shadow_nodes[ei].dynamic)
+                    .take(max_static)
+                    .collect();
+                let mut uniform_data: Vec<u8> =
+                    vec![0u8; stride * static_entries.len().max(1)];
+                for (slot, &ei) in static_entries.iter().enumerate() {
+                    let uniforms = crate::shadows::ShadowUniforms {
+                        light_vp: cascade_vp,
+                        model: shadow_nodes[ei].transform,
+                    };
+                    let off = slot * stride;
+                    uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
+                        .copy_from_slice(bytemuck::bytes_of(&uniforms));
+                }
+                // Each cascade owns its own slice of the uniform buffer —
+                // all write_buffer calls execute at submit, BEFORE any of
+                // the encoded passes run, so sharing one region would
+                // leave every cascade rendering with the last cascade's
+                // matrices (the no-near-shadows bug).
+                if !static_entries.is_empty() {
+                    self.queue.write_buffer(
+                        &self.shadow_map.uniform_buffer,
+                        cascade_base as u64,
+                        &uniform_data[..static_entries.len() * stride],
+                    );
+                }
+                {
+                    let shadow_ts = profiler.pass_timestamp_writes("shadow_pass");
+                    let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("shadow_pass_static"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.shadow_map.static_depth_views[cascade],
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: shadow_ts,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+
+                    // Pipeline kind per caster: 0 opaque, 1 cutout, 2 skinned.
+                    // Only switch when the kind changes.
+                    let mut cur_kind: u8 = 0;
+                    shadow_pass.set_pipeline(&self.shadow_map.pipeline);
+                    for (slot, &ei) in static_entries.iter().enumerate() {
+                        let entry = &shadow_nodes[ei];
+                        let offset = (cascade_base + slot * stride) as u32;
+                        let kind: u8 = if entry.skinned { 2 }
+                            else if entry.cutout_idx >= 0 { 1 }
+                            else { 0 };
+                        if kind != cur_kind {
+                            shadow_pass.set_pipeline(match kind {
+                                1 => &self.shadow_map.pipeline_cutout,
+                                2 => &self.shadow_map.pipeline_skinned,
+                                _ => &self.shadow_map.pipeline,
+                            });
+                            cur_kind = kind;
+                        }
+                        shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[offset]);
+                        if kind == 1 {
+                            shadow_pass.set_bind_group(1, cutout_bgs[entry.cutout_idx as usize], &[]);
+                        } else if kind == 2 {
+                            shadow_pass.set_bind_group(1, &self.joint_bind_group, &[]);
+                        }
+                        shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
+                        shadow_pass.set_index_buffer(shadow_ibs[entry.ib_idx].slice(..), wgpu::IndexFormat::Uint32);
+                        shadow_pass.draw_indexed(
+                            entry.index_start..entry.index_start + entry.index_count,
+                            0,
+                            0..1,
+                        );
+                    }
+                }
+                self.shadow_map.rendered_cascade_sig[cascade] = cascade_sigs[cascade];
+            }
+
+            // Refresh the live texture from the static cache, then draw
+            // dynamic casters on top.
+            encoder.copy_texture_to_texture(
+                self.shadow_map.static_depth_textures[cascade].as_image_copy(),
+                self.shadow_map.depth_textures[cascade].as_image_copy(),
+                wgpu::Extent3d {
+                    width: crate::shadows::CASCADE_MAP_SIZE,
+                    height: crate::shadows::CASCADE_MAP_SIZE,
+                    depth_or_array_layers: 1,
+                },
+            );
+            if dyn_now {
+                let dyn_base = cascade_base + stride * max_static;
+                let dyn_entries: Vec<usize> = entries.iter().copied()
+                    .filter(|&ei| shadow_nodes[ei].dynamic)
+                    .take(max_dynamic)
+                    .collect();
+                let mut uniform_data: Vec<u8> =
+                    vec![0u8; stride * dyn_entries.len().max(1)];
+                for (slot, &ei) in dyn_entries.iter().enumerate() {
+                    let uniforms = crate::shadows::ShadowUniforms {
+                        light_vp: cascade_vp,
+                        model: shadow_nodes[ei].transform,
+                    };
+                    let off = slot * stride;
+                    uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
+                        .copy_from_slice(bytemuck::bytes_of(&uniforms));
+                }
                 self.queue.write_buffer(
                     &self.shadow_map.uniform_buffer,
-                    cascade_base as u64,
-                    &uniform_data[..count * stride],
+                    dyn_base as u64,
+                    &uniform_data[..dyn_entries.len() * stride],
                 );
-            }
-
-            {
-                let shadow_ts = profiler.pass_timestamp_writes("shadow_pass");
-                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("shadow_pass"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.shadow_map.depth_views[cascade],
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
+                {
+                    let shadow_ts = profiler.pass_timestamp_writes("shadow_pass");
+                    let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("shadow_pass_dynamic"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.shadow_map.depth_views[cascade],
+                            depth_ops: Some(wgpu::Operations {
+                                // Refreshed static depth is the base.
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
                         }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: shadow_ts,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-
-                // Pipeline kind per caster: 0 opaque, 1 cutout, 2 skinned.
-                // Track the bound kind so we only switch when it changes
-                // (cutout/skinned casters are grouped at the tail, so this is
-                // usually one or two switches).
-                let mut cur_kind: u8 = 0;
-                shadow_pass.set_pipeline(&self.shadow_map.pipeline);
-
-                for (slot, &ei) in entries.iter().take(count).enumerate() {
-                    let entry = &shadow_nodes[ei];
-                    let offset = (cascade_base + slot * stride) as u32;
-                    let kind: u8 = if entry.skinned { 2 }
-                        else if entry.cutout_idx >= 0 { 1 }
-                        else { 0 };
-                    if kind != cur_kind {
-                        shadow_pass.set_pipeline(match kind {
-                            1 => &self.shadow_map.pipeline_cutout,
-                            2 => &self.shadow_map.pipeline_skinned,
-                            _ => &self.shadow_map.pipeline,
-                        });
-                        cur_kind = kind;
+                        timestamp_writes: shadow_ts,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    let mut cur_kind: u8 = 0;
+                    shadow_pass.set_pipeline(&self.shadow_map.pipeline);
+                    for (slot, &ei) in dyn_entries.iter().enumerate() {
+                        let entry = &shadow_nodes[ei];
+                        let offset = (dyn_base + slot * stride) as u32;
+                        let kind: u8 = if entry.skinned { 2 }
+                            else if entry.cutout_idx >= 0 { 1 }
+                            else { 0 };
+                        if kind != cur_kind {
+                            shadow_pass.set_pipeline(match kind {
+                                1 => &self.shadow_map.pipeline_cutout,
+                                2 => &self.shadow_map.pipeline_skinned,
+                                _ => &self.shadow_map.pipeline,
+                            });
+                            cur_kind = kind;
+                        }
+                        shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[offset]);
+                        if kind == 1 {
+                            shadow_pass.set_bind_group(1, cutout_bgs[entry.cutout_idx as usize], &[]);
+                        } else if kind == 2 {
+                            // Joint matrices for skinning the animated
+                            // characters in the immediate-mode batch.
+                            shadow_pass.set_bind_group(1, &self.joint_bind_group, &[]);
+                        }
+                        shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
+                        shadow_pass.set_index_buffer(shadow_ibs[entry.ib_idx].slice(..), wgpu::IndexFormat::Uint32);
+                        shadow_pass.draw_indexed(
+                            entry.index_start..entry.index_start + entry.index_count,
+                            0,
+                            0..1,
+                        );
                     }
-                    shadow_pass.set_bind_group(0, &self.shadow_map.uniform_bind_group, &[offset]);
-                    if kind == 1 {
-                        shadow_pass.set_bind_group(1, cutout_bgs[entry.cutout_idx as usize], &[]);
-                    } else if kind == 2 {
-                        // Joint matrices for skinning the animated characters in
-                        // the immediate-mode batch.
-                        shadow_pass.set_bind_group(1, &self.joint_bind_group, &[]);
-                    }
-                    shadow_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
-                    shadow_pass.set_index_buffer(shadow_ibs[entry.ib_idx].slice(..), wgpu::IndexFormat::Uint32);
-                    shadow_pass.draw_indexed(0..entry.index_count, 0, 0..1);
                 }
             }
+            self.shadow_map.had_dynamic[cascade] = dyn_now;
         }
 
-        // Cache bookkeeping — next frame will short-circuit if the
-        // camera, scene, and light all stay put.
+        // Cache bookkeeping — next frame skips every cascade whose VP
+        // and caster content stay put.
         self.shadow_map.rendered_light_vps = Some(self.shadow_map.light_vps);
         self.shadow_map.rendered_light_dir = Some(light_dir);
         self.shadow_map.rendered_scene_version = scene_ver;
         self.shadow_map.dirty = false;
-        } // end should_render
     }
 
     profiler.end("shadow_pass");

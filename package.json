@@ -96,6 +96,7 @@
   "perry": {
     "nativeLibrary": {
       "module": "@bloomengine/engine",
+      "abiVersion": "0.5",
       "functions": [
         {
           "name": "bloom_init_window",
@@ -1072,6 +1073,14 @@
         },
         {
           "name": "bloom_set_material_shading_model",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_material_probe_visible",
           "params": [
             "f64",
             "f64"
@@ -3501,7 +3510,7 @@
         {
           "name": "bloom_physics_vehicle_create",
           "params": [
-                        "f64",
+            "f64",
             "f64",
             "f64",
             "f64",
