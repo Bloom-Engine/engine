@@ -109,6 +109,26 @@ impl ModelManager {
         self.create_mesh(&verts, &inds)
     }
 
+    /// Take the scratch buffers as raw vertex floats + indices, for callers
+    /// that build something other than a Model out of them (the scene graph's
+    /// `update_geometry`). Same 12-floats-per-vertex layout as
+    /// `create_mesh_from_scratch`; returns None if the scratch is short.
+    pub fn take_scratch_geometry(
+        &self,
+        vertex_count: u32,
+        index_count: u32,
+    ) -> Option<(Vec<f32>, Vec<u32>)> {
+        let need_f = vertex_count as usize * 12;
+        let need_u = index_count as usize;
+        if vertex_count == 0 || self.scratch_f32.len() < need_f || self.scratch_u32.len() < need_u {
+            return None;
+        }
+        Some((
+            self.scratch_f32[..need_f].to_vec(),
+            self.scratch_u32[..need_u].to_vec(),
+        ))
+    }
+
     pub fn load_model(&mut self, file_data: &[u8]) -> f64 {
         match load_gltf(file_data) {
             Some(model) => self.models.alloc(model),
