@@ -817,3 +817,43 @@ building base and ≥8-10% luma in shaded receivers.
 `setSsgiEnabled(false)` on SW adapters banks the ~1.6 ms until this
 lands; needs a backend query FFI or the game reading the new boot log.
 
+---
+
+## EN-024 — iOS/iPadOS/tvOS report pixels as the logical size 🔴 needs decision
+
+**Why.** macOS passes points as logical and pixels as physical
+(`native/macos/src/lib.rs:361`, via `backingScaleFactor`). iOS/iPadOS
+and tvOS pass **pixels for both**: `bloom_attach_native` sets
+`logical_w = physical_w = width` (`native/ios/src/lib.rs:770-773`) and
+the orientation-change poll resizes with `resize(pw, ph, pw, ph)`
+(`native/ios/src/lib.rs:828`); tvOS mirrors it. Touch input is then
+scaled points→pixels to match (`native/tvos/src/lib.rs:267`), so the
+convention is at least self-consistent — a deliberate-looking choice,
+not an obvious slip.
+
+Two consequences, both real:
+
+1. **The physical-resolution glyph work is inert on iOS.** The shared
+   text renderer derives `dpi = surface_config.width / logical_width`
+   (`native/shared/src/text_renderer.rs:284-285`). With logical ==
+   physical that is always 1.0, so the "rasterize glyphs at physical
+   resolution" change (60ba704) does nothing on Apple mobile — glyphs
+   rasterize at 1× of a pixel-sized font instead of at the backing
+   scale. Text is not blurry (sizes are already in pixels) but the
+   crispness win never lands, and 3× devices get 3×-smaller text than
+   the same source produces on macOS.
+2. **Game-facing coordinates differ across Apple targets.** `screenWidth`
+   and 2D HUD coordinates are points on macOS and pixels on iOS, so the
+   same layout code does not carry across.
+
+**Decision needed (breaking either way).** Either (a) switch iOS/tvOS to
+the macOS convention — pass points as logical, pixels as physical, and
+stop pre-scaling touches — which fixes both consequences but changes
+game-facing coordinates and will break existing iOS games' layout; or
+(b) keep pixels and document the divergence explicitly, accepting that
+`text_renderer`'s dpi path is dead on Apple mobile. Deliberately not
+folded into the boot-path render-target fix (PR for EN-024's sibling
+bug), which was a straight bug — this one is a product call.
+
+**Found by** the macOS/iOS parity audit, 2026-07-11.
+

@@ -6082,7 +6082,7 @@ impl Renderer {
             ..Default::default()
         });
 
-        Self {
+        let mut renderer = Self {
             headless_target: if surface.is_none() {
                 Some(device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("headless_swapchain"),
@@ -6530,7 +6530,21 @@ impl Renderer {
             composite_ldr_rt_b: None,
             composite_ldr_rt_b_view: None,
             post_pass_depth_sampler,
-        }
+        };
+
+        // The targets above are sized to the full surface, but the pass
+        // chain runs at `render_extent()` (surface * render_scale, 0.5 by
+        // default) and `resize` is the only thing that reconciles the two.
+        // Run it once here rather than trusting the host to: every
+        // `attach_engine` platform (macOS/iOS/tvOS/Linux/Android) resizes
+        // only when the OS size *changes*, so it never fires on frame 1 —
+        // those hosts rendered against targets that ignored render_scale,
+        // dropping post-FX and failing the depth-snapshot copy outright
+        // with a scene-reading translucent material in view.
+        let (pw, ph) = (renderer.surface_config.width, renderer.surface_config.height);
+        let (lw, lh) = (renderer.logical_width, renderer.logical_height);
+        renderer.resize(pw, ph, lw, lh);
+        renderer
     }
 
     /// Q1: Set up a render target override. The next end_frame will render to
@@ -10730,6 +10744,15 @@ impl Renderer {
 
     pub fn physical_height(&self) -> u32 {
         self.surface_config.height
+    }
+
+    /// Actual size of the render-resolution targets (depth / HDR /
+    /// G-buffer). Must always equal `render_extent()`: the pass chain
+    /// computes viewports and dispatches from the latter and writes into
+    /// the former. Pinned by `tests/render_targets.rs`.
+    pub fn render_target_extent(&self) -> (u32, u32) {
+        let s = self.depth_texture.size();
+        (s.width, s.height)
     }
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {
