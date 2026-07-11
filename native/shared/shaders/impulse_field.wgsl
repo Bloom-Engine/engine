@@ -4,7 +4,11 @@
 //         `info` — world bounds, decay factor, queued splats.
 // Output: `dst` — this frame's field.
 //
-// Per texel: value = previous * decay + sum(splat strength × 1-d/r).
+// Per texel: value = min(previous * decay + sum(splat strength × (1-d/r)²), 1).
+// The clamp keeps repeated splats at the same spot (a player wading
+// through water submits one every few frames) from accumulating far
+// past 1.0 — an unclamped field takes seconds of decay to drop back
+// under 1.0, which reads as a stuck full-strength splat.
 
 struct Splat {
   pos:      vec2<f32>,  // world xz
@@ -49,5 +53,5 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  textureStore(dst, vec2<i32>(gid.xy), vec4<f32>(value, 0.0, 0.0, 0.0));
+  textureStore(dst, vec2<i32>(gid.xy), vec4<f32>(min(value, 1.0), 0.0, 0.0, 0.0));
 }

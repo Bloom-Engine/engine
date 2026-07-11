@@ -59,6 +59,20 @@ pub struct PlanarReflectionProbe {
     pub color_view:  wgpu::TextureView,
     pub depth_rt:    wgpu::Texture,
     pub depth_view:  wgpu::TextureView,
+
+    /// Dummy G-buffer attachments for the user-material probe pass.
+    /// Opaque-profile material pipelines target the full 4-attachment
+    /// opaque layout (hdr + material + velocity + albedo), so the
+    /// probe's material pass must present the same four attachments —
+    /// wgpu validates pipeline targets against pass attachments
+    /// exactly. Only the hdr result is kept; these three are cleared
+    /// each frame and their stores discarded.
+    pub aux_material_rt:   wgpu::Texture,
+    pub aux_material_view: wgpu::TextureView,
+    pub aux_velocity_rt:   wgpu::Texture,
+    pub aux_velocity_view: wgpu::TextureView,
+    pub aux_albedo_rt:     wgpu::Texture,
+    pub aux_albedo_view:   wgpu::TextureView,
 }
 
 impl PlanarReflectionProbe {
@@ -106,6 +120,30 @@ impl PlanarReflectionProbe {
         });
         let depth_view = depth_rt.create_view(&Default::default());
 
+        // Aux G-buffer dummies — see the struct field comment. Formats
+        // must byte-match what `Renderer::compile_material` passes to
+        // the pipeline descriptors or the probe pass fails validation.
+        let make_aux = |label: &str, format: wgpu::TextureFormat| {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&Default::default());
+            (tex, view)
+        };
+        let (aux_material_rt, aux_material_view) =
+            make_aux("planar_reflection_aux_material", super::formats::MATERIAL_FORMAT);
+        let (aux_velocity_rt, aux_velocity_view) =
+            make_aux("planar_reflection_aux_velocity", super::formats::VELOCITY_FORMAT);
+        let (aux_albedo_rt, aux_albedo_view) =
+            make_aux("planar_reflection_aux_albedo", wgpu::TextureFormat::Rgba8Unorm);
+
         // Normalise the supplied normal — caller may pass a non-unit
         // vector; downstream math (specifically the reflection
         // matrix below) assumes |n| == 1.
@@ -114,6 +152,9 @@ impl PlanarReflectionProbe {
         Self {
             plane_y, normal: n, resolution: res,
             color_rt, color_view, depth_rt, depth_view,
+            aux_material_rt, aux_material_view,
+            aux_velocity_rt, aux_velocity_view,
+            aux_albedo_rt, aux_albedo_view,
         }
     }
 }
