@@ -3646,6 +3646,9 @@
             "AudioToolbox",
             "AVFoundation",
             "GameController"
+          ],
+          "libs": [
+            "c++"
           ]
         },
         "tvos": {
