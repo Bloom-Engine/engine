@@ -307,6 +307,18 @@ pub extern "C" fn bloom_get_touch_count() -> f64 {
 }
 
 #[no_mangle]
+pub extern "C" fn bloom_is_touch_active(index: f64) -> f64 {
+    let s = state();
+    let i = index as usize;
+    if i < MAX_TOUCH && s.touch_active[i].load(Ordering::Acquire) != 0 { 1.0 } else { 0.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_max_touch_points() -> f64 {
+    MAX_TOUCH as f64
+}
+
+#[no_mangle]
 pub extern "C" fn bloom_get_delta_time() -> f64 {
     let s = state();
     let now = now_nanos();

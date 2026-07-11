@@ -161,6 +161,16 @@ pub fn bloom_get_touch_count() -> f64 {
     engine().input.get_touch_count() as f64
 }
 
+#[wasm_bindgen]
+pub fn bloom_is_touch_active(index: f64) -> f64 {
+    if engine().input.is_touch_active(index as usize) { 1.0 } else { 0.0 }
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_max_touch_points() -> f64 {
+    engine().input.max_touch_points() as f64
+}
+
 // ============================================================
 // Input injection (called from JS event listeners)
 // ============================================================

@@ -1831,6 +1831,18 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_is_touch_active",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_max_touch_points",
+          "params": [],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_get_time",
           "params": [],
           "returns": "f64"

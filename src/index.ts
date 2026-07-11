@@ -10,6 +10,7 @@ export {
   isGamepadAvailable, getGamepadAxis, getGamepadAxisValue, isGamepadButtonPressed,
   isGamepadButtonDown, isGamepadButtonReleased, getGamepadAxisCount,
   getTouchX, getTouchY, getTouchCount, getTouchPointCount,
+  isTouchActive, getMaxTouchPoints,
   toggleFullscreen, setWindowTitle, setWindowIcon,
   disableCursor, enableCursor, getMouseDeltaX, getMouseDeltaY, getMouseWheel, getCharPressed,
   setCursorShape, CursorShape,
