@@ -23,6 +23,25 @@ extern "C" {
     fn console_log(s: &str);
 }
 
+/// Display handle for the wgpu-core (WebGL2) path.
+///
+/// When wgpu falls back to WebGL2 it goes through wgpu-core, whose
+/// `create_surface` passes `raw_display_handle: None` for a canvas target and
+/// then errors with `MissingDisplayHandle` unless the *instance* carries one
+/// (wgpu-core 29 instance.rs:254). The WebGPU backend never looks at it. On the
+/// web a display handle holds nothing, so this is pure ceremony — but without it
+/// the WebGL2 fallback can't create a surface at all.
+#[derive(Debug)]
+struct WebDisplay;
+
+impl wgpu::rwh::HasDisplayHandle for WebDisplay {
+    fn display_handle(&self) -> Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
+        let raw = wgpu::rwh::RawDisplayHandle::Web(wgpu::rwh::WebDisplayHandle::new());
+        // SAFETY: a web display handle carries no pointer and cannot dangle.
+        Ok(unsafe { wgpu::rwh::DisplayHandle::borrow_raw(raw) })
+    }
+}
+
 // ============================================================
 // Window
 // ============================================================
@@ -85,7 +104,7 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WebDisplay))
         });
 
         let surface = instance
@@ -104,11 +123,21 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
         // BC feature -> cooked BC7 textures upload compressed (else CPU-decode).
         let required_features =
             adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
+        // On GL, `Limits::default()` is unsatisfiable: WebGL2 has no compute, so
+        // `max_compute_workgroups_per_dimension` is 0 against a default request of
+        // 65535 and device creation fails outright. Ask that backend for exactly what
+        // it reports instead. WebGPU keeps the defaults it has always requested.
+        let required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+            adapter.limits()
+        } else {
+            wgpu::Limits::default()
+        };
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("bloom_device"),
                     required_features,
+                    required_limits,
                     ..Default::default()
                 },
             )
@@ -123,8 +152,14 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
             .copied()
             .unwrap_or(surface_caps.formats[0]);
 
+        // COPY_SRC (readback of the swapchain image) is unsupported on a WebGL2
+        // surface — asking for it there fails Surface::configure validation — so keep
+        // it only where the surface advertises it.
+        let usage = (wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC)
+            & surface_caps.usages;
+
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage,
             format,
             width: phys_w,
             height: phys_h,
@@ -142,7 +177,11 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
             let _ = ENGINE.set(engine_state);
         }
 
-        console_log("Bloom engine initialized (WebGPU)");
+        let info = adapter.get_info();
+        console_log(&format!(
+            "Bloom engine initialized ({:?} on {})",
+            info.backend, info.name
+        ));
     });
 }
 
