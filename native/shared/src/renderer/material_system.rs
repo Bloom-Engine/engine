@@ -165,6 +165,27 @@ pub struct InstanceDrawInfo {
 pub struct InstanceBuffer {
     pub buffer: wgpu::Buffer,
     pub count:  u32,
+    /// Spatial tiles over the instances (built at creation by
+    /// reordering instances into an XZ grid). Empty = untiled (small
+    /// buffers). Opaque/cutout instanced draws use these to
+    /// frustum-cull whole tiles per view — a 20k-instance grass field
+    /// stops rasterizing the half behind the camera. Translucent draws
+    /// ignore tiles (their submission order is author-controlled).
+    pub tiles: Vec<InstanceTile>,
+}
+
+/// One spatial tile of an instance buffer: a contiguous instance range
+/// plus the AABB of the member instances' POSITIONS and their max
+/// scale. At cull time the position AABB is inflated by
+/// `max_scale × (drawn mesh's local half-diagonal)` — conservative for
+/// any rotation, exact enough at tile granularity.
+#[derive(Copy, Clone)]
+pub struct InstanceTile {
+    pub first: u32,
+    pub count: u32,
+    pub pmin: [f32; 3],
+    pub pmax: [f32; 3],
+    pub max_scale: f32,
 }
 
 /// EN-014 — owned wgpu::Texture + view + layer-count for a texture
@@ -1613,11 +1634,69 @@ impl MaterialSystem {
         raw: &[f32],
         instance_count: u32,
     ) -> u32 {
-        let count = instance_count as usize;
+        let count = (instance_count as usize).min(raw.len() / 9);
+
+        // Spatial tiling: reorder instances into an XZ grid so each tile
+        // is a contiguous range the dispatcher can frustum-cull as a
+        // unit. Reordering is invisible to opaque/cutout draws (depth
+        // tested) and the per-instance attributes travel with the
+        // instance, so @builtin(instance_index) consumers stay
+        // consistent with their data. Small buffers stay untiled.
+        const TILE_TARGET: usize = 128;
+        const TILE_MIN_COUNT: usize = 512;
+        let mut order: Vec<usize> = (0..count).collect();
+        let mut tiles: Vec<InstanceTile> = Vec::new();
+        if count >= TILE_MIN_COUNT {
+            let mut xz_min = [f32::MAX; 2];
+            let mut xz_max = [f32::MIN; 2];
+            for i in 0..count {
+                let p = &raw[i * 9..i * 9 + 3];
+                if p[0] < xz_min[0] { xz_min[0] = p[0]; }
+                if p[0] > xz_max[0] { xz_max[0] = p[0]; }
+                if p[2] < xz_min[1] { xz_min[1] = p[2]; }
+                if p[2] > xz_max[1] { xz_max[1] = p[2]; }
+            }
+            let grid = ((count as f32 / TILE_TARGET as f32).sqrt().ceil() as usize).max(1);
+            let ext_x = (xz_max[0] - xz_min[0]).max(1e-3);
+            let ext_z = (xz_max[1] - xz_min[1]).max(1e-3);
+            let cell_of = |i: usize| -> usize {
+                let p = &raw[i * 9..i * 9 + 3];
+                let cx = (((p[0] - xz_min[0]) / ext_x * grid as f32) as usize).min(grid - 1);
+                let cz = (((p[2] - xz_min[1]) / ext_z * grid as f32) as usize).min(grid - 1);
+                cz * grid + cx
+            };
+            order.sort_by_key(|&i| cell_of(i));
+            // Emit one tile per non-empty cell (contiguous after the sort).
+            let mut start = 0usize;
+            while start < count {
+                let cell = cell_of(order[start]);
+                let mut end = start + 1;
+                while end < count && cell_of(order[end]) == cell { end += 1; }
+                let mut pmin = [f32::MAX; 3];
+                let mut pmax = [f32::MIN; 3];
+                let mut max_scale = 0.0f32;
+                for &i in &order[start..end] {
+                    let inst = &raw[i * 9..i * 9 + 9];
+                    for a in 0..3 {
+                        if inst[a] < pmin[a] { pmin[a] = inst[a]; }
+                        if inst[a] > pmax[a] { pmax[a] = inst[a]; }
+                    }
+                    if inst[4].abs() > max_scale { max_scale = inst[4].abs(); }
+                }
+                tiles.push(InstanceTile {
+                    first: start as u32,
+                    count: (end - start) as u32,
+                    pmin,
+                    pmax,
+                    max_scale,
+                });
+                start = end;
+            }
+        }
+
         let mut packed: Vec<f32> = Vec::with_capacity(count * 12);
-        for i in 0..count {
+        for &i in order.iter() {
             let off = i * 9;
-            if off + 9 > raw.len() { break; }
             packed.extend_from_slice(&raw[off..off + 3]);     // pos.xyz
             packed.push(raw[off + 3]);                        // rot_y
             packed.push(raw[off + 4]);                        // scale
@@ -1637,7 +1716,11 @@ impl MaterialSystem {
         if !packed.is_empty() {
             queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&packed));
         }
-        self.instance_buffers.push(Some(InstanceBuffer { buffer, count: instance_count }));
+        self.instance_buffers.push(Some(InstanceBuffer {
+            buffer,
+            count: count as u32,
+            tiles,
+        }));
         self.instance_buffers.len() as u32
     }
 
@@ -1687,11 +1770,12 @@ impl MaterialSystem {
     pub fn dispatch<'pass, F>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
+        planes: Option<&[[f32; 4]; 6]>,
         mesh_fetch: F,
     )
-    where F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32)>
+    where F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32, [f32; 3], [f32; 3])>
     {
-        self.dispatch_with_view(pass, &self.per_view_bg, |_| true, false, mesh_fetch);
+        self.dispatch_with_view(pass, &self.per_view_bg, |_| true, false, planes, mesh_fetch);
     }
 
     /// EN-011 — like `dispatch`, but uses a caller-supplied PerView
@@ -1717,10 +1801,13 @@ impl MaterialSystem {
         per_view_bg: &'pass wgpu::BindGroup,
         mut accept:  A,
         use_reflection_pipeline: bool,
+        // View frustum for instance-tile culling (`mesh_fetch` supplies
+        // the mesh's local AABB). None = no per-tile culling.
+        planes: Option<&[[f32; 4]; 6]>,
         mut mesh_fetch: F,
     )
     where
-        F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32)>,
+        F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32, [f32; 3], [f32; 3])>,
         A: FnMut(MaterialHandle) -> bool,
     {
         if self.commands.is_empty() { return; }
@@ -1757,13 +1844,61 @@ impl MaterialSystem {
                 pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);
                 last_material = cmd.material;
             }
-            if let Some((vb, ib, icount)) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
+            if let Some((vb, ib, icount, lmin, lmax)) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
                 pass.set_bind_group(3, &self.per_draw_bgs[cmd.draw_slot], &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 let instance_range = self.bind_instance_buffer(pass, &cmd.instance);
-                if instance_range.end > instance_range.start {
-                    pass.draw_indexed(0..icount, 0, instance_range);
+                if instance_range.end <= instance_range.start { continue; }
+                // Instance-tile culling: `commands` holds only the
+                // opaque + cutout buckets (translucent draws dispatch
+                // elsewhere), so emitting the visible tile ranges is
+                // output-identical to the full-range draw. Tiles' pos
+                // AABBs are inflated by max_scale × the mesh's local
+                // half-diagonal (rotation-safe). Adjacent visible tiles
+                // merge into one draw.
+                let tiles = cmd.instance
+                    .as_ref()
+                    .filter(|_| planes.is_some() && lmin[0] <= lmax[0])
+                    .and_then(|inst| {
+                        self.instance_buffers
+                            .get(inst.buffer_handle as usize - 1)
+                            .and_then(|s| s.as_ref())
+                            .map(|s| &s.tiles)
+                    })
+                    .filter(|t| !t.is_empty());
+                match (tiles, planes) {
+                    (Some(tiles), Some(planes)) => {
+                        let half_diag = 0.5 * ((lmax[0] - lmin[0]).powi(2)
+                            + (lmax[1] - lmin[1]).powi(2)
+                            + (lmax[2] - lmin[2]).powi(2)).sqrt();
+                        let mut run: Option<(u32, u32)> = None;
+                        for tile in tiles.iter() {
+                            let r = tile.max_scale * half_diag;
+                            let bmin = [tile.pmin[0] - r, tile.pmin[1] - r, tile.pmin[2] - r];
+                            let bmax = [tile.pmax[0] + r, tile.pmax[1] + r, tile.pmax[2] + r];
+                            if crate::scene::aabb_outside_frustum(planes, bmin, bmax) {
+                                if let Some((s, e)) = run.take() {
+                                    pass.draw_indexed(0..icount, 0, s..e);
+                                }
+                                continue;
+                            }
+                            run = match run {
+                                Some((s, e)) if e == tile.first => Some((s, tile.first + tile.count)),
+                                Some((s, e)) => {
+                                    pass.draw_indexed(0..icount, 0, s..e);
+                                    Some((tile.first, tile.first + tile.count))
+                                }
+                                None => Some((tile.first, tile.first + tile.count)),
+                            };
+                        }
+                        if let Some((s, e)) = run {
+                            pass.draw_indexed(0..icount, 0, s..e);
+                        }
+                    }
+                    _ => {
+                        pass.draw_indexed(0..icount, 0, instance_range);
+                    }
                 }
             }
         }

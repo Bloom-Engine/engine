@@ -229,6 +229,12 @@ impl Renderer {
         let depth_view        = &self.depth_view;
         let material_system   = &self.material_system;
         let model_gpu_cache   = &self.model_gpu_cache;
+        // Camera frustum for instance-tile culling (same unjittered
+        // matrices as the cached-model culling above).
+        let cam_planes = crate::scene::extract_frustum_planes(&mat4_multiply(
+            self.current_proj_matrix_unjittered,
+            self.current_view_matrix,
+        ));
 
         struct FrameCtx<'a> {
             encoder:  &'a mut wgpu::CommandEncoder,
@@ -274,11 +280,14 @@ impl Renderer {
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
-                    material_system.dispatch(&mut pass, |handle, idx| {
+                    material_system.dispatch(&mut pass, Some(&cam_planes), |handle, idx| {
                         if let Some(Some(meshes)) = model_gpu_cache.get(&handle) {
                             if idx < meshes.len() {
                                 let mesh = &meshes[idx];
-                                return Some((&mesh.vb, &mesh.ib, mesh.index_count));
+                                return Some((
+                                    &mesh.vb, &mesh.ib, mesh.index_count,
+                                    mesh.local_min, mesh.local_max,
+                                ));
                             }
                         }
                         None

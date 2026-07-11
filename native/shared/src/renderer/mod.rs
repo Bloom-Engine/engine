@@ -11943,11 +11943,16 @@ impl Renderer {
                     // single-target pipelines can't render into this
                     // 4-target pass).
                     true,
+                    // Instance tiles cull against the MIRRORED frustum.
+                    Some(&mirror_planes),
                     |handle, idx| {
                         if let Some(Some(meshes)) = cache.get(&handle) {
                             if idx < meshes.len() {
                                 let mesh = &meshes[idx];
-                                return Some((&mesh.vb, &mesh.ib, mesh.index_count));
+                                return Some((
+                                    &mesh.vb, &mesh.ib, mesh.index_count,
+                                    mesh.local_min, mesh.local_max,
+                                ));
                             }
                         }
                         None
