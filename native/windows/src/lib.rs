@@ -675,15 +675,11 @@ unsafe fn init_engine_for_hwnd(
         };
         surface.configure(&device, &surface_config);
 
-        let mut renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
-        // Route initial target creation through the same resize path a
-        // WM_SIZE takes. Without this, windowed mode (which never gets a
-        // resize, unlike the borderless-fullscreen transition) keeps
-        // construction-time render targets that ignore render_scale —
-        // the depth-snapshot copy then spans a partial depth texture,
-        // which wgpu rejects (fatal validation error on the first frame
-        // with a scene-reading translucent material in view).
-        renderer.resize(phys_w, phys_h, logical_w, logical_h);
+        // `Renderer::new` routes initial target creation through `resize`
+        // itself, so the construction-time targets already honour
+        // render_scale — no explicit resize needed here (it used to live
+        // here, which left every non-Windows host with the bug).
+        let renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
         let _ = ENGINE.set(EngineState::new(renderer));
 }
 
