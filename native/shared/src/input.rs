@@ -254,6 +254,19 @@ impl InputState {
         if index < MAX_TOUCH_POINTS { self.touch_points[index].y } else { 0.0 }
     }
     pub fn get_touch_count(&self) -> usize { self.touch_count }
+    /// Whether touch *slot* `index` currently holds a live finger.
+    ///
+    /// `get_touch_count` counts active fingers, but `touch_points` is indexed
+    /// by slot, and slots go sparse as soon as a finger lifts out of order
+    /// (lift slot 0 while slot 1 is still held → count == 1, live finger at
+    /// slot 1). Scanning `0..get_touch_count()` therefore reads a released
+    /// slot's stale coordinates as if they were a live touch. Games that track
+    /// per-finger state must iterate `0..MAX_TOUCH_POINTS` and skip slots this
+    /// returns false for.
+    pub fn is_touch_active(&self, index: usize) -> bool {
+        index < MAX_TOUCH_POINTS && self.touch_points[index].active
+    }
+    pub fn max_touch_points(&self) -> usize { MAX_TOUCH_POINTS }
 
     // Digital Crown (watchOS)
     pub fn accumulate_crown_rotation(&mut self, delta: f64) { self.crown_rotation += delta; }

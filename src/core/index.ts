@@ -114,6 +114,8 @@ declare function bloom_get_gamepad_axis_count(): number;
 declare function bloom_get_touch_x(index: number): number;
 declare function bloom_get_touch_y(index: number): number;
 declare function bloom_get_touch_count(): number;
+declare function bloom_is_touch_active(index: number): number;
+declare function bloom_get_max_touch_points(): number;
 
 // Input injection FFI
 declare function bloom_inject_key_down(key: number): void;
@@ -837,6 +839,25 @@ export function getTouchCount(): number {
 
 export function getTouchPointCount(): number {
   return bloom_get_touch_count();
+}
+
+/// Is touch *slot* `index` holding a live finger?
+///
+/// `getTouchCount()` is the number of active fingers, but touch points are
+/// addressed by slot, and slots go sparse the moment a finger lifts out of
+/// order: hold two fingers, lift the first, and the live finger is at slot 1
+/// while the count is 1. Iterating `0..getTouchCount()` then reads slot 0 —
+/// released, but still carrying its last coordinates — as though it were live,
+/// which reads as a finger frozen at the point where it left the glass.
+///
+/// Track fingers by scanning `0..getMaxTouchPoints()` and skipping the slots
+/// this returns false for.
+export function isTouchActive(index: number): boolean {
+  return bloom_is_touch_active(index) > 0.5;
+}
+
+export function getMaxTouchPoints(): number {
+  return bloom_get_max_touch_points();
 }
 
 // Utility

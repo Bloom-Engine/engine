@@ -186,5 +186,21 @@ macro_rules! __bloom_ffi_input {
         })
         }
 
+        // bloom_is_touch_active  [source: macos]
+        #[no_mangle]
+        pub extern "C" fn bloom_is_touch_active(index: f64) -> f64 {
+            $crate::ffi::guard("bloom_is_touch_active", move || {
+                if engine().input.is_touch_active(index as usize) { 1.0 } else { 0.0 }
+        })
+        }
+
+        // bloom_get_max_touch_points  [source: macos]
+        #[no_mangle]
+        pub extern "C" fn bloom_get_max_touch_points() -> f64 {
+            $crate::ffi::guard("bloom_get_max_touch_points", move || {
+                engine().input.max_touch_points() as f64
+        })
+        }
+
     };
 }
