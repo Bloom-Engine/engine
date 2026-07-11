@@ -2164,6 +2164,14 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_gen_mesh_spline_ribbon_scratch",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_load_render_texture",
           "params": [
             "f64",

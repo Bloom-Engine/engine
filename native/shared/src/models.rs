@@ -109,6 +109,12 @@ impl ModelManager {
         self.create_mesh(&verts, &inds)
     }
 
+    /// Read-only view of the f32 scratch buffer, for consumers that lay their
+    /// own data out in it (the spline ribbon packs positions then widths).
+    pub fn scratch_floats(&self) -> &[f32] {
+        &self.scratch_f32
+    }
+
     /// Take the scratch buffers as raw vertex floats + indices, for callers
     /// that build something other than a Model out of them (the scene graph's
     /// `update_geometry`). Same 12-floats-per-vertex layout as

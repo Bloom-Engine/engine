@@ -652,6 +652,33 @@ macro_rules! __bloom_ffi_models {
             0.0
         }
 
+        // Array-free spline ribbon. Same reason as the mesh scratch above: the
+        // pointer form is unreachable from TypeScript (Perry won't pass a
+        // `number[]` into an i64 param). Push `point_count * 3` position floats
+        // followed by `width_count` width floats into the mesh scratch, then
+        // call this.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_gen_mesh_spline_ribbon_scratch(point_count: f64, width_count: f64) -> f64 {
+            $crate::ffi::guard("bloom_gen_mesh_spline_ribbon_scratch", move || {
+                let n = point_count as usize;
+                let wn = width_count as usize;
+                let scratch = engine().models.scratch_floats();
+                if n < 2 || wn == 0 || scratch.len() < n * 3 + wn {
+                    return 0.0;
+                }
+                let points: Vec<f32> = scratch[..n * 3].to_vec();
+                let widths: Vec<f32> = scratch[n * 3..n * 3 + wn].to_vec();
+                engine().models.gen_mesh_spline_ribbon(&points, &widths)
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_gen_mesh_spline_ribbon_scratch(_point_count: f64, _width_count: f64) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_gen_mesh_spline_ribbon_scratch", "models3d");
+            0.0
+        }
+
         // bloom_stage_model  [source: linux; gated: models3d]
         #[cfg(feature = "models3d")]
         #[no_mangle]

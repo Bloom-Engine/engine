@@ -38,6 +38,7 @@ import {
   mat4Scale,
 } from '../math/index';
 import { Mat4, Vec3 } from '../core/types';
+import { spawnWaterVolume, spawnRiver } from './render';
 import {
   WorldData,
   EntityData,
@@ -84,6 +85,13 @@ export interface InstantiateResult {
   // Scene node handle for the terrain mesh, or 0 if the world has no terrain.
   terrainHandle: SceneNodeHandle;
 
+  // Handles for water volumes and rivers, index-aligned with `world.water` and
+  // `world.rivers`. Arrays rather than Maps on purpose: Perry 0.5.x miscompiles
+  // interfaces that declare more than one Map field (see the editor's
+  // docs/perry-map-size-av.md), and this interface already carries one.
+  waterHandles: SceneNodeHandle[];
+  riverHandles: SceneNodeHandle[];
+
   // Non-fatal problems encountered during instantiation: missing models,
   // unresolved prefab references, cycles. The world still instantiates,
   // with the offending entities skipped.
@@ -115,13 +123,15 @@ export function loadWorld(path: string): WorldData {
 }
 
 // Spawn scene nodes for every entity in the world and apply environment
-// settings (lighting, shadows). Terrain, water, and rivers are also spawned
-// when present. Water and river rendering depend on engine additions that
-// land in later tasks; for now they are no-ops with TODO warnings.
+// settings (lighting, shadows). Terrain, water volumes, and rivers are spawned
+// when present — water and rivers via the shared helpers in ./render.ts, which
+// the editor uses too so the two never diverge.
 export function instantiateWorld(world: WorldData, ctx: InstantiateContext): InstantiateResult {
   const result: InstantiateResult = {
     entityHandles: new Map<string, SceneNodeHandle>(),
     terrainHandle: 0,
+    waterHandles: [],
+    riverHandles: [],
     warnings: [],
   };
 
@@ -149,15 +159,25 @@ export function instantiateWorld(world: WorldData, ctx: InstantiateContext): Ins
     }
   }
 
-  if (world.water.length > 0) {
-    result.warnings.push(
-      'world has ' + world.water.length + ' water volume(s) — water rendering pending engine Q8 shader',
-    );
+  // Water and rivers render through the shared helpers in ./render.ts, so a
+  // game and the editor produce identical geometry and materials.
+  for (let i = 0; i < world.water.length; i++) {
+    const handle = spawnWaterVolume(world.water[i]);
+    result.waterHandles.push(handle);
+    if (handle === 0) {
+      result.warnings.push('water volume "' + world.water[i].id + '" failed to spawn');
+    }
   }
-  if (world.rivers.length > 0) {
-    result.warnings.push(
-      'world has ' + world.rivers.length + ' river(s) — river rendering pending engine Q9 spline ribbon helper',
-    );
+
+  for (let i = 0; i < world.rivers.length; i++) {
+    const river = world.rivers[i];
+    const handle = spawnRiver(river);
+    result.riverHandles.push(handle);
+    if (handle === 0) {
+      result.warnings.push(
+        'river "' + river.id + '" failed to spawn (needs at least 2 control points)',
+      );
+    }
   }
 
   return result;
