@@ -667,6 +667,13 @@ macro_rules! __bloom_ffi_models {
             $crate::ffi::guard("bloom_compile_material_from_file", move || {
                 use $crate::renderer::material_pipeline::{FragmentProfile, Bucket};
                 let path = $crate::string_header::str_from_header(path_ptr);
+                // Every other asset loader routes through the platform's
+                // resolve hook; this one read the raw relative path straight
+                // off the working directory, which is only the asset root on
+                // the desktop hosts. On iOS the CWD is not the app bundle, so
+                // every from-file material failed to canonicalize and the whole
+                // scene lost its shaders.
+                let path: &str = &bloom_resolve_asset_path(path);
                 let (profile, bucket, reads_scene) = match bucket_kind as u32 {
                     0 => (FragmentProfile::Opaque,      Bucket::Opaque,      false),
                     1 => (FragmentProfile::Translucent, Bucket::Transparent, false),
