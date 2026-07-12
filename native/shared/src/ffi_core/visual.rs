@@ -472,6 +472,29 @@ macro_rules! __bloom_ffi_visual {
         })
         }
 
+        // bloom_set_model_foliage_wind  [EN-041]
+        //
+        // Mark a cached model as a plant so the wind bends it. amount ~1.0 for a
+        // tree. The engine used to sway alpha-cut materials only, so leaf cards
+        // fluttered and every trunk stood rigid.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_model_foliage_wind(model: f64, amount: f64) {
+            $crate::ffi::guard("bloom_set_model_foliage_wind", move || {
+                engine().renderer.set_model_foliage_wind(model.to_bits(), amount as f32);
+        })
+        }
+
+        // bloom_set_foliage_shadow_motion  [EN-041]
+        //
+        // Let foliage sway in the shadow pass too, so the canopy dapple moves.
+        // NOT free: a moving caster cannot reuse the cached static shadow depth.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_foliage_shadow_motion(on: f64) {
+            $crate::ffi::guard("bloom_set_foliage_shadow_motion", move || {
+                engine().renderer.set_foliage_shadow_motion(on > 0.5);
+        })
+        }
+
         // bloom_set_cloud_shadows  [EN-040]
         //
         // Opt the world into the deck the sky is already drawing. strength 0

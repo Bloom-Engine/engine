@@ -1471,6 +1471,15 @@ pub struct Renderer {
     /// every existing game keeps the look it shipped with; the sky still draws
     /// them. See `common/clouds.wgsl`.
     cloud_params: [f32; 4],
+    /// Per-model foliage wind amount, keyed by cached-model handle. Absent or 0
+    /// = not a plant, don't move it. See `common/foliage_wind.wgsl`.
+    foliage_wind: std::collections::HashMap<u64, f32>,
+    /// Whether foliage casters sway in the SHADOW pass too. Off by default and
+    /// deliberately so: a swaying caster can no longer use the cached static
+    /// shadow depth, so every tree re-renders into every cascade every frame.
+    /// That is a real cost, and it buys canopy dapple that MOVES — worth it on a
+    /// machine with headroom, not worth a frame-rate cliff on one without.
+    foliage_shadow_motion: bool,
     uniform_3d_layout: wgpu::BindGroupLayout,
 
     // State
@@ -6458,6 +6467,8 @@ impl Renderer {
             // decision, and silently darkening every existing game's terrain
             // is not the engine's call to make.
             cloud_params: [0.0, 420.0, 0.0035, 8.0],
+            foliage_wind: std::collections::HashMap::new(),
+            foliage_shadow_motion: false,
             uniform_3d_layout,
             render_mode: RenderMode::ScreenSpace,
             pending_skin_groups: Vec::with_capacity(8),
@@ -6898,6 +6909,35 @@ impl Renderer {
     /// displacement scale (~0.1 m for grass), `frequency` is in Hz.
     pub fn set_wind(&mut self, dir_x: f32, dir_z: f32, amplitude: f32, frequency: f32) {
         self.wind = [dir_x, dir_z, amplitude, frequency];
+    }
+
+    /// Mark a cached model as foliage, so the scene (and optionally shadow) pass
+    /// bends it in the wind. `amount` scales the whole effect: ~1.0 for a tree,
+    /// smaller for a stiff shrub, 0 to turn it off again.
+    ///
+    /// The wind is hierarchical (`common/foliage_wind.wgsl`) — trunk bend,
+    /// branch sway, leaf flutter — and the layer weights come from where each
+    /// vertex sits relative to the model origin, so nothing needs authoring into
+    /// the mesh. Direction/strength/rate come from [`Renderer::set_wind`].
+    ///
+    /// Before this the engine swayed alpha-cut materials only, which meant leaf
+    /// cards fluttered and every trunk stood perfectly rigid.
+    pub fn set_model_foliage_wind(&mut self, handle_bits: u64, amount: f32) {
+        if amount <= 0.0 {
+            self.foliage_wind.remove(&handle_bits);
+        } else {
+            self.foliage_wind.insert(handle_bits, amount);
+        }
+    }
+
+    /// Let foliage sway in the SHADOW pass as well, so a bending tree and its
+    /// shadow bend together and the canopy dapple actually moves.
+    ///
+    /// Off by default because it is not free: a caster that moves every frame
+    /// cannot reuse the cached static shadow depth, so every tree re-renders
+    /// into every cascade, every frame. Turn it on if the frame budget allows.
+    pub fn set_foliage_shadow_motion(&mut self, on: bool) {
+        self.foliage_shadow_motion = on;
     }
 
     /// Cloud deck — the clouds the sky draws and the shadows they cast, from one
@@ -11604,6 +11644,7 @@ impl Renderer {
         self.lighting_uniforms.wind =
             [self.wind[0], self.wind[1], self.wind[2], time_seconds];
         self.lighting_uniforms.cloud = self.cloud_params;
+        self.lighting_uniforms.frame_misc = [delta_time, 0.0, 0.0, 0.0];
         let screen_w = self.surface_config.width as f32;
         let screen_h = self.surface_config.height as f32;
         let (rw, rh) = self.render_extent();

@@ -1274,3 +1274,50 @@ design.
 - **Netcode:** absent entirely; out of scope by decision, not
   oversight. Revisit only with a design that needs it.
 
+
+
+## EN-041 — Hierarchical foliage wind ✅ *(shipped 2026-07-12)*
+
+The engine swayed **alpha-cut materials only**. So leaf cards fluttered and every
+tree trunk in every game stood perfectly rigid — a forest of poles with twitching
+hair — and the shadow shaders applied no wind at all, so the leaves moved while
+their shadows stayed nailed to the ground.
+
+`common/foliage_wind.wgsl` is now one field shared by the scene pass and both
+shadow shaders. Three layers, because a tree does not move as one thing: trunk
+bend (∝ height², a cantilever — the motion you read at 30 m), branch sway (∝ reach
+from the trunk axis), leaf flutter (cutout cards only). The weights are DERIVED
+from the vertex's position relative to the model origin rather than authored into
+vertex colours — COLOR_0 is already spent on albedo tint, and for procedurally
+generated trees the regions are known exactly anyway. So: no new vertex attribute,
+no GLB re-bake.
+
+`set_model_foliage_wind(model, amount)` opts a model in; everything else stays
+rigid. The offset is computed in WORLD space and mapped back through the model's
+inverse linear part — displacing along a local axis would let each tree's
+per-instance yaw rotate the wind with it, and a stand of trees would bend a dozen
+different ways. Prev-frame offset too, so TAA gets a real velocity for a moving
+leaf instead of 0.
+
+---
+
+## EN-042 — Dynamic shadow-caster budget is 64, and overflow is silently dropped 🔴
+
+**Found while shipping EN-041.** `SHADOW_MAX_DYNAMIC = 64`. A caster that moves
+every frame cannot reuse the cached static depth, so it must go in the dynamic
+set — and the shooter's forest alone is 88 trees × 4 primitives = **352**.
+
+Turning on `set_foliage_shadow_motion` therefore overflows the budget, and the
+overflow is **dropped without a word**. The measured result was not a slowdown but
+a *speedup* (34 → 40 fps) — because it had silently deleted every tree shadow AND
+**the player's own shadow from under their feet**. A perf win that is really a
+correctness loss is the worst possible failure mode.
+
+Mitigated for now: foliage is promoted to the dynamic set only while slots remain
+(`MAX_FOLIAGE_DYNAMIC = 24`), so characters always keep theirs and the rest of the
+forest just stays rigid. The real fix is a budget that scales, or a foliage path
+that refreshes cached static depth on a slow cadence instead of per frame.
+
+**Acceptance:** the dynamic set cannot silently drop a caster — it either fits, or
+the engine degrades a *chosen* class (foliage) rather than whatever happened to be
+queued last.

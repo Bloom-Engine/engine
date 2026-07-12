@@ -217,6 +217,7 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
 // reason to share it.
 pub(in crate::renderer) const SCENE_SHADER: &str = concat!(
     include_str!("../../../shaders/common/clouds.wgsl"),
+    include_str!("../../../shaders/common/foliage_wind.wgsl"),
     r#"
 struct Uniforms3D {
     mvp: mat4x4<f32>,
@@ -256,6 +257,7 @@ struct Lighting {
     shadow_view_matrix: mat4x4<f32>,
     wind: vec4<f32>,   // xy=dir, z=amplitude, w=time (foliage sway)
     cloud: vec4<f32>,  // x=shadow strength, y=deck height, z=scale, w=drift m/s
+    frame_misc: vec4<f32>, // x=delta_time (prev-frame wind, for motion vectors)
 };
 
 struct MaterialFactors {
@@ -393,24 +395,31 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
     }
     var out: VertexOutputScene;
     var local = in.position;
-    // Foliage wind sway — only for alpha-cut materials (leaf cards), so the
-    // opaque trunk and the rest of the world stay rigid. Sway grows with the
-    // vertex's height up the plant and its phase varies by world position so
-    // cards don't move in lockstep. lighting.wind = (dir.x, dir.z, amp, time).
-    if (material.metal_rough.w > 0.0 && lighting.wind.z > 0.0) {
-        let wp0 = (u.model * vec4<f32>(in.position, 1.0)).xyz;
-        let t = lighting.wind.w;
-        let sway = lighting.wind.z * (0.25 + max(in.position.y, 0.0) * 0.16);
-        let phase = t * 1.6 + wp0.x * 0.5 + wp0.z * 0.5;
-        local.x = local.x + lighting.wind.x * sway * sin(phase);
-        local.z = local.z + lighting.wind.y * sway * sin(phase * 1.3 + 1.1);
-        local.y = local.y + sway * 0.12 * sin(phase * 0.9 + 2.0);
+    // Hierarchical foliage wind (common/foliage_wind.wgsl). u.misc.z is the
+    // per-draw foliage amount — 0 for everything that is not a plant, so the
+    // world does not sway. This replaces a sway that only ever moved ALPHA-CUT
+    // materials, which meant leaf cards fluttered and every trunk was rigid.
+    //
+    // is_leaf comes from the alpha cutoff, so cards get the fast flutter layer
+    // and wood does not.
+    var prev_local = local;
+    if (u.misc.z > 0.0 && lighting.wind.z > 0.0) {
+        // is_leaf from the alpha cutoff: cards get the fast flutter layer, wood
+        // does not. Same helper the shadow pass calls, so the tree and its shadow
+        // bend together.
+        let is_leaf = select(0.0, 1.0, material.metal_rough.w > 0.0);
+        local = foliage_wind_local(in.position, u.model, lighting.wind, u.misc.z, is_leaf);
+        // Last frame's offset too, so TAA gets a real velocity for a moving leaf
+        // instead of 0 and stops smearing the canopy into the sky behind it.
+        var w_prev = lighting.wind;
+        w_prev.w = lighting.wind.w - lighting.frame_misc.x;
+        prev_local = foliage_wind_local(in.position, u.model, w_prev, u.misc.z, is_leaf);
     }
     let pos4 = vec4<f32>(local, 1.0);
     let curr = u.mvp * pos4;
     out.clip_position = curr;
     out.curr_clip = curr;
-    out.prev_clip = u.prev_mvp * pos4;
+    out.prev_clip = u.prev_mvp * vec4<f32>(prev_local, 1.0);
     let world4 = u.model * pos4;
     out.world_pos = world4.xyz;
     out.normal = normalize((u.model * vec4<f32>(in.normal, 0.0)).xyz);

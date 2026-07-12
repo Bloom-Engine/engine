@@ -5,6 +5,8 @@ import { Color, Model, Vec3, Mat4, BoundingBox } from '../core/types';
 declare function bloom_load_model(path: number): number;
 declare function bloom_draw_model(handle: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_model_rotated(handle: number, x: number, y: number, z: number, scale: number, rotY: number, colorPackedArgb: number): void;
+declare function bloom_set_model_foliage_wind(handle: number, amount: number): void;
+declare function bloom_set_foliage_shadow_motion(on: number): void;
 declare function bloom_unload_model(handle: number): void;
 declare function bloom_draw_cube(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_cube_wires(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
@@ -1103,4 +1105,28 @@ export function updateRagdoll(rag: number, anim: number, dt: number): number {
 /// invisible death.
 export function releaseRagdoll(rag: number): void {
   bloom_ragdoll_release(rag);
+}
+
+/// Mark a model as foliage, so the wind actually bends it.
+///
+/// `amount` scales the whole effect: ~1.0 for a tree, less for a stiff shrub,
+/// 0 to turn it off. Direction, strength and rate come from `setWind`.
+///
+/// The wind is hierarchical (trunk bend, branch sway, leaf flutter) and the
+/// layer weights are derived from where each vertex sits relative to the model
+/// origin — nothing has to be authored into the mesh. Before this the engine
+/// swayed alpha-cut materials only, which meant leaf cards fluttered while every
+/// trunk in the scene stood perfectly rigid.
+export function setModelFoliageWind(model: Model, amount: number): void {
+  bloom_set_model_foliage_wind(model.handle, amount);
+}
+
+/// Let foliage sway in the SHADOW pass too, so a bending tree and its shadow bend
+/// together and the canopy dapple on the ground actually moves.
+///
+/// Off by default, and not free: a caster that moves every frame cannot reuse the
+/// cached static shadow depth, so every plant re-renders into every cascade every
+/// frame. Measure before leaving it on.
+export function setFoliageShadowMotion(on: boolean): void {
+  bloom_set_foliage_shadow_motion(on ? 1 : 0);
 }

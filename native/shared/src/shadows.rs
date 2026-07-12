@@ -34,11 +34,14 @@ pub const SHADOW_MAX_NODES: u32 = 1024;
 pub const SHADOW_MAX_DYNAMIC: u32 = 64;
 
 /// Depth-only shader for shadow pass.
-pub const SHADOW_SHADER: &str = "
+pub const SHADOW_SHADER: &str = concat!(
+    include_str!("../shaders/common/foliage_wind.wgsl"),
+    r#"
 struct ShadowUniforms {
     light_vp: mat4x4<f32>,
     model: mat4x4<f32>,
-    misc: vec4<f32>,   // x = joint offset (used by the skinned variant)
+    misc: vec4<f32>,   // x = joint offset (skinned variant), z = foliage wind amount
+    wind: vec4<f32>,   // xy = dir, z = amplitude, w = time
 };
 
 @group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
@@ -54,21 +57,26 @@ struct ShadowVertexInput {
 
 @vertex
 fn vs_shadow(in: ShadowVertexInput) -> @builtin(position) vec4<f32> {
-    let world_pos = shadow_u.model * vec4<f32>(in.position, 1.0);
+    // is_leaf = 0: this pipeline draws the opaque casters (trunks, branches).
+    let p = foliage_wind_local(in.position, shadow_u.model, shadow_u.wind, shadow_u.misc.z, 0.0);
+    let world_pos = shadow_u.model * vec4<f32>(p, 1.0);
     return shadow_u.light_vp * world_pos;
 }
-";
+"#);
 
 /// Alpha-tested shadow shader for cutout foliage (trees, grass, leaves). Same
 /// depth-only output as SHADOW_SHADER but samples the caster's base-colour
 /// alpha and discards below the material cutoff, so cutout cards cast their
 /// real shape (dappled light) instead of an opaque billboard blob. Used by a
 /// dedicated pipeline; the opaque shadow path stays untouched.
-pub const SHADOW_SHADER_CUTOUT: &str = "
+pub const SHADOW_SHADER_CUTOUT: &str = concat!(
+    include_str!("../shaders/common/foliage_wind.wgsl"),
+    r#"
 struct ShadowUniforms {
     light_vp: mat4x4<f32>,
     model: mat4x4<f32>,
-    misc: vec4<f32>,   // x = joint offset (used by the skinned variant)
+    misc: vec4<f32>,   // x = joint offset (skinned variant), z = foliage wind amount
+    wind: vec4<f32>,   // xy = dir, z = amplitude, w = time
 };
 @group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
 
@@ -90,10 +98,14 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
 };
 
+
 @vertex
 fn vs_shadow_cutout(in: ShadowVertexInput) -> VsOut {
     var o: VsOut;
-    let world_pos = shadow_u.model * vec4<f32>(in.position, 1.0);
+    // is_leaf = 1: this pipeline draws the cutout cards, so they get the fast
+    // flutter layer -- and their shadows now flutter with them.
+    let p = foliage_wind_local(in.position, shadow_u.model, shadow_u.wind, shadow_u.misc.z, 1.0);
+    let world_pos = shadow_u.model * vec4<f32>(p, 1.0);
     o.pos = shadow_u.light_vp * world_pos;
     o.uv = in.uv;
     return o;
@@ -104,7 +116,7 @@ fn fs_shadow_cutout(in: VsOut) {
     let a = textureSample(base_tex, base_samp, in.uv).a;
     if (a < cut.cutoff.x) { discard; }
 }
-";
+"#);
 
 /// Skinned shadow shader for animated characters (player, enemies). Their
 /// vertices are *rest-pose* (cached model VBs with raw joint indices, or the
@@ -168,8 +180,14 @@ pub struct ShadowUniforms {
     /// x = joint-buffer base offset for skinned CACHED casters (their
     /// VBs keep raw joint indices; `vs_shadow_skinned` adds this before
     /// indexing). 0 for everything else, including the immediate batch
-    /// whose vertex joints are pre-offset CPU-side. yzw unused.
+    /// whose vertex joints are pre-offset CPU-side.
+    /// z = foliage wind amount for this caster (0 = rigid). A tree that bends in
+    /// the scene pass but not in the shadow pass detaches from its own shadow.
+    /// yw unused.
     pub misc: [f32; 4],
+    /// Global wind: xy = direction in XZ, z = amplitude, w = elapsed seconds.
+    /// The shadow pass needs it for the same reason the scene pass does.
+    pub wind: [f32; 4],
 }
 
 /// Shadow map resources for cascaded shadow mapping.

@@ -1651,6 +1651,21 @@
           "returns": "void"
         },
         {
+          "name": "bloom_set_model_foliage_wind",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_foliage_shadow_motion",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_set_cloud_shadows",
           "params": [
             "f64",

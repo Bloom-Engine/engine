@@ -144,6 +144,11 @@ pub(super) struct LightingUniforms {
     /// Strength 0 = the scene ignores the clouds. Appended last so existing
     /// field offsets stay stable.
     pub(super) cloud: [f32; 4],
+    /// x = delta_time (seconds). The scene VS needs LAST frame's wind offset to
+    /// emit a correct motion vector for swaying foliage — without it TAA sees
+    /// velocity 0 on every moving leaf and ghosts them. Appended last so existing
+    /// field offsets stay stable.
+    pub(super) frame_misc: [f32; 4],
 }
 
 impl LightingUniforms {
@@ -165,6 +170,7 @@ impl LightingUniforms {
             shadow_view_matrix: IDENTITY_MAT4,
             wind: [0.0, 0.0, 0.0, 0.0],
             cloud: [0.0, 420.0, 0.0035, 8.0],
+            frame_misc: [0.0; 4],
         }
     }
 }
