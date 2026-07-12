@@ -1301,7 +1301,7 @@ leaf instead of 0.
 
 ---
 
-## EN-042 — Dynamic shadow-caster budget is 64, and overflow is silently dropped 🔴
+## EN-042 — Dynamic shadow-caster budget is 64, and overflow is silently dropped ✅ *(fixed — see the resolution at the end of this file)*
 
 **Found while shipping EN-041.** `SHADOW_MAX_DYNAMIC = 64`. A caster that moves
 every frame cannot reuse the cached static depth, so it must go in the dynamic
