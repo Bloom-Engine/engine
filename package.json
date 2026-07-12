@@ -1772,9 +1772,44 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_sound_bus",
+          "params": ["f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_sound_reverb_send",
+          "params": ["f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_sound_lowpass",
+          "params": ["f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_bus_gain",
+          "params": ["f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_duck_bus",
+          "params": ["f64", "f64", "f64", "f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_set_reverb",
+          "params": ["f64", "f64", "f64"],
+          "returns": "void"
+        },
+        {
           "name": "bloom_is_gamepad_available",
           "params": [],
           "returns": "f64"
+        },
+        {
+          "name": "bloom_gamepad_rumble",
+          "params": ["f64", "f64", "f64"],
+          "returns": "void"
         },
         {
           "name": "bloom_get_gamepad_axis",

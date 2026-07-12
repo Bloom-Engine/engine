@@ -184,3 +184,66 @@ export function commitMusic(stagingHandle: number): Music {
   const handle = bloom_commit_music(stagingHandle);
   return { handle };
 }
+
+// ---- EN-029: mix buses, reverb send, occlusion low-pass ---------------------
+//
+// The mixer used to be master gain + per-voice gain. That plays sounds; it
+// does not make a space sound like a place. Three additions cover the moves a
+// shooter actually needs:
+//
+//   - a bus you can duck   ("drop the music when the player is hit")
+//   - a tail you can send to ("this gunshot is indoors")
+//   - a filter per source  ("that shriek is behind the building")
+//
+// Routing is per *sound*, set once at load — a footstep is always SFX, a menu
+// blip is always UI — so the per-shot call sites stay unchanged.
+
+declare function bloom_set_sound_bus(handle: number, bus: number): void;
+declare function bloom_set_sound_reverb_send(handle: number, send: number): void;
+declare function bloom_set_sound_lowpass(handle: number, cutoff: number): void;
+declare function bloom_set_bus_gain(bus: number, gain: number): void;
+declare function bloom_duck_bus(bus: number, amount: number, attack: number, release: number, hold: number): void;
+declare function bloom_set_reverb(size: number, damp: number, wet: number): void;
+
+export const BUS_SFX = 0;
+export const BUS_MUSIC = 1;
+export const BUS_UI = 2;
+
+/// Route a sound to a mix bus. Music loaded via `loadMusic` is already on
+/// BUS_MUSIC; this is for sound effects that belong somewhere other than SFX
+/// (menu clicks → BUS_UI, so they never duck with the rest of the mix).
+export function setSoundBus(sound: Sound, bus: number): void {
+  bloom_set_sound_bus(sound.handle, bus);
+}
+
+/// How much of this sound feeds the reverb, 0..1. This is what gives a weapon
+/// its tail — and raising it near walls is what makes a fight "indoors".
+export function setSoundReverbSend(sound: Sound, send: number): void {
+  bloom_set_sound_reverb_send(sound.handle, send);
+}
+
+/// Low-pass this sound at `cutoffHz` (0 = bypass). The occlusion primitive:
+/// the game raycasts to the emitter and muffles what it can't see. Muffling
+/// reads as geometry in a way that simply lowering the volume never does.
+export function setSoundLowpass(sound: Sound, cutoffHz: number): void {
+  bloom_set_sound_lowpass(sound.handle, cutoffHz);
+}
+
+export function setBusGain(bus: number, gain: number): void {
+  bloom_set_bus_gain(bus, gain);
+}
+
+/// Momentarily pull a bus down — `amount` 0..1 — over `attack` seconds, hold
+/// it for `hold`, then recover over `release`. Call it again to re-trigger;
+/// the hold restarts, so repeated hits keep the music down.
+export function duckBus(bus: number, amount: number, attack: number, release: number, hold: number): void {
+  bloom_duck_bus(bus, amount, attack, release, hold);
+}
+
+/// Global reverb: `size` 0..1 (tail length), `damp` 0..1 (HF absorption),
+/// `wet` 0..1 (how much returns to the mix). wet = 0 bypasses the entire
+/// reverb path, so it is free until you ask for it — ramp it up as the player
+/// moves indoors.
+export function setReverb(size: number, damp: number, wet: number): void {
+  bloom_set_reverb(size, damp, wet);
+}

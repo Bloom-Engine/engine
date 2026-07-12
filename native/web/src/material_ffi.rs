@@ -633,3 +633,36 @@ pub fn bloom_decals_instance_buffer() -> f64 {
 pub fn bloom_decals_clear() {
     engine().decals.clear();
 }
+
+// EN-029 — audio buses / reverb / occlusion low-pass. All CPU DSP in
+// bloom-shared's AudioMixer, so web gets the real thing.
+
+#[wasm_bindgen]
+pub fn bloom_set_sound_bus(handle: f64, bus: f64) {
+    engine().audio.set_sound_bus(handle, bus as u8);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_sound_reverb_send(handle: f64, send: f64) {
+    engine().audio.set_sound_reverb_send(handle, send as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_sound_lowpass(handle: f64, cutoff: f64) {
+    engine().audio.set_sound_lowpass(handle, cutoff as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_bus_gain(bus: f64, gain: f64) {
+    engine().audio.set_bus_gain(bus as u8, gain as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_duck_bus(bus: f64, amount: f64, attack: f64, release: f64, hold: f64) {
+    engine().audio.duck_bus(bus as u8, amount as f32, attack as f32, release as f32, hold as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_reverb(size: f64, damp: f64, wet: f64) {
+    engine().audio.set_reverb(size as f32, damp as f32, wet as f32);
+}

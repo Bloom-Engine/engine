@@ -827,3 +827,21 @@
 }
 #[no_mangle] pub extern "C" fn bloom_decals_clear() {
 }
+
+// EN-029 — audio bus/reverb/filter surface (watchOS stub platform).
+#[no_mangle] pub extern "C" fn bloom_set_sound_bus(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_sound_reverb_send(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_sound_lowpass(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_bus_gain(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_duck_bus(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_reverb(_p0: f64, _p1: f64, _p2: f64) {
+}
+
+// EN-031 — gamepad rumble (no vibration motor on watchOS).
+#[no_mangle] pub extern "C" fn bloom_gamepad_rumble(_p0: f64, _p1: f64, _p2: f64) {
+}

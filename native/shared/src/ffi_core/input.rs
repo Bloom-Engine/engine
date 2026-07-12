@@ -98,6 +98,24 @@ macro_rules! __bloom_ffi_input {
         })
         }
 
+        // bloom_gamepad_rumble  [EN-031]
+        // low/high motor 0..1, duration in seconds. The platform's input poll
+        // consumes this and drives its own vibration API; on platforms with no
+        // vibration it is simply ignored (the state is written, nobody reads
+        // it) — which is why the symbol exists everywhere and the behaviour
+        // does not have to.
+        #[no_mangle]
+        pub extern "C" fn bloom_gamepad_rumble(low: f64, high: f64, seconds: f64) {
+            $crate::ffi::guard("bloom_gamepad_rumble", move || {
+                let inp = &mut engine().input;
+                inp.rumble = [
+                    (low as f32).clamp(0.0, 1.0),
+                    (high as f32).clamp(0.0, 1.0),
+                    (seconds as f32).clamp(0.0, 10.0),
+                ];
+        })
+        }
+
         // bloom_is_gamepad_button_pressed  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_is_gamepad_button_pressed(btn: f64) -> f64 {

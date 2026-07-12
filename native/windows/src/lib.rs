@@ -841,10 +841,40 @@ fn poll_xinput_gamepad() {
                 eng.input.set_gamepad_button_up(idx);
             }
         }
+
+        // EN-031 — rumble. The FFI writes (low, high, seconds) into shared
+        // input state; we own the motors and the countdown. Only push a new
+        // XInputSetState when the commanded level actually changes, since the
+        // call goes out over USB/BT and doing it every frame is wasteful.
+        let dt = eng.delta_time as f32;
+        let (lo, hi, mut left) = (eng.input.rumble[0], eng.input.rumble[1], eng.input.rumble[2]);
+        let (want_lo, want_hi) = if left > 0.0 { (lo, hi) } else { (0.0, 0.0) };
+        unsafe {
+            if (want_lo, want_hi) != LAST_RUMBLE {
+                let mut vib = XINPUT_VIBRATION {
+                    wLeftMotorSpeed: (want_lo * 65535.0) as u16,
+                    wRightMotorSpeed: (want_hi * 65535.0) as u16,
+                };
+                let _ = XInputSetState(0, &mut vib);
+                LAST_RUMBLE = (want_lo, want_hi);
+            }
+        }
+        if left > 0.0 {
+            left = (left - dt).max(0.0);
+            eng.input.rumble[2] = left;
+        }
     } else {
         eng.input.gamepad_available = false;
+        // Pad unplugged mid-rumble: forget the commanded level so a
+        // reconnecting pad doesn't inherit a stale "still buzzing" state.
+        unsafe { LAST_RUMBLE = (0.0, 0.0); }
     }
 }
+
+/// Last vibration level actually pushed to the pad, so we only call
+/// XInputSetState on change.
+#[cfg(windows)]
+static mut LAST_RUMBLE: (f32, f32) = (0.0, 0.0);
 
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
