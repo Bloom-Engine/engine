@@ -666,3 +666,11 @@ pub fn bloom_duck_bus(bus: f64, amount: f64, attack: f64, release: f64, hold: f6
 pub fn bloom_set_reverb(size: f64, damp: f64, wet: f64) {
     engine().audio.set_reverb(size as f32, damp as f32, wet as f32);
 }
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_instanced_bucket(source: String, bucket: f64, reads_scene: f64) -> f64 {
+    match engine().renderer.compile_material_instanced_bucket(&source, bucket as u32, reads_scene != 0.0) {
+        Ok(handle) => handle as f64,
+        Err(e) => { web_sys::console::error_1(&format!("[material] instanced compile failed: {:?}", e).into()); 0.0 }
+    }
+}

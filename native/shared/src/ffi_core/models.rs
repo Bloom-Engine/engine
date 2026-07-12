@@ -259,6 +259,27 @@ macro_rules! __bloom_ffi_models {
         })
         }
 
+        // bloom_compile_material_instanced_bucket  [EN-026/027]
+        // bucket: 0 = opaque, 1 = cutout, 2 = additive, 3 = transparent.
+        // reads_scene: bind the scene colour/depth snapshot (soft particles).
+        // The plain instanced compile above is hardcoded to opaque, which is
+        // right for grass and wrong for the two things that most want
+        // instancing: particles (additive) and decals (cutout).
+        #[no_mangle]
+        pub extern "C" fn bloom_compile_material_instanced_bucket(
+            source_ptr: *const u8, bucket: f64, reads_scene: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_compile_material_instanced_bucket", move || {
+                let source = $crate::string_header::str_from_header(source_ptr);
+                match engine().renderer.compile_material_instanced_bucket(
+                    source, bucket as u32, reads_scene != 0.0)
+                {
+                    Ok(handle) => handle as f64,
+                    Err(e) => { eprintln!("[material] instanced compile failed: {:?}", e); 0.0 }
+                }
+        })
+        }
+
         // bloom_submit_material_draw_instanced  [source: linux; gated: models3d]
         #[cfg(feature = "models3d")]
         #[no_mangle]

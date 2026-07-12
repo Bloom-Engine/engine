@@ -161,6 +161,55 @@ macro_rules! __bloom_ffi_game_loop {
         })
         }
 
+        // bloom_create_texture_array_from_files  [EN-014 V3]
+        //
+        // The byte-array path above asks the game to marshal every texel across
+        // the FFI — a 6-layer 256² array is 1.5 M numbers, which is exactly the
+        // shape of call Perry's array bridge is worst at. Decoding on this side
+        // from a path list is both faster and the API every actual consumer
+        // wants (VFX atlas layers, splat-terrain layers).
+        //
+        // `paths` is comma-separated, and is parsed HERE, at load time — never
+        // on a per-frame path (perry-quirks #5). Layers must share dimensions;
+        // the first file's size wins and any mismatch is skipped with a warning.
+        #[no_mangle]
+        pub extern "C" fn bloom_create_texture_array_from_files(
+            paths_ptr: *const u8, format: f64, mip_levels: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_create_texture_array_from_files", move || {
+                let list = $crate::string_header::str_from_header(paths_ptr);
+                let mut decoded: Vec<(Vec<u8>, u32, u32)> = Vec::new();
+                for p in list.split(',') {
+                    let p = p.trim();
+                    if p.is_empty() { continue; }
+                    let resolved = bloom_resolve_asset_path(p);
+                    match image::open(resolved.as_ref()) {
+                        Ok(img) => {
+                            let rgba = img.to_rgba8();
+                            let (w, h) = rgba.dimensions();
+                            decoded.push((rgba.into_raw(), w, h));
+                        }
+                        Err(e) => {
+                            eprintln!("[texarray] failed to load {}: {}", p, e);
+                        }
+                    }
+                }
+                if decoded.is_empty() { return 0.0; }
+                let (w, h) = (decoded[0].1, decoded[0].2);
+                let mut layers: Vec<(&[u8], u32, u32)> = Vec::with_capacity(decoded.len());
+                for (bytes, lw, lh) in decoded.iter() {
+                    if *lw != w || *lh != h {
+                        eprintln!("[texarray] layer size {}x{} != {}x{}; skipped", lw, lh, w, h);
+                        continue;
+                    }
+                    layers.push((bytes.as_slice(), w, h));
+                }
+                if layers.is_empty() { return 0.0; }
+                engine().renderer.create_texture_array_ex(
+                    &layers, format as u32, mip_levels as u32) as f64
+        })
+        }
+
         // bloom_clear_post_pass  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_clear_post_pass() {

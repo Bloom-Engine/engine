@@ -169,6 +169,9 @@ for (const platform of PLATFORMS) {
   // pointer-taking geometry (cross-module WASM memory TODO) and
   // filesystem captures (no fs on wasm; need _bytes/_str designs).
   const WEB_GAP_ALLOWLIST = new Set([
+    // EN-014 V3 — decodes image files from disk; wasm has no fs. The
+    // byte-array path (bloom_create_texture_array_ex) is the web route.
+    'bloom_create_texture_array_from_files',
     'bloom_scene_set_lod',          // Perry-WASM linear-memory bridge TODO
     'bloom_take_screenshot',        // no fs — needs a bytes-returning design
     'bloom_set_env_clear_from_hdr', // no fs — needs a _bytes variant

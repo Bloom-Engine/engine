@@ -845,3 +845,11 @@
 // EN-031 — gamepad rumble (no vibration motor on watchOS).
 #[no_mangle] pub extern "C" fn bloom_gamepad_rumble(_p0: f64, _p1: f64, _p2: f64) {
 }
+
+#[no_mangle] pub extern "C" fn bloom_compile_material_instanced_bucket(_p0: i64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+
+#[no_mangle] pub extern "C" fn bloom_create_texture_array_from_files(_p0: i64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}

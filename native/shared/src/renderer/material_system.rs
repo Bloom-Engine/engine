@@ -866,6 +866,13 @@ impl MaterialSystem {
                 .get(idx)
                 .and_then(|b| b.as_ref())
                 .unwrap_or(&self._default_material_factors_buffer);
+            // EN-014 BUG FIX: this used to hardcode the 1×1 stub array on
+            // bindings 14/15/16, so setting user params AFTER linking a texture
+            // array silently unbound the array — the material kept sampling the
+            // stub and every fetch came back empty. Nothing errored; the pixels
+            // simply never appeared. Resolve the links like every other
+            // BG-build path does.
+            let [albedo_view, normal_view, mr_view] = self.resolve_array_views(idx);
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("material_per_material_bg_user"),
                 layout: &self.layouts.per_material,
@@ -884,10 +891,9 @@ impl MaterialSystem {
                     wgpu::BindGroupEntry { binding: 11, resource: buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.default_black_view) },
                     wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                    // EN-014 — default stub array on all 3 slots.
-                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&self.default_array_view) },
-                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.default_array_view) },
-                    wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&self.default_array_view) },
+                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(albedo_view) },
+                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(normal_view) },
+                    wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(mr_view) },
                     wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
                 ],
             });

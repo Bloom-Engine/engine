@@ -366,6 +366,29 @@ export function compileMaterialInstanced(wgslSource: string): number {
   return bloom_compile_material_instanced(wgslSource as any);
 }
 
+declare function bloom_compile_material_instanced_bucket(src: number, bucket: number, readsScene: number): number;
+
+export const BUCKET_OPAQUE = 0;
+export const BUCKET_CUTOUT = 1;
+export const BUCKET_ADDITIVE = 2;
+export const BUCKET_TRANSPARENT = 3;
+
+/// EN-026/027 — instanced compile into a chosen bucket. `compileMaterialInstanced`
+/// is opaque-only, which suits grass and suits nothing that blends: particles
+/// want BUCKET_ADDITIVE, decals want BUCKET_CUTOUT (alpha-tested against the
+/// atlas so they still write depth and receive shadow).
+///
+/// Set `readsScene` if the shader samples `scene_color_tex` / `scene_depth_tex`
+/// — soft particles need it, and WITHOUT it the scene bind group is simply
+/// absent from the pipeline layout and the shader fails validation when the
+/// pipeline is created (not when it is written), which is a confusing way to
+/// find out.
+export function compileMaterialInstancedBucket(
+  wgslSource: string, bucket: number, readsScene: boolean = false,
+): number {
+  return bloom_compile_material_instanced_bucket(wgslSource as any, bucket, readsScene ? 1 : 0);
+}
+
 /// EN-001 — upload a flat per-instance buffer to the GPU. `data` is
 /// laid out as 9 floats per instance:
 ///   [pos.x, pos.y, pos.z, rot_y, scale, tint.r, tint.g, tint.b, tint.a]
@@ -533,6 +556,39 @@ export function createTextureArrayEx(
   format: number, mipLevels: number,
 ): number {
   return bloom_create_texture_array_ex(bytes as any, dataLen, width, height, layerCount, format, mipLevels);
+}
+
+declare function bloom_create_texture_array_from_files(paths: number, format: number, mipLevels: number): number;
+
+/// EN-014 V3 — build a texture array by naming the files, letting the engine
+/// decode them.
+///
+/// Prefer this to `createTextureArray`: that one asks the caller to marshal
+/// every texel across the FFI (a 6-layer 256² array is 1.5 M numbers), which is
+/// both slow and exactly the call shape Perry's array bridge handles worst.
+/// Here the only thing crossing is a path list, parsed once at load — never on
+/// a frame path (perry-quirks #5).
+///
+/// All layers must share dimensions; the first file's size wins and mismatched
+/// ones are skipped with a warning. Layer index = position in the list, so the
+/// ORDER IS AN ABI — shaders index by it. Returns 0 if nothing decoded.
+///
+/// Not available on web (no filesystem in wasm); use `createTextureArrayEx`
+/// there.
+export function createTextureArrayFromFiles(
+  paths: string[],
+  format: number = TEX_ARRAY_FORMAT_SRGB,
+  mipLevels: number = 1,
+): number {
+  // Join rather than pass an array: one string is one pointer, and the engine
+  // splits it. Building the joined string with an explicit loop keeps clear of
+  // Perry's `.push()`/`.length` foot-gun.
+  let joined = '';
+  for (let i = 0; i < paths.length; i = i + 1) {
+    if (i > 0) joined = joined + ',';
+    joined = joined + paths[i];
+  }
+  return bloom_create_texture_array_from_files(joined as any, format, mipLevels);
 }
 
 /// EN-014 — link a texture-array handle to a material at one of three

@@ -815,6 +815,18 @@ export function isGamepadButtonDown(button: number): boolean {
   return bloom_is_gamepad_button_down(button) !== 0;
 }
 
+declare function bloom_gamepad_rumble(low: number, high: number, seconds: number): void;
+
+/// EN-031 — vibrate the pad. `low` drives the heavy (low-frequency) motor and
+/// `high` the light one, both 0..1; `seconds` is how long before it stops on
+/// its own, so callers never have to remember to switch it off.
+///
+/// A no-op on platforms with no motor, and silently ignored if no pad is
+/// connected.
+export function gamepadRumble(low: number, high: number, seconds: number): void {
+  bloom_gamepad_rumble(low, high, seconds);
+}
+
 export function isGamepadButtonReleased(button: number): boolean {
   return bloom_is_gamepad_button_released(button) !== 0;
 }

@@ -11055,12 +11055,37 @@ impl Renderer {
     pub fn compile_material_instanced(
         &mut self, wgsl_source: &str,
     ) -> Result<material_system::MaterialHandle, material_pipeline::MaterialCompileError> {
+        self.compile_material_instanced_bucket(wgsl_source, 0, false)
+    }
+
+    /// EN-026/027 — instanced compile into a chosen bucket.
+    ///
+    /// The original instanced path was hardcoded to Opaque, which is right for
+    /// grass and wrong for the two things that most want instancing: particles
+    /// (additive, thousands of quads) and decals (cutout, alpha-tested against
+    /// the atlas). `bucket`: 0 = opaque, 1 = cutout, 2 = additive,
+    /// 3 = transparent.
+    ///
+    /// `reads_scene` binds the scene colour/depth snapshot group. Soft
+    /// particles NEED it — a billboard that intersects the ground shows a hard
+    /// straight seam otherwise, which is the single biggest tell that a "puff"
+    /// is a flat card — and without this flag the group is absent from the
+    /// pipeline layout and the shader fails validation at create time.
+    pub fn compile_material_instanced_bucket(
+        &mut self, wgsl_source: &str, bucket: u32, reads_scene: bool,
+    ) -> Result<material_system::MaterialHandle, material_pipeline::MaterialCompileError> {
+        let (profile, bucket) = match bucket {
+            1 => (material_pipeline::FragmentProfile::Opaque, material_pipeline::Bucket::Cutout),
+            2 => (material_pipeline::FragmentProfile::Translucent, material_pipeline::Bucket::Additive),
+            3 => (material_pipeline::FragmentProfile::Translucent, material_pipeline::Bucket::Transparent),
+            _ => (material_pipeline::FragmentProfile::Opaque, material_pipeline::Bucket::Opaque),
+        };
         self.material_system.compile(
             &self.device,
             wgsl_source,
-            material_pipeline::FragmentProfile::Opaque,
-            material_pipeline::Bucket::Opaque,
-            false,
+            profile,
+            bucket,
+            reads_scene,
             true, // wants_instancing
             formats::HDR_FORMAT,
             formats::MATERIAL_FORMAT,
