@@ -1203,6 +1203,52 @@ points.
 
 ---
 
+## EN-038 — `bloom_take_screenshot` never fires on Windows 🔴
+
+**Symptom.** `takeScreenshot('x.png')` from TS produces nothing: no file, and —
+decisively — not even the unconditional `eprintln!("bloom: screenshot requested
+-> '{}'")` at the top of the FFI, nor the `screenshot readback branch running`
+log in `end_frame`. So the native function is never entered at all; this is not
+a path/permissions problem or a failed readback.
+
+**Repro (2026-07-12, shooter @ AAA round 1).** Call `takeScreenshot` from the
+game loop at a fixed frame. A `console.log` immediately before it prints; the
+engine's own log line never does. Three separate frames, plain relative path,
+same result.
+
+**Why it matters.** Every screenshot-based harness in the shooter
+(`SELFTEST`, `PERFTEST`'s in-engine captures) is silently capturing nothing, and
+has been reporting success. Visual verification had to fall back to a
+window-rect desktop grab (`shooter/tools/shot-window.ps1`).
+
+**Suspects, in order.** (1) Perry's FFI dispatch for a void-returning
+string-param extern — note the manifest declares `params: ["string"]` and the
+call site is inside a nested block; (2) a name collision with a platform-crate
+symbol; (3) dead-code elimination of a call whose return is unused.
+
+**Next step.** Bisect with a minimal Perry program that calls only
+`bloom_take_screenshot`, then compare the generated call against a
+known-working void/string FFI (`bloom_load_model` returns f64, so pick
+`bloom_set_env_clear_from_hdr` — same void+string shape — as the control).
+
+---
+
+## EN-039 — immediate draw with a full transform 🟢
+
+**Why.** `drawModelRotated` takes a single Y rotation, so an immediate-mode draw
+cannot pitch or roll. The shooter's weapon therefore cannot tilt with the
+player's aim — it stays level while the camera looks up or down. Any held prop,
+thrown object, or debris chunk hits the same wall.
+
+**API sketch.** `drawModelTransform(handle, m16)` taking a column-major 4×4
+(the scene graph already has `bloom_scene_set_transform16`; this is the
+immediate-mode twin). Perry can't pass 16 f64 args, so route it through the mesh
+scratch like the other array-shaped FFIs.
+
+**Acceptance:** shooter SH-027 v2 — the gun points where the camera points.
+
+---
+
 ## Deferred infrastructure tracks 🔴
 
 Recorded so the list is complete; each is real but none blocks the
