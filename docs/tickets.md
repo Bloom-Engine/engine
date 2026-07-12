@@ -1411,3 +1411,47 @@ be queued last is a landmine.
 **ranked**, not accidental: characters first (the shadow a player actually looks at),
 then other movers, then foliage — a swaying canopy shadow is soft, dappled and the
 most forgiving thing in the frame. If a shadow must be lost, it is now a chosen one.
+
+
+## EN-045 — The static shadow cache only ever worked on a stationary camera ✅ *(fixed 2026-07-12)*
+
+`shadow_pass` GPU was **0.12 ms on the title screen and 3.2 ms in a moving fight** —
+a 27× gap that nobody had looked at, because the cache had been *measured on the
+title screen*.
+
+**Cause.** A cascade keeps its cached static depth only while its VP is unchanged.
+`compute_cascade_vps` has exactly the machinery for that — an `accepted_fit` with
+`REFIT_SLACK`, so the cascade keeps its VP while the camera travels within slack —
+and it was gated on **`c > 0`**. Cascade 0, the NEAR cascade holding the player and
+everything they are standing next to, re-fit **every frame**. So its VP changed on
+every frame the camera moved, which is all of gameplay, and every static caster in
+it re-rendered every frame.
+
+**Fix.** Cascade 0 gets the slack too. It costs ~15% of near-field shadow resolution
+and buys a cache that survives ~15 frames of walking instead of zero.
+
+| | before | after |
+|---|---|---|
+| `shadow_pass` GPU (combat) | 3.58 ms | **0.53 ms** |
+| gameplay | 42–44 fps | **53–56 fps** |
+
+Near-field shadow quality verified by screenshot: the player's own shadow is still
+crisp and correctly shaped.
+
+**A lesson about benchmarks.** The cache was landed, measured, and celebrated on a
+screen where the camera does not move — the one condition under which its central
+assumption always holds. Measure the thing you actually ship.
+
+---
+
+## EN-043 follow-up — the caster identity must be ORDER-INDEPENDENT
+
+The first version keyed a caster on *"the Nth draw of this model handle"*. That held
+until the game started drawing its forest **front-to-back**: the sort order changes
+as the camera moves, so occurrence N became a different tree every frame, dozens of
+perfectly stationary trees were misread as movers, and the dynamic caster set blew
+past 32 in combat.
+
+The key is now a single hash of **identity AND transform**, tested for membership in
+last frame's set. "Was this exact caster, at this exact transform, here last frame?"
+A set membership test does not care what order the draws arrive in.

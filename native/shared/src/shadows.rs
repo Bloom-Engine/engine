@@ -838,7 +838,19 @@ impl ShadowMap {
             // byte-identical. The per-cascade shadow cache compares VPs
             // exactly, so a kept VP means the cascade's cached depth
             // stays valid while the camera travels within the slack.
-            if c > 0 {
+            // EN-045 — cascade 0 gets the slack too.
+            //
+            // It was excluded, and that quietly made the whole static-shadow cache a
+            // title-screen feature. Cascade 0 is the NEAR cascade: it holds the
+            // player and everything they are standing next to. Re-fitting it every
+            // frame means its VP changes every frame the camera moves — which is all
+            // of gameplay — so its cached depth was thrown away and every static
+            // caster in it re-rendered, every frame. Measured: shadow_pass 0.12 ms on
+            // the stationary title screen, 3.2 ms in a moving fight.
+            //
+            // The slack costs ~15% of near-field shadow resolution and buys a cache
+            // that survives ~15 frames of walking instead of zero.
+            {
                 if let Some(acc) = self.accepted_fit[c] {
                     let ls_x = dot3(center, right);
                     let ls_y = dot3(center, ortho_up);
@@ -881,7 +893,7 @@ impl ShadowMap {
                     }
                 }
             }
-            let radius = if c > 0 { radius * REFIT_SLACK } else { radius };
+            let radius = radius * REFIT_SLACK;
             // Quantize radius so subpixel camera movement can't shift
             // the texel grid.
             let radius = (radius * 16.0).ceil() / 16.0;
@@ -979,9 +991,11 @@ impl ShadowMap {
 
             self.light_vps[c] = crate::renderer::mat4_multiply(light_proj, snapped_view);
 
-            // Record the accepted fit so subsequent frames can keep this
-            // VP while their requirements stay inside it (cascades ≥ 1).
-            if c > 0 {
+            // Record the accepted fit so subsequent frames can keep this VP while
+            // their requirements stay inside it. EN-045 — cascade 0 included now;
+            // excluding it was what made the static-shadow cache a title-screen
+            // feature, because cascade 0's VP changed on every frame the camera moved.
+            {
                 self.accepted_fit[c] = Some(AcceptedFit {
                     ls_x: dot3(snapped_center, right),
                     ls_y: dot3(snapped_center, ortho_up),

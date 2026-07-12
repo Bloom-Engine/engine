@@ -26,12 +26,9 @@ impl Renderer {
         // caster lists below hold immutable borrows of self.model_gpu_cache for the
         // rest of the function, so this map cannot be touched through `self` again
         // until they are dead.
-        let prev_caster_tf = std::mem::take(&mut self.shadow_caster_tf);
-        let mut caster_tf_now: std::collections::HashMap<u64, u64> =
-            std::collections::HashMap::with_capacity(prev_caster_tf.len() + 64);
-        // Nth-draw-of-this-(handle, mesh) counter — see entry_key.
-        let mut caster_occ: std::collections::HashMap<u64, u32> =
-            std::collections::HashMap::with_capacity(64);
+        let prev_caster_ids = std::mem::take(&mut self.shadow_caster_tf);
+        let mut caster_ids_now: std::collections::HashSet<u64> =
+            std::collections::HashSet::with_capacity(prev_caster_ids.len() + 64);
         // Compute cascade VPs from the primary directional light and camera.
         let light_dir = [
             self.lighting_uniforms.light_dir[0],
@@ -165,28 +162,26 @@ impl Renderer {
             h = fnv1a_bytes(h, &idx.to_le_bytes());
             fnv1a_bytes(h, bytemuck::bytes_of(transform))
         }
-        // EN-043 — a caster's IDENTITY, without its transform, so "this caster
-        // moved" can be told apart from "a different caster appeared".
+        // EN-043 — "was this exact caster, at this exact transform, here last frame?"
         //
-        // `occ` is load-bearing, and the reason this is not just (handle, mesh_idx):
-        // the forest is 88 trees sharing THREE model handles, so every tree would
-        // collide on one key, each would be compared against some other tree's
-        // transform, and all 88 would be declared movers. That is not theoretical —
-        // it is what the first cut did: the whole forest went dynamic, overflowed
-        // the 64-slot budget, and every shadow in the game vanished while the fps
-        // went UP. Exactly the EN-042 trap.
+        // One combined hash of identity AND transform, looked up in a SET. If it is
+        // in last frame's set, the caster has not moved and stays static. If it is
+        // not, it either moved or is new — either way it goes in the dynamic set,
+        // where it draws on top of the cached static depth instead of invalidating it.
         //
-        // `occ` is the Nth draw of this (handle, mesh) this frame; the game submits
-        // its draws in a stable order, so occurrence N is the same tree every frame.
-        fn entry_key(kind: u8, id: u64, idx: u64, occ: u32) -> u64 {
+        // ORDER-INDEPENDENT, and that is the whole point of the rewrite. The first
+        // version keyed on "the Nth draw of this model handle", which was fine until
+        // the game started drawing its forest FRONT-TO-BACK: the sort order changes
+        // as the camera moves, so occurrence N became a different tree every frame,
+        // dozens of perfectly stationary trees were misread as movers, and the
+        // dynamic set blew past 32 casters in combat. A set membership test does not
+        // care what order the draws arrive in.
+        fn caster_id(kind: u8, id: u64, idx: u64, transform: &[[f32; 4]; 4]) -> u64 {
             let mut h = FNV_OFFSET;
             h = fnv1a_bytes(h, &[kind]);
             h = fnv1a_bytes(h, &id.to_le_bytes());
             h = fnv1a_bytes(h, &idx.to_le_bytes());
-            fnv1a_bytes(h, &occ.to_le_bytes())
-        }
-        fn tf_hash(transform: &[[f32; 4]; 4]) -> u64 {
-            fnv1a_bytes(FNV_OFFSET, bytemuck::bytes_of(transform))
+            fnv1a_bytes(h, bytemuck::bytes_of(transform))
         }
         // Per-frame nonce for animated casters' signatures. Bumped
         // whenever shadows render — skinned CACHED model draws need it
@@ -231,9 +226,7 @@ impl Renderer {
                 dynamic: false,
                 joint_offset: 0.0,
                 foliage: 0.0,
-                key: { let k0 = entry_key(0, i as u64, node.gpu_index_count as u64, 0);
-                       let o = caster_occ.entry(k0).or_insert(0); let v = *o; *o += 1;
-                       entry_key(0, i as u64, node.gpu_index_count as u64, v) },
+                key: caster_id(0, i as u64, node.gpu_index_count as u64, &node.transform),
             });
         }
 
@@ -393,9 +386,7 @@ impl Renderer {
                             dynamic: fol > 0.0,
                             joint_offset: 0.0,
                             foliage: fol,
-                            key: { let k0 = entry_key(1, cmd.cache_handle, cmd.mesh_idx as u64, 0);
-                                let o = caster_occ.entry(k0).or_insert(0); let v = *o; *o += 1;
-                                entry_key(1, cmd.cache_handle, cmd.mesh_idx as u64, v) },
+                            key: caster_id(1, cmd.cache_handle, cmd.mesh_idx as u64, &cmd.model),
                         });
                     }
                 }
@@ -440,9 +431,7 @@ impl Renderer {
                         dynamic: false,
                         joint_offset: 0.0,
                         foliage: 0.0,
-                        key: { let k0 = entry_key(2, cmd.mesh_handle, cmd.mesh_idx as u64, 0);
-                            let o = caster_occ.entry(k0).or_insert(0); let v = *o; *o += 1;
-                            entry_key(2, cmd.mesh_handle, cmd.mesh_idx as u64, v) },
+                        key: caster_id(2, cmd.mesh_handle, cmd.mesh_idx as u64, &cmd.model),
                     });
                 }
             }
@@ -464,13 +453,13 @@ impl Renderer {
         // thousand.
         for e in shadow_nodes.iter_mut() {
             if e.dynamic { continue; }
-            let tf = tf_hash(&e.transform);
-            caster_tf_now.insert(e.key, tf);
-            if let Some(&prev) = prev_caster_tf.get(&e.key) {
-                if prev != tf {
-                    e.dynamic = true;
-                    e.sig = nonce;
-                }
+            caster_ids_now.insert(e.key);
+            // Not here last frame at this exact transform => it moved (or is new).
+            // Either way: dynamic. A first-frame caster costs one extra dynamic draw
+            // and settles into the static set next frame.
+            if !prev_caster_ids.is_empty() && !prev_caster_ids.contains(&e.key) {
+                e.dynamic = true;
+                e.sig = nonce;
             }
         }
 
@@ -730,7 +719,7 @@ impl Renderer {
 
         // Cache bookkeeping — next frame skips every cascade whose VP
         // and caster content stay put.
-        self.shadow_caster_tf = caster_tf_now;
+        self.shadow_caster_tf = caster_ids_now;
         self.shadow_map.rendered_light_vps = Some(self.shadow_map.light_vps);
         self.shadow_map.rendered_light_dir = Some(light_dir);
         self.shadow_map.rendered_scene_version = scene_ver;

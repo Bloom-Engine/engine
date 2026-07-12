@@ -1477,7 +1477,7 @@ pub struct Renderer {
     /// different content signature — which would invalidate the whole cascade's
     /// cached depth and re-render every tree in the world, every frame, because one
     /// pickup was bobbing.
-    shadow_caster_tf: std::collections::HashMap<u64, u64>,
+    shadow_caster_tf: std::collections::HashSet<u64>,
     /// Per-model foliage wind amount, keyed by cached-model handle. Absent or 0
     /// = not a plant, don't move it. See `common/foliage_wind.wgsl`.
     foliage_wind: std::collections::HashMap<u64, f32>,
@@ -6610,7 +6610,7 @@ impl Renderer {
             // decision, and silently darkening every existing game's terrain
             // is not the engine's call to make.
             cloud_params: [0.0, 420.0, 0.0035, 8.0],
-            shadow_caster_tf: std::collections::HashMap::new(),
+            shadow_caster_tf: std::collections::HashSet::new(),
             foliage_wind: std::collections::HashMap::new(),
             foliage_shadow_motion: false,
             uniform_3d_layout,
