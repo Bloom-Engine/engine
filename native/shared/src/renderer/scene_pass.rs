@@ -36,6 +36,76 @@ impl Renderer {
         self.dispatch_aerial_perspective_lut();
     }
 
+    // EN-044 — DEPTH PREPASS over the cached-model draws.
+    //
+    // The scene fragment shader can `discard` (alpha-cutout foliage), and a shader
+    // that may discard cannot early-Z *write*: the GPU must run it in full before it
+    // knows whether the pixel survives. So an 88-tree forest of overlapping leaf
+    // cards shaded the whole 5-target MRT several layers deep and threw most of it
+    // away. Measured: the forest alone was 5.6 ms of a 7.4 ms main_hdr_pass, and
+    // dropping it took the title screen from 46.7 fps to the 60 fps vsync cap.
+    //
+    // Priming depth first turns that around. The prepass writes depth only (no MRT,
+    // no lighting, alpha cutout honoured so cards keep their real silhouette), and
+    // the main pass then early-Z *rejects* the occluded leaves before its shader
+    // ever runs. The main pass tests LessEqual, not Less — the visible surface
+    // arrives with a depth exactly equal to the one the prepass stored, and `Less`
+    // would throw it away.
+    //
+    // Same vertex stage, so the foliage wind displaces identically in both and the
+    // depths agree to the bit.
+    // Runs even with no cached models, because it now owns the depth CLEAR that
+    // main_hdr_pass used to do — skipping it would hand the main pass a depth
+    // buffer full of last frame's garbage.
+    profiler.begin("depth_prepass");
+    {
+        let prepass_ts = profiler.pass_timestamp_writes("depth_prepass");
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bloom_depth_prepass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: prepass_ts,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.scene_depth_pipeline);
+        pass.set_bind_group(1, &self.lighting_bind_group, &[]);
+        pass.set_bind_group(3, &self.joint_bind_group, &[]);
+        let cam_vp = mat4_multiply(
+            self.current_proj_matrix_unjittered,
+            self.current_view_matrix,
+        );
+        let cam_planes = crate::scene::extract_frustum_planes(&cam_vp);
+        for cmd in &self.model_draw_commands {
+            if let Some(Some(meshes)) = self.model_gpu_cache.get(&cmd.cache_handle) {
+                if cmd.mesh_idx < meshes.len() {
+                    let mesh = &meshes[cmd.mesh_idx];
+                    let (wmin, wmax) = cmd.bounds_override.unwrap_or_else(|| {
+                        transform_aabb(&cmd.model, mesh.local_min, mesh.local_max)
+                    });
+                    if wmin[0] <= wmax[0]
+                        && crate::scene::aabb_outside_frustum(&cam_planes, wmin, wmax)
+                    {
+                        continue;
+                    }
+                    pass.set_bind_group(0, &self.model_uniform_bind_groups[cmd.uniform_slot], &[]);
+                    pass.set_bind_group(2, &mesh.material_bg, &[]);
+                    pass.set_vertex_buffer(0, mesh.vb.slice(..));
+                    pass.set_index_buffer(mesh.ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
+        }
+    }
+    profiler.end("depth_prepass");
+
     profiler.begin("main_hdr_pass");
     {
         // HDR clear: the user's clear_color is in 0-1 srgb-ish
@@ -99,7 +169,9 @@ impl Renderer {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    // EN-044 — LOAD, not Clear: the depth prepass just primed this
+                    // buffer, and clearing it here would throw that away.
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -154,7 +226,11 @@ impl Renderer {
         // Cached models + retained scene graph — both via scene_pipeline.
         let has_cached_models = !self.model_draw_commands.is_empty();
         if has_cached_models || scene.node_count() > 0 {
-            pass.set_pipeline(&self.scene_pipeline);
+            // EN-044 — cached models go through the PREPASSED pipeline (no depth
+            // write, Equal test), because the depth prepass above already stored
+            // their exact depth. That is what lets the hardware early-Z reject the
+            // occluded leaf cards instead of shading every one of them.
+            pass.set_pipeline(&self.scene_pipeline_prepassed);
             pass.set_bind_group(1, &self.lighting_bind_group, &[]);
             pass.set_bind_group(3, &self.joint_bind_group, &[]);
 
@@ -197,6 +273,9 @@ impl Renderer {
                 }
             }
 
+            // Retained scene-graph nodes are not in the prepass, so they still need
+            // the depth-writing pipeline.
+            pass.set_pipeline(&self.scene_pipeline);
             scene.render(&mut pass);
         }
     }

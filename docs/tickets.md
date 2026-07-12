@@ -1354,3 +1354,38 @@ the same tree every frame.
 
 Related: EN-042 (the dynamic budget silently drops overflow) is what turned a keying
 bug into invisible shadows rather than a loud failure. It is still worth fixing.
+
+
+## EN-044 — Depth prepass for cached models ✅ *(shipped 2026-07-12)*
+
+The scene fragment shader can `discard` (alpha-cutout foliage), and **a shader that
+may discard cannot early-Z write** — the GPU has to run it in full before it knows
+whether the pixel survives. So an 88-tree forest of overlapping leaf cards shaded
+the whole 5-target MRT several layers deep and threw most of it away. Measured: the
+forest alone was **5.6 ms of a 7.4 ms `main_hdr_pass`**, and simply not drawing it
+took the title screen from 46.7 fps to the 60 fps vsync cap.
+
+Now a depth-only prepass runs the same cached-model draws first (same vertex stage,
+so the foliage wind displaces identically; alpha cutout honoured so cards keep their
+real silhouette), and the main pass draws them through a pipeline with **depth
+writes OFF and an `Equal` test**. Taking the writes away is the whole point: with
+writes on, a discarding shader forces late-Z and nothing is rejected. Without them,
+the hardware early-Z rejects the occluded leaves before the shader runs.
+
+| pass | before | after |
+|---|---|---|
+| `main_hdr_pass` | 7.43 ms | **2.14 ms** |
+| `depth_prepass` | — | 1.37 ms |
+| **title screen** | **33.5 fps** | **56.6 fps** |
+
+**The bug this uncovered, which is the interesting part.** The sky pipeline was
+`depth_write: true, depth_compare: Always`, and the sky is drawn *first* inside the
+HDR pass. That stamped depth = 1.0 across the entire screen. It had always been
+harmless — the buffer had just been cleared to 1.0 anyway — and it became instantly
+destructive the moment a prepass wrote real geometry depth *before* it: the sky
+wiped the lot, the `Equal` test failed everywhere, and **the entire forest and the
+player vanished**. The sky never needed that write. It is off now.
+
+(First suspect was depth invariance — two pipelines compiling the same vertex shader
+differently. `@invariant` on the position is in place and is genuinely required for
+an `Equal` test, but it was not the cause.)

@@ -276,7 +276,16 @@ struct VertexInputScene {
 };
 
 struct VertexOutputScene {
-    @builtin(position) clip_position: vec4<f32>,
+    // EN-044 — @invariant is load-bearing. The depth prepass and the main pass run
+    // the SAME vertex entry point, but through different pipelines: the prepass's
+    // fragment stage consumes almost none of the varyings, so the compiler is free
+    // to optimise the position maths differently (fma contraction, reassociation)
+    // and the two depths stop being bit-identical. The main pass then tests Equal
+    // against a depth that is one ulp off, every fragment fails, and the entire
+    // forest and the player VANISH — which is exactly what happened, and it looked
+    // like a 60 fps win. @invariant forbids that: the position must be computed
+    // identically in every pipeline that uses this shader.
+    @invariant @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
@@ -725,6 +734,25 @@ struct SceneOut {
     /// radiance. Rgba8Unorm is enough precision here.
     @location(3) albedo: vec4<f32>,
 };
+
+// EN-044 — depth prepass. Same vertex stage as the main pass (so the foliage wind
+// displaces identically and the depths match), and a fragment stage that does
+// nothing but honour the alpha cutout.
+//
+// WHY THIS EARNS ITS PASS. The scene fragment shader can `discard` (alpha-cutout
+// foliage), and a shader that may discard cannot early-Z *write* — the GPU has to
+// run the whole thing before it knows if the pixel survives. So every leaf card in
+// an 88-tree forest shaded the full 5-target MRT, several layers deep, and threw
+// most of it away. Priming depth first lets the main pass early-Z *reject* those
+// fragments before the shader ever runs.
+@fragment
+fn fs_depth_prepass(in: VertexOutputScene) {
+    let alpha_cutoff = material.metal_rough.w;
+    if (alpha_cutoff > 0.0) {
+        let a = textureSample(base_color_tex, base_color_samp, in.uv).a * in.color.a;
+        if (a < alpha_cutoff) { discard; }
+    }
+}
 
 @fragment
 fn fs_main_scene(in: VertexOutputScene) -> SceneOut {

@@ -1609,6 +1609,10 @@ pub struct Renderer {
     // mapping). Distinct from pipeline_3d so immediate-mode draws
     // don't have to carry tangent vertex data or normal-map bindings.
     pub scene_pipeline: wgpu::RenderPipeline,
+    /// EN-044 — depth-only prepass over the same cached-model draws.
+    pub scene_depth_pipeline: wgpu::RenderPipeline,
+    /// EN-044 — cached-model pipeline for the prepassed path (no depth write, Equal).
+    pub scene_pipeline_prepassed: wgpu::RenderPipeline,
     pub scene_material_layout: wgpu::BindGroupLayout,
     /// Froxel light clustering (task #23). `Some` when the device has
     /// fragment-stage storage buffers (everything but WebGL2); the
@@ -2607,7 +2611,15 @@ impl Renderer {
             // frame; the 3D opaque pass will overwrite where it draws.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
+                // EN-044 — the sky must NOT write depth. It is drawn first, with
+                // `Always`, so it used to stamp depth = 1.0 across the whole screen.
+                // That was harmless while the buffer had just been cleared to 1.0
+                // anyway — and instantly destructive once a depth PREPASS started
+                // writing real geometry depth before it. The sky wiped the lot, the
+                // main pass's Equal test then failed everywhere, and the entire
+                // forest and player vanished. It never needed the write: where no
+                // geometry is drawn the depth is already 1.0.
+                depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -2843,7 +2855,15 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
+                // EN-044 — the sky must NOT write depth. It is drawn first, with
+                // `Always`, so it used to stamp depth = 1.0 across the whole screen.
+                // That was harmless while the buffer had just been cleared to 1.0
+                // anyway — and instantly destructive once a depth PREPASS started
+                // writing real geometry depth before it. The sky wiped the lot, the
+                // main pass's Equal test then failed everywhere, and the entire
+                // forest and player vanished. It never needed the write: where no
+                // geometry is drawn the depth is already 1.0.
+                depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -3392,6 +3412,122 @@ impl Renderer {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // EN-044 — depth prepass pipeline. Identical layout and vertex stage to
+        // scene_pipeline (the wind must displace the same way, or the depths would
+        // not match); no colour targets, and a fragment stage that only honours the
+        // alpha cutout. Cheap: one depth write per fragment, no MRT, no lighting.
+        let scene_depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_depth_prepass_pipeline"),
+            layout: Some(&scene_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &[Vertex3D::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_depth_prepass"),
+                targets: &[],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // EN-044 — the cached-model pipeline for the PREPASSED path.
+        //
+        // depth_write is OFF, and that is the entire point. A fragment shader that
+        // can `discard` (alpha-cutout foliage) combined with depth WRITES forces the
+        // hardware into late-Z: it cannot know whether to write depth until the
+        // shader has run, so it runs the shader for every fragment, occluded or not.
+        // That is why simply priming depth changed nothing — the prepass cost 1.4 ms
+        // and saved zero.
+        //
+        // Take the writes away (the prepass already stored the exact depth) and the
+        // hardware is free to early-Z *test*, which throws out the occluded leaves
+        // before the 5-target MRT shader ever runs. `Equal` because the visible
+        // surface's depth is bit-identical to what the prepass wrote — same vertex
+        // stage, same uniforms, same wind.
+        //
+        // scene_pipeline (Less, write) stays for the retained scene-graph nodes,
+        // which are not in the prepass.
+        let scene_pipeline_prepassed = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_pipeline_prepassed"),
+            layout: Some(&scene_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &[Vertex3D::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_main_scene"),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: MATERIAL_FORMAT,
+                        // Replace blend so the material slot reflects
+                        // the topmost-fragment material, not blended.
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: VELOCITY_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Equal),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -6538,6 +6674,8 @@ impl Renderer {
             aerial_perspective_sampler,
             env_diffuse_texture: None,
             scene_pipeline,
+            scene_depth_pipeline,
+            scene_pipeline_prepassed,
             froxel,
             scene_material_layout,
             _scene_env_default_texture: scene_env_default_texture,
