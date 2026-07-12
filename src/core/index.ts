@@ -55,6 +55,7 @@ declare function bloom_clear_all_post_passes(): void;
 declare function bloom_set_ssao_intensity(intensity: number): void;
 declare function bloom_set_ssao_radius(worldRadius: number): void;
 declare function bloom_set_wind(dirX: number, dirZ: number, amplitude: number, frequency: number): void;
+declare function bloom_set_cloud_shadows(strength: number, deckHeight: number, featureScale: number, driftSpeed: number): void;
 declare function bloom_set_ssr_enabled(on: number): void;
 declare function bloom_set_motion_blur_enabled(on: number): void;
 declare function bloom_set_sss_enabled(on: number): void;
@@ -556,6 +557,33 @@ export function clearAllPostPasses(): void {
 /// frequency is in Hz (~1.0 typical).
 export function setWind(dirX: number, dirZ: number, amplitude: number, frequency: number): void {
   bloom_set_wind(dirX, dirZ, amplitude, frequency);
+}
+
+/// Cloud deck — the clouds the sky draws and the shadows they cast, from ONE
+/// field. Look up at a cloud, and the shadow you are standing in is its shadow.
+///
+/// `strength` is the only argument most callers need. 0 (the default) leaves the
+/// world unshadowed and the clouds sky-only; ~0.45 dims a shadowed surface to a
+/// bit over half its direct sunlight, which is about right for a bright day. It
+/// scales DIRECT sun only — a cloud blocks the sun, it does not stop the sky
+/// from being blue.
+///
+/// `deckHeight` and `featureScale` are not independent knobs for "cloud size
+/// overhead" and "shadow size underfoot": they are the same cloud seen from two
+/// directions. Raise the deck and the puffs look smaller overhead while their
+/// shadows stay the same size; lower `featureScale` and the clouds get bigger
+/// both above and below.
+///
+/// Drift direction comes from `setWind`, so the deck travels the way the foliage
+/// beneath it is leaning.
+/// (No default parameter values: Perry 0.5.x silently drops the call.)
+export function setCloudShadows(
+  strength: number,
+  deckHeight: number,
+  featureScale: number,
+  driftSpeed: number,
+): void {
+  bloom_set_cloud_shadows(strength, deckHeight, featureScale, driftSpeed);
 }
 
 /** Toggle screen-space reflections. Default on. */

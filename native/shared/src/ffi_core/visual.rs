@@ -472,6 +472,22 @@ macro_rules! __bloom_ffi_visual {
         })
         }
 
+        // bloom_set_cloud_shadows  [EN-040]
+        //
+        // Opt the world into the deck the sky is already drawing. strength 0
+        // (the default) = sky-only clouds, which is what every game that never
+        // calls this keeps.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_cloud_shadows(
+            strength: f64, deck_height: f64, feature_scale: f64, drift_speed: f64,
+        ) {
+            $crate::ffi::guard("bloom_set_cloud_shadows", move || {
+                engine().renderer.set_cloud_shadows(
+                    strength as f32, deck_height as f32,
+                    feature_scale as f32, drift_speed as f32);
+        })
+        }
+
         // bloom_set_ssr_enabled  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_ssr_enabled(on: f64) {

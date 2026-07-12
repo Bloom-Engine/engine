@@ -168,6 +168,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             time: 0.0, delta_time: 0.0, frame_index: 0, _pad0: 0,
             screen_resolution: [64.0, 64.0], render_resolution: [64.0, 64.0],
             taa_jitter: [0.0; 2], _pad1: [0.0; 2], wind: [0.0; 4],
+            cloud: [0.0; 4],
         };
         let pv = bytemuck::Zeroable::zeroed();
         sys.update_frame_uniforms(&queue, &pf, &pv);
@@ -448,6 +449,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             time: 0.0, delta_time: 0.0, frame_index: 0, _pad0: 0,
             screen_resolution: [64.0, 64.0], render_resolution: [64.0, 64.0],
             taa_jitter: [0.0; 2], _pad1: [0.0; 2], wind: [0.0; 4],
+            cloud: [0.0; 4],
         };
         let pv = bytemuck::Zeroable::zeroed();
         sys.update_frame_uniforms(&queue, &pf, &pv);

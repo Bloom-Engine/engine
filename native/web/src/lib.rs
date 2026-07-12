@@ -1534,6 +1534,11 @@ pub fn bloom_set_wind(dir_x: f64, dir_z: f64, amplitude: f64, frequency: f64) {
     engine().renderer.set_wind(dir_x as f32, dir_z as f32, amplitude as f32, frequency as f32);
 }
 #[wasm_bindgen]
+pub fn bloom_set_cloud_shadows(strength: f64, deck_height: f64, feature_scale: f64, drift_speed: f64) {
+    engine().renderer.set_cloud_shadows(
+        strength as f32, deck_height as f32, feature_scale as f32, drift_speed as f32);
+}
+#[wasm_bindgen]
 pub fn bloom_set_ssr_enabled(on: f64) {
     engine().renderer.set_ssr_enabled(on != 0.0);
 }

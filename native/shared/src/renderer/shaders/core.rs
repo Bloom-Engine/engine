@@ -210,7 +210,14 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
 }
 ";
 
-pub(in crate::renderer) const SCENE_SHADER: &str = "
+// The cloud deck (common/clouds.wgsl) is prepended verbatim: this shader is a
+// raw source const and does not run through the material preprocessor. Same
+// file the sky pass and the world materials use, so a cloud shadow crossing
+// the terrain also crosses the trees standing in it — which is the whole
+// reason to share it.
+pub(in crate::renderer) const SCENE_SHADER: &str = concat!(
+    include_str!("../../../shaders/common/clouds.wgsl"),
+    r#"
 struct Uniforms3D {
     mvp: mat4x4<f32>,
     model: mat4x4<f32>,
@@ -248,6 +255,7 @@ struct Lighting {
     shadow_cascade_splits: vec4<f32>,
     shadow_view_matrix: mat4x4<f32>,
     wind: vec4<f32>,   // xy=dir, z=amplitude, w=time (foliage sway)
+    cloud: vec4<f32>,  // x=shadow strength, y=deck height, z=scale, w=drift m/s
 };
 
 struct MaterialFactors {
@@ -883,8 +891,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // Never fully zero direct light — a 10% floor simulates
     // ambient bounce from surrounding surfaces and keeps shadows
     // from going pitch-black regardless of IBL intensity.
-    let direct_shadow = mix(0.03, 1.0, shadow_factor);
+    let direct_shadow_raw = mix(0.03, 1.0, shadow_factor);
     let legacy_dir = normalize(lighting.light_dir.xyz);
+    // Cloud deck (common/clouds.wgsl). Folded into the SUN shadow only: a cloud
+    // blocks the sun, it does not stop the sky from being blue. Multiplying it
+    // into ambient as well is what makes cloud shadows read as flat grey paint
+    // instead of shade. Costs nothing when strength is 0 (the default).
+    let direct_shadow = direct_shadow_raw * cloud_shadow_at(
+        in.world_pos, legacy_dir, lighting.wind.xy, lighting.wind.w, lighting.cloud);
     if (alpha_cutoff > 0.0) {
         // Foliage wrap-lambert (energy-conserving wrap, w = 0.45): a leaf
         // turning from the sun rolls off softly — light transmits and
@@ -1168,5 +1182,5 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         vec4<f32>(base_color, 1.0 - shadow_factor),
     );
 }
-";
+"#);
 

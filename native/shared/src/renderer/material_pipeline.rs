@@ -558,6 +558,7 @@ const BAKED_ENTRIES_SNAPSHOT: &[(&str, &str)] = &[
     ("common/fog.wgsl",             include_str!("../../../shared/shaders/common/fog.wgsl")),
     ("common/tonemap.wgsl",         include_str!("../../../shared/shaders/common/tonemap.wgsl")),
     ("common/sky.wgsl",             include_str!("../../../shared/shaders/common/sky.wgsl")),
+    ("common/clouds.wgsl",          include_str!("../../../shared/shaders/common/clouds.wgsl")),
     ("materials/test_minimal.wgsl", include_str!("../../../shared/shaders/materials/test_minimal.wgsl")),
 ];
 

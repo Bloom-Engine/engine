@@ -139,6 +139,11 @@ pub(super) struct LightingUniforms {
     /// z = amplitude, w = elapsed time (seconds) for the sway phase.
     /// Appended last so existing field offsets stay stable.
     pub(super) wind: [f32; 4],
+    /// Cloud deck for the built-in scene shader: x = shadow strength,
+    /// y = deck height (m), z = feature scale, w = drift speed (m/s).
+    /// Strength 0 = the scene ignores the clouds. Appended last so existing
+    /// field offsets stay stable.
+    pub(super) cloud: [f32; 4],
 }
 
 impl LightingUniforms {
@@ -159,6 +164,7 @@ impl LightingUniforms {
             shadow_cascade_splits: [8.0, 25.0, 80.0, 0.0],
             shadow_view_matrix: IDENTITY_MAT4,
             wind: [0.0, 0.0, 0.0, 0.0],
+            cloud: [0.0, 420.0, 0.0035, 8.0],
         }
     }
 }

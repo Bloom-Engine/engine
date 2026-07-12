@@ -36,6 +36,13 @@ struct PerFrame {
   // (~0.1 m typical for grass); w = frequency in Hz (~1.0 typical).
   // Foliage / cloth materials sample this in their vertex stage.
   wind:              vec4<f32>,
+
+  // Cloud deck. x = shadow strength (0 = the world ignores the clouds),
+  // y = deck height in metres, z = feature scale, w = drift speed in m/s.
+  // Feed it to `cloud_shadow_at` from common/clouds.wgsl and multiply the
+  // result into DIRECT sunlight only — this is the same deck the sky pass
+  // draws, so a shadow here has a cloud above it.
+  cloud:             vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: PerFrame;

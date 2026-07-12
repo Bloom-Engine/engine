@@ -1651,6 +1651,16 @@
           "returns": "void"
         },
         {
+          "name": "bloom_set_cloud_shadows",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_set_ssr_enabled",
           "params": [
             "f64"

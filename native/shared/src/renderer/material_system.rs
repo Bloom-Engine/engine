@@ -35,6 +35,10 @@ pub struct PerFrameUniforms {
     pub _pad1:             [f32; 2],
     /// Global wind: x=dir_x, y=dir_z, z=amplitude, w=frequency.
     pub wind:              [f32; 4],
+    /// Cloud deck: x = shadow strength, y = deck height (m), z = feature scale,
+    /// w = drift speed (m/s). Materials feed this to `cloud_shadow_at` from
+    /// common/clouds.wgsl — the same deck the sky pass draws.
+    pub cloud:             [f32; 4],
 }
 
 #[repr(C)]

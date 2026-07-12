@@ -140,13 +140,28 @@ struct SkyUniforms {
     /// Camera right vector × tan(fovy/2) × aspect — pre-scaled so the
     /// fragment shader just multiplies by NDC.x to get the horizontal
     /// offset from the forward direction.
+    /// `.w` = camera world position X (see below).
     right: [f32; 4],
-    /// Camera up vector × tan(fovy/2).
+    /// Camera up vector × tan(fovy/2). `.w` = camera world position Y.
     up: [f32; 4],
-    /// Camera forward unit vector.
+    /// Camera forward unit vector. `.w` = camera world position Z.
+    ///
+    /// The camera POSITION rides in the spare `.w` lanes of the three basis
+    /// vectors. The sky pass never needed it — a sky at infinity only cares
+    /// which way you are looking — but the cloud deck is anchored in world
+    /// space so that its shadow lands under it, and that makes the camera's
+    /// position load-bearing. Packing it here keeps the bind group unchanged.
     forward: [f32; 4],
-    /// x = intensity multiplier; yzw padding.
+    /// x = intensity multiplier, y = elapsed seconds (the cloud deck's clock);
+    /// zw padding.
     intensity: [f32; 4],
+    /// Cloud deck: x = shadow strength, y = deck height (m), z = feature scale
+    /// (noise units per metre), w = drift speed (m/s). Same vec4 the world
+    /// materials get, so the sky and the ground cannot disagree.
+    cloud: [f32; 4],
+    /// xy = wind direction in the XZ plane — the clouds drift downwind, the
+    /// same way the grass is leaning.
+    wind: [f32; 4],
 }
 
 // EN-005 Phase 2 — uniforms for the procedural sky path.
@@ -1451,6 +1466,11 @@ pub struct Renderer {
     current_inv_proj_matrix: [[f32; 4]; 4],
     current_inv_vp_matrix: [[f32; 4]; 4],
     current_camera_pos: [f32; 3],
+    /// Cloud deck: [shadow strength, deck height (m), feature scale, drift speed].
+    /// Strength 0 (the default) means the world ignores the clouds entirely, so
+    /// every existing game keeps the look it shipped with; the sky still draws
+    /// them. See `common/clouds.wgsl`.
+    cloud_params: [f32; 4],
     uniform_3d_layout: wgpu::BindGroupLayout,
 
     // State
@@ -6433,6 +6453,11 @@ impl Renderer {
             current_inv_proj_matrix: IDENTITY_MAT4,
             current_inv_vp_matrix: IDENTITY_MAT4,
             current_camera_pos: [0.0, 0.0, 0.0],
+            // Deck at 420 m, ~285 m puffs, 8 m/s. Shadow strength OFF by
+            // default — opting a world's ground into the clouds is a look
+            // decision, and silently darkening every existing game's terrain
+            // is not the engine's call to make.
+            cloud_params: [0.0, 420.0, 0.0035, 8.0],
             uniform_3d_layout,
             render_mode: RenderMode::ScreenSpace,
             pending_skin_groups: Vec::with_capacity(8),
@@ -6873,6 +6898,38 @@ impl Renderer {
     /// displacement scale (~0.1 m for grass), `frequency` is in Hz.
     pub fn set_wind(&mut self, dir_x: f32, dir_z: f32, amplitude: f32, frequency: f32) {
         self.wind = [dir_x, dir_z, amplitude, frequency];
+    }
+
+    /// Cloud deck — the clouds the sky draws and the shadows they cast, from one
+    /// field (`common/clouds.wgsl`).
+    ///
+    /// `strength` is the only argument most callers need: 0 (the default) means
+    /// the world ignores the clouds and only the sky shows them; ~0.45 dims a
+    /// shadowed surface to a bit over half its direct sunlight, which is about
+    /// right for a bright day. It multiplies DIRECT sun only — a cloud blocks the
+    /// sun, it does not stop the sky from being blue.
+    ///
+    /// `deck_height` and `feature_scale` are NOT independent knobs for "cloud size
+    /// overhead" and "shadow size underfoot" — they are the same cloud seen from
+    /// two directions. Raising the deck makes the puffs look smaller overhead
+    /// without changing their shadows; lowering `feature_scale` makes the clouds
+    /// themselves bigger, both above and below. That coupling is the feature.
+    ///
+    /// Drift direction comes from [`Renderer::set_wind`], so the deck travels the
+    /// way the foliage beneath it is leaning.
+    pub fn set_cloud_shadows(
+        &mut self,
+        strength: f32,
+        deck_height: f32,
+        feature_scale: f32,
+        drift_speed: f32,
+    ) {
+        self.cloud_params = [
+            strength.clamp(0.0, 1.0),
+            deck_height.max(1.0),
+            feature_scale.max(1e-6),
+            drift_speed,
+        ];
     }
 
     /// Toggle TAA on/off. Off = no jitter, no history blend, no
@@ -8153,21 +8210,30 @@ impl Renderer {
         let p = self.current_proj_matrix;
         let tan_half = if p[1][1].abs() > 1e-6 { 1.0 / p[1][1] } else { 1.0 };
 
+        // Camera position in the spare .w lanes and the clock in intensity.y, so
+        // this path fills the same buffer layout as the procedural one. The
+        // panorama sky itself draws no clouds — a static HDR already has whatever
+        // clouds it was captured with — but the buffer is shared, so it is filled
+        // honestly rather than with zeroes that would mean something elsewhere.
+        let cam = self.current_camera_pos;
+        let time = self.lighting_uniforms.wind[3];
         let uniforms = SkyUniforms {
             right: [
                 right_world[0] * tan_half * aspect,
                 right_world[1] * tan_half * aspect,
                 right_world[2] * tan_half * aspect,
-                0.0,
+                cam[0],
             ],
             up: [
                 up_world[0] * tan_half,
                 up_world[1] * tan_half,
                 up_world[2] * tan_half,
-                0.0,
+                cam[1],
             ],
-            forward: [forward_world[0], forward_world[1], forward_world[2], 0.0],
-            intensity: [intensity, 0.0, 0.0, 0.0],
+            forward: [forward_world[0], forward_world[1], forward_world[2], cam[2]],
+            intensity: [intensity, time, 0.0, 0.0],
+            cloud: self.cloud_params,
+            wind: self.lighting_uniforms.wind,
         };
         self.queue
             .write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -8609,17 +8675,23 @@ impl Renderer {
         let p = self.current_proj_matrix;
         let tan_half = if p[1][1].abs() > 1e-6 { 1.0 / p[1][1] } else { 1.0 };
 
+        // Camera position rides in the spare .w lanes: the cloud deck is anchored
+        // in WORLD space (so its shadow lands under it), which means the sky pass
+        // needs to know where the camera IS and not merely where it is looking.
+        let cam = self.current_camera_pos;
         let uniforms = SkyUniforms {
             right: [
                 right_world[0] * tan_half * aspect,
                 right_world[1] * tan_half * aspect,
                 right_world[2] * tan_half * aspect,
-                0.0,
+                cam[0],
             ],
-            up: [up_world[0] * tan_half, up_world[1] * tan_half, up_world[2] * tan_half, 0.0],
-            forward: [forward_world[0], forward_world[1], forward_world[2], 0.0],
-            // .y carries current time (seconds) so the cloud layer can drift.
+            up: [up_world[0] * tan_half, up_world[1] * tan_half, up_world[2] * tan_half, cam[1]],
+            forward: [forward_world[0], forward_world[1], forward_world[2], cam[2]],
+            // .y carries current time (seconds) so the cloud deck can drift.
             intensity: [intensity, self.lighting_uniforms.wind[3], 0.0, 0.0],
+            cloud: self.cloud_params,
+            wind: self.lighting_uniforms.wind,
         };
         self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -11531,6 +11603,7 @@ impl Renderer {
         // here each frame so it's current before the per-frame lighting upload.
         self.lighting_uniforms.wind =
             [self.wind[0], self.wind[1], self.wind[2], time_seconds];
+        self.lighting_uniforms.cloud = self.cloud_params;
         let screen_w = self.surface_config.width as f32;
         let screen_h = self.surface_config.height as f32;
         let (rw, rh) = self.render_extent();
@@ -11544,6 +11617,7 @@ impl Renderer {
             taa_jitter: [0.0, 0.0],
             _pad1: [0.0, 0.0],
             wind: self.wind,
+            cloud: self.cloud_params,
         };
         let per_view = material_system::PerViewUniforms {
             view:           self.current_view_matrix,
