@@ -92,6 +92,37 @@ fn abi_mismatch_warn_once(what: &str) {
 ///
 /// Never causes undefined behavior: null/garbage pointers, implausible
 /// headers, and invalid UTF-8 all yield `""` plus a one-time diagnostic.
+/// Like [`str_from_header`], but says whether it FAILED rather than papering over it
+/// with an empty string.
+///
+/// The distinction is not academic. `bloom_write_file` used `str_from_header`, got
+/// `""` back when a string failed ABI validation, wrote a ZERO-BYTE FILE, and
+/// returned SUCCESS. The editor's save path therefore destroyed every world it
+/// saved and reported that it had saved it. An empty string and a failed string are
+/// not the same thing, and any FFI that *persists* its input has to know which it
+/// is holding.
+pub fn try_str_from_header(ptr: *const u8) -> Option<&'static str> {
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
+        return Some("");
+    }
+    unsafe {
+        let header = &*(ptr as *const StringHeader);
+        if !header_looks_valid(header) {
+            abi_mismatch_warn_once("header invariants violated");
+            return None;
+        }
+        let len = header.byte_len as usize;
+        let data = ptr.add(std::mem::size_of::<StringHeader>());
+        match std::str::from_utf8(std::slice::from_raw_parts(data, len)) {
+            Ok(s) => Some(s),
+            Err(_) => {
+                abi_mismatch_warn_once("payload is not UTF-8");
+                None
+            }
+        }
+    }
+}
+
 pub fn str_from_header(ptr: *const u8) -> &'static str {
     if ptr.is_null() || (ptr as usize) < 0x1000 {
         return "";

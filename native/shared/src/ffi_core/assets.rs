@@ -198,7 +198,14 @@ macro_rules! __bloom_ffi_assets {
             $crate::ffi::guard("bloom_write_file", move || {
                 let path = $crate::string_header::str_from_header(path_ptr);
                 let path: &str = &bloom_resolve_asset_path(path);
-                let data = $crate::string_header::str_from_header(data_ptr);
+                // A string that failed ABI validation must NOT be written as "" and
+                // reported as a success. That is not a save, it is a deletion with a
+                // thumbs-up, and it is exactly what happened to every world the
+                // editor ever saved.
+                let data = match $crate::string_header::try_str_from_header(data_ptr) {
+                    Some(d) => d,
+                    None => return 0.0,
+                };
                 match std::fs::write(path, data.as_bytes()) {
                     Ok(_) => 1.0,
                     Err(_) => 0.0,

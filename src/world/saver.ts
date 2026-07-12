@@ -9,6 +9,7 @@
 import { writeFile } from '../core/index';
 import { WORLD_SCHEMA_VERSION, WorldData, PrefabData } from './types';
 import { validateWorld, validatePrefab, formatValidationErrors } from './validate';
+import { serializeWorld, serializePrefab } from './serialize';
 
 export interface SaveResult {
   ok: boolean;
@@ -28,7 +29,11 @@ export function saveWorld(path: string, world: WorldData): SaveResult {
     return { ok: false, errors: check.errors };
   }
 
-  const json = JSON.stringify(world, null, 2);
+  // NOT JSON.stringify — see serialize.ts. On Perry 0.5.x it corrupts a large object
+  // graph that came from JSON.parse, the corrupt string fails the FFI's UTF-8 check,
+  // and writeFile then wrote a ZERO-BYTE FILE AND RETURNED SUCCESS. Saving a world
+  // destroyed it, silently.
+  const json = serializeWorld(world);
   const ok = writeFile(path, json);
   if (!ok) {
     return { ok: false, errors: ['writeFile failed for path: ' + path] };
@@ -45,7 +50,7 @@ export function savePrefab(path: string, prefab: PrefabData): SaveResult {
     return { ok: false, errors: check.errors };
   }
 
-  const json = JSON.stringify(prefab, null, 2);
+  const json = serializePrefab(prefab);
   const ok = writeFile(path, json);
   if (!ok) {
     return { ok: false, errors: ['writeFile failed for path: ' + path] };

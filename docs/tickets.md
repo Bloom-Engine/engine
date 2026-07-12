@@ -1480,3 +1480,49 @@ size, so the scale can be changed at runtime without the platform telling it aga
 **Expose this to players.** At 4K it is the difference between a locked frame rate
 and a sharp one, and which of those someone wants is not the engine's call — nor the
 game's.
+
+
+---
+
+## EN-047 — `saveWorld` destroyed the world it saved, and reported success ✅ *(fixed 2026-07-12)*
+
+**The editor could not save. Saving a world emptied it.**
+
+`saveWorld` used `JSON.stringify(world, null, 2)`. On Perry 0.5.x that **corrupts a
+large object graph that came from `JSON.parse`**. Minimal repro, no engine code:
+
+```ts
+const text = readFile('assets/worlds/arena_02.world.json');  // 324 KB — writes back fine
+const o    = JSON.parse(text);                                // fine
+const re   = JSON.stringify(o, null, 2);
+// -> `re` holds 5,296 characters above U+00FF, in a document whose source is
+//    almost pure ASCII. It is garbage.
+```
+
+The corruption is invisible in TS. It only surfaces at the FFI: `str_from_header`
+fails its UTF-8 check, returns `""`, and `bloom_write_file` **writes a zero-byte file
+and returns SUCCESS**. So the editor's save path deleted the file and said "saved".
+
+Ruled out by probe: size (a *fresh* 1 MB world-shaped object stringifies fine),
+floats, nulls, `Record` keys, non-ASCII, and a manual deep clone. It is specifically
+the parsed graph.
+
+**Two fixes, and both are needed.**
+
+1. **`src/world/serialize.ts`** — a hand-written emitter that walks the schema by
+   literal key and builds the document by concatenation. Same discipline the
+   shooter's `settings.ts` already adopted for the same reason. `saveWorld` and
+   `savePrefab` no longer touch `JSON.stringify`.
+2. **`try_str_from_header`** — an FFI string that fails ABI validation is no longer
+   silently substituted with `""`. `bloom_write_file` now **fails** instead of
+   writing an empty file and claiming success. An empty string and a failed string
+   are not the same thing, and any FFI that *persists* its input must know which it
+   is holding.
+
+Verified: `loadWorld` → `saveWorld` → `loadWorld` on arena_02 round-trips 168
+entities, 5 lights, 1 water volume, 16,384 terrain heights and the world name, with
+field-level checks matching. 204,270 bytes written, where it used to write 0.
+
+**Still latent:** `JSON.parse(JSON.stringify(x))` is used as a deep-clone idiom in the
+editor (prefab cloning). It is safe at the sizes prefabs run to, and it is a landmine
+at scale. Anything that clones a *world* that way must not.
