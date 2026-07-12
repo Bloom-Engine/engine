@@ -28,6 +28,7 @@ declare function bloom_set_taa_enabled(on: number): void;
 declare function bloom_set_occlusion_culling(on: number): void;
 declare function bloom_set_render_scale(scale: number): void;
 declare function bloom_set_output_scale(scale: number): void;
+declare function bloom_launch_process(cmd: string, args: string, cwd: string): number;
 declare function bloom_get_output_scale(): number;
 declare function bloom_get_render_scale(): number;
 declare function bloom_set_upscale_mode(mode: number): void;
@@ -1131,4 +1132,25 @@ export function getWorldToScreen2D(position: { x: number; y: number }, camera: C
     x: (cos * dx - sin * dy) * camera.zoom + camera.offset.x,
     y: (sin * dx + cos * dy) * camera.zoom + camera.offset.y,
   };
+}
+
+
+/// Launch another program, fire and forget. Returns its pid, or 0 on failure.
+///
+/// Perry's `child_process.spawn` COMPILES and then does nothing — undefined pid, no
+/// process. So this is the only way for a Bloom tool to run another program (the
+/// editor's play-in-editor: save the level, run the game on it).
+///
+/// The child is fully detached: we never wait on it and its stdio goes nowhere. A
+/// GUI must not block on, or die with, the thing it launched.
+///
+/// `args` is passed as a real argv, not a command line — there is no shell here,
+/// which is also why there is nothing to inject into.
+export function launchProcess(cmd: string, args: string[], cwd: string): number {
+  let joined = '';
+  for (let i = 0; i < args.length; i++) {
+    if (i > 0) joined = joined + '\n';
+    joined = joined + args[i];
+  }
+  return bloom_launch_process(cmd, joined, cwd);
 }

@@ -247,6 +247,7 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_cloud_shadows(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_launch_process(_p0: i64, _p1: i64, _p2: i64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_set_output_scale(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_get_output_scale() -> f64 { 1.0 }

@@ -213,6 +213,59 @@ macro_rules! __bloom_ffi_assets {
         })
         }
 
+        // bloom_launch_process  [EN-048]
+        //
+        // Perry's `child_process.spawn` COMPILES and then does nothing — it returns a
+        // child with an undefined pid and no process is started. So a tool that wants
+        // to launch another program (the editor's play-in-editor: save the level, run
+        // the game on it) has nowhere to go.
+        //
+        // Fire-and-forget by design. The caller is a GUI that must not block on, or
+        // die with, the thing it launched: close the game, and you are back in the
+        // editor with your undo history intact.
+        //
+        // `args` is newline-separated. Not shell-escaped and not shell-interpreted —
+        // there is no shell here, which is also why there is nothing to inject into.
+        #[no_mangle]
+        pub extern "C" fn bloom_launch_process(
+            cmd_ptr: *const u8, args_ptr: *const u8, cwd_ptr: *const u8,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_launch_process", move || {
+                let cmd = $crate::string_header::str_from_header(cmd_ptr);
+                if cmd.is_empty() { return 0.0; }
+                let args = $crate::string_header::str_from_header(args_ptr);
+                let cwd = $crate::string_header::str_from_header(cwd_ptr);
+
+                // Resolve the program against `cwd` when it is a bare name.
+                //
+                // Rust's `Command::current_dir` sets the CHILD's working directory --
+                // it does NOT affect how the program is FOUND, which happens in the
+                // parent's context. So launching "main.exe" with cwd "<project>"
+                // fails with "program not found" even though main.exe is sitting
+                // right there in <project>. Which is exactly what it did.
+                let bare = !cmd.chars().any(|ch| ch == '/' || ch == std::path::MAIN_SEPARATOR);
+                let resolved: std::path::PathBuf = if !cwd.is_empty() && bare {
+                    std::path::Path::new(cwd).join(cmd)
+                } else {
+                    std::path::PathBuf::from(cmd)
+                };
+                let mut c = std::process::Command::new(&resolved);
+                for a in args.split('\n') {
+                    if !a.is_empty() { c.arg(a); }
+                }
+                if !cwd.is_empty() { c.current_dir(cwd); }
+                // Detach: we never wait on it, and we do not want its output in ours.
+                c.stdin(std::process::Stdio::null())
+                 .stdout(std::process::Stdio::null())
+                 .stderr(std::process::Stdio::null());
+                let r = c.spawn();
+                match r {
+                    Ok(child) => child.id() as f64,
+                    Err(_) => 0.0,
+                }
+        })
+        }
+
         // bloom_file_exists  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_file_exists(path_ptr: *const u8) -> f64 {

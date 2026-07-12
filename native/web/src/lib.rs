@@ -1534,6 +1534,11 @@ pub fn bloom_set_wind(dir_x: f64, dir_z: f64, amplitude: f64, frequency: f64) {
     engine().renderer.set_wind(dir_x as f32, dir_z as f32, amplitude as f32, frequency as f32);
 }
 #[wasm_bindgen]
+pub fn bloom_launch_process(_cmd: f64, _args: f64, _cwd: f64) -> f64 {
+    // A web page does not get to launch processes.
+    0.0
+}
+#[wasm_bindgen]
 pub fn bloom_set_output_scale(scale: f64) {
     engine().renderer.set_output_scale(scale as f32);
 }

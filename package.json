@@ -1651,6 +1651,15 @@
           "returns": "void"
         },
         {
+          "name": "bloom_launch_process",
+          "params": [
+            "string",
+            "string",
+            "string"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_output_scale",
           "params": [
             "f64"

@@ -1526,3 +1526,24 @@ field-level checks matching. 204,270 bytes written, where it used to write 0.
 **Still latent:** `JSON.parse(JSON.stringify(x))` is used as a deep-clone idiom in the
 editor (prefab cloning). It is safe at the sizes prefabs run to, and it is a landmine
 at scale. Anything that clones a *world* that way must not.
+
+
+## EN-048 — `launchProcess` ✅ *(shipped 2026-07-12)*
+
+Perry's `child_process.spawn` **compiles and then does nothing**: it returns a child
+with an undefined pid and no process is started. So no Bloom tool could run another
+program — which is all play-in-editor is (save the level, run the game on it).
+
+`launchProcess(cmd, args[], cwd)` shells out via `std::process::Command`, fully
+detached (never waited on, stdio to null): a GUI must not block on, or die with, the
+thing it launched.
+
+**Two traps, both hit:**
+
+1. **Rust's `Command::current_dir` sets the CHILD's working directory — it does not
+   affect how the program is FOUND**, which happens in the parent's context. So
+   launching `"main.exe"` with `cwd: "<project>"` fails with *"program not found"*
+   even though `main.exe` is sitting right there in `<project>`. A bare command name
+   is now resolved against `cwd` before spawning.
+2. Args cross as a newline-separated string and are re-split into a real argv. There
+   is no shell involved, which is also why there is nothing to inject into.
