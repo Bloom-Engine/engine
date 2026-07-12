@@ -1651,6 +1651,18 @@
           "returns": "void"
         },
         {
+          "name": "bloom_set_output_scale",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_get_output_scale",
+          "params": [],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_model_foliage_wind",
           "params": [
             "f64",

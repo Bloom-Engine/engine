@@ -1534,6 +1534,14 @@ pub fn bloom_set_wind(dir_x: f64, dir_z: f64, amplitude: f64, frequency: f64) {
     engine().renderer.set_wind(dir_x as f32, dir_z as f32, amplitude as f32, frequency as f32);
 }
 #[wasm_bindgen]
+pub fn bloom_set_output_scale(scale: f64) {
+    engine().renderer.set_output_scale(scale as f32);
+}
+#[wasm_bindgen]
+pub fn bloom_get_output_scale() -> f64 {
+    engine().renderer.output_scale() as f64
+}
+#[wasm_bindgen]
 pub fn bloom_set_model_foliage_wind(model: f64, amount: f64) {
     engine().renderer.set_model_foliage_wind(model.to_bits(), amount as f32);
 }

@@ -247,6 +247,9 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_cloud_shadows(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_output_scale(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_get_output_scale() -> f64 { 1.0 }
 #[no_mangle] pub extern "C" fn bloom_set_model_foliage_wind(_p0: f64, _p1: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_foliage_shadow_motion(_p0: f64) {

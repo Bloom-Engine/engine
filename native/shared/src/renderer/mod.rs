@@ -1026,6 +1026,22 @@ pub struct Renderer {
     /// full surface for composite. At 0.5 = quarter-pixel shading
     /// (former TSR default). At 1.0 = native.
     pub render_scale: f32,
+    /// EN-046 — OUTPUT scale: the swapchain is configured at this fraction of the
+    /// window's real size, and the presentation engine stretches it back up.
+    ///
+    /// This is a DIFFERENT lever from `render_scale`, and confusing the two is easy.
+    /// `render_scale` shrinks the G-buffer and everything that runs at render
+    /// resolution, then TSR upscales to the swapchain. `output_scale` shrinks the
+    /// swapchain ITSELF — so it is the only thing that touches the fixed cost of the
+    /// upscale and the final composite, which on a 4K display was measured at
+    /// 3.1 ms + 2.4 ms and did not care what render_scale was set to.
+    ///
+    /// 1.0 = native. Games that never call it are unaffected.
+    pub output_scale: f32,
+    /// The window's real physical size, before `output_scale` is applied. Kept so
+    /// the scale can be changed at runtime without the platform telling us again.
+    native_width: u32,
+    native_height: u32,
     /// Set once `set_render_scale` is called explicitly. While false,
     /// `set_taa_enabled` keeps the legacy coupling (TAA on = 0.5,
     /// TAA off = 1.0). Once the user opts into explicit control, the
@@ -6411,6 +6427,10 @@ impl Renderer {
             taa_frame_index: 0,
             taa_enabled: true,
             render_scale: 0.5,
+            // 1.0 = native output. Games that never touch it are unaffected.
+            output_scale: 1.0,
+            native_width: 0,
+            native_height: 0,
             render_scale_explicit: false,
             prev_vp_matrix: IDENTITY_MAT4,
             prev_proj_matrix_unjittered: IDENTITY_MAT4,
@@ -6784,6 +6804,24 @@ impl Renderer {
     /// from `render_scale`. At 0.5 this is half the surface size and
     /// the TAA pass (or upscale pass) brings it back to the full
     /// surface for composite; at 1.0 it matches the surface.
+    /// EN-046 — set the output (swapchain) scale. See the field docs: this is the
+    /// only knob that touches the fixed cost of the TSR upscale and the final
+    /// composite, which is what actually dominates a 4K frame.
+    ///
+    /// Re-applies immediately against the last known window size.
+    pub fn set_output_scale(&mut self, scale: f32) {
+        let s = scale.clamp(0.25, 1.0);
+        if (s - self.output_scale).abs() < 1e-4 { return; }
+        self.output_scale = s;
+        let (w, h) = (self.native_width, self.native_height);
+        let (lw, lh) = (self.logical_width, self.logical_height);
+        if w > 0 && h > 0 {
+            self.resize(w, h, lw, lh);
+        }
+    }
+
+    pub fn output_scale(&self) -> f32 { self.output_scale }
+
     pub fn render_extent(&self) -> (u32, u32) {
         let sw = self.surface_config.width as f32;
         let sh = self.surface_config.height as f32;
@@ -6794,7 +6832,16 @@ impl Renderer {
         )
     }
 
+    /// Platform entry point: the window changed size. Records the native size, then
+    /// applies `output_scale` on top of it.
     pub fn resize(&mut self, width: u32, height: u32, logical_width: u32, logical_height: u32) {
+        if width > 0 && height > 0 {
+            self.native_width = width;
+            self.native_height = height;
+        }
+        let s = self.output_scale.clamp(0.25, 1.0);
+        let width = (((width as f32) * s).round() as u32).max(1);
+        let height = (((height as f32) * s).round() as u32).max(1);
         if width > 0 && height > 0 {
             // Cascade fit depends on the projection aspect ratio, so a
             // resize can shift the VPs even with the camera stationary.

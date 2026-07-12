@@ -495,6 +495,25 @@ macro_rules! __bloom_ffi_visual {
         })
         }
 
+        // bloom_set_output_scale  [EN-046]
+        //
+        // Shrink the SWAPCHAIN, not the G-buffer. This is the only knob that touches
+        // the fixed cost of the TSR upscale + final composite, which is what actually
+        // dominates a 4K frame — render_scale does not.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_output_scale(scale: f64) {
+            $crate::ffi::guard("bloom_set_output_scale", move || {
+                engine().renderer.set_output_scale(scale as f32);
+        })
+        }
+
+        #[no_mangle]
+        pub extern "C" fn bloom_get_output_scale() -> f64 {
+            $crate::ffi::guard("bloom_get_output_scale", move || {
+                engine().renderer.output_scale() as f64
+        })
+        }
+
         // bloom_set_cloud_shadows  [EN-040]
         //
         // Opt the world into the deck the sky is already drawing. strength 0

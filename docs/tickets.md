@@ -1455,3 +1455,28 @@ past 32 in combat.
 The key is now a single hash of **identity AND transform**, tested for membership in
 last frame's set. "Was this exact caster, at this exact transform, here last frame?"
 A set membership test does not care what order the draws arrive in.
+
+
+## EN-046 — Output (swapchain) scale ✅ *(shipped 2026-07-12)*
+
+`set_render_scale` shrinks the G-buffer and everything drawn at render resolution,
+then TSR upscales to the swapchain. It does **nothing** for the cost of that upscale
+or the final composite — and on a 4K display those two passes were measured at
+**3.10 ms + 2.40 ms**, about a third of the whole frame.
+
+`set_output_scale(s)` configures the **swapchain itself** at `s ×` the window's real
+size; the presentation engine stretches it back up. It is the only knob that touches
+that fixed tail.
+
+| output scale | `taa_pass` | `final_composite` | gameplay |
+|---|---|---|---|
+| 1.0 (native 4K) | 3.06 ms | 2.37 ms | ~53 fps |
+| 0.8 | 1.46 ms | 1.04 ms | **locked 60.0 fps** (max frame 17.9 ms) |
+| 0.6 | 0.28 ms | 0.22 ms | 60 (capped) |
+
+Default 1.0, so no existing game changes. The renderer remembers the window's native
+size, so the scale can be changed at runtime without the platform telling it again.
+
+**Expose this to players.** At 4K it is the difference between a locked frame rate
+and a sharp one, and which of those someone wants is not the engine's call — nor the
+game's.

@@ -27,6 +27,8 @@ declare function bloom_set_auto_exposure(on: number): void;
 declare function bloom_set_taa_enabled(on: number): void;
 declare function bloom_set_occlusion_culling(on: number): void;
 declare function bloom_set_render_scale(scale: number): void;
+declare function bloom_set_output_scale(scale: number): void;
+declare function bloom_get_output_scale(): number;
 declare function bloom_get_render_scale(): number;
 declare function bloom_set_upscale_mode(mode: number): void;
 declare function bloom_set_cas_strength(strength: number): void;
@@ -339,6 +341,23 @@ export function setTaaEnabled(on: boolean): void {
 export function setRenderScale(scale: number): void {
   bloom_set_render_scale(Math.min(1.0, Math.max(0.5, scale)));
 }
+
+/// OUTPUT scale — configure the swapchain at this fraction of the window's real
+/// size and let the display stretch it back up.
+///
+/// This is NOT `setRenderScale`, and the difference is the whole point.
+/// `setRenderScale` shrinks the G-buffer and everything that runs at render
+/// resolution, then TSR upscales to the swapchain. `setOutputScale` shrinks the
+/// swapchain ITSELF — so it is the only knob that touches the fixed cost of that
+/// upscale and the final composite. On a 4K display those two passes were measured
+/// at 3.1 ms + 2.4 ms and did not care what the render scale was.
+///
+/// 1.0 = native. Expose it to players: at 4K it is the difference between a locked
+/// frame rate and a pretty one, and which of those they want is not the game's call.
+export function setOutputScale(scale: number): void {
+  bloom_set_output_scale(Math.min(1.0, Math.max(0.25, scale)));
+}
+export function getOutputScale(): number { return bloom_get_output_scale(); }
 export function getRenderScale(): number { return bloom_get_render_scale(); }
 
 /** Upscale filter when render_scale < 1 and TAA is off. "bilinear" = cheap/soft, "catmull-rom" = sharper (default). */
