@@ -1044,3 +1044,63 @@ export function drawImposterAtlas(
     1.0, 1.0, 1.0, 1.0,
   );
 }
+
+// ---- EN-025: ragdolls -------------------------------------------------------
+//
+// A ragdoll is not something you configure; it is something you TRIGGER, once,
+// at the moment of death, and then forget about. So the API is four calls:
+// build it, shove it, read the pose, put it away.
+//
+// The engine builds the bodies from the skeleton it already has — one capsule
+// per bone, one limited six-DOF joint per articulation — so there is no ragdoll
+// asset to author and it works for any skinned model the game loads.
+
+declare function bloom_ragdoll_create(): number;
+declare function bloom_ragdoll_activate(rag: number, anim: number, world: number, scale: number, px: number, py: number, pz: number, rotY: number): number;
+declare function bloom_ragdoll_push(rag: number, dx: number, dy: number, dz: number, impulse: number): void;
+declare function bloom_ragdoll_update(rag: number, anim: number, dt: number): number;
+declare function bloom_ragdoll_release(rag: number): void;
+
+/// Allocate a ragdoll slot. Pool these — one per corpse you intend to have on
+/// screen at once — and reuse them; a slot is cheap, but the bodies it holds
+/// are not.
+export function createRagdoll(): number {
+  return bloom_ragdoll_create();
+}
+
+/// Build the bodies from the model's CURRENT pose and let go.
+///
+/// Pass the same `(scale, position, yaw)` you last handed `animUpdate`. That
+/// transform is the bridge between model space (where skinning lives) and world
+/// space (where physics lives), and it is FROZEN here — from now on the corpse's
+/// motion belongs to the bodies, not to the dead thing's old position.
+///
+/// Returns false if the model has no skeleton, or no bones long enough to
+/// simulate.
+export function activateRagdoll(
+  rag: number, anim: number, world: number,
+  scale: number, px: number, py: number, pz: number, rotY: number,
+): boolean {
+  return bloom_ragdoll_activate(rag, anim, world, scale, px, py, pz, rotY) !== 0;
+}
+
+/// The killing blow. Applied across all the bodies, so the corpse is thrown as
+/// a whole rather than having one limb yanked off.
+export function pushRagdoll(rag: number, dx: number, dy: number, dz: number, impulse: number): void {
+  bloom_ragdoll_push(rag, dx, dy, dz, impulse);
+}
+
+/// Pull the simulated pose back into the model's joint matrices and upload it.
+/// Call once per frame per active ragdoll, then `drawModel()` as usual — no
+/// `animUpdate`, because physics owns the pose now. Returns the ragdoll's age in
+/// seconds, which is what you settle and despawn on.
+export function updateRagdoll(rag: number, anim: number, dt: number): number {
+  return bloom_ragdoll_update(rag, anim, dt);
+}
+
+/// Destroy the bodies and constraints and free the slot for reuse. A pooled
+/// ragdoll that is never released leaks bodies into the physics world — a slow,
+/// invisible death.
+export function releaseRagdoll(rag: number): void {
+  bloom_ragdoll_release(rag);
+}

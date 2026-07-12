@@ -245,6 +245,12 @@ impl ModelManager {
         }
     }
 
+    /// EN-025 — the ragdoll writes joint matrices directly, bypassing the
+    /// sampler entirely: once a thing is dead, physics owns its pose.
+    pub fn get_animation_mut(&mut self, handle: f64) -> Option<&mut ModelAnimation> {
+        self.animations.get_mut(handle)
+    }
+
     pub fn get_animation(&self, handle: f64) -> Option<&ModelAnimation> {
         self.animations.get(handle)
     }

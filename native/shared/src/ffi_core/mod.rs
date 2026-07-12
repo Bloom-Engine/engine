@@ -67,6 +67,7 @@ mod models;
 mod scene;
 mod visual;
 mod vfx;
+mod ragdoll_ffi;
 
 /// Expand the full shared (non-physics) FFI surface. Composed from the
 /// per-subsystem section macros in this directory; platform crates invoke
@@ -85,6 +86,7 @@ macro_rules! define_core_ffi {
         $crate::__bloom_ffi_scene!();
         $crate::__bloom_ffi_visual!();
         $crate::__bloom_ffi_vfx!();
+        $crate::__bloom_ffi_ragdoll!();
     };
 }
 

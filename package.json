@@ -1218,6 +1218,31 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_ragdoll_create",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_ragdoll_activate",
+          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_ragdoll_push",
+          "params": ["f64", "f64", "f64", "f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_ragdoll_update",
+          "params": ["f64", "f64", "f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_ragdoll_release",
+          "params": ["f64"],
+          "returns": "void"
+        },
+        {
           "name": "bloom_particles_create",
           "params": ["f64"],
           "returns": "f64"

@@ -853,3 +853,10 @@
 #[no_mangle] pub extern "C" fn bloom_create_texture_array_from_files(_p0: i64, _p1: f64, _p2: f64) -> f64 {
     0.0
 }
+
+// EN-025 — ragdolls (no 3D/physics on watchOS).
+#[no_mangle] pub extern "C" fn bloom_ragdoll_create() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_ragdoll_activate(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_ragdoll_push(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {}
+#[no_mangle] pub extern "C" fn bloom_ragdoll_update(_p0: f64, _p1: f64, _p2: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_ragdoll_release(_p0: f64) {}

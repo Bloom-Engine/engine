@@ -26,6 +26,8 @@ pub mod staging;
 pub mod profiler;
 pub mod particles;
 pub mod decals;
+#[cfg(all(feature = "models3d", feature = "jolt", not(target_arch = "wasm32")))]
+pub mod ragdoll;
 pub mod sdf_cache;
 // Jolt C ABI + Rust wrapper live on native only. On wasm32 the web crate
 // routes bloom_physics_* calls through wasm_bindgen to JoltPhysics.js;
