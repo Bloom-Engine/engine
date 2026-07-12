@@ -26,12 +26,19 @@ pub const SHADOW_FAR: f32 = 100.0;
 pub const SHADOW_UNIFORM_STRIDE: u32 = 256;
 pub const SHADOW_MAX_NODES: u32 = 1024;
 /// Slots at the TAIL of each cascade's uniform region reserved for
-/// dynamic (immediate-batch) casters, which re-render every frame while
-/// static casters keep their cached depth. Disjoint slot ranges keep the
-/// every-frame dynamic writes from clobbering the uniforms the static
-/// render was encoded against (all `write_buffer`s land at submit,
-/// before any pass executes).
-pub const SHADOW_MAX_DYNAMIC: u32 = 64;
+/// dynamic casters, which re-render every frame while static casters keep their
+/// cached depth. Disjoint slot ranges keep the every-frame dynamic writes from
+/// clobbering the uniforms the static render was encoded against (all
+/// `write_buffer`s land at submit, before any pass executes).
+///
+/// EN-042 — raised from 64. Sixty-four was fine while "dynamic" meant a handful of
+/// characters, and became a trap the moment a *forest* could go dynamic: 88 trees x
+/// 4 primitives is 352 casters, the overflow was dropped in queue order, and what
+/// disappeared was whatever happened to be last — twice this session, that was the
+/// player's own shadow from under their feet. 256 covers a moving crowd; the drop is
+/// also RANKED now (see shadow_pass.rs) so an overflow costs a canopy shadow rather
+/// than a character's.
+pub const SHADOW_MAX_DYNAMIC: u32 = 256;
 
 /// Depth-only shader for shadow pass.
 pub const SHADOW_SHADER: &str = concat!(

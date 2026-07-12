@@ -633,10 +633,28 @@ impl Renderer {
             );
             if dyn_now {
                 let dyn_base = cascade_base + stride * max_static;
-                let dyn_entries: Vec<usize> = entries.iter().copied()
+                // EN-042 — the dynamic budget can overflow, and the overflow IS
+                // dropped. Which caster gets dropped must not be an accident of
+                // queue order. It was, and it cost this project twice: both times
+                // the thing that silently vanished was the player's own shadow, and
+                // both times the frame rate went UP and looked like a win.
+                //
+                // Rank them, so if we must lose a shadow we lose one nobody misses:
+                // characters first (the shadow a player actually looks at), then
+                // other movers, then foliage — a swaying canopy shadow is soft and
+                // dappled and the most forgiving thing in the frame.
+                let mut dyn_entries: Vec<usize> = entries.iter().copied()
                     .filter(|&ei| shadow_nodes[ei].dynamic)
-                    .take(max_dynamic)
                     .collect();
+                if dyn_entries.len() > max_dynamic {
+                    dyn_entries.sort_by_key(|&ei| {
+                        let e = &shadow_nodes[ei];
+                        if e.skinned { 0u8 }
+                        else if e.foliage > 0.0 { 2u8 }
+                        else { 1u8 }
+                    });
+                    dyn_entries.truncate(max_dynamic);
+                }
                 let mut uniform_data: Vec<u8> =
                     vec![0u8; stride * dyn_entries.len().max(1)];
                 for (slot, &ei) in dyn_entries.iter().enumerate() {

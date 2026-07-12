@@ -353,7 +353,7 @@ bank, with the reflection wobbling on the wave normal.
 
 ---
 
-## EN-012 — Foliage shading model in PBR ABI 🟡
+## EN-012 — Foliage shading model in PBR ABI 🟡 *(V1 landed; see shooter SH-023 — its transmission drops the dot(-N,L) gate and it excludes ambient/IBL, so the shooter declined to adopt it. A V2 needs both.)*
 
 **Why:** SH-011 (grass) and SH-012 (tree) both bolt local
 wrap-lambert + transmission terms into bespoke material shaders.
@@ -487,7 +487,7 @@ sampler call per layer-class instead of 4.
 
 ---
 
-## EN-015 — Imposter / billboard system 🟡
+## EN-015 — Imposter / billboard system 🟡 *(deprioritised — the shooter's 88-tree forest was measured as pure alpha-cutout OVERDRAW, not geometry; EN-044's depth prepass solved it. Imposters remain a >500-instance tool.)*
 
 **Why:** the shooter ships 120 trees today; opening the playfield
 or moving toward "stand on a hill, see a forest stretching to the
@@ -903,7 +903,7 @@ which also carries the round ordering.
 
 ---
 
-## EN-025 — Ragdoll FFI 🟡
+## EN-025 — Ragdoll FFI ✅ *(shipped 2026-07-12)*
 
 **Why:** Jolt ships `Ragdoll.cpp` in the vendored submodule but no
 `bloom_physics_ragdoll_*` FFI exists — the shooter's enemies die by
@@ -945,7 +945,7 @@ edges, reacts to the killing impulse, never clips the heightfield;
 
 ---
 
-## EN-026 — Particle / VFX system 🟡
+## EN-026 — Particle / VFX system ✅ *(shipped)*
 
 **Why:** the engine has **no particle system at all** (spec Phase I,
 unbuilt) — the shooter fakes sparks with a 16-slot pool of additive
@@ -987,7 +987,7 @@ budget; mobile halves pool sizes via the same descriptors.
 
 ---
 
-## EN-027 — Deferred decal system 🟡
+## EN-027 — Deferred decal system ✅ *(shipped)*
 
 **Why:** the world takes no marks — no bullet holes, scorch, or blood
 splats. The impulse field is a material *input* (ripples/wet), not
@@ -1019,7 +1019,7 @@ conforming to terrain slope and building walls, no lighting seams,
 
 ---
 
-## EN-028 — Animation blending, masks, root motion 🟡
+## EN-028 — Animation blending, masks, root motion ✅ *(shipped — AnimMixer)*
 
 **Why:** the animation FFI plays exactly one clip per model
 (`update_model_animation(handle, index, time)`), so every transition
@@ -1051,7 +1051,7 @@ pounce follows its authored root arc instead of hand-tuned kinematics.
 
 ---
 
-## EN-029 — Audio buses, reverb send, occlusion filter 🟡
+## EN-029 — Audio buses, reverb send, occlusion filter ✅ *(shipped)*
 
 **Why:** the mixer is master + per-voice gain — no submixes, no DSP.
 AAA "gunfeel" is half audio: a weapon tail through a reverb send, a
@@ -1083,7 +1083,7 @@ building is muffled; zero underruns/glitches at 48 kHz with 32 voices.
 
 ---
 
-## EN-030 — UI widget layer 🟢 *(TS-side, no Rust needed)*
+## EN-030 — UI widget layer ✅ *(shipped — TS-side, `src/menu.ts` in the shooter)*
 
 **Why:** the engine offers immediate-mode shapes + text only. Every
 game needs pause/settings/menus, and the editor hand-rolls its own
@@ -1110,7 +1110,7 @@ widgets incrementally.
 
 ---
 
-## EN-031 — Gamepad backend verification + rumble 🟢
+## EN-031 — Gamepad backend verification + rumble ✅ *(shipped — XInput polling was already wired; rumble added)*
 
 **Why:** the FFI surface exists (`bloom_is_gamepad_available`,
 `bloom_get_gamepad_axis`, `bloom_is_gamepad_button_*`,
@@ -1389,3 +1389,25 @@ player vanished**. The sky never needed that write. It is off now.
 (First suspect was depth invariance — two pipelines compiling the same vertex shader
 differently. `@invariant` on the position is in place and is genuinely required for
 an `Equal` test, but it was not the cause.)
+
+
+---
+
+## EN-042 — Dynamic shadow-caster budget ✅ *(fixed 2026-07-12)*
+
+`SHADOW_MAX_DYNAMIC` was **64**, and the overflow was dropped **in queue order,
+silently**. That was fine while "dynamic" meant a handful of characters. It became a
+trap the moment a *forest* could go dynamic — 88 trees × 4 primitives = 352 casters —
+and it cost this project twice in one session:
+
+- enabling swaying foliage shadows measured **34 → 40 fps**, because it had deleted
+  every tree shadow **and the player's own shadow**;
+- the first cut of EN-043 measured **42 fps** for the same reason.
+
+Both looked like wins. Neither was. A budget that silently drops whatever happened to
+be queued last is a landmine.
+
+**Fixed two ways.** The budget is **256** (from 1024 slots/cascade). And the drop is
+**ranked**, not accidental: characters first (the shadow a player actually looks at),
+then other movers, then foliage — a swaying canopy shadow is soft, dappled and the
+most forgiving thing in the frame. If a shadow must be lost, it is now a chosen one.
