@@ -59,6 +59,30 @@ export function validateWorld(w: WorldData): ValidationResult {
     }
   }
 
+  if (!Array.isArray(w.lights)) {
+    errors.push('world.lights must be an array');
+  } else {
+    const seenLightIds = new Set<string>();
+    for (let i = 0; i < w.lights.length; i++) {
+      const l = w.lights[i];
+      const path = 'world.lights[' + i + ']';
+      if (typeof l.id !== 'string' || l.id.length === 0) {
+        errors.push(path + '.id is missing');
+      } else if (seenLightIds.has(l.id)) {
+        errors.push(path + '.id "' + l.id + '" is a duplicate');
+      } else {
+        seenLightIds.add(l.id);
+      }
+      if (l.kind !== 'point') {
+        errors.push(path + '.kind must be "point"');
+      }
+      checkVec3(errors, path + '.position', l.position);
+      checkVec3(errors, path + '.color', l.color);
+      if (typeof l.intensity !== 'number') errors.push(path + '.intensity must be a number');
+      if (typeof l.range !== 'number') errors.push(path + '.range must be a number');
+    }
+  }
+
   if (!Array.isArray(w.water)) {
     errors.push('world.water must be an array');
   }

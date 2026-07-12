@@ -97,6 +97,40 @@ macro_rules! __bloom_ffi_scene {
         })
         }
 
+        // bloom_scene_set_transform16 — all-f64 variant of set_transform.
+        //
+        // Perry 0.5.x refuses to pass a JS `number[]` into an `i64` pointer
+        // param ("Expected safe integer for native i64 parameter"), so the
+        // pointer-taking `bloom_scene_set_transform` above is unreachable from
+        // TypeScript. Meshes already dodge this via the scratch buffers; a
+        // 4x4 matrix is small enough to just spell out as 16 scalars, which
+        // keeps this stateless. Column-major, same layout as the ptr version.
+        #[no_mangle]
+        #[allow(clippy::too_many_arguments)]
+        pub extern "C" fn bloom_scene_set_transform16(
+            handle: f64,
+            m0: f64, m1: f64, m2: f64, m3: f64,
+            m4: f64, m5: f64, m6: f64, m7: f64,
+            m8: f64, m9: f64, m10: f64, m11: f64,
+            m12: f64, m13: f64, m14: f64, m15: f64,
+        ) {
+            $crate::ffi::guard("bloom_scene_set_transform16", move || {
+                let s = [
+                    m0, m1, m2, m3,
+                    m4, m5, m6, m7,
+                    m8, m9, m10, m11,
+                    m12, m13, m14, m15,
+                ];
+                let mut mat = [[0.0f32; 4]; 4];
+                for col in 0..4 {
+                    for row in 0..4 {
+                        mat[col][row] = s[col * 4 + row] as f32;
+                    }
+                }
+                engine().scene.set_transform(handle, mat);
+        })
+        }
+
         // bloom_scene_update_geometry  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_scene_update_geometry(

@@ -28,6 +28,24 @@ declare function bloom_scene_set_cast_shadow(handle: number, cast: number): void
 declare function bloom_scene_set_receive_shadow(handle: number, receive: number): void;
 declare function bloom_scene_set_parent(handle: number, parent: number): void;
 declare function bloom_scene_set_transform(handle: number, matrix: number): void;
+// All-scalar transform + geometry entry points. Perry 0.5.x cannot pass a
+// `number[]` into the i64 pointer params above, so these are the ones the
+// wrappers actually call.
+declare function bloom_scene_set_transform16(
+  handle: number,
+  m0: number, m1: number, m2: number, m3: number,
+  m4: number, m5: number, m6: number, m7: number,
+  m8: number, m9: number, m10: number, m11: number,
+  m12: number, m13: number, m14: number, m15: number,
+): void;
+declare function bloom_scene_update_geometry_scratch(
+  handle: number,
+  vertexCount: number,
+  indexCount: number,
+): void;
+declare function bloom_mesh_scratch_reset(): void;
+declare function bloom_mesh_scratch_push_f32(v: number): void;
+declare function bloom_mesh_scratch_push_u32(v: number): void;
 declare function bloom_scene_set_trs(handle: number, px: number, py: number, pz: number, yaw: number, scale: number): void;
 declare function bloom_scene_update_geometry(
   handle: number,
@@ -203,14 +221,23 @@ export function setSceneNodeParent(handle: SceneNodeHandle, parent: SceneNodeHan
  * Set the 4x4 transform matrix for a scene node.
  * Matrix is in column-major order (same as Three.js/glm).
  *
- * NOTE: this crosses the FFI as an array-into-i64-pointer, which Perry
- * 0.5.x rejects at runtime ("Expected safe integer for native i64
- * parameter"). Until the scratch-buffer migration lands, prefer
- * `setSceneNodeTrs` for position/yaw/scale placement — it is all-scalar
- * and works on every Perry.
+ * Takes a column-major 16-element matrix, so arbitrary rotation and
+ * non-uniform scale are expressible (`setSceneNodeTrs` covers only
+ * position + yaw + uniform scale).
+ *
+ * The matrix crosses the FFI as 16 scalars rather than a pointer: Perry
+ * 0.5.x refuses to pass a `number[]` into an `i64` pointer param
+ * ("Expected safe integer for native i64 parameter"), which made the old
+ * pointer-based entry point unreachable from TypeScript.
  */
 export function setSceneNodeTransform(handle: SceneNodeHandle, matrix: number[]): void {
-  bloom_scene_set_transform(handle, matrix as any);
+  bloom_scene_set_transform16(
+    handle,
+    matrix[0], matrix[1], matrix[2], matrix[3],
+    matrix[4], matrix[5], matrix[6], matrix[7],
+    matrix[8], matrix[9], matrix[10], matrix[11],
+    matrix[12], matrix[13], matrix[14], matrix[15],
+  );
 }
 
 /**
@@ -233,19 +260,26 @@ export function setSceneNodeTrs(
  * @param vertices — Flat array of vertex data. Each vertex has 12 floats:
  *   [x, y, z, nx, ny, nz, r, g, b, a, u, v]
  * @param indices — Flat array of triangle indices (3 per triangle).
+ *
+ * Uploads through the mesh scratch buffers (one scalar per FFI call) for the
+ * same reason as `createMesh`: Perry 0.5.x rejects `number[]` in an `i64`
+ * pointer param. Cost is linear in the mesh size, so this is for
+ * edit-time re-meshing (terrain sculpting), not per-frame streaming.
  */
 export function updateSceneNodeGeometry(
   handle: SceneNodeHandle,
   vertices: number[],
   indices: number[],
 ): void {
-  bloom_scene_update_geometry(
-    handle,
-    vertices as any,
-    vertices.length / 12,
-    indices as any,
-    indices.length,
-  );
+  const vertexCount = Math.floor(vertices.length / 12);
+  const indexCount = indices.length;
+  if (vertexCount === 0 || indexCount === 0) return;
+
+  bloom_mesh_scratch_reset();
+  const floatCount = vertexCount * 12;
+  for (let i = 0; i < floatCount; i++) bloom_mesh_scratch_push_f32(vertices[i]);
+  for (let i = 0; i < indexCount; i++) bloom_mesh_scratch_push_u32(indices[i]);
+  bloom_scene_update_geometry_scratch(handle, vertexCount, indexCount);
 }
 
 /**

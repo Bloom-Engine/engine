@@ -51,6 +51,7 @@ declare function bloom_set_directional_light(dx: number, dy: number, dz: number,
 declare function bloom_set_procedural_sky(enabled: number, rayleighDensity: number, mieDensity: number, groundAlbedo: number): void;
 declare function bloom_set_sun_direction(dx: number, dy: number, dz: number, intensity: number): void;
 declare function bloom_gen_mesh_spline_ribbon(pointsPtr: number, pointCount: number, widthsPtr: number, widthCount: number): number;
+declare function bloom_gen_mesh_spline_ribbon_scratch(pointCount: number, widthCount: number): number;
 declare function bloom_get_model_mesh_count(handle: number): number;
 declare function bloom_get_model_material_count(handle: number): number;
 declare function bloom_get_model_bounds_min_x(handle: number): number;
@@ -201,9 +202,24 @@ export function unloadModel(model: Model): void {
  * `widths` has one width per control point.
  * Returns a Model whose mesh is a smooth triangle-strip ribbon.
  */
+/**
+ * Build a ribbon mesh that follows a Catmull-Rom spline through `points`
+ * (flat x,y,z triples), with a per-point half-width from `widths`.
+ *
+ * Goes through the mesh scratch buffers — positions first, then widths — for
+ * the same reason as `createMesh`: Perry 0.5.x will not pass a `number[]` into
+ * an `i64` pointer param, which made the pointer form unreachable from TS.
+ */
 export function genMeshSplineRibbon(points: number[], widths: number[]): Model {
-  const pointCount = points.length / 3;
-  const handle = bloom_gen_mesh_spline_ribbon(points as any, pointCount, widths as any, widths.length);
+  const pointCount = Math.floor(points.length / 3);
+  const widthCount = widths.length;
+  if (pointCount < 2 || widthCount === 0) return makeModel(0);
+
+  bloom_mesh_scratch_reset();
+  for (let i = 0; i < pointCount * 3; i++) bloom_mesh_scratch_push_f32(points[i]);
+  for (let i = 0; i < widthCount; i++) bloom_mesh_scratch_push_f32(widths[i]);
+
+  const handle = bloom_gen_mesh_spline_ribbon_scratch(pointCount, widthCount);
   return makeModel(handle);
 }
 

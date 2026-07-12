@@ -450,6 +450,59 @@ macro_rules! __bloom_ffi_models {
             0.0
         }
 
+        // Array-free scene-geometry upload. Same motivation as the mesh scratch
+        // above: `bloom_scene_update_geometry` takes `i64` pointers, which
+        // Perry cannot produce from a `number[]`. Push the vertex floats and
+        // u32 indices through the mesh scratch, then re-upload them into an
+        // existing scene node (the editor's terrain re-meshes every brush
+        // stroke this way).
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_update_geometry_scratch(
+            handle: f64,
+            vertex_count: f64,
+            index_count: f64,
+        ) {
+            $crate::ffi::guard("bloom_scene_update_geometry_scratch", move || {
+                let taken = engine()
+                    .models
+                    .take_scratch_geometry(vertex_count as u32, index_count as u32);
+                let (vert_floats, indices) = match taken {
+                    Some(v) => v,
+                    None => return,
+                };
+                let nv = vertex_count as usize;
+                let mut vertices = Vec::with_capacity(nv);
+                for i in 0..nv {
+                    let base = i * 12;
+                    vertices.push($crate::renderer::Vertex3D {
+                        position: [vert_floats[base], vert_floats[base + 1], vert_floats[base + 2]],
+                        normal: [vert_floats[base + 3], vert_floats[base + 4], vert_floats[base + 5]],
+                        color: [
+                            vert_floats[base + 6],
+                            vert_floats[base + 7],
+                            vert_floats[base + 8],
+                            vert_floats[base + 9],
+                        ],
+                        uv: [vert_floats[base + 10], vert_floats[base + 11]],
+                        joints: [0.0; 4],
+                        weights: [0.0; 4],
+                        tangent: [0.0; 4],
+                    });
+                }
+                engine().scene.update_geometry(handle, vertices, indices);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_scene_update_geometry_scratch(
+            _handle: f64,
+            _vertex_count: f64,
+            _index_count: f64,
+        ) {
+            $crate::ffi::feature_off_warn_once("bloom_scene_update_geometry_scratch", "models3d");
+        }
+
         // bloom_get_model_mesh_count  [source: linux; gated: models3d]
         #[cfg(feature = "models3d")]
         #[no_mangle]
@@ -596,6 +649,33 @@ macro_rules! __bloom_ffi_models {
         #[no_mangle]
         pub extern "C" fn bloom_gen_mesh_spline_ribbon(_points_ptr: *const f64, _point_count: f64, _widths_ptr: *const f64, _width_count: f64) -> f64 {
             $crate::ffi::feature_off_warn_once("bloom_gen_mesh_spline_ribbon", "models3d");
+            0.0
+        }
+
+        // Array-free spline ribbon. Same reason as the mesh scratch above: the
+        // pointer form is unreachable from TypeScript (Perry won't pass a
+        // `number[]` into an i64 param). Push `point_count * 3` position floats
+        // followed by `width_count` width floats into the mesh scratch, then
+        // call this.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_gen_mesh_spline_ribbon_scratch(point_count: f64, width_count: f64) -> f64 {
+            $crate::ffi::guard("bloom_gen_mesh_spline_ribbon_scratch", move || {
+                let n = point_count as usize;
+                let wn = width_count as usize;
+                let scratch = engine().models.scratch_floats();
+                if n < 2 || wn == 0 || scratch.len() < n * 3 + wn {
+                    return 0.0;
+                }
+                let points: Vec<f32> = scratch[..n * 3].to_vec();
+                let widths: Vec<f32> = scratch[n * 3..n * 3 + wn].to_vec();
+                engine().models.gen_mesh_spline_ribbon(&points, &widths)
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_gen_mesh_spline_ribbon_scratch(_point_count: f64, _width_count: f64) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_gen_mesh_spline_ribbon_scratch", "models3d");
             0.0
         }
 
