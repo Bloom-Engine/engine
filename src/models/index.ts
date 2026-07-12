@@ -685,6 +685,85 @@ export function updateModelAnimation(handle: number, animIndex: number, time: nu
   bloom_update_model_animation(handle, animIndex, time, scale, px, py, pz, rotY);
 }
 
+// ---- EN-028: animation mixer -----------------------------------------------
+// The single-clip `updateModelAnimation` above stays for callers that drive
+// their own clip clock. The mixer below owns the clock instead, which is what
+// makes crossfades possible at all: a fade needs the *outgoing* clip to keep
+// advancing, and a caller that only passes one time value cannot express that.
+//
+// Typical use, per model per frame:
+//   animPlay(h, moving ? CLIP_WALK : CLIP_IDLE, 0.15);   // idempotent
+//   animSetLayer(h, attacking ? CLIP_ATTACK : -1, 1, spineJoint);
+//   animUpdate(h, dt, scale, x, y, z, yaw);
+
+declare function bloom_anim_play(handle: number, clip: number, fade: number, speed: number, looping: number): void;
+declare function bloom_anim_set_layer(handle: number, clip: number, weight: number, maskRoot: number, speed: number, looping: number): void;
+declare function bloom_anim_set_root_motion(handle: number, on: number): void;
+declare function bloom_anim_update(handle: number, dt: number, scale: number, px: number, py: number, pz: number, rotY: number): void;
+declare function bloom_anim_finished(handle: number): number;
+declare function bloom_anim_clip_duration(handle: number, clip: number): number;
+declare function bloom_anim_root_delta(handle: number, axis: number): number;
+declare function bloom_model_find_joint(handle: number, name: number): number;
+declare function bloom_model_joint_world(handle: number, joint: number, comp: number): number;
+
+/// Transition the base track to `clip` over `fade` seconds. Safe to call every
+/// frame with the clip you *want* — re-requesting the clip already playing is
+/// a no-op, so callers don't have to track edges.
+export function animPlay(handle: number, clip: number, fade: number = 0.15, speed: number = 1.0, looping: boolean = true): void {
+  bloom_anim_play(handle, clip, fade, speed, looping ? 1 : 0);
+}
+
+/// Drive the subtree below `maskRoot` (a joint index — see `findJoint`) from a
+/// second clip at `weight`. Pass clip = -1 to switch the layer off. This is how
+/// a character attacks while still walking.
+export function animSetLayer(handle: number, clip: number, weight: number, maskRoot: number, speed: number = 1.0, looping: boolean = false): void {
+  bloom_anim_set_layer(handle, clip, weight, maskRoot, speed, looping ? 1 : 0);
+}
+
+/// Opt in to authored root motion. Off by default: with it on, the pose stops
+/// carrying the root translation and you must feed `animRootDelta` to your
+/// character controller, or the model animates in place.
+export function animSetRootMotion(handle: number, on: boolean): void {
+  bloom_anim_set_root_motion(handle, on ? 1 : 0);
+}
+
+/// Advance all clocks on this model and upload the blended pose. One call per
+/// model per frame, in place of `updateModelAnimation`.
+export function animUpdate(handle: number, dt: number, scale: number, px: number, py: number, pz: number, rotY: number): void {
+  bloom_anim_update(handle, dt, scale, px, py, pz, rotY);
+}
+
+/// True once a non-looping clip has run past its end — the death/attack
+/// one-shot query.
+export function animFinished(handle: number): boolean {
+  return bloom_anim_finished(handle) !== 0;
+}
+
+export function animClipDuration(handle: number, clip: number): number {
+  return bloom_anim_clip_duration(handle, clip);
+}
+
+/// Root-motion translation applied by the last `animUpdate`, in model space.
+export function animRootDelta(handle: number, axis: number): number {
+  return bloom_anim_root_delta(handle, axis);
+}
+
+// ---- EN-033: bone sockets ---------------------------------------------------
+
+/// Joint index by name (exact, else case-insensitive substring). Call once at
+/// load and cache — it parses a string, which must never happen per-frame
+/// (perry-quirks #5). Returns -1 if not found.
+export function findJoint(handle: number, name: string): number {
+  return bloom_model_find_joint(handle, name as any);
+}
+
+/// One component of a joint's model-space 4x4 (column-major, 0..15).
+/// Translation is 12/13/14. Model-space, not world: apply the same scale /
+/// position / yaw you passed to `animUpdate` to place it in the world.
+export function jointWorld(handle: number, joint: number, comp: number): number {
+  return bloom_model_joint_world(handle, joint, comp);
+}
+
 // Upload a mesh via the scratch buffer (array-free). Perry 0.5.1171 rejects
 // passing a `number[]` to a native `i64` pointer param (strict safe-integer
 // check), so we push each vertex float + index scalar through the all-f64

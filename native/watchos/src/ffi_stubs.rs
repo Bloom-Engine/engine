@@ -768,3 +768,62 @@
 #[no_mangle] pub extern "C" fn bloom_physics_vehicle_get_wheel_angular_velocity(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
+
+// EN-028 / EN-033 / EN-026 / EN-027 — watchOS is a stub platform (no 3D
+// renderer), so these keep the symbol surface complete without behaviour.
+#[no_mangle] pub extern "C" fn bloom_anim_play(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_layer(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_root_motion(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_update(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_finished(_p0: f64) -> f64 {
+    1.0
+}
+#[no_mangle] pub extern "C" fn bloom_anim_clip_duration(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_anim_root_delta(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_model_find_joint(_p0: f64, _p1: i64) -> f64 {
+    -1.0
+}
+#[no_mangle] pub extern "C" fn bloom_model_joint_world(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_create(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_configure(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_emit(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_update(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_instance_buffer(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_clear(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_live(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_init(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_spawn(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_decals_set_style(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_decals_update(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_instance_buffer() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_clear() {
+}

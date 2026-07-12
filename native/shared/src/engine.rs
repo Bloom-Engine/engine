@@ -32,6 +32,11 @@ pub struct EngineState {
     pub profiler: Profiler,
     pub screenshot_pending: bool,
     pub drs: DrsController,
+    /// EN-026 / EN-027 — particle pools and the decal ring. Both are pure CPU
+    /// state that feeds dynamic instance buffers; they own no GPU resources of
+    /// their own beyond the buffer handles they were given at creation.
+    pub particles: crate::particles::ParticleManager,
+    pub decals: crate::decals::DecalManager,
 
     // Timing
     pub target_fps: f64,
@@ -89,6 +94,8 @@ impl EngineState {
             profiler,
             screenshot_pending: false,
             drs: DrsController::new(),
+            particles: crate::particles::ParticleManager::new(),
+            decals: crate::decals::DecalManager::new(),
             target_fps: 60.0,
             delta_time: 0.0,
             last_frame_time: now,

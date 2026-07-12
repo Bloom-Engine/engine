@@ -8,7 +8,12 @@ broader RFC
 
 ---
 
-## EN-001 — Instanced-draw FFI 🟢
+## EN-001 — Instanced-draw FFI ✅ shipped
+
+> **Status:** landed — instance buffers + instanced material draws
+> (`renderer/material_instancing.rs`, `bloom_create_instance_buffer`,
+> `submit_material_draw_instanced`); shooter runs 20k grass instances
+> in one draw, tile-culled since aeb3228.
 
 **Why:** the shooter currently bakes 5000 grass blades into one
 big static mesh and draws it with a single `drawMeshWithMaterial`.
@@ -47,7 +52,11 @@ time so the right vertex layout is used.
 
 ---
 
-## EN-002 — `drawModel` rotation parameter 🟢
+## EN-002 — `drawModel` rotation parameter ✅ shipped
+
+> **Status:** landed — `drawModelRotated` (degrees), later moved onto
+> the cached scene pipeline so cutout/materials apply; used by the
+> shooter's 88-tree forest.
 
 **Why:** the shooter just shipped `drawMeshWithMaterial`-based tree
 sway because `drawModel` has no rotation arg, so we couldn't tilt
@@ -245,7 +254,11 @@ SH-020..SH-024 tickets.
 
 ---
 
-## EN-010 — Alpha-cutout bucket 🟢
+## EN-010 — Alpha-cutout bucket ✅ engine side shipped
+
+> **Status:** cutout bucket landed in the material pipeline (leaf-card
+> trees render through it since the round-5 texture work). Game-side
+> SH-020 (converting 2 of 4 tree variants) still pending.
 
 **Why:** today's render buckets are Opaque (full G-buffer),
 Transparent (back-to-front blend), Refractive (Transparent +
@@ -289,7 +302,13 @@ emit doc update.
 
 ---
 
-## EN-011 — Planar reflection capture 🟢
+## EN-011 — Planar reflection capture ✅ shipped
+
+> **Status:** landed — `renderer/planar_reflection.rs` /
+> `planar_pass.rs` + `setMaterialReflectionProbe`; the river reflects
+> the bank. Mirrored-frustum culling, batched uniforms, cached probe
+> bind group, and `setMaterialProbeVisible` (grass exclusion) landed
+> in the 2026-07 perf round.
 
 **Why:** the water material today reads `env_tex` (the static HDR
 panorama) for sky reflection. That's correct for sky but means a
@@ -385,7 +404,10 @@ math go away from each.
 
 ---
 
-## EN-013 — Global wind UBO in PerFrame 🟢
+## EN-013 — Global wind UBO in PerFrame ✅ shipped
+
+> **Status:** landed — `frame.wind` + `setWind()`; shooter grass and
+> trees ride one UBO.
 
 **Why:** every foliage material today re-declares its own `wind:
 vec4<f32>` in a per-material UBO (GrassParams, TreeParams). When
@@ -415,7 +437,11 @@ overrides.
 
 ---
 
-## EN-014 — Texture-array binding pattern for splat-mapped terrain 🟡
+## EN-014 — Texture-array binding pattern for splat-mapped terrain ✅ shipped
+
+> **Status:** landed — texture-array bindings in the material ABI
+> (`material_abi.wgsl`, splat-terrain support in the material system).
+> Game-side SH-009 (4-layer PBR terrain) is unblocked and pending.
 
 **Why:** SH-009 wants 4 PBR layers (grass / dry-grass / dirt /
 rock) blended in the fragment by weight masks. The current
@@ -503,7 +529,10 @@ cost as today's 120.
 
 ---
 
-## EN-016 — Custom-material shadow-receive helper 🟢
+## EN-016 — Custom-material shadow-receive helper ✅ shipped
+
+> **Status:** landed — `sample_sun_shadow` / `sample_sun_shadow_n`
+> helpers; consumed by grass, terrain, tree, and water materials.
 
 **Why:** game materials (`grass.wgsl`, `tree.wgsl`, `terrain.wgsl`,
 `water.wgsl`) all want to sample the directional shadow cascades.
@@ -532,7 +561,11 @@ above.
 
 ---
 
-## EN-017 — Post-pass slot for game-side full-screen FX 🟡
+## EN-017 — Post-pass slot for game-side full-screen FX ✅ shipped
+
+> **Status:** landed — `bloom_add_post_pass` game-injected fullscreen
+> passes. First consumers: shooter SH-029 damage-flash / low-health
+> grading (the original SH-019 underwater use case was closed).
 
 **Why:** SH-019 wants an underwater colour tint when the camera Y
 falls below the water surface. The engine ships several built-in
@@ -856,4 +889,342 @@ folded into the boot-path render-target fix (PR for EN-024's sibling
 bug), which was a straight bug — this one is a product call.
 
 **Found by** the macOS/iOS parity audit, 2026-07-11.
+
+---
+
+# AAA-feel enablers (2026-07-12 gap audit)
+
+EN-025 onward come out of the full shooter/engine/editor AAA gap
+audit. The renderer is past diminishing returns; these are the engine
+systems whose absence is most visible in actual gameplay footage:
+animation depth, VFX, decals, audio DSP, UI, and input. Game-side
+counterparts are shooter SH-025..SH-044 (`bloom/shooter/docs/tickets.md`),
+which also carries the round ordering.
+
+---
+
+## EN-025 — Ragdoll FFI 🟡
+
+**Why:** Jolt ships `Ragdoll.cpp` in the vendored submodule but no
+`bloom_physics_ragdoll_*` FFI exists — the shooter's enemies die by
+clamping the last animation frame and sinking through the floor.
+Ragdoll handoff is the single strongest "physical world" signal in an
+action game, and the hard part (the solver) is already linked into
+every build.
+
+**API sketch:**
+
+```ts
+// Build once per model kind: bones as capsules between joint pairs,
+// constraints from the skeleton hierarchy.
+const rag = physicsCreateRagdoll(modelHandle, {
+  boneRadiusScale: 0.4,   // capsule radius from bone length
+  maxBodies: 16,          // merge tiny finger/tail chains
+});
+// On death: seed from the current animated pose + a kill impulse.
+physicsActivateRagdoll(rag, modelHandle, hitDirX, hitDirY, hitDirZ, impulse);
+// Per frame while active: physics drives the skin.
+physicsFetchRagdollPose(rag, modelHandle);  // writes joint matrices
+physicsDeactivateRagdoll(rag);              // back to the pool
+```
+
+**Open questions:**
+- Auto-shape generation from the skeleton (capsules per joint pair,
+  mass from bone length) vs authored shapes? (V1: auto with a scale
+  knob; the alien skeletons are simple.)
+- Sleep/despawn policy — deactivate when velocity < ε for N frames.
+
+**Scope:** medium-large (~1 week) — C shim over Jolt's Ragdoll +
+skeleton mapping + the pose write-back into the existing joint UBO
+path (GPU skinning already consumes joint matrices; this only changes
+who computes them).
+
+**Acceptance:** shooter SH-031 — a killed enemy crumples over terrain
+edges, reacts to the killing impulse, never clips the heightfield;
+4 simultaneous ragdolls cost < 0.5 ms CPU.
+
+---
+
+## EN-026 — Particle / VFX system 🟡
+
+**Why:** the engine has **no particle system at all** (spec Phase I,
+unbuilt) — the shooter fakes sparks with a 16-slot pool of additive
+material draws. Muzzle smoke, blood, dust, shells, explosions, and
+ambient motes all want one system. This is the most visible missing
+engine feature in combat footage.
+
+**Design (V1 — CPU sim, GPU instanced):**
+- Emitter descriptor: spawn rate / burst count, lifetime ± variance,
+  initial velocity cone, gravity + drag, size/alpha/color over life
+  (4-key curves), optional atlas frame animation, bucket (additive |
+  cutout), soft-depth-fade distance.
+- CPU sim over a global pool (4–8k particles), one instance buffer
+  write per frame (the EN-001 instancing path is exactly the right
+  infrastructure), camera-facing quads in the shader.
+- Sort: additive needs none; per-emitter sort for the rare
+  alpha-blended case.
+- Soft particles: sample scene depth (the refractive bucket already
+  binds it) and fade near intersections.
+
+**API sketch:**
+
+```ts
+const em = createParticleEmitter({ /* descriptor above */ });
+emitterBurst(em, x, y, z, count);          // impact/muzzle one-shots
+setEmitterPosition(em, x, y, z);           // continuous (smoke trail)
+setEmitterActive(em, on);
+```
+
+**Open questions:** GPU sim (compute) is V2 — only needed past ~50k
+particles; V1's budget target is 2k live particles < 0.3 ms GPU on
+the 760M-class iGPU.
+
+**Scope:** medium-large (~1–1.5 weeks).
+
+**Acceptance:** shooter SH-033 ships muzzle smoke, blood, shells,
+dust, and an explosion set entirely on this API within its GPU
+budget; mobile halves pool sizes via the same descriptors.
+
+---
+
+## EN-027 — Deferred decal system 🟡
+
+**Why:** the world takes no marks — no bullet holes, scorch, or blood
+splats. The impulse field is a material *input* (ripples/wet), not
+projected decals. A deferred renderer makes decals cheap: project a
+box, rewrite G-buffer albedo/normal/roughness before lighting.
+
+**Design (V1):**
+- Decal = oriented box (position, normal-aligned rotation, size),
+  atlas UV rect, albedo/normal/roughness contribution weights,
+  lifetime + fade.
+- Rendered as instanced boxes after the opaque G-buffer pass,
+  reading depth to reconstruct the surface point, discarding outside
+  the box, angle-fade past ~60° to kill stretching.
+- Fixed pool (e.g. 256) with ring reuse; per-decal fade-out.
+- Skinned meshes excluded in V1 (blood on enemies is SH-033's
+  particle tint job).
+
+**API sketch:**
+
+```ts
+spawnDecal(x,y,z, nx,ny,nz, size, rotRad, atlasU0,V0,U1,V1, lifetimeS);
+```
+
+**Scope:** medium (~1 week) — one new pass + atlas loader + pool.
+
+**Acceptance:** shooter SH-033 — 64 bullet holes visible at once,
+conforming to terrain slope and building walls, no lighting seams,
+< 0.2 ms GPU at full pool.
+
+---
+
+## EN-028 — Animation blending, masks, root motion 🟡
+
+**Why:** the animation FFI plays exactly one clip per model
+(`update_model_animation(handle, index, time)`), so every transition
+in every game pops. Root motion is unconditionally stripped at import
+(`models.rs:531`). This is the widest quality gap between Bloom
+content and AAA content — geometry and lighting are fine; the
+*motion* is 2005.
+
+**Pieces (shippable in order):**
+1. **Crossfade:** `playModelAnimation(handle, clip, fadeSeconds)` —
+   engine keeps a 2-slot mixer per model (current + previous clip,
+   lerped by fade progress at pose level). Covers 80% of the pops.
+2. **Locomotion blend:** `setModelLocomotion(handle, clipA, clipB,
+   t)` — two-clip continuous blend (idle↔walk↔run by speed), with
+   phase-matching so feet don't slide during the blend.
+3. **Upper-body masks:** joint-range (or named-group) mask so an
+   attack clip drives the spine-up while locomotion keeps the legs.
+4. **Root motion opt-in:** converter/import flag to *keep* root
+   translation + an FFI to read the per-frame root delta
+   (`getModelRootDelta(handle)`) so the game can feed it to the
+   character controller. Default stays stripped (back-compat).
+
+**Scope:** medium overall; piece 1 alone is small (~2 days) and
+unlocks most of shooter SH-030/SH-034.
+
+**Acceptance:** shooter transitions (walk↔attack↔pain↔die) show no
+pops at 0.15 s fades; a marauder attacks while moving; the dragoon
+pounce follows its authored root arc instead of hand-tuned kinematics.
+
+---
+
+## EN-029 — Audio buses, reverb send, occlusion filter 🟡
+
+**Why:** the mixer is master + per-voice gain — no submixes, no DSP.
+AAA "gunfeel" is half audio: a weapon tail through a reverb send, a
+mix that ducks around damage, distance/occlusion filtering. The
+render thread is already lock-free SPSC; these are additions to that
+graph, not a rewrite.
+
+**Pieces:**
+1. **Fixed bus graph V1:** master → { music, sfx, ui }. Per-bus gain
+   + `duckBus(bus, amountDb, attackS, releaseS)` (sidechain-style
+   momentary duck).
+2. **One reverb send:** Freeverb/Schroeder on the render thread;
+   per-voice send amount; global room params (`setReverbParams(size,
+   damp, wet)`) so the game can morph zones.
+3. **Per-voice one-pole low-pass:** `setSoundLowpass(voice, cutoffHz)`
+   — the occlusion/distance-muffle primitive; the game decides when
+   (raycasts are game-side).
+4. Bus assignment at play time: `playSound3DOnBus(...)` or a default
+   + setter.
+
+All parameters flow through the existing SPSC control messages — no
+locks on the audio thread.
+
+**Scope:** medium (~1 week for 1–3).
+
+**Acceptance:** shooter SH-035 — music audibly ducks on damage,
+fights near the building sound enclosed, a shrieking enemy behind the
+building is muffled; zero underruns/glitches at 48 kHz with 32 voices.
+
+---
+
+## EN-030 — UI widget layer 🟢 *(TS-side, no Rust needed)*
+
+**Why:** the engine offers immediate-mode shapes + text only. Every
+game needs pause/settings/menus, and the editor hand-rolls its own
+panels. A retained-lite widget layer over the existing `draw2d` +
+text + input FFIs closes both — **entirely in TypeScript** as a
+`bloom/ui` module; no engine-native work.
+
+**Scope (V1):**
+- Widgets: panel, label, button, slider, toggle, dropdown, key-capture
+  field (for rebinding).
+- Layout: vertical/horizontal stacks with padding/anchors — no
+  general constraint solver.
+- Focus model: one focus ring driven by mouse hover, D-pad/arrows,
+  and touch; activate on click/A/tap. This is the piece that makes
+  gamepad menus (shooter SH-039) possible.
+- Theming: flat colors + 9-patch optional; respects the logical-space
+  scaling pattern the shooter already uses for HiDPI/mobile.
+- Input capture: when a UI tree is active it consumes input so the
+  game doesn't fire while clicking Resume.
+
+**Acceptance:** shooter SH-038 builds title/pause/settings on it,
+navigable by mouse, keyboard, pad, and touch; the editor can adopt
+widgets incrementally.
+
+---
+
+## EN-031 — Gamepad backend verification + rumble 🟢
+
+**Why:** the FFI surface exists (`bloom_is_gamepad_available`,
+`bloom_get_gamepad_axis`, `bloom_is_gamepad_button_*`,
+`bloom_get_gamepad_axis_count` — package.json manifest) alongside
+`bloom_inject_gamepad_*` twins, which suggests the desktop backends
+may only ever have been fed by injection (web/tests) rather than
+polling real hardware. Nothing ships until a pad physically works.
+
+**Scope:** small-medium.
+
+- Audit each native backend: Windows (XInput), macOS/iOS
+  (GameController framework), Linux (evdev/SDL-free), web (Gamepad
+  API — likely already live).
+- Wire whichever are dead; normalize axis ranges/deadzones and the
+  button index map across platforms (document the canonical layout).
+- **Add rumble:** `bloom_gamepad_rumble(lowFreq, highFreq, durationMs)`
+  — cheap on XInput/GameController and a big feel win for SH-029.
+
+**Acceptance:** a wired/BT pad drives the shooter on Windows and
+iPhone; axis/button indices match the documented map on all
+platforms; rumble fires on damage.
+
+---
+
+## EN-032 — Async model + world loading 🟡
+
+**Why:** every load is synchronous on the main thread — `loadWorld`
+is readFile → parse → validate in one blocking call, and model/texture
+loads block too. One arena hides this; level switching (shooter
+SH-040), bigger worlds, and any future streaming need the machinery.
+
+**Scope:** medium.
+
+- `loadModelAsync(path) -> handle` immediately; `isModelReady(handle)`
+  poll; draws of not-ready handles no-op (or draw a bounds proxy).
+- Background thread does file IO + parse + GPU upload staging; main
+  thread finalizes (wgpu queue submission) in bounded per-frame slices.
+- World: `loadWorldAsync(path)` with a progress query so games can
+  render a loading screen; instantiation itself amortized over frames.
+- This is deliberately *not* world-partition streaming — just the
+  substrate it would need (tracked as a deferred item below).
+
+**Acceptance:** shooter switches arenas behind an animated loading
+screen with no main-thread stall > 100 ms; title screen appears
+< 1 s after launch with assets streaming in behind it.
+
+---
+
+## EN-033 — Bone-socket world-transform query 🟢
+
+**Why:** games can't attach anything to a skeleton — the shooter's
+weapon can't ride the player's hand, muzzle points can't track fire
+animations. The skin matrices are already computed every frame; this
+is a read-back, not a feature.
+
+**API sketch:**
+
+```ts
+// After updateModelAnimation: joint's world transform under the given
+// model transform (pos + quat, or 12 floats). Numeric FFI per
+// perry-quirks #5.
+getModelJointWorld(handle, jointIndex, posX,posY,posZ, yawRad, scale)
+  -> writes into a flat out-array FFI (bloom_get_model_joint_world_*)
+```
+
+Plus `findModelJoint(handle, name) -> index` at load time (string ok —
+load-time only).
+
+**Scope:** small (~1–2 days).
+
+**Acceptance:** shooter SH-027 v2 — the rifle rides the hand joint
+through walk/attack clips; muzzle flash tracks the true muzzle.
+
+---
+
+## EN-034 — Spot lights 🟢
+
+**Why:** the light schema is directional + point only
+(`src/world/types.ts`). Spots are the workhorse light of interiors,
+muzzle-light shaping, and flashlights; the froxel clustering path
+already handles points — a cone test is incremental.
+
+**Scope:** small-medium — `LightData kind:"spot"` (schema v3 with
+migration, editor light-tool angle handles), cone attenuation in the
+clustered lighting path. Shadowed spots explicitly deferred.
+
+**Acceptance:** editor places a spot with direction + inner/outer
+angles; engine renders correct cone falloff; N spots cluster like
+points.
+
+---
+
+## Deferred infrastructure tracks 🔴
+
+Recorded so the list is complete; each is real but none blocks the
+current shooter roadmap. Most are specced in
+`bloom-renderer-spec-v2.md` — this is the priority call, not new
+design.
+
+- **EN-035 — Job system.** No general-purpose task pool exists (audio
+  + Jolt thread internally; render submission is single-threaded).
+  Becomes the bottleneck when draw counts or anim/ragdoll counts grow
+  10×.
+- **EN-036 — Wire the render graph.** `renderer/graph.rs` is built and
+  unit-tested but the live frame is hand-ordered in `mod.rs`. Wiring
+  it buys automatic barriers/aliasing and makes pass insertion
+  (EN-026/EN-027) cheaper — do it opportunistically with one of those.
+- **EN-037 — World streaming / partition.** Chunked worlds, HLOD,
+  cell load/unload on EN-032's substrate. Only if a game outgrows
+  arena scale.
+- **Spec-v2 renderer tracks** (VSM, froxel volumetrics, virtualized
+  geometry, DLSS/FSR SDK integration): explicitly parked — the
+  current CSM/TSR stack is not the gap. Revisit after the feel
+  rounds ship.
+- **Netcode:** absent entirely; out of scope by decision, not
+  oversight. Revisit only with a design that needs it.
 

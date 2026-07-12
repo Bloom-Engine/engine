@@ -110,6 +110,54 @@ impl MaterialSystem {
         self.instance_buffers.len() as u32
     }
 
+    /// EN-026 — a *dynamic* instance buffer: fixed capacity, rewritten every
+    /// frame, never tiled.
+    ///
+    /// The static path above reorders instances into XZ tiles so the
+    /// dispatcher can frustum-cull them, which is right for a 20k-blade grass
+    /// field that never moves and wrong for particles, which move every frame
+    /// and would have to be re-tiled (a sort) each time. Here the caller
+    /// simply writes the live prefix of the buffer and draws that many
+    /// instances.
+    pub fn create_dynamic_instance_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        capacity: u32,
+    ) -> u32 {
+        let size = (capacity.max(1) as u64) * 48;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dynamic_instance_buffer"),
+            size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.instance_buffers.push(Some(InstanceBuffer {
+            buffer,
+            count: capacity,
+            tiles: Vec::new(),
+        }));
+        self.instance_buffers.len() as u32
+    }
+
+    /// EN-026 — overwrite the first `count` instances of a dynamic buffer.
+    /// `packed` is already at the 12-float GPU stride (pos.xyz, rot_y, scale,
+    /// tint.rgba, extra.xyz), so this is a straight memcpy into GPU memory
+    /// with no per-instance work on the CPU.
+    pub fn update_instance_buffer(
+        &mut self,
+        queue: &wgpu::Queue,
+        handle: u32,
+        packed: &[f32],
+        count: u32,
+    ) {
+        if handle == 0 || count == 0 { return; }
+        let idx = handle as usize - 1;
+        let Some(Some(ib)) = self.instance_buffers.get(idx) else { return };
+        let n = (count as usize).min(packed.len() / 12);
+        if n == 0 { return; }
+        queue.write_buffer(&ib.buffer, 0, bytemuck::cast_slice(&packed[..n * 12]));
+    }
+
     /// EN-001 — drop an instance buffer slot. The slot is left as
     /// `None` so previously-issued handles never alias a future
     /// allocation. No-op for `handle == 0` or out-of-range handles.

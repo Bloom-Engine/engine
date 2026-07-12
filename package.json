@@ -16,7 +16,8 @@
     "./mobile": "./src/mobile/index.ts",
     "./scene": "./src/scene/index.ts",
     "./physics": "./src/physics/index.ts",
-    "./world": "./src/world/index.ts"
+    "./world": "./src/world/index.ts",
+    "./vfx": "./src/vfx/index.ts"
   },
   "files": [
     "src/",
@@ -1159,6 +1160,116 @@
             "f64",
             "f64"
           ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_play",
+          "params": ["f64", "f64", "f64", "f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_set_layer",
+          "params": ["f64", "f64", "f64", "f64", "f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_set_root_motion",
+          "params": ["f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_update",
+          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_anim_finished",
+          "params": ["f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_anim_clip_duration",
+          "params": ["f64", "f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_anim_root_delta",
+          "params": ["f64", "f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_model_find_joint",
+          "params": ["f64", "string"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_model_joint_world",
+          "params": ["f64", "f64", "f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_particles_create",
+          "params": ["f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_particles_configure",
+          "params": ["f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_particles_emit",
+          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_particles_update",
+          "params": ["f64", "f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_particles_instance_buffer",
+          "params": ["f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_particles_clear",
+          "params": ["f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_particles_live",
+          "params": ["f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_decals_init",
+          "params": ["f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_decals_spawn",
+          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_decals_set_style",
+          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_decals_update",
+          "params": ["f64"],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_decals_instance_buffer",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_decals_clear",
+          "params": [],
           "returns": "void"
         },
         {

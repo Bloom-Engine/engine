@@ -845,5 +845,162 @@ macro_rules! __bloom_ffi_models {
             $crate::ffi::feature_off_warn_once("bloom_set_material_params", "models3d");
         }
 
+        // ==================================================================
+        // EN-028 — animation mixer (crossfade + masked layer + root motion)
+        // EN-033 — bone sockets
+        //
+        // All numeric ABI, <= 8 f64 args per call (the 9th arg garbles on
+        // Perry/ARM64 — see bloom_update_model_animation's note).
+        // ==================================================================
+
+        // bloom_anim_play  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_play(handle: f64, clip: f64, fade: f64, speed: f64, looping: f64) {
+            $crate::ffi::guard("bloom_anim_play", move || {
+                engine().models.anim_play(
+                    handle, clip as usize, fade as f32, speed as f32, looping != 0.0);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_play(_h: f64, _c: f64, _f: f64, _s: f64, _l: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_play", "models3d");
+        }
+
+        // bloom_anim_set_layer  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_layer(handle: f64, clip: f64, weight: f64, mask_root: f64, speed: f64, looping: f64) {
+            $crate::ffi::guard("bloom_anim_set_layer", move || {
+                engine().models.anim_set_layer(
+                    handle, clip as i32, weight as f32, mask_root as i32,
+                    speed as f32, looping != 0.0);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_layer(_h: f64, _c: f64, _w: f64, _m: f64, _s: f64, _l: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_set_layer", "models3d");
+        }
+
+        // bloom_anim_set_root_motion  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_root_motion(handle: f64, on: f64) {
+            $crate::ffi::guard("bloom_anim_set_root_motion", move || {
+                engine().models.anim_set_root_motion(handle, on != 0.0);
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_set_root_motion(_h: f64, _o: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_set_root_motion", "models3d");
+        }
+
+        // bloom_anim_update  [gated: models3d]
+        // Advances every clock on the model by dt, rebuilds the blended pose,
+        // and uploads the joint matrices — the mixer-driven replacement for
+        // bloom_update_model_animation (which stays for single-clip callers).
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_update(handle: f64, dt: f64, scale: f64, px: f64, py: f64, pz: f64, rot_y: f64) {
+            $crate::ffi::guard("bloom_anim_update", move || {
+                let rot_y_f = rot_y as f32;
+                let rot_sin = rot_y_f.sin();
+                let rot_cos = rot_y_f.cos();
+                let eng = engine();
+                eng.models.advance_and_update(handle, dt as f32);
+                if let Some(anim) = eng.models.get_animation(handle) {
+                    if !anim.joint_matrices.is_empty() {
+                        eng.renderer.set_joint_matrices_scaled(
+                            &anim.joint_matrices, scale as f32,
+                            [px as f32, py as f32, pz as f32], rot_sin, rot_cos);
+                    }
+                }
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_update(_h: f64, _d: f64, _s: f64, _x: f64, _y: f64, _z: f64, _r: f64) {
+            $crate::ffi::feature_off_warn_once("bloom_anim_update", "models3d");
+        }
+
+        // bloom_anim_finished  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_finished(handle: f64) -> f64 {
+            $crate::ffi::guard("bloom_anim_finished", move || {
+                if engine().models.anim_finished(handle) { 1.0 } else { 0.0 }
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_finished(_h: f64) -> f64 { 1.0 }
+
+        // bloom_anim_clip_duration  [gated: models3d]
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_clip_duration(handle: f64, clip: f64) -> f64 {
+            $crate::ffi::guard("bloom_anim_clip_duration", move || {
+                engine().models.anim_clip_duration(handle, clip as usize) as f64
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_clip_duration(_h: f64, _c: f64) -> f64 { 0.0 }
+
+        // bloom_anim_root_delta  [gated: models3d]  axis: 0=x 1=y 2=z
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_root_delta(handle: f64, axis: f64) -> f64 {
+            $crate::ffi::guard("bloom_anim_root_delta", move || {
+                let d = engine().models.anim_root_delta(handle);
+                let i = axis as usize;
+                if i < 3 { d[i] as f64 } else { 0.0 }
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_anim_root_delta(_h: f64, _a: f64) -> f64 { 0.0 }
+
+        // bloom_model_find_joint  [gated: models3d]
+        // Load-time only (it parses a string) — cache the index, per
+        // perry-quirks #5.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_find_joint(handle: f64, name_ptr: *const u8) -> f64 {
+            $crate::ffi::guard("bloom_model_find_joint", move || {
+                let name = $crate::string_header::str_from_header(name_ptr);
+                engine().models.find_joint(handle, &name) as f64
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_find_joint(_h: f64, _n: *const u8) -> f64 { -1.0 }
+
+        // bloom_model_joint_world  [gated: models3d]
+        // Model-space 4x4 of a joint, column-major, component 0..15.
+        // Translation is components 12/13/14. The caller applies the same
+        // (scale, position, yaw) it passed to bloom_anim_update to lift this
+        // into world space — the engine deliberately does not, so a socket
+        // costs no extra state.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_joint_world(handle: f64, joint: f64, comp: f64) -> f64 {
+            $crate::ffi::guard("bloom_model_joint_world", move || {
+                let j = joint as i64;
+                let c = comp as usize;
+                if j < 0 || c > 15 { return 0.0; }
+                match engine().models.joint_world(handle, j as usize) {
+                    Some(m) => m[c / 4][c % 4] as f64,
+                    None => 0.0,
+                }
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_model_joint_world(_h: f64, _j: f64, _c: f64) -> f64 { 0.0 }
+
     };
 }
