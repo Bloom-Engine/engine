@@ -22,6 +22,16 @@ impl Renderer {
     // the main pass samples from them as if we had redrawn.
     profiler.begin("shadow_pass");
     if self.shadow_map.enabled {
+        // EN-043 — take last frame's caster transforms out of `self` up front: the
+        // caster lists below hold immutable borrows of self.model_gpu_cache for the
+        // rest of the function, so this map cannot be touched through `self` again
+        // until they are dead.
+        let prev_caster_tf = std::mem::take(&mut self.shadow_caster_tf);
+        let mut caster_tf_now: std::collections::HashMap<u64, u64> =
+            std::collections::HashMap::with_capacity(prev_caster_tf.len() + 64);
+        // Nth-draw-of-this-(handle, mesh) counter — see entry_key.
+        let mut caster_occ: std::collections::HashMap<u64, u32> =
+            std::collections::HashMap::with_capacity(64);
         // Compute cascade VPs from the primary directional light and camera.
         let light_dir = [
             self.lighting_uniforms.light_dir[0],
@@ -144,6 +154,9 @@ impl Renderer {
             // caster MOVE, which is why it also forces `dynamic` — a swaying tree
             // cannot reuse its cached static shadow depth.
             foliage: f32,
+            // EN-043 — stable identity (NOT including the transform), so a caster
+            // that moved can be told apart from a caster that appeared.
+            key: u64,
         }
         fn entry_sig(kind: u8, id: u64, idx: u64, transform: &[[f32; 4]; 4]) -> u64 {
             let mut h = FNV_OFFSET;
@@ -151,6 +164,29 @@ impl Renderer {
             h = fnv1a_bytes(h, &id.to_le_bytes());
             h = fnv1a_bytes(h, &idx.to_le_bytes());
             fnv1a_bytes(h, bytemuck::bytes_of(transform))
+        }
+        // EN-043 — a caster's IDENTITY, without its transform, so "this caster
+        // moved" can be told apart from "a different caster appeared".
+        //
+        // `occ` is load-bearing, and the reason this is not just (handle, mesh_idx):
+        // the forest is 88 trees sharing THREE model handles, so every tree would
+        // collide on one key, each would be compared against some other tree's
+        // transform, and all 88 would be declared movers. That is not theoretical —
+        // it is what the first cut did: the whole forest went dynamic, overflowed
+        // the 64-slot budget, and every shadow in the game vanished while the fps
+        // went UP. Exactly the EN-042 trap.
+        //
+        // `occ` is the Nth draw of this (handle, mesh) this frame; the game submits
+        // its draws in a stable order, so occurrence N is the same tree every frame.
+        fn entry_key(kind: u8, id: u64, idx: u64, occ: u32) -> u64 {
+            let mut h = FNV_OFFSET;
+            h = fnv1a_bytes(h, &[kind]);
+            h = fnv1a_bytes(h, &id.to_le_bytes());
+            h = fnv1a_bytes(h, &idx.to_le_bytes());
+            fnv1a_bytes(h, &occ.to_le_bytes())
+        }
+        fn tf_hash(transform: &[[f32; 4]; 4]) -> u64 {
+            fnv1a_bytes(FNV_OFFSET, bytemuck::bytes_of(transform))
         }
         // Per-frame nonce for animated casters' signatures. Bumped
         // whenever shadows render — skinned CACHED model draws need it
@@ -195,6 +231,9 @@ impl Renderer {
                 dynamic: false,
                 joint_offset: 0.0,
                 foliage: 0.0,
+                key: { let k0 = entry_key(0, i as u64, node.gpu_index_count as u64, 0);
+                       let o = caster_occ.entry(k0).or_insert(0); let v = *o; *o += 1;
+                       entry_key(0, i as u64, node.gpu_index_count as u64, v) },
             });
         }
 
@@ -229,6 +268,7 @@ impl Renderer {
                     dynamic: true,
                     joint_offset: 0.0,
                     foliage: 0.0,
+                    key: 0,
                 });
             } else {
                 let num_calls = self.draw_calls_3d.len();
@@ -255,6 +295,7 @@ impl Renderer {
                         dynamic: true,
                         joint_offset: 0.0,
                         foliage: 0.0,
+                        key: 0,
                     });
                 }
             }
@@ -305,6 +346,7 @@ impl Renderer {
                             dynamic: true,
                             joint_offset: cmd.joint_offset,
                             foliage: 0.0,
+                            key: 0,
                         });
                     } else {
                         // Only sway the shadow if the game asked for it AND there is
@@ -351,6 +393,9 @@ impl Renderer {
                             dynamic: fol > 0.0,
                             joint_offset: 0.0,
                             foliage: fol,
+                            key: { let k0 = entry_key(1, cmd.cache_handle, cmd.mesh_idx as u64, 0);
+                                let o = caster_occ.entry(k0).or_insert(0); let v = *o; *o += 1;
+                                entry_key(1, cmd.cache_handle, cmd.mesh_idx as u64, v) },
                         });
                     }
                 }
@@ -395,7 +440,36 @@ impl Renderer {
                         dynamic: false,
                         joint_offset: 0.0,
                         foliage: 0.0,
+                        key: { let k0 = entry_key(2, cmd.mesh_handle, cmd.mesh_idx as u64, 0);
+                            let o = caster_occ.entry(k0).or_insert(0); let v = *o; *o += 1;
+                            entry_key(2, cmd.mesh_handle, cmd.mesh_idx as u64, v) },
                     });
+                }
+            }
+        }
+
+        // EN-043 — promote MOVERS to the dynamic set.
+        //
+        // A non-skinned cached caster whose transform changed since last frame used
+        // to stay in the STATIC set with a different content signature. That
+        // invalidated the cascade's cached depth, so every tree, wall and terrain
+        // tile in the world re-rendered into all three cascades — every frame —
+        // because one pickup was bobbing. Measured on the shooter's title screen:
+        // shadow_pass GPU 6.0-7.0 ms against the 0.1-1.7 ms the cache was built to
+        // deliver.
+        //
+        // A caster that moves is DYNAMIC, by definition. Dynamic casters draw on
+        // top of the cached static depth every frame and never invalidate it, which
+        // is exactly what a moving object needs and costs one draw instead of a
+        // thousand.
+        for e in shadow_nodes.iter_mut() {
+            if e.dynamic { continue; }
+            let tf = tf_hash(&e.transform);
+            caster_tf_now.insert(e.key, tf);
+            if let Some(&prev) = prev_caster_tf.get(&e.key) {
+                if prev != tf {
+                    e.dynamic = true;
+                    e.sig = nonce;
                 }
             }
         }
@@ -638,6 +712,7 @@ impl Renderer {
 
         // Cache bookkeeping — next frame skips every cascade whose VP
         // and caster content stay put.
+        self.shadow_caster_tf = caster_tf_now;
         self.shadow_map.rendered_light_vps = Some(self.shadow_map.light_vps);
         self.shadow_map.rendered_light_dir = Some(light_dir);
         self.shadow_map.rendered_scene_version = scene_ver;

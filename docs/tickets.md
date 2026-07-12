@@ -1321,3 +1321,36 @@ that refreshes cached static depth on a slow cadence instead of per frame.
 **Acceptance:** the dynamic set cannot silently drop a caster — it either fits, or
 the engine degrades a *chosen* class (foliage) rather than whatever happened to be
 queued last.
+
+
+## EN-043 — A moving cached caster invalidated the ENTIRE static shadow cache ✅ *(fixed 2026-07-12)*
+
+The static-cascade shadow cache (the perf round's biggest win, shadow_pass 7.2 ms
+→ 0.1–1.7 ms) had quietly stopped working. Measured on the shooter's title screen:
+**shadow_pass GPU back up to 6.9 ms**, and the title down from 50.7 to 33.5 fps.
+
+**Cause.** A cached, non-skinned caster whose transform changed since last frame
+stayed in the STATIC set — but its content signature changed, which invalidated the
+cascade's cached depth. So every tree, wall and terrain tile in the world
+re-rendered into all three cascades, every frame, because *something small was
+moving*. The cache was working exactly as designed and being defeated by one
+bobbing object.
+
+**Fix.** A caster that moves is DYNAMIC, by definition. Track each caster's
+transform hash against last frame's; if it changed, promote it to the dynamic set,
+where it draws on top of the cached static depth and never invalidates it. One draw
+instead of a thousand.
+
+**shadow_pass GPU 6954 µs → 182 µs (38×). Title screen 33.5 → 44.7 fps.**
+
+**The trap inside the fix, which cost a round.** The first cut keyed casters on
+`(model_handle, mesh_idx)`. The forest is **88 trees sharing three model handles**,
+so every tree collided on one key, each was compared against some other tree's
+transform, and all 88 were declared movers — the whole forest went dynamic,
+overflowed the 64-slot budget (EN-042), and **every shadow in the game vanished
+while the fps went UP**. A perf win that is really a correctness loss, again. The
+key now includes the Nth-draw-of-this-handle occurrence index, so occurrence N is
+the same tree every frame.
+
+Related: EN-042 (the dynamic budget silently drops overflow) is what turned a keying
+bug into invisible shadows rather than a loud failure. It is still worth fixing.
