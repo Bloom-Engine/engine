@@ -18,6 +18,7 @@ impl Renderer {
             // Leaving PT (or never entering it) invalidates history so
             // re-enabling starts a fresh accumulation, not a stale one.
             self.pt_accum_count = 0;
+            self.pt_wrote_frame = false;
             return;
         }
         // Same readiness gate as the HW probe trace: first frames before
@@ -29,6 +30,7 @@ impl Renderer {
             || self.pt_geo_index_buffer.is_none()
         {
             self.pt_accum_count = 0;
+            self.pt_wrote_frame = false;
             return;
         }
         // PT-2 — a grown texture store means the baked view array is
@@ -70,6 +72,14 @@ impl Renderer {
         if self.tlas_built_version != self.pt_last_tlas_version {
             self.pt_last_tlas_version = self.tlas_built_version;
             self.pt_accum_count = 0;
+        }
+        // Progressive mode + camera in motion: the raster frame stays on
+        // screen (kernel write threshold) and any sample traced now is
+        // discarded by next frame's reset — skip the dispatch entirely.
+        // Moving costs nothing; standing still starts the accumulation.
+        if self.pt_mode == 1 && moved {
+            self.pt_wrote_frame = false;
+            return;
         }
 
         // ---- accumulation buffer (vec4<f32> per pixel) ----
@@ -223,6 +233,11 @@ impl Renderer {
             }
             pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
         }
+        // Mirrors the kernel's write threshold: mode 1 leaves the raster
+        // frame on screen until 8 samples exist (u.size.w carried the
+        // pre-increment count), so SSGI/SSR must keep running for those
+        // frames — the gates downstream check pt_owns_frame().
+        self.pt_wrote_frame = self.pt_mode >= 2 || self.pt_accum_count >= 8;
         self.pt_accum_count = self.pt_accum_count.saturating_add(1);
 
         // ---- debug 16: numeric readback of traced intersections ----

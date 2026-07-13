@@ -185,7 +185,7 @@ impl Renderer {
         // PT-1: while path tracing, the SSR passes are skipped entirely,
         // so history is stale — route compose to ssr_rt, which the march
         // else-branch keeps cleared to transparent black.
-        let ssr_composite_view = if self.ssr_enabled && !self.pt_active() {
+        let ssr_composite_view = if self.ssr_enabled && !self.pt_owns_frame() {
             &self.ssr_history_views[self.ssr_history_idx]
         } else {
             &self.ssr_rt_view

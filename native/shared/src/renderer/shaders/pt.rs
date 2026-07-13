@@ -836,12 +836,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // NaN/Inf guard + firefly cap so one bad sample cannot poison the
-    // accumulator forever.
+    // accumulator forever. The cap scales with history: at 1 spp a
+    // single bright specular sample reads as a white dot on screen, so
+    // clamp hard; as the average deepens it can absorb real energy.
     if (radiance.r != radiance.r || radiance.g != radiance.g || radiance.b != radiance.b) {
         radiance = vec3<f32>(0.0);
     }
     let luma = dot(radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
-    if (luma > 32.0) { radiance *= 32.0 / luma; }
+    let cap = 4.0 + f32(min(u.size.w, 28u));
+    if (luma > cap) { radiance *= cap / luma; }
 
     // ---- accumulate ---------------------------------------------------------
 
@@ -863,6 +866,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let n = f32(u.size.w) + 1.0;
         accum[idx] = vec4<f32>(sum, n);
         out = sum / n;
+        // Interim gameplay behaviour until PT-3's denoiser: a moving
+        // camera resets accumulation every frame, and raw 1-spp noise
+        // through TSR looks terrible. Keep accumulating but leave the
+        // raster frame on screen until a few samples exist — stand
+        // still for half a second and PT dissolves in. The CPU side
+        // mirrors this threshold (pt_wrote_frame) so SSGI/SSR stay on
+        // for the raster frames.
+        if (u.size.w < 8u) {
+            return;
+        }
     }
 
     textureStore(out_hdr, px, vec4<f32>(out, 1.0));

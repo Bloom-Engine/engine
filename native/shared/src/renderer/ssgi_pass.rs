@@ -30,8 +30,10 @@ impl Renderer {
     // PT-1: while the path tracer owns the frame its output already
     // contains full GI — probe SSGI would burn ~2ms to be composited
     // over by nothing (the else-branch clear keeps compose additive-
-    // safe either way).
-    if self.ssgi_enabled && !self.pt_active() {
+    // safe either way). pt_owns_frame, not pt_active: progressive mode
+    // shows raster frames until accumulation warms up, and those still
+    // want SSGI.
+    if self.ssgi_enabled && !self.pt_owns_frame() {
         let p00 = self.current_proj_matrix[0][0];
         let p11 = self.current_proj_matrix[1][1];
         let p20 = self.current_proj_matrix[2][0];

@@ -1293,6 +1293,13 @@ pub struct Renderer {
     /// Debug-16 numeric readback (see pt_pass.rs).
     pt_readback_buffer: Option<wgpu::Buffer>,
     pt_dump_written: bool,
+    /// True when the PT kernel actually replaced this frame's scene
+    /// colour. Mode 1 leaves the raster frame on screen until a few
+    /// samples have accumulated (a moving camera = perpetual resets =
+    /// raw 1-spp noise), and for those frames SSGI/SSR must keep
+    /// running — so the downstream gates check pt_owns_frame(), not
+    /// pt_active().
+    pt_wrote_frame: bool,
 
     /// Ticket 014 V3 — SW SDF sphere-trace pipeline + layout.
     /// Active whenever the scene clipmap has been baked; chosen at
@@ -6790,6 +6797,7 @@ impl Renderer {
             pt_bg_texture_count: 0,
             pt_readback_buffer: None,
             pt_dump_written: false,
+            pt_wrote_frame: false,
             probe_trace_sdf_pipeline,
             probe_trace_sdf_layout,
             probe_trace_sdf_bg_cache: [None, None],
@@ -7554,6 +7562,16 @@ impl Renderer {
     /// than useless in every mode we ship.
     pub fn pt_active(&self) -> bool {
         self.pt_mode > 0 && self.pt_supported()
+    }
+
+    /// Whether the path tracer replaced THIS frame's scene colour.
+    /// Distinct from `pt_active()`: in progressive mode the kernel
+    /// leaves the raster frame on screen until a few samples have
+    /// accumulated, and those frames still need SSGI/SSR. Valid only
+    /// after the "pt" graph node has run for the frame (SSR/SSGI/
+    /// compose all schedule after it).
+    fn pt_owns_frame(&self) -> bool {
+        self.pt_active() && self.pt_wrote_frame
     }
 
     /// Ticket 013 — rasterise every pending mesh card into its
