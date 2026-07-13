@@ -15,7 +15,9 @@ impl Renderer {
     // ============================================================
     // SSR: view-space ray march of the depth buffer + HDR sample.
     // ============================================================
-    if self.ssr_enabled {
+    // PT-1: skipped while the path tracer owns the frame — it marches
+    // the raster-lit HDR, which PT has already overwritten.
+    if self.ssr_enabled && !self.pt_active() {
         let inv_proj = self.current_inv_proj_matrix;
         // EN-021 — view→world rotation for the env-miss fallback: the
         // transpose of the view matrix's 3×3 (rigid view ⇒ inverse
@@ -136,7 +138,8 @@ impl Renderer {
     // history. Compose then reads ssr_history[cur] instead of
     // ssr_rt.
     // ============================================================
-    if self.ssr_enabled {
+    // PT-1: same gate as the march — no fresh rays, nothing to blend.
+    if self.ssr_enabled && !self.pt_active() {
         let prev_idx = 1 - self.ssr_history_idx;
         let cur_idx = self.ssr_history_idx;
 

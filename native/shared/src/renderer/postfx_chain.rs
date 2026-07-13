@@ -182,7 +182,10 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
     ) {
         // Composite input views (were locals in end_frame_with_scene).
-        let ssr_composite_view = if self.ssr_enabled {
+        // PT-1: while path tracing, the SSR passes are skipped entirely,
+        // so history is stale — route compose to ssr_rt, which the march
+        // else-branch keeps cleared to transparent black.
+        let ssr_composite_view = if self.ssr_enabled && !self.pt_active() {
             &self.ssr_history_views[self.ssr_history_idx]
         } else {
             &self.ssr_rt_view
