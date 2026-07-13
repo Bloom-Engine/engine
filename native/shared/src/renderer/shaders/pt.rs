@@ -333,9 +333,19 @@ fn sample_brdf(
         return out;
     }
     let f0 = mix(vec3<f32>(0.04), base_color, metallic);
-    let spec_weight = (f0.x + f0.y + f0.z) / 3.0;
+    // Lobe pick by Fresnel at the ACTUAL view angle, not at normal
+    // incidence: at grazing angles specular energy approaches 1, and
+    // the estimator divides by the pick probability — picking with the
+    // ~0.04 normal-incidence weight amplified rare grazing specular
+    // samples ~25x into a field of white fireflies at 1-2 spp (the
+    // whole ground plane is grazing at distance). Clamped so neither
+    // lobe's 1/p boost can exceed ~20x even in edge cases.
+    let n_dot_v_pick = max(dot(n, view_ws), 0.0);
+    let f_view = fresnel_schlick3(n_dot_v_pick, f0);
+    let spec_weight = (f_view.x + f_view.y + f_view.z) / 3.0;
     let diff_weight = (1.0 - spec_weight) * (1.0 - metallic);
-    let p_spec = spec_weight / (spec_weight + diff_weight + 1e-6);
+    var p_spec = spec_weight / (spec_weight + diff_weight + 1e-6);
+    p_spec = clamp(p_spec, 0.05, 0.95);
     let r2 = rand_2f();
     if (rand_f() < p_spec) {
         let h_t = sample_ggx_vndf(v_t, alpha, r2);
@@ -351,7 +361,14 @@ fn sample_brdf(
         let g2 = v_smith(n_dot_v, n_dot_l, alpha) * 4.0 * n_dot_v * n_dot_l;
         let g1_v = smith_g1(n_dot_v, alpha);
         out.dir = m * l_t;
-        out.weight = f * g2 / (max(g1_v, 1e-6) * max(p_spec, 1e-6));
+        out.weight = f * g2 / (max(g1_v, 1e-6) * p_spec);
+        // Realtime mode trades a little energy for stability: a single
+        // bounce may not multiply throughput more than 4x (the ~7-frame
+        // EMA window cannot average outliers away like progressive
+        // accumulation can). Progressive mode stays unclamped.
+        if (u.cfg.x >= 2.0) {
+            out.weight = min(out.weight, vec3<f32>(4.0));
+        }
         out.valid = true;
         return out;
     }
@@ -370,7 +387,10 @@ fn sample_brdf(
     let diffuse_albedo = base_color * (1.0 - metallic) * (vec3<f32>(1.0) - f0);
     let fd = burley_diffuse(n_dot_l, n_dot_v, l_dot_h, roughness);
     out.dir = m * l_t;
-    out.weight = diffuse_albedo * fd * 3.14159265 / max(1.0 - p_spec, 1e-6);
+    out.weight = diffuse_albedo * fd * 3.14159265 / (1.0 - p_spec);
+    if (u.cfg.x >= 2.0) {
+        out.weight = min(out.weight, vec3<f32>(4.0));
+    }
     out.valid = true;
     return out;
 }
@@ -858,7 +878,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         radiance = vec3<f32>(0.0);
     }
     let luma = dot(radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let cap = 4.0 + f32(min(u.size.w, 28u));
+    // Progressive: relax with accumulation depth (a deep average can
+    // absorb real energy). Realtime: FIXED — its EMA window stays ~7
+    // frames no matter how large the frame count grows, so the cap
+    // must never relax or fireflies return as the count climbs.
+    var cap = 4.0 + f32(min(u.size.w, 28u));
+    if (u.cfg.x >= 2.0) { cap = 6.0; }
     if (luma > cap) { radiance *= cap / luma; }
 
     // ---- accumulate ---------------------------------------------------------
