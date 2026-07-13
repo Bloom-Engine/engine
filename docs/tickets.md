@@ -818,6 +818,23 @@ visualization).
 
 ## EN-023 — GI software path: colored bounce is unreachable 🟡 partially landed (PR #79), still open
 
+**Update 2026-07-13 — the premise below is wrong, and it changes the priority.**
+The dev box's Radeon 760M *does* support hardware ray query. It reported
+`ray_query=false` because **wgpu's DX12 backend was compiling shaders with
+FXC**, which caps the reported shader model at 5.1 — and
+`EXPERIMENTAL_RAY_QUERY` is gated on shader model ≥ 6.5 (wgpu-hal
+`dx12/adapter.rs`: `supports_ray_tracing`). With FXC, ray query is unreachable
+on DX12 **on every GPU**, so every Windows machine was silently running the SW
+path. Switching the DX12 backend to DXC (`Dx12Compiler::DynamicDxc`, DLLs
+copied by `tools/fetch-dxc.ps1`) flips the boot line to `ray_query=true` and the
+trace backend to `hw-ray-query`.
+
+So EN-023 is no longer the thing standing between this hardware and coloured
+bounce — the HW path was always available. The SW path still matters for
+adapters that genuinely lack RT (most Android, web permanently), and the
+object-space-AABB bug below is still real there. But it is no longer urgent, and
+the interim "disable SSGI on SW adapters" is no longer needed on Windows.
+
 **Status 2026-07-04.** `feat/en023-gi-sw-cards` (PR #79, pending merge)
 fixed the data path: world-space AABBs carried per instance
 (`world_aabb_min/max` in InstanceGiData, both HW and SDF struct

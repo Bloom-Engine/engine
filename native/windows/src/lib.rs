@@ -557,8 +557,31 @@ unsafe fn init_engine_for_hwnd(
     phys_w: u32,
     phys_h: u32,
 ) {
+        // Compile shaders with DXC, not FXC.
+        //
+        // This is not a nicety. wgpu's DX12 backend reports the adapter's
+        // shader model as min(device, compiler), and FXC — its default — caps
+        // that at 5.1. Hardware ray query requires 6.5 (wgpu-hal
+        // dx12/adapter.rs: `supports_ray_tracing`), so with FXC,
+        // EXPERIMENTAL_RAY_QUERY is never exposed on DX12 on *any* GPU, no
+        // matter how capable. Lumen then silently takes its software path and
+        // the frame quietly loses its hardware-traced GI. That is what the
+        // `ray_query=false` in the boot line has been telling us.
+        //
+        // DXC is loaded at runtime from `dxcompiler.dll` + `dxil.dll`. wgpu's
+        // `static-dxc` feature would avoid the DLLs but needs MSVC's ATL,
+        // which is not part of a default toolchain install. Both DLLs ship
+        // with the Windows SDK; `tools/fetch-dxc.ps1` copies them next to the
+        // binary. If they are missing, wgpu falls back to FXC on its own — we
+        // lose HW ray query, exactly as before, and nothing else breaks.
+        let mut backend_options = wgpu::BackendOptions::default();
+        backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::DynamicDxc {
+            dxc_path: String::from("dxcompiler.dll"),
+        };
+
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+            backend_options,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
@@ -575,11 +598,52 @@ unsafe fn init_engine_for_hwnd(
             }).expect("Failed to create surface")
         };
 
-        let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        })).expect("No adapter found");
+        // Pick the adapter that can actually trace rays.
+        //
+        // We used to take whatever `request_adapter` handed back, which on
+        // Windows means DX12 — and wgpu's DX12 backend only reports
+        // EXPERIMENTAL_RAY_QUERY when the driver advertises D3D12 raytracing
+        // tier 1.1. The same GPU under Vulkan can expose VK_KHR_ray_query
+        // when DX12 does not. The result was silent: Lumen's hardware trace
+        // was never selected, the software SDF path ran instead, and nobody
+        // saw a reason why. So enumerate the candidates, say out loud what
+        // each one offers, and prefer one that supports ray query.
+        //
+        // BLOOM_FORCE_SW_GI keeps its meaning: it also stops us from picking
+        // a backend *for* ray tracing, so the software path can be tested on
+        // hardware that would otherwise take the fast route.
+        let want_rt = !std::env::var("BLOOM_FORCE_SW_GI")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let candidates = pollster_block_on(
+            instance.enumerate_adapters(wgpu::Backends::DX12 | wgpu::Backends::VULKAN),
+        );
+        let mut rt_adapter: Option<wgpu::Adapter> = None;
+        for cand in candidates {
+            let info = cand.get_info();
+            let surf_ok = cand.is_surface_supported(&surface);
+            let has_rt = cand
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+            eprintln!(
+                "bloom: candidate '{}' ({:?}), ray_query={}, surface={}",
+                info.name, info.backend, has_rt, surf_ok,
+            );
+            if want_rt && has_rt && surf_ok && rt_adapter.is_none() {
+                rt_adapter = Some(cand);
+            }
+        }
+
+        let adapter = match rt_adapter {
+            Some(a) => a,
+            None => pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&surface),
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            }))
+            .expect("No adapter found"),
+        };
 
         {
             // One line of boot truth: which GPU we got and whether the
