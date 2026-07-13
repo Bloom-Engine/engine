@@ -246,6 +246,120 @@ fn sky_radiance(dir: vec3<f32>) -> vec3<f32> {
     return u.sky_color.rgb * mix(0.45, 1.35, t);
 }
 
+// ---- GGX BRDF sampling (PT-2; port of bloom-reference sample_brdf) --------
+
+fn fresnel_schlick3(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    let m = clamp(1.0 - cos_theta, 0.0, 1.0);
+    let m2 = m * m;
+    return f0 + (vec3<f32>(1.0) - f0) * (m2 * m2 * m);
+}
+
+fn smith_g1(n_dot_x: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let inner = sqrt((1.0 - a2) * n_dot_x * n_dot_x + a2);
+    return 2.0 * n_dot_x / (n_dot_x + inner + 1e-6);
+}
+
+fn v_smith(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let ggx_v = n_dot_l * sqrt((n_dot_v * (1.0 - a2) + a2) * n_dot_v);
+    let ggx_l = n_dot_v * sqrt((n_dot_l * (1.0 - a2) + a2) * n_dot_l);
+    return 0.5 / (ggx_v + ggx_l + 1e-6);
+}
+
+fn burley_diffuse(n_dot_l: f32, n_dot_v: f32, l_dot_h: f32, roughness: f32) -> f32 {
+    let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * roughness;
+    let ml = pow(1.0 - n_dot_l, 5.0);
+    let mv = pow(1.0 - n_dot_v, 5.0);
+    return (1.0 + (fd90 - 1.0) * ml) * (1.0 + (fd90 - 1.0) * mv) / 3.14159265;
+}
+
+// Heitz 2018 VNDF sampler — visible-normal distribution, tangent frame.
+fn sample_ggx_vndf(v_t: vec3<f32>, alpha: f32, r2: vec2<f32>) -> vec3<f32> {
+    let vh = normalize(vec3<f32>(alpha * v_t.x, alpha * v_t.y, v_t.z));
+    let lensq = vh.x * vh.x + vh.y * vh.y;
+    var t1 = vec3<f32>(1.0, 0.0, 0.0);
+    if (lensq > 0.0) {
+        t1 = vec3<f32>(-vh.y, vh.x, 0.0) / sqrt(lensq);
+    }
+    let t2 = cross(vh, t1);
+    let r = sqrt(r2.x);
+    let phi = 6.2831853 * r2.y;
+    let t1v = r * cos(phi);
+    var t2v = r * sin(phi);
+    let s = 0.5 * (1.0 + vh.z);
+    t2v = (1.0 - s) * sqrt(max(0.0, 1.0 - t1v * t1v)) + s * t2v;
+    let nh = t1v * t1 + t2v * t2 + sqrt(max(0.0, 1.0 - t1v * t1v - t2v * t2v)) * vh;
+    return normalize(vec3<f32>(alpha * nh.x, alpha * nh.y, max(nh.z, 0.0)));
+}
+
+struct BrdfSample {
+    dir: vec3<f32>,
+    // BRDF * cos / pdf, physical convention. For the pure-diffuse case
+    // this reduces to plain albedo, so the game's pi-premultiplied
+    // light intensities are unaffected.
+    weight: vec3<f32>,
+    valid: bool,
+};
+
+fn sample_brdf(
+    n: vec3<f32>,
+    view_ws: vec3<f32>,
+    base_color: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+) -> BrdfSample {
+    var out: BrdfSample;
+    out.valid = false;
+    let alpha = max(roughness * roughness, 1e-3);
+    let m = onb(n); // columns (t, bt, n): local -> world
+    let v_t = vec3<f32>(dot(view_ws, m[0]), dot(view_ws, m[1]), dot(view_ws, n));
+    if (v_t.z <= 0.0) {
+        return out;
+    }
+    let f0 = mix(vec3<f32>(0.04), base_color, metallic);
+    let spec_weight = (f0.x + f0.y + f0.z) / 3.0;
+    let diff_weight = (1.0 - spec_weight) * (1.0 - metallic);
+    let p_spec = spec_weight / (spec_weight + diff_weight + 1e-6);
+    let r2 = rand_2f();
+    if (rand_f() < p_spec) {
+        let h_t = sample_ggx_vndf(v_t, alpha, r2);
+        let l_t = reflect(-v_t, h_t);
+        if (l_t.z <= 0.0) {
+            return out;
+        }
+        let n_dot_l = l_t.z;
+        let n_dot_v = max(v_t.z, 1e-4);
+        let v_dot_h = max(dot(v_t, h_t), 1e-4);
+        let f = fresnel_schlick3(v_dot_h, f0);
+        // VNDF pdf: throughput collapses to F * G2 / G1(V).
+        let g2 = v_smith(n_dot_v, n_dot_l, alpha) * 4.0 * n_dot_v * n_dot_l;
+        let g1_v = smith_g1(n_dot_v, alpha);
+        out.dir = m * l_t;
+        out.weight = f * g2 / (max(g1_v, 1e-6) * max(p_spec, 1e-6));
+        out.valid = true;
+        return out;
+    }
+    // Diffuse lobe: cosine hemisphere; weight = albedo * burley * pi
+    // (Burley divides by pi internally; pdf = cos/pi cancels the cos).
+    let r = sqrt(r2.x);
+    let phi = 6.2831853 * r2.y;
+    let l_t = vec3<f32>(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r2.x)));
+    let n_dot_l = max(l_t.z, 1e-4);
+    let n_dot_v = max(v_t.z, 1e-4);
+    let h_un = v_t + l_t;
+    var l_dot_h = 0.0;
+    if (dot(h_un, h_un) > 1e-8) {
+        l_dot_h = max(dot(l_t, normalize(h_un)), 0.0);
+    }
+    let diffuse_albedo = base_color * (1.0 - metallic) * (vec3<f32>(1.0) - f0);
+    let fd = burley_diffuse(n_dot_l, n_dot_v, l_dot_h, roughness);
+    out.dir = m * l_t;
+    out.weight = diffuse_albedo * fd * 3.14159265 / max(1.0 - p_spec, 1e-6);
+    out.valid = true;
+    return out;
+}
+
 // ---- Ray casts ------------------------------------------------------------------
 
 fn occluded(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
@@ -635,14 +749,29 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // ---- one path sample --------------------------------------------------
 
-    var radiance = direct_light(p0 + n0 * 0.02, n0, albedo0);
-    var throughput = albedo0;
+    // Primary surface material from the G-buffer (R = metallic,
+    // G = roughness). NEE stays diffuse-only, so scale it by
+    // (1 - metallic) — metals have no diffuse lobe. Specular NEE is a
+    // known gap (see the PT-2 ticket); specular reflection of sky and
+    // scene comes from the GGX bounce below.
+    let mr0 = textureLoad(material_tex, px, 0).rg;
+    var metal_cur = mr0.r;
+    var rough_cur = mr0.g;
+    var radiance = direct_light(p0 + n0 * 0.02, n0, albedo0 * (1.0 - metal_cur));
+    var throughput = vec3<f32>(1.0);
     var origin = p0 + n0 * 0.02;
     var n_cur = n0;
+    var alb_cur = albedo0;
+    var view_cur = normalize(u.cam_pos.xyz - p0);
 
     let max_bounces = u32(u.cfg.y);
     for (var b = 0u; b < max_bounces; b = b + 1u) {
-        let dir = cosine_sample(n_cur, rand_2f());
+        let s = sample_brdf(n_cur, view_cur, alb_cur, rough_cur, metal_cur);
+        if (!s.valid) {
+            break;
+        }
+        throughput *= s.weight;
+        let dir = s.dir;
 
         var rq: ray_query;
         rayQueryInitialize(&rq, accel, RayDesc(0u, 0xFFu, 0.001, 500.0, origin, dir));
@@ -689,11 +818,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         radiance += throughput * inst.albedo * inst.emissive_luma;
 
         let hit_p = hit_ws + n_hit * 0.02;
-        radiance += throughput * direct_light(hit_p, n_hit, alb_hit);
+        radiance += throughput * direct_light(hit_p, n_hit, alb_hit * (1.0 - inst.mat_params.y));
 
-        throughput *= alb_hit;
         origin = hit_p;
         n_cur = n_hit;
+        alb_cur = alb_hit;
+        rough_cur = inst.mat_params.x;
+        metal_cur = inst.mat_params.y;
+        view_cur = -dir;
 
         // Russian roulette from the third bounce.
         if (b >= 2u) {
