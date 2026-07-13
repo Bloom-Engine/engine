@@ -42,10 +42,19 @@ data at every bounce:
 - Found + fixed the transposed `inv_vp` upload (see the post-scriptum
   in PT-1's ticket) — this had silently broken all PT-1 transport.
 
-## Open (M3)
+## M3 — GGX (landed b146b6d)
 
-- GGX specular bounce using `mat_params` (port bloom-reference
-  `sample_brdf`: VNDF + Burley, Fresnel lobe pick).
+`sample_brdf` ported: VNDF specular + Burley diffuse, Fresnel-weighted
+lobe pick, metal/dielectric f0 split. Primary material from the
+G-buffer material RT, bounce material from `mat_params`. Verified: the
+45 s converged title render is clean (no fireflies, no NaN blowups),
+with visibly deeper foliage shading than the pure-Lambert version.
+
+## Open (rolls into PT-3/PT-5)
+
+- Specular NEE (direct highlights from sun/point lights on smooth
+  surfaces) — bounce sampling covers reflections but not delta-light
+  highlights; diffuse NEE is scaled by (1 − metallic) meanwhile.
 - Emissive triangles at hits already work via `albedo × emissive_luma`;
   emissive-as-light-source sampling is PT-4 (ReSTIR) territory.
 - Known gaps, accepted: skinned enemies not in the TLAS (no per-frame
