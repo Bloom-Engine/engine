@@ -651,11 +651,15 @@ unsafe fn init_engine_for_hwnd(
             // GI, timestamps for the profiler) are available on it.
             let info = adapter.get_info();
             eprintln!(
-                "bloom: adapter '{}' ({:?}), ray_query={}, timestamps={}",
+                "bloom: adapter '{}' ({:?}), ray_query={}, timestamps={}, tex_arrays={}",
                 info.name,
                 info.backend,
                 adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
                 adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY),
+                adapter.features().contains(
+                    wgpu::Features::TEXTURE_BINDING_ARRAY
+                        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+                ),
             );
         }
 
@@ -680,6 +684,14 @@ unsafe fn init_engine_for_hwnd(
         if !force_sw_gi && supported.contains(rt_mask) {
             required_features |= rt_mask;
         }
+        // PT-2: texture binding array + non-uniform indexing for textured
+        // path-trace hit shading. Both or neither (the kernel indexes the
+        // array with a per-thread material id).
+        let pt_tex_mask = wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+        if supported.contains(pt_tex_mask) {
+            required_features |= pt_tex_mask;
+        }
         let experimental_features = if required_features.intersects(rt_mask) {
             unsafe { wgpu::ExperimentalFeatures::enabled() }
         } else {
@@ -703,6 +715,14 @@ unsafe fn init_engine_for_hwnd(
             adapter_limits.max_sampled_textures_per_shader_stage;
         required_limits.max_samplers_per_shader_stage =
             adapter_limits.max_samplers_per_shader_stage;
+        // PT-2: binding arrays have their own element budget, default 0.
+        // Take whatever the adapter offers; the renderer checks the
+        // granted value against its fixed array size before compiling
+        // the textured kernel variant.
+        if required_features.contains(pt_tex_mask) {
+            required_limits.max_binding_array_elements_per_shader_stage =
+                adapter_limits.max_binding_array_elements_per_shader_stage;
+        }
         if required_features.intersects(rt_mask) {
             required_limits = required_limits
                 .using_minimum_supported_acceleration_structure_values();

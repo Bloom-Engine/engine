@@ -24,6 +24,20 @@
 //!   1 = raw depth visualised          2 = reconstructed world normals
 //!   3 = G-buffer albedo               4 = sun shadow-ray visibility
 //!   5 = solid magenta (pipeline probe — proves dispatch + write path)
+//!   6 = traced-primary interpolated normal (compare against 2;
+//!       magenta = TLAS miss where G-buffer had geometry, orange = hit
+//!       instance without a geometry window)
+//!   7 = traced-primary textured hit albedo (compare against 3;
+//!       yellow = adapter lacks texture-array features)
+//!   8-15 = binary/quantized probes from the DX12 bring-up (hit-window
+//!       flag, normal axes, primitive/instance banding, two-query
+//!       aliasing, t-vs-G-buffer sanity, t contours). 13 is the
+//!       keeper: green = traced t agrees with the G-buffer, red =
+//!       mismatch, blue = miss.
+//!   16/17 = NUMERIC dumps via the accum buffer + CPU readback
+//!       (pt_trace_dump.txt): 16 = t/instance/prim/kind, 17 = p0 +
+//!       raw depth. These found the transposed inv_vp: when every
+//!       probe looks "constant", dump numbers before theorizing.
 
 pub(in crate::renderer) const PT_KERNEL_WGSL: &str = r#"
 struct PtLight {
@@ -53,6 +67,11 @@ struct InstanceGiData {
     card_aabb_max: vec4<f32>,
     world_aabb_min: vec4<f32>,
     world_aabb_max: vec4<f32>,
+    // PT-2: x = vertex_base, y = index_base, z = index_count (0 = no
+    // geometry window -> PT-1 fallback), w = albedo texture index.
+    geo: vec4<u32>,
+    // PT-2: x = roughness, y = metalness.
+    mat_params: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: PtParams;
@@ -65,6 +84,56 @@ struct InstanceGiData {
 @group(0) @binding(7) var card_samp: sampler;
 @group(0) @binding(8) var<storage, read_write> accum: array<vec4<f32>>;
 @group(0) @binding(9) var out_hdr: texture_storage_2d<rgba16float, write>;
+// PT-2: geometry megabuffers. geo_v holds raw Vertex3D words (stride 24
+// f32: position +0, normal +3, color +6, uv +10, ...); geo_i holds the
+// concatenated index streams. Windows are per-instance via inst.geo.
+// (Binding 12, the texture array + PT_HAS_TEXTURES + pt_tex_sample, is
+// appended by the Rust side per adapter support.)
+@group(0) @binding(10) var<storage, read> geo_v: array<f32>;
+@group(0) @binding(11) var<storage, read> geo_i: array<u32>;
+
+const PT_VSTRIDE: u32 = 24u;
+
+struct HitAttrs {
+    normal_os: vec3<f32>,
+    uv: vec2<f32>,
+};
+
+fn vert_normal_os(slot: u32) -> vec3<f32> {
+    let o = slot * PT_VSTRIDE + 3u;
+    return vec3<f32>(geo_v[o], geo_v[o + 1u], geo_v[o + 2u]);
+}
+
+fn vert_uv(slot: u32) -> vec2<f32> {
+    let o = slot * PT_VSTRIDE + 10u;
+    return vec2<f32>(geo_v[o], geo_v[o + 1u]);
+}
+
+// Interpolate the hit triangle's vertex normal + UV. DXR/Vulkan
+// barycentric convention: (u, v) weight vertices 1 and 2, w = 1-u-v
+// weights vertex 0.
+fn fetch_hit_attrs(geo: vec4<u32>, prim: u32, bary: vec2<f32>) -> HitAttrs {
+    let base = geo.y + prim * 3u;
+    let s0 = geo.x + geo_i[base];
+    let s1 = geo.x + geo_i[base + 1u];
+    let s2 = geo.x + geo_i[base + 2u];
+    let w = 1.0 - bary.x - bary.y;
+    var a: HitAttrs;
+    a.normal_os = w * vert_normal_os(s0) + bary.x * vert_normal_os(s1) + bary.y * vert_normal_os(s2);
+    a.uv = w * vert_uv(s0) + bary.x * vert_uv(s1) + bary.y * vert_uv(s2);
+    return a;
+}
+
+// Object-space normal -> world space: with M = object_to_world the
+// correct transform is (M^-1)^T, and the ray query hands us M^-1 as
+// world_to_object. `v * mat3` multiplies by the transpose in WGSL.
+fn normal_to_world(n_os: vec3<f32>, w2o: mat4x3<f32>) -> vec3<f32> {
+    let lin = mat3x3<f32>(w2o[0], w2o[1], w2o[2]);
+    let n = n_os * lin;
+    let len = length(n);
+    if (len < 1e-8) { return vec3<f32>(0.0, 1.0, 0.0); }
+    return n / len;
+}
 
 // ---- RNG: PCG, one stream per (pixel, frame) --------------------------------
 
@@ -327,6 +396,242 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out_hdr, px, vec4<f32>(vec3<f32>(vis), 1.0));
         return;
     }
+    if (debug == 8.0) {
+        // Binary probe: white = traced hit has a geometry window,
+        // black = geo.z reads 0, red = TLAS miss. HDR-large values so
+        // exposure/tonemap can't blur the verdict.
+        let dir0 = normalize(p0 - u.cam_pos.xyz);
+        var rq8: ray_query;
+        rayQueryInitialize(&rq8, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
+        loop {
+            if (!rayQueryProceed(&rq8)) { break; }
+        }
+        let h8 = rayQueryGetCommittedIntersection(&rq8);
+        var c8 = vec3<f32>(100.0, 0.0, 0.0);
+        if (h8.kind != RAY_QUERY_INTERSECTION_NONE) {
+            let gi = instance_data[h8.instance_custom_data].geo;
+            c8 = select(vec3<f32>(0.0), vec3<f32>(100.0), gi.z > 0u);
+        }
+        textureStore(out_hdr, px, vec4<f32>(c8, 1.0));
+        return;
+    }
+    if (debug == 9.0) {
+        // Quantized normal probe: dominant axis of the interpolated
+        // world normal as six saturated HDR colours. +X red, -X dark
+        // red-ish magenta, +Y green, -Y cyan, +Z blue, -Z yellow.
+        // Gray = TLAS miss / no window / zero-length normal.
+        let dir0 = normalize(p0 - u.cam_pos.xyz);
+        var rq9: ray_query;
+        rayQueryInitialize(&rq9, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
+        loop {
+            if (!rayQueryProceed(&rq9)) { break; }
+        }
+        let h9 = rayQueryGetCommittedIntersection(&rq9);
+        var c9 = vec3<f32>(5.0, 5.0, 5.0);
+        if (h9.kind != RAY_QUERY_INTERSECTION_NONE) {
+            let inst9 = instance_data[h9.instance_custom_data];
+            if (inst9.geo.z > 0u) {
+                let a9 = fetch_hit_attrs(inst9.geo, h9.primitive_index, h9.barycentrics);
+                let raw = a9.normal_os;
+                if (length(raw) > 1e-6) {
+                    let n9 = normal_to_world(raw, h9.world_to_object);
+                    let an = abs(n9);
+                    if (an.y >= an.x && an.y >= an.z) {
+                        c9 = select(vec3<f32>(0.0, 50.0, 50.0), vec3<f32>(0.0, 50.0, 0.0), n9.y >= 0.0);
+                    } else if (an.x >= an.z) {
+                        c9 = select(vec3<f32>(50.0, 0.0, 25.0), vec3<f32>(50.0, 0.0, 0.0), n9.x >= 0.0);
+                    } else {
+                        c9 = select(vec3<f32>(50.0, 50.0, 0.0), vec3<f32>(0.0, 0.0, 50.0), n9.z >= 0.0);
+                    }
+                }
+            }
+        }
+        textureStore(out_hdr, px, vec4<f32>(c9, 1.0));
+        return;
+    }
+    if (debug == 10.0) {
+        // primitive_index sanity probe: banded pseudo-colour of the hit
+        // triangle index. Expected: per-triangle colour noise across
+        // meshes. A single flat colour everywhere = the field is
+        // constant; saturated white = garbage-huge.
+        let dir0 = normalize(p0 - u.cam_pos.xyz);
+        var rq10: ray_query;
+        rayQueryInitialize(&rq10, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
+        loop {
+            if (!rayQueryProceed(&rq10)) { break; }
+        }
+        let h10 = rayQueryGetCommittedIntersection(&rq10);
+        var c10 = vec3<f32>(0.0);
+        if (h10.kind != RAY_QUERY_INTERSECTION_NONE) {
+            let prim = f32(h10.primitive_index);
+            c10 = vec3<f32>(fract(prim / 64.0), fract(prim / 1024.0), fract(prim / 16384.0)) * 30.0;
+        }
+        textureStore(out_hdr, px, vec4<f32>(c10, 1.0));
+        return;
+    }
+    if (debug == 11.0 || debug == 12.0) {
+        // 11: instance_custom_data palette (expect distinct colours per
+        //     proxy: terrain vs trees vs building). Constant = broken.
+        // 12: raw barycentrics (expect smooth per-triangle gradients).
+        let dir0 = normalize(p0 - u.cam_pos.xyz);
+        var rq11: ray_query;
+        rayQueryInitialize(&rq11, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
+        loop {
+            if (!rayQueryProceed(&rq11)) { break; }
+        }
+        let h11 = rayQueryGetCommittedIntersection(&rq11);
+        var c11 = vec3<f32>(0.0);
+        if (h11.kind != RAY_QUERY_INTERSECTION_NONE) {
+            if (debug == 11.0) {
+                let id = h11.instance_custom_data;
+                c11 = vec3<f32>(
+                    f32((id * 37u) % 7u) / 7.0,
+                    f32((id * 61u) % 11u) / 11.0,
+                    f32((id * 13u) % 5u) / 5.0,
+                ) * 30.0;
+            } else {
+                let b = h11.barycentrics;
+                c11 = vec3<f32>(b.x, b.y, max(0.0, 1.0 - b.x - b.y)) * 30.0;
+            }
+        }
+        textureStore(out_hdr, px, vec4<f32>(c11, 1.0));
+        return;
+    }
+    if (debug == 13.0) {
+        // TLAS sanity: green = traced primary hit distance agrees with
+        // the G-buffer depth (within 2% + 0.1m), red = disagreement
+        // (wrong geometry committed), blue = TLAS miss on a G-buffer
+        // pixel. If this is red/blue everywhere the TLAS itself (not
+        // the intersection attributes) is broken on this backend.
+        let to_p = p0 - u.cam_pos.xyz;
+        let gdist = length(to_p);
+        let dir0 = to_p / max(gdist, 1e-4);
+        var rq13: ray_query;
+        rayQueryInitialize(&rq13, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
+        loop {
+            if (!rayQueryProceed(&rq13)) { break; }
+        }
+        let h13 = rayQueryGetCommittedIntersection(&rq13);
+        var c13 = vec3<f32>(0.0, 0.0, 50.0);
+        if (h13.kind != RAY_QUERY_INTERSECTION_NONE) {
+            let err = abs(h13.t - gdist);
+            if (err < gdist * 0.02 + 0.1) {
+                c13 = vec3<f32>(0.0, 50.0, 0.0);
+            } else {
+                c13 = vec3<f32>(50.0, 0.0, 0.0);
+            }
+        }
+        textureStore(out_hdr, px, vec4<f32>(c13, 1.0));
+        return;
+    }
+    if (debug == 14.0) {
+        // Shape probe: contour bands of the traced primary hit distance
+        // — shows what world the TLAS actually contains. Blue = miss.
+        let dir0 = normalize(p0 - u.cam_pos.xyz);
+        var rq14: ray_query;
+        rayQueryInitialize(&rq14, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
+        loop {
+            if (!rayQueryProceed(&rq14)) { break; }
+        }
+        let h14 = rayQueryGetCommittedIntersection(&rq14);
+        var c14 = vec3<f32>(0.0, 0.0, 30.0);
+        if (h14.kind != RAY_QUERY_INTERSECTION_NONE) {
+            c14 = vec3<f32>(
+                fract(h14.t * 0.125),
+                fract(h14.t * 0.03125),
+                fract(h14.t * 0.0078125),
+            ) * 20.0;
+        }
+        textureStore(out_hdr, px, vec4<f32>(c14, 1.0));
+        return;
+    }
+    if (debug == 15.0) {
+        // Aliasing probe: two queries, two very different rays.
+        // A = primary (per-pixel), B = straight down (t ~= camera
+        // height, near-constant). R channel = banded tA, G = banded tB.
+        // If R == G everywhere the two queries alias to one object.
+        let dirA = normalize(p0 - u.cam_pos.xyz);
+        var rqA: ray_query;
+        rayQueryInitialize(&rqA, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dirA));
+        loop {
+            if (!rayQueryProceed(&rqA)) { break; }
+        }
+        var rqB: ray_query;
+        rayQueryInitialize(&rqB, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, vec3<f32>(0.0, -1.0, 0.0)));
+        loop {
+            if (!rayQueryProceed(&rqB)) { break; }
+        }
+        let hA = rayQueryGetCommittedIntersection(&rqA);
+        let hB = rayQueryGetCommittedIntersection(&rqB);
+        var tA = -1.0;
+        var tB = -1.0;
+        if (hA.kind != RAY_QUERY_INTERSECTION_NONE) { tA = hA.t; }
+        if (hB.kind != RAY_QUERY_INTERSECTION_NONE) { tB = hB.t; }
+        let c15 = vec3<f32>(fract(tA * 0.125) * 20.0, fract(tB * 0.125) * 20.0, 0.0);
+        textureStore(out_hdr, px, vec4<f32>(c15, 1.0));
+        return;
+    }
+    if (debug == 16.0) {
+        // Raw numeric dump: traced primary intersection into the accum
+        // buffer as (t, instance_custom_data, primitive_index, kind).
+        // The CPU side reads a window of this buffer back and writes a
+        // text file — no tonemap guesswork.
+        let dir0 = normalize(p0 - u.cam_pos.xyz);
+        var rq16: ray_query;
+        rayQueryInitialize(&rq16, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
+        loop {
+            if (!rayQueryProceed(&rq16)) { break; }
+        }
+        let h16 = rayQueryGetCommittedIntersection(&rq16);
+        let idx16 = gid.y * u.size.x + gid.x;
+        accum[idx16] = vec4<f32>(
+            h16.t,
+            f32(h16.instance_custom_data),
+            f32(h16.primitive_index),
+            f32(h16.kind),
+        );
+        textureStore(out_hdr, px, vec4<f32>(0.2, 0.0, 0.4, 1.0));
+        return;
+    }
+    if (debug == 17.0) {
+        // Raw ray-generation dump: reconstructed world position + raw
+        // depth, straight into accum for CPU readback.
+        let idx17 = gid.y * u.size.x + gid.x;
+        accum[idx17] = vec4<f32>(p0, depth);
+        textureStore(out_hdr, px, vec4<f32>(0.4, 0.2, 0.0, 1.0));
+        return;
+    }
+    if (debug == 6.0 || debug == 7.0) {
+        // PT-2 validation: trace the primary ray through the TLAS
+        // (ignoring the G-buffer) and show interpolated attributes.
+        // Should match debug 2/3 up to smooth-vs-screen normals and
+        // card-vs-texture resolution.
+        let dir0 = normalize(p0 - u.cam_pos.xyz);
+        var rq0: ray_query;
+        rayQueryInitialize(&rq0, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
+        loop {
+            if (!rayQueryProceed(&rq0)) { break; }
+        }
+        let h = rayQueryGetCommittedIntersection(&rq0);
+        var col = vec3<f32>(1.0, 0.0, 1.0);        // magenta: TLAS miss
+        if (h.kind != RAY_QUERY_INTERSECTION_NONE) {
+            let hinst = instance_data[h.instance_custom_data];
+            if (hinst.geo.z > 0u) {
+                let attrs = fetch_hit_attrs(hinst.geo, h.primitive_index, h.barycentrics);
+                if (debug == 6.0) {
+                    col = normal_to_world(attrs.normal_os, h.world_to_object) * 0.5 + vec3<f32>(0.5);
+                } else if (PT_HAS_TEXTURES) {
+                    col = hinst.albedo * pt_tex_sample(hinst.geo.w, attrs.uv);
+                } else {
+                    col = vec3<f32>(1.0, 1.0, 0.0);  // yellow: no tex arrays
+                }
+            } else {
+                col = vec3<f32>(1.0, 0.5, 0.0);      // orange: no geo window
+            }
+        }
+        textureStore(out_hdr, px, vec4<f32>(col, 1.0));
+        return;
+    }
 
     // ---- one path sample --------------------------------------------------
 
@@ -354,18 +659,30 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let inst = instance_data[hit.instance_custom_data];
         let hit_ws = origin + dir * hit.t;
         let hit_os = (hit.world_to_object * vec4<f32>(hit_ws, 1.0)).xyz;
-        let alb_hit = albedo_at_hit(inst, hit_os, dir);
 
-        // Hit normal: the flat per-instance normal (Tier-1 honesty note in
-        // the roadmap; PT-2 replaces this with interpolated vertex normals).
-        var n_hit = inst.normal_ws;
-        let n_len = length(n_hit);
-        if (n_len < 1e-4) {
-            n_hit = -dir;
+        // PT-2: interpolated vertex normal + textured albedo when the
+        // instance carries a geometry window; PT-1 flat-normal/card
+        // fallback otherwise.
+        var n_hit: vec3<f32>;
+        var alb_hit: vec3<f32>;
+        if (inst.geo.z > 0u) {
+            let attrs = fetch_hit_attrs(inst.geo, hit.primitive_index, hit.barycentrics);
+            n_hit = normal_to_world(attrs.normal_os, hit.world_to_object);
+            if (PT_HAS_TEXTURES) {
+                alb_hit = inst.albedo * pt_tex_sample(inst.geo.w, attrs.uv);
+            } else {
+                alb_hit = albedo_at_hit(inst, hit_os, dir);
+            }
         } else {
-            n_hit = n_hit / n_len;
-            if (dot(n_hit, dir) > 0.0) { n_hit = -n_hit; }
+            var nf = inst.normal_ws;
+            let n_len = length(nf);
+            if (n_len < 1e-4) { nf = -dir; } else { nf = nf / n_len; }
+            n_hit = nf;
+            alb_hit = albedo_at_hit(inst, hit_os, dir);
         }
+        // A backface (or a flat normal pointing away) still bounces
+        // outward, matching the OPAQUE two-sided raster convention.
+        if (dot(n_hit, dir) > 0.0) { n_hit = -n_hit; }
 
         // Emissive surfaces radiate; matches the Lumen fallback semantics
         // (albedo * emissive_luma).

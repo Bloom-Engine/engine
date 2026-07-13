@@ -405,6 +405,10 @@ struct InstanceGiData {
     // EN-023 — world-space AABB (SDF path only; layout mirror).
     world_aabb_min: vec4<f32>,
     world_aabb_max: vec4<f32>,
+    // PT-2 — layout mirror only (path-tracer geometry window +
+    // material params); the GI traces ignore both fields.
+    geo: vec4<u32>,
+    mat_params: vec4<f32>,
 };
 
 const CARD_SLOTS_PER_ROW: f32 = 64.0;

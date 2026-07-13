@@ -126,6 +126,13 @@ pub unsafe fn attach_engine(
     if !force_sw_gi && supported.contains(rt_mask) {
         required_features |= rt_mask;
     }
+    // PT-2: texture binding array + non-uniform indexing for textured
+    // path-trace hit shading (mirrors bloom_init_window).
+    let pt_tex_mask = wgpu::Features::TEXTURE_BINDING_ARRAY
+        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+    if supported.contains(pt_tex_mask) {
+        required_features |= pt_tex_mask;
+    }
     let experimental_features = if required_features.intersects(rt_mask) {
         // wgpu 29 requires this explicit opt-in token for EXPERIMENTAL_*
         // features. Apple-Silicon Metal ray query has been stable since
@@ -161,6 +168,11 @@ pub unsafe fn attach_engine(
     required_limits.max_samplers_per_shader_stage = required_limits
         .max_samplers_per_shader_stage
         .max(adapter_limits.max_samplers_per_shader_stage);
+    // PT-2: binding arrays have their own element budget, default 0.
+    if required_features.contains(pt_tex_mask) {
+        required_limits.max_binding_array_elements_per_shader_stage =
+            adapter_limits.max_binding_array_elements_per_shader_stage;
+    }
 
     if required_features.intersects(rt_mask) {
         required_limits =

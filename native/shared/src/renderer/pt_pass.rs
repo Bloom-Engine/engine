@@ -25,9 +25,16 @@ impl Renderer {
         if self.pt_pipeline.is_none()
             || self.tlas.is_none()
             || self.tlas_instance_data_buffer.is_none()
+            || self.pt_geo_vertex_buffer.is_none()
+            || self.pt_geo_index_buffer.is_none()
         {
             self.pt_accum_count = 0;
             return;
+        }
+        // PT-2 — a grown texture store means the baked view array is
+        // stale; rebuild so new textures become visible to hit shading.
+        if self.pt_texture_arrays_enabled && self.pt_bg_texture_count != self.textures.len() {
+            self.pt_tex_bg = None;
         }
 
         // ---- accumulation validity ----
@@ -75,7 +82,11 @@ impl Renderer {
             self.pt_accum_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pt_accum"),
                 size: needed,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                // COPY_SRC: the debug-16 numeric readback copies a window
+                // of this buffer to a staging buffer.
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }));
             self.pt_bg = None;
@@ -102,8 +113,22 @@ impl Renderer {
 
         let max_bounces = if self.pt_mode == 2 { 2.0 } else { 8.0 };
         let cam = self.current_camera_pos;
+        // current_inv_vp_matrix is stored transposed relative to what
+        // WGSL's `M * v` needs (the composed VP inherits mat4_multiply's
+        // convention; its inverse lands transposed). Upload the
+        // transpose so the kernel's unprojection is the real inverse —
+        // without this every ray collapses to one degenerate bundle and
+        // the whole path trace silently hits garbage (found via numeric
+        // readback; see docs/pt/PT-2 notes).
+        let m = &self.current_inv_vp_matrix;
+        let inv_vp_t = [
+            [m[0][0], m[1][0], m[2][0], m[3][0]],
+            [m[0][1], m[1][1], m[2][1], m[3][1]],
+            [m[0][2], m[1][2], m[2][2], m[3][2]],
+            [m[0][3], m[1][3], m[2][3], m[3][3]],
+        ];
         let params = PtParamsCpu {
-            inv_vp: self.current_inv_vp_matrix,
+            inv_vp: inv_vp_t,
             cam_pos: [cam[0], cam[1], cam[2], 0.0],
             sun_dir: [
                 -ld[0] * sun_inv_len,
@@ -138,10 +163,7 @@ impl Renderer {
         // buffer recreation) ----
         if self.pt_bg.is_none() {
             let tlas = self.tlas.as_ref().unwrap();
-            self.pt_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pt_bg"),
-                layout: self.pt_layout.as_ref().unwrap(),
-                entries: &[
+            let entries = vec![
                     wgpu::BindGroupEntry { binding: 0, resource: self.pt_uniform_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: tlas.as_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: self.tlas_instance_data_buffer.as_ref().unwrap().as_entire_binding() },
@@ -155,8 +177,36 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
                     wgpu::BindGroupEntry { binding: 8, resource: self.pt_accum_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
-                ],
+                    wgpu::BindGroupEntry { binding: 10, resource: self.pt_geo_vertex_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 11, resource: self.pt_geo_index_buffer.as_ref().unwrap().as_entire_binding() },
+            ];
+            self.pt_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pt_bg"),
+                layout: self.pt_layout.as_ref().unwrap(),
+                entries: &entries,
             }));
+        }
+        // PT-2 — group 1: the texture binding array. Real store views
+        // first, white (slot 0) padding to the fixed layout count. The
+        // bind group holds refs, so the temporary views live with it.
+        if self.pt_texture_arrays_enabled && self.pt_tex_bg.is_none() {
+            let n = self.textures.len().min(PT_MAX_TEXTURES);
+            let tex_views: Vec<wgpu::TextureView> = (0..n.max(1))
+                .map(|i| self.textures[i.min(self.textures.len() - 1)]
+                    .create_view(&wgpu::TextureViewDescriptor::default()))
+                .collect();
+            let tex_view_refs: Vec<&wgpu::TextureView> = (0..PT_MAX_TEXTURES)
+                .map(|i| &tex_views[if i < n { i } else { 0 }])
+                .collect();
+            self.pt_tex_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pt_tex_bg"),
+                layout: self.pt_tex_layout.as_ref().unwrap(),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureViewArray(&tex_view_refs),
+                }],
+            }));
+            self.pt_bg_texture_count = self.textures.len();
         }
 
         // ---- dispatch ----
@@ -168,8 +218,101 @@ impl Renderer {
             });
             pass.set_pipeline(self.pt_pipeline.as_ref().unwrap());
             pass.set_bind_group(0, self.pt_bg.as_ref().unwrap(), &[]);
+            if self.pt_texture_arrays_enabled {
+                pass.set_bind_group(1, self.pt_tex_bg.as_ref().unwrap(), &[]);
+            }
             pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
         }
         self.pt_accum_count = self.pt_accum_count.saturating_add(1);
+
+        // ---- debug 16: numeric readback of traced intersections ----
+        // Copies a window of the accum buffer (center of frame) into a
+        // staging buffer each frame; the previous frame's copy is mapped
+        // (blocking) and dumped to pt_trace_dump.txt once.
+        if (self.pt_debug == 16.0 || self.pt_debug == 17.0)
+            && self.pt_accum_count > 30
+            && !self.pt_dump_written
+        {
+            let dump_pixels: u64 = (surf_w as u64).min(4096);
+            let row = (surf_h / 2) as u64;
+            let offset = row * surf_w as u64 * 16;
+            if self.pt_readback_buffer.is_none() {
+                self.pt_readback_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pt_readback"),
+                    size: dump_pixels * 16,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+                encoder.copy_buffer_to_buffer(
+                    self.pt_accum_buffer.as_ref().unwrap(),
+                    offset,
+                    self.pt_readback_buffer.as_ref().unwrap(),
+                    0,
+                    dump_pixels * 16,
+                );
+            } else {
+                // Previous frame's copy has been submitted; map it now.
+                let buf = self.pt_readback_buffer.as_ref().unwrap();
+                let slice = buf.slice(..);
+                slice.map_async(wgpu::MapMode::Read, |_| {});
+                let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                let data = slice.get_mapped_range();
+                let vals: &[[f32; 4]] = bytemuck::cast_slice(&data);
+                let mut out = String::new();
+                out.push_str(&format!(
+                    "middle row, {} pixels, mode {}\n",
+                    vals.len(),
+                    self.pt_debug
+                ));
+                // Every 64th pixel across the full row. Field meaning:
+                // 16 = t / id / prim / kind; 17 = p0.xyz / raw depth.
+                for (i, v) in vals.iter().enumerate().step_by(64) {
+                    out.push_str(&format!(
+                        "col {i}: {:.4} {:.4} {:.4} {:.6}\n",
+                        v[0], v[1], v[2], v[3]
+                    ));
+                }
+                // Also dump the CPU-side uniform inputs for comparison,
+                // plus the unprojection computed in BOTH multiply
+                // conventions. Whichever matches the GPU dump is what
+                // the shader effectively computed; the other (if sane)
+                // is the fix.
+                let ndc = [0.0f32, 0.0, 0.998647, 1.0];
+                let m = &self.current_inv_vp_matrix;
+                let mut h_col = [0.0f32; 4]; // h_i = sum_c m[c][i] * ndc[c]
+                let mut h_row = [0.0f32; 4]; // h_i = sum_c m[i][c] * ndc[c]
+                for i in 0..4 {
+                    for c in 0..4 {
+                        h_col[i] += m[c][i] * ndc[c];
+                        h_row[i] += m[i][c] * ndc[c];
+                    }
+                }
+                out.push_str(&format!(
+                    "cpu cam_pos = {:?}\n\
+                     unproject as columns: h={:?} p={:?}\n\
+                     unproject transposed: h={:?} p={:?}\n",
+                    self.current_camera_pos,
+                    h_col,
+                    [h_col[0] / h_col[3], h_col[1] / h_col[3], h_col[2] / h_col[3]],
+                    h_row,
+                    [h_row[0] / h_row[3], h_row[1] / h_row[3], h_row[2] / h_row[3]],
+                ));
+                // Distinct instance-id count over the whole row.
+                let mut ids: Vec<i64> = vals
+                    .iter()
+                    .filter(|v| v[3] != 0.0)
+                    .map(|v| v[1] as i64)
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                let misses = vals.iter().filter(|v| v[3] == 0.0).count();
+                out.push_str(&format!("distinct hit ids: {:?}\n", ids));
+                out.push_str(&format!("misses: {}\n", misses));
+                drop(data);
+                buf.unmap();
+                let _ = std::fs::write("pt_trace_dump.txt", out);
+                self.pt_dump_written = true;
+            }
+        }
     }
 }

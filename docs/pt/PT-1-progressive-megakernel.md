@@ -86,6 +86,35 @@ Implementation notes discovered on the way:
   directly. Careful with F12-capture scripts: the title screen treats
   the posted F12 as "press any key" and starts the game.
 
+## Post-scriptum (2026-07-13, PT-2 bring-up): the transposed inv_vp
+
+PT-2's numeric readback (BLOOM_PT_DEBUG=16/17) revealed that EVERY ray
+this kernel generated since PT-1 was degenerate: `current_inv_vp_matrix`
+is stored transposed relative to what WGSL's `M * v` computes, so the
+unprojection collapsed all primary rays into one bundle. Light transport
+(sun shadow rays, bounces) traced garbage while the image still looked
+plausible — primaries come from the G-buffer and direct NdotL carried
+the shading. Fixed by uploading the transpose (pt_pass.rs). Lessons,
+paid for in full:
+
+- The house rule exists for a reason: every other pass unprojects via
+  linear-z + projection coefficients and never touches an inverted
+  matrix. The PT kernel was the first `inv_vp` consumer, and the first
+  casualty.
+- "Looks plausible" is not a transport test. The M2 convergence gate
+  passed on top of broken rays because accumulation mechanics are
+  independent of ray correctness. The debug-13 t-vs-G-buffer sanity
+  view (green/red/blue) is now the mandatory first check for any
+  ray-generation change.
+- HDR-scaled probe colours (×20-50 to defeat tonemapping) saturate
+  fract-band signals into uniform blobs — three investigation probes
+  lied because of this. When probes disagree with expectations twice,
+  switch to numeric readback (debug 16/17) immediately.
+- wgpu 29 DX12+DXC inline ray query is fully correct (validated with a
+  standalone repro: fat vertex strides, same-encoder build+dispatch,
+  multiple queries, engine-shaped bind groups — all fine). The naga
+  helper-function codegen needs no patching.
+
 ## Known honest limits (by design, closed by PT-2)
 
 Flat per-mesh hit normals; card-resolution albedo at hits; no specular
