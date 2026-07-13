@@ -472,6 +472,64 @@ macro_rules! __bloom_ffi_visual {
         })
         }
 
+        // bloom_set_model_foliage_wind  [EN-041]
+        //
+        // Mark a cached model as a plant so the wind bends it. amount ~1.0 for a
+        // tree. The engine used to sway alpha-cut materials only, so leaf cards
+        // fluttered and every trunk stood rigid.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_model_foliage_wind(model: f64, amount: f64) {
+            $crate::ffi::guard("bloom_set_model_foliage_wind", move || {
+                engine().renderer.set_model_foliage_wind(model.to_bits(), amount as f32);
+        })
+        }
+
+        // bloom_set_foliage_shadow_motion  [EN-041]
+        //
+        // Let foliage sway in the shadow pass too, so the canopy dapple moves.
+        // NOT free: a moving caster cannot reuse the cached static shadow depth.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_foliage_shadow_motion(on: f64) {
+            $crate::ffi::guard("bloom_set_foliage_shadow_motion", move || {
+                engine().renderer.set_foliage_shadow_motion(on > 0.5);
+        })
+        }
+
+        // bloom_set_output_scale  [EN-046]
+        //
+        // Shrink the SWAPCHAIN, not the G-buffer. This is the only knob that touches
+        // the fixed cost of the TSR upscale + final composite, which is what actually
+        // dominates a 4K frame — render_scale does not.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_output_scale(scale: f64) {
+            $crate::ffi::guard("bloom_set_output_scale", move || {
+                engine().renderer.set_output_scale(scale as f32);
+        })
+        }
+
+        #[no_mangle]
+        pub extern "C" fn bloom_get_output_scale() -> f64 {
+            $crate::ffi::guard("bloom_get_output_scale", move || {
+                engine().renderer.output_scale() as f64
+        })
+        }
+
+        // bloom_set_cloud_shadows  [EN-040]
+        //
+        // Opt the world into the deck the sky is already drawing. strength 0
+        // (the default) = sky-only clouds, which is what every game that never
+        // calls this keeps.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_cloud_shadows(
+            strength: f64, deck_height: f64, feature_scale: f64, drift_speed: f64,
+        ) {
+            $crate::ffi::guard("bloom_set_cloud_shadows", move || {
+                engine().renderer.set_cloud_shadows(
+                    strength as f32, deck_height as f32,
+                    feature_scale as f32, drift_speed as f32);
+        })
+        }
+
         // bloom_set_ssr_enabled  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_ssr_enabled(on: f64) {

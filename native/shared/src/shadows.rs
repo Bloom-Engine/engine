@@ -26,19 +26,29 @@ pub const SHADOW_FAR: f32 = 100.0;
 pub const SHADOW_UNIFORM_STRIDE: u32 = 256;
 pub const SHADOW_MAX_NODES: u32 = 1024;
 /// Slots at the TAIL of each cascade's uniform region reserved for
-/// dynamic (immediate-batch) casters, which re-render every frame while
-/// static casters keep their cached depth. Disjoint slot ranges keep the
-/// every-frame dynamic writes from clobbering the uniforms the static
-/// render was encoded against (all `write_buffer`s land at submit,
-/// before any pass executes).
-pub const SHADOW_MAX_DYNAMIC: u32 = 64;
+/// dynamic casters, which re-render every frame while static casters keep their
+/// cached depth. Disjoint slot ranges keep the every-frame dynamic writes from
+/// clobbering the uniforms the static render was encoded against (all
+/// `write_buffer`s land at submit, before any pass executes).
+///
+/// EN-042 — raised from 64. Sixty-four was fine while "dynamic" meant a handful of
+/// characters, and became a trap the moment a *forest* could go dynamic: 88 trees x
+/// 4 primitives is 352 casters, the overflow was dropped in queue order, and what
+/// disappeared was whatever happened to be last — twice this session, that was the
+/// player's own shadow from under their feet. 256 covers a moving crowd; the drop is
+/// also RANKED now (see shadow_pass.rs) so an overflow costs a canopy shadow rather
+/// than a character's.
+pub const SHADOW_MAX_DYNAMIC: u32 = 256;
 
 /// Depth-only shader for shadow pass.
-pub const SHADOW_SHADER: &str = "
+pub const SHADOW_SHADER: &str = concat!(
+    include_str!("../shaders/common/foliage_wind.wgsl"),
+    r#"
 struct ShadowUniforms {
     light_vp: mat4x4<f32>,
     model: mat4x4<f32>,
-    misc: vec4<f32>,   // x = joint offset (used by the skinned variant)
+    misc: vec4<f32>,   // x = joint offset (skinned variant), z = foliage wind amount
+    wind: vec4<f32>,   // xy = dir, z = amplitude, w = time
 };
 
 @group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
@@ -54,21 +64,26 @@ struct ShadowVertexInput {
 
 @vertex
 fn vs_shadow(in: ShadowVertexInput) -> @builtin(position) vec4<f32> {
-    let world_pos = shadow_u.model * vec4<f32>(in.position, 1.0);
+    // is_leaf = 0: this pipeline draws the opaque casters (trunks, branches).
+    let p = foliage_wind_local(in.position, shadow_u.model, shadow_u.wind, shadow_u.misc.z, 0.0);
+    let world_pos = shadow_u.model * vec4<f32>(p, 1.0);
     return shadow_u.light_vp * world_pos;
 }
-";
+"#);
 
 /// Alpha-tested shadow shader for cutout foliage (trees, grass, leaves). Same
 /// depth-only output as SHADOW_SHADER but samples the caster's base-colour
 /// alpha and discards below the material cutoff, so cutout cards cast their
 /// real shape (dappled light) instead of an opaque billboard blob. Used by a
 /// dedicated pipeline; the opaque shadow path stays untouched.
-pub const SHADOW_SHADER_CUTOUT: &str = "
+pub const SHADOW_SHADER_CUTOUT: &str = concat!(
+    include_str!("../shaders/common/foliage_wind.wgsl"),
+    r#"
 struct ShadowUniforms {
     light_vp: mat4x4<f32>,
     model: mat4x4<f32>,
-    misc: vec4<f32>,   // x = joint offset (used by the skinned variant)
+    misc: vec4<f32>,   // x = joint offset (skinned variant), z = foliage wind amount
+    wind: vec4<f32>,   // xy = dir, z = amplitude, w = time
 };
 @group(0) @binding(0) var<uniform> shadow_u: ShadowUniforms;
 
@@ -90,10 +105,14 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
 };
 
+
 @vertex
 fn vs_shadow_cutout(in: ShadowVertexInput) -> VsOut {
     var o: VsOut;
-    let world_pos = shadow_u.model * vec4<f32>(in.position, 1.0);
+    // is_leaf = 1: this pipeline draws the cutout cards, so they get the fast
+    // flutter layer -- and their shadows now flutter with them.
+    let p = foliage_wind_local(in.position, shadow_u.model, shadow_u.wind, shadow_u.misc.z, 1.0);
+    let world_pos = shadow_u.model * vec4<f32>(p, 1.0);
     o.pos = shadow_u.light_vp * world_pos;
     o.uv = in.uv;
     return o;
@@ -104,7 +123,7 @@ fn fs_shadow_cutout(in: VsOut) {
     let a = textureSample(base_tex, base_samp, in.uv).a;
     if (a < cut.cutoff.x) { discard; }
 }
-";
+"#);
 
 /// Skinned shadow shader for animated characters (player, enemies). Their
 /// vertices are *rest-pose* (cached model VBs with raw joint indices, or the
@@ -168,8 +187,14 @@ pub struct ShadowUniforms {
     /// x = joint-buffer base offset for skinned CACHED casters (their
     /// VBs keep raw joint indices; `vs_shadow_skinned` adds this before
     /// indexing). 0 for everything else, including the immediate batch
-    /// whose vertex joints are pre-offset CPU-side. yzw unused.
+    /// whose vertex joints are pre-offset CPU-side.
+    /// z = foliage wind amount for this caster (0 = rigid). A tree that bends in
+    /// the scene pass but not in the shadow pass detaches from its own shadow.
+    /// yw unused.
     pub misc: [f32; 4],
+    /// Global wind: xy = direction in XZ, z = amplitude, w = elapsed seconds.
+    /// The shadow pass needs it for the same reason the scene pass does.
+    pub wind: [f32; 4],
 }
 
 /// Shadow map resources for cascaded shadow mapping.
@@ -813,7 +838,19 @@ impl ShadowMap {
             // byte-identical. The per-cascade shadow cache compares VPs
             // exactly, so a kept VP means the cascade's cached depth
             // stays valid while the camera travels within the slack.
-            if c > 0 {
+            // EN-045 — cascade 0 gets the slack too.
+            //
+            // It was excluded, and that quietly made the whole static-shadow cache a
+            // title-screen feature. Cascade 0 is the NEAR cascade: it holds the
+            // player and everything they are standing next to. Re-fitting it every
+            // frame means its VP changes every frame the camera moves — which is all
+            // of gameplay — so its cached depth was thrown away and every static
+            // caster in it re-rendered, every frame. Measured: shadow_pass 0.12 ms on
+            // the stationary title screen, 3.2 ms in a moving fight.
+            //
+            // The slack costs ~15% of near-field shadow resolution and buys a cache
+            // that survives ~15 frames of walking instead of zero.
+            {
                 if let Some(acc) = self.accepted_fit[c] {
                     let ls_x = dot3(center, right);
                     let ls_y = dot3(center, ortho_up);
@@ -856,7 +893,7 @@ impl ShadowMap {
                     }
                 }
             }
-            let radius = if c > 0 { radius * REFIT_SLACK } else { radius };
+            let radius = radius * REFIT_SLACK;
             // Quantize radius so subpixel camera movement can't shift
             // the texel grid.
             let radius = (radius * 16.0).ceil() / 16.0;
@@ -954,9 +991,11 @@ impl ShadowMap {
 
             self.light_vps[c] = crate::renderer::mat4_multiply(light_proj, snapped_view);
 
-            // Record the accepted fit so subsequent frames can keep this
-            // VP while their requirements stay inside it (cascades ≥ 1).
-            if c > 0 {
+            // Record the accepted fit so subsequent frames can keep this VP while
+            // their requirements stay inside it. EN-045 — cascade 0 included now;
+            // excluding it was what made the static-shadow cache a title-screen
+            // feature, because cascade 0's VP changed on every frame the camera moved.
+            {
                 self.accepted_fit[c] = Some(AcceptedFit {
                     ls_x: dot3(snapped_center, right),
                     ls_y: dot3(snapped_center, ortho_up),

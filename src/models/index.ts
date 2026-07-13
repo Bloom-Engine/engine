@@ -5,6 +5,8 @@ import { Color, Model, Vec3, Mat4, BoundingBox } from '../core/types';
 declare function bloom_load_model(path: number): number;
 declare function bloom_draw_model(handle: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_model_rotated(handle: number, x: number, y: number, z: number, scale: number, rotY: number, colorPackedArgb: number): void;
+declare function bloom_set_model_foliage_wind(handle: number, amount: number): void;
+declare function bloom_set_foliage_shadow_motion(on: number): void;
 declare function bloom_unload_model(handle: number): void;
 declare function bloom_draw_cube(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_cube_wires(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
@@ -366,6 +368,29 @@ export function compileMaterialInstanced(wgslSource: string): number {
   return bloom_compile_material_instanced(wgslSource as any);
 }
 
+declare function bloom_compile_material_instanced_bucket(src: number, bucket: number, readsScene: number): number;
+
+export const BUCKET_OPAQUE = 0;
+export const BUCKET_CUTOUT = 1;
+export const BUCKET_ADDITIVE = 2;
+export const BUCKET_TRANSPARENT = 3;
+
+/// EN-026/027 — instanced compile into a chosen bucket. `compileMaterialInstanced`
+/// is opaque-only, which suits grass and suits nothing that blends: particles
+/// want BUCKET_ADDITIVE, decals want BUCKET_CUTOUT (alpha-tested against the
+/// atlas so they still write depth and receive shadow).
+///
+/// Set `readsScene` if the shader samples `scene_color_tex` / `scene_depth_tex`
+/// — soft particles need it, and WITHOUT it the scene bind group is simply
+/// absent from the pipeline layout and the shader fails validation when the
+/// pipeline is created (not when it is written), which is a confusing way to
+/// find out.
+export function compileMaterialInstancedBucket(
+  wgslSource: string, bucket: number, readsScene: boolean = false,
+): number {
+  return bloom_compile_material_instanced_bucket(wgslSource as any, bucket, readsScene ? 1 : 0);
+}
+
 /// EN-001 — upload a flat per-instance buffer to the GPU. `data` is
 /// laid out as 9 floats per instance:
 ///   [pos.x, pos.y, pos.z, rot_y, scale, tint.r, tint.g, tint.b, tint.a]
@@ -535,6 +560,69 @@ export function createTextureArrayEx(
   return bloom_create_texture_array_ex(bytes as any, dataLen, width, height, layerCount, format, mipLevels);
 }
 
+declare function bloom_create_texture_array_scratch(
+  width: number, height: number, layerCount: number, format: number, mipLevels: number,
+): number;
+
+/// EN-049 — build a texture array from data you computed, not from files.
+///
+/// `createTextureArray`/`createTextureArrayEx` take a `*const u8`, which the
+/// manifest must declare `i64` — and Perry cannot pass a `number[]` to an i64
+/// param ("Expected safe integer for native i64 parameter"). They are, from
+/// Perry, uncallable. That is fine for ART, which has files to name
+/// (`createTextureArrayFromFiles`), and useless for DATA: a terrain splat map is
+/// computed at load out of the world file and there is no file to point at.
+///
+/// So the payload goes through the mesh scratch buffer, exactly as
+/// `updateSceneNodeGeometry` already does for vertices. `texels` is one PACKED
+/// u32 per texel — `r | g<<8 | b<<16 | a<<24`, each channel 0..255 — so a 128²
+/// map is 16,384 FFI calls, not 65,536. Layers are back-to-back, layer 0 first.
+///
+/// Load-time only. It is linear in the texel count and crosses the FFI once per
+/// texel; do not put it on a frame path.
+export function createTextureArrayFromTexels(
+  texels: number[], texelCount: number,
+  width: number, height: number, layerCount: number,
+  format: number = TEX_ARRAY_FORMAT_LINEAR, mipLevels: number = 1,
+): number {
+  bloom_mesh_scratch_reset();
+  for (let i = 0; i < texelCount; i = i + 1) bloom_mesh_scratch_push_u32(texels[i]);
+  return bloom_create_texture_array_scratch(width, height, layerCount, format, mipLevels);
+}
+
+declare function bloom_create_texture_array_from_files(paths: number, format: number, mipLevels: number): number;
+
+/// EN-014 V3 — build a texture array by naming the files, letting the engine
+/// decode them.
+///
+/// Prefer this to `createTextureArray`: that one asks the caller to marshal
+/// every texel across the FFI (a 6-layer 256² array is 1.5 M numbers), which is
+/// both slow and exactly the call shape Perry's array bridge handles worst.
+/// Here the only thing crossing is a path list, parsed once at load — never on
+/// a frame path (perry-quirks #5).
+///
+/// All layers must share dimensions; the first file's size wins and mismatched
+/// ones are skipped with a warning. Layer index = position in the list, so the
+/// ORDER IS AN ABI — shaders index by it. Returns 0 if nothing decoded.
+///
+/// Not available on web (no filesystem in wasm); use `createTextureArrayEx`
+/// there.
+export function createTextureArrayFromFiles(
+  paths: string[],
+  format: number = TEX_ARRAY_FORMAT_SRGB,
+  mipLevels: number = 1,
+): number {
+  // Join rather than pass an array: one string is one pointer, and the engine
+  // splits it. Building the joined string with an explicit loop keeps clear of
+  // Perry's `.push()`/`.length` foot-gun.
+  let joined = '';
+  for (let i = 0; i < paths.length; i = i + 1) {
+    if (i > 0) joined = joined + ',';
+    joined = joined + paths[i];
+  }
+  return bloom_create_texture_array_from_files(joined as any, format, mipLevels);
+}
+
 /// EN-014 — link a texture-array handle to a material at one of three
 /// slots: `TEXTURE_ARRAY_ALBEDO` (binding 14), `TEXTURE_ARRAY_NORMAL`
 /// (binding 15), `TEXTURE_ARRAY_MR` (binding 16). Pass `array = 0` to
@@ -683,6 +771,85 @@ export function loadModelAnimation(path: string): number {
 
 export function updateModelAnimation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotY: number): void {
   bloom_update_model_animation(handle, animIndex, time, scale, px, py, pz, rotY);
+}
+
+// ---- EN-028: animation mixer -----------------------------------------------
+// The single-clip `updateModelAnimation` above stays for callers that drive
+// their own clip clock. The mixer below owns the clock instead, which is what
+// makes crossfades possible at all: a fade needs the *outgoing* clip to keep
+// advancing, and a caller that only passes one time value cannot express that.
+//
+// Typical use, per model per frame:
+//   animPlay(h, moving ? CLIP_WALK : CLIP_IDLE, 0.15);   // idempotent
+//   animSetLayer(h, attacking ? CLIP_ATTACK : -1, 1, spineJoint);
+//   animUpdate(h, dt, scale, x, y, z, yaw);
+
+declare function bloom_anim_play(handle: number, clip: number, fade: number, speed: number, looping: number): void;
+declare function bloom_anim_set_layer(handle: number, clip: number, weight: number, maskRoot: number, speed: number, looping: number): void;
+declare function bloom_anim_set_root_motion(handle: number, on: number): void;
+declare function bloom_anim_update(handle: number, dt: number, scale: number, px: number, py: number, pz: number, rotY: number): void;
+declare function bloom_anim_finished(handle: number): number;
+declare function bloom_anim_clip_duration(handle: number, clip: number): number;
+declare function bloom_anim_root_delta(handle: number, axis: number): number;
+declare function bloom_model_find_joint(handle: number, name: number): number;
+declare function bloom_model_joint_world(handle: number, joint: number, comp: number): number;
+
+/// Transition the base track to `clip` over `fade` seconds. Safe to call every
+/// frame with the clip you *want* — re-requesting the clip already playing is
+/// a no-op, so callers don't have to track edges.
+export function animPlay(handle: number, clip: number, fade: number = 0.15, speed: number = 1.0, looping: boolean = true): void {
+  bloom_anim_play(handle, clip, fade, speed, looping ? 1 : 0);
+}
+
+/// Drive the subtree below `maskRoot` (a joint index — see `findJoint`) from a
+/// second clip at `weight`. Pass clip = -1 to switch the layer off. This is how
+/// a character attacks while still walking.
+export function animSetLayer(handle: number, clip: number, weight: number, maskRoot: number, speed: number = 1.0, looping: boolean = false): void {
+  bloom_anim_set_layer(handle, clip, weight, maskRoot, speed, looping ? 1 : 0);
+}
+
+/// Opt in to authored root motion. Off by default: with it on, the pose stops
+/// carrying the root translation and you must feed `animRootDelta` to your
+/// character controller, or the model animates in place.
+export function animSetRootMotion(handle: number, on: boolean): void {
+  bloom_anim_set_root_motion(handle, on ? 1 : 0);
+}
+
+/// Advance all clocks on this model and upload the blended pose. One call per
+/// model per frame, in place of `updateModelAnimation`.
+export function animUpdate(handle: number, dt: number, scale: number, px: number, py: number, pz: number, rotY: number): void {
+  bloom_anim_update(handle, dt, scale, px, py, pz, rotY);
+}
+
+/// True once a non-looping clip has run past its end — the death/attack
+/// one-shot query.
+export function animFinished(handle: number): boolean {
+  return bloom_anim_finished(handle) !== 0;
+}
+
+export function animClipDuration(handle: number, clip: number): number {
+  return bloom_anim_clip_duration(handle, clip);
+}
+
+/// Root-motion translation applied by the last `animUpdate`, in model space.
+export function animRootDelta(handle: number, axis: number): number {
+  return bloom_anim_root_delta(handle, axis);
+}
+
+// ---- EN-033: bone sockets ---------------------------------------------------
+
+/// Joint index by name (exact, else case-insensitive substring). Call once at
+/// load and cache — it parses a string, which must never happen per-frame
+/// (perry-quirks #5). Returns -1 if not found.
+export function findJoint(handle: number, name: string): number {
+  return bloom_model_find_joint(handle, name as any);
+}
+
+/// One component of a joint's model-space 4x4 (column-major, 0..15).
+/// Translation is 12/13/14. Model-space, not world: apply the same scale /
+/// position / yaw you passed to `animUpdate` to place it in the world.
+export function jointWorld(handle: number, joint: number, comp: number): number {
+  return bloom_model_joint_world(handle, joint, comp);
 }
 
 // Upload a mesh via the scratch buffer (array-free). Perry 0.5.1171 rejects
@@ -908,4 +1075,88 @@ export function drawImposterAtlas(
     position.x, position.y, position.z, scale,
     1.0, 1.0, 1.0, 1.0,
   );
+}
+
+// ---- EN-025: ragdolls -------------------------------------------------------
+//
+// A ragdoll is not something you configure; it is something you TRIGGER, once,
+// at the moment of death, and then forget about. So the API is four calls:
+// build it, shove it, read the pose, put it away.
+//
+// The engine builds the bodies from the skeleton it already has — one capsule
+// per bone, one limited six-DOF joint per articulation — so there is no ragdoll
+// asset to author and it works for any skinned model the game loads.
+
+declare function bloom_ragdoll_create(): number;
+declare function bloom_ragdoll_activate(rag: number, anim: number, world: number, scale: number, px: number, py: number, pz: number, rotY: number): number;
+declare function bloom_ragdoll_push(rag: number, dx: number, dy: number, dz: number, impulse: number): void;
+declare function bloom_ragdoll_update(rag: number, anim: number, dt: number): number;
+declare function bloom_ragdoll_release(rag: number): void;
+
+/// Allocate a ragdoll slot. Pool these — one per corpse you intend to have on
+/// screen at once — and reuse them; a slot is cheap, but the bodies it holds
+/// are not.
+export function createRagdoll(): number {
+  return bloom_ragdoll_create();
+}
+
+/// Build the bodies from the model's CURRENT pose and let go.
+///
+/// Pass the same `(scale, position, yaw)` you last handed `animUpdate`. That
+/// transform is the bridge between model space (where skinning lives) and world
+/// space (where physics lives), and it is FROZEN here — from now on the corpse's
+/// motion belongs to the bodies, not to the dead thing's old position.
+///
+/// Returns false if the model has no skeleton, or no bones long enough to
+/// simulate.
+export function activateRagdoll(
+  rag: number, anim: number, world: number,
+  scale: number, px: number, py: number, pz: number, rotY: number,
+): boolean {
+  return bloom_ragdoll_activate(rag, anim, world, scale, px, py, pz, rotY) !== 0;
+}
+
+/// The killing blow. Applied across all the bodies, so the corpse is thrown as
+/// a whole rather than having one limb yanked off.
+export function pushRagdoll(rag: number, dx: number, dy: number, dz: number, impulse: number): void {
+  bloom_ragdoll_push(rag, dx, dy, dz, impulse);
+}
+
+/// Pull the simulated pose back into the model's joint matrices and upload it.
+/// Call once per frame per active ragdoll, then `drawModel()` as usual — no
+/// `animUpdate`, because physics owns the pose now. Returns the ragdoll's age in
+/// seconds, which is what you settle and despawn on.
+export function updateRagdoll(rag: number, anim: number, dt: number): number {
+  return bloom_ragdoll_update(rag, anim, dt);
+}
+
+/// Destroy the bodies and constraints and free the slot for reuse. A pooled
+/// ragdoll that is never released leaks bodies into the physics world — a slow,
+/// invisible death.
+export function releaseRagdoll(rag: number): void {
+  bloom_ragdoll_release(rag);
+}
+
+/// Mark a model as foliage, so the wind actually bends it.
+///
+/// `amount` scales the whole effect: ~1.0 for a tree, less for a stiff shrub,
+/// 0 to turn it off. Direction, strength and rate come from `setWind`.
+///
+/// The wind is hierarchical (trunk bend, branch sway, leaf flutter) and the
+/// layer weights are derived from where each vertex sits relative to the model
+/// origin — nothing has to be authored into the mesh. Before this the engine
+/// swayed alpha-cut materials only, which meant leaf cards fluttered while every
+/// trunk in the scene stood perfectly rigid.
+export function setModelFoliageWind(model: Model, amount: number): void {
+  bloom_set_model_foliage_wind(model.handle, amount);
+}
+
+/// Let foliage sway in the SHADOW pass too, so a bending tree and its shadow bend
+/// together and the canopy dapple on the ground actually moves.
+///
+/// Off by default, and not free: a caster that moves every frame cannot reuse the
+/// cached static shadow depth, so every plant re-renders into every cascade every
+/// frame. Measure before leaving it on.
+export function setFoliageShadowMotion(on: boolean): void {
+  bloom_set_foliage_shadow_motion(on ? 1 : 0);
 }

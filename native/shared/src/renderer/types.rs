@@ -139,6 +139,16 @@ pub(super) struct LightingUniforms {
     /// z = amplitude, w = elapsed time (seconds) for the sway phase.
     /// Appended last so existing field offsets stay stable.
     pub(super) wind: [f32; 4],
+    /// Cloud deck for the built-in scene shader: x = shadow strength,
+    /// y = deck height (m), z = feature scale, w = drift speed (m/s).
+    /// Strength 0 = the scene ignores the clouds. Appended last so existing
+    /// field offsets stay stable.
+    pub(super) cloud: [f32; 4],
+    /// x = delta_time (seconds). The scene VS needs LAST frame's wind offset to
+    /// emit a correct motion vector for swaying foliage — without it TAA sees
+    /// velocity 0 on every moving leaf and ghosts them. Appended last so existing
+    /// field offsets stay stable.
+    pub(super) frame_misc: [f32; 4],
 }
 
 impl LightingUniforms {
@@ -159,6 +169,8 @@ impl LightingUniforms {
             shadow_cascade_splits: [8.0, 25.0, 80.0, 0.0],
             shadow_view_matrix: IDENTITY_MAT4,
             wind: [0.0, 0.0, 0.0, 0.0],
+            cloud: [0.0, 420.0, 0.0035, 8.0],
+            frame_misc: [0.0; 4],
         }
     }
 }
@@ -237,7 +249,14 @@ pub struct InstanceData3D {
     pub rot_y:    f32,        // Y-axis rotation in radians
     pub scale:    f32,        // uniform scale multiplier (1.0 = no scale)
     pub tint:     [f32; 4],   // RGBA tint multiplier (1,1,1,1 = no tint)
-    pub _pad:     [f32; 3],   // pad to 16-byte alignment (vec4 boundary)
+    /// EN-026 — was pure padding to the 16-byte boundary; now carried to the
+    /// shader as `@location(11) instance_extra: vec3<f32>`. The three floats
+    /// were already being uploaded, so exposing them costs nothing: no stride
+    /// change, no extra bandwidth. Particles use them for (atlas frame,
+    /// velocity-stretch length, random seed); anything else can leave them 0
+    /// and simply not declare location 11 — a vertex buffer may carry
+    /// attributes the shader does not consume.
+    pub extra:    [f32; 3],
 }
 
 impl InstanceData3D {
@@ -250,6 +269,7 @@ impl InstanceData3D {
                 wgpu::VertexAttribute { offset: 12, shader_location: 8,  format: wgpu::VertexFormat::Float32 },    // rot_y
                 wgpu::VertexAttribute { offset: 16, shader_location: 9,  format: wgpu::VertexFormat::Float32 },    // scale
                 wgpu::VertexAttribute { offset: 20, shader_location: 10, format: wgpu::VertexFormat::Float32x4 },  // tint
+                wgpu::VertexAttribute { offset: 36, shader_location: 11, format: wgpu::VertexFormat::Float32x3 },  // extra (EN-026)
             ],
         }
     }

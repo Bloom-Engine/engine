@@ -169,6 +169,17 @@ for (const platform of PLATFORMS) {
   // pointer-taking geometry (cross-module WASM memory TODO) and
   // filesystem captures (no fs on wasm; need _bytes/_str designs).
   const WEB_GAP_ALLOWLIST = new Set([
+    // EN-014 V3 — decodes image files from disk; wasm has no fs. The
+    // byte-array path (bloom_create_texture_array_ex) is the web route.
+    'bloom_create_texture_array_from_files',
+    // EN-025 — ragdolls are built on the native Jolt Rust wrapper
+    // (physics_jolt.rs). Web routes bloom_physics_* through JoltPhysics.js
+    // instead, so there is no Rust-side world to create bodies in.
+    'bloom_ragdoll_create',
+    'bloom_ragdoll_activate',
+    'bloom_ragdoll_push',
+    'bloom_ragdoll_update',
+    'bloom_ragdoll_release',
     'bloom_scene_set_lod',          // Perry-WASM linear-memory bridge TODO
     'bloom_take_screenshot',        // no fs — needs a bytes-returning design
     'bloom_set_env_clear_from_hdr', // no fs — needs a _bytes variant

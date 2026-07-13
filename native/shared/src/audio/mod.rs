@@ -80,6 +80,9 @@ pub struct AudioMixer {
     /// Default volume per sound handle, applied to future plays.
     sound_volumes: Vec<(f64, f32)>,
     master_volume: f32,
+    /// EN-029 — per-sound routing: (bus, reverb send, low-pass cutoff Hz).
+    /// A property of the sound, not of each play call.
+    routes: std::collections::HashMap<u64, (u8, f32, f32)>,
     tx: spsc::Producer<Cmd>,
     /// Present until the platform takes it for its audio thread; used for
     /// inline mixing on single-threaded targets (web).
@@ -105,6 +108,7 @@ impl AudioMixer {
             music: HandleRegistry::new(),
             sound_volumes: Vec::new(),
             master_volume: 1.0,
+            routes: std::collections::HashMap::new(),
             tx,
             renderer: Some(AudioRenderer::new(rx)),
         }
@@ -140,18 +144,73 @@ impl AudioMixer {
     pub fn play_sound(&mut self, handle: f64) {
         let Some(data) = self.sounds.get(handle).cloned() else { return };
         let volume = self.get_sound_volume(handle);
-        self.send(Cmd::PlaySound { sound_id: handle.to_bits(), data, volume, spatial: None });
+        let (bus, send, lowpass) = self.routing(handle);
+        self.send(Cmd::PlaySound {
+            sound_id: handle.to_bits(), data, volume, spatial: None,
+            bus, send, lowpass,
+        });
     }
 
     pub fn play_sound_3d(&mut self, handle: f64, x: f32, y: f32, z: f32) {
         let Some(data) = self.sounds.get(handle).cloned() else { return };
         let volume = self.get_sound_volume(handle);
+        let (bus, send, lowpass) = self.routing(handle);
         self.send(Cmd::PlaySound {
             sound_id: handle.to_bits(),
             data,
             volume,
             spatial: Some([x, y, z]),
+            bus, send, lowpass,
         });
+    }
+
+    // ---- EN-029 routing ------------------------------------------------
+    //
+    // Routing is a property of the *sound*, not of the individual play call:
+    // a footstep is always on the SFX bus, a menu blip is always UI. Setting
+    // it once at load keeps the per-shot call sites unchanged.
+
+    fn routing(&self, handle: f64) -> (u8, f32, f32) {
+        match self.routes.get(&handle.to_bits()) {
+            Some(r) => *r,
+            None => (render::bus::SFX, 0.0, 0.0),
+        }
+    }
+
+    /// Assign a sound to a mix bus (see `render::bus`).
+    pub fn set_sound_bus(&mut self, handle: f64, bus: u8) {
+        let e = self.routes.entry(handle.to_bits()).or_insert((render::bus::SFX, 0.0, 0.0));
+        e.0 = bus;
+    }
+
+    /// Reverb send for this sound, 0..1. This is what gives a gunshot its tail.
+    pub fn set_sound_reverb_send(&mut self, handle: f64, send: f32) {
+        let send = send.clamp(0.0, 1.0);
+        let e = self.routes.entry(handle.to_bits()).or_insert((render::bus::SFX, 0.0, 0.0));
+        e.1 = send;
+        // Also steer voices already in flight, so a zone change is audible on
+        // the tail that is sounding right now rather than only the next one.
+        self.send(Cmd::SetSoundSend { sound_id: handle.to_bits(), send });
+    }
+
+    /// Low-pass cutoff in Hz for this sound; 0 = bypass. The occlusion knob.
+    pub fn set_sound_lowpass(&mut self, handle: f64, cutoff: f32) {
+        let cutoff = cutoff.max(0.0);
+        let e = self.routes.entry(handle.to_bits()).or_insert((render::bus::SFX, 0.0, 0.0));
+        e.2 = cutoff;
+        self.send(Cmd::SetSoundLowpass { sound_id: handle.to_bits(), cutoff });
+    }
+
+    pub fn set_bus_gain(&mut self, bus: u8, gain: f32) {
+        self.send(Cmd::SetBusGain { bus, gain });
+    }
+
+    pub fn duck_bus(&mut self, bus: u8, amount: f32, attack: f32, release: f32, hold: f32) {
+        self.send(Cmd::DuckBus { bus, amount, attack, release, hold });
+    }
+
+    pub fn set_reverb(&mut self, size: f32, damp: f32, wet: f32) {
+        self.send(Cmd::SetReverbParams { size, damp, wet });
     }
 
     pub fn stop_sound(&mut self, handle: f64) {
@@ -346,6 +405,112 @@ mod tests {
         let mut out = [0.0f32; 32];
         a.mix_output(&mut out);
         assert!(out.iter().any(|&s| s != 0.0), "voice produced no output");
+    }
+
+    // ---- EN-029 -------------------------------------------------------
+
+    fn peak(buf: &[f32]) -> f32 {
+        buf.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    #[test]
+    fn bus_gain_scales_only_its_own_bus() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(tone(4096));
+        a.play_sound(h);
+        let mut loud = [0.0f32; 256];
+        a.mix_output(&mut loud);
+
+        let mut b = AudioMixer::new();
+        let h2 = b.load_sound(tone(4096));
+        b.set_bus_gain(render::bus::SFX, 0.25);
+        b.play_sound(h2);
+        let mut quiet = [0.0f32; 256];
+        b.mix_output(&mut quiet);
+
+        assert!(peak(&quiet) < peak(&loud) * 0.5,
+            "SFX bus gain did not attenuate: {} vs {}", peak(&quiet), peak(&loud));
+
+        // A sound on a *different* bus must be untouched by that gain.
+        let mut c = AudioMixer::new();
+        let h3 = c.load_sound(tone(4096));
+        c.set_sound_bus(h3, render::bus::UI);
+        c.set_bus_gain(render::bus::SFX, 0.0);
+        c.play_sound(h3);
+        let mut ui = [0.0f32; 256];
+        c.mix_output(&mut ui);
+        assert!(peak(&ui) > 0.1, "muting SFX also muted the UI bus");
+    }
+
+    #[test]
+    fn duck_pulls_the_bus_down_then_recovers() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(tone(1 << 16));
+        a.play_sound(h);
+        let mut out = [0.0f32; 512];
+        a.mix_output(&mut out);
+        let dry = peak(&out);
+
+        // Duck hard, effectively instantly, and hold well past the block.
+        a.duck_bus(render::bus::SFX, 0.9, 0.0001, 0.5, 1.0);
+        let mut ducked = [0.0f32; 512];
+        a.mix_output(&mut ducked);
+        assert!(peak(&ducked) < dry * 0.5,
+            "duck had no effect: {} vs {}", peak(&ducked), dry);
+    }
+
+    #[test]
+    fn lowpass_attenuates_a_nyquist_tone() {
+        // tone() alternates +0.5/-0.5 every sample: that is exactly Nyquist,
+        // the highest frequency representable. A low cutoff must crush it.
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(tone(4096));
+        a.set_sound_lowpass(h, 200.0);
+        a.play_sound(h);
+        let mut out = [0.0f32; 512];
+        a.mix_output(&mut out);
+        assert!(peak(&out) < 0.1,
+            "low-pass did not attenuate a Nyquist tone: peak {}", peak(&out));
+    }
+
+    /// Mix `blocks` × 256-sample blocks, returning the peak seen *after* the
+    /// first block. The shortest comb delay is 1116 samples (~25 ms), so a
+    /// reverb tail cannot appear inside one short block — you have to run the
+    /// mixer past the delay length before asking whether it rang.
+    fn peak_after_first_block(a: &mut AudioMixer, blocks: usize) -> f32 {
+        let mut first = [0.0f32; 256];
+        a.mix_output(&mut first);
+        let mut p = 0.0f32;
+        for _ in 1..blocks {
+            let mut out = [0.0f32; 256];
+            a.mix_output(&mut out);
+            p = p.max(peak(&out));
+        }
+        p
+    }
+
+    #[test]
+    fn reverb_rings_after_the_source_stops() {
+        let mut a = AudioMixer::new();
+        // A short click, fully sent to a long, bright reverb.
+        let h = a.load_sound(tone(8));
+        a.set_reverb(0.9, 0.1, 1.0);
+        a.set_sound_reverb_send(h, 1.0);
+        a.play_sound(h);
+        // 40 blocks × 128 frames = 5120 frames, comfortably past the 1356-sample
+        // longest comb.
+        let tail = peak_after_first_block(&mut a, 40);
+        assert!(tail > 0.0, "reverb produced no tail after the source ended");
+    }
+
+    #[test]
+    fn reverb_is_bypassed_when_wet_is_zero() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(tone(8));
+        a.set_sound_reverb_send(h, 1.0); // sending, but nothing returns
+        a.play_sound(h);
+        let tail = peak_after_first_block(&mut a, 40);
+        assert_eq!(tail, 0.0, "wet=0 must cost nothing and return nothing");
     }
 
     #[test]

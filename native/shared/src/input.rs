@@ -58,6 +58,12 @@ pub struct InputState {
     gamepad_buttons_released: [bool; MAX_GAMEPAD_BUTTONS],
     prev_gamepad_buttons: [bool; MAX_GAMEPAD_BUTTONS],
     pub gamepad_axis_count: usize,
+    /// EN-031 rumble: (low-frequency motor, high-frequency motor, seconds
+    /// left), all 0 = motors off. The FFI writes this; each platform's input
+    /// poll drives its own vibration API from it and decrements the timer.
+    /// Keeping the *state* shared and only the driving per-platform is what
+    /// stops the six platform crates from drifting again.
+    pub rumble: [f32; 3],
 
     // Touch
     pub touch_points: [TouchPoint; MAX_TOUCH_POINTS],
@@ -103,6 +109,7 @@ impl InputState {
             gamepad_buttons_released: [false; MAX_GAMEPAD_BUTTONS],
             prev_gamepad_buttons: [false; MAX_GAMEPAD_BUTTONS],
             gamepad_axis_count: 0,
+            rumble: [0.0; 3],
             touch_points: [EMPTY_TOUCH; MAX_TOUCH_POINTS],
             touch_count: 0,
             touch_pending_release: [false; MAX_TOUCH_POINTS],

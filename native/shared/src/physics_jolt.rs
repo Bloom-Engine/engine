@@ -940,6 +940,48 @@ impl JoltPhysics {
         if c == BJ_INVALID { 0.0 } else { self.constraints.alloc((w, c)) }
     }
 
+    /// EN-025 — six-DOF, which is what a ragdoll joint actually is: translation
+    /// locked (a shoulder does not slide off the torso) and rotation limited (an
+    /// elbow does not bend backwards). An unlimited ball joint is cheaper and
+    /// gives you spaghetti; the limits are the whole difference between a corpse
+    /// and a novelty.
+    ///
+    /// `rot_limits` is [xmin, xmax, ymin, ymax, zmin, zmax] in radians.
+    #[allow(clippy::too_many_arguments)]
+    pub fn constraint_six_dof_locked_translation(
+        &mut self, body_a: f64, body_b: f64,
+        ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32,
+        rot_limits: [f32; 6], world_space: bool,
+    ) -> f64 {
+        let (w, anchors) = match self.make_anchors(body_a, body_b, ax, ay, az, bx, by, bz, world_space) {
+            Some(v) => v, None => return 0.0,
+        };
+        // min >= max means LOCKED (see the shim header), so this pins all three
+        // translation axes.
+        let trans: [f32; 6] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+        let c = unsafe {
+            bj_constraint_six_dof(w, &anchors, trans.as_ptr(), rot_limits.as_ptr())
+        };
+        if c == BJ_INVALID { 0.0 } else { self.constraints.alloc((w, c)) }
+    }
+
+    /// Body world transform as (position, quaternion) — the ragdoll needs the
+    /// full frame, and the existing getters hand back one axis at a time.
+    pub fn body_transform(&self, h: f64) -> Option<([f32; 3], [f32; 4])> {
+        let p = [
+            self.body_get_position_axis(h, 0) as f32,
+            self.body_get_position_axis(h, 1) as f32,
+            self.body_get_position_axis(h, 2) as f32,
+        ];
+        let q = [
+            self.body_get_rotation_axis(h, 0) as f32,
+            self.body_get_rotation_axis(h, 1) as f32,
+            self.body_get_rotation_axis(h, 2) as f32,
+            self.body_get_rotation_axis(h, 3) as f32,
+        ];
+        Some((p, q))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn constraint_hinge(
         &mut self, body_a: f64, body_b: f64,

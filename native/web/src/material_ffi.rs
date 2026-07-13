@@ -454,3 +454,223 @@ pub fn bloom_get_model_material_count(handle: f64) -> f64 {
         None => 0.0,
     }
 }
+
+// ============================================================
+// EN-028 animation mixer / EN-033 sockets / EN-026 particles /
+// EN-027 decals — web ports.
+//
+// The mixer and both VFX systems are pure CPU state in bloom-shared, so the
+// web crate gets the real behaviour, not a stub: same ModelManager, same
+// ParticleManager, same DecalManager. The only web-specific care is that the
+// particle/decal *upload* path goes through the same material-system dynamic
+// instance buffer, which WebGPU supports.
+// ============================================================
+
+#[wasm_bindgen]
+pub fn bloom_anim_play(handle: f64, clip: f64, fade: f64, speed: f64, looping: f64) {
+    engine().models.anim_play(handle, clip as usize, fade as f32, speed as f32, looping != 0.0);
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_set_layer(handle: f64, clip: f64, weight: f64, mask_root: f64, speed: f64, looping: f64) {
+    engine().models.anim_set_layer(handle, clip as i32, weight as f32, mask_root as i32, speed as f32, looping != 0.0);
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_set_root_motion(handle: f64, on: f64) {
+    engine().models.anim_set_root_motion(handle, on != 0.0);
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_update(handle: f64, dt: f64, scale: f64, px: f64, py: f64, pz: f64, rot_y: f64) {
+    let rot_y_f = rot_y as f32;
+    let eng = engine();
+    eng.models.advance_and_update(handle, dt as f32);
+    if let Some(anim) = eng.models.get_animation(handle) {
+        if !anim.joint_matrices.is_empty() {
+            eng.renderer.set_joint_matrices_scaled(
+                &anim.joint_matrices, scale as f32,
+                [px as f32, py as f32, pz as f32], rot_y_f.sin(), rot_y_f.cos());
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_finished(handle: f64) -> f64 {
+    if engine().models.anim_finished(handle) { 1.0 } else { 0.0 }
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_clip_duration(handle: f64, clip: f64) -> f64 {
+    engine().models.anim_clip_duration(handle, clip as usize) as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_anim_root_delta(handle: f64, axis: f64) -> f64 {
+    let d = engine().models.anim_root_delta(handle);
+    let i = axis as usize;
+    if i < 3 { d[i] as f64 } else { 0.0 }
+}
+
+#[wasm_bindgen]
+pub fn bloom_model_find_joint(handle: f64, name: String) -> f64 {
+    engine().models.find_joint(handle, &name) as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_model_joint_world(handle: f64, joint: f64, comp: f64) -> f64 {
+    let j = joint as i64;
+    let c = comp as usize;
+    if j < 0 || c > 15 { return 0.0; }
+    match engine().models.joint_world(handle, j as usize) {
+        Some(m) => m[c / 4][c % 4] as f64,
+        None => 0.0,
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_particles_create(capacity: f64) -> f64 {
+    let cap = (capacity as usize).clamp(1, 100_000);
+    let eng = engine();
+    let ib = eng.renderer.material_system.create_dynamic_instance_buffer(&eng.renderer.device, cap as u32);
+    eng.particles.create(cap, ib) as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_particles_configure(sys: f64) {
+    let eng = engine();
+    let params: Vec<f32> = eng.models.scratch_f32.clone();
+    eng.models.mesh_scratch_reset();
+    if let Some(s) = eng.particles.get_mut(sys as u32) {
+        s.configure_from_slice(&params);
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_particles_emit(sys: f64, x: f64, y: f64, z: f64, dx: f64, dy: f64, dz: f64, count: f64) {
+    if let Some(s) = engine().particles.get_mut(sys as u32) {
+        s.emit([x as f32, y as f32, z as f32], [dx as f32, dy as f32, dz as f32], (count as usize).min(4096));
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_particles_update(sys: f64, dt: f64) -> f64 {
+    let eng = engine();
+    let (live, ib) = match eng.particles.get_mut(sys as u32) {
+        Some(s) => (s.update(dt as f32), s.instance_buffer),
+        None => return 0.0,
+    };
+    if live > 0 {
+        let packed: Vec<f32> = match eng.particles.get_mut(sys as u32) {
+            Some(s) => s.packed()[..(live as usize) * 12].to_vec(),
+            None => return 0.0,
+        };
+        eng.renderer.material_system.update_instance_buffer(&eng.renderer.queue, ib, &packed, live);
+    }
+    live as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_particles_instance_buffer(sys: f64) -> f64 {
+    engine().particles.get_mut(sys as u32).map(|s| s.instance_buffer as f64).unwrap_or(0.0)
+}
+
+#[wasm_bindgen]
+pub fn bloom_particles_clear(sys: f64) {
+    if let Some(s) = engine().particles.get_mut(sys as u32) { s.clear(); }
+}
+
+#[wasm_bindgen]
+pub fn bloom_particles_live(sys: f64) -> f64 {
+    engine().particles.get_mut(sys as u32).map(|s| s.live as f64).unwrap_or(0.0)
+}
+
+#[wasm_bindgen]
+pub fn bloom_decals_init(capacity: f64) -> f64 {
+    let cap = (capacity as usize).clamp(1, 8192);
+    let eng = engine();
+    let ib = eng.renderer.material_system.create_dynamic_instance_buffer(&eng.renderer.device, cap as u32);
+    eng.decals.init(cap, ib);
+    ib as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_decals_spawn(x: f64, y: f64, z: f64, nx: f64, ny: f64, nz: f64, size: f64, roll: f64) {
+    engine().decals.spawn_styled(
+        [x as f32, y as f32, z as f32],
+        [nx as f32, ny as f32, nz as f32],
+        size as f32, roll as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_decals_set_style(frame: f64, r: f64, g: f64, b: f64, a: f64, life: f64, fade: f64) {
+    engine().decals.style = bloom_shared::decals::DecalStyle {
+        frame: frame as f32,
+        color: [r as f32, g as f32, b as f32, a as f32],
+        life: life as f32,
+        fade: fade as f32,
+    };
+}
+
+#[wasm_bindgen]
+pub fn bloom_decals_update(dt: f64) -> f64 {
+    let eng = engine();
+    let live = eng.decals.update(dt as f32);
+    let ib = eng.decals.instance_buffer;
+    if live > 0 {
+        let packed: Vec<f32> = eng.decals.packed()[..(live as usize) * 12].to_vec();
+        eng.renderer.material_system.update_instance_buffer(&eng.renderer.queue, ib, &packed, live);
+    }
+    live as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_decals_instance_buffer() -> f64 {
+    engine().decals.instance_buffer as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_decals_clear() {
+    engine().decals.clear();
+}
+
+// EN-029 — audio buses / reverb / occlusion low-pass. All CPU DSP in
+// bloom-shared's AudioMixer, so web gets the real thing.
+
+#[wasm_bindgen]
+pub fn bloom_set_sound_bus(handle: f64, bus: f64) {
+    engine().audio.set_sound_bus(handle, bus as u8);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_sound_reverb_send(handle: f64, send: f64) {
+    engine().audio.set_sound_reverb_send(handle, send as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_sound_lowpass(handle: f64, cutoff: f64) {
+    engine().audio.set_sound_lowpass(handle, cutoff as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_bus_gain(bus: f64, gain: f64) {
+    engine().audio.set_bus_gain(bus as u8, gain as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_duck_bus(bus: f64, amount: f64, attack: f64, release: f64, hold: f64) {
+    engine().audio.duck_bus(bus as u8, amount as f32, attack as f32, release as f32, hold as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_reverb(size: f64, damp: f64, wet: f64) {
+    engine().audio.set_reverb(size as f32, damp as f32, wet as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_compile_material_instanced_bucket(source: String, bucket: f64, reads_scene: f64) -> f64 {
+    match engine().renderer.compile_material_instanced_bucket(&source, bucket as u32, reads_scene != 0.0) {
+        Ok(handle) => handle as f64,
+        Err(e) => { web_sys::console::error_1(&format!("[material] instanced compile failed: {:?}", e).into()); 0.0 }
+    }
+}

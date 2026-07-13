@@ -16,11 +16,46 @@
 //                          by the brush tool to find where the user is painting.
 //   defaultTerrain       — a flat 128x128 terrain centered at origin.
 
-import { TerrainData, Vec3Lit } from './types';
+import { TerrainData, TerrainLayer, Vec3Lit } from './types';
 
 // Vertex stride in floats (matches scene graph expectation).
 // See `bloom/engine/src/scene/index.ts` updateSceneNodeGeometry docs.
 const STRIDE = 12;
+
+
+// ---- splat mask preview -----------------------------------------------------
+
+// Mask colours for the first eight splat layers, used to tint the heightmap
+// mesh's vertex colours so a painted layer is VISIBLE while you paint it.
+//
+// This is a MASK preview, not a material preview: it shows you *where* layer 2
+// is, not what layer 2's texture looks like. A game renders the real textures
+// from `TerrainLayer.textureRef` (the shooter samples them triplanar, blended by
+// exactly these weights); nothing but the editor viewport ever sees these
+// colours. They are ordered to read naturally for the common
+// grass/dry/dirt/rock set, so the preview is not actively misleading.
+const MASK_PALETTE: number[] = [
+  0.36, 0.60, 0.24,   // 0 — green      (lush grass)
+  0.72, 0.68, 0.30,   // 1 — olive      (dry grass)
+  0.55, 0.40, 0.26,   // 2 — brown      (dirt)
+  0.58, 0.58, 0.60,   // 3 — grey       (rock)
+  0.80, 0.74, 0.55,   // 4 — sand
+  0.90, 0.92, 0.95,   // 5 — snow
+  0.30, 0.34, 0.42,   // 6 — slate
+  0.62, 0.30, 0.28,   // 7 — clay
+];
+
+// Unpainted ground. Also the colour of a terrain with no layers at all, which
+// is every terrain until someone opens the paint tool.
+const BARE_R = 0.55;
+const BARE_G = 0.60;
+const BARE_B = 0.50;
+
+/// The mask colour the editor viewport uses for splat layer `i`. Wraps past 8.
+export function terrainLayerMaskColor(i: number): Vec3Lit {
+  const k = (i % 8) * 3;
+  return [MASK_PALETTE[k], MASK_PALETTE[k + 1], MASK_PALETTE[k + 2]];
+}
 
 // Default grid size for new worlds. Large enough for meaningful terrain,
 // small enough to rebuild in <1ms on any modern CPU.
@@ -49,11 +84,20 @@ export function buildHeightmapMesh(t: TerrainData): { vertices: number[]; indice
   const vertices: number[] = new Array<number>(vertexCount * STRIDE);
   const indices: number[] = new Array<number>((width - 1) * (depth - 1) * 6);
 
-  // Default vertex color (grayscale stone). Editor / game can tint per-layer
-  // via the splat weights once that pipeline lands.
-  const cr = 0.55;
-  const cg = 0.60;
-  const cb = 0.50;
+  // Splat preview. Vertex colour = the bare-ground grey, with each painted
+  // layer's mask colour mixed in by its weight at this cell. A cell nobody has
+  // painted keeps the grey exactly, so an unpainted terrain looks precisely as
+  // it did before painting existed.
+  //
+  // Hoisted out of the vertex loop: `layers` is up to eight parallel arrays and
+  // resolving `t.layers[l].weights` 16,384 times is 16,384 property chains.
+  const layerCount = t.layers.length;
+  const layerWeights = new Array<number[]>(layerCount);
+  const layerColor = new Array<Vec3Lit>(layerCount);
+  for (let l = 0; l < layerCount; l++) {
+    layerWeights[l] = t.layers[l].weights;
+    layerColor[l] = terrainLayerMaskColor(l);
+  }
   const ca = 1.0;
 
   // Vertex pass.
@@ -61,6 +105,23 @@ export function buildHeightmapMesh(t: TerrainData): { vertices: number[]; indice
     for (let x = 0; x < width; x++) {
       const idx = z * width + x;
       const h = heights[idx];
+
+      let cr = BARE_R;
+      let cg = BARE_G;
+      let cb = BARE_B;
+      for (let l = 0; l < layerCount; l++) {
+        const ws = layerWeights[l];
+        // A layer whose weights array is short (hand-edited file, or a layer
+        // added before the grid was resized) contributes nothing rather than
+        // reading undefined and poisoning the whole vertex with NaN.
+        if (idx >= ws.length) continue;
+        const wgt = ws[idx];
+        if (wgt <= 0.0) continue;
+        const c = layerColor[l];
+        cr = cr + (c[0] - cr) * wgt;
+        cg = cg + (c[1] - cg) * wgt;
+        cb = cb + (c[2] - cb) * wgt;
+      }
 
       // World-space position.
       const wx = originX + x * cellSize;
@@ -119,6 +180,7 @@ export function buildHeightmapMesh(t: TerrainData): { vertices: number[]; indice
 
   return { vertices: vertices, indices: indices };
 }
+
 
 // Bilinear sample of the terrain at world-space (wx, wz). Returns the world
 // Y of the surface at that point, including the terrain's origin offset.
@@ -249,6 +311,45 @@ export function defaultTerrain(): TerrainData {
   };
 }
 
+/// A new, fully-unpainted splat layer sized to `t`'s grid.
+///
+/// Weights start at zero everywhere, which means "this layer is nowhere" — the
+/// terrain keeps whatever it looked like before the layer was added. Adding a
+/// layer is therefore always a no-op until you paint with it, which is the only
+/// behaviour that makes "add layer" a safe button to press.
+export function createTerrainLayer(t: TerrainData, id: string, textureRef: string, tileScale: number): TerrainLayer {
+  const n = t.width * t.depth;
+  const w = new Array<number>(n);
+  for (let i = 0; i < n; i++) w[i] = 0;
+  return { id: id, textureRef: textureRef, weights: w, tileScale: tileScale };
+}
+
+/// Quantize a splat weight for storage.
+///
+/// Weights are consumed as an 8-bit texture, so anything past ~3 decimals is
+/// precision that cannot survive the trip to the GPU — but it CAN survive the
+/// trip to the JSON file, where `0.5019607843137255` costs 18 bytes and there
+/// are `width * depth * layers` of them. A 128² four-layer terrain is 65,536
+/// weights; at full precision that is a megabyte of noise in the diff.
+export function quantizeWeight(w: number): number {
+  const c = clamp(w, 0, 1);
+  return Math.round(c * 1000) / 1000;
+}
+
+// Written with `if` statements, NOT the obvious `v < lo ? lo : (v > hi ? hi : v)`.
+//
+// Perry miscompiles a module-private helper whose body is a single nested-ternary
+// return: called from another function in the same module it evaluates to the
+// FIRST branch regardless of the condition — `clamp(0.5, 0, 1)` returns 0. The
+// same helper written with `if` statements is correct, and so is the same ternary
+// inlined at the call site. See the shooter's docs/perry-quirks.md #8.
+//
+// Pinned by the editor self-test `testSplatPaintPartition` ("weights quantize to
+// 3dp"), which fails outright if this is "simplified" back to a ternary — at
+// which point every splat weight silently becomes 0 and every painted terrain
+// loads unpainted.
 function clamp(v: number, lo: number, hi: number): number {
-  return v < lo ? lo : (v > hi ? hi : v);
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
 }

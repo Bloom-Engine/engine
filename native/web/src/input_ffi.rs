@@ -1,4 +1,4 @@
-//! Input FFI surface for web: keyboard/mouse/gamepad/touch getters plus
+﻿//! Input FFI surface for web: keyboard/mouse/gamepad/touch getters plus
 //! the injection entry points the JS glue calls from DOM event
 //! listeners. Split from lib.rs (2000-line file policy).
 
@@ -198,5 +198,21 @@ pub fn bloom_inject_gamepad_button_down(button: f64) {
 #[wasm_bindgen]
 pub fn bloom_inject_gamepad_button_up(button: f64) {
     engine().input.set_gamepad_button_up(button as usize);
+}
+
+
+/// EN-031 â€” gamepad rumble. The Gamepad API exposes vibrationActuator, but
+/// only behind a user-gesture requirement and with patchy support, so the web
+/// port records the request (keeping the symbol and the state consistent with
+/// native) without driving a motor. Wire `playEffect` here when the browser
+/// story settles.
+#[wasm_bindgen]
+pub fn bloom_gamepad_rumble(low: f64, high: f64, seconds: f64) {
+    let inp = &mut engine().input;
+    inp.rumble = [
+        (low as f32).clamp(0.0, 1.0),
+        (high as f32).clamp(0.0, 1.0),
+        (seconds as f32).clamp(0.0, 10.0),
+    ];
 }
 

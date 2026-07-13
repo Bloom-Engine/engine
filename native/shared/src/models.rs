@@ -56,6 +56,62 @@ pub struct SkeletonData {
     pub root_joints: Vec<usize>,
 }
 
+/// EN-028 — per-model animation mixer.
+///
+/// Three things a single-clip sampler cannot do, all of which read as
+/// "cheap" on screen: transitions pop, an attacking character has to stop
+/// walking, and authored locomotion arcs (a pounce, a lunge) get replaced
+/// by hand-tuned kinematics because the root is nailed to the rest pose.
+///
+/// Layout: a base track that crossfades from `prev` to `cur` over
+/// `fade_dur`, plus one optional additive-by-mask layer (an attack driving
+/// the spine-up while the legs keep walking). All clocks advance in
+/// `advance_animation`, so the game hands over a dt and never tracks clip
+/// time itself.
+#[derive(Clone)]
+pub struct AnimMixer {
+    pub cur_clip: usize,
+    pub cur_time: f32,
+    pub cur_speed: f32,
+    pub cur_loop: bool,
+    /// Clip we are fading *out* of. `fade_dur <= 0` means no fade in flight.
+    pub prev_clip: usize,
+    pub prev_time: f32,
+    pub prev_speed: f32,
+    pub prev_loop: bool,
+    pub fade_t: f32,
+    pub fade_dur: f32,
+    /// Masked layer. `layer_clip < 0` = inactive.
+    pub layer_clip: i32,
+    pub layer_time: f32,
+    pub layer_speed: f32,
+    pub layer_loop: bool,
+    pub layer_weight: f32,
+    /// Root joint of the masked subtree (e.g. the spine). Every joint at or
+    /// below it takes the layer pose; everything else keeps the base pose.
+    pub layer_mask_root: i32,
+    /// Opt-in root motion. Off by default so existing games are unchanged.
+    pub root_motion: bool,
+    pub root_delta: [f32; 3],
+    /// True once a non-looping `cur_clip` has played past its duration.
+    pub finished: bool,
+    pub started: bool,
+}
+
+impl Default for AnimMixer {
+    fn default() -> Self {
+        Self {
+            cur_clip: 0, cur_time: 0.0, cur_speed: 1.0, cur_loop: true,
+            prev_clip: 0, prev_time: 0.0, prev_speed: 1.0, prev_loop: true,
+            fade_t: 0.0, fade_dur: 0.0,
+            layer_clip: -1, layer_time: 0.0, layer_speed: 1.0, layer_loop: false,
+            layer_weight: 0.0, layer_mask_root: -1,
+            root_motion: false, root_delta: [0.0; 3],
+            finished: false, started: false,
+        }
+    }
+}
+
 pub struct ModelAnimation {
     pub skeleton: Option<SkeletonData>,
     pub animations: Vec<AnimationData>,
@@ -63,6 +119,15 @@ pub struct ModelAnimation {
     /// Reference rest-pose rotations (from first animation, sampled at t=0).
     /// Used for retargeting when multiple armatures have different rest orientations.
     pub ref_rest_rotations: Option<Vec<[f32; 4]>>,
+    /// EN-028 mixer state.
+    pub mixer: AnimMixer,
+    /// EN-033 — joint world transforms *before* the inverse-bind multiply.
+    /// `joint_matrices` is skinning-space and useless for attaching props;
+    /// this is the model-space transform a socket actually wants.
+    pub joint_world: Vec<[[f32; 4]; 4]>,
+    /// Cached per-joint layer weights, rebuilt when `layer_mask_root` changes.
+    pub mask_weights: Vec<f32>,
+    pub mask_cached_root: i32,
 }
 
 pub struct ModelManager {
@@ -178,6 +243,12 @@ impl ModelManager {
             Some(model) => (model.bbox_min, model.bbox_max),
             None => ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
         }
+    }
+
+    /// EN-025 — the ragdoll writes joint matrices directly, bypassing the
+    /// sampler entirely: once a thing is dead, physics owns its pose.
+    pub fn get_animation_mut(&mut self, handle: f64) -> Option<&mut ModelAnimation> {
+        self.animations.get_mut(handle)
     }
 
     pub fn get_animation(&self, handle: f64) -> Option<&ModelAnimation> {
@@ -486,86 +557,362 @@ impl ModelManager {
                 None => return,
             };
             if anim_index >= model_anim.animations.len() { return; }
-
-            let joint_count = skeleton.joints.len();
-            if model_anim.joint_matrices.len() != joint_count {
-                model_anim.joint_matrices = vec![mat4_identity(); joint_count];
-            }
-
-            // Initialize from rest-pose transforms (fallback for non-animated joints)
-            let mut local_translations: Vec<[f32; 3]> = skeleton.joints.iter()
-                .map(|j| j.rest_translation).collect();
-            let mut local_rotations: Vec<[f32; 4]> = skeleton.joints.iter()
-                .map(|j| j.rest_rotation).collect();
-            let mut local_scales: Vec<[f32; 3]> = skeleton.joints.iter()
-                .map(|j| j.rest_scale).collect();
-
-            let anim = &model_anim.animations[anim_index];
-            let t = if anim.duration > 0.0 { time % anim.duration } else { 0.0 };
-
             #[cfg(debug_assertions)]
-            let mut channels_applied = 0usize;
-            for channel in &anim.channels {
-                let ji = channel.joint_index;
-                if ji >= joint_count { continue; }
-                #[cfg(debug_assertions)]
-                { channels_applied += 1; }
+            let joint_count = skeleton.joints.len();
 
-                if !channel.translations.is_empty() && !channel.timestamps.is_empty() {
-                    local_translations[ji] = sample_vec3(&channel.timestamps, &channel.translations, t);
-                }
-                if !channel.rotations.is_empty() {
-                    let rot_ts = if !channel.rotation_timestamps.is_empty() { &channel.rotation_timestamps } else { &channel.timestamps };
-                    if !rot_ts.is_empty() {
-                        local_rotations[ji] = sample_quat(rot_ts, &channel.rotations, t);
-                    }
-                }
-                if !channel.scales.is_empty() {
-                    let scale_ts = if !channel.scale_timestamps.is_empty() { &channel.scale_timestamps } else { &channel.timestamps };
-                    if !scale_ts.is_empty() {
-                        local_scales[ji] = sample_vec3(scale_ts, &channel.scales, t);
-                    }
-                }
-            }
-
-            // Lock root translation to rest pose (strip all root motion)
-            local_translations[0] = skeleton.joints[0].rest_translation;
-
-            // Build world transforms by walking the hierarchy from roots
-            let mut world_transforms = vec![mat4_identity(); joint_count];
-
-            let root_joints = skeleton.root_joints.clone();
-            for &root in &root_joints {
-                compute_joint_transforms(
-                    skeleton, root, &mat4_identity(),
-                    &local_translations, &local_rotations, &local_scales,
-                    &mut world_transforms,
-                );
-            }
-
-            // Multiply by inverse bind matrices to get final joint matrices
-            for i in 0..joint_count {
-                model_anim.joint_matrices[i] = mat4_mul(&world_transforms[i], &skeleton.joints[i].inverse_bind);
-            }
+            let pose = sample_local_pose(skeleton, &model_anim.animations[anim_index], time, true);
+            model_anim.apply_pose(&pose);
 
             #[cfg(debug_assertions)]
             {
                 static mut DEBUG_PRINTED: bool = false;
                 unsafe {
-                    if !DEBUG_PRINTED {
+                    if !DEBUG_PRINTED && joint_count > 0 {
                         DEBUG_PRINTED = true;
-                        eprintln!("[anim] channels_applied={}, t={:.3}, anim_index={}", channels_applied, t, anim_index);
-                        eprintln!("[anim] Joint0 local: t=[{:.2},{:.2},{:.2}] r=[{:.4},{:.4},{:.4},{:.4}]",
-                            local_translations[0][0], local_translations[0][1], local_translations[0][2],
-                            local_rotations[0][0], local_rotations[0][1], local_rotations[0][2], local_rotations[0][3]);
-                        let m = &model_anim.joint_matrices[0];
-                        eprintln!("[anim] Joint0 final diag=[{:.4},{:.4},{:.4}] trans=[{:.4},{:.4},{:.4}]",
-                            m[0][0], m[1][1], m[2][2], m[3][0], m[3][1], m[3][2]);
+                        eprintln!("[anim] joints={}, t={:.3}, anim_index={}", joint_count, time, anim_index);
                     }
                 }
             }
         }
     }
+
+    // ---- EN-028 mixer -----------------------------------------------------
+
+    /// Start a transition to `clip`. Re-requesting the clip already playing is
+    /// a no-op, so game code can call this unconditionally every frame ("I
+    /// want to be walking") instead of tracking edges itself — which is how
+    /// this gets used in practice and where the pops came from before.
+    pub fn anim_play(&mut self, handle: f64, clip: usize, fade: f32, speed: f32, looping: bool) {
+        if let Some(ma) = self.animations.get_mut(handle) {
+            if clip >= ma.animations.len() { return; }
+            let m = &mut ma.mixer;
+            if m.started && m.cur_clip == clip && m.fade_dur <= 0.0 {
+                m.cur_speed = speed;
+                m.cur_loop = looping;
+                return;
+            }
+            if m.started && fade > 0.0 {
+                m.prev_clip = m.cur_clip;
+                m.prev_time = m.cur_time;
+                m.prev_speed = m.cur_speed;
+                m.prev_loop = m.cur_loop;
+                m.fade_dur = fade;
+                m.fade_t = 0.0;
+            } else {
+                m.fade_dur = 0.0;
+                m.fade_t = 0.0;
+            }
+            m.cur_clip = clip;
+            m.cur_time = 0.0;
+            m.cur_speed = speed;
+            m.cur_loop = looping;
+            m.finished = false;
+            m.started = true;
+        }
+    }
+
+    /// Masked layer: `clip` drives every joint at or below `mask_root`,
+    /// blended in by `weight`. weight <= 0 (or clip < 0) turns it off.
+    pub fn anim_set_layer(&mut self, handle: f64, clip: i32, weight: f32, mask_root: i32, speed: f32, looping: bool) {
+        if let Some(ma) = self.animations.get_mut(handle) {
+            let m = &mut ma.mixer;
+            let off = clip < 0 || weight <= 0.0 || (clip as usize) >= ma.animations.len();
+            if off {
+                m.layer_clip = -1;
+                m.layer_weight = 0.0;
+                return;
+            }
+            if m.layer_clip != clip {
+                m.layer_time = 0.0;
+                m.layer_clip = clip;
+            }
+            m.layer_weight = weight.clamp(0.0, 1.0);
+            m.layer_mask_root = mask_root;
+            m.layer_speed = speed;
+            m.layer_loop = looping;
+        }
+    }
+
+    pub fn anim_set_root_motion(&mut self, handle: f64, on: bool) {
+        if let Some(ma) = self.animations.get_mut(handle) {
+            ma.mixer.root_motion = on;
+            ma.mixer.root_delta = [0.0; 3];
+        }
+    }
+
+    pub fn anim_finished(&self, handle: f64) -> bool {
+        self.animations.get(handle).map(|m| m.mixer.finished).unwrap_or(true)
+    }
+
+    pub fn anim_clip_duration(&self, handle: f64, clip: usize) -> f32 {
+        self.animations.get(handle)
+            .and_then(|m| m.animations.get(clip))
+            .map(|a| a.duration)
+            .unwrap_or(0.0)
+    }
+
+    pub fn anim_root_delta(&self, handle: f64) -> [f32; 3] {
+        self.animations.get(handle).map(|m| m.mixer.root_delta).unwrap_or([0.0; 3])
+    }
+
+    pub fn find_joint(&self, handle: f64, name: &str) -> i32 {
+        if let Some(ma) = self.animations.get(handle) {
+            if let Some(sk) = &ma.skeleton {
+                for (i, j) in sk.joints.iter().enumerate() {
+                    if j.name == name { return i as i32; }
+                }
+                // Fall back to a case-insensitive contains match: exporters
+                // decorate names ("mixamorig:Hand_R", "Bip01 R Hand") often
+                // enough that an exact match is the exception, not the rule.
+                let want = name.to_ascii_lowercase();
+                for (i, j) in sk.joints.iter().enumerate() {
+                    if j.name.to_ascii_lowercase().contains(&want) { return i as i32; }
+                }
+            }
+        }
+        -1
+    }
+
+    /// Model-space transform of a joint (EN-033 sockets). Valid after the
+    /// frame's `advance_and_update`.
+    pub fn joint_world(&self, handle: f64, joint: usize) -> Option<[[f32; 4]; 4]> {
+        self.animations.get(handle)
+            .and_then(|m| m.joint_world.get(joint))
+            .copied()
+    }
+
+    /// Advance every mixer clock by `dt` and rebuild the pose. One call per
+    /// model per frame; the game never touches clip time.
+    pub fn advance_and_update(&mut self, handle: f64, dt: f32) {
+        if let Some(ma) = self.animations.get_mut(handle) {
+            if ma.skeleton.is_none() || ma.animations.is_empty() { return; }
+            if !ma.mixer.started { ma.mixer.started = true; }
+
+            // --- advance clocks
+            let cur_dur = ma.animations.get(ma.mixer.cur_clip).map(|a| a.duration).unwrap_or(0.0);
+            let t_before = ma.mixer.cur_time;
+            let t_raw = ma.mixer.cur_time + dt * ma.mixer.cur_speed;
+            let mut wrapped = false;
+            ma.mixer.cur_time = if cur_dur <= 0.0 {
+                0.0
+            } else if ma.mixer.cur_loop {
+                if t_raw >= cur_dur { wrapped = true; }
+                t_raw.rem_euclid(cur_dur)
+            } else if t_raw >= cur_dur {
+                ma.mixer.finished = true;
+                cur_dur
+            } else {
+                t_raw
+            };
+
+            if ma.mixer.fade_dur > 0.0 {
+                let prev_dur = ma.animations.get(ma.mixer.prev_clip).map(|a| a.duration).unwrap_or(0.0);
+                let pt = ma.mixer.prev_time + dt * ma.mixer.prev_speed;
+                ma.mixer.prev_time = if prev_dur <= 0.0 {
+                    0.0
+                } else if ma.mixer.prev_loop {
+                    pt.rem_euclid(prev_dur)
+                } else {
+                    pt.min(prev_dur)
+                };
+                ma.mixer.fade_t += dt;
+                if ma.mixer.fade_t >= ma.mixer.fade_dur {
+                    ma.mixer.fade_dur = 0.0;
+                    ma.mixer.fade_t = 0.0;
+                }
+            }
+
+            if ma.mixer.layer_clip >= 0 {
+                let li = ma.mixer.layer_clip as usize;
+                let ldur = ma.animations.get(li).map(|a| a.duration).unwrap_or(0.0);
+                let lt = ma.mixer.layer_time + dt * ma.mixer.layer_speed;
+                ma.mixer.layer_time = if ldur <= 0.0 {
+                    0.0
+                } else if ma.mixer.layer_loop {
+                    lt.rem_euclid(ldur)
+                } else {
+                    lt.min(ldur)
+                };
+            }
+
+            // --- sample + blend the base track
+            let skel = ma.skeleton.as_ref().unwrap();
+            let strip_root = !ma.mixer.root_motion;
+            let mut pose = sample_local_pose(skel, &ma.animations[ma.mixer.cur_clip], ma.mixer.cur_time, strip_root);
+
+            if ma.mixer.fade_dur > 0.0 {
+                let w = (ma.mixer.fade_t / ma.mixer.fade_dur).clamp(0.0, 1.0);
+                // Smoothstep the fade — a linear pose blend still reads as a
+                // slope discontinuity at both ends of the transition.
+                let w = w * w * (3.0 - 2.0 * w);
+                let prev = sample_local_pose(skel, &ma.animations[ma.mixer.prev_clip], ma.mixer.prev_time, strip_root);
+                blend_pose(&mut pose, &prev, 1.0 - w, None);
+            }
+
+            // --- root motion: delta of the root joint's authored translation
+            if ma.mixer.root_motion && !skel.joints.is_empty() {
+                let cd = cur_dur;
+                let anim = &ma.animations[ma.mixer.cur_clip];
+                let p_now = root_translation_at(skel, anim, ma.mixer.cur_time);
+                let p_old = root_translation_at(skel, anim, t_before);
+                let d = if wrapped && cd > 0.0 {
+                    let p_end = root_translation_at(skel, anim, cd);
+                    let p_start = root_translation_at(skel, anim, 0.0);
+                    [
+                        (p_end[0] - p_old[0]) + (p_now[0] - p_start[0]),
+                        (p_end[1] - p_old[1]) + (p_now[1] - p_start[1]),
+                        (p_end[2] - p_old[2]) + (p_now[2] - p_start[2]),
+                    ]
+                } else {
+                    [p_now[0] - p_old[0], p_now[1] - p_old[1], p_now[2] - p_old[2]]
+                };
+                ma.mixer.root_delta = d;
+                // The delta is handed to the character controller, so the pose
+                // itself must not also carry it or the model double-moves.
+                pose.0[0] = skel.joints[0].rest_translation;
+            } else {
+                ma.mixer.root_delta = [0.0; 3];
+            }
+
+            // --- masked layer over the top
+            if ma.mixer.layer_clip >= 0 && ma.mixer.layer_weight > 0.0 {
+                let root = ma.mixer.layer_mask_root;
+                if ma.mask_cached_root != root {
+                    ma.mask_weights = build_mask_weights(skel, root);
+                    ma.mask_cached_root = root;
+                }
+                let li = ma.mixer.layer_clip as usize;
+                let lpose = sample_local_pose(skel, &ma.animations[li], ma.mixer.layer_time, true);
+                let w = ma.mixer.layer_weight;
+                let mask = ma.mask_weights.clone();
+                blend_pose(&mut pose, &lpose, w, Some(&mask));
+            }
+
+            ma.apply_pose(&pose);
+        }
+    }
+}
+
+type LocalPose = (Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<[f32; 3]>);
+
+impl ModelAnimation {
+    /// Local TRS pose -> world transforms -> skinning matrices. Keeps the
+    /// world transforms around too, because that is what sockets read.
+    fn apply_pose(&mut self, pose: &LocalPose) {
+        let skeleton = match &self.skeleton { Some(s) => s, None => return };
+        let joint_count = skeleton.joints.len();
+        if self.joint_matrices.len() != joint_count {
+            self.joint_matrices = vec![mat4_identity(); joint_count];
+        }
+        if self.joint_world.len() != joint_count {
+            self.joint_world = vec![mat4_identity(); joint_count];
+        }
+        let mut world = vec![mat4_identity(); joint_count];
+        for &root in &skeleton.root_joints {
+            compute_joint_transforms(skeleton, root, &mat4_identity(), &pose.0, &pose.1, &pose.2, &mut world);
+        }
+        for i in 0..joint_count {
+            self.joint_matrices[i] = mat4_mul(&world[i], &skeleton.joints[i].inverse_bind);
+        }
+        self.joint_world.copy_from_slice(&world);
+    }
+}
+
+/// Sample one clip into a local TRS pose, rest pose as the fallback for
+/// joints the clip does not animate.
+fn sample_local_pose(skeleton: &SkeletonData, anim: &AnimationData, time: f32, strip_root: bool) -> LocalPose {
+    let joint_count = skeleton.joints.len();
+    let mut t: Vec<[f32; 3]> = skeleton.joints.iter().map(|j| j.rest_translation).collect();
+    let mut r: Vec<[f32; 4]> = skeleton.joints.iter().map(|j| j.rest_rotation).collect();
+    let mut s: Vec<[f32; 3]> = skeleton.joints.iter().map(|j| j.rest_scale).collect();
+
+    let time = if anim.duration > 0.0 { time.rem_euclid(anim.duration) } else { 0.0 };
+
+    for channel in &anim.channels {
+        let ji = channel.joint_index;
+        if ji >= joint_count { continue; }
+        if !channel.translations.is_empty() && !channel.timestamps.is_empty() {
+            t[ji] = sample_vec3(&channel.timestamps, &channel.translations, time);
+        }
+        if !channel.rotations.is_empty() {
+            let ts = if !channel.rotation_timestamps.is_empty() { &channel.rotation_timestamps } else { &channel.timestamps };
+            if !ts.is_empty() { r[ji] = sample_quat(ts, &channel.rotations, time); }
+        }
+        if !channel.scales.is_empty() {
+            let ts = if !channel.scale_timestamps.is_empty() { &channel.scale_timestamps } else { &channel.timestamps };
+            if !ts.is_empty() { s[ji] = sample_vec3(ts, &channel.scales, time); }
+        }
+    }
+
+    if strip_root && joint_count > 0 {
+        t[0] = skeleton.joints[0].rest_translation;
+    }
+    (t, r, s)
+}
+
+/// The root joint's authored translation at `time` — the raw channel value,
+/// *not* the rest-locked one, which is the whole point of root motion.
+fn root_translation_at(skeleton: &SkeletonData, anim: &AnimationData, time: f32) -> [f32; 3] {
+    if skeleton.joints.is_empty() { return [0.0; 3]; }
+    let time = if anim.duration > 0.0 { time.clamp(0.0, anim.duration) } else { 0.0 };
+    for channel in &anim.channels {
+        if channel.joint_index == 0 && !channel.translations.is_empty() && !channel.timestamps.is_empty() {
+            return sample_vec3(&channel.timestamps, &channel.translations, time);
+        }
+    }
+    skeleton.joints[0].rest_translation
+}
+
+/// `dst = lerp(dst, src, w * mask[j])`. Rotations use nlerp with a
+/// hemisphere fix — without the dot-sign flip, two clips whose quaternions
+/// land on opposite hemispheres blend the *long* way round and the limb
+/// visibly swings through the body.
+fn blend_pose(dst: &mut LocalPose, src: &LocalPose, w: f32, mask: Option<&[f32]>) {
+    let n = dst.0.len().min(src.0.len());
+    for j in 0..n {
+        let jw = match mask {
+            Some(m) => w * m.get(j).copied().unwrap_or(0.0),
+            None => w,
+        };
+        if jw <= 0.0 { continue; }
+        let jw = jw.min(1.0);
+        for k in 0..3 {
+            dst.0[j][k] = dst.0[j][k] + (src.0[j][k] - dst.0[j][k]) * jw;
+            dst.2[j][k] = dst.2[j][k] + (src.2[j][k] - dst.2[j][k]) * jw;
+        }
+        let a = dst.1[j];
+        let mut b = src.1[j];
+        let dot = a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3];
+        if dot < 0.0 { b = [-b[0], -b[1], -b[2], -b[3]]; }
+        let mut q = [
+            a[0] + (b[0] - a[0]) * jw,
+            a[1] + (b[1] - a[1]) * jw,
+            a[2] + (b[2] - a[2]) * jw,
+            a[3] + (b[3] - a[3]) * jw,
+        ];
+        let len = (q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]).sqrt();
+        if len > 1e-6 {
+            q = [q[0]/len, q[1]/len, q[2]/len, q[3]/len];
+        } else {
+            q = a;
+        }
+        dst.1[j] = q;
+    }
+}
+
+/// 1.0 for every joint at or below `root`, 0.0 elsewhere. `root < 0` means
+/// "whole skeleton" so a layer with no mask is a plain full-body override.
+fn build_mask_weights(skeleton: &SkeletonData, root: i32) -> Vec<f32> {
+    let n = skeleton.joints.len();
+    if root < 0 || (root as usize) >= n { return vec![1.0; n]; }
+    let mut w = vec![0.0f32; n];
+    let mut stack = vec![root as usize];
+    while let Some(j) = stack.pop() {
+        if j >= n || w[j] > 0.0 { continue; }
+        w[j] = 1.0;
+        for &c in &skeleton.joints[j].children { stack.push(c); }
+    }
+    w
 }
 
 // ============================================================
@@ -1071,6 +1418,10 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
         animations,
         joint_matrices: vec![mat4_identity(); joint_count],
         ref_rest_rotations,
+        mixer: AnimMixer::default(),
+        joint_world: vec![mat4_identity(); joint_count],
+        mask_weights: vec![0.0; joint_count],
+        mask_cached_root: -1,
     })
 }
 

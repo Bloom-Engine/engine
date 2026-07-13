@@ -168,6 +168,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             time: 0.0, delta_time: 0.0, frame_index: 0, _pad0: 0,
             screen_resolution: [64.0, 64.0], render_resolution: [64.0, 64.0],
             taa_jitter: [0.0; 2], _pad1: [0.0; 2], wind: [0.0; 4],
+            cloud: [0.0; 4],
         };
         let pv = bytemuck::Zeroable::zeroed();
         sys.update_frame_uniforms(&queue, &pf, &pv);
@@ -364,6 +365,200 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         let f = (1.0 + (frac as f32) / 1024.0) * (2.0f32).powi(exp as i32 - 15);
         if sign == 1 { -f } else { f }
     }
+
+    /// Samples layer 0 of the albedo texture array and writes it straight out.
+    /// If the array is bound, this is the array's colour; if the stub is bound,
+    /// it is the stub's.
+    const ARRAY_SAMPLING_WGSL: &str = r#"
+#include "material_abi.wgsl"
+
+struct VsOut {
+  @builtin(position) clip_position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VsOut {
+  var out: VsOut;
+  out.clip_position = draw.mvp * vec4<f32>(in.position, 1.0);
+  return out;
+}
+
+@fragment
+fn fs_main(_in: VsOut) -> TranslucentOut {
+  var out: TranslucentOut;
+  let c = textureSampleLevel(albedo_array, albedo_array_samp, vec2<f32>(0.5, 0.5), 0, 0.0);
+  out.hdr = vec4<f32>(c.rgb, 1.0);
+  return out;
+}
+"#;
+
+    /// EN-014 regression, end-to-end.
+    ///
+    /// `set_user_params` used to rebuild the per-material bind group with the
+    /// 1×1 stub array HARDCODED on bindings 14/15/16, so this sequence —
+    ///
+    ///     set_material_texture_array(m, ALBEDO, arr);   // link the art
+    ///     set_material_params(m, [...]);                // ...and silently lose it
+    ///
+    /// — left the material sampling the stub. Nothing errored, no validation
+    /// complained; the pixels just never appeared. It cost an afternoon in the
+    /// VFX round, with particles and decals both simulating perfectly and
+    /// rendering nothing.
+    ///
+    /// Asserting the *link* survives is not enough (it always did — it was the
+    /// bind group that lost it), so this renders a quad that samples the array
+    /// and reads the pixel back. Green means the array is bound; the stub is
+    /// not green.
+    #[test]
+    fn set_user_params_preserves_a_linked_texture_array() {
+        let Some((device, queue)) = try_create_device() else { return; };
+        let joint_buf = make_joint_buffer(&device);
+        let mut sys = MaterialSystem::new(&device, &queue, &joint_buf);
+
+        let handle = sys.compile(
+            &device,
+            ARRAY_SAMPLING_WGSL,
+            FragmentProfile::Translucent,
+            Bucket::Transparent,
+            false,
+            false,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureFormat::Rg8Unorm,
+            wgpu::TextureFormat::Rg16Float,
+            wgpu::TextureFormat::Rgba8Unorm,
+            formats::DEPTH_FORMAT,
+        ).expect("array-sampling material compiles");
+
+        // One 2×2 layer of pure green (linear Rgba8 → format code 1).
+        let px: [u8; 2 * 2 * 4] = [
+            0, 255, 0, 255,  0, 255, 0, 255,
+            0, 255, 0, 255,  0, 255, 0, 255,
+        ];
+        let arr = sys.create_texture_array_ex(&device, &queue, &[(&px[..], 2, 2)], 1, 1);
+        assert!(arr != 0, "texture array allocates");
+
+        // Link the array, THEN set params — the order that used to break.
+        // (Clone the stub probe view: set_material_texture_array borrows `sys`
+        // mutably and would otherwise conflict with holding a & into it.)
+        let probe_view = sys.default_black_view.clone();
+        sys.set_material_texture_array(&device, handle, 0, arr, &probe_view);
+        sys.set_user_params(&device, &queue, handle, &[0u8; 16]).expect("params set");
+
+        // Render it.
+        let pf = PerFrameUniforms {
+            time: 0.0, delta_time: 0.0, frame_index: 0, _pad0: 0,
+            screen_resolution: [64.0, 64.0], render_resolution: [64.0, 64.0],
+            taa_jitter: [0.0; 2], _pad1: [0.0; 2], wind: [0.0; 4],
+            cloud: [0.0; 4],
+        };
+        let pv = bytemuck::Zeroable::zeroed();
+        sys.update_frame_uniforms(&queue, &pf, &pv);
+        sys.reset_draw_slot(crate::renderer::IDENTITY_MAT4);
+
+        let identity = crate::renderer::IDENTITY_MAT4;
+        let (vb, ib, icount) = make_fullscreen_tri(&device, &queue);
+        sys.submit_draw(
+            &device, &queue, &joint_buf,
+            handle, 1, 0, identity, identity, identity, [1.0; 4], [0; 4],
+        );
+
+        let (rt_w, rt_h) = (64u32, 64u32);
+        let hdr_rt = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test_arr_hdr"),
+            size: wgpu::Extent3d { width: rt_w, height: rt_h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let hdr_view = hdr_rt.create_view(&Default::default());
+        let depth_rt = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test_arr_depth"),
+            size: wgpu::Extent3d { width: rt_w, height: rt_h, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: formats::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_rt.create_view(&Default::default());
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("test_arr_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &hdr_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        // Clear to RED: if the draw never lands, or the stub
+                        // (white/black) is sampled, the assert below fails loudly
+                        // instead of accidentally passing.
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            sys.dispatch_translucent(&mut pass, |mh, _idx| {
+                if mh == 1 { Some((&vb, &ib, icount)) } else { None }
+            });
+        }
+
+        let bpr = ((rt_w * 8) + 255) & !255;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test_arr_staging"),
+            size: (bpr * rt_h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &hdr_rt, mip_level: 0,
+                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(rt_h),
+                },
+            },
+            wgpu::Extent3d { width: rt_w, height: rt_h, depth_or_array_layers: 1 },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        rx.recv().expect("map sender").expect("map failed");
+        let data = slice.get_mapped_range();
+
+        let texel = ((rt_h / 2) * bpr) as usize + ((rt_w / 2) as usize) * 8;
+        let r = f16_to_f32(u16::from_le_bytes([data[texel],     data[texel + 1]]));
+        let g = f16_to_f32(u16::from_le_bytes([data[texel + 2], data[texel + 3]]));
+        drop(data);
+        staging.unmap();
+
+        assert!(
+            g > 0.9 && r < 0.1,
+            "material sampled the stub array, not the linked one \
+             (expected green, got r={r:.2} g={g:.2}) — set_user_params clobbered \
+             the texture-array binding",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -402,4 +597,5 @@ mod translucent_sort_tests {
         let order: Vec<MaterialHandle> = ms_cmds.iter().map(|c| c.material).collect();
         assert_eq!(order, vec![2, 3, 4, 1, 5]);
     }
+
 }

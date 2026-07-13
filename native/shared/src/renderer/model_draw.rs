@@ -12,6 +12,8 @@ impl Renderer {
             Some(Some(meshes)) => meshes.len(),
             _ => return,
         };
+        // Foliage wind amount for this model (0 = not a plant). Rides in misc.z.
+        let foliage = self.foliage_wind.get(&handle_bits).copied().unwrap_or(0.0);
 
         for mesh_idx in 0..mesh_count {
             let slot = self.next_model_uniform_slot;
@@ -31,7 +33,7 @@ impl Renderer {
             self.stage_model_uniform(slot, &Uniforms3D {
                 mvp: model_mvp, model: model_matrix,
                 prev_mvp: model_mvp, model_tint: tint,
-                misc: [0.0; 4],
+                misc: [0.0, 0.0, foliage, 0.0],
             });
 
             self.model_draw_commands.push(CachedModelDraw {
@@ -67,6 +69,7 @@ impl Renderer {
             _ => return,
         };
 
+        let foliage = self.foliage_wind.get(&handle_bits).copied().unwrap_or(0.0);
         let (s, c) = rot_y.sin_cos();
         // Column-major rotY (matches mat4_translate / mat4_scale layout).
         let rot: [[f32; 4]; 4] = [
@@ -89,7 +92,7 @@ impl Renderer {
             self.stage_model_uniform(slot, &Uniforms3D {
                 mvp: model_mvp, model: model_matrix,
                 prev_mvp: model_mvp, model_tint: tint,
-                misc: [0.0; 4],
+                misc: [0.0, 0.0, foliage, 0.0],
             });
 
             self.model_draw_commands.push(CachedModelDraw {

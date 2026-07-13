@@ -22,6 +22,13 @@ impl Renderer {
     // the main pass samples from them as if we had redrawn.
     profiler.begin("shadow_pass");
     if self.shadow_map.enabled {
+        // EN-043 — take last frame's caster transforms out of `self` up front: the
+        // caster lists below hold immutable borrows of self.model_gpu_cache for the
+        // rest of the function, so this map cannot be touched through `self` again
+        // until they are dead.
+        let prev_caster_ids = std::mem::take(&mut self.shadow_caster_tf);
+        let mut caster_ids_now: std::collections::HashSet<u64> =
+            std::collections::HashSet::with_capacity(prev_caster_ids.len() + 64);
         // Compute cascade VPs from the primary directional light and camera.
         let light_dir = [
             self.lighting_uniforms.light_dir[0],
@@ -140,8 +147,36 @@ impl Renderer {
             // 0.0 for everything else — including immediate-batch
             // skinned segments, whose vertex joints are pre-offset.
             joint_offset: f32,
+            // Foliage wind amount for this caster (0 = rigid). Non-zero makes the
+            // caster MOVE, which is why it also forces `dynamic` — a swaying tree
+            // cannot reuse its cached static shadow depth.
+            foliage: f32,
+            // EN-043 — stable identity (NOT including the transform), so a caster
+            // that moved can be told apart from a caster that appeared.
+            key: u64,
         }
         fn entry_sig(kind: u8, id: u64, idx: u64, transform: &[[f32; 4]; 4]) -> u64 {
+            let mut h = FNV_OFFSET;
+            h = fnv1a_bytes(h, &[kind]);
+            h = fnv1a_bytes(h, &id.to_le_bytes());
+            h = fnv1a_bytes(h, &idx.to_le_bytes());
+            fnv1a_bytes(h, bytemuck::bytes_of(transform))
+        }
+        // EN-043 — "was this exact caster, at this exact transform, here last frame?"
+        //
+        // One combined hash of identity AND transform, looked up in a SET. If it is
+        // in last frame's set, the caster has not moved and stays static. If it is
+        // not, it either moved or is new — either way it goes in the dynamic set,
+        // where it draws on top of the cached static depth instead of invalidating it.
+        //
+        // ORDER-INDEPENDENT, and that is the whole point of the rewrite. The first
+        // version keyed on "the Nth draw of this model handle", which was fine until
+        // the game started drawing its forest FRONT-TO-BACK: the sort order changes
+        // as the camera moves, so occurrence N became a different tree every frame,
+        // dozens of perfectly stationary trees were misread as movers, and the
+        // dynamic set blew past 32 casters in combat. A set membership test does not
+        // care what order the draws arrive in.
+        fn caster_id(kind: u8, id: u64, idx: u64, transform: &[[f32; 4]; 4]) -> u64 {
             let mut h = FNV_OFFSET;
             h = fnv1a_bytes(h, &[kind]);
             h = fnv1a_bytes(h, &id.to_le_bytes());
@@ -190,6 +225,8 @@ impl Renderer {
                 sig: entry_sig(0, i as u64, node.gpu_index_count as u64, &node.transform),
                 dynamic: false,
                 joint_offset: 0.0,
+                foliage: 0.0,
+                key: caster_id(0, i as u64, node.gpu_index_count as u64, &node.transform),
             });
         }
 
@@ -223,6 +260,8 @@ impl Renderer {
                     sig: nonce,
                     dynamic: true,
                     joint_offset: 0.0,
+                    foliage: 0.0,
+                    key: 0,
                 });
             } else {
                 let num_calls = self.draw_calls_3d.len();
@@ -248,10 +287,18 @@ impl Renderer {
                         sig: if call.has_skinned { nonce } else { call.content_hash },
                         dynamic: true,
                         joint_offset: 0.0,
+                        foliage: 0.0,
+                        key: 0,
                     });
                 }
             }
         }
+
+        // Foliage promoted to the dynamic set this frame. Capped well below
+        // SHADOW_MAX_DYNAMIC so the characters — whose shadows are the ones a
+        // player actually looks at — always keep their slots.
+        const MAX_FOLIAGE_DYNAMIC: u32 = 24;
+        let mut foliage_dynamic: u32 = 0;
 
         // Cached models (drawModel: trees, characters, etc.) — each is a
         // GpuMesh plus its object→world matrix. World AABB from the
@@ -291,8 +338,32 @@ impl Renderer {
                             sig: nonce,
                             dynamic: true,
                             joint_offset: cmd.joint_offset,
+                            foliage: 0.0,
+                            key: 0,
                         });
                     } else {
+                        // Only sway the shadow if the game asked for it AND there is
+                        // room in the dynamic-caster budget.
+                        //
+                        // That second condition is not paranoia. A swaying caster
+                        // cannot reuse the cached static depth, so it must move to
+                        // the DYNAMIC set — and that set holds SHADOW_MAX_DYNAMIC
+                        // (64) entries. The shooter's forest alone is 88 trees x 4
+                        // primitives = 352. Marking them all dynamic overflows the
+                        // budget, and the overflow is dropped — which does not merely
+                        // cost frames, it silently DELETES shadows. Measured: turning
+                        // this on removed every tree shadow AND the player's own
+                        // shadow from under their feet, while reporting a higher fps.
+                        //
+                        // So: sway as many as fit, leave the rest rigid. A slightly
+                        // stale canopy shadow is invisible; a missing one is not.
+                        let fol = if self.foliage_shadow_motion
+                            && foliage_dynamic < MAX_FOLIAGE_DYNAMIC
+                        {
+                            let f = self.foliage_wind.get(&cmd.cache_handle).copied().unwrap_or(0.0);
+                            if f > 0.0 { foliage_dynamic += 1; }
+                            f
+                        } else { 0.0 };
                         let (wmin, wmax) =
                             transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
                         shadow_nodes.push(ShadowDrawEntry {
@@ -305,9 +376,17 @@ impl Renderer {
                             wmax,
                             cutout_idx,
                             skinned: false,
-                            sig: entry_sig(1, cmd.cache_handle, cmd.mesh_idx as u64, &cmd.model),
-                            dynamic: false,
+                            // A swaying caster changes shape every frame, so it
+                            // cannot share the cached static depth: signature goes
+                            // to the per-frame nonce and it renders as dynamic.
+                            // That is exactly the cost `foliage_shadow_motion`
+                            // gates, which is why it defaults off.
+                            sig: if fol > 0.0 { nonce }
+                                 else { entry_sig(1, cmd.cache_handle, cmd.mesh_idx as u64, &cmd.model) },
+                            dynamic: fol > 0.0,
                             joint_offset: 0.0,
+                            foliage: fol,
+                            key: caster_id(1, cmd.cache_handle, cmd.mesh_idx as u64, &cmd.model),
                         });
                     }
                 }
@@ -351,8 +430,36 @@ impl Renderer {
                         sig: entry_sig(2, cmd.mesh_handle, cmd.mesh_idx as u64, &cmd.model),
                         dynamic: false,
                         joint_offset: 0.0,
+                        foliage: 0.0,
+                        key: caster_id(2, cmd.mesh_handle, cmd.mesh_idx as u64, &cmd.model),
                     });
                 }
+            }
+        }
+
+        // EN-043 — promote MOVERS to the dynamic set.
+        //
+        // A non-skinned cached caster whose transform changed since last frame used
+        // to stay in the STATIC set with a different content signature. That
+        // invalidated the cascade's cached depth, so every tree, wall and terrain
+        // tile in the world re-rendered into all three cascades — every frame —
+        // because one pickup was bobbing. Measured on the shooter's title screen:
+        // shadow_pass GPU 6.0-7.0 ms against the 0.1-1.7 ms the cache was built to
+        // deliver.
+        //
+        // A caster that moves is DYNAMIC, by definition. Dynamic casters draw on
+        // top of the cached static depth every frame and never invalidate it, which
+        // is exactly what a moving object needs and costs one draw instead of a
+        // thousand.
+        for e in shadow_nodes.iter_mut() {
+            if e.dynamic { continue; }
+            caster_ids_now.insert(e.key);
+            // Not here last frame at this exact transform => it moved (or is new).
+            // Either way: dynamic. A first-frame caster costs one extra dynamic draw
+            // and settles into the static set next frame.
+            if !prev_caster_ids.is_empty() && !prev_caster_ids.contains(&e.key) {
+                e.dynamic = true;
+                e.sig = nonce;
             }
         }
 
@@ -429,7 +536,8 @@ impl Renderer {
                     let uniforms = crate::shadows::ShadowUniforms {
                         light_vp: cascade_vp,
                         model: shadow_nodes[ei].transform,
-                        misc: [shadow_nodes[ei].joint_offset, 0.0, 0.0, 0.0],
+                        misc: [shadow_nodes[ei].joint_offset, 0.0, shadow_nodes[ei].foliage, 0.0],
+                        wind: self.lighting_uniforms.wind,
                     };
                     let off = slot * stride;
                     uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
@@ -514,17 +622,36 @@ impl Renderer {
             );
             if dyn_now {
                 let dyn_base = cascade_base + stride * max_static;
-                let dyn_entries: Vec<usize> = entries.iter().copied()
+                // EN-042 — the dynamic budget can overflow, and the overflow IS
+                // dropped. Which caster gets dropped must not be an accident of
+                // queue order. It was, and it cost this project twice: both times
+                // the thing that silently vanished was the player's own shadow, and
+                // both times the frame rate went UP and looked like a win.
+                //
+                // Rank them, so if we must lose a shadow we lose one nobody misses:
+                // characters first (the shadow a player actually looks at), then
+                // other movers, then foliage — a swaying canopy shadow is soft and
+                // dappled and the most forgiving thing in the frame.
+                let mut dyn_entries: Vec<usize> = entries.iter().copied()
                     .filter(|&ei| shadow_nodes[ei].dynamic)
-                    .take(max_dynamic)
                     .collect();
+                if dyn_entries.len() > max_dynamic {
+                    dyn_entries.sort_by_key(|&ei| {
+                        let e = &shadow_nodes[ei];
+                        if e.skinned { 0u8 }
+                        else if e.foliage > 0.0 { 2u8 }
+                        else { 1u8 }
+                    });
+                    dyn_entries.truncate(max_dynamic);
+                }
                 let mut uniform_data: Vec<u8> =
                     vec![0u8; stride * dyn_entries.len().max(1)];
                 for (slot, &ei) in dyn_entries.iter().enumerate() {
                     let uniforms = crate::shadows::ShadowUniforms {
                         light_vp: cascade_vp,
                         model: shadow_nodes[ei].transform,
-                        misc: [shadow_nodes[ei].joint_offset, 0.0, 0.0, 0.0],
+                        misc: [shadow_nodes[ei].joint_offset, 0.0, shadow_nodes[ei].foliage, 0.0],
+                        wind: self.lighting_uniforms.wind,
                     };
                     let off = slot * stride;
                     uniform_data[off..off + std::mem::size_of::<crate::shadows::ShadowUniforms>()]
@@ -592,6 +719,7 @@ impl Renderer {
 
         // Cache bookkeeping — next frame skips every cascade whose VP
         // and caster content stay put.
+        self.shadow_caster_tf = caster_ids_now;
         self.shadow_map.rendered_light_vps = Some(self.shadow_map.light_vps);
         self.shadow_map.rendered_light_dir = Some(light_dir);
         self.shadow_map.rendered_scene_version = scene_ver;

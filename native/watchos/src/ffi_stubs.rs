@@ -245,6 +245,16 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_wind(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_cloud_shadows(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_launch_process(_p0: i64, _p1: i64, _p2: i64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_set_output_scale(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_get_output_scale() -> f64 { 1.0 }
+#[no_mangle] pub extern "C" fn bloom_set_model_foliage_wind(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_foliage_shadow_motion(_p0: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_motion_blur_enabled(_p0: f64) {
@@ -768,3 +778,95 @@
 #[no_mangle] pub extern "C" fn bloom_physics_vehicle_get_wheel_angular_velocity(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
+
+// EN-028 / EN-033 / EN-026 / EN-027 — watchOS is a stub platform (no 3D
+// renderer), so these keep the symbol surface complete without behaviour.
+#[no_mangle] pub extern "C" fn bloom_anim_play(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_layer(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_root_motion(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_update(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_finished(_p0: f64) -> f64 {
+    1.0
+}
+#[no_mangle] pub extern "C" fn bloom_anim_clip_duration(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_anim_root_delta(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_model_find_joint(_p0: f64, _p1: i64) -> f64 {
+    -1.0
+}
+#[no_mangle] pub extern "C" fn bloom_model_joint_world(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_create(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_configure(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_emit(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_update(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_instance_buffer(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_clear(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_live(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_init(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_spawn(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_decals_set_style(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_decals_update(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_instance_buffer() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_clear() {
+}
+
+// EN-029 — audio bus/reverb/filter surface (watchOS stub platform).
+#[no_mangle] pub extern "C" fn bloom_set_sound_bus(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_sound_reverb_send(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_sound_lowpass(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_bus_gain(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_duck_bus(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_reverb(_p0: f64, _p1: f64, _p2: f64) {
+}
+
+// EN-031 — gamepad rumble (no vibration motor on watchOS).
+#[no_mangle] pub extern "C" fn bloom_gamepad_rumble(_p0: f64, _p1: f64, _p2: f64) {
+}
+
+#[no_mangle] pub extern "C" fn bloom_compile_material_instanced_bucket(_p0: i64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+
+#[no_mangle] pub extern "C" fn bloom_create_texture_array_from_files(_p0: i64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+
+// EN-025 — ragdolls (no 3D/physics on watchOS).
+#[no_mangle] pub extern "C" fn bloom_ragdoll_create() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_ragdoll_activate(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_ragdoll_push(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {}
+#[no_mangle] pub extern "C" fn bloom_ragdoll_update(_p0: f64, _p1: f64, _p2: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_ragdoll_release(_p0: f64) {}

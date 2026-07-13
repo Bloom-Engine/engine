@@ -140,13 +140,28 @@ struct SkyUniforms {
     /// Camera right vector × tan(fovy/2) × aspect — pre-scaled so the
     /// fragment shader just multiplies by NDC.x to get the horizontal
     /// offset from the forward direction.
+    /// `.w` = camera world position X (see below).
     right: [f32; 4],
-    /// Camera up vector × tan(fovy/2).
+    /// Camera up vector × tan(fovy/2). `.w` = camera world position Y.
     up: [f32; 4],
-    /// Camera forward unit vector.
+    /// Camera forward unit vector. `.w` = camera world position Z.
+    ///
+    /// The camera POSITION rides in the spare `.w` lanes of the three basis
+    /// vectors. The sky pass never needed it — a sky at infinity only cares
+    /// which way you are looking — but the cloud deck is anchored in world
+    /// space so that its shadow lands under it, and that makes the camera's
+    /// position load-bearing. Packing it here keeps the bind group unchanged.
     forward: [f32; 4],
-    /// x = intensity multiplier; yzw padding.
+    /// x = intensity multiplier, y = elapsed seconds (the cloud deck's clock);
+    /// zw padding.
     intensity: [f32; 4],
+    /// Cloud deck: x = shadow strength, y = deck height (m), z = feature scale
+    /// (noise units per metre), w = drift speed (m/s). Same vec4 the world
+    /// materials get, so the sky and the ground cannot disagree.
+    cloud: [f32; 4],
+    /// xy = wind direction in the XZ plane — the clouds drift downwind, the
+    /// same way the grass is leaning.
+    wind: [f32; 4],
 }
 
 // EN-005 Phase 2 — uniforms for the procedural sky path.
@@ -1011,6 +1026,22 @@ pub struct Renderer {
     /// full surface for composite. At 0.5 = quarter-pixel shading
     /// (former TSR default). At 1.0 = native.
     pub render_scale: f32,
+    /// EN-046 — OUTPUT scale: the swapchain is configured at this fraction of the
+    /// window's real size, and the presentation engine stretches it back up.
+    ///
+    /// This is a DIFFERENT lever from `render_scale`, and confusing the two is easy.
+    /// `render_scale` shrinks the G-buffer and everything that runs at render
+    /// resolution, then TSR upscales to the swapchain. `output_scale` shrinks the
+    /// swapchain ITSELF — so it is the only thing that touches the fixed cost of the
+    /// upscale and the final composite, which on a 4K display was measured at
+    /// 3.1 ms + 2.4 ms and did not care what render_scale was set to.
+    ///
+    /// 1.0 = native. Games that never call it are unaffected.
+    pub output_scale: f32,
+    /// The window's real physical size, before `output_scale` is applied. Kept so
+    /// the scale can be changed at runtime without the platform telling us again.
+    native_width: u32,
+    native_height: u32,
     /// Set once `set_render_scale` is called explicitly. While false,
     /// `set_taa_enabled` keeps the legacy coupling (TAA on = 0.5,
     /// TAA off = 1.0). Once the user opts into explicit control, the
@@ -1451,6 +1482,27 @@ pub struct Renderer {
     current_inv_proj_matrix: [[f32; 4]; 4],
     current_inv_vp_matrix: [[f32; 4]; 4],
     current_camera_pos: [f32; 3],
+    /// Cloud deck: [shadow strength, deck height (m), feature scale, drift speed].
+    /// Strength 0 (the default) means the world ignores the clouds entirely, so
+    /// every existing game keeps the look it shipped with; the sky still draws
+    /// them. See `common/clouds.wgsl`.
+    cloud_params: [f32; 4],
+    /// EN-043 — last frame's transform hash per static shadow caster, keyed by its
+    /// stable identity. A caster whose transform CHANGED since last frame is
+    /// promoted to the dynamic set instead of being left in the static set with a
+    /// different content signature — which would invalidate the whole cascade's
+    /// cached depth and re-render every tree in the world, every frame, because one
+    /// pickup was bobbing.
+    shadow_caster_tf: std::collections::HashSet<u64>,
+    /// Per-model foliage wind amount, keyed by cached-model handle. Absent or 0
+    /// = not a plant, don't move it. See `common/foliage_wind.wgsl`.
+    foliage_wind: std::collections::HashMap<u64, f32>,
+    /// Whether foliage casters sway in the SHADOW pass too. Off by default and
+    /// deliberately so: a swaying caster can no longer use the cached static
+    /// shadow depth, so every tree re-renders into every cascade every frame.
+    /// That is a real cost, and it buys canopy dapple that MOVES — worth it on a
+    /// machine with headroom, not worth a frame-rate cliff on one without.
+    foliage_shadow_motion: bool,
     uniform_3d_layout: wgpu::BindGroupLayout,
 
     // State
@@ -1573,6 +1625,10 @@ pub struct Renderer {
     // mapping). Distinct from pipeline_3d so immediate-mode draws
     // don't have to carry tangent vertex data or normal-map bindings.
     pub scene_pipeline: wgpu::RenderPipeline,
+    /// EN-044 — depth-only prepass over the same cached-model draws.
+    pub scene_depth_pipeline: wgpu::RenderPipeline,
+    /// EN-044 — cached-model pipeline for the prepassed path (no depth write, Equal).
+    pub scene_pipeline_prepassed: wgpu::RenderPipeline,
     pub scene_material_layout: wgpu::BindGroupLayout,
     /// Froxel light clustering (task #23). `Some` when the device has
     /// fragment-stage storage buffers (everything but WebGL2); the
@@ -2571,7 +2627,15 @@ impl Renderer {
             // frame; the 3D opaque pass will overwrite where it draws.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
+                // EN-044 — the sky must NOT write depth. It is drawn first, with
+                // `Always`, so it used to stamp depth = 1.0 across the whole screen.
+                // That was harmless while the buffer had just been cleared to 1.0
+                // anyway — and instantly destructive once a depth PREPASS started
+                // writing real geometry depth before it. The sky wiped the lot, the
+                // main pass's Equal test then failed everywhere, and the entire
+                // forest and player vanished. It never needed the write: where no
+                // geometry is drawn the depth is already 1.0.
+                depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -2807,7 +2871,15 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
+                // EN-044 — the sky must NOT write depth. It is drawn first, with
+                // `Always`, so it used to stamp depth = 1.0 across the whole screen.
+                // That was harmless while the buffer had just been cleared to 1.0
+                // anyway — and instantly destructive once a depth PREPASS started
+                // writing real geometry depth before it. The sky wiped the lot, the
+                // main pass's Equal test then failed everywhere, and the entire
+                // forest and player vanished. It never needed the write: where no
+                // geometry is drawn the depth is already 1.0.
+                depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -3356,6 +3428,122 @@ impl Renderer {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // EN-044 — depth prepass pipeline. Identical layout and vertex stage to
+        // scene_pipeline (the wind must displace the same way, or the depths would
+        // not match); no colour targets, and a fragment stage that only honours the
+        // alpha cutout. Cheap: one depth write per fragment, no MRT, no lighting.
+        let scene_depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_depth_prepass_pipeline"),
+            layout: Some(&scene_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &[Vertex3D::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_depth_prepass"),
+                targets: &[],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // EN-044 — the cached-model pipeline for the PREPASSED path.
+        //
+        // depth_write is OFF, and that is the entire point. A fragment shader that
+        // can `discard` (alpha-cutout foliage) combined with depth WRITES forces the
+        // hardware into late-Z: it cannot know whether to write depth until the
+        // shader has run, so it runs the shader for every fragment, occluded or not.
+        // That is why simply priming depth changed nothing — the prepass cost 1.4 ms
+        // and saved zero.
+        //
+        // Take the writes away (the prepass already stored the exact depth) and the
+        // hardware is free to early-Z *test*, which throws out the occluded leaves
+        // before the 5-target MRT shader ever runs. `Equal` because the visible
+        // surface's depth is bit-identical to what the prepass wrote — same vertex
+        // stage, same uniforms, same wind.
+        //
+        // scene_pipeline (Less, write) stays for the retained scene-graph nodes,
+        // which are not in the prepass.
+        let scene_pipeline_prepassed = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_pipeline_prepassed"),
+            layout: Some(&scene_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main_scene"),
+                buffers: &[Vertex3D::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_main_scene"),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: MATERIAL_FORMAT,
+                        // Replace blend so the material slot reflects
+                        // the topmost-fragment material, not blended.
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: VELOCITY_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Equal),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -6239,6 +6427,10 @@ impl Renderer {
             taa_frame_index: 0,
             taa_enabled: true,
             render_scale: 0.5,
+            // 1.0 = native output. Games that never touch it are unaffected.
+            output_scale: 1.0,
+            native_width: 0,
+            native_height: 0,
             render_scale_explicit: false,
             prev_vp_matrix: IDENTITY_MAT4,
             prev_proj_matrix_unjittered: IDENTITY_MAT4,
@@ -6433,6 +6625,14 @@ impl Renderer {
             current_inv_proj_matrix: IDENTITY_MAT4,
             current_inv_vp_matrix: IDENTITY_MAT4,
             current_camera_pos: [0.0, 0.0, 0.0],
+            // Deck at 420 m, ~285 m puffs, 8 m/s. Shadow strength OFF by
+            // default — opting a world's ground into the clouds is a look
+            // decision, and silently darkening every existing game's terrain
+            // is not the engine's call to make.
+            cloud_params: [0.0, 420.0, 0.0035, 8.0],
+            shadow_caster_tf: std::collections::HashSet::new(),
+            foliage_wind: std::collections::HashMap::new(),
+            foliage_shadow_motion: false,
             uniform_3d_layout,
             render_mode: RenderMode::ScreenSpace,
             pending_skin_groups: Vec::with_capacity(8),
@@ -6494,6 +6694,8 @@ impl Renderer {
             aerial_perspective_sampler,
             env_diffuse_texture: None,
             scene_pipeline,
+            scene_depth_pipeline,
+            scene_pipeline_prepassed,
             froxel,
             scene_material_layout,
             _scene_env_default_texture: scene_env_default_texture,
@@ -6602,6 +6804,24 @@ impl Renderer {
     /// from `render_scale`. At 0.5 this is half the surface size and
     /// the TAA pass (or upscale pass) brings it back to the full
     /// surface for composite; at 1.0 it matches the surface.
+    /// EN-046 — set the output (swapchain) scale. See the field docs: this is the
+    /// only knob that touches the fixed cost of the TSR upscale and the final
+    /// composite, which is what actually dominates a 4K frame.
+    ///
+    /// Re-applies immediately against the last known window size.
+    pub fn set_output_scale(&mut self, scale: f32) {
+        let s = scale.clamp(0.25, 1.0);
+        if (s - self.output_scale).abs() < 1e-4 { return; }
+        self.output_scale = s;
+        let (w, h) = (self.native_width, self.native_height);
+        let (lw, lh) = (self.logical_width, self.logical_height);
+        if w > 0 && h > 0 {
+            self.resize(w, h, lw, lh);
+        }
+    }
+
+    pub fn output_scale(&self) -> f32 { self.output_scale }
+
     pub fn render_extent(&self) -> (u32, u32) {
         let sw = self.surface_config.width as f32;
         let sh = self.surface_config.height as f32;
@@ -6612,7 +6832,16 @@ impl Renderer {
         )
     }
 
+    /// Platform entry point: the window changed size. Records the native size, then
+    /// applies `output_scale` on top of it.
     pub fn resize(&mut self, width: u32, height: u32, logical_width: u32, logical_height: u32) {
+        if width > 0 && height > 0 {
+            self.native_width = width;
+            self.native_height = height;
+        }
+        let s = self.output_scale.clamp(0.25, 1.0);
+        let width = (((width as f32) * s).round() as u32).max(1);
+        let height = (((height as f32) * s).round() as u32).max(1);
         if width > 0 && height > 0 {
             // Cascade fit depends on the projection aspect ratio, so a
             // resize can shift the VPs even with the camera stationary.
@@ -6873,6 +7102,67 @@ impl Renderer {
     /// displacement scale (~0.1 m for grass), `frequency` is in Hz.
     pub fn set_wind(&mut self, dir_x: f32, dir_z: f32, amplitude: f32, frequency: f32) {
         self.wind = [dir_x, dir_z, amplitude, frequency];
+    }
+
+    /// Mark a cached model as foliage, so the scene (and optionally shadow) pass
+    /// bends it in the wind. `amount` scales the whole effect: ~1.0 for a tree,
+    /// smaller for a stiff shrub, 0 to turn it off again.
+    ///
+    /// The wind is hierarchical (`common/foliage_wind.wgsl`) — trunk bend,
+    /// branch sway, leaf flutter — and the layer weights come from where each
+    /// vertex sits relative to the model origin, so nothing needs authoring into
+    /// the mesh. Direction/strength/rate come from [`Renderer::set_wind`].
+    ///
+    /// Before this the engine swayed alpha-cut materials only, which meant leaf
+    /// cards fluttered and every trunk stood perfectly rigid.
+    pub fn set_model_foliage_wind(&mut self, handle_bits: u64, amount: f32) {
+        if amount <= 0.0 {
+            self.foliage_wind.remove(&handle_bits);
+        } else {
+            self.foliage_wind.insert(handle_bits, amount);
+        }
+    }
+
+    /// Let foliage sway in the SHADOW pass as well, so a bending tree and its
+    /// shadow bend together and the canopy dapple actually moves.
+    ///
+    /// Off by default because it is not free: a caster that moves every frame
+    /// cannot reuse the cached static shadow depth, so every tree re-renders
+    /// into every cascade, every frame. Turn it on if the frame budget allows.
+    pub fn set_foliage_shadow_motion(&mut self, on: bool) {
+        self.foliage_shadow_motion = on;
+    }
+
+    /// Cloud deck — the clouds the sky draws and the shadows they cast, from one
+    /// field (`common/clouds.wgsl`).
+    ///
+    /// `strength` is the only argument most callers need: 0 (the default) means
+    /// the world ignores the clouds and only the sky shows them; ~0.45 dims a
+    /// shadowed surface to a bit over half its direct sunlight, which is about
+    /// right for a bright day. It multiplies DIRECT sun only — a cloud blocks the
+    /// sun, it does not stop the sky from being blue.
+    ///
+    /// `deck_height` and `feature_scale` are NOT independent knobs for "cloud size
+    /// overhead" and "shadow size underfoot" — they are the same cloud seen from
+    /// two directions. Raising the deck makes the puffs look smaller overhead
+    /// without changing their shadows; lowering `feature_scale` makes the clouds
+    /// themselves bigger, both above and below. That coupling is the feature.
+    ///
+    /// Drift direction comes from [`Renderer::set_wind`], so the deck travels the
+    /// way the foliage beneath it is leaning.
+    pub fn set_cloud_shadows(
+        &mut self,
+        strength: f32,
+        deck_height: f32,
+        feature_scale: f32,
+        drift_speed: f32,
+    ) {
+        self.cloud_params = [
+            strength.clamp(0.0, 1.0),
+            deck_height.max(1.0),
+            feature_scale.max(1e-6),
+            drift_speed,
+        ];
     }
 
     /// Toggle TAA on/off. Off = no jitter, no history blend, no
@@ -8153,21 +8443,30 @@ impl Renderer {
         let p = self.current_proj_matrix;
         let tan_half = if p[1][1].abs() > 1e-6 { 1.0 / p[1][1] } else { 1.0 };
 
+        // Camera position in the spare .w lanes and the clock in intensity.y, so
+        // this path fills the same buffer layout as the procedural one. The
+        // panorama sky itself draws no clouds — a static HDR already has whatever
+        // clouds it was captured with — but the buffer is shared, so it is filled
+        // honestly rather than with zeroes that would mean something elsewhere.
+        let cam = self.current_camera_pos;
+        let time = self.lighting_uniforms.wind[3];
         let uniforms = SkyUniforms {
             right: [
                 right_world[0] * tan_half * aspect,
                 right_world[1] * tan_half * aspect,
                 right_world[2] * tan_half * aspect,
-                0.0,
+                cam[0],
             ],
             up: [
                 up_world[0] * tan_half,
                 up_world[1] * tan_half,
                 up_world[2] * tan_half,
-                0.0,
+                cam[1],
             ],
-            forward: [forward_world[0], forward_world[1], forward_world[2], 0.0],
-            intensity: [intensity, 0.0, 0.0, 0.0],
+            forward: [forward_world[0], forward_world[1], forward_world[2], cam[2]],
+            intensity: [intensity, time, 0.0, 0.0],
+            cloud: self.cloud_params,
+            wind: self.lighting_uniforms.wind,
         };
         self.queue
             .write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -8609,17 +8908,23 @@ impl Renderer {
         let p = self.current_proj_matrix;
         let tan_half = if p[1][1].abs() > 1e-6 { 1.0 / p[1][1] } else { 1.0 };
 
+        // Camera position rides in the spare .w lanes: the cloud deck is anchored
+        // in WORLD space (so its shadow lands under it), which means the sky pass
+        // needs to know where the camera IS and not merely where it is looking.
+        let cam = self.current_camera_pos;
         let uniforms = SkyUniforms {
             right: [
                 right_world[0] * tan_half * aspect,
                 right_world[1] * tan_half * aspect,
                 right_world[2] * tan_half * aspect,
-                0.0,
+                cam[0],
             ],
-            up: [up_world[0] * tan_half, up_world[1] * tan_half, up_world[2] * tan_half, 0.0],
-            forward: [forward_world[0], forward_world[1], forward_world[2], 0.0],
-            // .y carries current time (seconds) so the cloud layer can drift.
+            up: [up_world[0] * tan_half, up_world[1] * tan_half, up_world[2] * tan_half, cam[1]],
+            forward: [forward_world[0], forward_world[1], forward_world[2], cam[2]],
+            // .y carries current time (seconds) so the cloud deck can drift.
             intensity: [intensity, self.lighting_uniforms.wind[3], 0.0, 0.0],
+            cloud: self.cloud_params,
+            wind: self.lighting_uniforms.wind,
         };
         self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -11055,12 +11360,37 @@ impl Renderer {
     pub fn compile_material_instanced(
         &mut self, wgsl_source: &str,
     ) -> Result<material_system::MaterialHandle, material_pipeline::MaterialCompileError> {
+        self.compile_material_instanced_bucket(wgsl_source, 0, false)
+    }
+
+    /// EN-026/027 — instanced compile into a chosen bucket.
+    ///
+    /// The original instanced path was hardcoded to Opaque, which is right for
+    /// grass and wrong for the two things that most want instancing: particles
+    /// (additive, thousands of quads) and decals (cutout, alpha-tested against
+    /// the atlas). `bucket`: 0 = opaque, 1 = cutout, 2 = additive,
+    /// 3 = transparent.
+    ///
+    /// `reads_scene` binds the scene colour/depth snapshot group. Soft
+    /// particles NEED it — a billboard that intersects the ground shows a hard
+    /// straight seam otherwise, which is the single biggest tell that a "puff"
+    /// is a flat card — and without this flag the group is absent from the
+    /// pipeline layout and the shader fails validation at create time.
+    pub fn compile_material_instanced_bucket(
+        &mut self, wgsl_source: &str, bucket: u32, reads_scene: bool,
+    ) -> Result<material_system::MaterialHandle, material_pipeline::MaterialCompileError> {
+        let (profile, bucket) = match bucket {
+            1 => (material_pipeline::FragmentProfile::Opaque, material_pipeline::Bucket::Cutout),
+            2 => (material_pipeline::FragmentProfile::Translucent, material_pipeline::Bucket::Additive),
+            3 => (material_pipeline::FragmentProfile::Translucent, material_pipeline::Bucket::Transparent),
+            _ => (material_pipeline::FragmentProfile::Opaque, material_pipeline::Bucket::Opaque),
+        };
         self.material_system.compile(
             &self.device,
             wgsl_source,
-            material_pipeline::FragmentProfile::Opaque,
-            material_pipeline::Bucket::Opaque,
-            false,
+            profile,
+            bucket,
+            reads_scene,
             true, // wants_instancing
             formats::HDR_FORMAT,
             formats::MATERIAL_FORMAT,
@@ -11506,6 +11836,8 @@ impl Renderer {
         // here each frame so it's current before the per-frame lighting upload.
         self.lighting_uniforms.wind =
             [self.wind[0], self.wind[1], self.wind[2], time_seconds];
+        self.lighting_uniforms.cloud = self.cloud_params;
+        self.lighting_uniforms.frame_misc = [delta_time, 0.0, 0.0, 0.0];
         let screen_w = self.surface_config.width as f32;
         let screen_h = self.surface_config.height as f32;
         let (rw, rh) = self.render_extent();
@@ -11519,6 +11851,7 @@ impl Renderer {
             taa_jitter: [0.0, 0.0],
             _pad1: [0.0, 0.0],
             wind: self.wind,
+            cloud: self.cloud_params,
         };
         let per_view = material_system::PerViewUniforms {
             view:           self.current_view_matrix,

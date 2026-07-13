@@ -27,6 +27,9 @@ declare function bloom_set_auto_exposure(on: number): void;
 declare function bloom_set_taa_enabled(on: number): void;
 declare function bloom_set_occlusion_culling(on: number): void;
 declare function bloom_set_render_scale(scale: number): void;
+declare function bloom_set_output_scale(scale: number): void;
+declare function bloom_launch_process(cmd: string, args: string, cwd: string): number;
+declare function bloom_get_output_scale(): number;
 declare function bloom_get_render_scale(): number;
 declare function bloom_set_upscale_mode(mode: number): void;
 declare function bloom_set_cas_strength(strength: number): void;
@@ -55,6 +58,7 @@ declare function bloom_clear_all_post_passes(): void;
 declare function bloom_set_ssao_intensity(intensity: number): void;
 declare function bloom_set_ssao_radius(worldRadius: number): void;
 declare function bloom_set_wind(dirX: number, dirZ: number, amplitude: number, frequency: number): void;
+declare function bloom_set_cloud_shadows(strength: number, deckHeight: number, featureScale: number, driftSpeed: number): void;
 declare function bloom_set_ssr_enabled(on: number): void;
 declare function bloom_set_motion_blur_enabled(on: number): void;
 declare function bloom_set_sss_enabled(on: number): void;
@@ -338,6 +342,23 @@ export function setTaaEnabled(on: boolean): void {
 export function setRenderScale(scale: number): void {
   bloom_set_render_scale(Math.min(1.0, Math.max(0.5, scale)));
 }
+
+/// OUTPUT scale — configure the swapchain at this fraction of the window's real
+/// size and let the display stretch it back up.
+///
+/// This is NOT `setRenderScale`, and the difference is the whole point.
+/// `setRenderScale` shrinks the G-buffer and everything that runs at render
+/// resolution, then TSR upscales to the swapchain. `setOutputScale` shrinks the
+/// swapchain ITSELF — so it is the only knob that touches the fixed cost of that
+/// upscale and the final composite. On a 4K display those two passes were measured
+/// at 3.1 ms + 2.4 ms and did not care what the render scale was.
+///
+/// 1.0 = native. Expose it to players: at 4K it is the difference between a locked
+/// frame rate and a pretty one, and which of those they want is not the game's call.
+export function setOutputScale(scale: number): void {
+  bloom_set_output_scale(Math.min(1.0, Math.max(0.25, scale)));
+}
+export function getOutputScale(): number { return bloom_get_output_scale(); }
 export function getRenderScale(): number { return bloom_get_render_scale(); }
 
 /** Upscale filter when render_scale < 1 and TAA is off. "bilinear" = cheap/soft, "catmull-rom" = sharper (default). */
@@ -556,6 +577,33 @@ export function clearAllPostPasses(): void {
 /// frequency is in Hz (~1.0 typical).
 export function setWind(dirX: number, dirZ: number, amplitude: number, frequency: number): void {
   bloom_set_wind(dirX, dirZ, amplitude, frequency);
+}
+
+/// Cloud deck — the clouds the sky draws and the shadows they cast, from ONE
+/// field. Look up at a cloud, and the shadow you are standing in is its shadow.
+///
+/// `strength` is the only argument most callers need. 0 (the default) leaves the
+/// world unshadowed and the clouds sky-only; ~0.45 dims a shadowed surface to a
+/// bit over half its direct sunlight, which is about right for a bright day. It
+/// scales DIRECT sun only — a cloud blocks the sun, it does not stop the sky
+/// from being blue.
+///
+/// `deckHeight` and `featureScale` are not independent knobs for "cloud size
+/// overhead" and "shadow size underfoot": they are the same cloud seen from two
+/// directions. Raise the deck and the puffs look smaller overhead while their
+/// shadows stay the same size; lower `featureScale` and the clouds get bigger
+/// both above and below.
+///
+/// Drift direction comes from `setWind`, so the deck travels the way the foliage
+/// beneath it is leaning.
+/// (No default parameter values: Perry 0.5.x silently drops the call.)
+export function setCloudShadows(
+  strength: number,
+  deckHeight: number,
+  featureScale: number,
+  driftSpeed: number,
+): void {
+  bloom_set_cloud_shadows(strength, deckHeight, featureScale, driftSpeed);
 }
 
 /** Toggle screen-space reflections. Default on. */
@@ -815,6 +863,18 @@ export function isGamepadButtonDown(button: number): boolean {
   return bloom_is_gamepad_button_down(button) !== 0;
 }
 
+declare function bloom_gamepad_rumble(low: number, high: number, seconds: number): void;
+
+/// EN-031 — vibrate the pad. `low` drives the heavy (low-frequency) motor and
+/// `high` the light one, both 0..1; `seconds` is how long before it stops on
+/// its own, so callers never have to remember to switch it off.
+///
+/// A no-op on platforms with no motor, and silently ignored if no pad is
+/// connected.
+export function gamepadRumble(low: number, high: number, seconds: number): void {
+  bloom_gamepad_rumble(low, high, seconds);
+}
+
 export function isGamepadButtonReleased(button: number): boolean {
   return bloom_is_gamepad_button_released(button) !== 0;
 }
@@ -1072,4 +1132,25 @@ export function getWorldToScreen2D(position: { x: number; y: number }, camera: C
     x: (cos * dx - sin * dy) * camera.zoom + camera.offset.x,
     y: (sin * dx + cos * dy) * camera.zoom + camera.offset.y,
   };
+}
+
+
+/// Launch another program, fire and forget. Returns its pid, or 0 on failure.
+///
+/// Perry's `child_process.spawn` COMPILES and then does nothing — undefined pid, no
+/// process. So this is the only way for a Bloom tool to run another program (the
+/// editor's play-in-editor: save the level, run the game on it).
+///
+/// The child is fully detached: we never wait on it and its stdio goes nowhere. A
+/// GUI must not block on, or die with, the thing it launched.
+///
+/// `args` is passed as a real argv, not a command line — there is no shell here,
+/// which is also why there is nothing to inject into.
+export function launchProcess(cmd: string, args: string[], cwd: string): number {
+  let joined = '';
+  for (let i = 0; i < args.length; i++) {
+    if (i > 0) joined = joined + '\n';
+    joined = joined + args[i];
+  }
+  return bloom_launch_process(cmd, joined, cwd);
 }

@@ -210,7 +210,15 @@ fn fs_main_3d(in: VertexOutput3D) -> Fs3DOut {
 }
 ";
 
-pub(in crate::renderer) const SCENE_SHADER: &str = "
+// The cloud deck (common/clouds.wgsl) is prepended verbatim: this shader is a
+// raw source const and does not run through the material preprocessor. Same
+// file the sky pass and the world materials use, so a cloud shadow crossing
+// the terrain also crosses the trees standing in it — which is the whole
+// reason to share it.
+pub(in crate::renderer) const SCENE_SHADER: &str = concat!(
+    include_str!("../../../shaders/common/clouds.wgsl"),
+    include_str!("../../../shaders/common/foliage_wind.wgsl"),
+    r#"
 struct Uniforms3D {
     mvp: mat4x4<f32>,
     model: mat4x4<f32>,
@@ -248,6 +256,8 @@ struct Lighting {
     shadow_cascade_splits: vec4<f32>,
     shadow_view_matrix: mat4x4<f32>,
     wind: vec4<f32>,   // xy=dir, z=amplitude, w=time (foliage sway)
+    cloud: vec4<f32>,  // x=shadow strength, y=deck height, z=scale, w=drift m/s
+    frame_misc: vec4<f32>, // x=delta_time (prev-frame wind, for motion vectors)
 };
 
 struct MaterialFactors {
@@ -266,7 +276,16 @@ struct VertexInputScene {
 };
 
 struct VertexOutputScene {
-    @builtin(position) clip_position: vec4<f32>,
+    // EN-044 — @invariant is load-bearing. The depth prepass and the main pass run
+    // the SAME vertex entry point, but through different pipelines: the prepass's
+    // fragment stage consumes almost none of the varyings, so the compiler is free
+    // to optimise the position maths differently (fma contraction, reassociation)
+    // and the two depths stop being bit-identical. The main pass then tests Equal
+    // against a depth that is one ulp off, every fragment fails, and the entire
+    // forest and the player VANISH — which is exactly what happened, and it looked
+    // like a 60 fps win. @invariant forbids that: the position must be computed
+    // identically in every pipeline that uses this shader.
+    @invariant @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
@@ -385,24 +404,31 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
     }
     var out: VertexOutputScene;
     var local = in.position;
-    // Foliage wind sway — only for alpha-cut materials (leaf cards), so the
-    // opaque trunk and the rest of the world stay rigid. Sway grows with the
-    // vertex's height up the plant and its phase varies by world position so
-    // cards don't move in lockstep. lighting.wind = (dir.x, dir.z, amp, time).
-    if (material.metal_rough.w > 0.0 && lighting.wind.z > 0.0) {
-        let wp0 = (u.model * vec4<f32>(in.position, 1.0)).xyz;
-        let t = lighting.wind.w;
-        let sway = lighting.wind.z * (0.25 + max(in.position.y, 0.0) * 0.16);
-        let phase = t * 1.6 + wp0.x * 0.5 + wp0.z * 0.5;
-        local.x = local.x + lighting.wind.x * sway * sin(phase);
-        local.z = local.z + lighting.wind.y * sway * sin(phase * 1.3 + 1.1);
-        local.y = local.y + sway * 0.12 * sin(phase * 0.9 + 2.0);
+    // Hierarchical foliage wind (common/foliage_wind.wgsl). u.misc.z is the
+    // per-draw foliage amount — 0 for everything that is not a plant, so the
+    // world does not sway. This replaces a sway that only ever moved ALPHA-CUT
+    // materials, which meant leaf cards fluttered and every trunk was rigid.
+    //
+    // is_leaf comes from the alpha cutoff, so cards get the fast flutter layer
+    // and wood does not.
+    var prev_local = local;
+    if (u.misc.z > 0.0 && lighting.wind.z > 0.0) {
+        // is_leaf from the alpha cutoff: cards get the fast flutter layer, wood
+        // does not. Same helper the shadow pass calls, so the tree and its shadow
+        // bend together.
+        let is_leaf = select(0.0, 1.0, material.metal_rough.w > 0.0);
+        local = foliage_wind_local(in.position, u.model, lighting.wind, u.misc.z, is_leaf);
+        // Last frame's offset too, so TAA gets a real velocity for a moving leaf
+        // instead of 0 and stops smearing the canopy into the sky behind it.
+        var w_prev = lighting.wind;
+        w_prev.w = lighting.wind.w - lighting.frame_misc.x;
+        prev_local = foliage_wind_local(in.position, u.model, w_prev, u.misc.z, is_leaf);
     }
     let pos4 = vec4<f32>(local, 1.0);
     let curr = u.mvp * pos4;
     out.clip_position = curr;
     out.curr_clip = curr;
-    out.prev_clip = u.prev_mvp * pos4;
+    out.prev_clip = u.prev_mvp * vec4<f32>(prev_local, 1.0);
     let world4 = u.model * pos4;
     out.world_pos = world4.xyz;
     out.normal = normalize((u.model * vec4<f32>(in.normal, 0.0)).xyz);
@@ -709,6 +735,25 @@ struct SceneOut {
     @location(3) albedo: vec4<f32>,
 };
 
+// EN-044 — depth prepass. Same vertex stage as the main pass (so the foliage wind
+// displaces identically and the depths match), and a fragment stage that does
+// nothing but honour the alpha cutout.
+//
+// WHY THIS EARNS ITS PASS. The scene fragment shader can `discard` (alpha-cutout
+// foliage), and a shader that may discard cannot early-Z *write* — the GPU has to
+// run the whole thing before it knows if the pixel survives. So every leaf card in
+// an 88-tree forest shaded the full 5-target MRT, several layers deep, and threw
+// most of it away. Priming depth first lets the main pass early-Z *reject* those
+// fragments before the shader ever runs.
+@fragment
+fn fs_depth_prepass(in: VertexOutputScene) {
+    let alpha_cutoff = material.metal_rough.w;
+    if (alpha_cutoff > 0.0) {
+        let a = textureSample(base_color_tex, base_color_samp, in.uv).a * in.color.a;
+        if (a < alpha_cutoff) { discard; }
+    }
+}
+
 @fragment
 fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     var n = normalize(in.normal);
@@ -883,8 +928,14 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // Never fully zero direct light — a 10% floor simulates
     // ambient bounce from surrounding surfaces and keeps shadows
     // from going pitch-black regardless of IBL intensity.
-    let direct_shadow = mix(0.03, 1.0, shadow_factor);
+    let direct_shadow_raw = mix(0.03, 1.0, shadow_factor);
     let legacy_dir = normalize(lighting.light_dir.xyz);
+    // Cloud deck (common/clouds.wgsl). Folded into the SUN shadow only: a cloud
+    // blocks the sun, it does not stop the sky from being blue. Multiplying it
+    // into ambient as well is what makes cloud shadows read as flat grey paint
+    // instead of shade. Costs nothing when strength is 0 (the default).
+    let direct_shadow = direct_shadow_raw * cloud_shadow_at(
+        in.world_pos, legacy_dir, lighting.wind.xy, lighting.wind.w, lighting.cloud);
     if (alpha_cutoff > 0.0) {
         // Foliage wrap-lambert (energy-conserving wrap, w = 0.45): a leaf
         // turning from the sun rolls off softly — light transmits and
@@ -1168,5 +1219,5 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         vec4<f32>(base_color, 1.0 - shadow_factor),
     );
 }
-";
+"#);
 
