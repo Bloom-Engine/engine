@@ -381,11 +381,14 @@ struct PtParamsCpu {
     sun_color: [f32; 4],
     /// rgb ambient-derived sky tint, w unused.
     sky_color: [f32; 4],
-    /// x=width, y=height, z=frame_index, w=accum_count.
+    /// x/y = TRACE grid dims (half in realtime mode), z=frame_index,
+    /// w=accum_count.
     size: [u32; 4],
     /// x=mode (1 progressive / 2 realtime), y=max_bounces,
     /// z=point_light_count (≤16), w=debug view (BLOOM_PT_DEBUG).
     cfg: [f32; 4],
+    /// PT-3 half-res: x/y = full G-buffer dims, z/w = 2x2 sample phase.
+    ext: [u32; 4],
     /// 16 lights × (pos_range vec4, color_int vec4).
     lights: [[f32; 4]; 32],
 }
@@ -1309,11 +1312,14 @@ pub struct Renderer {
     pt_atrous_final_pipeline: Option<wgpu::ComputePipeline>,
     pt_atrous_layout: Option<wgpu::BindGroupLayout>,
     /// Per-iteration uniform (step size + sigmas + extent).
-    pt_atrous_params_bufs: [wgpu::Buffer; 2],
+    pt_atrous_params_bufs: [wgpu::Buffer; 3],
     pt_atrous_scratch: Option<wgpu::Buffer>,
-    /// bg[0][i] = pass 1 reading accum buffer i; bg[1][0] = pass 2
-    /// (scratch → hdr). Invalidated with pt_bg.
+    pt_atrous_scratch2: Option<wgpu::Buffer>,
+    /// Three iterations: bg1[i] = accum buffer i → scratch (step 1),
+    /// bg_mid2 = scratch → scratch2 (step 2), bg2 = scratch2 → hdr
+    /// (step 4, upsampling). Invalidated with pt_bg.
     pt_atrous_bg1: [Option<wgpu::BindGroup>; 2],
+    pt_atrous_bg_mid2: Option<wgpu::BindGroup>,
     pt_atrous_bg2: Option<wgpu::BindGroup>,
     /// True when the PT kernel actually replaced this frame's scene
     /// colour. Mode 1 leaves the raster frame on screen until a few
@@ -5242,6 +5248,26 @@ impl Renderer {
                                 view_dimension: wgpu::TextureViewDimension::D2,
                             }, count: None,
                         },
+                        // PT-3 half-res: full-res depth guides the
+                        // upsample in cs_final.
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Depth,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            }, count: None,
+                        },
+                        // Full-res G-buffer albedo for SVGF
+                        // re-modulation in cs_final.
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            }, count: None,
+                        },
                     ],
                 });
                 let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -5268,13 +5294,19 @@ impl Renderer {
         let pt_atrous_params_bufs = [
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pt_atrous_params_0"),
-                size: 16,
+                size: 32,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pt_atrous_params_1"),
-                size: 16,
+                size: 32,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pt_atrous_params_2"),
+                size: 32,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -6913,7 +6945,9 @@ impl Renderer {
             pt_atrous_layout,
             pt_atrous_params_bufs,
             pt_atrous_scratch: None,
+            pt_atrous_scratch2: None,
             pt_atrous_bg1: [None, None],
+            pt_atrous_bg_mid2: None,
             pt_atrous_bg2: None,
             probe_trace_sdf_pipeline,
             probe_trace_sdf_layout,
@@ -7417,7 +7451,9 @@ impl Renderer {
             self.pt_accum_buffers = [None, None];
             self.pt_accum_count = 0;
             self.pt_atrous_scratch = None;
+            self.pt_atrous_scratch2 = None;
             self.pt_atrous_bg1 = [None, None];
+            self.pt_atrous_bg_mid2 = None;
             self.pt_atrous_bg2 = None;
             self.hiz_linearize_bg_cache = None;
         self.occlusion.invalidate_bindings();

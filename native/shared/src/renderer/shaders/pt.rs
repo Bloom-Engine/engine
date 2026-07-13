@@ -55,8 +55,11 @@ struct PtParams {
     sun_dir: vec4<f32>,     // xyz unit vector toward the sun
     sun_color: vec4<f32>,   // rgb premultiplied by intensity
     sky_color: vec4<f32>,   // rgb ambient-derived sky tint
-    size: vec4<u32>,        // x=width, y=height, z=frame_index, w=accum_count
+    size: vec4<u32>,        // x/y = TRACE grid dims, z=frame_index, w=accum_count
     cfg: vec4<f32>,         // x=mode(1|2), y=max_bounces, z=point_light_count, w=debug
+    // PT-3 half-res: x/y = full G-buffer dims, z/w = 2x2 sample phase.
+    // Full-res modes set ext.xy == size.xy and phase 0.
+    ext: vec4<u32>,
     lights: array<PtLight, 16>,
 };
 
@@ -173,8 +176,10 @@ fn rand_2f() -> vec2<f32> { return vec2<f32>(rand_f(), rand_f()); }
 
 // ---- Geometry reconstruction -------------------------------------------------
 
+// px here is always a FULL-resolution G-buffer pixel (u.ext dims); the
+// trace grid may be half of that in realtime mode.
 fn world_at(px: vec2<i32>, depth: f32) -> vec3<f32> {
-    let dims = vec2<f32>(f32(u.size.x), f32(u.size.y));
+    let dims = vec2<f32>(f32(u.ext.x), f32(u.ext.y));
     let uv = (vec2<f32>(px) + vec2<f32>(0.5)) / dims;
     let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
     let w = u.inv_vp * ndc;
@@ -182,7 +187,7 @@ fn world_at(px: vec2<i32>, depth: f32) -> vec3<f32> {
 }
 
 fn depth_at(px: vec2<i32>) -> f32 {
-    let clamped = clamp(px, vec2<i32>(0), vec2<i32>(i32(u.size.x) - 1, i32(u.size.y) - 1));
+    let clamped = clamp(px, vec2<i32>(0), vec2<i32>(i32(u.ext.x) - 1, i32(u.ext.y) - 1));
     return textureLoad(depth_tex, clamped, 0);
 }
 
@@ -510,15 +515,27 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = vec2<i32>(i32(gid.x), i32(gid.y));
     rng_seed(gid.xy, u.size.z);
 
+    // PT-3 half-res: realtime mode traces a half grid; map this trace
+    // cell to its full-res G-buffer pixel (the 2x2 phase rotates per
+    // frame so the EMA integrates all four over time). Full-res modes
+    // have ext == size and phase 0, making this the identity.
+    var px_full = px;
+    if (u.ext.x > u.size.x) {
+        px_full = min(
+            px * 2 + vec2<i32>(i32(u.ext.z), i32(u.ext.w)),
+            vec2<i32>(i32(u.ext.x) - 1, i32(u.ext.y) - 1),
+        );
+    }
+
     let debug = u.cfg.w;
     if (debug == 5.0) {
-        textureStore(out_hdr, px, vec4<f32>(1.0, 0.0, 1.0, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(1.0, 0.0, 1.0, 1.0));
         return;
     }
 
-    let depth = depth_at(px);
+    let depth = depth_at(px_full);
     if (debug == 1.0) {
-        textureStore(out_hdr, px, vec4<f32>(vec3<f32>(depth), 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(vec3<f32>(depth), 1.0));
         return;
     }
 
@@ -531,22 +548,22 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let p0 = world_at(px, depth);
-    let n0 = normal_from_depth(px, p0);
-    let albedo0 = textureLoad(albedo_tex, px, 0).rgb;
+    let p0 = world_at(px_full, depth);
+    let n0 = normal_from_depth(px_full, p0);
+    let albedo0 = textureLoad(albedo_tex, px_full, 0).rgb;
 
     if (debug == 2.0) {
-        textureStore(out_hdr, px, vec4<f32>(n0 * 0.5 + 0.5, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(n0 * 0.5 + 0.5, 1.0));
         return;
     }
     if (debug == 3.0) {
-        textureStore(out_hdr, px, vec4<f32>(albedo0, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(albedo0, 1.0));
         return;
     }
     if (debug == 4.0) {
         let sd = sun_cone_sample(rand_2f());
         let vis = select(0.0, 1.0, !occluded(p0 + n0 * 0.02, sd, 1000.0));
-        textureStore(out_hdr, px, vec4<f32>(vec3<f32>(vis), 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(vec3<f32>(vis), 1.0));
         return;
     }
     if (debug == 8.0) {
@@ -565,7 +582,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let gi = instance_data[h8.instance_custom_data].geo;
             c8 = select(vec3<f32>(0.0), vec3<f32>(100.0), gi.z > 0u);
         }
-        textureStore(out_hdr, px, vec4<f32>(c8, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(c8, 1.0));
         return;
     }
     if (debug == 9.0) {
@@ -599,7 +616,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         }
-        textureStore(out_hdr, px, vec4<f32>(c9, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(c9, 1.0));
         return;
     }
     if (debug == 10.0) {
@@ -619,7 +636,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let prim = f32(h10.primitive_index);
             c10 = vec3<f32>(fract(prim / 64.0), fract(prim / 1024.0), fract(prim / 16384.0)) * 30.0;
         }
-        textureStore(out_hdr, px, vec4<f32>(c10, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(c10, 1.0));
         return;
     }
     if (debug == 11.0 || debug == 12.0) {
@@ -647,7 +664,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 c11 = vec3<f32>(b.x, b.y, max(0.0, 1.0 - b.x - b.y)) * 30.0;
             }
         }
-        textureStore(out_hdr, px, vec4<f32>(c11, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(c11, 1.0));
         return;
     }
     if (debug == 13.0) {
@@ -674,7 +691,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 c13 = vec3<f32>(50.0, 0.0, 0.0);
             }
         }
-        textureStore(out_hdr, px, vec4<f32>(c13, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(c13, 1.0));
         return;
     }
     if (debug == 14.0) {
@@ -695,7 +712,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 fract(h14.t * 0.0078125),
             ) * 20.0;
         }
-        textureStore(out_hdr, px, vec4<f32>(c14, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(c14, 1.0));
         return;
     }
     if (debug == 15.0) {
@@ -721,7 +738,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (hA.kind != RAY_QUERY_INTERSECTION_NONE) { tA = hA.t; }
         if (hB.kind != RAY_QUERY_INTERSECTION_NONE) { tB = hB.t; }
         let c15 = vec3<f32>(fract(tA * 0.125) * 20.0, fract(tB * 0.125) * 20.0, 0.0);
-        textureStore(out_hdr, px, vec4<f32>(c15, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(c15, 1.0));
         return;
     }
     if (debug == 16.0) {
@@ -743,7 +760,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             f32(h16.primitive_index),
             f32(h16.kind),
         );
-        textureStore(out_hdr, px, vec4<f32>(0.2, 0.0, 0.4, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(0.2, 0.0, 0.4, 1.0));
         return;
     }
     if (debug == 17.0) {
@@ -751,7 +768,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // depth, straight into accum for CPU readback.
         let idx17 = gid.y * u.size.x + gid.x;
         accum_out[idx17] = vec4<f32>(p0, depth);
-        textureStore(out_hdr, px, vec4<f32>(0.4, 0.2, 0.0, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(0.4, 0.2, 0.0, 1.0));
         return;
     }
     if (debug == 6.0 || debug == 7.0) {
@@ -782,7 +799,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 col = vec3<f32>(1.0, 0.5, 0.0);      // orange: no geo window
             }
         }
-        textureStore(out_hdr, px, vec4<f32>(col, 1.0));
+        textureStore(out_hdr, px_full, vec4<f32>(col, 1.0));
         return;
     }
 
@@ -793,7 +810,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // (1 - metallic) — metals have no diffuse lobe. Specular NEE is a
     // known gap (see the PT-2 ticket); specular reflection of sky and
     // scene comes from the GGX bounce below.
-    let mr0 = textureLoad(material_tex, px, 0).rg;
+    let mr0 = textureLoad(material_tex, px_full, 0).rg;
     var metal_cur = mr0.r;
     var rough_cur = mr0.g;
     var radiance = direct_light(p0 + n0 * 0.02, n0, albedo0 * (1.0 - metal_cur));
@@ -887,7 +904,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // frames no matter how large the frame count grows, so the cap
     // must never relax or fireflies return as the count climbs.
     var cap = 4.0 + f32(min(u.size.w, 28u));
-    if (u.cfg.x >= 2.0) { cap = 6.0; }
+    // Realtime cap is TIGHT (3): the à-trous luminance edge-stop
+    // preserves bright outliers as if they were edges, so any firefly
+    // that survives the cap survives the filter too. Scene luma sits
+    // around 0.5-1.5, so 3 leaves sunlit highlights alone.
+    if (u.cfg.x >= 2.0) { cap = 3.0; }
     if (luma > cap) { radiance *= cap / luma; }
 
     // ---- accumulate ---------------------------------------------------------
@@ -919,16 +940,35 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let ph = accum[pidx];
                 let zl_hist = lin_depth(ph.w);
                 let zl_here = lin_depth(ndc_prev.z);
-                if (abs(zl_hist - zl_here) < 0.05 * max(zl_hist, zl_here) + 0.05) {
+                // Tolerance is deliberately loose: at half-res the
+                // reprojected texel quantizes to 2 full pixels, and on
+                // depth-chaotic surfaces (grass) a tight test rejects
+                // almost every frame — pinning texels at 1 spp. The
+                // ghosting a loose test admits is invisible exactly
+                // where the depth is chaotic.
+                if (abs(zl_hist - zl_here) < 0.12 * max(zl_hist, zl_here) + 0.05) {
                     alpha = 0.15;
                     hist = ph.rgb;
                 }
             }
         }
-        out = mix(hist, radiance, alpha);
-        accum_out[idx] = vec4<f32>(out, depth);
-        // Realtime output goes through the a-trous passes (they write
-        // out_hdr); the main kernel only feeds the history buffer.
+        // SVGF-style albedo demodulation: history and output store
+        // IRRADIANCE (radiance divided by the primary albedo) so the
+        // à-trous passes filter lighting only; the final pass
+        // re-multiplies by the FULL-RES G-buffer albedo, keeping
+        // texture detail crisp despite the half-res trace and the
+        // aggressive smoothing.
+        var irr = radiance / max(albedo0, vec3<f32>(0.05));
+        // The firefly cap must bind IRRADIANCE, not radiance: dividing
+        // by a dark albedo amplifies up to 20x, so a radiance-space cap
+        // leaves outliers the filter sigmas can't absorb. Sunlit
+        // irradiance sits around 1-3; 4 leaves highlights alone.
+        let irr_luma = dot(irr, vec3<f32>(0.2126, 0.7152, 0.0722));
+        if (irr_luma > 4.0) {
+            irr *= 4.0 / irr_luma;
+        }
+        let out_irr = mix(hist, irr, alpha);
+        accum_out[idx] = vec4<f32>(out_irr, depth);
         return;
     } else {
         // Progressive: plain running sum; count lives on the CPU.
@@ -949,7 +989,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    textureStore(out_hdr, px, vec4<f32>(out, 1.0));
+    textureStore(out_hdr, px_full, vec4<f32>(out, 1.0));
 }
 "#;
 
@@ -961,13 +1001,20 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// through untouched and are never written to hdr.
 pub(in crate::renderer) const PT_ATROUS_WGSL: &str = r#"
 struct AtrousParams {
-    // x = step (texels), y = sigma_luma, z = width, w = height
+    // x = step (texels), y = sigma_luma, z = trace width, w = trace height
     p: vec4<f32>,
+    // x/y = full G-buffer dims (cs_final upsamples trace -> full when
+    // they differ), z/w unused.
+    p2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> ap: AtrousParams;
 @group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
 @group(0) @binding(3) var out_hdr_a: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var depth_full: texture_depth_2d;
+// Full-res G-buffer albedo: cs_final re-modulates the filtered
+// irradiance with it (SVGF demodulation keeps textures crisp).
+@group(0) @binding(5) var albedo_full: texture_2d<f32>;
 
 fn lin_depth_a(d: f32) -> f32 {
     return 0.02 / max(1.0 - d, 1e-6);
@@ -1002,7 +1049,7 @@ fn filter_at(px: vec2<i32>, w: i32, h: i32, step: i32) -> vec4<f32> {
                 continue;
             }
             let zq = lin_depth_a(s.w);
-            let wz = exp(-abs(zq - zc) / (0.08 * max(zc, zq) + 0.02));
+            let wz = exp(-abs(zq - zc) / (0.15 * max(zc, zq) + 0.02));
             let lq = dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
             let wl = exp(-abs(lq - lc) / max(ap.p.y, 1e-3));
             let wgt = kern(dx) * kern(dy) * wz * wl;
@@ -1027,20 +1074,64 @@ fn cs_mid(@builtin(global_invocation_id) gid: vec3<u32>) {
     dst[gid.y * u32(w) + gid.x] = filter_at(px, w, h, i32(ap.p.x));
 }
 
+// Final pass runs at FULL resolution: filter-and-write when the trace
+// grid is full-res, depth-guided joint-bilateral upsample when the
+// trace grid is half-res. Sky pixels (full-res depth at far plane) are
+// never written so the raster sky survives.
 @compute @workgroup_size(8, 8, 1)
 fn cs_final(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let w = i32(ap.p.z);
-    let h = i32(ap.p.w);
-    if (i32(gid.x) >= w || i32(gid.y) >= h) {
+    let fw = i32(ap.p2.x);
+    let fh = i32(ap.p2.y);
+    if (i32(gid.x) >= fw || i32(gid.y) >= fh) {
         return;
     }
     let px = vec2<i32>(i32(gid.x), i32(gid.y));
-    let cidx = gid.y * u32(w) + gid.x;
-    if (src[cidx].w >= 0.9999999) {
-        // Sky: the raster sky in hdr stays untouched.
+    let d = textureLoad(depth_full, px, 0);
+    if (d >= 0.9999999) {
         return;
     }
-    let r = filter_at(px, w, h, i32(ap.p.x));
-    textureStore(out_hdr_a, px, vec4<f32>(r.rgb, 1.0));
+    let hw = i32(ap.p.z);
+    let hh = i32(ap.p.w);
+    let alb = max(textureLoad(albedo_full, px, 0).rgb, vec3<f32>(0.05));
+    if (hw == fw) {
+        let cidx = gid.y * u32(fw) + gid.x;
+        if (src[cidx].w >= 0.9999999) {
+            return;
+        }
+        let r = filter_at(px, fw, fh, i32(ap.p.x));
+        textureStore(out_hdr_a, px, vec4<f32>(r.rgb * alb, 1.0));
+        return;
+    }
+    // Half-res upsample: 3x3 taps around the containing trace texel,
+    // weighted by kernel distance and relative linear-depth agreement
+    // with THIS full-res pixel. The epsilon keeps thin foreground
+    // geometry (whose taps all mismatch) softly averaged rather than
+    // black.
+    let zc = lin_depth_a(d);
+    let hx = clamp(px.x / 2, 0, hw - 1);
+    let hy = clamp(px.y / 2, 0, hh - 1);
+    var sum = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let qx = hx + dx;
+            let qy = hy + dy;
+            if (qx < 0 || qy < 0 || qx >= hw || qy >= hh) {
+                continue;
+            }
+            let s = src[u32(qy) * u32(hw) + u32(qx)];
+            if (s.w >= 0.9999999) {
+                continue;
+            }
+            let wz = exp(-abs(lin_depth_a(s.w) - zc) / (0.08 * zc + 0.02));
+            let wgt = kern(dx) * kern(dy) * wz + 1e-5;
+            sum += s.rgb * wgt;
+            wsum += wgt;
+        }
+    }
+    if (wsum < 1e-6) {
+        return;
+    }
+    textureStore(out_hdr_a, px, vec4<f32>((sum / wsum) * alb, 1.0));
 }
 "#;

@@ -85,8 +85,30 @@ impl Renderer {
             return;
         }
 
+        // ---- trace grid ----
+        // Realtime mode traces at half resolution (4x fewer rays) and
+        // joint-bilaterally upsamples in the final à-trous pass; the
+        // 2x2 sample phase rotates per frame so the temporal EMA
+        // integrates full-res coverage over 4 frames. Progressive mode
+        // stays full-res.
+        let (trace_w, trace_h) = if self.pt_mode >= 2 {
+            (surf_w.div_ceil(2), surf_h.div_ceil(2))
+        } else {
+            (surf_w, surf_h)
+        };
+        // Phase pinned to (0,0): rotating it makes each trace texel
+        // sample a different full-res pixel every frame, and on
+        // depth-chaotic surfaces (grass) the history validation then
+        // rejects almost every frame — texels never accumulate past
+        // 1 spp and read as white speckle. A consistent owner pixel
+        // keeps history valid; the upsample covers the other three.
+        let phase = [0u32, 0u32];
+
         // ---- accumulation buffers (vec4<f32> per pixel, ping-pong) ----
-        let needed = (surf_w as u64) * (surf_h as u64) * 16;
+        // Sized to the TRACE grid; a mode switch changes the size and
+        // recreates (which also resets accumulation — correct, the two
+        // modes' buffer contents are not interchangeable).
+        let needed = (trace_w as u64) * (trace_h as u64) * 16;
         let recreate = match &self.pt_accum_buffers[0] {
             Some(b) => b.size() != needed,
             None => true,
@@ -110,8 +132,15 @@ impl Renderer {
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             }));
+            self.pt_atrous_scratch2 = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pt_atrous_scratch2"),
+                size: needed,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }));
             self.pt_bg = [None, None];
             self.pt_atrous_bg1 = [None, None];
+            self.pt_atrous_bg_mid2 = None;
             self.pt_atrous_bg2 = None;
             self.pt_accum_count = 0;
             self.pt_accum_idx = 0;
@@ -181,13 +210,14 @@ impl Renderer {
                 amb[2] * sky_intensity,
                 0.0,
             ],
-            size: [surf_w, surf_h, self.taa_frame_index, self.pt_accum_count],
+            size: [trace_w, trace_h, self.taa_frame_index, self.pt_accum_count],
             cfg: [
                 self.pt_mode as f32,
                 max_bounces,
                 light_count as f32,
                 self.pt_debug,
             ],
+            ext: [surf_w, surf_h, phase[0], phase[1]],
             lights,
         };
         self.queue.write_buffer(&self.pt_uniform_buffer, 0, bytemuck::bytes_of(&params));
@@ -259,7 +289,7 @@ impl Renderer {
             if self.pt_texture_arrays_enabled {
                 pass.set_bind_group(1, self.pt_tex_bg.as_ref().unwrap(), &[]);
             }
-            pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
+            pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
         }
         // This frame wrote into buffers[1 - idx]; it becomes next
         // frame's read side.
@@ -275,11 +305,19 @@ impl Renderer {
             && self.pt_atrous_mid_pipeline.is_some()
             && self.pt_atrous_scratch.is_some()
         {
-            let sigma_luma = 0.25f32;
-            let p0 = [1.0f32, sigma_luma, surf_w as f32, surf_h as f32];
-            let p1 = [2.0f32, sigma_luma, surf_w as f32, surf_h as f32];
-            self.queue.write_buffer(&self.pt_atrous_params_bufs[0], 0, bytemuck::bytes_of(&p0));
-            self.queue.write_buffer(&self.pt_atrous_params_bufs[1], 0, bytemuck::bytes_of(&p1));
+            // SVGF-style schedule: the first iteration barely edge-stops
+            // on luminance (1-2 spp variance IS the signal to remove);
+            // later iterations tighten so real shading detail survives.
+            // Depth stopping guards geometry edges throughout.
+            for (i, (step, sigma_luma)) in
+                [(1.0f32, 2.0f32), (2.0, 0.5), (4.0, 0.3)].iter().enumerate()
+            {
+                let p = [
+                    [*step, *sigma_luma, trace_w as f32, trace_h as f32],
+                    [surf_w as f32, surf_h as f32, 0.0, 0.0],
+                ];
+                self.queue.write_buffer(&self.pt_atrous_params_bufs[i], 0, bytemuck::bytes_of(&p));
+            }
 
             if self.pt_atrous_bg1[written_idx].is_none() {
                 self.pt_atrous_bg1[written_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -290,6 +328,22 @@ impl Renderer {
                         wgpu::BindGroupEntry { binding: 1, resource: self.pt_accum_buffers[written_idx].as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 2, resource: self.pt_atrous_scratch.as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
+                    ],
+                }));
+            }
+            if self.pt_atrous_bg_mid2.is_none() {
+                self.pt_atrous_bg_mid2 = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("pt_atrous_bg_mid2"),
+                    layout: self.pt_atrous_layout.as_ref().unwrap(),
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[1].as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.pt_atrous_scratch.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: self.pt_atrous_scratch2.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
                     ],
                 }));
             }
@@ -298,14 +352,16 @@ impl Renderer {
                     label: Some("pt_atrous_bg2"),
                     layout: self.pt_atrous_layout.as_ref().unwrap(),
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[1].as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: self.pt_atrous_scratch.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[2].as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.pt_atrous_scratch2.as_ref().unwrap().as_entire_binding() },
                         // dst is unused by cs_final; bind an accum
                         // buffer to satisfy the layout (cannot alias
-                        // the scratch src binding — RO+RW of the same
+                        // the scratch2 src binding — RO+RW of the same
                         // buffer in one group fails validation).
                         wgpu::BindGroupEntry { binding: 2, resource: self.pt_accum_buffers[0].as_ref().unwrap().as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
                     ],
                 }));
             }
@@ -315,9 +371,14 @@ impl Renderer {
                 label: Some("pt_atrous"),
                 timestamp_writes: ts,
             });
+            // Mid passes filter on the trace grid (steps 1 and 2); the
+            // final pass runs at FULL resolution with step 4 (it
+            // upsamples when the grids differ).
             pass.set_pipeline(self.pt_atrous_mid_pipeline.as_ref().unwrap());
             pass.set_bind_group(0, self.pt_atrous_bg1[written_idx].as_ref().unwrap(), &[]);
-            pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
+            pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
+            pass.set_bind_group(0, self.pt_atrous_bg_mid2.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
             pass.set_pipeline(self.pt_atrous_final_pipeline.as_ref().unwrap());
             pass.set_bind_group(0, self.pt_atrous_bg2.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
