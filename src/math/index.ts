@@ -154,11 +154,25 @@ export function randomInt(min: number, max: number): number {
 
 export function easeInQuad(t: number): number { return t * t; }
 export function easeOutQuad(t: number): number { return t * (2 - t); }
-export function easeInOutQuad(t: number): number { return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; }
+// BROKEN under Perry — EN-051. The parameter never arrives: `t < 0.5` is false
+// for every input, so this returns a constant. Adding a `console.log(t)` to the
+// body makes it correct, which is the signature of a codegen bug, not a logic
+// one. Rewriting with `if`, reordering the expression, and binding `t` to a
+// local were all tried and none of them fix it. `easeInOutCubic` below is the
+// same shape and is fine, so the shape is not the trigger.
+//
+// Left in its honest form rather than contorted around a bug I cannot explain.
+// Nothing in the shooter or the editor calls it. See shooter
+// docs/perry-quirks.md #8, Case B.
+export function easeInOutQuad(t: number): number {
+  if (t < 0.5) return 2 * t * t;
+  return (4 - 2 * t) * t - 1;
+}
 export function easeInCubic(t: number): number { return t * t * t; }
 export function easeOutCubic(t: number): number { const t1 = t - 1; return t1 * t1 * t1 + 1; }
 export function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  if (t < 0.5) return 4 * t * t * t;
+  return 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 export function easeInElastic(t: number): number {
   if (t === 0 || t === 1) return t;

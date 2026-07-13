@@ -560,6 +560,36 @@ export function createTextureArrayEx(
   return bloom_create_texture_array_ex(bytes as any, dataLen, width, height, layerCount, format, mipLevels);
 }
 
+declare function bloom_create_texture_array_scratch(
+  width: number, height: number, layerCount: number, format: number, mipLevels: number,
+): number;
+
+/// EN-049 — build a texture array from data you computed, not from files.
+///
+/// `createTextureArray`/`createTextureArrayEx` take a `*const u8`, which the
+/// manifest must declare `i64` — and Perry cannot pass a `number[]` to an i64
+/// param ("Expected safe integer for native i64 parameter"). They are, from
+/// Perry, uncallable. That is fine for ART, which has files to name
+/// (`createTextureArrayFromFiles`), and useless for DATA: a terrain splat map is
+/// computed at load out of the world file and there is no file to point at.
+///
+/// So the payload goes through the mesh scratch buffer, exactly as
+/// `updateSceneNodeGeometry` already does for vertices. `texels` is one PACKED
+/// u32 per texel — `r | g<<8 | b<<16 | a<<24`, each channel 0..255 — so a 128²
+/// map is 16,384 FFI calls, not 65,536. Layers are back-to-back, layer 0 first.
+///
+/// Load-time only. It is linear in the texel count and crosses the FFI once per
+/// texel; do not put it on a frame path.
+export function createTextureArrayFromTexels(
+  texels: number[], texelCount: number,
+  width: number, height: number, layerCount: number,
+  format: number = TEX_ARRAY_FORMAT_LINEAR, mipLevels: number = 1,
+): number {
+  bloom_mesh_scratch_reset();
+  for (let i = 0; i < texelCount; i = i + 1) bloom_mesh_scratch_push_u32(texels[i]);
+  return bloom_create_texture_array_scratch(width, height, layerCount, format, mipLevels);
+}
+
 declare function bloom_create_texture_array_from_files(paths: number, format: number, mipLevels: number): number;
 
 /// EN-014 V3 — build a texture array by naming the files, letting the engine

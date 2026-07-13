@@ -1547,3 +1547,74 @@ thing it launched.
    is now resolved against `cwd` before spawning.
 2. Args cross as a newline-separated string and are re-split into a real argv. There
    is no shell involved, which is also why there is nothing to inject into.
+
+## EN-049 — `createTextureArrayFromTexels`: a texture array from DATA, not files ✅
+
+`createTextureArray` / `createTextureArrayEx` take a `*const u8`, so the manifest has
+to declare that param `i64` — and **Perry cannot pass a `number[]` into an i64 param**
+(`TypeError: Expected safe integer for native i64 parameter`). From Perry, both are
+uncallable. Every real caller therefore ended up on `createTextureArrayFromFiles`,
+which is right for ART and useless for DATA: a terrain splat map is computed at load
+out of the world file and there is no file to name.
+
+Same fix the mesh path has used all along (`bloom_create_mesh_scratch`, whose comment
+already says *"Perry 0.5.x rejects `number[]` in an `i64` pointer param"*): push the
+payload through the scratch buffer, then call with the dimensions.
+
+```ts
+createTextureArrayFromTexels(texels, texelCount, w, h, layerCount, format, mipLevels)
+```
+
+`texels` is one **packed u32 per texel** (`r | g<<8 | b<<16 | a<<24`), so a 128² map
+costs 16,384 FFI calls rather than 65,536. Load-time only — it is linear in the texel
+count.
+
+Shipped as the transport for the shooter's authored splat terrain (editor PLAN §D).
+
+**Platform gap:** web and watchOS do not implement the scratch buffer at all, so
+`validate-ffi` reports this function as unexported there — the same pre-existing gap
+already carried by `bloom_scene_update_geometry_scratch` and
+`bloom_gen_mesh_spline_ribbon_scratch`. Failures went 6 → 8 for that reason.
+
+## EN-050 — `clamp` in `world/terrain.ts` miscompiled; splat weights all read 0 ✅
+
+`clamp(v, lo, hi)`, whose body was a single nested-ternary return, evaluated to `lo`
+for **every** input when called from `quantizeWeight` in the same module — while
+`sampleHeight`, in the same file, called the same helper correctly.
+
+Every splat weight therefore quantised to `0`, and a painted terrain loaded
+unpainted. Fixed by writing `clamp` with `if` statements; verified end-to-end (the
+shooter renders authored paint) and pinned by the editor self-test
+`testSplatPaintPartition`.
+
+Root cause is a Perry codegen bug, not ours. Reduced repro, and the five probe
+designs that gave *wrong* answers on the way to it: shooter `docs/perry-quirks.md`
+#8.
+
+## EN-051 — `easeInOutQuad` never receives its argument 🔴
+
+```ts
+export function easeInOutQuad(t: number): number {
+  if (t < 0.5) return 2 * t * t;      // false for EVERY input
+  return (4 - 2 * t) * t - 1;
+}
+```
+
+The parameter does not arrive; the function returns a constant for all `t`. Adding a
+`console.log(t)` to the body makes it correct — the signature of a codegen /
+optimisation bug. Rewriting with `if` statements, reordering the expression, and
+binding `t` to a local all fail to fix it. `easeInOutCubic`, directly below it and
+the same shape, is fine.
+
+**Left broken deliberately.** Nothing in the shooter or the editor calls it, and
+cargo-culting a workaround into a function I do not understand would only hide it.
+It is a public export, so a game that uses it gets silently wrong easing — that is
+the cost of leaving it, and it is why this is filed rather than quietly patched.
+
+Needs a Perry-side fix (or a minimal repro filed upstream). See shooter
+`docs/perry-quirks.md` #8, Case B.
+
+**The rest of `src/` is not cleared.** A sweep found the single-ternary shape in the
+two editor `clamp`s, `easeInOutCubic`, and three shooter helpers; those were rewritten
+defensively, but only `clamp`/`quantizeWeight` and the easings were actually
+*verified*. The shape is a smell, not a diagnosis.

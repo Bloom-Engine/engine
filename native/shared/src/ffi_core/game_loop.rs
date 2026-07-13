@@ -161,6 +161,64 @@ macro_rules! __bloom_ffi_game_loop {
         })
         }
 
+        // bloom_create_texture_array_scratch  [EN-049]
+        //
+        // The byte-array path above takes a `*const u8`, which the manifest has
+        // to declare as `i64` — and Perry cannot put a `number[]` in an i64
+        // param (it raises "Expected safe integer for native i64 parameter").
+        // So from Perry, `bloom_create_texture_array_ex` is only callable with a
+        // pointer nobody has. Every real caller ended up on the from_files path,
+        // which is fine for ART and useless for DATA: a splat map is computed at
+        // load from the world file, and there is no file to name.
+        //
+        // Same fix the mesh path already uses (`bloom_create_mesh_scratch`):
+        // push the payload through the scratch buffer, then call this with the
+        // dimensions. Texels are pushed as PACKED u32 (one per texel, RGBA in
+        // little-endian byte order = R | G<<8 | B<<16 | A<<24), so a 128² splat
+        // is 16,384 pushes rather than 65,536.
+        #[no_mangle]
+        pub extern "C" fn bloom_create_texture_array_scratch(
+            width:       f64,
+            height:      f64,
+            layer_count: f64,
+            format:      f64,
+            mip_levels:  f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_create_texture_array_scratch", move || {
+                let w = width as u32;
+                let h = height as u32;
+                if w == 0 || h == 0 { return 0.0; }
+                let layers_count = (layer_count as u32)
+                    .min($crate::renderer::material_system::MAX_TEXTURE_ARRAY_LAYERS);
+                if layers_count == 0 { return 0.0; }
+
+                let texels = (w as usize) * (h as usize) * (layers_count as usize);
+                // Scoped so the scratch borrow ends before the renderer borrow.
+                let bytes: Vec<u8> = {
+                    let eng = engine();
+                    if eng.models.scratch_u32.len() < texels {
+                        // Short buffer: refuse rather than upload uninitialised
+                        // memory as a texture. Silent garbage here surfaces as a
+                        // terrain painted in noise, three layers from the cause.
+                        return 0.0;
+                    }
+                    eng.models.scratch_u32[..texels]
+                        .iter()
+                        .flat_map(|p| p.to_le_bytes())
+                        .collect()
+                };
+                let layer_size = (w as usize) * (h as usize) * 4;
+                let mut layers: Vec<(&[u8], u32, u32)> = Vec::with_capacity(layers_count as usize);
+                for i in 0..(layers_count as usize) {
+                    let start = i * layer_size;
+                    let end   = start + layer_size;
+                    if end > bytes.len() { break; }
+                    layers.push((&bytes[start..end], w, h));
+                }
+                engine().renderer.create_texture_array_ex(&layers, format as u32, mip_levels as u32) as f64
+        })
+        }
+
         // bloom_create_texture_array_from_files  [EN-014 V3]
         //
         // The byte-array path above asks the game to marshal every texel across

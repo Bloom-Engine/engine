@@ -1064,6 +1064,17 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_create_texture_array_scratch",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_material_texture_array",
           "params": [
             "f64",
@@ -1164,57 +1175,104 @@
         },
         {
           "name": "bloom_anim_play",
-          "params": ["f64", "f64", "f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_anim_set_layer",
-          "params": ["f64", "f64", "f64", "f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_anim_set_root_motion",
-          "params": ["f64", "f64"],
+          "params": [
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_anim_update",
-          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_anim_finished",
-          "params": ["f64"],
+          "params": [
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_anim_clip_duration",
-          "params": ["f64", "f64"],
+          "params": [
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_anim_root_delta",
-          "params": ["f64", "f64"],
+          "params": [
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_model_find_joint",
-          "params": ["f64", "string"],
+          "params": [
+            "f64",
+            "string"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_model_joint_world",
-          "params": ["f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_create_texture_array_from_files",
-          "params": ["string", "f64", "f64"],
+          "params": [
+            "string",
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_compile_material_instanced_bucket",
-          "params": ["string", "f64", "f64"],
+          "params": [
+            "string",
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {
@@ -1224,77 +1282,141 @@
         },
         {
           "name": "bloom_ragdoll_activate",
-          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_ragdoll_push",
-          "params": ["f64", "f64", "f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_ragdoll_update",
-          "params": ["f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_ragdoll_release",
-          "params": ["f64"],
+          "params": [
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_particles_create",
-          "params": ["f64"],
+          "params": [
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_particles_configure",
-          "params": ["f64"],
+          "params": [
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_particles_emit",
-          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_particles_update",
-          "params": ["f64", "f64"],
+          "params": [
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_particles_instance_buffer",
-          "params": ["f64"],
+          "params": [
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_particles_clear",
-          "params": ["f64"],
+          "params": [
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_particles_live",
-          "params": ["f64"],
+          "params": [
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_decals_init",
-          "params": ["f64"],
+          "params": [
+            "f64"
+          ],
           "returns": "f64"
         },
         {
           "name": "bloom_decals_spawn",
-          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_decals_set_style",
-          "params": ["f64", "f64", "f64", "f64", "f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_decals_update",
-          "params": ["f64"],
+          "params": [
+            "f64"
+          ],
           "returns": "f64"
         },
         {
@@ -1854,32 +1976,54 @@
         },
         {
           "name": "bloom_set_sound_bus",
-          "params": ["f64", "f64"],
+          "params": [
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_set_sound_reverb_send",
-          "params": ["f64", "f64"],
+          "params": [
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_set_sound_lowpass",
-          "params": ["f64", "f64"],
+          "params": [
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_set_bus_gain",
-          "params": ["f64", "f64"],
+          "params": [
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_duck_bus",
-          "params": ["f64", "f64", "f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
           "name": "bloom_set_reverb",
-          "params": ["f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {
@@ -1889,7 +2033,11 @@
         },
         {
           "name": "bloom_gamepad_rumble",
-          "params": ["f64", "f64", "f64"],
+          "params": [
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "void"
         },
         {

@@ -76,7 +76,14 @@ function num(n: number): string {
   return '' + n;
 }
 
-function bool(b: boolean): string { return b ? 'true' : 'false'; }
+// Written with `if` as a precaution, not a fix for an observed bug: a helper whose
+// entire body is one ternary return is a shape Perry has miscompiled elsewhere
+// (perry-quirks #8). `bool()` itself was verified CORRECT in both forms — a world
+// saved with `shadowsEnabled: false` does write `false`.
+function bool(b: boolean): string {
+  if (b) return 'true';
+  return 'false';
+}
 
 function vec3(v: Vec3Lit): string {
   return '[' + num(v[0]) + ', ' + num(v[1]) + ', ' + num(v[2]) + ']';
