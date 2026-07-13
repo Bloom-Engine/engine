@@ -104,7 +104,15 @@ impl Renderer {
                     mapped_at_creation: false,
                 }));
             }
+            self.pt_atrous_scratch = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pt_atrous_scratch"),
+                size: needed,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }));
             self.pt_bg = [None, None];
+            self.pt_atrous_bg1 = [None, None];
+            self.pt_atrous_bg2 = None;
             self.pt_accum_count = 0;
             self.pt_accum_idx = 0;
         }
@@ -257,6 +265,63 @@ impl Renderer {
         // frame's read side.
         let written_idx = 1 - self.pt_accum_idx;
         self.pt_accum_idx = written_idx;
+
+        // ---- PT-3: à-trous denoise (realtime mode only) ----
+        // Two edge-aware iterations over the temporally-blended
+        // radiance: accum[written] → scratch (step 1), scratch → hdr
+        // (step 2). Progressive mode converges on its own and writes
+        // hdr directly from the kernel.
+        if self.pt_mode >= 2
+            && self.pt_atrous_mid_pipeline.is_some()
+            && self.pt_atrous_scratch.is_some()
+        {
+            let sigma_luma = 0.25f32;
+            let p0 = [1.0f32, sigma_luma, surf_w as f32, surf_h as f32];
+            let p1 = [2.0f32, sigma_luma, surf_w as f32, surf_h as f32];
+            self.queue.write_buffer(&self.pt_atrous_params_bufs[0], 0, bytemuck::bytes_of(&p0));
+            self.queue.write_buffer(&self.pt_atrous_params_bufs[1], 0, bytemuck::bytes_of(&p1));
+
+            if self.pt_atrous_bg1[written_idx].is_none() {
+                self.pt_atrous_bg1[written_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("pt_atrous_bg1"),
+                    layout: self.pt_atrous_layout.as_ref().unwrap(),
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[0].as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.pt_accum_buffers[written_idx].as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: self.pt_atrous_scratch.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                    ],
+                }));
+            }
+            if self.pt_atrous_bg2.is_none() {
+                self.pt_atrous_bg2 = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("pt_atrous_bg2"),
+                    layout: self.pt_atrous_layout.as_ref().unwrap(),
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[1].as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.pt_atrous_scratch.as_ref().unwrap().as_entire_binding() },
+                        // dst is unused by cs_final; bind an accum
+                        // buffer to satisfy the layout (cannot alias
+                        // the scratch src binding — RO+RW of the same
+                        // buffer in one group fails validation).
+                        wgpu::BindGroupEntry { binding: 2, resource: self.pt_accum_buffers[0].as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                    ],
+                }));
+            }
+
+            let ts = profiler.compute_pass_timestamp_writes("pt_atrous");
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("pt_atrous"),
+                timestamp_writes: ts,
+            });
+            pass.set_pipeline(self.pt_atrous_mid_pipeline.as_ref().unwrap());
+            pass.set_bind_group(0, self.pt_atrous_bg1[written_idx].as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
+            pass.set_pipeline(self.pt_atrous_final_pipeline.as_ref().unwrap());
+            pass.set_bind_group(0, self.pt_atrous_bg2.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
+        }
         // Mirrors the kernel's write threshold: mode 1 leaves the raster
         // frame on screen until 8 samples exist (u.size.w carried the
         // pre-increment count), so SSGI/SSR must keep running for those

@@ -523,7 +523,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (is_sky(depth)) {
-        // Leave the raster sky/clouds untouched.
+        // Leave the raster sky/clouds untouched. Realtime mode marks
+        // the texel (w = 1) so the a-trous passes skip it too.
+        if (u.cfg.x >= 2.0 && u.cfg.w == 0.0) {
+            accum_out[gid.y * u.size.x + gid.x] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
         return;
     }
 
@@ -923,6 +927,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         out = mix(hist, radiance, alpha);
         accum_out[idx] = vec4<f32>(out, depth);
+        // Realtime output goes through the a-trous passes (they write
+        // out_hdr); the main kernel only feeds the history buffer.
+        return;
     } else {
         // Progressive: plain running sum; count lives on the CPU.
         // Ping-pong read/write at the same index (static camera only).
@@ -943,5 +950,97 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     textureStore(out_hdr, px, vec4<f32>(out, 1.0));
+}
+"#;
+
+/// PT-3 — edge-aware à-trous denoiser for the realtime mode. Two
+/// iterations (step 1 then 2) over the temporally-blended radiance:
+/// `cs_mid` filters buffer→buffer, `cs_final` filters buffer→out_hdr.
+/// Edge stopping = relative linearized depth (accum.w carries the raw
+/// depth) + luminance similarity; sky texels (w = 1 marker) pass
+/// through untouched and are never written to hdr.
+pub(in crate::renderer) const PT_ATROUS_WGSL: &str = r#"
+struct AtrousParams {
+    // x = step (texels), y = sigma_luma, z = width, w = height
+    p: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> ap: AtrousParams;
+@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
+@group(0) @binding(3) var out_hdr_a: texture_storage_2d<rgba16float, write>;
+
+fn lin_depth_a(d: f32) -> f32 {
+    return 0.02 / max(1.0 - d, 1e-6);
+}
+
+// B3-spline kernel weight for |offset| 0/1/2.
+fn kern(d: i32) -> f32 {
+    let a = abs(d);
+    if (a == 0) { return 0.375; }
+    if (a == 1) { return 0.25; }
+    return 0.0625;
+}
+
+fn filter_at(px: vec2<i32>, w: i32, h: i32, step: i32) -> vec4<f32> {
+    let cidx = u32(px.y) * u32(w) + u32(px.x);
+    let center = src[cidx];
+    if (center.w >= 0.9999999) {
+        return center;
+    }
+    let zc = lin_depth_a(center.w);
+    let lc = dot(center.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    var sum = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
+            let q = px + vec2<i32>(dx, dy) * step;
+            if (q.x < 0 || q.y < 0 || q.x >= w || q.y >= h) {
+                continue;
+            }
+            let s = src[u32(q.y) * u32(w) + u32(q.x)];
+            if (s.w >= 0.9999999) {
+                continue;
+            }
+            let zq = lin_depth_a(s.w);
+            let wz = exp(-abs(zq - zc) / (0.08 * max(zc, zq) + 0.02));
+            let lq = dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let wl = exp(-abs(lq - lc) / max(ap.p.y, 1e-3));
+            let wgt = kern(dx) * kern(dy) * wz * wl;
+            sum += s.rgb * wgt;
+            wsum += wgt;
+        }
+    }
+    if (wsum < 1e-6) {
+        return center;
+    }
+    return vec4<f32>(sum / wsum, center.w);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_mid(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = i32(ap.p.z);
+    let h = i32(ap.p.w);
+    if (i32(gid.x) >= w || i32(gid.y) >= h) {
+        return;
+    }
+    let px = vec2<i32>(i32(gid.x), i32(gid.y));
+    dst[gid.y * u32(w) + gid.x] = filter_at(px, w, h, i32(ap.p.x));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_final(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = i32(ap.p.z);
+    let h = i32(ap.p.w);
+    if (i32(gid.x) >= w || i32(gid.y) >= h) {
+        return;
+    }
+    let px = vec2<i32>(i32(gid.x), i32(gid.y));
+    let cidx = gid.y * u32(w) + gid.x;
+    if (src[cidx].w >= 0.9999999) {
+        // Sky: the raster sky in hdr stays untouched.
+        return;
+    }
+    let r = filter_at(px, w, h, i32(ap.p.x));
+    textureStore(out_hdr_a, px, vec4<f32>(r.rgb, 1.0));
 }
 "#;

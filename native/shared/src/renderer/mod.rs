@@ -1303,6 +1303,18 @@ pub struct Renderer {
     /// Debug-16 numeric readback (see pt_pass.rs).
     pt_readback_buffer: Option<wgpu::Buffer>,
     pt_dump_written: bool,
+    /// PT-3 — à-trous denoiser (realtime mode): two iterations over the
+    /// temporally-blended radiance, buffer→scratch then scratch→hdr.
+    pt_atrous_mid_pipeline: Option<wgpu::ComputePipeline>,
+    pt_atrous_final_pipeline: Option<wgpu::ComputePipeline>,
+    pt_atrous_layout: Option<wgpu::BindGroupLayout>,
+    /// Per-iteration uniform (step size + sigmas + extent).
+    pt_atrous_params_bufs: [wgpu::Buffer; 2],
+    pt_atrous_scratch: Option<wgpu::Buffer>,
+    /// bg[0][i] = pass 1 reading accum buffer i; bg[1][0] = pass 2
+    /// (scratch → hdr). Invalidated with pt_bg.
+    pt_atrous_bg1: [Option<wgpu::BindGroup>; 2],
+    pt_atrous_bg2: Option<wgpu::BindGroup>,
     /// True when the PT kernel actually replaced this frame's scene
     /// colour. Mode 1 leaves the raster frame on screen until a few
     /// samples have accumulated (a moving camera = perpetual resets =
@@ -5189,6 +5201,84 @@ impl Renderer {
         } else {
             (None, None, None)
         };
+        // PT-3 — à-trous denoiser pipelines for the realtime mode
+        // (plain compute; gated with the kernel since it is useless
+        // without it).
+        let (pt_atrous_mid_pipeline, pt_atrous_final_pipeline, pt_atrous_layout) =
+            if hw_rt_enabled {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("pt_atrous_shader"),
+                    source: wgpu::ShaderSource::Wgsl(PT_ATROUS_WGSL.into()),
+                });
+                let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("pt_atrous_layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false, min_binding_size: None,
+                            }, count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false, min_binding_size: None,
+                            }, count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false, min_binding_size: None,
+                            }, count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::StorageTexture {
+                                access: wgpu::StorageTextureAccess::WriteOnly,
+                                format: HDR_FORMAT,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                            }, count: None,
+                        },
+                    ],
+                });
+                let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("pt_atrous_pl"),
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
+                });
+                let mid = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("pt_atrous_mid"),
+                    layout: Some(&pl),
+                    module: &shader, entry_point: Some("cs_mid"),
+                    compilation_options: Default::default(), cache: None,
+                });
+                let fin = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("pt_atrous_final"),
+                    layout: Some(&pl),
+                    module: &shader, entry_point: Some("cs_final"),
+                    compilation_options: Default::default(), cache: None,
+                });
+                (Some(mid), Some(fin), Some(layout))
+            } else {
+                (None, None, None)
+            };
+        let pt_atrous_params_bufs = [
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pt_atrous_params_0"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pt_atrous_params_1"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        ];
         let pt_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pt_uniform"),
             size: std::mem::size_of::<PtParamsCpu>() as u64,
@@ -6818,6 +6908,13 @@ impl Renderer {
             pt_readback_buffer: None,
             pt_dump_written: false,
             pt_wrote_frame: false,
+            pt_atrous_mid_pipeline,
+            pt_atrous_final_pipeline,
+            pt_atrous_layout,
+            pt_atrous_params_bufs,
+            pt_atrous_scratch: None,
+            pt_atrous_bg1: [None, None],
+            pt_atrous_bg2: None,
             probe_trace_sdf_pipeline,
             probe_trace_sdf_layout,
             probe_trace_sdf_bg_cache: [None, None],
@@ -7315,10 +7412,13 @@ impl Renderer {
             self.probe_resolve_bg_cache = [None, None];
             // PT-1 — the BGs reference hdr_rt/depth views and the
             // accumulation buffers are per-pixel-sized; both die with
-            // the old extent.
+            // the old extent. Same for the à-trous scratch + bgs.
             self.pt_bg = [None, None];
             self.pt_accum_buffers = [None, None];
             self.pt_accum_count = 0;
+            self.pt_atrous_scratch = None;
+            self.pt_atrous_bg1 = [None, None];
+            self.pt_atrous_bg2 = None;
             self.hiz_linearize_bg_cache = None;
         self.occlusion.invalidate_bindings();
             for slot in self.hiz_downsample_bg_cache.iter_mut() {
