@@ -47,6 +47,10 @@ struct PtLight {
 
 struct PtParams {
     inv_vp: mat4x4<f32>,
+    // PT-3: previous frame's UNJITTERED view-projection — reprojects
+    // this frame's world positions into last frame's screen for
+    // temporal history fetch in realtime mode.
+    prev_vp: mat4x4<f32>,
     cam_pos: vec4<f32>,     // xyz camera world pos
     sun_dir: vec4<f32>,     // xyz unit vector toward the sun
     sun_color: vec4<f32>,   // rgb premultiplied by intensity
@@ -82,8 +86,19 @@ struct InstanceGiData {
 @group(0) @binding(5) var material_tex: texture_2d<f32>;
 @group(0) @binding(6) var card_albedo_atlas: texture_2d<f32>;
 @group(0) @binding(7) var card_samp: sampler;
+// PT-3: ping-pong accumulation. Binding 8 = previous frame's buffer
+// (read), binding 13 = this frame's output. Reprojection reads OTHER
+// pixels from prev, which a single read_write buffer cannot do safely.
 @group(0) @binding(8) var<storage, read_write> accum: array<vec4<f32>>;
 @group(0) @binding(9) var out_hdr: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(13) var<storage, read_write> accum_out: array<vec4<f32>>;
+
+// Approximate linear view distance from the raw depth-buffer value
+// (GL-convention matrix, near 0.01: z_view ~= 2n / (1 - d)). Only used
+// for RELATIVE history-validation comparisons.
+fn lin_depth(d: f32) -> f32 {
+    return 0.02 / max(1.0 - d, 1e-6);
+}
 // PT-2: geometry megabuffers. geo_v holds raw Vertex3D words (stride 24
 // f32: position +0, normal +3, color +6, uv +10, ...); geo_i holds the
 // concatenated index streams. Windows are per-instance via inst.geo.
@@ -698,7 +713,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let h16 = rayQueryGetCommittedIntersection(&rq16);
         let idx16 = gid.y * u.size.x + gid.x;
-        accum[idx16] = vec4<f32>(
+        accum_out[idx16] = vec4<f32>(
             h16.t,
             f32(h16.instance_custom_data),
             f32(h16.primitive_index),
@@ -711,7 +726,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Raw ray-generation dump: reconstructed world position + raw
         // depth, straight into accum for CPU readback.
         let idx17 = gid.y * u.size.x + gid.x;
-        accum[idx17] = vec4<f32>(p0, depth);
+        accum_out[idx17] = vec4<f32>(p0, depth);
         textureStore(out_hdr, px, vec4<f32>(0.4, 0.2, 0.0, 1.0));
         return;
     }
@@ -855,16 +870,40 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var out: vec3<f32>;
     if (mode >= 2.0) {
-        // Realtime: rolling exponential window. PT-3 replaces this with
-        // motion-reprojected accumulation + a-trous.
-        let alpha = select(0.125, 1.0, u.size.w == 0u);
-        out = mix(prev.rgb, radiance, alpha);
-        accum[idx] = vec4<f32>(out, 1.0);
+        // PT-3 M1: temporally REPROJECTED exponential history. The
+        // previous frame's result is fetched where THIS surface was
+        // last frame (world pos through prev_vp), so camera motion no
+        // longer smears screen-space history into fog. Disocclusions
+        // and depth mismatches reject history (alpha = 1); accepted
+        // history blends at 0.15. accum.w carries the raw depth the
+        // texel's surface wrote, validated against the reprojected
+        // depth of this frame's surface.
+        var alpha = 1.0;
+        var hist = vec3<f32>(0.0);
+        let clip_prev = u.prev_vp * vec4<f32>(p0, 1.0);
+        if (u.size.w > 0u && clip_prev.w > 1e-4) {
+            let ndc_prev = clip_prev.xyz / clip_prev.w;
+            let uv_prev = vec2<f32>(ndc_prev.x * 0.5 + 0.5, 0.5 - ndc_prev.y * 0.5);
+            if (uv_prev.x >= 0.0 && uv_prev.x < 1.0 && uv_prev.y >= 0.0 && uv_prev.y < 1.0) {
+                let ppx = vec2<u32>(uv_prev * vec2<f32>(f32(u.size.x), f32(u.size.y)));
+                let pidx = min(ppx.y, u.size.y - 1u) * u.size.x + min(ppx.x, u.size.x - 1u);
+                let ph = accum[pidx];
+                let zl_hist = lin_depth(ph.w);
+                let zl_here = lin_depth(ndc_prev.z);
+                if (abs(zl_hist - zl_here) < 0.05 * max(zl_hist, zl_here) + 0.05) {
+                    alpha = 0.15;
+                    hist = ph.rgb;
+                }
+            }
+        }
+        out = mix(hist, radiance, alpha);
+        accum_out[idx] = vec4<f32>(out, depth);
     } else {
         // Progressive: plain running sum; count lives on the CPU.
+        // Ping-pong read/write at the same index (static camera only).
         let sum = prev.rgb + radiance;
         let n = f32(u.size.w) + 1.0;
-        accum[idx] = vec4<f32>(sum, n);
+        accum_out[idx] = vec4<f32>(sum, n);
         out = sum / n;
         // Interim gameplay behaviour until PT-3's denoiser: a moving
         // camera resets accumulation every frame, and raw 1-spp noise

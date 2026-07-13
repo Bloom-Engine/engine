@@ -66,6 +66,9 @@ impl Renderer {
         if moved && self.pt_mode == 1 {
             self.pt_accum_count = 0;
         }
+        // PT-3 — the uniform needs LAST frame's VP for history
+        // reprojection; stash it before the tracker is overwritten.
+        let prev_vp_for_reproject = self.pt_prev_vp;
         self.pt_prev_vp = vp_unjittered;
         // Geometry changed under the accumulated image (door opened,
         // enemy died) → history is a lie, restart.
@@ -82,25 +85,28 @@ impl Renderer {
             return;
         }
 
-        // ---- accumulation buffer (vec4<f32> per pixel) ----
+        // ---- accumulation buffers (vec4<f32> per pixel, ping-pong) ----
         let needed = (surf_w as u64) * (surf_h as u64) * 16;
-        let recreate = match &self.pt_accum_buffer {
+        let recreate = match &self.pt_accum_buffers[0] {
             Some(b) => b.size() != needed,
             None => true,
         };
         if recreate {
-            self.pt_accum_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pt_accum"),
-                size: needed,
-                // COPY_SRC: the debug-16 numeric readback copies a window
-                // of this buffer to a staging buffer.
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            }));
-            self.pt_bg = None;
+            for (i, slot) in self.pt_accum_buffers.iter_mut().enumerate() {
+                *slot = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(if i == 0 { "pt_accum_a" } else { "pt_accum_b" }),
+                    size: needed,
+                    // COPY_SRC: the debug-16 numeric readback copies a
+                    // window of this buffer to a staging buffer.
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }));
+            }
+            self.pt_bg = [None, None];
             self.pt_accum_count = 0;
+            self.pt_accum_idx = 0;
         }
 
         // ---- uniforms ----
@@ -137,8 +143,17 @@ impl Renderer {
             [m[0][2], m[1][2], m[2][2], m[3][2]],
             [m[0][3], m[1][3], m[2][3], m[3][3]],
         ];
+        // Same transpose story for the reprojection matrix.
+        let p = &prev_vp_for_reproject;
+        let prev_vp_t = [
+            [p[0][0], p[1][0], p[2][0], p[3][0]],
+            [p[0][1], p[1][1], p[2][1], p[3][1]],
+            [p[0][2], p[1][2], p[2][2], p[3][2]],
+            [p[0][3], p[1][3], p[2][3], p[3][3]],
+        ];
         let params = PtParamsCpu {
             inv_vp: inv_vp_t,
+            prev_vp: prev_vp_t,
             cam_pos: [cam[0], cam[1], cam[2], 0.0],
             sun_dir: [
                 -ld[0] * sun_inv_len,
@@ -169,9 +184,13 @@ impl Renderer {
         };
         self.queue.write_buffer(&self.pt_uniform_buffer, 0, bytemuck::bytes_of(&params));
 
-        // ---- bind group (lazy; nulled on resize / TLAS or instance
-        // buffer recreation) ----
-        if self.pt_bg.is_none() {
+        // ---- bind groups (lazy; nulled on resize / TLAS or instance
+        // buffer recreation). Two ping-pong variants: bg[i] reads accum
+        // buffer i (binding 8) and writes buffer 1-i (binding 13).
+        for i in 0..2 {
+            if self.pt_bg[i].is_some() {
+                continue;
+            }
             let tlas = self.tlas.as_ref().unwrap();
             let entries = vec![
                     wgpu::BindGroupEntry { binding: 0, resource: self.pt_uniform_buffer.as_entire_binding() },
@@ -185,12 +204,13 @@ impl Renderer {
                     // hits; radiance would double-count.
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh_card_atlas_view) },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
-                    wgpu::BindGroupEntry { binding: 8, resource: self.pt_accum_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: self.pt_accum_buffers[i].as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
                     wgpu::BindGroupEntry { binding: 10, resource: self.pt_geo_vertex_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 11, resource: self.pt_geo_index_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 13, resource: self.pt_accum_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
             ];
-            self.pt_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            self.pt_bg[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pt_bg"),
                 layout: self.pt_layout.as_ref().unwrap(),
                 entries: &entries,
@@ -227,12 +247,16 @@ impl Renderer {
                 timestamp_writes: ts,
             });
             pass.set_pipeline(self.pt_pipeline.as_ref().unwrap());
-            pass.set_bind_group(0, self.pt_bg.as_ref().unwrap(), &[]);
+            pass.set_bind_group(0, self.pt_bg[self.pt_accum_idx].as_ref().unwrap(), &[]);
             if self.pt_texture_arrays_enabled {
                 pass.set_bind_group(1, self.pt_tex_bg.as_ref().unwrap(), &[]);
             }
             pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
         }
+        // This frame wrote into buffers[1 - idx]; it becomes next
+        // frame's read side.
+        let written_idx = 1 - self.pt_accum_idx;
+        self.pt_accum_idx = written_idx;
         // Mirrors the kernel's write threshold: mode 1 leaves the raster
         // frame on screen until 8 samples exist (u.size.w carried the
         // pre-increment count), so SSGI/SSR must keep running for those
@@ -259,7 +283,9 @@ impl Renderer {
                     mapped_at_creation: false,
                 }));
                 encoder.copy_buffer_to_buffer(
-                    self.pt_accum_buffer.as_ref().unwrap(),
+                    // written_idx == pt_accum_idx here (already flipped):
+                    // the buffer this frame's dispatch wrote.
+                    self.pt_accum_buffers[self.pt_accum_idx].as_ref().unwrap(),
                     offset,
                     self.pt_readback_buffer.as_ref().unwrap(),
                     0,

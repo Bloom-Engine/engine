@@ -104,7 +104,11 @@ impl Renderer {
     // preserving depth edges (depth-guided bilateral filter).
     // Reads ssao_rt → writes ssao_blur_rt.
     // ============================================================
-    if self.ssao_enabled {
+    // PT: when the path tracer owns the frame it computes real
+    // occlusion by tracing — screen-space AO on top double-darkens
+    // every crevice. Route compose to "no occlusion" (white clear
+    // below) for those frames.
+    if self.ssao_enabled && !self.pt_owns_frame() {
         // texel_size is the size of one SSAO RT texel (half-res).
         let ao_w = (surf_w / 2).max(1) as f32;
         let ao_h = (surf_h / 2).max(1) as f32;

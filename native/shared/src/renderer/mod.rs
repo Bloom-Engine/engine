@@ -370,6 +370,9 @@ const PT_MAX_TEXTURES: usize = 256;
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct PtParamsCpu {
     inv_vp: [[f32; 4]; 4],
+    /// PT-3 — previous frame's unjittered VP (transposed like inv_vp)
+    /// for temporal history reprojection in realtime mode.
+    prev_vp: [[f32; 4]; 4],
     /// xyz camera world pos, w unused.
     cam_pos: [f32; 4],
     /// xyz unit vector toward the sun, w unused.
@@ -1259,12 +1262,19 @@ pub struct Renderer {
     pub pt_pipeline: Option<wgpu::ComputePipeline>,
     pub pt_layout: Option<wgpu::BindGroupLayout>,
     /// Rebuilt lazily; nulled on resize and on instance-data rebuild.
-    pt_bg: Option<wgpu::BindGroup>,
+    /// Two variants for the accumulation ping-pong: bg[i] reads
+    /// accum_buffers[i] (binding 8) and writes accum_buffers[1-i]
+    /// (binding 13).
+    pt_bg: [Option<wgpu::BindGroup>; 2],
     pt_uniform_buffer: wgpu::Buffer,
-    /// rgba32float-equivalent accumulation (vec4 per pixel) as a storage
-    /// buffer — rgba32float storage *textures* lack read_write in core
-    /// WGSL. Lazily (re)created at render extent.
-    pt_accum_buffer: Option<wgpu::Buffer>,
+    /// rgba32float-equivalent accumulation (vec4 per pixel) as storage
+    /// buffers — rgba32float storage *textures* lack read_write in core
+    /// WGSL. Ping-pong pair (PT-3 reprojection reads other pixels from
+    /// the previous frame). Lazily (re)created at render extent.
+    pt_accum_buffers: [Option<wgpu::Buffer>; 2],
+    /// Index of the buffer holding the PREVIOUS frame's result (the
+    /// read side of this frame's dispatch). Flipped after dispatch.
+    pt_accum_idx: usize,
     /// Samples accumulated at the current view; 0 = history invalid.
     pt_accum_count: u32,
     /// VP matrix of the last accumulated frame; movement beyond epsilon
@@ -5126,6 +5136,15 @@ impl Renderer {
                             has_dynamic_offset: false, min_binding_size: None,
                         }, count: None,
                     },
+                    // PT-3 — accumulation write target (binding 8 holds
+                    // the previous frame's buffer; ping-pong).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 13, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
             ];
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("pt_layout"),
@@ -6782,9 +6801,10 @@ impl Renderer {
             probe_trace_hw_bg_cache: [None, None],
             pt_pipeline,
             pt_layout,
-            pt_bg: None,
+            pt_bg: [None, None],
             pt_uniform_buffer,
-            pt_accum_buffer: None,
+            pt_accum_buffers: [None, None],
+            pt_accum_idx: 0,
             pt_accum_count: 0,
             pt_prev_vp: [[0.0; 4]; 4],
             pt_last_tlas_version: 0,
@@ -7293,11 +7313,11 @@ impl Renderer {
             self.probe_trace_sdf_bg_cache = [None, None];
             self.probe_temporal_bg_cache = [None, None];
             self.probe_resolve_bg_cache = [None, None];
-            // PT-1 — the BG references hdr_rt/depth views and the
-            // accumulation buffer is per-pixel-sized; both die with
+            // PT-1 — the BGs reference hdr_rt/depth views and the
+            // accumulation buffers are per-pixel-sized; both die with
             // the old extent.
-            self.pt_bg = None;
-            self.pt_accum_buffer = None;
+            self.pt_bg = [None, None];
+            self.pt_accum_buffers = [None, None];
             self.pt_accum_count = 0;
             self.hiz_linearize_bg_cache = None;
         self.occlusion.invalidate_bindings();
@@ -7995,7 +8015,7 @@ impl Renderer {
             // instance_data buffer; invalidate on resize.
             self.wsrc_bake_hw_bg_cache = None;
             // PT-1 — same buffer bound at group 0 binding 2.
-            self.pt_bg = None;
+            self.pt_bg = [None, None];
             resized = true;
         }
 
@@ -8091,7 +8111,7 @@ impl Renderer {
                 }));
             }
             if v_recreate || i_recreate {
-                self.pt_bg = None;
+                self.pt_bg = [None, None];
             }
             if !geo_vertices.is_empty() {
                 self.queue.write_buffer(
@@ -8188,7 +8208,7 @@ impl Renderer {
             // V14 — same reason as the resize path above.
             self.wsrc_bake_hw_bg_cache = None;
             // PT-1 — TLAS bound at group 0 binding 1.
-            self.pt_bg = None;
+            self.pt_bg = [None, None];
         }
 
         // Populate TLAS instance slots. Clear stale entries from prior
