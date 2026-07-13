@@ -340,6 +340,26 @@ macro_rules! __bloom_ffi_visual {
         })
         }
 
+        // bloom_set_path_tracing — 0 off / 1 progressive / 2 realtime
+        // (docs/pt/pt-roadmap.md). Needs hardware ray query; without it
+        // the request is stored but nothing engages — check
+        // bloom_path_tracing_supported to know which world you are in.
+        #[no_mangle]
+        pub extern "C" fn bloom_set_path_tracing(mode: f64) {
+            $crate::ffi::guard("bloom_set_path_tracing", move || {
+                engine().renderer.set_path_tracing(mode as u32);
+        })
+        }
+
+        // bloom_path_tracing_supported — 1.0 when the device can trace
+        // (same ray-query requirement as Lumen's HW backend), else 0.0.
+        #[no_mangle]
+        pub extern "C" fn bloom_path_tracing_supported() -> f64 {
+            $crate::ffi::guard("bloom_path_tracing_supported", move || {
+                if engine().renderer.pt_supported() { 1.0 } else { 0.0 }
+        })
+        }
+
         // bloom_set_ssgi_intensity  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_ssgi_intensity(intensity: f64) {

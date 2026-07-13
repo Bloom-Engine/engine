@@ -1138,6 +1138,13 @@ pub struct Renderer {
     pub ssgi_radius: f32,
     /// SSGI master switch.
     pub ssgi_enabled: bool,
+    /// Path-tracing mode (docs/pt/pt-roadmap.md): 0 = off (Lumen as
+    /// usual), 1 = progressive (accumulate while the camera is still),
+    /// 2 = realtime (temporal + spatial denoise). Stores the *requested*
+    /// mode even without hardware ray query, so callers can query why
+    /// nothing engaged; the frame only switches when `pt_active()` says
+    /// both mode and hardware agree.
+    pub pt_mode: u32,
     /// EN-023 — mean flat albedo over the card instances; feeds the SW
     /// WSRC bake's ground-bounce term. Neutral mid-gray until the first
     /// instance-data upload computes the real scene average.
@@ -6470,6 +6477,7 @@ impl Renderer {
             ssgi_intensity: 1.0,
             ssgi_radius: 20.0,
             ssgi_enabled: true,
+            pt_mode: 0,
             ssgi_backend_logged: None,
             gi_scene_avg_albedo: [0.35, 0.35, 0.35],
             probe_grid_w,
@@ -7233,6 +7241,27 @@ impl Renderer {
     /// indirect diffuse lighting via screen-space ray marching.
     pub fn set_ssgi_enabled(&mut self, on: bool) {
         self.ssgi_enabled = on;
+    }
+
+    /// Path-tracing mode request (0 off / 1 progressive / 2 realtime).
+    /// Clamped; anything above realtime means realtime.
+    pub fn set_path_tracing(&mut self, mode: u32) {
+        self.pt_mode = mode.min(2);
+    }
+
+    /// Whether path tracing can run at all on this device: it needs the
+    /// same hardware ray query + TLAS the Lumen HW trace uses.
+    pub fn pt_supported(&self) -> bool {
+        self.hw_rt_enabled
+    }
+
+    /// Whether the current frame should path-trace instead of running
+    /// the raster GI stack: a non-zero requested mode AND the hardware
+    /// to honour it. There is deliberately no software fallback — a
+    /// software path tracer would be seconds per frame, which is worse
+    /// than useless in every mode we ship.
+    pub fn pt_active(&self) -> bool {
+        self.pt_mode > 0 && self.pt_supported()
     }
 
     /// Ticket 013 — rasterise every pending mesh card into its
