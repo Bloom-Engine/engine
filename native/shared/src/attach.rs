@@ -173,6 +173,12 @@ pub unsafe fn attach_engine(
         required_limits.max_binding_array_elements_per_shader_stage =
             adapter_limits.max_binding_array_elements_per_shader_stage;
     }
+    // PT-4: the path-trace kernel binds 9 storage buffers (accum +
+    // moments + reservoir ping-pongs on top of instance/geo data);
+    // the wgpu default limit is 8.
+    required_limits.max_storage_buffers_per_shader_stage = required_limits
+        .max_storage_buffers_per_shader_stage
+        .max(adapter_limits.max_storage_buffers_per_shader_stage.min(16));
 
     if required_features.intersects(rt_mask) {
         required_limits =

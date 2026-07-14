@@ -78,17 +78,21 @@ impl Renderer {
         // debug-20 history-length view; the frozen-seed era masked it).
         // Mode 2's per-tap depth validation already rejects exactly the
         // texels whose surface actually changed.
+        let mut tlas_reset = false;
         if self.tlas_built_version != self.pt_last_tlas_version {
             self.pt_last_tlas_version = self.tlas_built_version;
             if self.pt_mode == 1 {
                 self.pt_accum_count = 0;
+                tlas_reset = true;
             }
         }
-        // Progressive mode + camera in motion: the raster frame stays on
-        // screen (kernel write threshold) and any sample traced now is
-        // discarded by next frame's reset — skip the dispatch entirely.
-        // Moving costs nothing; standing still starts the accumulation.
-        if self.pt_mode == 1 && moved {
+        // Progressive mode + camera in motion OR scene churn: the raster
+        // frame stays on screen (kernel write threshold) and any sample
+        // traced now is discarded by next frame's reset — skip the
+        // dispatch entirely. During combat the TLAS bumps every frame
+        // (enemy transforms), so without the tlas_reset arm progressive
+        // paid the full-res trace cost while displaying raster.
+        if self.pt_mode == 1 && (moved || tlas_reset) {
             self.pt_wrote_frame = false;
             return;
         }
@@ -115,7 +119,7 @@ impl Renderer {
         // rejects almost every frame — texels never accumulate past
         // 1 spp and read as white speckle. A consistent owner pixel
         // keeps history valid; the upsample covers the other three.
-        let phase = [0u32, 0u32];
+        let _phase = [0u32, 0u32];
 
         // ---- accumulation buffers (vec4<f32> per pixel, ping-pong) ----
         // Sized to the TRACE grid; a mode switch changes the size and
@@ -145,6 +149,16 @@ impl Renderer {
             for (i, slot) in self.pt_moments_buffers.iter_mut().enumerate() {
                 *slot = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(if i == 0 { "pt_moments_a" } else { "pt_moments_b" }),
+                    size: needed,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            // PT-4 — ReSTIR reservoirs (light idx, W, M, target pdf).
+            // Zero-init M = 0 marks every reservoir empty.
+            for (i, slot) in self.pt_resv_buffers.iter_mut().enumerate() {
+                *slot = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(if i == 0 { "pt_resv_a" } else { "pt_resv_b" }),
                     size: needed,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
@@ -252,7 +266,8 @@ impl Renderer {
                 surf_w,
                 surf_h,
                 if self.pt_mode >= 2 && self.shadow_map.enabled { 1 } else { 0 },
-                phase[1],
+                // PT-4 experimental flag (BLOOM_PT_RESTIR=1), realtime only.
+                if self.pt_restir && self.pt_mode >= 2 { 1 } else { 0 },
             ],
             // RAW upload, unlike inv_vp: the shadow VPs are consumed as
             // M*v by every existing WGSL user (scene shader, WSRC
@@ -297,6 +312,9 @@ impl Renderer {
                     // side), write out (paired with the write side).
                     wgpu::BindGroupEntry { binding: 18, resource: self.pt_moments_buffers[i].as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 19, resource: self.pt_moments_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
+                    // PT-4 ReSTIR reservoirs, same ping-pong pairing.
+                    wgpu::BindGroupEntry { binding: 20, resource: self.pt_resv_buffers[i].as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 21, resource: self.pt_resv_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
             ];
             self.pt_bg[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pt_bg"),
