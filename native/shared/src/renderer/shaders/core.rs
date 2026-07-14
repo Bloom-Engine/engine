@@ -318,6 +318,10 @@ struct VertexOutputScene {
 @group(2) @binding(9) var occ_tex: texture_2d<f32>;
 @group(2) @binding(10) var occ_samp: sampler;
 @group(3) @binding(0) var<uniform> joints: JointMatrices;
+// PT-7 — previous frame's palette, same slot offsets: skinned verts
+// reconstruct last frame's world position from it, giving skeletal
+// motion a REAL velocity (it was exactly zero before).
+@group(3) @binding(1) var<uniform> joints_prev: JointMatrices;
 
 const PI: f32 = 3.14159265;
 
@@ -363,6 +367,7 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
         // sway here — characters aren't foliage.
         let total_weight = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
         var world4: vec4<f32>;
+        var prev_world4: vec4<f32>;
         var nrm4: vec4<f32>;
         var tan4: vec4<f32>;
         let pos4l = vec4<f32>(in.position, 1.0);
@@ -377,6 +382,13 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
                    + joints.matrices[j1] * pos4l * in.weights.y
                    + joints.matrices[j2] * pos4l * in.weights.z
                    + joints.matrices[j3] * pos4l * in.weights.w;
+            // PT-7 — where this vertex WAS: previous palette, same
+            // slots. Feeds the velocity MRT so TAA/TSR and the path
+            // tracer can reproject skeletal motion.
+            prev_world4 = joints_prev.matrices[j0] * pos4l * in.weights.x
+                        + joints_prev.matrices[j1] * pos4l * in.weights.y
+                        + joints_prev.matrices[j2] * pos4l * in.weights.z
+                        + joints_prev.matrices[j3] * pos4l * in.weights.w;
             nrm4 = joints.matrices[j0] * nrm4l * in.weights.x
                  + joints.matrices[j1] * nrm4l * in.weights.y
                  + joints.matrices[j2] * nrm4l * in.weights.z
@@ -387,6 +399,7 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
                  + joints.matrices[j3] * tan4l * in.weights.w;
         } else {
             world4 = u.model * pos4l;
+            prev_world4 = world4;
             nrm4 = u.model * nrm4l;
             tan4 = u.model * tan4l;
         }
@@ -394,7 +407,7 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
         let c = u.mvp * world4;
         o.clip_position = c;
         o.curr_clip = c;
-        o.prev_clip = u.prev_mvp * world4;
+        o.prev_clip = u.prev_mvp * prev_world4;
         o.world_pos = world4.xyz;
         o.normal = normalize(nrm4.xyz);
         o.color = in.color * u.model_tint;

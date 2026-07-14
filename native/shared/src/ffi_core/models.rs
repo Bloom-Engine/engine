@@ -378,7 +378,9 @@ macro_rules! __bloom_ffi_models {
                 eng.models.update_model_animation(handle, anim_index as usize, time as f32);
                 if let Some(anim) = eng.models.get_animation(handle) {
                     if !anim.joint_matrices.is_empty() {
-                        eng.renderer.set_joint_matrices_scaled(&anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32], rot_sin, rot_cos);
+                        // PT-7: the anim handle keys the prev-palette
+                        // pairing for skinned motion vectors.
+                        eng.renderer.set_joint_matrices_scaled(handle.to_bits(), &anim.joint_matrices, scale as f32, [px as f32, py as f32, pz as f32], rot_sin, rot_cos);
                     }
                 }
         })
@@ -934,8 +936,9 @@ macro_rules! __bloom_ffi_models {
                 eng.models.advance_and_update(handle, dt as f32);
                 if let Some(anim) = eng.models.get_animation(handle) {
                     if !anim.joint_matrices.is_empty() {
+                        // PT-7: anim handle = prev-palette pairing key.
                         eng.renderer.set_joint_matrices_scaled(
-                            &anim.joint_matrices, scale as f32,
+                            handle.to_bits(), &anim.joint_matrices, scale as f32,
                             [px as f32, py as f32, pz as f32], rot_sin, rot_cos);
                     }
                 }

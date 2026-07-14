@@ -251,7 +251,12 @@ impl Renderer {
                 amb[2] * sky_intensity,
                 0.0,
             ],
-            size: [trace_w, trace_h, self.taa_frame_index, self.pt_accum_count],
+            // size.z: PT's OWN frame counter, not taa_frame_index —
+            // the TAA index freezes when TAA is disabled (settings,
+            // headless tests), which froze the sample sequence and
+            // silently stopped progressive accumulation from ever
+            // converging (found by the pt_progressive golden).
+            size: [trace_w, trace_h, self.pt_frame_index, self.pt_accum_count],
             cfg: [
                 self.pt_mode as f32,
                 max_bounces,
@@ -315,6 +320,9 @@ impl Renderer {
                     // PT-4 ReSTIR reservoirs, same ping-pong pairing.
                     wgpu::BindGroupEntry { binding: 20, resource: self.pt_resv_buffers[i].as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 21, resource: self.pt_resv_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
+                    // PT-7 — velocity MRT (written by hdr_scene, which
+                    // runs before the PT node every frame).
+                    wgpu::BindGroupEntry { binding: 22, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
             ];
             self.pt_bg[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pt_bg"),
@@ -466,6 +474,7 @@ impl Renderer {
         // frames — the gates downstream check pt_owns_frame().
         self.pt_wrote_frame = self.pt_mode >= 2 || self.pt_accum_count >= 8;
         self.pt_accum_count = self.pt_accum_count.saturating_add(1);
+        self.pt_frame_index = self.pt_frame_index.wrapping_add(1);
 
         // ---- debug 16: numeric readback of traced intersections ----
         // Copies a window of the accum buffer (center of frame) into a

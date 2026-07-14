@@ -79,3 +79,7 @@ examples/intel-sponza/assets/outdoor.hdr
 examples/**/main.exe
 examples/**/main
 examples/**/main.app
+
+# DXC runtime DLLs (local, for the PT golden tests on Windows)
+native/shared/dxcompiler.dll
+native/shared/dxil.dll
