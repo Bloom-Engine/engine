@@ -462,3 +462,145 @@ fn golden_lit_primitives_taa() {
     });
     compare_or_update("lit_primitives_taa", w, h, &rgba);
 }
+
+// ============================================================================
+// PT-8 — path-tracer correctness goldens.
+//
+// Nothing automated guarded the path tracer before these: a transposed
+// reprojection matrix survived three review rounds because every check
+// was a human looking at screenshots. Two scenes:
+//
+// - `pt_progressive`: converged progressive mode on a static node scene.
+//   Catches transport regressions (BRDF, NEE, sky, accumulation math) as
+//   an energy/structure diff.
+// - `pt_realtime_motion`: realtime mode while the camera orbits. Catches
+//   reprojection/temporal regressions — a broken history (the prev_vp
+//   transpose class) floods the image with unconverged noise and blows
+//   straight past the tolerance.
+//
+// Both need a ray-query device (DX12+DXC / Vulkan RQ / Metal) and skip
+// gracefully without one — same contract as the CPU-adapter skip. On
+// Windows, dxcompiler.dll + dxil.dll must be loadable (cwd or PATH);
+// without them DX12 is FXC-capped and the tests skip.
+
+fn try_engine_rt() -> Option<EngineState> {
+    let mut backend_options = wgpu::BackendOptions::default();
+    backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::DynamicDxc {
+        dxc_path: String::from("dxcompiler.dll"),
+    };
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        backend_options,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+    // The default adapter pick may be an FXC-capped DX12 view of a GPU
+    // whose Vulkan view traces fine — enumerate and prefer ray query.
+    let adapter = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+        .into_iter()
+        .find(|a| {
+            a.get_info().device_type != wgpu::DeviceType::Cpu
+                && a.features().contains(rt_mask)
+        })?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: rt_mask,
+        required_limits: adapter.limits(),
+        experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+        ..Default::default()
+    }))
+    .ok()?;
+    let renderer = Renderer::new_headless(device, queue, W, H);
+    let mut eng = EngineState::new(renderer);
+    eng.renderer.set_taa_enabled(false);
+    // Auto-exposure adapts over the accumulation window; a fixed
+    // exposure keeps the golden a pure function of the transport.
+    eng.renderer.set_manual_exposure(1.0);
+    Some(eng)
+}
+
+/// Shared PT test scene: floor slab + a ring of cubes as SCENE NODES so
+/// each gets a BLAS and the TLAS has real occluders (traced shadows and
+/// bounce light are the whole point).
+fn build_pt_scene(eng: &mut EngineState) {
+    let scale_translate = |sx: f32, sy: f32, sz: f32, x: f32, y: f32, z: f32| -> [[f32; 4]; 4] {
+        let mut m = [[0.0f32; 4]; 4];
+        m[0][0] = sx; m[1][1] = sy; m[2][2] = sz; m[3][3] = 1.0;
+        m[3][0] = x; m[3][1] = y; m[3][2] = z;
+        m
+    };
+    let (floor_v, floor_i) = cube_verts(0.5, [0.55, 0.5, 0.45, 1.0]);
+    let floor = eng.scene.create_node();
+    eng.scene.update_geometry(floor, floor_v, floor_i);
+    eng.scene.set_transform(floor, scale_translate(16.0, 0.2, 16.0, 0.0, -0.1, 0.0));
+    let colors: [[f32; 4]; 3] = [
+        [0.85, 0.2, 0.15, 1.0],
+        [0.2, 0.65, 0.9, 1.0],
+        [0.9, 0.8, 0.2, 1.0],
+    ];
+    for i in 0..6u32 {
+        let t = i as f32 / 6.0 * std::f32::consts::TAU;
+        let (cv, ci) = cube_verts(0.5, colors[(i % 3) as usize]);
+        let node = eng.scene.create_node();
+        eng.scene.update_geometry(node, cv, ci);
+        eng.scene.set_transform(
+            node,
+            scale_translate(1.0, 1.0 + (i % 2) as f32, 1.0, t.cos() * 2.4, 0.5, t.sin() * 2.4),
+        );
+    }
+}
+
+#[test]
+fn golden_pt_progressive() {
+    let Some(mut eng) = try_engine_rt() else {
+        eprintln!("skip: no ray-query adapter (or DXC unavailable)");
+        return;
+    };
+    build_pt_scene(&mut eng);
+    eng.renderer.set_path_tracing(1);
+    // Static camera: progressive accumulates 96 samples — converged
+    // enough at 256x256 that the residual noise sits well under the
+    // tolerance while transport regressions (wrong BRDF energy,
+    // broken NEE, sky double-count) land far above it.
+    let (w, h, rgba) = render(&mut eng, 300, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(0.05, 0.07, 0.1, 1.0);
+        r.begin_mode_3d(5.0, 4.0, 7.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 50.0, 0.0);
+        r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.95, 0.9, 1.2);
+    });
+    // Accumulated stochastic content: same seed sequence every run on
+    // one GPU; cross-GPU fp differences get a little extra headroom.
+    compare_or_update_tol("pt_progressive", w, h, &rgba, 4.0);
+}
+
+#[test]
+fn golden_pt_realtime_motion() {
+    let Some(mut eng) = try_engine_rt() else {
+        eprintln!("skip: no ray-query adapter (or DXC unavailable)");
+        return;
+    };
+    build_pt_scene(&mut eng);
+    eng.renderer.set_path_tracing(2);
+    // The camera orbits ~0.5 deg/frame: every frame reprojects real
+    // motion through the SVGF history. A reprojection regression (the
+    // prev_vp-transpose class) rejects all history, the denoiser gets
+    // 1-spp input with zero variance signal, and the image fills with
+    // speckle — far past any tolerance here.
+    let mut frame = 0u32;
+    let (w, h, rgba) = render(&mut eng, 48, move |eng| {
+        let r = &mut eng.renderer;
+        let a = 0.6 + frame as f32 * 0.009;
+        frame += 1;
+        r.set_clear_color(0.05, 0.07, 0.1, 1.0);
+        r.begin_mode_3d(
+            a.cos() * 8.0, 4.0, a.sin() * 8.0,
+            0.0, 0.5, 0.0,
+            0.0, 1.0, 0.0,
+            50.0, 0.0,
+        );
+        r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.95, 0.9, 1.2);
+    });
+    // Denoised 1-spp under motion: noisier baseline than the converged
+    // progressive golden, hence the wider mean gate. The outlier gate
+    // (broken-region detector) stays at the global strict value.
+    compare_or_update_tol("pt_realtime_motion", w, h, &rgba, 6.0);
+}

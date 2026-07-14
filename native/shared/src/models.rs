@@ -586,7 +586,18 @@ impl ModelManager {
         if let Some(ma) = self.animations.get_mut(handle) {
             if clip >= ma.animations.len() { return; }
             let m = &mut ma.mixer;
-            if m.started && m.cur_clip == clip && m.fade_dur <= 0.0 {
+            // Re-requesting the clip that is ALREADY current is a no-op by
+            // contract ("safe to call every frame with the clip you want"), and
+            // that has to hold DURING a fade too — a fade is a fade *to*
+            // cur_clip, so the right thing is to let it finish.
+            //
+            // This used to also require `m.fade_dur <= 0.0`. A caller doing the
+            // documented thing then fell through to the restart path on every
+            // frame of the fade: it re-seeded the fade (fade_t = 0, so the fade
+            // could never complete) and reset cur_time = 0. The base clip was
+            // pinned at t≈0 forever, from the first clip change onward — every
+            // animated character in a game froze the moment it stopped idling.
+            if m.started && m.cur_clip == clip {
                 m.cur_speed = speed;
                 m.cur_loop = looping;
                 return;

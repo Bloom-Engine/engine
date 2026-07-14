@@ -1346,6 +1346,10 @@ pub struct Renderer {
     pt_last_tlas_version: u64,
     /// BLOOM_PT_DEBUG view selector, forwarded to the kernel via cfg.w.
     pt_debug: f32,
+    /// PT's own rolling frame counter (kernel RNG seed). Deliberately
+    /// NOT taa_frame_index: that freezes when TAA is off, which froze
+    /// the sample sequence and stopped accumulation from converging.
+    pt_frame_index: u32,
     /// BLOOM_PT_RESTIR=1 — PT-4 experimental ReSTIR DI (kernel ext.w).
     pt_restir: bool,
     /// PT-4 — ReSTIR reservoir ping-pong, sized with the accum pair.
@@ -7138,6 +7142,7 @@ impl Renderer {
             pt_prev_vp: [[0.0; 4]; 4],
             pt_last_tlas_version: 0,
             pt_debug,
+            pt_frame_index: 0,
             pt_restir,
             pt_resv_buffers: [None, None],
             pt_dynamic_draws: Vec::new(),
