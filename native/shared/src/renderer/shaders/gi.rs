@@ -621,6 +621,9 @@ struct HwBakeInstanceGiData {
     // EN-023 — world-space AABB (SDF path only; layout mirror).
     world_aabb_min: vec4<f32>,
     world_aabb_max: vec4<f32>,
+    // PT-2 — layout mirror only; the WSRC bake ignores both fields.
+    geo: vec4<u32>,
+    mat_params: vec4<f32>,
 };
 
 const HW_BAKE_CARD_SLOTS_PER_ROW: f32 = 64.0;

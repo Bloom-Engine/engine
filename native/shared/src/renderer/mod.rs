@@ -8,6 +8,7 @@ mod hiz;
 mod occlusion;
 mod ssr_pass;
 mod ssgi_pass;
+mod pt_pass;
 mod shadow_pass;
 mod model_draw;
 mod planar_pass;
@@ -358,6 +359,43 @@ struct ProbeTraceParams {
     wsrc_cascades: [[f32; 4]; 3],
 }
 
+/// PT-2 — fixed size of the kernel's texture binding array. Real texture
+/// indices at or above this clamp to 0 (white); unused tail slots are
+/// padded with the white texture so no PARTIALLY_BOUND feature is needed.
+const PT_MAX_TEXTURES: usize = 256;
+
+/// Uniform for the path-tracing megakernel — WGSL mirror `PtParams` in
+/// shaders/pt.rs. Field-for-field, 16-byte aligned, 672 bytes.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct PtParamsCpu {
+    inv_vp: [[f32; 4]; 4],
+    /// PT-3 — previous frame's unjittered VP (transposed like inv_vp)
+    /// for temporal history reprojection in realtime mode.
+    prev_vp: [[f32; 4]; 4],
+    /// xyz camera world pos, w unused.
+    cam_pos: [f32; 4],
+    /// xyz unit vector toward the sun, w unused.
+    sun_dir: [f32; 4],
+    /// rgb premultiplied by intensity, w unused.
+    sun_color: [f32; 4],
+    /// rgb ambient-derived sky tint, w unused.
+    sky_color: [f32; 4],
+    /// x/y = TRACE grid dims (half in realtime mode), z=frame_index,
+    /// w=accum_count.
+    size: [u32; 4],
+    /// x=mode (1 progressive / 2 realtime), y=max_bounces,
+    /// z=point_light_count (≤16), w=debug view (BLOOM_PT_DEBUG).
+    cfg: [f32; 4],
+    /// PT-3 half-res: x/y = full G-buffer dims. z = 1 → hybrid sun
+    /// (shadow cascades instead of traced sun rays). w unused.
+    ext: [u32; 4],
+    /// Raster shadow cascade VPs, transposed at upload like inv_vp.
+    shadow_vps: [[[f32; 4]; 4]; 3],
+    /// 16 lights × (pos_range vec4, color_int vec4).
+    lights: [[f32; 4]; 32],
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ProbeTemporalParams {
@@ -586,6 +624,15 @@ struct InstanceGiDataCpu {
     /// bounce on non-RT adapters (round-2 audit F4).
     world_aabb_min: [f32; 4],
     world_aabb_max: [f32; 4],
+    /// PT-2 — geometry window into the PT megabuffers + texture id.
+    /// x = first vertex (Vertex3D-stride slot) in pt_geo_vertices,
+    /// y = first index in pt_geo_indices, z = index count,
+    /// w = albedo texture index (renderer texture store; 0 = white).
+    /// z == 0 marks "no geometry window" (kernel falls back to the
+    /// flat normal + card albedo, i.e. PT-1 behaviour).
+    geo: [u32; 4],
+    /// PT-2 — x = roughness, y = metalness, z/w unused.
+    mat_params: [f32; 4],
 }
 
 #[repr(C)]
@@ -1138,6 +1185,13 @@ pub struct Renderer {
     pub ssgi_radius: f32,
     /// SSGI master switch.
     pub ssgi_enabled: bool,
+    /// Path-tracing mode (docs/pt/pt-roadmap.md): 0 = off (Lumen as
+    /// usual), 1 = progressive (accumulate while the camera is still),
+    /// 2 = realtime (temporal + spatial denoise). Stores the *requested*
+    /// mode even without hardware ray query, so callers can query why
+    /// nothing engaged; the frame only switches when `pt_active()` says
+    /// both mode and hardware agree.
+    pub pt_mode: u32,
     /// EN-023 — mean flat albedo over the card instances; feeds the SW
     /// WSRC bake's ground-bounce term. Neutral mid-gray until the first
     /// instance-data upload computes the real scene average.
@@ -1207,6 +1261,83 @@ pub struct Renderer {
     /// probe history on a per-frame ping-pong index, matching the
     /// SW cache shape.
     probe_trace_hw_bg_cache: [Option<wgpu::BindGroup>; 2],
+
+    // --- Path tracing (PT-1, docs/pt/pt-roadmap.md) ---
+    /// Megakernel pipeline; None when the adapter lacks ray query
+    /// (same gate as the HW probe trace — there is no SW fallback).
+    pub pt_pipeline: Option<wgpu::ComputePipeline>,
+    pub pt_layout: Option<wgpu::BindGroupLayout>,
+    /// Rebuilt lazily; nulled on resize and on instance-data rebuild.
+    /// Two variants for the accumulation ping-pong: bg[i] reads
+    /// accum_buffers[i] (binding 8) and writes accum_buffers[1-i]
+    /// (binding 13).
+    pt_bg: [Option<wgpu::BindGroup>; 2],
+    pt_uniform_buffer: wgpu::Buffer,
+    /// rgba32float-equivalent accumulation (vec4 per pixel) as storage
+    /// buffers — rgba32float storage *textures* lack read_write in core
+    /// WGSL. Ping-pong pair (PT-3 reprojection reads other pixels from
+    /// the previous frame). Lazily (re)created at render extent.
+    pt_accum_buffers: [Option<wgpu::Buffer>; 2],
+    /// PT-3b SVGF — luminance moments + geometry side-channel, ping-pong
+    /// with the accum pair: (mu1, mu2, history length, raw depth) per
+    /// trace texel. The kernel validates reprojection taps and derives
+    /// the temporal variance from it; the à-trous passes read it for
+    /// depth edge-stopping and sky markers.
+    pt_moments_buffers: [Option<wgpu::Buffer>; 2],
+    /// Index of the buffer holding the PREVIOUS frame's result (the
+    /// read side of this frame's dispatch). Flipped after dispatch.
+    pt_accum_idx: usize,
+    /// Samples accumulated at the current view; 0 = history invalid.
+    pt_accum_count: u32,
+    /// VP matrix of the last accumulated frame; movement beyond epsilon
+    /// resets accumulation (mode 1) — mode 2 relies on EMA instead.
+    pt_prev_vp: [[f32; 4]; 4],
+    /// TLAS version last traced; a rebuild invalidates accumulation.
+    pt_last_tlas_version: u64,
+    /// BLOOM_PT_DEBUG view selector, forwarded to the kernel via cfg.w.
+    pt_debug: f32,
+    /// PT-2 — concatenated Vertex3D words (f32) / indices (u32) for
+    /// interpolated hit shading. Grow-only, rebuilt alongside the
+    /// instance-data buffer.
+    pt_geo_vertex_buffer: Option<wgpu::Buffer>,
+    pt_geo_index_buffer: Option<wgpu::Buffer>,
+    /// PT-2 — adapter grants binding-array features; when false the
+    /// kernel compiles without the texture array and hit shading stays
+    /// on card albedo.
+    pt_texture_arrays_enabled: bool,
+    /// PT-2 — the texture binding array lives in its own group (wgpu
+    /// forbids binding arrays next to uniform buffers).
+    pt_tex_layout: Option<wgpu::BindGroupLayout>,
+    pt_tex_bg: Option<wgpu::BindGroup>,
+    /// Texture-store length baked into the current pt_tex_bg; growth
+    /// forces a rebuild so new textures become visible to PT.
+    pt_bg_texture_count: usize,
+    /// Debug-16 numeric readback (see pt_pass.rs).
+    pt_readback_buffer: Option<wgpu::Buffer>,
+    pt_dump_written: bool,
+    /// PT-3b — SVGF wavelet filter (realtime mode): four à-trous
+    /// iterations (steps 1/2/4/8) on the trace grid, then a full-res
+    /// upsample+modulate pass.
+    pt_atrous_mid_pipeline: Option<wgpu::ComputePipeline>,
+    pt_atrous_final_pipeline: Option<wgpu::ComputePipeline>,
+    pt_atrous_layout: Option<wgpu::BindGroupLayout>,
+    /// Per-iteration uniform (step size + first-iteration flag + extent).
+    pt_atrous_params_bufs: [wgpu::Buffer; 6],
+    pt_atrous_scratch: Option<wgpu::Buffer>,
+    pt_atrous_scratch2: Option<wgpu::Buffer>,
+    /// Bind groups indexed [written accum idx][stage 0..5]: stage 0 =
+    /// accum[written]→scratch, 1..4 ping-pong the scratches, 5 = final
+    /// upsample to hdr. All six bind moments[written] as the geometry
+    /// side-channel, hence the per-written-idx variants. Invalidated
+    /// with pt_bg.
+    pt_atrous_bgs: [[Option<wgpu::BindGroup>; 6]; 2],
+    /// True when the PT kernel actually replaced this frame's scene
+    /// colour. Mode 1 leaves the raster frame on screen until a few
+    /// samples have accumulated (a moving camera = perpetual resets =
+    /// raw 1-spp noise), and for those frames SSGI/SSR must keep
+    /// running — so the downstream gates check pt_owns_frame(), not
+    /// pt_active().
+    pt_wrote_frame: bool,
 
     /// Ticket 014 V3 — SW SDF sphere-trace pipeline + layout.
     /// Active whenever the scene clipmap has been baked; chosen at
@@ -1817,6 +1948,15 @@ impl Renderer {
         let hw_rt_enabled = device
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        // PT-2 — textured hit shading wants a bindless-ish texture
+        // array. Both feature bits AND the element budget (a separate
+        // limit that defaults to 0 and must be granted at device
+        // creation), or the kernel compiles with the card-only stub.
+        let pt_texture_arrays_enabled = device.features().contains(
+            wgpu::Features::TEXTURE_BINDING_ARRAY
+                | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+        ) && device.limits().max_binding_array_elements_per_shader_stage
+            >= PT_MAX_TEXTURES as u32;
 
         // --- Shaders ---
         let shader_2d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -4908,6 +5048,346 @@ impl Renderer {
             (None, None)
         };
 
+        // --- Path-tracing megakernel (PT-1, docs/pt/pt-roadmap.md) ---
+        // Same gate as the HW probe trace: no ray query, no path tracer —
+        // and deliberately no software fallback (a CPU-speed path trace is
+        // seconds per frame, worse than useless in any shipped mode).
+        let (pt_pipeline, pt_layout, pt_tex_layout) = if hw_rt_enabled {
+            // PT-2 — the texture-array half of hit shading is feature-
+            // gated. The variant snippet defines PT_HAS_TEXTURES plus
+            // pt_tex_sample; without the features the kernel compiles
+            // with a constant-white stub and hit shading stays on the
+            // card-atlas path (PT-1 behaviour).
+            let tex_variant = if pt_texture_arrays_enabled {
+                // Own bind group: wgpu forbids mixing a binding array
+                // with a uniform buffer inside one group.
+                "const PT_HAS_TEXTURES: bool = true;\n\
+                 @group(1) @binding(0) var pt_textures: binding_array<texture_2d<f32>>;\n\
+                 fn pt_tex_sample(idx: u32, uv: vec2<f32>) -> vec3<f32> {\n\
+                     return textureSampleLevel(pt_textures[idx], card_samp, uv, 0.0).rgb;\n\
+                 }\n"
+            } else {
+                "const PT_HAS_TEXTURES: bool = false;\n\
+                 fn pt_tex_sample(idx: u32, uv: vec2<f32>) -> vec3<f32> { return vec3<f32>(1.0); }\n"
+            };
+            let pt_source = format!("enable wgpu_ray_query;\n{}\n{}", PT_KERNEL_WGSL, tex_variant);
+            let pt_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("pt_kernel_shader"),
+                source: wgpu::ShaderSource::Wgsl(pt_source.into()),
+            });
+            let mut pt_layout_entries = vec![
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::AccelerationStructure {
+                            vertex_return: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: HDR_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        }, count: None,
+                    },
+                    // PT-2 — geometry megabuffers (vertex words + indices).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    // PT-3 — accumulation write target (binding 8 holds
+                    // the previous frame's buffer; ping-pong).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 13, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    // Hybrid sun — the raster shadow cascades + their
+                    // comparison sampler.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 14, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 15, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 16, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 17, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                    // PT-3b SVGF — moments ping-pong (18 = previous
+                    // frame read side, 19 = this frame's output).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 18, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 19, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+            ];
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("pt_layout"),
+                entries: &pt_layout_entries,
+            });
+            // PT-2 — the texture array lives in its own group: wgpu
+            // forbids a binding array next to a uniform buffer. Fixed
+            // size; the bind group pads unused slots with the white
+            // texture (slot 0), so no PARTIALLY_BOUND requirement.
+            let tex_layout = if pt_texture_arrays_enabled {
+                Some(device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("pt_tex_layout"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: Some(std::num::NonZeroU32::new(PT_MAX_TEXTURES as u32).unwrap()),
+                    }],
+                }))
+            } else {
+                None
+            };
+            let mut pl_groups: Vec<Option<&wgpu::BindGroupLayout>> = vec![Some(&layout)];
+            if let Some(tl) = tex_layout.as_ref() {
+                pl_groups.push(Some(tl));
+            }
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("pt_pl_layout"),
+                bind_group_layouts: &pl_groups,
+                immediate_size: 0,
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("pt_pipeline"),
+                layout: Some(&pl),
+                module: &pt_shader, entry_point: Some("cs_main"),
+                compilation_options: Default::default(), cache: None,
+            });
+            (Some(pipeline), Some(layout), tex_layout)
+        } else {
+            (None, None, None)
+        };
+        // PT-3 — à-trous denoiser pipelines for the realtime mode
+        // (plain compute; gated with the kernel since it is useless
+        // without it).
+        let (pt_atrous_mid_pipeline, pt_atrous_final_pipeline, pt_atrous_layout) =
+            if hw_rt_enabled {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("pt_atrous_shader"),
+                    source: wgpu::ShaderSource::Wgsl(PT_ATROUS_WGSL.into()),
+                });
+                let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("pt_atrous_layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false, min_binding_size: None,
+                            }, count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false, min_binding_size: None,
+                            }, count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false, min_binding_size: None,
+                            }, count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::StorageTexture {
+                                access: wgpu::StorageTextureAccess::WriteOnly,
+                                format: HDR_FORMAT,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                            }, count: None,
+                        },
+                        // PT-3 half-res: full-res depth guides the
+                        // upsample in cs_final.
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Depth,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            }, count: None,
+                        },
+                        // Full-res G-buffer albedo for SVGF
+                        // re-modulation in cs_final.
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            }, count: None,
+                        },
+                        // SVGF geometry side-channel (the kernel's
+                        // moments buffer): depth edge-stopping, history
+                        // length and sky markers.
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 6, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false, min_binding_size: None,
+                            }, count: None,
+                        },
+                    ],
+                });
+                let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("pt_atrous_pl"),
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
+                });
+                let mid = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("pt_atrous_mid"),
+                    layout: Some(&pl),
+                    module: &shader, entry_point: Some("cs_mid"),
+                    compilation_options: Default::default(), cache: None,
+                });
+                let fin = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("pt_atrous_final"),
+                    layout: Some(&pl),
+                    module: &shader, entry_point: Some("cs_final"),
+                    compilation_options: Default::default(), cache: None,
+                });
+                (Some(mid), Some(fin), Some(layout))
+            } else {
+                (None, None, None)
+            };
+        // Six stages: five à-trous iterations + the final upsample.
+        let pt_atrous_params_bufs = std::array::from_fn::<_, 6, _>(|i| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(match i {
+                    0 => "pt_atrous_params_0",
+                    1 => "pt_atrous_params_1",
+                    2 => "pt_atrous_params_2",
+                    3 => "pt_atrous_params_3",
+                    4 => "pt_atrous_params_4",
+                    _ => "pt_atrous_params_5",
+                }),
+                size: 32,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        let pt_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pt_uniform"),
+            size: std::mem::size_of::<PtParamsCpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Debug view selector for the kernel (see shaders/pt.rs header).
+        // Env read happens once at device init, which is fine: it is a
+        // developer-only diagnostic, not a runtime setting.
+        let pt_debug = std::env::var("BLOOM_PT_DEBUG")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+
         // --- Ticket 014 V3: SW SDF sphere-trace pipeline ---
         // Always built. At dispatch time we pick SDF over Hi-Z when
         // `scene_sdf_clipmap_built` is true; HW (when available)
@@ -6470,6 +6950,14 @@ impl Renderer {
             ssgi_intensity: 1.0,
             ssgi_radius: 20.0,
             ssgi_enabled: true,
+            // BLOOM_PT env seeds the initial mode for headless/batch
+            // verification runs (keypresses don't reach batch runs);
+            // the game overrides it live via set_path_tracing.
+            pt_mode: std::env::var("BLOOM_PT")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0)
+                .min(2),
             ssgi_backend_logged: None,
             gi_scene_avg_albedo: [0.35, 0.35, 0.35],
             probe_grid_w,
@@ -6496,6 +6984,33 @@ impl Renderer {
             probe_trace_hw_pipeline,
             probe_trace_hw_layout,
             probe_trace_hw_bg_cache: [None, None],
+            pt_pipeline,
+            pt_layout,
+            pt_bg: [None, None],
+            pt_uniform_buffer,
+            pt_accum_buffers: [None, None],
+            pt_moments_buffers: [None, None],
+            pt_accum_idx: 0,
+            pt_accum_count: 0,
+            pt_prev_vp: [[0.0; 4]; 4],
+            pt_last_tlas_version: 0,
+            pt_debug,
+            pt_geo_vertex_buffer: None,
+            pt_geo_index_buffer: None,
+            pt_texture_arrays_enabled,
+            pt_tex_layout,
+            pt_tex_bg: None,
+            pt_bg_texture_count: 0,
+            pt_readback_buffer: None,
+            pt_dump_written: false,
+            pt_wrote_frame: false,
+            pt_atrous_mid_pipeline,
+            pt_atrous_final_pipeline,
+            pt_atrous_layout,
+            pt_atrous_params_bufs,
+            pt_atrous_scratch: None,
+            pt_atrous_scratch2: None,
+            pt_atrous_bgs: [[None, None, None, None, None, None], [None, None, None, None, None, None]],
             probe_trace_sdf_pipeline,
             probe_trace_sdf_layout,
             probe_trace_sdf_bg_cache: [None, None],
@@ -6991,6 +7506,16 @@ impl Renderer {
             self.probe_trace_sdf_bg_cache = [None, None];
             self.probe_temporal_bg_cache = [None, None];
             self.probe_resolve_bg_cache = [None, None];
+            // PT-1 — the BGs reference hdr_rt/depth views and the
+            // accumulation buffers are per-pixel-sized; both die with
+            // the old extent. Same for the à-trous scratch + bgs.
+            self.pt_bg = [None, None];
+            self.pt_accum_buffers = [None, None];
+            self.pt_moments_buffers = [None, None];
+            self.pt_accum_count = 0;
+            self.pt_atrous_scratch = None;
+            self.pt_atrous_scratch2 = None;
+            self.pt_atrous_bgs = [[None, None, None, None, None, None], [None, None, None, None, None, None]];
             self.hiz_linearize_bg_cache = None;
         self.occlusion.invalidate_bindings();
             for slot in self.hiz_downsample_bg_cache.iter_mut() {
@@ -7233,6 +7758,37 @@ impl Renderer {
     /// indirect diffuse lighting via screen-space ray marching.
     pub fn set_ssgi_enabled(&mut self, on: bool) {
         self.ssgi_enabled = on;
+    }
+
+    /// Path-tracing mode request (0 off / 1 progressive / 2 realtime).
+    /// Clamped; anything above realtime means realtime.
+    pub fn set_path_tracing(&mut self, mode: u32) {
+        self.pt_mode = mode.min(2);
+    }
+
+    /// Whether path tracing can run at all on this device: it needs the
+    /// same hardware ray query + TLAS the Lumen HW trace uses.
+    pub fn pt_supported(&self) -> bool {
+        self.hw_rt_enabled
+    }
+
+    /// Whether the current frame should path-trace instead of running
+    /// the raster GI stack: a non-zero requested mode AND the hardware
+    /// to honour it. There is deliberately no software fallback — a
+    /// software path tracer would be seconds per frame, which is worse
+    /// than useless in every mode we ship.
+    pub fn pt_active(&self) -> bool {
+        self.pt_mode > 0 && self.pt_supported()
+    }
+
+    /// Whether the path tracer replaced THIS frame's scene colour.
+    /// Distinct from `pt_active()`: in progressive mode the kernel
+    /// leaves the raster frame on screen until a few samples have
+    /// accumulated, and those frames still need SSGI/SSR. Valid only
+    /// after the "pt" graph node has run for the frame (SSR/SSGI/
+    /// compose all schedule after it).
+    fn pt_owns_frame(&self) -> bool {
+        self.pt_active() && self.pt_wrote_frame
     }
 
     /// Ticket 013 — rasterise every pending mesh card into its
@@ -7655,6 +8211,8 @@ impl Renderer {
             // V14 — WSRC HW bake bg also references the TLAS +
             // instance_data buffer; invalidate on resize.
             self.wsrc_bake_hw_bg_cache = None;
+            // PT-1 — same buffer bound at group 0 binding 2.
+            self.pt_bg = [None, None];
             resized = true;
         }
 
@@ -7663,6 +8221,15 @@ impl Renderer {
         // EN-023 — running mean of instance albedos feeds the SW WSRC
         // bake's ground-bounce term.
         let mut albedo_sum = [0.0f32; 3];
+        // PT-2 — geometry megabuffers: every instance's Vertex3D + index
+        // data concatenated so the path-trace kernel can interpolate
+        // real normals/UVs at ray hits. Raw Vertex3D stride (24 f32);
+        // instances without retained CPU geometry get index_count = 0
+        // and the kernel falls back to flat-normal/card shading.
+        // Shared meshes are duplicated per node (nodes own their
+        // vertices); arena-scale worlds measure a few tens of MB.
+        let mut geo_vertices: Vec<f32> = Vec::new();
+        let mut geo_indices: Vec<u32> = Vec::new();
         for &h in instance_handles {
             let n = scene.nodes.get(h).unwrap();
             let e = n.material.emissive;
@@ -7670,6 +8237,16 @@ impl Renderer {
                 Some(s) => (s as f32, 1.0_f32),
                 None => (0.0, 0.0),
             };
+            let (vertex_base, index_base, index_count) =
+                if !n.vertices.is_empty() && !n.indices.is_empty() {
+                    let vb = (geo_vertices.len() / 24) as u32;
+                    let ib = geo_indices.len() as u32;
+                    geo_vertices.extend_from_slice(bytemuck::cast_slice(&n.vertices));
+                    geo_indices.extend_from_slice(&n.indices);
+                    (vb, ib, n.indices.len() as u32)
+                } else {
+                    (0, 0, 0)
+                };
             // EN-023 — world AABB for the SDF broad-phase. The scene's
             // bounds pass keeps world_bounds fresh; the sentinel
             // (min.x > max.x = not yet computed) falls back to the local
@@ -7692,7 +8269,61 @@ impl Renderer {
                 card_aabb_max: [n.bounds_max[0], n.bounds_max[1], n.bounds_max[2], 0.0],
                 world_aabb_min: [wmin[0], wmin[1], wmin[2], 0.0],
                 world_aabb_max: [wmax[0], wmax[1], wmax[2], 0.0],
+                geo: [
+                    vertex_base,
+                    index_base,
+                    index_count,
+                    // Indices beyond the kernel's fixed array clamp to
+                    // white — same render as an unloaded texture.
+                    if (n.material.texture_idx as usize) < PT_MAX_TEXTURES {
+                        n.material.texture_idx
+                    } else {
+                        0
+                    },
+                ],
+                mat_params: [n.material.roughness, n.material.metalness, 0.0, 0.0],
             });
+        }
+        // PT-2 — upload the megabuffers (grow-only; a minimum size keeps
+        // bind-group creation valid before any geometry is committed).
+        {
+            let v_bytes = (geo_vertices.len() * 4).max(16) as u64;
+            let i_bytes = (geo_indices.len() * 4).max(16) as u64;
+            let v_recreate = self.pt_geo_vertex_buffer.as_ref().map_or(true, |b| b.size() < v_bytes);
+            let i_recreate = self.pt_geo_index_buffer.as_ref().map_or(true, |b| b.size() < i_bytes);
+            if v_recreate {
+                self.pt_geo_vertex_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pt_geo_vertices"),
+                    size: v_bytes.next_power_of_two(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            if i_recreate {
+                self.pt_geo_index_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pt_geo_indices"),
+                    size: i_bytes.next_power_of_two(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            if v_recreate || i_recreate {
+                self.pt_bg = [None, None];
+            }
+            if !geo_vertices.is_empty() {
+                self.queue.write_buffer(
+                    self.pt_geo_vertex_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(&geo_vertices),
+                );
+            }
+            if !geo_indices.is_empty() {
+                self.queue.write_buffer(
+                    self.pt_geo_index_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(&geo_indices),
+                );
+            }
         }
         if !instance_data.is_empty() {
             let inv = 1.0 / instance_data.len() as f32;
@@ -7701,6 +8332,21 @@ impl Renderer {
                 albedo_sum[1] * inv,
                 albedo_sum[2] * inv,
             ];
+        }
+        // PT-2 diagnostic (BLOOM_PT_DEBUG only): eprintln is unreliable
+        // after init on Windows, so drop a summary file in cwd.
+        if self.pt_debug > 0.0 {
+            let with_geo = instance_data.iter().filter(|d| d.geo[2] > 0).count();
+            let _ = std::fs::write(
+                "pt_geo_debug.txt",
+                format!(
+                    "instances={} with_geo_window={} megabuffer_verts={} megabuffer_indices={}\n",
+                    instance_data.len(),
+                    with_geo,
+                    geo_vertices.len() / 24,
+                    geo_indices.len(),
+                ),
+            );
         }
         if !instance_data.is_empty() {
             self.queue.write_buffer(
@@ -7758,6 +8404,8 @@ impl Renderer {
             self.probe_trace_hw_bg_cache = [None, None];
             // V14 — same reason as the resize path above.
             self.wsrc_bake_hw_bg_cache = None;
+            // PT-1 — TLAS bound at group 0 binding 1.
+            self.pt_bg = [None, None];
         }
 
         // Populate TLAS instance slots. Clear stale entries from prior
@@ -9572,13 +10220,25 @@ impl Renderer {
                 .with_after(&["shadow", "froxel_assign"]),
             );
             g.push(
+                PassNode::new("pt", Box::new(|c: &mut FrameCtx2| {
+                    // No-op unless pt_active() (the method gates). Sits
+                    // between the opaque scene and translucency so water /
+                    // glass still composite over the traced opaques, and
+                    // sky pixels (never written by the kernel) keep the
+                    // raster sky.
+                    c.r.record_pt_pass(c.encoder, c.profiler, c.surf.0, c.surf.1);
+                }))
+                .with_reads(&[PassInput::SceneDepth])
+                .with_after(&["hdr_scene"]),
+            );
+            g.push(
                 PassNode::new("translucent", Box::new(|c: &mut FrameCtx2| {
                     c.r.record_translucent_pass(c.encoder, c.profiler);
                 }))
                 // Reads the opaque HDR + depth and alpha-blends back into
                 // HdrColor; the pin (not a second HdrColor write) keeps a
                 // single declared writer per resource.
-                .with_after(&["hdr_scene"]),
+                .with_after(&["pt"]),
             );
             g.push(
                 PassNode::new("hiz_build", Box::new(|c: &mut FrameCtx2| {

@@ -39,6 +39,8 @@ declare function bloom_set_auto_resolution(targetHz: number, enabled: number): v
 declare function bloom_set_manual_exposure(value: number): void;
 declare function bloom_set_env_intensity(intensity: number): void;
 declare function bloom_set_ssgi_enabled(on: number): void;
+declare function bloom_set_path_tracing(mode: number): void;
+declare function bloom_path_tracing_supported(): number;
 declare function bloom_set_ssgi_intensity(intensity: number): void;
 declare function bloom_set_ssgi_radius(radius: number): void;
 declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): void;
@@ -407,6 +409,25 @@ export function setEnvIntensity(intensity: number): void {
 /** Toggle screen-space global illumination (single-bounce indirect diffuse). Default on. */
 export function setSsgiEnabled(on: boolean): void {
   bloom_set_ssgi_enabled(on ? 1 : 0);
+}
+
+/**
+ * Path-tracing mode (engine docs/pt/pt-roadmap.md):
+ *   0 — off: the normal raster + Lumen pipeline (default).
+ *   1 — progressive: 1 sample/frame accumulated while the camera is still;
+ *       resets on movement. Converges to ground truth — the "final quality"
+ *       view for the editor and for stills.
+ *   2 — realtime: denoised 1-sample path tracing for gameplay.
+ * Requires hardware ray query (see isPathTracingSupported); on devices
+ * without it the request is a no-op and the engine stays on Lumen.
+ */
+export function setPathTracing(mode: number): void {
+  bloom_set_path_tracing(mode);
+}
+
+/** True when the device can hardware-path-trace (ray query + TLAS). */
+export function isPathTracingSupported(): boolean {
+  return bloom_path_tracing_supported() !== 0;
 }
 
 /** SSGI intensity multiplier. 0 = off, 0.5 = default, 1+ = strong. */

@@ -92,9 +92,13 @@ pub(super) fn create_hdr_rt(device: &wgpu::Device, width: u32, height: u32) -> (
         // Phase 4b adds COPY_SRC so the translucent-pass scheduler
         // can snapshot hdr_rt → a SceneColor transient via
         // copy_texture_to_texture before refractive draws run.
+        //
+        // STORAGE_BINDING: the path-trace megakernel (PT-1) writes the
+        // traced scene colour directly into hdr_rt from compute.
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
              | wgpu::TextureUsages::TEXTURE_BINDING
-             | wgpu::TextureUsages::COPY_SRC,
+             | wgpu::TextureUsages::COPY_SRC
+             | wgpu::TextureUsages::STORAGE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
