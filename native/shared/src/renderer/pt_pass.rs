@@ -71,10 +71,18 @@ impl Renderer {
         let prev_vp_for_reproject = self.pt_prev_vp;
         self.pt_prev_vp = vp_unjittered;
         // Geometry changed under the accumulated image (door opened,
-        // enemy died) → history is a lie, restart.
+        // enemy died) → PROGRESSIVE history is a lie, restart. Realtime
+        // must NOT reset here: tlas_version bumps on every node
+        // transform — during gameplay that is every single frame, which
+        // silently pinned the SVGF history at 1 sample (found via the
+        // debug-20 history-length view; the frozen-seed era masked it).
+        // Mode 2's per-tap depth validation already rejects exactly the
+        // texels whose surface actually changed.
         if self.tlas_built_version != self.pt_last_tlas_version {
             self.pt_last_tlas_version = self.tlas_built_version;
-            self.pt_accum_count = 0;
+            if self.pt_mode == 1 {
+                self.pt_accum_count = 0;
+            }
         }
         // Progressive mode + camera in motion: the raster frame stays on
         // screen (kernel write threshold) and any sample traced now is
@@ -131,10 +139,24 @@ impl Renderer {
                     mapped_at_creation: false,
                 }));
             }
+            // SVGF moments side-channel (mu1, mu2, history length, raw
+            // depth), ping-pong with the accum pair. wgpu zero-inits,
+            // and pt_accum_count = 0 marks the whole history invalid.
+            for (i, slot) in self.pt_moments_buffers.iter_mut().enumerate() {
+                *slot = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(if i == 0 { "pt_moments_a" } else { "pt_moments_b" }),
+                    size: needed,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            // COPY_SRC: the first à-trous iteration's output is copied
+            // back over the accum buffer as next frame's colour history
+            // (SVGF feeds back the once-filtered signal).
             self.pt_atrous_scratch = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pt_atrous_scratch"),
                 size: needed,
-                usage: wgpu::BufferUsages::STORAGE,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }));
             self.pt_atrous_scratch2 = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -144,9 +166,7 @@ impl Renderer {
                 mapped_at_creation: false,
             }));
             self.pt_bg = [None, None];
-            self.pt_atrous_bg1 = [None, None];
-            self.pt_atrous_bg_mid2 = None;
-            self.pt_atrous_bg2 = None;
+            self.pt_atrous_bgs = [[None, None, None, None, None, None], [None, None, None, None, None, None]];
             self.pt_accum_count = 0;
             self.pt_accum_idx = 0;
         }
@@ -185,14 +205,16 @@ impl Renderer {
             [m[0][2], m[1][2], m[2][2], m[3][2]],
             [m[0][3], m[1][3], m[2][3], m[3][3]],
         ];
-        // Same transpose story for the reprojection matrix.
-        let p = &prev_vp_for_reproject;
-        let prev_vp_t = [
-            [p[0][0], p[1][0], p[2][0], p[3][0]],
-            [p[0][1], p[1][1], p[2][1], p[3][1]],
-            [p[0][2], p[1][2], p[2][2], p[3][2]],
-            [p[0][3], p[1][3], p[2][3], p[3][3]],
-        ];
+        // The reprojection VP uploads RAW — the opposite of inv_vp. The
+        // two matrix conventions coexist: mat4_invert outputs land
+        // transposed relative to WGSL's M*v (hence inv_vp's transpose
+        // above), while mat4_multiply products are already in M*v
+        // layout — the shadow cascade VPs upload raw for the same
+        // reason. Transposing this one collapsed every reprojection
+        // into a ~40-texel band at screen centre (debug-23 dump), so
+        // history never matched under camera motion — invisible in the
+        // frozen-seed era, which is why it survived since PT-3 M1.
+        let prev_vp_t = prev_vp_for_reproject;
         let params = PtParamsCpu {
             inv_vp: inv_vp_t,
             prev_vp: prev_vp_t,
@@ -271,6 +293,10 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
                     wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
                     wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
+                    // SVGF moments: read prev (paired with accum read
+                    // side), write out (paired with the write side).
+                    wgpu::BindGroupEntry { binding: 18, resource: self.pt_moments_buffers[i].as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 19, resource: self.pt_moments_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
             ];
             self.pt_bg[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pt_bg"),
@@ -320,93 +346,101 @@ impl Renderer {
         let written_idx = 1 - self.pt_accum_idx;
         self.pt_accum_idx = written_idx;
 
-        // ---- PT-3: à-trous denoise (realtime mode only) ----
-        // Two edge-aware iterations over the temporally-blended
-        // radiance: accum[written] → scratch (step 1), scratch → hdr
-        // (step 2). Progressive mode converges on its own and writes
-        // hdr directly from the kernel.
+        // ---- PT-3b: SVGF wavelet filter (realtime mode only) ----
+        // Four variance-guided à-trous iterations on the trace grid
+        // (steps 1/2/4/8), then the full-res upsample+modulate pass.
+        // After iteration 1 the once-filtered signal is copied back
+        // over the accum buffer: SVGF feeds the first wavelet output
+        // into next frame's colour history (moments stay raw). This is
+        // what makes the temporal loop stable at 1 spp — raw history
+        // carries every spike forward, once-filtered history does not.
+        // Progressive mode converges on its own and writes hdr
+        // directly from the kernel.
         if self.pt_mode >= 2
             && self.pt_debug == 0.0
             && self.pt_atrous_mid_pipeline.is_some()
             && self.pt_atrous_scratch.is_some()
         {
-            // SVGF-style schedule: the first iteration barely edge-stops
-            // on luminance (1-2 spp variance IS the signal to remove);
-            // later iterations tighten so real shading detail survives.
-            // Depth stopping guards geometry edges throughout.
-            for (i, (step, sigma_luma)) in
-                [(1.0f32, 2.0f32), (2.0, 0.5), (4.0, 0.3)].iter().enumerate()
-            {
+            // p.y = 1.0 flags the FIRST iteration: it may substitute a
+            // spatial variance estimate where the history is young.
+            for (i, step) in [1.0f32, 2.0, 4.0, 8.0, 16.0, 1.0].iter().enumerate() {
+                let first = if i == 0 { 1.0f32 } else { 0.0 };
                 let p = [
-                    [*step, *sigma_luma, trace_w as f32, trace_h as f32],
+                    [*step, first, trace_w as f32, trace_h as f32],
                     [surf_w as f32, surf_h as f32, 0.0, 0.0],
                 ];
                 self.queue.write_buffer(&self.pt_atrous_params_bufs[i], 0, bytemuck::bytes_of(&p));
             }
 
-            if self.pt_atrous_bg1[written_idx].is_none() {
-                self.pt_atrous_bg1[written_idx] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("pt_atrous_bg1"),
-                    layout: self.pt_atrous_layout.as_ref().unwrap(),
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[0].as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: self.pt_accum_buffers[written_idx].as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: self.pt_atrous_scratch.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
-                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
-                    ],
-                }));
-            }
-            if self.pt_atrous_bg_mid2.is_none() {
-                self.pt_atrous_bg_mid2 = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("pt_atrous_bg_mid2"),
-                    layout: self.pt_atrous_layout.as_ref().unwrap(),
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[1].as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: self.pt_atrous_scratch.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: self.pt_atrous_scratch2.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
-                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
-                    ],
-                }));
-            }
-            if self.pt_atrous_bg2.is_none() {
-                self.pt_atrous_bg2 = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("pt_atrous_bg2"),
-                    layout: self.pt_atrous_layout.as_ref().unwrap(),
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[2].as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: self.pt_atrous_scratch2.as_ref().unwrap().as_entire_binding() },
-                        // dst is unused by cs_final; bind an accum
-                        // buffer to satisfy the layout (cannot alias
-                        // the scratch2 src binding — RO+RW of the same
-                        // buffer in one group fails validation).
-                        wgpu::BindGroupEntry { binding: 2, resource: self.pt_accum_buffers[0].as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
-                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
-                    ],
-                }));
+            if self.pt_atrous_bgs[written_idx][0].is_none() {
+                let scratch = self.pt_atrous_scratch.as_ref().unwrap();
+                let scratch2 = self.pt_atrous_scratch2.as_ref().unwrap();
+                let accum_w = self.pt_accum_buffers[written_idx].as_ref().unwrap();
+                let moments_w = self.pt_moments_buffers[written_idx].as_ref().unwrap();
+                // Stage src → dst chain: accum→s1, then the scratches
+                // ping-pong; the final upsample reads the last-written
+                // scratch. cs_final never writes dst; it gets whichever
+                // scratch is not its src (RO+RW of one buffer in a
+                // single group fails validation).
+                let chain: [(&wgpu::Buffer, &wgpu::Buffer); 6] = [
+                    (accum_w, scratch),
+                    (scratch, scratch2),
+                    (scratch2, scratch),
+                    (scratch, scratch2),
+                    (scratch2, scratch),
+                    (scratch, scratch2),
+                ];
+                for (i, (src, dst)) in chain.iter().enumerate() {
+                    self.pt_atrous_bgs[written_idx][i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("pt_atrous_bg"),
+                        layout: self.pt_atrous_layout.as_ref().unwrap(),
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[i].as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: src.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: dst.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
+                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
+                            wgpu::BindGroupEntry { binding: 6, resource: moments_w.as_entire_binding() },
+                        ],
+                    }));
+                }
             }
 
-            let ts = profiler.compute_pass_timestamp_writes("pt_atrous");
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("pt_atrous"),
-                timestamp_writes: ts,
-            });
-            // Mid passes filter on the trace grid (steps 1 and 2); the
-            // final pass runs at FULL resolution with step 4 (it
-            // upsamples when the grids differ).
-            pass.set_pipeline(self.pt_atrous_mid_pipeline.as_ref().unwrap());
-            pass.set_bind_group(0, self.pt_atrous_bg1[written_idx].as_ref().unwrap(), &[]);
-            pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
-            pass.set_bind_group(0, self.pt_atrous_bg_mid2.as_ref().unwrap(), &[]);
-            pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
-            pass.set_pipeline(self.pt_atrous_final_pipeline.as_ref().unwrap());
-            pass.set_bind_group(0, self.pt_atrous_bg2.as_ref().unwrap(), &[]);
-            pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
+            {
+                let ts = profiler.compute_pass_timestamp_writes("pt_atrous");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("pt_atrous"),
+                    timestamp_writes: ts,
+                });
+                pass.set_pipeline(self.pt_atrous_mid_pipeline.as_ref().unwrap());
+                pass.set_bind_group(0, self.pt_atrous_bgs[written_idx][0].as_ref().unwrap(), &[]);
+                pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
+            }
+            // History feedback: the pass split makes the copy legal
+            // (buffer copies cannot live inside a compute pass).
+            encoder.copy_buffer_to_buffer(
+                self.pt_atrous_scratch.as_ref().unwrap(),
+                0,
+                self.pt_accum_buffers[written_idx].as_ref().unwrap(),
+                0,
+                needed,
+            );
+            {
+                let ts = profiler.compute_pass_timestamp_writes("pt_atrous2");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("pt_atrous2"),
+                    timestamp_writes: ts,
+                });
+                pass.set_pipeline(self.pt_atrous_mid_pipeline.as_ref().unwrap());
+                for i in 1..5 {
+                    pass.set_bind_group(0, self.pt_atrous_bgs[written_idx][i].as_ref().unwrap(), &[]);
+                    pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
+                }
+                pass.set_pipeline(self.pt_atrous_final_pipeline.as_ref().unwrap());
+                pass.set_bind_group(0, self.pt_atrous_bgs[written_idx][5].as_ref().unwrap(), &[]);
+                pass.dispatch_workgroups((surf_w + 7) / 8, (surf_h + 7) / 8, 1);
+            }
         }
         // Mirrors the kernel's write threshold: mode 1 leaves the raster
         // frame on screen until 8 samples exist (u.size.w carried the
@@ -419,7 +453,11 @@ impl Renderer {
         // Copies a window of the accum buffer (center of frame) into a
         // staging buffer each frame; the previous frame's copy is mapped
         // (blocking) and dumped to pt_trace_dump.txt once.
-        if (self.pt_debug == 16.0 || self.pt_debug == 17.0 || self.pt_debug == 19.0)
+        if (self.pt_debug == 16.0
+            || self.pt_debug == 17.0
+            || self.pt_debug == 19.0
+            || self.pt_debug == 22.0
+            || self.pt_debug == 23.0)
             && self.pt_accum_count > 30
             && !self.pt_dump_written
         {

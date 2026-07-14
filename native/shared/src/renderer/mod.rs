@@ -1278,6 +1278,12 @@ pub struct Renderer {
     /// WGSL. Ping-pong pair (PT-3 reprojection reads other pixels from
     /// the previous frame). Lazily (re)created at render extent.
     pt_accum_buffers: [Option<wgpu::Buffer>; 2],
+    /// PT-3b SVGF — luminance moments + geometry side-channel, ping-pong
+    /// with the accum pair: (mu1, mu2, history length, raw depth) per
+    /// trace texel. The kernel validates reprojection taps and derives
+    /// the temporal variance from it; the à-trous passes read it for
+    /// depth edge-stopping and sky markers.
+    pt_moments_buffers: [Option<wgpu::Buffer>; 2],
     /// Index of the buffer holding the PREVIOUS frame's result (the
     /// read side of this frame's dispatch). Flipped after dispatch.
     pt_accum_idx: usize,
@@ -1309,21 +1315,22 @@ pub struct Renderer {
     /// Debug-16 numeric readback (see pt_pass.rs).
     pt_readback_buffer: Option<wgpu::Buffer>,
     pt_dump_written: bool,
-    /// PT-3 — à-trous denoiser (realtime mode): two iterations over the
-    /// temporally-blended radiance, buffer→scratch then scratch→hdr.
+    /// PT-3b — SVGF wavelet filter (realtime mode): four à-trous
+    /// iterations (steps 1/2/4/8) on the trace grid, then a full-res
+    /// upsample+modulate pass.
     pt_atrous_mid_pipeline: Option<wgpu::ComputePipeline>,
     pt_atrous_final_pipeline: Option<wgpu::ComputePipeline>,
     pt_atrous_layout: Option<wgpu::BindGroupLayout>,
-    /// Per-iteration uniform (step size + sigmas + extent).
-    pt_atrous_params_bufs: [wgpu::Buffer; 3],
+    /// Per-iteration uniform (step size + first-iteration flag + extent).
+    pt_atrous_params_bufs: [wgpu::Buffer; 6],
     pt_atrous_scratch: Option<wgpu::Buffer>,
     pt_atrous_scratch2: Option<wgpu::Buffer>,
-    /// Three iterations: bg1[i] = accum buffer i → scratch (step 1),
-    /// bg_mid2 = scratch → scratch2 (step 2), bg2 = scratch2 → hdr
-    /// (step 4, upsampling). Invalidated with pt_bg.
-    pt_atrous_bg1: [Option<wgpu::BindGroup>; 2],
-    pt_atrous_bg_mid2: Option<wgpu::BindGroup>,
-    pt_atrous_bg2: Option<wgpu::BindGroup>,
+    /// Bind groups indexed [written accum idx][stage 0..5]: stage 0 =
+    /// accum[written]→scratch, 1..4 ping-pong the scratches, 5 = final
+    /// upsample to hdr. All six bind moments[written] as the geometry
+    /// side-channel, hence the per-written-idx variants. Invalidated
+    /// with pt_bg.
+    pt_atrous_bgs: [[Option<wgpu::BindGroup>; 6]; 2],
     /// True when the PT kernel actually replaced this frame's scene
     /// colour. Mode 1 leaves the raster frame on screen until a few
     /// samples have accumulated (a moving camera = perpetual resets =
@@ -5197,6 +5204,22 @@ impl Renderer {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                         count: None,
                     },
+                    // PT-3b SVGF — moments ping-pong (18 = previous
+                    // frame read side, 19 = this frame's output).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 18, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 19, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
             ];
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("pt_layout"),
@@ -5302,6 +5325,16 @@ impl Renderer {
                                 multisampled: false,
                             }, count: None,
                         },
+                        // SVGF geometry side-channel (the kernel's
+                        // moments buffer): depth edge-stopping, history
+                        // length and sky markers.
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 6, visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false, min_binding_size: None,
+                            }, count: None,
+                        },
                     ],
                 });
                 let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -5325,26 +5358,22 @@ impl Renderer {
             } else {
                 (None, None, None)
             };
-        let pt_atrous_params_bufs = [
+        // Six stages: five à-trous iterations + the final upsample.
+        let pt_atrous_params_bufs = std::array::from_fn::<_, 6, _>(|i| {
             device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pt_atrous_params_0"),
+                label: Some(match i {
+                    0 => "pt_atrous_params_0",
+                    1 => "pt_atrous_params_1",
+                    2 => "pt_atrous_params_2",
+                    3 => "pt_atrous_params_3",
+                    4 => "pt_atrous_params_4",
+                    _ => "pt_atrous_params_5",
+                }),
                 size: 32,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
-            }),
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pt_atrous_params_1"),
-                size: 32,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pt_atrous_params_2"),
-                size: 32,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-        ];
+            })
+        });
         let pt_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pt_uniform"),
             size: std::mem::size_of::<PtParamsCpu>() as u64,
@@ -6960,6 +6989,7 @@ impl Renderer {
             pt_bg: [None, None],
             pt_uniform_buffer,
             pt_accum_buffers: [None, None],
+            pt_moments_buffers: [None, None],
             pt_accum_idx: 0,
             pt_accum_count: 0,
             pt_prev_vp: [[0.0; 4]; 4],
@@ -6980,9 +7010,7 @@ impl Renderer {
             pt_atrous_params_bufs,
             pt_atrous_scratch: None,
             pt_atrous_scratch2: None,
-            pt_atrous_bg1: [None, None],
-            pt_atrous_bg_mid2: None,
-            pt_atrous_bg2: None,
+            pt_atrous_bgs: [[None, None, None, None, None, None], [None, None, None, None, None, None]],
             probe_trace_sdf_pipeline,
             probe_trace_sdf_layout,
             probe_trace_sdf_bg_cache: [None, None],
@@ -7483,12 +7511,11 @@ impl Renderer {
             // the old extent. Same for the à-trous scratch + bgs.
             self.pt_bg = [None, None];
             self.pt_accum_buffers = [None, None];
+            self.pt_moments_buffers = [None, None];
             self.pt_accum_count = 0;
             self.pt_atrous_scratch = None;
             self.pt_atrous_scratch2 = None;
-            self.pt_atrous_bg1 = [None, None];
-            self.pt_atrous_bg_mid2 = None;
-            self.pt_atrous_bg2 = None;
+            self.pt_atrous_bgs = [[None, None, None, None, None, None], [None, None, None, None, None, None]];
             self.hiz_linearize_bg_cache = None;
         self.occlusion.invalidate_bindings();
             for slot in self.hiz_downsample_bg_cache.iter_mut() {

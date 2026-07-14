@@ -97,9 +97,16 @@ struct InstanceGiData {
 // PT-3: ping-pong accumulation. Binding 8 = previous frame's buffer
 // (read), binding 13 = this frame's output. Reprojection reads OTHER
 // pixels from prev, which a single read_write buffer cannot do safely.
+//
+// Layout (SVGF): accum = (irradiance rgb, luminance variance);
+// moments = (mu1, mu2, history length, raw depth). Progressive mode
+// keeps its original (radiance sum, sample count) layout in accum and
+// leaves the moments buffers untouched.
 @group(0) @binding(8) var<storage, read_write> accum: array<vec4<f32>>;
 @group(0) @binding(9) var out_hdr: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(13) var<storage, read_write> accum_out: array<vec4<f32>>;
+@group(0) @binding(18) var<storage, read_write> moments: array<vec4<f32>>;
+@group(0) @binding(19) var<storage, read_write> moments_out: array<vec4<f32>>;
 
 // Approximate linear view distance from the raw depth-buffer value
 // (GL-convention matrix, near 0.01: z_view ~= 2n / (1 - d)). Only used
@@ -596,16 +603,13 @@ fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>) -
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= u.size.x || gid.y >= u.size.y) { return; }
     let px = vec2<i32>(i32(gid.x), i32(gid.y));
-    // Realtime mode uses a FROZEN random sequence (seed 0 instead of
-    // the frame index): every sample is deterministic per pixel, so
-    // the path tracer injects ZERO frame-to-frame noise — the à-trous
-    // smooths a static dither into a stable image. Progressive (and
-    // the debug views) keep the rolling sequence for convergence.
-    var seed_frame = u.size.z;
-    if (u.cfg.x >= 2.0 && u.cfg.w == 0.0) {
-        seed_frame = 0u;
-    }
-    rng_seed(gid.xy, seed_frame);
+    // A rolling per-frame sequence in EVERY mode: SVGF's temporal
+    // accumulation needs unbiased fresh samples each frame (a frozen
+    // sequence converges the EMA to a wrong-but-stable value that
+    // reads as static dirty-lens grain glued to the screen). The
+    // variance estimate below is what keeps rolling noise from
+    // shimmering: it tells the à-trous exactly where to blur hard.
+    rng_seed(gid.xy, u.size.z);
 
     // PT-3 half-res: realtime mode traces a half grid; map this trace
     // cell to its full-res G-buffer pixel (the 2x2 phase rotates per
@@ -639,9 +643,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (is_sky(depth)) {
         // Leave the raster sky/clouds untouched. Realtime mode marks
-        // the texel (w = 1) so the a-trous passes skip it too.
+        // the texel as sky in the MOMENTS buffer (depth channel = far
+        // plane) so the a-trous passes and the upsampler skip it.
         if (u.cfg.x >= 2.0 && u.cfg.w == 0.0) {
-            accum_out[gid.y * u.size.x + gid.x] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            let sky_idx = gid.y * u.size.x + gid.x;
+            accum_out[sky_idx] = vec4<f32>(0.0);
+            moments_out[sky_idx] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         }
         return;
     }
@@ -942,18 +949,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var metal_cur = mr0.r;
     var rough_cur = mr0.g;
     // Realtime mode samples the primary sun cone with structured IGN
-    // noise, FROZEN in time (frame 0): a per-frame rolling sequence
-    // makes every stochastically-shadowed pixel (grass, canopies)
-    // oscillate around its mean forever — the EMA never settles it and
-    // it reads as sparkle across the whole frame. A fixed per-pixel
-    // sample gives a static dither that the à-trous flattens into
-    // STABLE soft shadows. Progressive keeps rolling white noise for
-    // unbiased convergence.
+    // noise, rolling per frame: spatially well-distributed (a 5x5
+    // filter averages it nearly flat, unlike white PCG noise) and
+    // temporally unbiased so the SVGF accumulation converges to the
+    // true mean. Under the hybrid cascade sun this path only matters
+    // when shadow maps are disabled. Progressive keeps white noise.
     var sun_r2 = rand_2f();
     if (u.cfg.x >= 2.0) {
         sun_r2 = vec2<f32>(
-            ign_at(px_full, 0u),
-            ign_at(px_full + vec2<i32>(17, 59), 0u),
+            ign_at(px_full, u.size.z),
+            ign_at(px_full + vec2<i32>(17, 59), u.size.z),
         );
     }
     var view_cur = normalize(u.cam_pos.xyz - p0);
@@ -1056,25 +1061,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // NaN/Inf guard + firefly cap so one bad sample cannot poison the
-    // accumulator forever. The cap scales with history: at 1 spp a
-    // single bright specular sample reads as a white dot on screen, so
-    // clamp hard; as the average deepens it can absorb real energy.
+    // NaN/Inf guard so one bad sample cannot poison the accumulator.
     if (radiance.r != radiance.r || radiance.g != radiance.g || radiance.b != radiance.b) {
         radiance = vec3<f32>(0.0);
     }
-    let luma = dot(radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
-    // Progressive: relax with accumulation depth (a deep average can
-    // absorb real energy). Realtime: FIXED — its EMA window stays ~7
-    // frames no matter how large the frame count grows, so the cap
-    // must never relax or fireflies return as the count climbs.
-    var cap = 4.0 + f32(min(u.size.w, 28u));
-    // Realtime cap is TIGHT (3): the à-trous luminance edge-stop
-    // preserves bright outliers as if they were edges, so any firefly
-    // that survives the cap survives the filter too. Scene luma sits
-    // around 0.5-1.5, so 3 leaves sunlit highlights alone.
-    if (u.cfg.x >= 2.0) { cap = 3.0; }
-    if (luma > cap) { radiance *= cap / luma; }
 
     // ---- accumulate ---------------------------------------------------------
 
@@ -1085,66 +1075,197 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var out: vec3<f32>;
     if (mode >= 2.0) {
-        // PT-3 M1: temporally REPROJECTED exponential history. The
-        // previous frame's result is fetched where THIS surface was
-        // last frame (world pos through prev_vp), so camera motion no
-        // longer smears screen-space history into fog. Disocclusions
-        // and depth mismatches reject history (alpha = 1); accepted
-        // history blends at 0.15. accum.w carries the raw depth the
-        // texel's surface wrote, validated against the reprojected
-        // depth of this frame's surface.
-        var alpha = 1.0;
-        var hist = vec3<f32>(0.0);
+        // SVGF temporal accumulation (Schied et al. 2017). History and
+        // output store IRRADIANCE (radiance demodulated by the primary
+        // albedo) so the wavelet passes filter lighting only; the
+        // final pass re-multiplies by the full-res G-buffer albedo.
+        var irr = radiance / max(albedo0, vec3<f32>(0.05));
+        // Firefly clamp — the one practical deviation from the paper
+        // (reference implementations keep one too): it must bind in
+        // IRRADIANCE space, because dividing by a dark albedo
+        // amplifies radiance outliers up to 20x. Sunlit irradiance
+        // sits around 1-3; 4 leaves real highlights alone.
+        let irr_luma = dot(irr, vec3<f32>(0.2126, 0.7152, 0.0722));
+        if (irr_luma > 4.0) {
+            irr *= 4.0 / irr_luma;
+        }
+        let l_new = min(irr_luma, 4.0);
+
+        // Reprojection: 2x2 BILINEAR taps around the reprojected
+        // position, each tap validated for geometric consistency
+        // (relative linearized depth against the moments buffer).
+        // Point sampling here quantizes to whole trace texels and
+        // forced the old loose-tolerance workaround; weighted taps
+        // give sub-texel reprojection and a honest per-tap test.
+        var hist_rgb = vec3<f32>(0.0);
+        var hist_m1 = 0.0;
+        var hist_m2 = 0.0;
+        var hist_n = 0.0;
+        var wsum = 0.0;
+        // Footprint depth window (current frame): one trace texel
+        // covers ~3x3 full-res pixels; used below to tell a jitter
+        // surface-flip apart from a true disocclusion.
+        var fp_lo = 1e30;
+        var fp_hi = 0.0;
+        {
+            let rx = max(i32(u.ext.x) / i32(u.size.x), 1);
+            let ry = max(i32(u.ext.y) / i32(u.size.y), 1);
+            for (var sy = 0; sy <= 1; sy = sy + 1) {
+                for (var sx = 0; sx <= 1; sx = sx + 1) {
+                    let sp = min(
+                        px_full + vec2<i32>(sx * (rx - 1), sy * (ry - 1)),
+                        vec2<i32>(i32(u.ext.x) - 1, i32(u.ext.y) - 1),
+                    );
+                    let dz = depth_at(sp);
+                    if (dz >= 0.9999999) { continue; }
+                    let zl = lin_depth(dz);
+                    fp_lo = min(fp_lo, zl);
+                    fp_hi = max(fp_hi, zl);
+                }
+            }
+        }
+        var reproj_in_bounds = false;
+        var nearest_prev_idx = 0u;
         let clip_prev = u.prev_vp * vec4<f32>(p0, 1.0);
         if (u.size.w > 0u && clip_prev.w > 1e-4) {
             let ndc_prev = clip_prev.xyz / clip_prev.w;
             let uv_prev = vec2<f32>(ndc_prev.x * 0.5 + 0.5, 0.5 - ndc_prev.y * 0.5);
             if (uv_prev.x >= 0.0 && uv_prev.x < 1.0 && uv_prev.y >= 0.0 && uv_prev.y < 1.0) {
-                let ppx = vec2<u32>(uv_prev * vec2<f32>(f32(u.size.x), f32(u.size.y)));
-                let pidx = min(ppx.y, u.size.y - 1u) * u.size.x + min(ppx.x, u.size.x - 1u);
-                let ph = accum[pidx];
-                let zl_hist = lin_depth(ph.w);
+                reproj_in_bounds = true;
+                let pos = uv_prev * vec2<f32>(f32(u.size.x), f32(u.size.y)) - 0.5;
+                let base = vec2<i32>(floor(pos));
+                let fr = pos - floor(pos);
+                let np = vec2<u32>(
+                    min(u32(max(base.x + i32(round(fr.x)), 0)), u.size.x - 1u),
+                    min(u32(max(base.y + i32(round(fr.y)), 0)), u.size.y - 1u),
+                );
+                nearest_prev_idx = np.y * u.size.x + np.x;
                 let zl_here = lin_depth(ndc_prev.z);
-                // Tolerance is deliberately loose: at half-res the
-                // reprojected texel quantizes to 2 full pixels, and on
-                // depth-chaotic surfaces (grass) a tight test rejects
-                // almost every frame — pinning texels at 1 spp. The
-                // ghosting a loose test admits is invisible exactly
-                // where the depth is chaotic.
-                if (abs(zl_hist - zl_here) < 0.12 * max(zl_hist, zl_here) + 0.05) {
-                    alpha = 0.1;
-                    hist = ph.rgb;
+                if (debug == 23.0) {
+                    // Reprojection dump: where this texel thinks it was
+                    // last frame (trace-grid units) + the depth pair the
+                    // acceptance test compares. Static camera => pos
+                    // must equal the texel's own coordinates.
+                    accum_out[idx] = vec4<f32>(pos.x, pos.y, zl_here, lin_depth(moments[nearest_prev_idx].w));
+                    moments_out[idx] = vec4<f32>(0.0, 0.0, 0.0, depth);
+                    return;
+                }
+                // Tap test is TIGHT (surface identity). Cross-surface
+                // blending is the expensive error: it leaks bright
+                // blade-top lighting onto the ground below (gray-blue
+                // mottle). Surface flips are handled after the loop,
+                // not by widening this tolerance.
+                let tol = 0.1 * zl_here + 0.02;
+                for (var ty = 0; ty <= 1; ty = ty + 1) {
+                    for (var tx = 0; tx <= 1; tx = tx + 1) {
+                        let q = base + vec2<i32>(tx, ty);
+                        if (q.x < 0 || q.y < 0 || q.x >= i32(u.size.x) || q.y >= i32(u.size.y)) {
+                            continue;
+                        }
+                        let qidx = u32(q.y) * u.size.x + u32(q.x);
+                        let m = moments[qidx];
+                        // Sky texels and depth-inconsistent taps carry
+                        // another surface's lighting — skip them.
+                        if (m.w >= 0.9999999) {
+                            continue;
+                        }
+                        let zl_hist = lin_depth(m.w);
+                        if (abs(zl_hist - zl_here) > tol) {
+                            continue;
+                        }
+                        let wx = mix(1.0 - fr.x, fr.x, f32(tx));
+                        let wy = mix(1.0 - fr.y, fr.y, f32(ty));
+                        let wt = wx * wy + 1e-4;
+                        hist_rgb += accum[qidx].rgb * wt;
+                        hist_m1 += m.x * wt;
+                        hist_m2 += m.y * wt;
+                        hist_n += m.z * wt;
+                        wsum += wt;
+                    }
                 }
             }
         }
-        // SVGF-style albedo demodulation: history and output store
-        // IRRADIANCE (radiance divided by the primary albedo) so the
-        // à-trous passes filter lighting only; the final pass
-        // re-multiplies by the FULL-RES G-buffer albedo, keeping
-        // texture detail crisp despite the half-res trace and the
-        // aggressive smoothing.
-        var irr = radiance / max(albedo0, vec3<f32>(0.05));
-        // The firefly cap must bind IRRADIANCE, not radiance: dividing
-        // by a dark albedo amplifies up to 20x, so a radiance-space cap
-        // leaves outliers the filter sigmas can't absorb. Sunlit
-        // irradiance sits around 1-3; 4 leaves highlights alone.
-        let irr_luma = dot(irr, vec3<f32>(0.2126, 0.7152, 0.0722));
-        if (irr_luma > 4.0) {
-            irr *= 4.0 / irr_luma;
+
+        // No tap matched. One trace texel holds ONE surface's history;
+        // TAA jitter re-picks which surface the owner pixel sees each
+        // frame on sub-texel geometry (grass). If the STORED surface
+        // still exists in this texel's current footprint, this frame's
+        // sample simply belongs to the other surface: keep the history
+        // verbatim and drop the sample (blending would leak lighting
+        // across surfaces; resetting would pin the texel at 1 spp and
+        // fill the screen with speckle). The upsampler routes trace
+        // texels to full-res pixels by depth, so the other surface
+        // draws its lighting from neighbouring texels. Only a stored
+        // surface that has LEFT the footprint is a true disocclusion.
+        if (wsum <= 1e-3 && reproj_in_bounds) {
+            let mnp = moments[nearest_prev_idx];
+            if (mnp.w < 0.9999999 && mnp.z > 0.0 && fp_hi > 0.0 && fp_lo < 1e29) {
+                let zl_st = lin_depth(mnp.w);
+                let wtol = 0.1 * zl_st + 0.02;
+                if (zl_st > fp_lo - wtol && zl_st < fp_hi + wtol) {
+                    accum_out[idx] = accum[nearest_prev_idx];
+                    moments_out[idx] = mnp;
+                    if (debug == 22.0) {
+                        // Numeric dump: n / variance / 99 = flip path / depth.
+                        accum_out[idx] = vec4<f32>(mnp.z, max(mnp.y - mnp.x * mnp.x, 0.0), 99.0, mnp.w);
+                    }
+                    if (debug == 20.0) {
+                        textureStore(out_hdr, px_full, vec4<f32>(vec3<f32>(mnp.z / 32.0), 1.0));
+                    }
+                    if (debug == 21.0) {
+                        let v_st = max(mnp.y - mnp.x * mnp.x, 0.0);
+                        textureStore(out_hdr, px_full, vec4<f32>(vec3<f32>(v_st * 10.0), 1.0));
+                    }
+                    return;
+                }
+            }
         }
-        // History-guided spike clamp: with valid history, one frame may
-        // not jump more than 50% + 0.25 above it — single-frame bright
-        // spikes ARE noise at 1-2 spp, and the à-trous edge-stop
-        // (center-relative) cannot remove an outlier CENTER. Darkening
-        // (a shadow appearing) stays unclamped so lighting changes
-        // propagate at full speed downward and EMA speed upward.
-        if (alpha < 1.0) {
-            irr = min(irr, hist * 1.5 + vec3<f32>(0.25));
+
+        var n_hist = 0.0;
+        if (wsum > 1e-3) {
+            hist_rgb /= wsum;
+            hist_m1 /= wsum;
+            hist_m2 /= wsum;
+            n_hist = hist_n / wsum;
         }
-        let out_irr = mix(hist, irr, alpha);
-        accum_out[idx] = vec4<f32>(out_irr, depth);
+        // Canonical blend: cumulative average while the history is
+        // young (alpha = 1/N), settling to EMA. The floor is 0.1
+        // rather than the paper's 0.2: our trace is half-res with a
+        // 2-bounce sky lottery as the dominant noise source, and the
+        // deeper average halves the residual mottle. Direct sun comes
+        // from the raster cascades (deterministic), so the slower EMA
+        // only delays indirect/ambient changes (~10 frames).
+        let n_new = min(n_hist + 1.0, 32.0);
+        let alpha_c = max(1.0 / n_new, 0.1);
+        let out_irr = mix(hist_rgb, irr, alpha_c);
+        let m1 = mix(hist_m1, l_new, alpha_c);
+        let m2 = mix(hist_m2, l_new * l_new, alpha_c);
+        // Temporal luminance variance — the signal that drives the
+        // wavelet filter's luminance sigma. Young history makes this
+        // unreliable; the first à-trous iteration substitutes a
+        // spatial estimate when n < 4 (accum.w carries n via moments).
+        let variance = max(m2 - m1 * m1, 0.0);
+        accum_out[idx] = vec4<f32>(out_irr, variance);
+        moments_out[idx] = vec4<f32>(m1, m2, n_new, depth);
+        if (debug == 22.0) {
+            // Numeric dump: n / variance / accepted tap mass / depth.
+            accum_out[idx] = vec4<f32>(n_new, variance, wsum, depth);
+        }
+        if (debug == 20.0) {
+            // History length heat: white = full 32-frame history.
+            textureStore(out_hdr, px_full, vec4<f32>(vec3<f32>(n_new / 32.0), 1.0));
+        }
+        if (debug == 21.0) {
+            // Variance view (x10 so typical values are visible).
+            textureStore(out_hdr, px_full, vec4<f32>(vec3<f32>(variance * 10.0), 1.0));
+        }
         return;
     } else {
+        // Progressive keeps its firefly cap, relaxing with
+        // accumulation depth (a deep average can absorb real energy).
+        let luma = dot(radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let cap = 4.0 + f32(min(u.size.w, 28u));
+        if (luma > cap) { radiance *= cap / luma; }
         // Progressive: plain running sum; count lives on the CPU.
         // Ping-pong read/write at the same index (static camera only).
         let sum = prev.rgb + radiance;
@@ -1167,15 +1288,26 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// PT-3 — edge-aware à-trous denoiser for the realtime mode. Two
-/// iterations (step 1 then 2) over the temporally-blended radiance:
-/// `cs_mid` filters buffer→buffer, `cs_final` filters buffer→out_hdr.
-/// Edge stopping = relative linearized depth (accum.w carries the raw
-/// depth) + luminance similarity; sky texels (w = 1 marker) pass
-/// through untouched and are never written to hdr.
+/// PT-3b — SVGF wavelet filter (Schied et al. 2017) for the realtime
+/// mode. Four `cs_mid` à-trous iterations (steps 1/2/4/8) run on the
+/// trace grid over the temporally-accumulated irradiance; `cs_final`
+/// joint-bilaterally upsamples to full resolution and re-modulates the
+/// G-buffer albedo. Buffers: src/dst = (irradiance rgb, luminance
+/// variance w); `geo` = the kernel's moments buffer (mu1, mu2, history
+/// length, raw depth) — static across iterations, it carries the depth
+/// for edge-stopping and the sky marker (depth = far plane).
+///
+/// The luminance edge-stop is VARIANCE-DRIVEN: sigma_l scales with the
+/// per-texel noise estimate, so grainy regions blur hard while
+/// converged shading detail survives. Variance travels with the signal,
+/// filtered by the squared weights, shrinking each iteration exactly as
+/// the residual noise does. This replaces the old fixed sigma schedule,
+/// the despeckle clamp and the history spike clamp — with a correct
+/// variance estimate none of those are needed.
 pub(in crate::renderer) const PT_ATROUS_WGSL: &str = r#"
 struct AtrousParams {
-    // x = step (texels), y = sigma_luma, z = trace width, w = trace height
+    // x = step (texels), y = 1.0 on the FIRST iteration (enables the
+    // short-history spatial variance fallback), z/w = trace dims
     p: vec4<f32>,
     // x/y = full G-buffer dims (cs_final upsamples trace -> full when
     // they differ), z/w unused.
@@ -1189,9 +1321,15 @@ struct AtrousParams {
 // Full-res G-buffer albedo: cs_final re-modulates the filtered
 // irradiance with it (SVGF demodulation keeps textures crisp).
 @group(0) @binding(5) var albedo_full: texture_2d<f32>;
+// Kernel moments buffer: (mu1, mu2, history length, raw depth).
+@group(0) @binding(6) var<storage, read> geo: array<vec4<f32>>;
 
 fn lin_depth_a(d: f32) -> f32 {
     return 0.02 / max(1.0 - d, 1e-6);
+}
+
+fn luma_of(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
 // B3-spline kernel weight for |offset| 0/1/2.
@@ -1202,46 +1340,93 @@ fn kern(d: i32) -> f32 {
     return 0.0625;
 }
 
-fn filter_at(px: vec2<i32>, w: i32, h: i32, step: i32) -> vec4<f32> {
+// SVGF luminance sigma (paper value).
+const SIGMA_L: f32 = 4.0;
+
+fn filter_at(px: vec2<i32>, w: i32, h: i32, step: i32, first: bool) -> vec4<f32> {
     let cidx = u32(px.y) * u32(w) + u32(px.x);
-    var center = src[cidx];
-    if (center.w >= 0.9999999) {
+    let g_c = geo[cidx];
+    let center = src[cidx];
+    if (g_c.w >= 0.9999999) {
         return center;
     }
-    let zc = lin_depth_a(center.w);
-    var lc = dot(center.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let zc = lin_depth_a(g_c.w);
+    let lc = luma_of(center.rgb);
 
-    // Despeckle (first iteration only): the edge-stopping weights below
-    // are measured FROM the center, so an outlier center rejects its
-    // neighbors and survives every iteration. Clamp the center to its
-    // immediate neighborhood maximum before blending — isolated bright
-    // texels cannot exceed what any neighbor has seen.
-    if (step == 1) {
-        var nmax = 0.0;
+    // Center variance. Temporal variance from a young history (< 4
+    // frames, e.g. right after a disocclusion) is meaningless — the
+    // paper substitutes a spatial luminance-variance estimate there.
+    var var_c = max(center.w, 0.0);
+    if (first && g_c.z < 4.0) {
+        var s1 = 0.0;
+        var s2 = 0.0;
+        var cnt = 0.0;
         for (var dy = -1; dy <= 1; dy = dy + 1) {
             for (var dx = -1; dx <= 1; dx = dx + 1) {
-                if (dx == 0 && dy == 0) {
-                    continue;
-                }
                 let q = px + vec2<i32>(dx, dy);
                 if (q.x < 0 || q.y < 0 || q.x >= w || q.y >= h) {
                     continue;
                 }
-                let s = src[u32(q.y) * u32(w) + u32(q.x)];
-                if (s.w >= 0.9999999) {
+                let qi = u32(q.y) * u32(w) + u32(q.x);
+                if (geo[qi].w >= 0.9999999) {
                     continue;
                 }
-                nmax = max(nmax, dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
+                let lq = luma_of(src[qi].rgb);
+                s1 += lq;
+                s2 += lq * lq;
+                cnt += 1.0;
             }
         }
-        let lim = nmax * 1.5 + 0.05;
-        if (nmax > 0.0 && lc > lim) {
-            center = vec4<f32>(center.rgb * (lim / lc), center.w);
-            lc = lim;
+        if (cnt > 1.0) {
+            let mu = s1 / cnt;
+            var_c = max(var_c, max(s2 / cnt - mu * mu, 0.0));
         }
+        // Variance boost: a young history's estimate is unreliable in
+        // BOTH directions, and underestimating is the expensive error
+        // (a 1-spp outlier with variance 0 survives every iteration as
+        // a false edge). Floor it so fresh texels blend spatially until
+        // their temporal estimate matures.
+        var_c = max(var_c, 0.25);
+    }
+
+    // 3x3 gaussian prefilter of the variance (paper 4.2): keeps a
+    // single hot texel from stopping its own smoothing.
+    var vsum = var_c * 0.25;
+    var vwsum = 0.25;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            if (dx == 0 && dy == 0) {
+                continue;
+            }
+            let q = px + vec2<i32>(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= w || q.y >= h) {
+                continue;
+            }
+            let qi = u32(q.y) * u32(w) + u32(q.x);
+            if (geo[qi].w >= 0.9999999) {
+                continue;
+            }
+            let gw = select(0.0625, 0.125, dx == 0 || dy == 0);
+            vsum += max(src[qi].w, 0.0) * gw;
+            vwsum += gw;
+        }
+    }
+    let sigma_l_denom = SIGMA_L * sqrt(max(vsum / vwsum, 0.0)) + 1e-3;
+
+    // Depth gradient (central differences on linear depth) scales the
+    // depth edge-stop so steep-slope surfaces stay connected while
+    // depth discontinuities still stop the filter (paper eq. 3).
+    var dzdx = 0.0;
+    var dzdy = 0.0;
+    if (px.x > 0 && px.x < w - 1) {
+        dzdx = (lin_depth_a(geo[cidx + 1u].w) - lin_depth_a(geo[cidx - 1u].w)) * 0.5;
+    }
+    if (px.y > 0 && px.y < h - 1) {
+        dzdy = (lin_depth_a(geo[cidx + u32(w)].w) - lin_depth_a(geo[cidx - u32(w)].w)) * 0.5;
     }
 
     var sum = vec3<f32>(0.0);
+    var sum_v = 0.0;
     var wsum = 0.0;
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
@@ -1249,26 +1434,30 @@ fn filter_at(px: vec2<i32>, w: i32, h: i32, step: i32) -> vec4<f32> {
             if (q.x < 0 || q.y < 0 || q.x >= w || q.y >= h) {
                 continue;
             }
-            var s = src[u32(q.y) * u32(w) + u32(q.x)];
-            if (dx == 0 && dy == 0) {
-                s = center; // use the despeckled value for the center tap
-            }
-            if (s.w >= 0.9999999) {
+            let qi = u32(q.y) * u32(w) + u32(q.x);
+            let g_q = geo[qi];
+            if (g_q.w >= 0.9999999) {
                 continue;
             }
-            let zq = lin_depth_a(s.w);
-            let wz = exp(-abs(zq - zc) / (0.15 * max(zc, zq) + 0.02));
-            let lq = dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-            let wl = exp(-abs(lq - lc) / max(ap.p.y, 1e-3));
+            let s = src[qi];
+            let zq = lin_depth_a(g_q.w);
+            let z_denom = abs(dzdx) * f32(abs(dx) * step)
+                + abs(dzdy) * f32(abs(dy) * step)
+                + 0.01 * zc + 1e-4;
+            let wz = exp(-abs(zq - zc) / z_denom);
+            let wl = exp(-abs(luma_of(s.rgb) - lc) / sigma_l_denom);
             let wgt = kern(dx) * kern(dy) * wz * wl;
             sum += s.rgb * wgt;
+            // Variance contracts with the SQUARED weights — the
+            // estimate shrinks exactly as the filtered noise does.
+            sum_v += max(s.w, 0.0) * wgt * wgt;
             wsum += wgt;
         }
     }
     if (wsum < 1e-6) {
         return center;
     }
-    return vec4<f32>(sum / wsum, center.w);
+    return vec4<f32>(sum / wsum, sum_v / (wsum * wsum));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1279,13 +1468,14 @@ fn cs_mid(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let px = vec2<i32>(i32(gid.x), i32(gid.y));
-    dst[gid.y * u32(w) + gid.x] = filter_at(px, w, h, i32(ap.p.x));
+    dst[gid.y * u32(w) + gid.x] = filter_at(px, w, h, i32(ap.p.x), ap.p.y > 0.5);
 }
 
-// Final pass runs at FULL resolution: filter-and-write when the trace
-// grid is full-res, depth-guided joint-bilateral upsample when the
-// trace grid is half-res. Sky pixels (full-res depth at far plane) are
-// never written so the raster sky survives.
+// Final pass runs at FULL resolution: depth-guided joint-bilateral
+// upsample of the filtered irradiance, re-modulated by the full-res
+// G-buffer albedo. Sky pixels (full-res depth at far plane) are never
+// written so the raster sky survives. When the trace grid IS the full
+// grid it degenerates to a plain modulate-and-write.
 @compute @workgroup_size(8, 8, 1)
 fn cs_final(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fw = i32(ap.p2.x);
@@ -1303,18 +1493,16 @@ fn cs_final(@builtin(global_invocation_id) gid: vec3<u32>) {
     let alb = max(textureLoad(albedo_full, px, 0).rgb, vec3<f32>(0.05));
     if (hw == fw) {
         let cidx = gid.y * u32(fw) + gid.x;
-        if (src[cidx].w >= 0.9999999) {
+        if (geo[cidx].w >= 0.9999999) {
             return;
         }
-        let r = filter_at(px, fw, fh, i32(ap.p.x));
-        textureStore(out_hdr_a, px, vec4<f32>(r.rgb * alb, 1.0));
+        textureStore(out_hdr_a, px, vec4<f32>(src[cidx].rgb * alb, 1.0));
         return;
     }
-    // Half-res upsample: 3x3 taps around the containing trace texel,
-    // weighted by kernel distance and relative linear-depth agreement
-    // with THIS full-res pixel. The epsilon keeps thin foreground
-    // geometry (whose taps all mismatch) softly averaged rather than
-    // black.
+    // 3x3 taps around the containing trace texel, weighted by kernel
+    // distance and relative linear-depth agreement with THIS full-res
+    // pixel. The epsilon keeps thin foreground geometry (whose taps
+    // all mismatch) softly averaged rather than black.
     let zc = lin_depth_a(d);
     // Generalized ratio mapping (trace grid is budget-capped, not
     // always exactly half of full res).
@@ -1329,11 +1517,12 @@ fn cs_final(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (qx < 0 || qy < 0 || qx >= hw || qy >= hh) {
                 continue;
             }
-            let s = src[u32(qy) * u32(hw) + u32(qx)];
-            if (s.w >= 0.9999999) {
+            let qi = u32(qy) * u32(hw) + u32(qx);
+            if (geo[qi].w >= 0.9999999) {
                 continue;
             }
-            let wz = exp(-abs(lin_depth_a(s.w) - zc) / (0.08 * zc + 0.02));
+            let s = src[qi];
+            let wz = exp(-abs(lin_depth_a(geo[qi].w) - zc) / (0.08 * zc + 0.02));
             let wgt = kern(dx) * kern(dy) * wz + 1e-5;
             sum += s.rgb * wgt;
             wsum += wgt;
