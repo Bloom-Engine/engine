@@ -613,8 +613,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // have ext == size and phase 0, making this the identity.
     var px_full = px;
     if (u.ext.x > u.size.x) {
+        // Generalized ratio (the trace grid is budget-capped, so the
+        // factor is not necessarily 2): integer scale keeps each trace
+        // texel pinned to one owner pixel.
         px_full = min(
-            px * 2 + vec2<i32>(i32(u.ext.z), i32(u.ext.w)),
+            vec2<i32>(
+                px.x * i32(u.ext.x) / i32(u.size.x),
+                px.y * i32(u.ext.y) / i32(u.size.y),
+            ),
             vec2<i32>(i32(u.ext.x) - 1, i32(u.ext.y) - 1),
         );
     }
@@ -1310,8 +1316,10 @@ fn cs_final(@builtin(global_invocation_id) gid: vec3<u32>) {
     // geometry (whose taps all mismatch) softly averaged rather than
     // black.
     let zc = lin_depth_a(d);
-    let hx = clamp(px.x / 2, 0, hw - 1);
-    let hy = clamp(px.y / 2, 0, hh - 1);
+    // Generalized ratio mapping (trace grid is budget-capped, not
+    // always exactly half of full res).
+    let hx = clamp(px.x * hw / fw, 0, hw - 1);
+    let hy = clamp(px.y * hh / fh, 0, hh - 1);
     var sum = vec3<f32>(0.0);
     var wsum = 0.0;
     for (var dy = -1; dy <= 1; dy = dy + 1) {

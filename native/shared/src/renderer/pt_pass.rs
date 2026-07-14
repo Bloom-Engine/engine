@@ -91,8 +91,13 @@ impl Renderer {
         // 2x2 sample phase rotates per frame so the temporal EMA
         // integrates full-res coverage over 4 frames. Progressive mode
         // stays full-res.
+        // The realtime trace grid is capped at ~0.5 Mpx (960x540) so
+        // raising the raster render scale sharpens the image without
+        // multiplying the ray budget — the upsampler handles arbitrary
+        // trace-to-full ratios. Progressive stays uncapped: quality is
+        // its entire point.
         let (trace_w, trace_h) = if self.pt_mode >= 2 {
-            (surf_w.div_ceil(2), surf_h.div_ceil(2))
+            (surf_w.div_ceil(2).min(960), surf_h.div_ceil(2).min(540))
         } else {
             (surf_w, surf_h)
         };
