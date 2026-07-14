@@ -1688,3 +1688,69 @@ fn cs_final(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out_hdr_a, px, vec4<f32>((sum / wsum) * alb, 1.0));
 }
 "#;
+
+/// PT-6 — compute pre-skin: poses one skinned mesh into its PT geometry
+/// megabuffer window (world space; the joint palette bakes placement).
+/// The CPU wrote the bind-pose vertex data into the window this frame;
+/// this pass overwrites position + normal, leaving color/uv untouched.
+/// The BLAS for the dynamic instance then reads the same window
+/// (first_vertex offset), so intersection and hit shading share bytes.
+pub(in crate::renderer) const PT_SKIN_WGSL: &str = r#"
+struct SkinParams {
+    // Places the rare rigid (weightless) verts, same as the raster VS.
+    model: mat4x4<f32>,
+    // x = megabuffer vertex slot base (Vertex3D units), y = vertex
+    // count, z = joint palette base offset, w unused.
+    p: vec4<u32>,
+};
+struct SkinJoints {
+    m: array<mat4x4<f32>, 1024>,
+};
+@group(0) @binding(0) var<uniform> sp: SkinParams;
+@group(0) @binding(1) var<storage, read> src_v: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst_v: array<f32>;
+@group(0) @binding(3) var<uniform> joints: SkinJoints;
+
+@compute @workgroup_size(64, 1, 1)
+fn cs_skin(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= sp.p.y) { return; }
+    // Vertex3D words: pos +0, normal +3, color +6, uv +10, joints +12,
+    // weights +16, tangent +20 (stride 24 f32).
+    let s = i * 24u;
+    let d = (sp.p.x + i) * 24u;
+    let pos = vec4<f32>(src_v[s], src_v[s + 1u], src_v[s + 2u], 1.0);
+    let nrm = vec4<f32>(src_v[s + 3u], src_v[s + 4u], src_v[s + 5u], 0.0);
+    let w = vec4<f32>(
+        src_v[s + 16u], src_v[s + 17u], src_v[s + 18u], src_v[s + 19u],
+    );
+    var wp: vec3<f32>;
+    var wn: vec3<f32>;
+    if (w.x + w.y + w.z + w.w > 0.01) {
+        // Same palette blend as the raster VS (core.rs vs_main_scene).
+        let j0 = u32(src_v[s + 12u]) + sp.p.z;
+        let j1 = u32(src_v[s + 13u]) + sp.p.z;
+        let j2 = u32(src_v[s + 14u]) + sp.p.z;
+        let j3 = u32(src_v[s + 15u]) + sp.p.z;
+        let m0 = joints.m[j0];
+        let m1 = joints.m[j1];
+        let m2 = joints.m[j2];
+        let m3 = joints.m[j3];
+        wp = ((m0 * pos) * w.x + (m1 * pos) * w.y
+            + (m2 * pos) * w.z + (m3 * pos) * w.w).xyz;
+        wn = ((m0 * nrm) * w.x + (m1 * nrm) * w.y
+            + (m2 * nrm) * w.z + (m3 * nrm) * w.w).xyz;
+    } else {
+        wp = (sp.model * pos).xyz;
+        wn = (sp.model * nrm).xyz;
+    }
+    let ln = length(wn);
+    if (ln > 1e-6) { wn = wn / ln; }
+    dst_v[d] = wp.x;
+    dst_v[d + 1u] = wp.y;
+    dst_v[d + 2u] = wp.z;
+    dst_v[d + 3u] = wn.x;
+    dst_v[d + 4u] = wn.y;
+    dst_v[d + 5u] = wn.z;
+}
+"#;

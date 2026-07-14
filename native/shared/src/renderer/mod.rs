@@ -749,6 +749,48 @@ struct GpuMesh {
     /// its real shape. `None` → opaque caster, uses the plain shadow pipeline.
     shadow_cutout_bg: Option<wgpu::BindGroup>,
     _shadow_cutoff_buf: Option<wgpu::Buffer>,
+    /// PT-6 — retained CPU geometry for SKINNED meshes only: the
+    /// bind-pose vertices/indices are appended into the PT geometry
+    /// megabuffer each frame as the window the compute pre-skin pass
+    /// then overwrites with posed world-space data. `None` for rigid
+    /// meshes (they enter the TLAS as scene nodes or not at all).
+    cpu_vertices: Option<Vec<Vertex3D>>,
+    cpu_indices: Option<Vec<u32>>,
+    /// PT-6 — hit-shading inputs for the dynamic TLAS instance.
+    base_color_idx: u32,
+    metallic_factor: f32,
+    roughness_factor: f32,
+}
+
+/// PT-6 — a dynamic instance's megabuffer window for this frame:
+/// where its geometry lives (Vertex3D-slot / index units), which pose
+/// to apply, and which cached mesh is its compute-skin source.
+struct PtDynWindow {
+    v_base: u32,
+    v_count: u32,
+    i_base: u32,
+    i_count: u32,
+    joint_offset: f32,
+    model: [[f32; 4]; 4],
+    cache_handle: u64,
+    mesh_idx: usize,
+}
+
+/// PT-6 — one skinned mesh drawn this frame, registered by
+/// `draw_model_cached_skinned` for the dynamic TLAS path. Cleared with
+/// the per-frame draw lists; consumed by `rebuild_instance_data`.
+pub(crate) struct PtDynamicDraw {
+    cache_handle: u64,
+    mesh_idx: usize,
+    /// Base slot of the pose in the frame joint buffer (world-space
+    /// palette — the compute pre-skin outputs world-space vertices,
+    /// so the TLAS instance transform is identity).
+    joint_offset: f32,
+    /// Places the rare rigid (weightless) verts, same as the VS.
+    model: [[f32; 4]; 4],
+    /// World AABB (joint-union bound from the draw call).
+    wmin: [f32; 3],
+    wmax: [f32; 3],
 }
 
 struct CachedModelDraw {
@@ -1232,6 +1274,12 @@ pub struct Renderer {
     /// rounded up to 1024 instances; resized only when exceeded.
     pub tlas: Option<wgpu::Tlas>,
     pub tlas_max_instances: u32,
+    /// Capacity the CURRENT tlas object was created with. The dynamic
+    /// (skinned) instance count grows mid-run when waves spawn, so the
+    /// TLAS must be recreated when the total exceeds what it was built
+    /// for — `tlas_max_instances` alone can't tell (the instance-data
+    /// buffer grows it before the TLAS check runs).
+    tlas_created_cap: u32,
     /// `SceneGraph::tlas_version` the last time we rebuilt the TLAS +
     /// instance-data buffer. Mismatch → rebuild. Mirrors `shadow_version`'s
     /// cache pattern (ticket 004).
@@ -1300,6 +1348,23 @@ pub struct Renderer {
     pt_restir: bool,
     /// PT-4 — ReSTIR reservoir ping-pong, sized with the accum pair.
     pt_resv_buffers: [Option<wgpu::Buffer>; 2],
+    /// PT-6 — skinned meshes drawn this frame (dynamic TLAS instances).
+    /// Pushed by draw_model_cached_skinned, consumed by
+    /// rebuild_instance_data, cleared with the per-frame draw lists.
+    pt_dynamic_draws: Vec<PtDynamicDraw>,
+    /// PT-6 — per-slot megabuffer windows for this frame's dynamic
+    /// instances. Feeds the compute pre-skin dispatches and the
+    /// per-frame BLAS builds.
+    pt_dyn_windows: Vec<PtDynWindow>,
+    /// PT-6 — dynamic BLAS pool, one slot per dynamic instance.
+    /// Recreated when a slot's (vertex_count, index_count) changes.
+    pt_dyn_blas: Vec<(wgpu::Blas, u32, u32)>,
+    /// PT-6 — compute pre-skin pipeline (posed world-space vertices
+    /// written into the PT megabuffer window before the BLAS build).
+    pt_skin_pipeline: Option<wgpu::ComputePipeline>,
+    pt_skin_layout: Option<wgpu::BindGroupLayout>,
+    /// Per-slot uniform buffers for the pre-skin params (grow-only).
+    pt_skin_params: Vec<wgpu::Buffer>,
     /// PT-2 — concatenated Vertex3D words (f32) / indices (u32) for
     /// interpolated hit shading. Grow-only, rebuilt alongside the
     /// instance-data buffer.
@@ -6996,6 +7061,7 @@ impl Renderer {
             hw_rt_enabled,
             tlas: None,
             tlas_max_instances: 1024,
+            tlas_created_cap: 0,
             tlas_built_version: 0,
             tlas_instance_data_buffer: None,
             probe_place_pipeline,
@@ -7022,6 +7088,12 @@ impl Renderer {
             pt_debug,
             pt_restir,
             pt_resv_buffers: [None, None],
+            pt_dynamic_draws: Vec::new(),
+            pt_dyn_windows: Vec::new(),
+            pt_dyn_blas: Vec::new(),
+            pt_skin_pipeline: None,
+            pt_skin_layout: None,
+            pt_skin_params: Vec::new(),
             pt_geo_vertex_buffer: None,
             pt_geo_index_buffer: None,
             pt_texture_arrays_enabled,
@@ -8218,7 +8290,10 @@ impl Renderer {
         scene: &crate::scene::SceneGraph,
         instance_handles: &[f64],
     ) -> (u32, bool) {
-        let instance_count = instance_handles.len() as u32;
+        // PT-6 — dynamic (skinned) instances ride after the node
+        // instances in both the instance-data buffer and the TLAS.
+        let instance_count =
+            instance_handles.len() as u32 + self.pt_dynamic_draws.len() as u32;
         let mut resized = false;
         let needed_cap = instance_count.max(self.tlas_max_instances).max(64);
         if self.tlas_instance_data_buffer.is_none()
@@ -8312,6 +8387,63 @@ impl Renderer {
                 mat_params: [n.material.roughness, n.material.metalness, 0.0, 0.0],
             });
         }
+        // PT-6 — dynamic skinned instances: append the BIND-POSE
+        // geometry as this frame's megabuffer window (the compute
+        // pre-skin overwrites position/normal with posed world-space
+        // data before the BLAS build) plus an instance entry per mesh.
+        // Hit shading multiplies the texture by inst.albedo, so the
+        // flat albedo is white; no card (geo window always present).
+        self.pt_dyn_windows.clear();
+        let dyn_draws = std::mem::take(&mut self.pt_dynamic_draws);
+        for d in &dyn_draws {
+            let mesh = match self.model_gpu_cache.get(&d.cache_handle) {
+                Some(Some(meshes)) => match meshes.get(d.mesh_idx) {
+                    Some(m) => m,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            let (cv, ci) = match (&mesh.cpu_vertices, &mesh.cpu_indices) {
+                (Some(v), Some(i)) if !v.is_empty() && !i.is_empty() => (v, i),
+                _ => continue,
+            };
+            let vb = (geo_vertices.len() / 24) as u32;
+            let ib = geo_indices.len() as u32;
+            geo_vertices.extend_from_slice(bytemuck::cast_slice(cv));
+            geo_indices.extend_from_slice(ci);
+            instance_data.push(InstanceGiDataCpu {
+                albedo: [1.0, 1.0, 1.0],
+                emissive_luma: 0.0,
+                normal_ws: [0.0, 1.0, 0.0],
+                _pad0: 0.0,
+                card_slot: [0.0, 0.0, 0.0, 0.0],
+                card_aabb_min: [mesh.local_min[0], mesh.local_min[1], mesh.local_min[2], 0.0],
+                card_aabb_max: [mesh.local_max[0], mesh.local_max[1], mesh.local_max[2], 0.0],
+                world_aabb_min: [d.wmin[0], d.wmin[1], d.wmin[2], 0.0],
+                world_aabb_max: [d.wmax[0], d.wmax[1], d.wmax[2], 0.0],
+                geo: [
+                    vb,
+                    ib,
+                    ci.len() as u32,
+                    if (mesh.base_color_idx as usize) < PT_MAX_TEXTURES {
+                        mesh.base_color_idx
+                    } else {
+                        0
+                    },
+                ],
+                mat_params: [mesh.roughness_factor, mesh.metallic_factor, 0.0, 0.0],
+            });
+            self.pt_dyn_windows.push(PtDynWindow {
+                v_base: vb,
+                v_count: cv.len() as u32,
+                i_base: ib,
+                i_count: ci.len() as u32,
+                joint_offset: d.joint_offset,
+                model: d.model,
+                cache_handle: d.cache_handle,
+                mesh_idx: d.mesh_idx,
+            });
+        }
         // PT-2 — upload the megabuffers (grow-only; a minimum size keeps
         // bind-group creation valid before any geometry is committed).
         {
@@ -8319,11 +8451,21 @@ impl Renderer {
             let i_bytes = (geo_indices.len() * 4).max(16) as u64;
             let v_recreate = self.pt_geo_vertex_buffer.as_ref().map_or(true, |b| b.size() < v_bytes);
             let i_recreate = self.pt_geo_index_buffer.as_ref().map_or(true, |b| b.size() < i_bytes);
+            // PT-6 — on RT adapters the megabuffers double as BLAS
+            // geometry inputs for the dynamic skinned instances (the
+            // BLAS reads a window via first_vertex/first_index).
+            let mega_usage = if self.hw_rt_enabled {
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::BLAS_INPUT
+            } else {
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+            };
             if v_recreate {
                 self.pt_geo_vertex_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("pt_geo_vertices"),
                     size: v_bytes.next_power_of_two(),
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    usage: mega_usage,
                     mapped_at_creation: false,
                 }));
             }
@@ -8331,7 +8473,7 @@ impl Renderer {
                 self.pt_geo_index_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("pt_geo_indices"),
                     size: i_bytes.next_power_of_two(),
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    usage: mega_usage,
                     mapped_at_creation: false,
                 }));
             }
@@ -8383,7 +8525,9 @@ impl Renderer {
                 bytemuck::cast_slice(&instance_data),
             );
         }
-        (instance_count, resized)
+        // Actual written count (dynamic draws with a missing cache
+        // entry were skipped, so this can be below the requested cap).
+        (instance_data.len() as u32, resized)
     }
 
     fn rebuild_acceleration_structures(
@@ -8397,7 +8541,10 @@ impl Renderer {
         // branch on `hw_rt_enabled` for TLAS/BLAS-specific work.
         let pending_blas = !scene.pending_blas_builds.is_empty();
         let version_changed = scene.tlas_version != self.tlas_built_version;
-        if !pending_blas && !version_changed {
+        // PT-6 — dynamic skinned instances re-pose every frame, so any
+        // frame that drew one rebuilds regardless of scene versioning.
+        let has_dyn = !self.pt_dynamic_draws.is_empty();
+        if !pending_blas && !version_changed && !has_dyn {
             return;
         }
 
@@ -8407,7 +8554,10 @@ impl Renderer {
                 instance_handles.push(h);
             }
         }
+        let node_count = instance_handles.len();
         let (instance_count, _resized) = self.rebuild_instance_data(scene, &instance_handles);
+        // Dynamic instances occupy the slots after the nodes.
+        let dyn_count = (instance_count as usize).saturating_sub(node_count);
 
         // Everything below this point is HW-ray-tracing-specific
         // (TLAS build + BLAS batch). On SW adapters we're done.
@@ -8421,7 +8571,11 @@ impl Renderer {
             return;
         }
 
-        if self.tlas.is_none() || instance_count > self.tlas_max_instances {
+        // PT-6 — pose the dynamic windows (compute pre-skin into the
+        // megabuffer) and make sure each slot has a matching BLAS.
+        self.encode_dynamic_skin(encoder, dyn_count);
+
+        if self.tlas.is_none() || instance_count > self.tlas_created_cap {
             let cap = self.tlas_max_instances.max(64);
             self.tlas = Some(self.device.create_tlas(&wgpu::CreateTlasDescriptor {
                 label: Some("bloom_tlas"),
@@ -8429,6 +8583,7 @@ impl Renderer {
                 flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             }));
+            self.tlas_created_cap = cap;
             self.probe_trace_hw_bg_cache = [None, None];
             // V14 — same reason as the resize path above.
             self.wsrc_bake_hw_bg_cache = None;
@@ -8441,7 +8596,7 @@ impl Renderer {
         // instance count (extras beyond stay None from the initial vec).
         {
             let tlas = self.tlas.as_mut().unwrap();
-            for slot in 0..(instance_count as usize) {
+            for slot in 0..node_count {
                 let n = scene.nodes.get(instance_handles[slot]).unwrap();
                 let blas = n.blas.as_ref().unwrap();
                 let t = &n.transform;
@@ -8456,6 +8611,23 @@ impl Renderer {
                 tlas[slot] = Some(wgpu::TlasInstance::new(
                     blas,
                     transform_3x4,
+                    slot as u32,
+                    0xff,
+                ));
+            }
+            // PT-6 — dynamic instances: IDENTITY transform (the joint
+            // palette bakes world placement, so the compute pre-skin
+            // output is already world-space).
+            for i in 0..dyn_count {
+                let slot = node_count + i;
+                let blas = &self.pt_dyn_blas[i].0;
+                tlas[slot] = Some(wgpu::TlasInstance::new(
+                    blas,
+                    [
+                        1.0, 0.0, 0.0, 0.0,
+                        0.0, 1.0, 0.0, 0.0,
+                        0.0, 0.0, 1.0, 0.0,
+                    ],
                     slot as u32,
                     0xff,
                 ));
@@ -8517,6 +8689,42 @@ impl Renderer {
             });
         }
 
+        // PT-6 — dynamic BLASes rebuild EVERY frame from the freshly
+        // posed megabuffer windows (topology constant, positions move).
+        let dyn_size_descs: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = self
+            .pt_dyn_windows
+            .iter()
+            .take(dyn_count)
+            .map(|w| wgpu::BlasTriangleGeometrySizeDescriptor {
+                vertex_format: wgpu::VertexFormat::Float32x3,
+                vertex_count: w.v_count,
+                index_format: Some(wgpu::IndexFormat::Uint32),
+                index_count: Some(w.i_count),
+                flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+            })
+            .collect();
+        if dyn_count > 0 {
+            let mega_vb = self.pt_geo_vertex_buffer.as_ref().unwrap();
+            let mega_ib = self.pt_geo_index_buffer.as_ref().unwrap();
+            for (i, w) in self.pt_dyn_windows.iter().take(dyn_count).enumerate() {
+                build_entries.push(wgpu::BlasBuildEntry {
+                    blas: &self.pt_dyn_blas[i].0,
+                    geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
+                        wgpu::BlasTriangleGeometry {
+                            size: &dyn_size_descs[i],
+                            vertex_buffer: mega_vb,
+                            first_vertex: w.v_base,
+                            vertex_stride: std::mem::size_of::<Vertex3D>() as u64,
+                            index_buffer: Some(mega_ib),
+                            first_index: Some(w.i_base),
+                            transform_buffer: None,
+                            transform_buffer_offset: None,
+                        },
+                    ]),
+                });
+            }
+        }
+
         let tlas_ref = self.tlas.as_ref().unwrap();
         encoder.build_acceleration_structures(
             build_entries.iter(),
@@ -8524,6 +8732,166 @@ impl Renderer {
         );
 
         self.tlas_built_version = scene.tlas_version;
+    }
+
+    /// PT-6 — encode the compute pre-skin dispatches for this frame's
+    /// dynamic windows (posed world-space position/normal written over
+    /// the bind-pose data in the megabuffer) and (re)create each slot's
+    /// BLAS when its geometry size changed. Runs before the combined
+    /// BLAS+TLAS build on the same encoder, so the build reads posed
+    /// vertices.
+    fn encode_dynamic_skin(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        dyn_count: usize,
+    ) {
+        if dyn_count == 0 {
+            return;
+        }
+        // Lazy pipeline: first dynamic draw on an RT adapter.
+        if self.pt_skin_pipeline.is_none() {
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("pt_skin_shader"),
+                source: wgpu::ShaderSource::Wgsl(shaders::PT_SKIN_WGSL.into()),
+            });
+            let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("pt_skin_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                ],
+            });
+            let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("pt_skin_pl"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            self.pt_skin_pipeline = Some(self.device.create_compute_pipeline(
+                &wgpu::ComputePipelineDescriptor {
+                    label: Some("pt_skin_pipeline"),
+                    layout: Some(&pl),
+                    module: &shader,
+                    entry_point: Some("cs_skin"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            ));
+            self.pt_skin_layout = Some(layout);
+        }
+        // Params pool (mat4 model + vec4<u32> = 80 bytes per slot).
+        while self.pt_skin_params.len() < dyn_count {
+            self.pt_skin_params.push(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pt_skin_params"),
+                size: 80,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+
+        // Per-slot: params upload, BLAS pool upkeep, bind group.
+        let mut bind_groups: Vec<wgpu::BindGroup> = Vec::with_capacity(dyn_count);
+        let mut dispatch_counts: Vec<u32> = Vec::with_capacity(dyn_count);
+        for i in 0..dyn_count {
+            let w = &self.pt_dyn_windows[i];
+            let mut words = [0f32; 20];
+            for c in 0..4 {
+                for r in 0..4 {
+                    words[c * 4 + r] = w.model[c][r];
+                }
+            }
+            words[16] = f32::from_bits(w.v_base);
+            words[17] = f32::from_bits(w.v_count);
+            words[18] = f32::from_bits(w.joint_offset.max(0.0) as u32);
+            words[19] = 0.0;
+            self.queue.write_buffer(
+                &self.pt_skin_params[i],
+                0,
+                bytemuck::cast_slice(&words),
+            );
+
+            let need_new = match self.pt_dyn_blas.get(i) {
+                Some((_, vc, ic)) => *vc != w.v_count || *ic != w.i_count,
+                None => true,
+            };
+            if need_new {
+                let blas = self.device.create_blas(
+                    &wgpu::CreateBlasDescriptor {
+                        label: Some("pt_dyn_blas"),
+                        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                    },
+                    wgpu::BlasGeometrySizeDescriptors::Triangles {
+                        descriptors: vec![wgpu::BlasTriangleGeometrySizeDescriptor {
+                            vertex_format: wgpu::VertexFormat::Float32x3,
+                            vertex_count: w.v_count,
+                            index_format: Some(wgpu::IndexFormat::Uint32),
+                            index_count: Some(w.i_count),
+                            flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+                        }],
+                    },
+                );
+                if i < self.pt_dyn_blas.len() {
+                    self.pt_dyn_blas[i] = (blas, w.v_count, w.i_count);
+                } else {
+                    self.pt_dyn_blas.push((blas, w.v_count, w.i_count));
+                }
+            }
+
+            let src_vb = match self.model_gpu_cache.get(&w.cache_handle) {
+                Some(Some(meshes)) => match meshes.get(w.mesh_idx) {
+                    Some(m) => &m.vb,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            bind_groups.push(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pt_skin_bg"),
+                layout: self.pt_skin_layout.as_ref().unwrap(),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.pt_skin_params[i].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: src_vb.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.pt_geo_vertex_buffer.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: self.joint_buffer.as_entire_binding() },
+                ],
+            }));
+            dispatch_counts.push(w.v_count);
+        }
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("pt_skin"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(self.pt_skin_pipeline.as_ref().unwrap());
+        for (bg, vc) in bind_groups.iter().zip(dispatch_counts.iter()) {
+            pass.set_bind_group(0, bg, &[]);
+            pass.dispatch_workgroups(vc.div_ceil(64), 1, 1);
+        }
     }
 
     /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
@@ -9775,6 +10143,10 @@ impl Renderer {
         self.indices_3d.clear();
         self.draw_calls_3d.clear();
         self.model_draw_commands.clear();
+        // PT-6 — normally consumed by rebuild_instance_data (mem::take);
+        // this clear covers frames where the accel path is skipped
+        // (PT and Lumen both off) so the registry can't grow unbounded.
+        self.pt_dynamic_draws.clear();
         self.next_model_uniform_slot = 0;
         self.current_texture_3d = 0;
         self.current_uniform_idx = 0;
@@ -11262,10 +11634,16 @@ impl Renderer {
                 local_min = [1.0; 3];
                 local_max = [-1.0; 3];
             }
+            // PT-6: skinned VBs are also the compute pre-skin pass's
+            // INPUT (read as a raw storage array), hence STORAGE.
             let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("cached_model_vb"),
                 contents: bytemuck::cast_slice(&mesh.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
+                usage: if is_skinned {
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE
+                } else {
+                    wgpu::BufferUsages::VERTEX
+                },
             });
             let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("cached_model_ib"),
@@ -11326,6 +11704,14 @@ impl Renderer {
                 _material_uniform: material_uniform,
                 shadow_cutout_bg,
                 _shadow_cutoff_buf: shadow_cutoff_buf,
+                // PT-6 — bind-pose geometry retained for the dynamic
+                // TLAS path (skinned only; a handful of enemy models,
+                // a few thousand verts each).
+                cpu_vertices: if is_skinned { Some(mesh.vertices.clone()) } else { None },
+                cpu_indices: if is_skinned { Some(mesh.indices.clone()) } else { None },
+                base_color_idx: base_color_idx as u32,
+                metallic_factor: mesh.metallic_factor,
+                roughness_factor: mesh.roughness_factor,
             }
         }).collect();
 

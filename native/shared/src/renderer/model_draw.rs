@@ -200,6 +200,23 @@ impl Renderer {
                 joint_offset,
                 bounds_override,
             });
+
+            // PT-6 — register the mesh for the dynamic TLAS path: a
+            // compute pass skins it into the PT megabuffer and a
+            // per-frame BLAS build makes it visible to every ray
+            // (traced shadows, bounce light, reflections).
+            if self.hw_rt_enabled {
+                let (wmin, wmax) = bounds_override
+                    .unwrap_or(([0.0; 3], [-1.0; 3]));
+                self.pt_dynamic_draws.push(super::PtDynamicDraw {
+                    cache_handle: handle_bits,
+                    mesh_idx,
+                    joint_offset,
+                    model: model_matrix,
+                    wmin,
+                    wmax,
+                });
+            }
         }
     }
 
