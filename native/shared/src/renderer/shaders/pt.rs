@@ -174,6 +174,16 @@ fn rand_f() -> f32 {
 
 fn rand_2f() -> vec2<f32> { return vec2<f32>(rand_f(), rand_f()); }
 
+// Interleaved gradient noise, scrolled per frame by the golden-ratio
+// offset. Spatially STRUCTURED (neighbors get well-distributed values)
+// so a 5x5 filter averages it nearly flat — white PCG noise leaves
+// mid-frequency blotch at 1-2 spp that shimmers. Used for the primary
+// sun test in realtime mode.
+fn ign_at(px: vec2<i32>, frame: u32) -> f32 {
+    let p = vec2<f32>(px) + f32(frame % 64u) * 5.588238;
+    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+
 // ---- Geometry reconstruction -------------------------------------------------
 
 // px here is always a FULL-resolution G-buffer pixel (u.ext dims); the
@@ -478,10 +488,10 @@ fn albedo_at_hit(
 // Direct light at a surface point: sun through the solar cone + one point
 // light chosen uniformly (contribution / pdf). Game-radiometry convention:
 // no 1/pi (see file header).
-fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>) -> vec3<f32> {
+fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>) -> vec3<f32> {
     var lit = vec3<f32>(0.0);
 
-    let sd = sun_cone_sample(rand_2f());
+    let sd = sun_cone_sample(sun_r2);
     let ndl = dot(n, sd);
     if (ndl > 0.0 && !occluded(p, sd, 1000.0)) {
         lit += u.sun_color.rgb * ndl;
@@ -813,7 +823,17 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mr0 = textureLoad(material_tex, px_full, 0).rg;
     var metal_cur = mr0.r;
     var rough_cur = mr0.g;
-    var radiance = direct_light(p0 + n0 * 0.02, n0, albedo0 * (1.0 - metal_cur));
+    // Realtime mode samples the primary sun cone with structured IGN
+    // noise (filterable); progressive keeps white noise (unbiased
+    // convergence).
+    var sun_r2 = rand_2f();
+    if (u.cfg.x >= 2.0) {
+        sun_r2 = vec2<f32>(
+            ign_at(px_full, u.size.z),
+            ign_at(px_full + vec2<i32>(17, 59), u.size.z),
+        );
+    }
+    var radiance = direct_light(p0 + n0 * 0.02, n0, albedo0 * (1.0 - metal_cur), sun_r2);
     var throughput = vec3<f32>(1.0);
     var origin = p0 + n0 * 0.02;
     var n_cur = n0;
@@ -874,7 +894,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         radiance += throughput * inst.albedo * inst.emissive_luma;
 
         let hit_p = hit_ws + n_hit * 0.02;
-        radiance += throughput * direct_light(hit_p, n_hit, alb_hit * (1.0 - inst.mat_params.y));
+        radiance += throughput * direct_light(hit_p, n_hit, alb_hit * (1.0 - inst.mat_params.y), rand_2f());
 
         origin = hit_p;
         n_cur = n_hit;
@@ -947,7 +967,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // ghosting a loose test admits is invisible exactly
                 // where the depth is chaotic.
                 if (abs(zl_hist - zl_here) < 0.12 * max(zl_hist, zl_here) + 0.05) {
-                    alpha = 0.15;
+                    alpha = 0.1;
                     hist = ph.rgb;
                 }
             }
