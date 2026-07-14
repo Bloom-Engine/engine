@@ -1296,6 +1296,10 @@ pub struct Renderer {
     pt_last_tlas_version: u64,
     /// BLOOM_PT_DEBUG view selector, forwarded to the kernel via cfg.w.
     pt_debug: f32,
+    /// BLOOM_PT_RESTIR=1 — PT-4 experimental ReSTIR DI (kernel ext.w).
+    pt_restir: bool,
+    /// PT-4 — ReSTIR reservoir ping-pong, sized with the accum pair.
+    pt_resv_buffers: [Option<wgpu::Buffer>; 2],
     /// PT-2 — concatenated Vertex3D words (f32) / indices (u32) for
     /// interpolated hit shading. Grow-only, rebuilt alongside the
     /// instance-data buffer.
@@ -5220,6 +5224,21 @@ impl Renderer {
                             has_dynamic_offset: false, min_binding_size: None,
                         }, count: None,
                     },
+                    // PT-4 — ReSTIR reservoir ping-pong (20/21).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 20, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 21, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false, min_binding_size: None,
+                        }, count: None,
+                    },
             ];
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("pt_layout"),
@@ -5387,6 +5406,12 @@ impl Renderer {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0);
+        // PT-4 — ReSTIR DI stays behind an env flag until the many-light
+        // content that justifies it exists (roadmap: with ≤16 analytic
+        // lights plain NEE is nearly as good).
+        let pt_restir = std::env::var("BLOOM_PT_RESTIR")
+            .map(|v| v == "1")
+            .unwrap_or(false);
 
         // --- Ticket 014 V3: SW SDF sphere-trace pipeline ---
         // Always built. At dispatch time we pick SDF over Hi-Z when
@@ -6995,6 +7020,8 @@ impl Renderer {
             pt_prev_vp: [[0.0; 4]; 4],
             pt_last_tlas_version: 0,
             pt_debug,
+            pt_restir,
+            pt_resv_buffers: [None, None],
             pt_geo_vertex_buffer: None,
             pt_geo_index_buffer: None,
             pt_texture_arrays_enabled,
@@ -7512,6 +7539,7 @@ impl Renderer {
             self.pt_bg = [None, None];
             self.pt_accum_buffers = [None, None];
             self.pt_moments_buffers = [None, None];
+            self.pt_resv_buffers = [None, None];
             self.pt_accum_count = 0;
             self.pt_atrous_scratch = None;
             self.pt_atrous_scratch2 = None;

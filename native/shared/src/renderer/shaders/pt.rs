@@ -60,10 +60,11 @@ struct PtParams {
     // PT-3 half-res: x/y = full G-buffer dims. z = 1 -> hybrid sun
     // (sample the raster shadow cascades instead of tracing the sun;
     // crisp noise-free direct shadows, rays spent on indirect only).
-    // w unused.
+    // w = 1 -> ReSTIR DI (PT-4, experimental).
     ext: vec4<u32>,
-    // Raster shadow cascade view-projections (transposed at upload,
-    // same convention as inv_vp/prev_vp).
+    // Raster shadow cascade view-projections. Uploaded RAW, like
+    // prev_vp: mat4_multiply products are already in WGSL M*v layout;
+    // only mat4_invert outputs (inv_vp) upload transposed.
     shadow_vps: array<mat4x4<f32>, 3>,
     lights: array<PtLight, 16>,
 };
@@ -107,6 +108,40 @@ struct InstanceGiData {
 @group(0) @binding(13) var<storage, read_write> accum_out: array<vec4<f32>>;
 @group(0) @binding(18) var<storage, read_write> moments: array<vec4<f32>>;
 @group(0) @binding(19) var<storage, read_write> moments_out: array<vec4<f32>>;
+// PT-4 (EXPERIMENTAL, ext.w == 1) — ReSTIR DI reservoirs, ping-pong
+// with the accum pair: (light index, W, M, target pdf) per trace texel.
+@group(0) @binding(20) var<storage, read_write> resv: array<vec4<f32>>;
+@group(0) @binding(21) var<storage, read_write> resv_out: array<vec4<f32>>;
+
+// Reprojection of the current surface into the previous frame's trace
+// grid — computed once per texel (module privates because both the
+// ReSTIR temporal reuse and the SVGF colour accumulation consume it).
+var<private> rp_valid: bool;
+var<private> rp_base: vec2<i32>;
+var<private> rp_fr: vec2<f32>;
+var<private> rp_zl_here: f32;
+var<private> rp_nearest: u32;
+
+fn compute_reproj(p0: vec3<f32>) {
+    rp_valid = false;
+    let clip_prev = u.prev_vp * vec4<f32>(p0, 1.0);
+    if (u.size.w == 0u || clip_prev.w <= 1e-4) { return; }
+    let ndc_prev = clip_prev.xyz / clip_prev.w;
+    let uv_prev = vec2<f32>(ndc_prev.x * 0.5 + 0.5, 0.5 - ndc_prev.y * 0.5);
+    if (uv_prev.x < 0.0 || uv_prev.x >= 1.0 || uv_prev.y < 0.0 || uv_prev.y >= 1.0) {
+        return;
+    }
+    let pos = uv_prev * vec2<f32>(f32(u.size.x), f32(u.size.y)) - 0.5;
+    rp_base = vec2<i32>(floor(pos));
+    rp_fr = pos - floor(pos);
+    rp_zl_here = lin_depth(ndc_prev.z);
+    let np = vec2<u32>(
+        min(u32(max(rp_base.x + i32(round(rp_fr.x)), 0)), u.size.x - 1u),
+        min(u32(max(rp_base.y + i32(round(rp_fr.y)), 0)), u.size.y - 1u),
+    );
+    rp_nearest = np.y * u.size.x + np.x;
+    rp_valid = true;
+}
 
 // Approximate linear view distance from the raw depth-buffer value
 // (GL-convention matrix, near 0.01: z_view ~= 2n / (1 - d)). Only used
@@ -569,16 +604,44 @@ fn sun_visibility(p: vec3<f32>, n: vec3<f32>, r2: vec2<f32>) -> f32 {
     return 1.0;
 }
 
-fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>) -> vec3<f32> {
+// GGX highlight for an NEE light sample — the same D/F/V terms as
+// sample_brdf, evaluated for a known light direction. The shadow ray is
+// already paid for by the diffuse term, so specular NEE rides along
+// free (PT-5: point lights and bounce vertices were diffuse-only, the
+// documented PT-2 gap). Analytic lights cannot be hit by BSDF rays and
+// sky misses exclude the sun disc, so nothing double-counts.
+fn nee_spec(n: vec3<f32>, view: vec3<f32>, ldir: vec3<f32>, ndl: f32,
+            full_alb: vec3<f32>, rough: f32, metal: f32) -> vec3<f32> {
+    let hv = normalize(view + ldir);
+    let ndv = max(dot(n, view), 1e-4);
+    let ndh = max(dot(n, hv), 0.0);
+    let vdh = max(dot(view, hv), 1e-4);
+    let alpha0 = max(rough * rough, 1e-3);
+    let a2 = alpha0 * alpha0;
+    let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+    let dterm = a2 / (3.14159265 * dd * dd);
+    let f0s = mix(vec3<f32>(0.04), full_alb, metal);
+    return fresnel_schlick3(vdh, f0s) * dterm * v_smith(ndv, ndl, alpha0) * ndl;
+}
+
+fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>,
+                view: vec3<f32>, full_alb: vec3<f32>, rough: f32, metal: f32,
+                with_points: bool) -> vec3<f32> {
     var lit = vec3<f32>(0.0);
+    var spec = vec3<f32>(0.0);
 
     let ndl = max(dot(n, u.sun_dir.xyz), 0.0);
     if (ndl > 0.0) {
-        lit += u.sun_color.rgb * ndl * sun_visibility(p, n, sun_r2);
+        let vis = sun_visibility(p, n, sun_r2);
+        lit += u.sun_color.rgb * ndl * vis;
+        if (vis > 0.0) {
+            spec += nee_spec(n, view, u.sun_dir.xyz, ndl, full_alb, rough, metal)
+                * u.sun_color.rgb * vis;
+        }
     }
 
     let count = u32(u.cfg.z);
-    if (count > 0u) {
+    if (count > 0u && with_points) {
         let pick = min(u32(rand_f() * f32(count)), count - 1u);
         let l = u.lights[pick];
         let to_l = l.pos_range.xyz - p;
@@ -590,11 +653,113 @@ fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>) -
             if (ndl2 > 0.0 && !occluded(p, dir, d - 0.02)) {
                 // Raster-parity falloff: (1 - d/range)^2, core.rs.
                 let att = 1.0 - d / range;
-                lit += l.color_int.rgb * l.color_int.w * ndl2 * att * att * f32(count);
+                let li = l.color_int.rgb * l.color_int.w * att * att * f32(count);
+                lit += li * ndl2;
+                spec += nee_spec(n, view, dir, ndl2, full_alb, rough, metal) * li;
             }
         }
     }
-    return alb * lit;
+    return alb * lit + spec;
+}
+
+// ---- PT-4 (EXPERIMENTAL) — ReSTIR DI over the analytic point lights -------
+//
+// RIS with 8 uniform candidates + temporal reservoir reuse (M-capped at
+// 20x), one shadow ray for the winner. The target is re-evaluated at
+// the CURRENT shading point when merging history, so the temporal reuse
+// carries no geometric bias; visibility reuse bias does not arise
+// because visibility is never folded into the reservoir. With this
+// game's <=16 analytic lights plain NEE is nearly as good (the roadmap
+// said so up front) — this lands the architecture for the day emissive
+// particles/muzzle flashes become real light sources.
+
+// Unshadowed contribution of light `li` at the shading point.
+fn restir_contrib(li: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
+                  alb_diff: vec3<f32>, full_alb: vec3<f32>,
+                  rough: f32, metal: f32) -> vec3<f32> {
+    let l = u.lights[li];
+    let to_l = l.pos_range.xyz - p;
+    let d = length(to_l);
+    let range = l.pos_range.w;
+    if (d >= range || d <= 1e-3) { return vec3<f32>(0.0); }
+    let dir = to_l / d;
+    let ndl = dot(n, dir);
+    if (ndl <= 0.0) { return vec3<f32>(0.0); }
+    let att = 1.0 - d / range;
+    let li_rgb = l.color_int.rgb * l.color_int.w * att * att;
+    return alb_diff * li_rgb * ndl
+        + nee_spec(n, view, dir, ndl, full_alb, rough, metal) * li_rgb;
+}
+
+// Scalar target density: luminance of the unshadowed contribution.
+// Correctness never depends on the target — only variance does.
+fn restir_target(li: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
+                 alb_diff: vec3<f32>, full_alb: vec3<f32>,
+                 rough: f32, metal: f32) -> f32 {
+    return dot(restir_contrib(li, p, n, view, alb_diff, full_alb, rough, metal),
+        vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// Runs at the primary vertex when ext.w == 1; writes this frame's
+// reservoir and returns the winner's shadow-tested contribution.
+fn restir_point_light(idx: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
+                      alb_diff: vec3<f32>, full_alb: vec3<f32>,
+                      rough: f32, metal: f32) -> vec3<f32> {
+    let count = u32(u.cfg.z);
+    if (count == 0u) {
+        resv_out[idx] = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
+        return vec3<f32>(0.0);
+    }
+    var r_y = 0u;
+    var r_wsum = 0.0;
+    var r_m = 0.0;
+    var r_phat = 0.0;
+    // RIS: 8 uniform candidates (pdf = 1/count => w = phat * count).
+    for (var c = 0u; c < 8u; c = c + 1u) {
+        let cand = min(u32(rand_f() * f32(count)), count - 1u);
+        let ph = restir_target(cand, p, n, view, alb_diff, full_alb, rough, metal);
+        let w = ph * f32(count);
+        r_wsum += w;
+        r_m += 1.0;
+        if (w > 0.0 && rand_f() * r_wsum < w) {
+            r_y = cand;
+            r_phat = ph;
+        }
+    }
+    // Temporal reuse from the reprojected texel. The stored W already
+    // integrates that reservoir's history; its M is capped so stale
+    // samples cannot outvote fresh ones forever.
+    if (rp_valid) {
+        let pr = resv[rp_nearest];
+        let pm = min(pr.z, 160.0);
+        if (pm > 0.0 && pr.x >= 0.0 && u32(pr.x) < count) {
+            let py = u32(pr.x);
+            let ph = restir_target(py, p, n, view, alb_diff, full_alb, rough, metal);
+            let w = ph * pr.y * pm;
+            if (w > 0.0) {
+                r_wsum += w;
+                if (rand_f() * r_wsum < w) {
+                    r_y = py;
+                    r_phat = ph;
+                }
+            }
+            r_m += pm;
+        }
+    }
+    var r_w = 0.0;
+    if (r_phat > 0.0 && r_m > 0.0) {
+        r_w = r_wsum / (r_m * r_phat);
+    }
+    resv_out[idx] = vec4<f32>(f32(r_y), r_w, r_m, r_phat);
+    if (r_w <= 0.0) { return vec3<f32>(0.0); }
+    // One shadow ray for the winner.
+    let l = u.lights[r_y];
+    let to_l = l.pos_range.xyz - p;
+    let d = length(to_l);
+    if (d <= 1e-3) { return vec3<f32>(0.0); }
+    let dir = to_l / d;
+    if (occluded(p, dir, d - 0.02)) { return vec3<f32>(0.0); }
+    return restir_contrib(r_y, p, n, view, alb_diff, full_alb, rough, metal) * r_w;
 }
 
 // ---- Main -----------------------------------------------------------------------------
@@ -962,28 +1127,24 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
     }
     var view_cur = normalize(u.cam_pos.xyz - p0);
-    var radiance = direct_light(p0 + n0 * 0.02, n0, albedo0 * (1.0 - metal_cur), sun_r2);
-    // Sun SPECULAR at the primary surface — the raster-style GGX
-    // highlight (D carries the 1/pi) masked by the same visibility.
-    // Without it every surface reads as dead-matte under the sun.
-    {
-        let ndl0 = max(dot(n0, u.sun_dir.xyz), 0.0);
-        if (ndl0 > 0.0) {
-            let vis0 = sun_visibility(p0 + n0 * 0.02, n0, sun_r2);
-            if (vis0 > 0.0) {
-                let hv = normalize(view_cur + u.sun_dir.xyz);
-                let ndv = max(dot(n0, view_cur), 1e-4);
-                let ndh = max(dot(n0, hv), 0.0);
-                let vdh = max(dot(view_cur, hv), 1e-4);
-                let alpha0 = max(rough_cur * rough_cur, 1e-3);
-                let a2 = alpha0 * alpha0;
-                let dd = ndh * ndh * (a2 - 1.0) + 1.0;
-                let dterm = a2 / (3.14159265 * dd * dd);
-                let f0s = mix(vec3<f32>(0.04), albedo0, metal_cur);
-                let spec = fresnel_schlick3(vdh, f0s) * dterm * v_smith(ndv, ndl0, alpha0);
-                radiance += spec * u.sun_color.rgb * ndl0 * vis0;
-            }
-        }
+    // Reproject this surface into the previous trace grid ONCE — the
+    // ReSTIR temporal reuse and the SVGF colour accumulation below both
+    // consume the result (rp_* privates).
+    compute_reproj(p0);
+    // PT-4 experimental: ext.w routes the primary point-light NEE
+    // through the ReSTIR reservoirs; sun NEE is untouched either way.
+    let use_restir = u.ext.w == 1u && u.cfg.x >= 2.0;
+    // Sun + point lights, diffuse AND specular (nee_spec inside) — the
+    // GGX highlight rides the same visibility as the diffuse term.
+    var radiance = direct_light(
+        p0 + n0 * 0.02, n0, albedo0 * (1.0 - metal_cur), sun_r2,
+        view_cur, albedo0, rough_cur, metal_cur, !use_restir,
+    );
+    if (use_restir) {
+        radiance += restir_point_light(
+            gid.y * u.size.x + gid.x, p0 + n0 * 0.02, n0, view_cur,
+            albedo0 * (1.0 - metal_cur), albedo0, rough_cur, metal_cur,
+        );
     }
     var throughput = vec3<f32>(1.0);
     var origin = p0 + n0 * 0.02;
@@ -1044,7 +1205,13 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         radiance += throughput * inst.albedo * inst.emissive_luma;
 
         let hit_p = hit_ws + n_hit * 0.02;
-        radiance += throughput * direct_light(hit_p, n_hit, alb_hit * (1.0 - inst.mat_params.y), rand_2f());
+        // view at a bounce vertex = back along the incoming ray.
+        // Bounce vertices always use plain NEE (reservoirs are per
+        // PRIMARY texel; reusing them off-surface would be biased).
+        radiance += throughput * direct_light(
+            hit_p, n_hit, alb_hit * (1.0 - inst.mat_params.y), rand_2f(),
+            -dir, alb_hit, inst.mat_params.x, inst.mat_params.y, true,
+        );
 
         origin = hit_p;
         n_cur = n_hit;
@@ -1124,64 +1291,51 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         }
-        var reproj_in_bounds = false;
-        var nearest_prev_idx = 0u;
-        let clip_prev = u.prev_vp * vec4<f32>(p0, 1.0);
-        if (u.size.w > 0u && clip_prev.w > 1e-4) {
-            let ndc_prev = clip_prev.xyz / clip_prev.w;
-            let uv_prev = vec2<f32>(ndc_prev.x * 0.5 + 0.5, 0.5 - ndc_prev.y * 0.5);
-            if (uv_prev.x >= 0.0 && uv_prev.x < 1.0 && uv_prev.y >= 0.0 && uv_prev.y < 1.0) {
-                reproj_in_bounds = true;
-                let pos = uv_prev * vec2<f32>(f32(u.size.x), f32(u.size.y)) - 0.5;
-                let base = vec2<i32>(floor(pos));
-                let fr = pos - floor(pos);
-                let np = vec2<u32>(
-                    min(u32(max(base.x + i32(round(fr.x)), 0)), u.size.x - 1u),
-                    min(u32(max(base.y + i32(round(fr.y)), 0)), u.size.y - 1u),
-                );
-                nearest_prev_idx = np.y * u.size.x + np.x;
-                let zl_here = lin_depth(ndc_prev.z);
-                if (debug == 23.0) {
-                    // Reprojection dump: where this texel thinks it was
-                    // last frame (trace-grid units) + the depth pair the
-                    // acceptance test compares. Static camera => pos
-                    // must equal the texel's own coordinates.
-                    accum_out[idx] = vec4<f32>(pos.x, pos.y, zl_here, lin_depth(moments[nearest_prev_idx].w));
-                    moments_out[idx] = vec4<f32>(0.0, 0.0, 0.0, depth);
-                    return;
-                }
-                // Tap test is TIGHT (surface identity). Cross-surface
-                // blending is the expensive error: it leaks bright
-                // blade-top lighting onto the ground below (gray-blue
-                // mottle). Surface flips are handled after the loop,
-                // not by widening this tolerance.
-                let tol = 0.1 * zl_here + 0.02;
-                for (var ty = 0; ty <= 1; ty = ty + 1) {
-                    for (var tx = 0; tx <= 1; tx = tx + 1) {
-                        let q = base + vec2<i32>(tx, ty);
-                        if (q.x < 0 || q.y < 0 || q.x >= i32(u.size.x) || q.y >= i32(u.size.y)) {
-                            continue;
-                        }
-                        let qidx = u32(q.y) * u.size.x + u32(q.x);
-                        let m = moments[qidx];
-                        // Sky texels and depth-inconsistent taps carry
-                        // another surface's lighting — skip them.
-                        if (m.w >= 0.9999999) {
-                            continue;
-                        }
-                        let zl_hist = lin_depth(m.w);
-                        if (abs(zl_hist - zl_here) > tol) {
-                            continue;
-                        }
-                        let wx = mix(1.0 - fr.x, fr.x, f32(tx));
-                        let wy = mix(1.0 - fr.y, fr.y, f32(ty));
-                        let wt = wx * wy + 1e-4;
-                        hist_rgb += accum[qidx].rgb * wt;
-                        hist_m1 += m.x * wt;
-                        hist_m2 += m.y * wt;
-                        hist_n += m.z * wt;
-                        wsum += wt;
+        // Reprojection basis was computed once at the top of the frame
+        // (rp_* privates, shared with the ReSTIR temporal reuse).
+        if (rp_valid && debug == 23.0) {
+            // Reprojection dump: where this texel thinks it was
+            // last frame (trace-grid units) + the depth pair the
+            // acceptance test compares. Static camera => pos
+            // must equal the texel's own coordinates.
+            accum_out[idx] = vec4<f32>(
+                f32(rp_base.x) + rp_fr.x, f32(rp_base.y) + rp_fr.y,
+                rp_zl_here, lin_depth(moments[rp_nearest].w));
+            moments_out[idx] = vec4<f32>(0.0, 0.0, 0.0, depth);
+            return;
+        }
+        if (rp_valid) {
+            // Tap test is TIGHT (surface identity). Cross-surface
+            // blending is the expensive error: it leaks bright
+            // blade-top lighting onto the ground below (gray-blue
+            // mottle). Surface flips are handled after the loop,
+            // not by widening this tolerance.
+            let tol = 0.1 * rp_zl_here + 0.02;
+            for (var ty = 0; ty <= 1; ty = ty + 1) {
+                for (var tx = 0; tx <= 1; tx = tx + 1) {
+                    let q = rp_base + vec2<i32>(tx, ty);
+                    if (q.x < 0 || q.y < 0 || q.x >= i32(u.size.x) || q.y >= i32(u.size.y)) {
+                        continue;
                     }
+                    let qidx = u32(q.y) * u.size.x + u32(q.x);
+                    let m = moments[qidx];
+                    // Sky texels and depth-inconsistent taps carry
+                    // another surface's lighting — skip them.
+                    if (m.w >= 0.9999999) {
+                        continue;
+                    }
+                    let zl_hist = lin_depth(m.w);
+                    if (abs(zl_hist - rp_zl_here) > tol) {
+                        continue;
+                    }
+                    let wx = mix(1.0 - rp_fr.x, rp_fr.x, f32(tx));
+                    let wy = mix(1.0 - rp_fr.y, rp_fr.y, f32(ty));
+                    let wt = wx * wy + 1e-4;
+                    hist_rgb += accum[qidx].rgb * wt;
+                    hist_m1 += m.x * wt;
+                    hist_m2 += m.y * wt;
+                    hist_n += m.z * wt;
+                    wsum += wt;
                 }
             }
         }
@@ -1197,13 +1351,13 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // texels to full-res pixels by depth, so the other surface
         // draws its lighting from neighbouring texels. Only a stored
         // surface that has LEFT the footprint is a true disocclusion.
-        if (wsum <= 1e-3 && reproj_in_bounds) {
-            let mnp = moments[nearest_prev_idx];
+        if (wsum <= 1e-3 && rp_valid) {
+            let mnp = moments[rp_nearest];
             if (mnp.w < 0.9999999 && mnp.z > 0.0 && fp_hi > 0.0 && fp_lo < 1e29) {
                 let zl_st = lin_depth(mnp.w);
                 let wtol = 0.1 * zl_st + 0.02;
                 if (zl_st > fp_lo - wtol && zl_st < fp_hi + wtol) {
-                    accum_out[idx] = accum[nearest_prev_idx];
+                    accum_out[idx] = accum[rp_nearest];
                     moments_out[idx] = mnp;
                     if (debug == 22.0) {
                         // Numeric dump: n / variance / 99 = flip path / depth.
