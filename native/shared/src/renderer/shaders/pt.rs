@@ -523,7 +523,16 @@ fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>) -
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= u.size.x || gid.y >= u.size.y) { return; }
     let px = vec2<i32>(i32(gid.x), i32(gid.y));
-    rng_seed(gid.xy, u.size.z);
+    // Realtime mode uses a FROZEN random sequence (seed 0 instead of
+    // the frame index): every sample is deterministic per pixel, so
+    // the path tracer injects ZERO frame-to-frame noise — the à-trous
+    // smooths a static dither into a stable image. Progressive (and
+    // the debug views) keep the rolling sequence for convergence.
+    var seed_frame = u.size.z;
+    if (u.cfg.x >= 2.0 && u.cfg.w == 0.0) {
+        seed_frame = 0u;
+    }
+    rng_seed(gid.xy, seed_frame);
 
     // PT-3 half-res: realtime mode traces a half grid; map this trace
     // cell to its full-res G-buffer pixel (the 2x2 phase rotates per
@@ -824,13 +833,18 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var metal_cur = mr0.r;
     var rough_cur = mr0.g;
     // Realtime mode samples the primary sun cone with structured IGN
-    // noise (filterable); progressive keeps white noise (unbiased
-    // convergence).
+    // noise, FROZEN in time (frame 0): a per-frame rolling sequence
+    // makes every stochastically-shadowed pixel (grass, canopies)
+    // oscillate around its mean forever — the EMA never settles it and
+    // it reads as sparkle across the whole frame. A fixed per-pixel
+    // sample gives a static dither that the à-trous flattens into
+    // STABLE soft shadows. Progressive keeps rolling white noise for
+    // unbiased convergence.
     var sun_r2 = rand_2f();
     if (u.cfg.x >= 2.0) {
         sun_r2 = vec2<f32>(
-            ign_at(px_full, u.size.z),
-            ign_at(px_full + vec2<i32>(17, 59), u.size.z),
+            ign_at(px_full, 0u),
+            ign_at(px_full + vec2<i32>(17, 59), 0u),
         );
     }
     var radiance = direct_light(p0 + n0 * 0.02, n0, albedo0 * (1.0 - metal_cur), sun_r2);
