@@ -315,6 +315,9 @@ impl Renderer {
                     // PT-4 ReSTIR reservoirs, same ping-pong pairing.
                     wgpu::BindGroupEntry { binding: 20, resource: self.pt_resv_buffers[i].as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 21, resource: self.pt_resv_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
+                    // PT-7 — velocity MRT (written by hdr_scene, which
+                    // runs before the PT node every frame).
+                    wgpu::BindGroupEntry { binding: 22, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
             ];
             self.pt_bg[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pt_bg"),

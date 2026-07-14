@@ -205,8 +205,9 @@ macro_rules! __bloom_ffi_ragdoll {
                 if let Some(a) = eng.models.get_animation(anim) {
                     if !a.joint_matrices.is_empty() {
                         let (s, c) = (rot.sin(), rot.cos());
+                        // PT-7: anim handle = prev-palette pairing key.
                         eng.renderer.set_joint_matrices_scaled(
-                            &a.joint_matrices, scale, pos, s, c);
+                            anim.to_bits(), &a.joint_matrices, scale, pos, s, c);
                     }
                 }
                 age as f64

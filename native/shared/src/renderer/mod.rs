@@ -899,6 +899,8 @@ pub struct Renderer {
 
     // Joint matrices for GPU skinning (64 joints × 4x4 matrix)
     joint_buffer: wgpu::Buffer,
+    /// PT-7 — previous frame's palette (same slot offsets).
+    joint_prev_buffer: wgpu::Buffer,
     joint_bind_group: wgpu::BindGroup,
 
     // False until the material system's per-view bind group has been
@@ -1720,6 +1722,17 @@ pub struct Renderer {
     // At `end_frame` the accumulator is flushed in one write.
     pub pending_skin_groups: Vec<Vec<[[f32; 4]; 4]>>,
     pub frame_joint_data: Vec<[[f32; 4]; 4]>,
+    /// PT-7 — the PREVIOUS frame's palette for each staged group, in
+    /// lockstep with `pending_skin_groups`/`frame_joint_data` (same
+    /// offsets). The skinned VS reconstructs last frame's world
+    /// position from it, which is what makes skeletal motion vectors
+    /// real (they were exactly zero before — no history existed).
+    pub pending_skin_groups_prev: Vec<Vec<[[f32; 4]; 4]>>,
+    pub frame_joint_data_prev: Vec<[[f32; 4]; 4]>,
+    /// Last staged palette per animation key (FFI anim handle). A few
+    /// dozen entries at most — anim handles are per model slot, not
+    /// per spawn — so no eviction is needed.
+    skin_prev_palettes: std::collections::HashMap<u64, Vec<[[f32; 4]; 4]>>,
     pub model_skin_scale: f32,
 
     // Shadow mapping
@@ -2403,16 +2416,31 @@ impl Renderer {
         // caster pipeline needs this layout at construction time.
         let joint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("joint_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // PT-7 — previous frame's palette (same offsets). Only
+                // the scene VS reads it; the shadow shader ignores the
+                // binding, which wgpu permits.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         // Shadow map needs to be created before the lighting bind
@@ -2624,13 +2652,25 @@ impl Renderer {
             contents: &joint_data,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        // PT-7 — previous frame's palette, parallel offsets.
+        let joint_prev_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("joint_prev_buffer"),
+            contents: &joint_data,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         let joint_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("joint_bg"),
             layout: &joint_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: joint_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: joint_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: joint_prev_buffer.as_entire_binding(),
+                },
+            ],
         });
         // Initialize with identity matrices
         {
@@ -2645,6 +2685,7 @@ impl Renderer {
                 identity_data[offset+60..offset+64].copy_from_slice(&one);   // [3][3]
             }
             queue.write_buffer(&joint_buffer, 0, &identity_data);
+            queue.write_buffer(&joint_prev_buffer, 0, &identity_data);
         }
 
         // --- 3D Pipeline ---
@@ -5304,6 +5345,16 @@ impl Renderer {
                             has_dynamic_offset: false, min_binding_size: None,
                         }, count: None,
                     },
+                    // PT-7 — raster velocity MRT for object-motion
+                    // reprojection (skinned characters).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 22, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
             ];
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("pt_layout"),
@@ -6881,6 +6932,7 @@ impl Renderer {
             lighting_buffer,
             lighting_bind_group,
             joint_buffer,
+            joint_prev_buffer,
             joint_bind_group,
             material_per_view_bg_live: false,
             texture_bind_group_layout,
@@ -7251,6 +7303,9 @@ impl Renderer {
             render_mode: RenderMode::ScreenSpace,
             pending_skin_groups: Vec::with_capacity(8),
             frame_joint_data: Vec::with_capacity(256),
+            pending_skin_groups_prev: Vec::with_capacity(8),
+            frame_joint_data_prev: Vec::with_capacity(256),
+            skin_prev_palettes: std::collections::HashMap::new(),
             model_skin_scale: 1.0,
             clear_color: wgpu::Color::BLACK,
             custom_pipelines: Vec::new(),
@@ -11498,6 +11553,9 @@ impl Renderer {
     }
 
     pub fn set_joint_matrices(&mut self, matrices: &[[[f32; 4]; 4]]) {
+        // Unkeyed path (editor/tests): no palette history, so previous
+        // pose = current pose (zero skeletal velocity).
+        self.pending_skin_groups_prev.push(matrices.to_vec());
         self.pending_skin_groups.push(matrices.to_vec());
     }
 
@@ -11505,7 +11563,12 @@ impl Renderer {
         self.model_skin_scale = scale;
     }
 
-    pub fn set_joint_matrices_scaled(&mut self, matrices: &[[[f32; 4]; 4]], scale: f32, position: [f32; 3], rot_sin: f32, rot_cos: f32) {
+    /// `key` pairs this pose with the SAME model's pose last frame
+    /// (PT-7 motion vectors) — pass the FFI animation handle. The
+    /// world placement is baked into every joint matrix, so the prev
+    /// palette carries last frame's position/rotation too: skeletal
+    /// AND locomotion motion both land in the velocity buffer.
+    pub fn set_joint_matrices_scaled(&mut self, key: u64, matrices: &[[[f32; 4]; 4]], scale: f32, position: [f32; 3], rot_sin: f32, rot_cos: f32) {
         let cos_r = rot_cos;
         let sin_r = rot_sin;
         let mut scaled = Vec::with_capacity(matrices.len());
@@ -11531,6 +11594,15 @@ impl Renderer {
             scaled.push(sm);
         }
 
+        // First sighting of a key (spawn) has no history: previous =
+        // current, i.e. zero velocity — correct for something that
+        // just appeared.
+        let prev = match self.skin_prev_palettes.get(&key) {
+            Some(p) if p.len() == scaled.len() => p.clone(),
+            _ => scaled.clone(),
+        };
+        self.pending_skin_groups_prev.push(prev);
+        self.skin_prev_palettes.insert(key, scaled.clone());
         self.pending_skin_groups.push(scaled);
     }
 
@@ -11732,10 +11804,22 @@ impl Renderer {
                 all_data[i] = self.frame_joint_data[i];
             }
             self.queue.write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(&all_data));
+            // PT-7 — previous frame's palette, same offsets.
+            let prev_count = self.frame_joint_data_prev.len().min(count);
+            for i in 0..count {
+                all_data[i] = if i < prev_count {
+                    self.frame_joint_data_prev[i]
+                } else {
+                    self.frame_joint_data[i]
+                };
+            }
+            self.queue.write_buffer(&self.joint_prev_buffer, 0, bytemuck::cast_slice(&all_data));
         }
         self.frame_joint_data.clear();
+        self.frame_joint_data_prev.clear();
         // Any leftover staged poses are stale (no draw consumed them).
         self.pending_skin_groups.clear();
+        self.pending_skin_groups_prev.clear();
     }
 
     // ============================================================

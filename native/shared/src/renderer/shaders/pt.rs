@@ -112,6 +112,11 @@ struct InstanceGiData {
 // with the accum pair: (light index, W, M, target pdf) per trace texel.
 @group(0) @binding(20) var<storage, read_write> resv: array<vec4<f32>>;
 @group(0) @binding(21) var<storage, read_write> resv_out: array<vec4<f32>>;
+// PT-7 — the raster velocity MRT (uv-space delta, current − previous,
+// no Y flip at write; see core.rs). Non-zero where a surface MOVED —
+// reprojection follows it instead of the camera-only prev_vp math,
+// exactly like TAA, so moving skinned characters keep their history.
+@group(0) @binding(22) var velocity_tex: texture_2d<f32>;
 
 // Reprojection of the current surface into the previous frame's trace
 // grid — computed once per texel (module privates because both the
@@ -122,19 +127,39 @@ var<private> rp_fr: vec2<f32>;
 var<private> rp_zl_here: f32;
 var<private> rp_nearest: u32;
 
-fn compute_reproj(p0: vec3<f32>) {
+fn compute_reproj(p0: vec3<f32>, px_full: vec2<i32>, depth_cur: f32) {
     rp_valid = false;
-    let clip_prev = u.prev_vp * vec4<f32>(p0, 1.0);
-    if (u.size.w == 0u || clip_prev.w <= 1e-4) { return; }
-    let ndc_prev = clip_prev.xyz / clip_prev.w;
-    let uv_prev = vec2<f32>(ndc_prev.x * 0.5 + 0.5, 0.5 - ndc_prev.y * 0.5);
+    if (u.size.w == 0u) { return; }
+    // PT-7 — object motion first: the velocity buffer knows how THIS
+    // pixel's surface moved (including skeletal motion, which no
+    // camera matrix can express). TAA's convention:
+    // prev_uv = (uv.x - vel.x, uv.y + vel.y). Camera-only pixels
+    // write ~zero velocity and fall through to the prev_vp math.
+    var uv_prev: vec2<f32>;
+    var zl_here: f32;
+    let vel = textureLoad(velocity_tex, px_full, 0).rg;
+    if (abs(vel.x) + abs(vel.y) > 1e-5) {
+        let uv_cur = (vec2<f32>(px_full) + 0.5)
+            / vec2<f32>(f32(u.ext.x), f32(u.ext.y));
+        uv_prev = vec2<f32>(uv_cur.x - vel.x, uv_cur.y + vel.y);
+        // Depth along a moving surface changes slowly frame-to-frame;
+        // the tap tolerance absorbs it, and a fast approach degrades
+        // to a disocclusion reset — the safe direction.
+        zl_here = lin_depth(depth_cur);
+    } else {
+        let clip_prev = u.prev_vp * vec4<f32>(p0, 1.0);
+        if (clip_prev.w <= 1e-4) { return; }
+        let ndc_prev = clip_prev.xyz / clip_prev.w;
+        uv_prev = vec2<f32>(ndc_prev.x * 0.5 + 0.5, 0.5 - ndc_prev.y * 0.5);
+        zl_here = lin_depth(ndc_prev.z);
+    }
     if (uv_prev.x < 0.0 || uv_prev.x >= 1.0 || uv_prev.y < 0.0 || uv_prev.y >= 1.0) {
         return;
     }
     let pos = uv_prev * vec2<f32>(f32(u.size.x), f32(u.size.y)) - 0.5;
     rp_base = vec2<i32>(floor(pos));
     rp_fr = pos - floor(pos);
-    rp_zl_here = lin_depth(ndc_prev.z);
+    rp_zl_here = zl_here;
     let np = vec2<u32>(
         min(u32(max(rp_base.x + i32(round(rp_fr.x)), 0)), u.size.x - 1u),
         min(u32(max(rp_base.y + i32(round(rp_fr.y)), 0)), u.size.y - 1u),
@@ -1130,7 +1155,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Reproject this surface into the previous trace grid ONCE — the
     // ReSTIR temporal reuse and the SVGF colour accumulation below both
     // consume the result (rp_* privates).
-    compute_reproj(p0);
+    compute_reproj(p0, px_full, depth);
     // PT-4 experimental: ext.w routes the primary point-light NEE
     // through the ReSTIR reservoirs; sun NEE is untouched either way.
     let use_restir = u.ext.w == 1u && u.cfg.x >= 2.0;

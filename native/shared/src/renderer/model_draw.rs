@@ -182,12 +182,17 @@ impl Renderer {
             self.next_model_uniform_slot += 1;
             self.ensure_model_uniform_slot(slot);
 
-            // Skinned draws: mvp/prev_mvp are the BARE view-projection —
-            // the joint matrices bake world placement, so the VS goes
+            // Skinned draws: mvp is the BARE view-projection — the
+            // joint matrices bake world placement, so the VS goes
             // joint-space → world → clip without a model term.
+            // prev_mvp is the EN-022 velocity-reference VP (previous
+            // frame, jitter-cancelled): with the previous palette in
+            // the VS this yields REAL skeletal+locomotion velocity
+            // (it used to be the current VP -> exactly zero velocity,
+            // which is why enemies ghosted under TAA/TSR).
             self.stage_model_uniform(slot, &Uniforms3D {
                 mvp: vp, model: model_matrix,
-                prev_mvp: vp, model_tint: tint,
+                prev_mvp: self.velocity_ref_vp, model_tint: tint,
                 misc: [joint_offset, 1.0, 0.0, 0.0],
             });
 
@@ -321,12 +326,23 @@ impl Renderer {
             return None;
         }
         let group = self.pending_skin_groups.remove(0);
+        // PT-7 — the prev-palette queue moves in lockstep so both
+        // arenas assign the SAME offset to this draw. A length
+        // mismatch (or an unpaired group from a legacy caller) falls
+        // back to the current pose = zero skeletal velocity.
+        let prev_group = if !self.pending_skin_groups_prev.is_empty() {
+            let p = self.pending_skin_groups_prev.remove(0);
+            if p.len() == group.len() { p } else { group.clone() }
+        } else {
+            group.clone()
+        };
         let start = self.frame_joint_data.len();
         // Cap at the 1024-slot buffer. Overflowing poses land at offset 0,
         // which at least avoids an out-of-range read — the model will look
         // mis-posed but not corrupt memory.
         if start + group.len() <= 1024 {
             self.frame_joint_data.extend_from_slice(&group);
+            self.frame_joint_data_prev.extend_from_slice(&prev_group);
             Some(start as f32)
         } else {
             Some(0.0)
