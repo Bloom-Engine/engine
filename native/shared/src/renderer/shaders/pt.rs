@@ -57,9 +57,14 @@ struct PtParams {
     sky_color: vec4<f32>,   // rgb ambient-derived sky tint
     size: vec4<u32>,        // x/y = TRACE grid dims, z=frame_index, w=accum_count
     cfg: vec4<f32>,         // x=mode(1|2), y=max_bounces, z=point_light_count, w=debug
-    // PT-3 half-res: x/y = full G-buffer dims, z/w = 2x2 sample phase.
-    // Full-res modes set ext.xy == size.xy and phase 0.
+    // PT-3 half-res: x/y = full G-buffer dims. z = 1 -> hybrid sun
+    // (sample the raster shadow cascades instead of tracing the sun;
+    // crisp noise-free direct shadows, rays spent on indirect only).
+    // w unused.
     ext: vec4<u32>,
+    // Raster shadow cascade view-projections (transposed at upload,
+    // same convention as inv_vp/prev_vp).
+    shadow_vps: array<mat4x4<f32>, 3>,
     lights: array<PtLight, 16>,
 };
 
@@ -109,6 +114,58 @@ fn lin_depth(d: f32) -> f32 {
 // appended by the Rust side per adapter support.)
 @group(0) @binding(10) var<storage, read> geo_v: array<f32>;
 @group(0) @binding(11) var<storage, read> geo_i: array<u32>;
+// Hybrid sun (ext.z == 1): the raster shadow cascades.
+@group(0) @binding(14) var shadow_atlas_0: texture_depth_2d;
+@group(0) @binding(15) var shadow_atlas_1: texture_depth_2d;
+@group(0) @binding(16) var shadow_atlas_2: texture_depth_2d;
+@group(0) @binding(17) var shadow_samp: sampler_comparison;
+
+// Sun visibility from the shadow cascades (near -> far fallthrough by
+// coverage, same scheme as the WSRC bake). Deterministic and smooth —
+// the whole reason RT mode's direct light doesn't shimmer or dither.
+fn sun_vis_cascade(pos_ws: vec3<f32>) -> f32 {
+    for (var c = 0; c < 3; c = c + 1) {
+        var clip: vec4<f32>;
+        if (c == 0) { clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0); }
+        else if (c == 1) { clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0); }
+        else { clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0); }
+        if (abs(clip.w) < 1e-6) { continue; }
+        let ndc = clip.xyz / clip.w;
+        if (ndc.x < -0.99 || ndc.x > 0.99 || ndc.y < -0.99 || ndc.y > 0.99 || ndc.z < 0.0 || ndc.z > 1.0) {
+            continue;
+        }
+        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        let ref_depth = ndc.z - 0.002;
+        // Manual load-and-compare with a 2x2 average instead of the
+        // comparison sampler: SampleCmp from a COMPUTE stage proved
+        // unreliable on this DXC path (constant 0, independent of the
+        // matrices — same failure shape as the ray-query saga), and the
+        // only other compute-stage user (WSRC bake) was never validated
+        // on DX12. textureLoad is proven (the PT depth reads use it).
+        var dims: vec2<u32>;
+        if (c == 0) { dims = textureDimensions(shadow_atlas_0); }
+        else if (c == 1) { dims = textureDimensions(shadow_atlas_1); }
+        else { dims = textureDimensions(shadow_atlas_2); }
+        let fdims = vec2<f32>(dims);
+        var vis = 0.0;
+        for (var ty = 0; ty <= 1; ty = ty + 1) {
+            for (var tx = 0; tx <= 1; tx = tx + 1) {
+                let tc = clamp(
+                    vec2<i32>(uv * fdims - vec2<f32>(0.5)) + vec2<i32>(tx, ty),
+                    vec2<i32>(0),
+                    vec2<i32>(i32(dims.x) - 1, i32(dims.y) - 1),
+                );
+                var stored: f32;
+                if (c == 0) { stored = textureLoad(shadow_atlas_0, tc, 0); }
+                else if (c == 1) { stored = textureLoad(shadow_atlas_1, tc, 0); }
+                else { stored = textureLoad(shadow_atlas_2, tc, 0); }
+                if (ref_depth <= stored) { vis += 0.25; }
+            }
+        }
+        return vis;
+    }
+    return 1.0;
+}
 
 const PT_VSTRIDE: u32 = 24u;
 
@@ -488,13 +545,29 @@ fn albedo_at_hit(
 // Direct light at a surface point: sun through the solar cone + one point
 // light chosen uniformly (contribution / pdf). Game-radiometry convention:
 // no 1/pi (see file header).
+// Sun visibility at a surface point: shadow cascades in hybrid mode
+// (deterministic, matches the raster shadows exactly), a traced cone
+// ray otherwise (reference quality, soft penumbra).
+fn sun_visibility(p: vec3<f32>, n: vec3<f32>, r2: vec2<f32>) -> f32 {
+    if (u.ext.z == 1u) {
+        return sun_vis_cascade(p);
+    }
+    let sd = sun_cone_sample(r2);
+    if (dot(n, sd) <= 0.0) {
+        return 0.0;
+    }
+    if (occluded(p, sd, 1000.0)) {
+        return 0.0;
+    }
+    return 1.0;
+}
+
 fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>) -> vec3<f32> {
     var lit = vec3<f32>(0.0);
 
-    let sd = sun_cone_sample(sun_r2);
-    let ndl = dot(n, sd);
-    if (ndl > 0.0 && !occluded(p, sd, 1000.0)) {
-        lit += u.sun_color.rgb * ndl;
+    let ndl = max(dot(n, u.sun_dir.xyz), 0.0);
+    if (ndl > 0.0) {
+        lit += u.sun_color.rgb * ndl * sun_visibility(p, n, sun_r2);
     }
 
     let count = u32(u.cfg.z);
@@ -790,6 +863,36 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out_hdr, px_full, vec4<f32>(0.4, 0.2, 0.0, 1.0));
         return;
     }
+    if (debug == 18.0) {
+        // Hybrid-sun validation: cascade shadow visibility at the
+        // primary surface. Must match the raster shadow shapes exactly
+        // (crisp tree/building shadows). Gray everywhere = the VPs are
+        // wrong (transposition or stale).
+        let vis18 = sun_vis_cascade(p0 + n0 * 0.02);
+        textureStore(out_hdr, px_full, vec4<f32>(vec3<f32>(vis18 * 50.0), 1.0));
+        return;
+    }
+    if (debug == 19.0) {
+        // Numeric dump: cascade-0 shadow projection (ndc.xyz) + the
+        // stored atlas depth at the landing texel (-1 = out of range,
+        // -9 = degenerate w). Read back via pt_trace_dump.txt.
+        let pw19 = p0 + n0 * 0.02;
+        let clip19 = u.shadow_vps[0] * vec4<f32>(pw19, 1.0);
+        var out19 = vec4<f32>(-9.0);
+        if (abs(clip19.w) > 1e-6) {
+            let ndc19 = clip19.xyz / clip19.w;
+            let uv19 = vec2<f32>(ndc19.x * 0.5 + 0.5, 0.5 - ndc19.y * 0.5);
+            var stored19 = -1.0;
+            if (uv19.x >= 0.0 && uv19.x <= 1.0 && uv19.y >= 0.0 && uv19.y <= 1.0) {
+                let dims19 = vec2<f32>(textureDimensions(shadow_atlas_0));
+                stored19 = textureLoad(shadow_atlas_0, vec2<i32>(uv19 * dims19), 0);
+            }
+            out19 = vec4<f32>(ndc19.xyz, stored19);
+        }
+        accum_out[gid.y * u.size.x + gid.x] = out19;
+        textureStore(out_hdr, px_full, vec4<f32>(0.1, 0.0, 0.2, 1.0));
+        return;
+    }
     if (debug == 6.0 || debug == 7.0) {
         // PT-2 validation: trace the primary ray through the TLAS
         // (ignoring the G-buffer) and show interpolated attributes.
@@ -847,12 +950,34 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             ign_at(px_full + vec2<i32>(17, 59), 0u),
         );
     }
+    var view_cur = normalize(u.cam_pos.xyz - p0);
     var radiance = direct_light(p0 + n0 * 0.02, n0, albedo0 * (1.0 - metal_cur), sun_r2);
+    // Sun SPECULAR at the primary surface — the raster-style GGX
+    // highlight (D carries the 1/pi) masked by the same visibility.
+    // Without it every surface reads as dead-matte under the sun.
+    {
+        let ndl0 = max(dot(n0, u.sun_dir.xyz), 0.0);
+        if (ndl0 > 0.0) {
+            let vis0 = sun_visibility(p0 + n0 * 0.02, n0, sun_r2);
+            if (vis0 > 0.0) {
+                let hv = normalize(view_cur + u.sun_dir.xyz);
+                let ndv = max(dot(n0, view_cur), 1e-4);
+                let ndh = max(dot(n0, hv), 0.0);
+                let vdh = max(dot(view_cur, hv), 1e-4);
+                let alpha0 = max(rough_cur * rough_cur, 1e-3);
+                let a2 = alpha0 * alpha0;
+                let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+                let dterm = a2 / (3.14159265 * dd * dd);
+                let f0s = mix(vec3<f32>(0.04), albedo0, metal_cur);
+                let spec = fresnel_schlick3(vdh, f0s) * dterm * v_smith(ndv, ndl0, alpha0);
+                radiance += spec * u.sun_color.rgb * ndl0 * vis0;
+            }
+        }
+    }
     var throughput = vec3<f32>(1.0);
     var origin = p0 + n0 * 0.02;
     var n_cur = n0;
     var alb_cur = albedo0;
-    var view_cur = normalize(u.cam_pos.xyz - p0);
 
     let max_bounces = u32(u.cfg.y);
     for (var b = 0u; b < max_bounces; b = b + 1u) {

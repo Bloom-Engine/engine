@@ -387,8 +387,11 @@ struct PtParamsCpu {
     /// x=mode (1 progressive / 2 realtime), y=max_bounces,
     /// z=point_light_count (≤16), w=debug view (BLOOM_PT_DEBUG).
     cfg: [f32; 4],
-    /// PT-3 half-res: x/y = full G-buffer dims, z/w = 2x2 sample phase.
+    /// PT-3 half-res: x/y = full G-buffer dims. z = 1 → hybrid sun
+    /// (shadow cascades instead of traced sun rays). w unused.
     ext: [u32; 4],
+    /// Raster shadow cascade VPs, transposed at upload like inv_vp.
+    shadow_vps: [[[f32; 4]; 4]; 3],
     /// 16 lights × (pos_range vec4, color_int vec4).
     lights: [[f32; 4]; 32],
 }
@@ -5162,6 +5165,37 @@ impl Renderer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false, min_binding_size: None,
                         }, count: None,
+                    },
+                    // Hybrid sun — the raster shadow cascades + their
+                    // comparison sampler.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 14, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 15, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 16, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }, count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 17, visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
                     },
             ];
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

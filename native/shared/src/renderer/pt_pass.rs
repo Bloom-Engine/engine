@@ -217,7 +217,22 @@ impl Renderer {
                 light_count as f32,
                 self.pt_debug,
             ],
-            ext: [surf_w, surf_h, phase[0], phase[1]],
+            // ext.z: hybrid sun — realtime mode samples the raster
+            // shadow cascades instead of tracing sun rays (crisp
+            // noise-free direct shadows). Progressive keeps traced sun
+            // for reference-quality penumbra.
+            ext: [
+                surf_w,
+                surf_h,
+                if self.pt_mode >= 2 && self.shadow_map.enabled { 1 } else { 0 },
+                phase[1],
+            ],
+            // RAW upload, unlike inv_vp: the shadow VPs are consumed as
+            // M*v by every existing WGSL user (scene shader, WSRC
+            // bake), so they are already stored in WGSL column layout.
+            // Verified empirically via debug 18 — transposing them
+            // black-shadows the whole frame.
+            shadow_vps: self.shadow_map.light_vps,
             lights,
         };
         self.queue.write_buffer(&self.pt_uniform_buffer, 0, bytemuck::bytes_of(&params));
@@ -247,6 +262,10 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 10, resource: self.pt_geo_vertex_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 11, resource: self.pt_geo_index_buffer.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 13, resource: self.pt_accum_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
+                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
+                    wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
             ];
             self.pt_bg[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pt_bg"),
@@ -302,6 +321,7 @@ impl Renderer {
         // (step 2). Progressive mode converges on its own and writes
         // hdr directly from the kernel.
         if self.pt_mode >= 2
+            && self.pt_debug == 0.0
             && self.pt_atrous_mid_pipeline.is_some()
             && self.pt_atrous_scratch.is_some()
         {
@@ -394,13 +414,15 @@ impl Renderer {
         // Copies a window of the accum buffer (center of frame) into a
         // staging buffer each frame; the previous frame's copy is mapped
         // (blocking) and dumped to pt_trace_dump.txt once.
-        if (self.pt_debug == 16.0 || self.pt_debug == 17.0)
+        if (self.pt_debug == 16.0 || self.pt_debug == 17.0 || self.pt_debug == 19.0)
             && self.pt_accum_count > 30
             && !self.pt_dump_written
         {
-            let dump_pixels: u64 = (surf_w as u64).min(4096);
-            let row = (surf_h / 2) as u64;
-            let offset = row * surf_w as u64 * 16;
+            // Offsets in TRACE-grid units — the accum buffers are
+            // half-res in realtime mode.
+            let dump_pixels: u64 = (trace_w as u64).min(4096);
+            let row = (trace_h / 2) as u64;
+            let offset = row * trace_w as u64 * 16;
             if self.pt_readback_buffer.is_none() {
                 self.pt_readback_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("pt_readback"),
