@@ -967,6 +967,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (irr_luma > 4.0) {
             irr *= 4.0 / irr_luma;
         }
+        // History-guided spike clamp: with valid history, one frame may
+        // not jump more than 50% + 0.25 above it — single-frame bright
+        // spikes ARE noise at 1-2 spp, and the à-trous edge-stop
+        // (center-relative) cannot remove an outlier CENTER. Darkening
+        // (a shadow appearing) stays unclamped so lighting changes
+        // propagate at full speed downward and EMA speed upward.
+        if (alpha < 1.0) {
+            irr = min(irr, hist * 1.5 + vec3<f32>(0.25));
+        }
         let out_irr = mix(hist, irr, alpha);
         accum_out[idx] = vec4<f32>(out_irr, depth);
         return;
@@ -1030,12 +1039,43 @@ fn kern(d: i32) -> f32 {
 
 fn filter_at(px: vec2<i32>, w: i32, h: i32, step: i32) -> vec4<f32> {
     let cidx = u32(px.y) * u32(w) + u32(px.x);
-    let center = src[cidx];
+    var center = src[cidx];
     if (center.w >= 0.9999999) {
         return center;
     }
     let zc = lin_depth_a(center.w);
-    let lc = dot(center.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    var lc = dot(center.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+
+    // Despeckle (first iteration only): the edge-stopping weights below
+    // are measured FROM the center, so an outlier center rejects its
+    // neighbors and survives every iteration. Clamp the center to its
+    // immediate neighborhood maximum before blending — isolated bright
+    // texels cannot exceed what any neighbor has seen.
+    if (step == 1) {
+        var nmax = 0.0;
+        for (var dy = -1; dy <= 1; dy = dy + 1) {
+            for (var dx = -1; dx <= 1; dx = dx + 1) {
+                if (dx == 0 && dy == 0) {
+                    continue;
+                }
+                let q = px + vec2<i32>(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x >= w || q.y >= h) {
+                    continue;
+                }
+                let s = src[u32(q.y) * u32(w) + u32(q.x)];
+                if (s.w >= 0.9999999) {
+                    continue;
+                }
+                nmax = max(nmax, dot(s.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
+            }
+        }
+        let lim = nmax * 1.5 + 0.05;
+        if (nmax > 0.0 && lc > lim) {
+            center = vec4<f32>(center.rgb * (lim / lc), center.w);
+            lc = lim;
+        }
+    }
+
     var sum = vec3<f32>(0.0);
     var wsum = 0.0;
     for (var dy = -2; dy <= 2; dy = dy + 1) {
@@ -1044,7 +1084,10 @@ fn filter_at(px: vec2<i32>, w: i32, h: i32, step: i32) -> vec4<f32> {
             if (q.x < 0 || q.y < 0 || q.x >= w || q.y >= h) {
                 continue;
             }
-            let s = src[u32(q.y) * u32(w) + u32(q.x)];
+            var s = src[u32(q.y) * u32(w) + u32(q.x)];
+            if (dx == 0 && dy == 0) {
+                s = center; // use the despeckled value for the center tap
+            }
             if (s.w >= 0.9999999) {
                 continue;
             }
