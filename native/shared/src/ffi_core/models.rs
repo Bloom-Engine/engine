@@ -115,6 +115,81 @@ macro_rules! __bloom_ffi_models {
             $crate::ffi::feature_off_warn_once("bloom_draw_model_rotated", "models3d");
         }
 
+        // bloom_draw_model_transform16 — EN-039. [gated: models3d]
+        //
+        // The immediate-mode twin of bloom_scene_set_transform16: a full
+        // column-major 4x4, so an immediate draw can finally pitch and roll.
+        // bloom_draw_model_rotated only takes a Y rotation, which is why the
+        // shooter's gun cannot tilt with the aim.
+        //
+        // The ticket proposed routing this through the mesh scratch on the
+        // grounds that "Perry can't pass 16 f64 args". It can:
+        // bloom_scene_set_transform16 already passes 17 and works. Spelling the
+        // matrix out keeps this STATELESS — no scratch to reset, no ordering
+        // hazard between a reset and a draw — which is the same reasoning
+        // recorded on the scene twin.
+        //
+        // SKINNED models are rejected rather than silently mis-drawn: their
+        // joint matrices already bake world orientation, so a caller-supplied
+        // model matrix would double-transform them. bloom_draw_model_rotated
+        // has the same carve-out (it ignores rot_y for skinned).
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        #[allow(clippy::too_many_arguments)]
+        pub extern "C" fn bloom_draw_model_transform16(
+            handle: f64,
+            m0: f64, m1: f64, m2: f64, m3: f64,
+            m4: f64, m5: f64, m6: f64, m7: f64,
+            m8: f64, m9: f64, m10: f64, m11: f64,
+            m12: f64, m13: f64, m14: f64, m15: f64,
+            color_packed_argb: f64,
+        ) {
+            $crate::ffi::guard("bloom_draw_model_transform16", move || {
+                let bits = color_packed_argb as u32;
+                let a = ((bits >> 24) & 0xff) as f32 / 255.0;
+                let r = ((bits >> 16) & 0xff) as f32 / 255.0;
+                let g = ((bits >>  8) & 0xff) as f32 / 255.0;
+                let b = ( bits        & 0xff) as f32 / 255.0;
+                let s = [
+                    m0, m1, m2, m3,
+                    m4, m5, m6, m7,
+                    m8, m9, m10, m11,
+                    m12, m13, m14, m15,
+                ];
+                let mut mat = [[0.0f32; 4]; 4];
+                for col in 0..4 {
+                    for row in 0..4 {
+                        mat[col][row] = s[col * 4 + row] as f32;
+                    }
+                }
+                let eng = engine();
+                if let Some(model) = eng.models.get(handle) {
+                    let handle_bits = handle.to_bits();
+                    if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+                        if eng.renderer.is_model_skinned(handle_bits) {
+                            return;   // see the note above
+                        }
+                        eng.renderer.draw_model_cached_transform(
+                            handle_bits, mat, [r, g, b, a],
+                        );
+                    }
+                }
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        #[allow(clippy::too_many_arguments)]
+        pub extern "C" fn bloom_draw_model_transform16(
+            _handle: f64,
+            _m0: f64, _m1: f64, _m2: f64, _m3: f64,
+            _m4: f64, _m5: f64, _m6: f64, _m7: f64,
+            _m8: f64, _m9: f64, _m10: f64, _m11: f64,
+            _m12: f64, _m13: f64, _m14: f64, _m15: f64,
+            _color_packed_argb: f64,
+        ) {
+            $crate::ffi::feature_off_warn_once("bloom_draw_model_transform16", "models3d");
+        }
+
         // bloom_unload_model  [source: linux; gated: models3d]
         #[cfg(feature = "models3d")]
         #[no_mangle]

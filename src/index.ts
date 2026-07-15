@@ -67,7 +67,7 @@ export {
 } from './textures/index';
 
 export {
-  loadModel, drawModel, drawModelRotated, unloadModel, getModelBounds, genMeshSplineRibbon,
+  loadModel, drawModel, drawModelRotated, drawModelTransform, unloadModel, getModelBounds, genMeshSplineRibbon,
   setModelFoliageWind, setFoliageShadowMotion,
   drawCube, drawCubeWires, drawSphere, drawSphereWires,
   drawCylinder, drawPlane, drawGrid, drawRay, genMeshCube, genMeshHeightmap,

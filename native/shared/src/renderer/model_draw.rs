@@ -107,6 +107,51 @@ impl Renderer {
         }
     }
 
+    /// EN-039 — `draw_model_cached` taking the model matrix WHOLE, instead of
+    /// composing it from a position/scale/yaw. `draw_model_cached_rotated` above
+    /// can only express a Y rotation, so an immediate-mode caller could not
+    /// pitch or roll: the shooter's weapon stays level while the camera looks up
+    /// or down, and the same wall hits any held prop, thrown object or debris
+    /// chunk. Everything downstream (alpha cutout, normal/MR maps, foliage wind,
+    /// cutout shadows, planar reflections) is identical — this only skips the
+    /// composition step and trusts the caller's matrix.
+    pub fn draw_model_cached_transform(
+        &mut self,
+        handle_bits: u64,
+        model_matrix: [[f32; 4]; 4],
+        tint: [f32; 4],
+    ) {
+        let mesh_count = match self.model_gpu_cache.get(&handle_bits) {
+            Some(Some(meshes)) => meshes.len(),
+            _ => return,
+        };
+
+        let foliage = self.foliage_wind.get(&handle_bits).copied().unwrap_or(0.0);
+
+        for mesh_idx in 0..mesh_count {
+            let slot = self.next_model_uniform_slot;
+            self.next_model_uniform_slot += 1;
+            self.ensure_model_uniform_slot(slot);
+
+            let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
+            self.stage_model_uniform(slot, &Uniforms3D {
+                mvp: model_mvp, model: model_matrix,
+                prev_mvp: model_mvp, model_tint: tint,
+                misc: [0.0, 0.0, foliage, 0.0],
+            });
+
+            self.model_draw_commands.push(CachedModelDraw {
+                uniform_slot: slot,
+                cache_handle: handle_bits,
+                mesh_idx,
+                model: model_matrix,
+                skinned: false,
+                joint_offset: 0.0,
+                bounds_override: None,
+            });
+        }
+    }
+
     /// Cached-path draw for a SKINNED model: the bind-pose VB/IB stay
     /// GPU-resident (raw joint indices) and the scene VS skins from the
     /// shared joint buffer — replacing the immediate path's per-frame
