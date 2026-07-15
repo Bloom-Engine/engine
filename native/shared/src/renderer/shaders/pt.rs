@@ -1743,21 +1743,32 @@ fn cs_final(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out_hdr_a, px, vec4<f32>(src[cidx].rgb * alb, 1.0));
         return;
     }
-    // 3x3 taps around the containing trace texel, weighted by kernel
-    // distance and relative linear-depth agreement with THIS full-res
-    // pixel. The epsilon keeps thin foreground geometry (whose taps
-    // all mismatch) softly averaged rather than black.
+    // 3x3 taps around the trace texel, weighted by SUB-TEXEL tent distance
+    // and relative linear-depth agreement with THIS full-res pixel. The
+    // weights used to centre on the CONTAINING texel (integer mapping, no
+    // fractional phase), which reconstructed the lighting as trace-texel-
+    // sized constant blocks — and because the trace grid's sample phase
+    // rotates every frame, the block boundaries CRAWLED under motion (the
+    // residual "pixelated while moving" indoors). Tent weights at the
+    // continuous position make this a true bilinear-plus-depth joint
+    // bilateral: smooth gradients, stable under the phase rotation. The
+    // epsilon keeps thin foreground geometry (whose taps all mismatch)
+    // softly averaged rather than black.
     let zc = lin_depth_a(d);
     // Generalized ratio mapping (trace grid is budget-capped, not
-    // always exactly half of full res).
-    let hx = clamp(px.x * hw / fw, 0, hw - 1);
-    let hy = clamp(px.y * hh / fh, 0, hh - 1);
+    // always exactly half of full res), texel centres aligned.
+    let fx = (f32(px.x) + 0.5) * f32(hw) / f32(fw) - 0.5;
+    let fy = (f32(px.y) + 0.5) * f32(hh) / f32(fh) - 0.5;
+    let bx = i32(floor(fx));
+    let by = i32(floor(fy));
+    let frx = fx - f32(bx);
+    let fry = fy - f32(by);
     var sum = vec3<f32>(0.0);
     var wsum = 0.0;
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let qx = hx + dx;
-            let qy = hy + dy;
+            let qx = bx + dx;
+            let qy = by + dy;
             if (qx < 0 || qy < 0 || qx >= hw || qy >= hh) {
                 continue;
             }
@@ -1766,8 +1777,10 @@ fn cs_final(@builtin(global_invocation_id) gid: vec3<u32>) {
                 continue;
             }
             let s = src[qi];
+            let wx = max(0.0, 1.0 - abs(f32(dx) - frx));
+            let wy = max(0.0, 1.0 - abs(f32(dy) - fry));
             let wz = exp(-abs(lin_depth_a(geo[qi].w) - zc) / (0.08 * zc + 0.02));
-            let wgt = kern(dx) * kern(dy) * wz + 1e-5;
+            let wgt = wx * wy * wz + 1e-5;
             sum += s.rgb * wgt;
             wsum += wgt;
         }
