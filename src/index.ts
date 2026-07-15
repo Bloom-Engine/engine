@@ -18,7 +18,9 @@ export {
   openFileDialog, saveFileDialog,
   writeFile, fileExists, readFile,
   getScreenToWorld2D, getWorldToScreen2D,
-  Color, ColorConstants, Colors, Key, MouseButton,
+  // `Color` is not here: it is the RGBA type, re-exported as a type below.
+  // The palette map is `Colors` / `ColorConstants` (GH #53).
+  ColorConstants, Colors, Key, MouseButton,
   injectKeyDown, injectKeyUp, isAnyInputPressed, getPlatform, isMobile, isTV, Platform,
   injectGamepadAxis, injectGamepadButtonDown, injectGamepadButtonUp,
   runGame,
