@@ -1401,6 +1401,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         var n_hist = 0.0;
+        var seeded = false;
         if (wsum > 1e-3) {
             hist_rgb /= wsum;
             hist_m1 /= wsum;
@@ -1430,8 +1431,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             var seed_m2 = 0.0;
             var seed_n = 0.0;
             var seed_w = 0.0;
-            for (var by = -2; by <= 2; by = by + 1) {
-                for (var bx = -2; bx <= 2; bx = bx + 1) {
+            // 7x7: under TRANSLATION a whole COLUMN of texels streams in per
+            // frame (rotation only trickles a few px), so a 5x5 often found
+            // nothing but fellow newborns and the band stayed raw.
+            for (var by = -3; by <= 3; by = by + 1) {
+                for (var bx = -3; bx <= 3; bx = bx + 1) {
                     if (bx == 0 && by == 0) { continue; }
                     let q = vec2<i32>(i32(gid.x) + bx, i32(gid.y) + by);
                     if (q.x < 0 || q.y < 0 || q.x >= i32(u.size.x) || q.y >= i32(u.size.y)) {
@@ -1454,6 +1458,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 hist_m1 = seed_m1 / seed_w;
                 hist_m2 = seed_m2 / seed_w;
                 n_hist = min((seed_n / seed_w) * 0.5, 8.0);
+                seeded = true;
             }
         }
         // Canonical blend: cumulative average while the history is
@@ -1472,7 +1477,18 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // wavelet filter's luminance sigma. Young history makes this
         // unreliable; the first à-trous iteration substitutes a
         // spatial estimate when n < 4 (accum.w carries n via moments).
-        let variance = max(m2 - m1 * m1, 0.0);
+        var variance = max(m2 - m1 * m1, 0.0);
+        // A newborn with NOTHING to borrow is a 1-sample estimate whose true
+        // variance is unknown — not zero, which is what m2 - m1² of a single
+        // value degenerates to. Zero variance tells the wavelet the pixel is
+        // CONVERGED, so the raw outlier survived every iteration: that was
+        // the residual noise band on wide stream-ins under camera
+        // translation. Write a frank variance instead so the à-trous blurs
+        // these pixels hard; one converged frame later the real statistics
+        // take over.
+        if (n_new <= 1.5 && !seeded) {
+            variance = max(l_new * l_new, 0.25);
+        }
         accum_out[idx] = vec4<f32>(out_irr, variance);
         moments_out[idx] = vec4<f32>(m1, m2, n_new, depth);
         if (debug == 22.0) {
