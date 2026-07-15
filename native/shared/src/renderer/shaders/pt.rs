@@ -1406,6 +1406,55 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             hist_m1 /= wsum;
             hist_m2 /= wsum;
             n_hist = hist_n / wsum;
+        } else {
+            // PT-9 — disocclusion seeding. A true disocclusion used to start
+            // from the raw 1-spp sample with variance EXACTLY zero (m2 - m1²
+            // of a single value), so freshly streamed-in pixels — the whole
+            // viewport periphery whenever the camera translates — showed raw
+            // path noise until history rebuilt. Indoors (bounce-dominated
+            // light) that read as a salt-and-pepper ring around a clean
+            // centre. But a newborn's NEIGHBOURS usually hold converged
+            // history for the very same surface (the wall streaming in at
+            // the screen edge continues inward), and accum[]/moments[] are
+            // the previous frame's buffers — race-free to read at any texel.
+            // Borrow from depth-consistent, converged (n ≥ 4) neighbours,
+            // weighted by their history length; inherit HALF their history
+            // (capped at 8) so the canonical 1/N blend still folds real
+            // fresh samples in quickly. A pixel with no depth-compatible
+            // neighbour (a genuinely new surface, e.g. rounding a doorway)
+            // keeps the honest raw start — there is nothing to borrow.
+            let zl_here = lin_depth(depth);
+            let btol = 0.1 * zl_here + 0.02;
+            var seed_rgb = vec3<f32>(0.0);
+            var seed_m1 = 0.0;
+            var seed_m2 = 0.0;
+            var seed_n = 0.0;
+            var seed_w = 0.0;
+            for (var by = -2; by <= 2; by = by + 1) {
+                for (var bx = -2; bx <= 2; bx = bx + 1) {
+                    if (bx == 0 && by == 0) { continue; }
+                    let q = vec2<i32>(i32(gid.x) + bx, i32(gid.y) + by);
+                    if (q.x < 0 || q.y < 0 || q.x >= i32(u.size.x) || q.y >= i32(u.size.y)) {
+                        continue;
+                    }
+                    let qidx = u32(q.y) * u.size.x + u32(q.x);
+                    let m = moments[qidx];
+                    if (m.w >= 0.9999999 || m.z < 4.0) { continue; }
+                    if (abs(lin_depth(m.w) - zl_here) > btol) { continue; }
+                    let wt = m.z;
+                    seed_rgb += accum[qidx].rgb * wt;
+                    seed_m1 += m.x * wt;
+                    seed_m2 += m.y * wt;
+                    seed_n += m.z * wt;
+                    seed_w += wt;
+                }
+            }
+            if (seed_w > 0.0) {
+                hist_rgb = seed_rgb / seed_w;
+                hist_m1 = seed_m1 / seed_w;
+                hist_m2 = seed_m2 / seed_w;
+                n_hist = min((seed_n / seed_w) * 0.5, 8.0);
+            }
         }
         // Canonical blend: cumulative average while the history is
         // young (alpha = 1/N), settling to EMA. The floor is 0.1
