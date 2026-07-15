@@ -1,5 +1,12 @@
 export {
-  initWindow, closeWindow, windowShouldClose, attachToHwnd, resize,
+  initWindow, closeWindow, windowShouldClose, resize,
+  // Embedding (Perry UI `BloomView`, or any host that owns a native view).
+  // attachToNativeView is the portable one and is what new code should use;
+  // attachToHwnd is Windows-only, returns nothing, and is kept for the existing
+  // callers. Until now only the DEPRECATED one was reachable from the `bloom`
+  // root, which is a good way to make everyone write the wrong call.
+  attachToNativeView, attachToNSView, attachToUIView, attachToSurface,
+  attachToHwnd,
   beginDrawing, endDrawing, takeScreenshot, clearBackground, setEnvClearFromHdr,
   setTargetFPS, getDeltaTime, getFPS, getTime,
   getScreenWidth, getScreenHeight,

@@ -1,0 +1,12 @@
+{
+  "name": "bloom-perry-embed",
+  "version": "0.1.0",
+  "dependencies": {
+    "bloom": "file:../../"
+  },
+  "perry": {
+    "allow": {
+      "nativeLibrary": ["bloom", "bloom/core"]
+    }
+  }
+}
