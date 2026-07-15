@@ -5,6 +5,14 @@ import { Color, Model, Vec3, Mat4, BoundingBox } from '../core/types';
 declare function bloom_load_model(path: number): number;
 declare function bloom_draw_model(handle: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_model_rotated(handle: number, x: number, y: number, z: number, scale: number, rotY: number, colorPackedArgb: number): void;
+declare function bloom_draw_model_transform16(
+  handle: number,
+  m0: number, m1: number, m2: number, m3: number,
+  m4: number, m5: number, m6: number, m7: number,
+  m8: number, m9: number, m10: number, m11: number,
+  m12: number, m13: number, m14: number, m15: number,
+  colorPackedArgb: number,
+): void;
 declare function bloom_set_model_foliage_wind(handle: number, amount: number): void;
 declare function bloom_set_foliage_shadow_motion(on: number): void;
 declare function bloom_unload_model(handle: number): void;
@@ -180,6 +188,40 @@ export function drawModelRotated(
   // Use unsigned-shift-zero to keep the value positive when stored as f64.
   const packed = (a | r | g | b) >>> 0;
   bloom_draw_model_rotated(model.handle, position.x, position.y, position.z, scale, rotY * Math.PI / 180, packed);
+}
+
+/**
+ * EN-039 — draw a model under a full column-major 4x4 transform, so an
+ * immediate-mode draw can pitch and roll. `drawModelRotated` above can only
+ * express a Y rotation: a held weapon cannot tilt with the aim, and neither can
+ * a thrown prop or a debris chunk.
+ *
+ * `m16` is column-major (same layout as `setSceneNodeTransform16` and as
+ * `mat4_*` in this engine — note the two conventions warning in the PT docs:
+ * `mat4_multiply` is RAW). It carries translation and scale too, so this
+ * REPLACES position/scale rather than combining with them.
+ *
+ * Skinned models are a no-op here on purpose: their joint matrices already bake
+ * world orientation, so applying a model matrix on top double-transforms them.
+ * Use `animUpdate` for those.
+ *
+ * Tint components are 0-255. RGBA packs into one f64 (ARGB byte order), as in
+ * `drawModelRotated`.
+ */
+export function drawModelTransform(model: Model, m16: number[], tint: Color): void {
+  const a = (tint.a & 0xff) << 24;
+  const r = (tint.r & 0xff) << 16;
+  const g = (tint.g & 0xff) <<  8;
+  const b =  tint.b & 0xff;
+  const packed = (a | r | g | b) >>> 0;
+  bloom_draw_model_transform16(
+    model.handle,
+    m16[0], m16[1], m16[2], m16[3],
+    m16[4], m16[5], m16[6], m16[7],
+    m16[8], m16[9], m16[10], m16[11],
+    m16[12], m16[13], m16[14], m16[15],
+    packed,
+  );
 }
 
 export function unloadModel(model: Model): void {
