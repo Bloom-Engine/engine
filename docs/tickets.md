@@ -84,7 +84,11 @@ have a `rotation` field that's actually honoured at draw time.
 
 ---
 
-## EN-003 — SSAO intensity / radius knobs 🟢
+## EN-003 — SSAO intensity / radius knobs ✅ *(closed 2026-07-15 — was already done)*
+
+> Stale bookkeeping, not new work: `set_ssao_intensity` / `set_ssao_radius`
+> are live in `ffi_core/visual.rs` + `src/core/index.ts`, declared in the
+> manifest, and present on web and watchOS. Marked open long after landing.
 
 **Why:** SSAO is in the pipeline (visible in F3 overlay). Engine
 exposes `setSsaoEnabled(on)` only — no intensity or radius
@@ -223,7 +227,10 @@ the shooter ships a binary without `notify` linked.
 
 ---
 
-## EN-009 — Multi-mesh `drawMeshWithMaterial` ergonomics 🟢
+## EN-009 — Multi-mesh `drawMeshWithMaterial` ergonomics ✅ *(closed 2026-07-15 — was already done)*
+
+> Stale bookkeeping: the `drawModelWithMaterial` wrapper exists in
+> `src/models/index.ts`.
 
 **Why:** rendering a multi-primitive GLB (like the 4 Kenney trees,
 where one variant has 3 primitives) now requires the caller to
@@ -1100,7 +1107,25 @@ building is muffled; zero underruns/glitches at 48 kHz with 32 voices.
 
 ---
 
-## EN-030 — UI widget layer ✅ *(shipped — TS-side, `src/menu.ts` in the shooter)*
+## EN-030 — UI widget layer 🔵 *(RE-OPENED 2026-07-15 — the ✅ was wrong)*
+
+> **Corrected 2026-07-15.** This read *"✅ shipped — TS-side, `src/menu.ts` in
+> the shooter"*. **The engine shipped nothing**: there is no `src/ui/` and no
+> `src/widget*/` — verified. The ticket was closed by pointing at a *different
+> repo's* file.
+>
+> That closure hid the exact gap the ticket exists to name. Its own scope below
+> says a reusable `bloom/ui` module that "the editor can adopt incrementally".
+> Instead: the editor still hand-rolls every panel, and game #2 starts from zero.
+> One game having a menu is not an engine having a UI layer.
+>
+> The shooter's `src/menu.ts` is a good candidate to PROMOTE into `bloom/ui` — it
+> already carries the hard part (one focus model shared by mouse, keyboard,
+> gamepad and touch). But promoting it is the work, and it has not been done.
+>
+> Honest alternative if nobody will do it: close this as **won't-do** and say
+> plainly that UI is per-game forever, so the editor stops waiting. What must not
+> stand is a ✅ that means neither.
 
 **Why:** the engine offers immediate-mode shapes + text only. Every
 game needs pause/settings/menus, and the editor hand-rolls its own
@@ -1176,7 +1201,13 @@ screen with no main-thread stall > 100 ms; title screen appears
 
 ---
 
-## EN-033 — Bone-socket world-transform query 🟢
+## EN-033 — Bone-socket world-transform query ✅ *(closed 2026-07-15 — landed in 1150c6b)*
+
+> Stale bookkeeping, and it cost the shooter: SH-027 recorded its v2 as
+> "gated on EN-033" for weeks AFTER this landed, so the gate was imaginary.
+> `findJoint` + `jointWorld` are live; the shooter's weapon has ridden the
+> `tag_weapon` joint since. A ticket left open past its landing is not a
+> harmless clerical error — it stops downstream work that was already free.
 
 **Why:** games can't attach anything to a skeleton — the shooter's
 weapon can't ride the player's hand, muzzle points can't track fire
@@ -1220,18 +1251,49 @@ points.
 
 ---
 
-## EN-038 — `bloom_take_screenshot` never fires on Windows 🔴
+## EN-038 — `takeScreenshot` writes no file on Windows 🔴 *(diagnosis VOID — re-diagnose before acting)*
 
-**Symptom.** `takeScreenshot('x.png')` from TS produces nothing: no file, and —
-decisively — not even the unconditional `eprintln!("bloom: screenshot requested
--> '{}'")` at the top of the FFI, nor the `screenshot readback branch running`
-log in `end_frame`. So the native function is never entered at all; this is not
-a path/permissions problem or a failed readback.
+> ### ⚠️ The evidence below is invalid. Read this first.
+>
+> **Every conclusion in the original ticket rests on "the `eprintln!` never
+> printed". That proves nothing on Windows: `eprintln!` is DEAD after init here.**
+> Only the two init-time lines ever reach a redirected stderr, so "the native
+> function is never entered at all" was inferred from a channel that cannot
+> report. The "Perry FFI dispatch drops the call" suspect list is unfounded
+> speculation built on top of it.
+>
+> What is actually known, verified 2026-07-15:
+> - `bloom_take_screenshot` **exists**, is correctly registered
+>   (`ffi_core/assets.rs`), exported from `native/windows/src/lib.rs`, and is in
+>   the manifest. So the "Perry never dispatches it" theory has no support.
+> - The **F12 path works and produces true 4K captures** — and it goes through
+>   the *same* `renderer.screenshot_requested` + readback machinery, just
+>   triggered inside the wndproc instead of from TS. That strongly suggests the
+>   readback is fine and the problem, if any, is upstream of it.
+> - The symptom that is real and reproducible: **no file appears.**
+>
+> **How to re-diagnose (do not repeat the mistake):** probe with
+> `std::fs::write` to an ABSOLUTE path, or an atomic counter read back over an
+> FFI — never a log line. Check for the FILE, not for output. See
+> `shooter/docs/perry-quirks.md` and the dead-stderr note.
+>
+> **Cost so far.** This is not academic: with `takeScreenshot` unusable and
+> `tools/shot-window.ps1` returning stale desktop frames, visual verification on
+> Windows currently depends entirely on `tools/f12-shot.ps1` (PostMessage VK_F12).
+> A whole session's worth of "is it actually on screen?" questions had to route
+> through that one path, and several screenshots were believed before the
+> staleness was spotted.
+
+**Original symptom (evidence void — kept for the record).** `takeScreenshot('x.png')`
+from TS produces nothing: no file, and — supposedly decisively — not even the
+unconditional `eprintln!("bloom: screenshot requested -> '{}'")` at the top of
+the FFI, nor the `screenshot readback branch running` log in `end_frame`.
 
 **Repro (2026-07-12, shooter @ AAA round 1).** Call `takeScreenshot` from the
 game loop at a fixed frame. A `console.log` immediately before it prints; the
 engine's own log line never does. Three separate frames, plain relative path,
-same result.
+same result. *(The last sentence is the void part: the engine's log line CANNOT
+print post-init on Windows regardless of whether the FFI ran.)*
 
 **Why it matters.** Every screenshot-based harness in the shooter
 (`SELFTEST`, `PERFTEST`'s in-engine captures) is silently capturing nothing, and
@@ -1250,7 +1312,20 @@ known-working void/string FFI (`bloom_load_model` returns f64, so pick
 
 ---
 
-## EN-039 — immediate draw with a full transform 🟢
+## EN-039 — immediate draw with a full transform ✅ *(shipped 2026-07-15 — PR #100)*
+
+> `drawModelTransform(model, m16, tint)` — a full column-major 4x4, the
+> immediate-mode twin of `bloom_scene_set_transform16`. Skinned models are a
+> deliberate no-op (their joint matrices already bake orientation).
+>
+> **The API sketch below was wrong and the correction is worth keeping:** it
+> said to route the matrix through the mesh scratch because "Perry can't pass
+> 16 f64 args". Perry can — `bloom_scene_set_transform16` already passes 17 and
+> always has. Spelling the matrix out keeps the call STATELESS: no scratch to
+> reset, no ordering hazard between a reset and a draw.
+>
+> Acceptance met: shooter SH-027 v2 (PR #22) — the gun points where the camera
+> points, verified by re-orienting the weapon with only the pitch changed.
 
 **Why.** `drawModelRotated` takes a single Y rotation, so an immediate-mode draw
 cannot pitch or roll. The shooter's weapon therefore cannot tilt with the
