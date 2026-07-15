@@ -5526,12 +5526,15 @@ impl Renderer {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0);
-        // PT-4 — ReSTIR DI stays behind an env flag until the many-light
-        // content that justifies it exists (roadmap: with ≤16 analytic
-        // lights plain NEE is nearly as good).
+        // PT-4/PT-9 — ReSTIR DI is ON by default now: interior scenes
+        // (the shooter's house) carry 7+ point lights and uniform 1-of-N
+        // NEE picks the light that matters for a pixel ~6% of the time —
+        // the indoor A/B showed ReSTIR shrinks disocclusion noise at no
+        // measurable frame cost. BLOOM_PT_RESTIR=0 restores plain NEE
+        // for comparison runs.
         let pt_restir = std::env::var("BLOOM_PT_RESTIR")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+            .map(|v| v != "0")
+            .unwrap_or(true);
 
         // --- Ticket 014 V3: SW SDF sphere-trace pipeline ---
         // Always built. At dispatch time we pick SDF over Hi-Z when
