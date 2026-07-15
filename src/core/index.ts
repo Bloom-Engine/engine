@@ -1,7 +1,19 @@
 import { Color, Camera2D, Camera3D } from './types';
 
 export type { Color, Vec2, Vec3, Vec4, Rect, Camera2D, Camera3D, Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4, RayHit, FrustumPlanes } from './types';
-export { Color, ColorConstants, Colors } from './colors';
+// GH #53 — `Color` is deliberately NOT re-exported from './colors' any more.
+// `Color` is the RGBA TYPE (`./types`, re-exported above); './colors' exports a
+// palette MAP that also happened to be called `Color`, so the name arrived at
+// every consumer as both a type and a value. It shadowed the thing people
+// actually annotate with. The palette has always had two other names —
+// `Colors` and `ColorConstants` (the latter is literally `= Color`) — so
+// nothing is lost by dropping the third.
+//
+// Verified before removing: no code in engine, shooter, editor, garden or jump
+// reads the palette through the name `Color` (i.e. `Color.Red`). `jump` imports
+// `Color` from here, but only ever in TYPE position (`const WHITE: Color = {...}`),
+// which the type re-export above still serves.
+export { ColorConstants, Colors } from './colors';
 export { Key, MouseButton } from './keys';
 
 // FFI declarations
