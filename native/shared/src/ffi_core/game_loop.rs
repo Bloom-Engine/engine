@@ -348,7 +348,7 @@ macro_rules! __bloom_ffi_game_loop {
         #[no_mangle]
         pub extern "C" fn bloom_inject_key_down(key: f64) {
             $crate::ffi::guard("bloom_inject_key_down", move || {
-                engine().input.set_key_down(key as usize);
+                engine().input.inject_key_down(key as usize);
         })
         }
 
@@ -356,7 +356,7 @@ macro_rules! __bloom_ffi_game_loop {
         #[no_mangle]
         pub extern "C" fn bloom_inject_key_up(key: f64) {
             $crate::ffi::guard("bloom_inject_key_up", move || {
-                engine().input.set_key_up(key as usize);
+                engine().input.inject_key_up(key as usize);
         })
         }
 

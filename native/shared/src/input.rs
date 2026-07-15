@@ -18,6 +18,21 @@ pub struct InputState {
     keys_released: [bool; MAX_KEYS],
     prev_keys_down: [bool; MAX_KEYS],
 
+    // Injected keys (bloom_inject_key_down/up) are staged here and applied at the
+    // top of begin_frame, rather than written straight into keys_down.
+    //
+    // They HAVE to be, and the reason is the frame order: a real key arrives in
+    // poll_events(), which runs BEFORE begin_frame(), so the edge
+    // (keys_down && !prev_keys_down) is computed for it. An injected key is set
+    // from the game loop — AFTER begin_frame — so end_frame() copied it into
+    // prev_keys_down before begin_frame ever got to look at it, and the edge was
+    // never computed at all. is_key_down() saw the key; is_key_pressed() never
+    // did. That silently made the injection API useless for anything
+    // edge-triggered, which is to say every menu and every UI in every game
+    // built on this engine.
+    pending_key_down: [bool; MAX_KEYS],
+    pending_key_up: [bool; MAX_KEYS],
+
     pub mouse_x: f64,
     pub mouse_y: f64,
     pub mouse_delta_x: f64,
@@ -83,6 +98,8 @@ impl InputState {
             keys_down: [false; MAX_KEYS],
             keys_released: [false; MAX_KEYS],
             prev_keys_down: [false; MAX_KEYS],
+            pending_key_down: [false; MAX_KEYS],
+            pending_key_up: [false; MAX_KEYS],
             mouse_x: 0.0,
             mouse_y: 0.0,
             mouse_delta_x: 0.0,
@@ -117,6 +134,20 @@ impl InputState {
     }
 
     pub fn begin_frame(&mut self) {
+        // Apply injected keys BEFORE the edge computation below, so an injection
+        // made during the previous frame reads exactly like a real key press:
+        // down this frame, not-down last frame => keys_pressed. See the note on
+        // pending_key_down.
+        for i in 0..MAX_KEYS {
+            if self.pending_key_down[i] {
+                self.keys_down[i] = true;
+                self.pending_key_down[i] = false;
+            }
+            if self.pending_key_up[i] {
+                self.keys_down[i] = false;
+                self.pending_key_up[i] = false;
+            }
+        }
         if self.cursor_disabled {
             self.mouse_delta_x = self.raw_delta_x;
             self.mouse_delta_y = self.raw_delta_y;
@@ -160,8 +191,19 @@ impl InputState {
     }
 
     // Keyboard
+    /// Real key events, delivered from the platform's message pump. These run
+    /// before begin_frame(), so writing keys_down directly is correct here.
     pub fn set_key_down(&mut self, key: usize) { if key < MAX_KEYS { self.keys_down[key] = true; } }
     pub fn set_key_up(&mut self, key: usize) { if key < MAX_KEYS { self.keys_down[key] = false; } }
+
+    /// Synthetic key events (bloom_inject_key_down/up), which callers raise from
+    /// inside the game loop. Staged, not written — see pending_key_down.
+    pub fn inject_key_down(&mut self, key: usize) {
+        if key < MAX_KEYS { self.pending_key_down[key] = true; self.pending_key_up[key] = false; }
+    }
+    pub fn inject_key_up(&mut self, key: usize) {
+        if key < MAX_KEYS { self.pending_key_up[key] = true; self.pending_key_down[key] = false; }
+    }
 
     pub fn is_key_pressed(&self, key: usize) -> bool { key < MAX_KEYS && self.keys_pressed[key] }
     pub fn is_key_down(&self, key: usize) -> bool { key < MAX_KEYS && self.keys_down[key] }
