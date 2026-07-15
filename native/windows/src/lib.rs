@@ -61,6 +61,26 @@ fn map_keycode(vk: u32) -> usize {
     }
 }
 
+// Windows reports the GENERIC modifier VKs — VK_SHIFT (0x10), VK_CONTROL (0x11),
+// VK_MENU (0x12) — in WM_KEYDOWN/UP for BOTH the left and right keys. The
+// side-specific codes (VK_LSHIFT 0xA0, etc.) come back only from GetKeyState,
+// never in the message wParam. map_keycode knows only the side-specific codes,
+// so a raw generic VK mapped to 0 and was dropped: every Shift and Ctrl press
+// vanished, which is why sprint (Shift) and dodge (Ctrl) silently never fired on
+// Windows. Recover the side from lParam — scancode for Shift (LShift = 0x2A,
+// RShift = 0x36), the extended-key bit for Ctrl/Alt (the right-hand ones are
+// flagged extended).
+fn resolve_modifier_vk(vk: u32, lparam: isize) -> u32 {
+    let scancode = ((lparam >> 16) & 0xFF) as u32;
+    let extended = (lparam >> 24) & 1 != 0;
+    match vk {
+        0x10 => if scancode == 0x36 { 0xA1 } else { 0xA0 }, // VK_SHIFT   -> R/L
+        0x11 => if extended { 0xA3 } else { 0xA2 },          // VK_CONTROL -> R/L
+        0x12 => if extended { 0xA5 } else { 0xA4 },          // VK_MENU    -> R/L
+        _ => vk,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Crash reporting (title-freeze / EN-020 investigation): the game was dying
 // with empty stderr, no WER event, and no dump — i.e. invisibly. Catch
@@ -246,7 +266,7 @@ mod win32 {
                 LRESULT(0)
             }
             WM_KEYDOWN => {
-                let bloom_key = map_keycode(wparam.0 as u32);
+                let bloom_key = map_keycode(resolve_modifier_vk(wparam.0 as u32, lparam.0));
                 if bloom_key > 0 {
                     if let Some(eng) = ENGINE.get_mut() {
                         eng.input.set_key_down(bloom_key);
@@ -275,7 +295,7 @@ mod win32 {
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_KEYUP => {
-                let bloom_key = map_keycode(wparam.0 as u32);
+                let bloom_key = map_keycode(resolve_modifier_vk(wparam.0 as u32, lparam.0));
                 if bloom_key > 0 {
                     if let Some(eng) = ENGINE.get_mut() {
                         eng.input.set_key_up(bloom_key);
@@ -494,11 +514,11 @@ mod win32 {
                 }
             }
             WM_KEYDOWN => {
-                let k = map_keycode(wparam.0 as u32);
+                let k = map_keycode(resolve_modifier_vk(wparam.0 as u32, lparam.0));
                 if k > 0 { if let Some(eng) = ENGINE.get_mut() { eng.input.set_key_down(k); } }
             }
             WM_KEYUP => {
-                let k = map_keycode(wparam.0 as u32);
+                let k = map_keycode(resolve_modifier_vk(wparam.0 as u32, lparam.0));
                 if k > 0 { if let Some(eng) = ENGINE.get_mut() { eng.input.set_key_up(k); } }
             }
             WM_MOUSEMOVE => {
