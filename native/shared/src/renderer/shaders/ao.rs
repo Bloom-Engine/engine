@@ -186,6 +186,68 @@ fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32) -> vec3<f32> {
     return vec3<f32>(view_x, view_y, view_z);
 }
 
+// Mip level per march step — depends only on step_size, so it is computed
+// once per pixel in cs_main and read by every scan_direction call.
+var<private> mip_per_step: array<i32, 8>;
+
+// March one horizon direction (both signs) and return its visibility
+// contribution in [0, 1]. Factored out of cs_main so the adaptive full-scan
+// fallback below can reuse it for the directions outside this frame's phase.
+fn scan_direction(angle: f32, P: vec3<f32>, N: vec3<f32>, uv: vec2<f32>,
+                  step_size: f32, inv_radius: f32) -> f32 {
+    let dir = vec2<f32>(cos(angle), sin(angle));
+
+    var max_horizon_pos = -1.0;
+    var max_horizon_neg = -1.0;
+    var pos_on_sky = false;
+    var neg_on_sky = false;
+
+    for (var s = 1u; s <= N_STEPS; s = s + 1u) {
+        let offset = dir * step_size * f32(s);
+        let mip = mip_per_step[s - 1u];
+
+        if (!pos_on_sky) {
+            let uv_pos = uv + offset;
+            let z_pos = hiz_sample(uv_pos, mip);
+            if (z_pos >= HIZ_SKY_Z * 0.5) {
+                pos_on_sky = true;
+            } else {
+                let S_pos = view_pos_from_linear(uv_pos, z_pos);
+                let diff_pos = S_pos - P;
+                let dist_pos = length(diff_pos);
+                if (dist_pos > 0.001) {
+                    let h_pos = dot(diff_pos, N) / dist_pos;
+                    let atten = saturate(1.0 - dist_pos * inv_radius);
+                    max_horizon_pos = max(max_horizon_pos, mix(-1.0, h_pos, atten));
+                }
+            }
+        }
+
+        if (!neg_on_sky) {
+            let uv_neg = uv - offset;
+            let z_neg = hiz_sample(uv_neg, mip);
+            if (z_neg >= HIZ_SKY_Z * 0.5) {
+                neg_on_sky = true;
+            } else {
+                let S_neg = view_pos_from_linear(uv_neg, z_neg);
+                let diff_neg = S_neg - P;
+                let dist_neg = length(diff_neg);
+                if (dist_neg > 0.001) {
+                    let h_neg = dot(diff_neg, N) / dist_neg;
+                    let atten = saturate(1.0 - dist_neg * inv_radius);
+                    max_horizon_neg = max(max_horizon_neg, mix(-1.0, h_neg, atten));
+                }
+            }
+        }
+
+        if (pos_on_sky && neg_on_sky) { break; }
+    }
+
+    let vis_pos = 1.0 - saturate(max_horizon_pos);
+    let vis_neg = 1.0 - saturate(max_horizon_neg);
+    return (vis_pos + vis_neg) * 0.5;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = gid.xy;
@@ -243,7 +305,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Mip-per-step: step s covers ~s * step_size * mip0_w pixels;
     // take floor(log2(that)). Precomputed once per pixel.
     let step_pixels = step_size * f32(u.size.x);
-    var mip_per_step: array<i32, 8>;
     for (var s = 0u; s < N_STEPS; s = s + 1u) {
         let d_px = step_pixels * f32(s + 1u);
         mip_per_step[s] = clamp(i32(floor(log2(max(d_px, 1.0)))), 0, HIZ_MAX_MIP);
@@ -261,69 +322,57 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // high-frequency geometry, the entire surface's AO pulsed in
     // lockstep once per 4-frame cycle (periodic wall-wide flicker).
     // Dithered, the same bias becomes 2×2 spatial noise that the
-    // bilateral blur and the EMA absorb completely.
+    // bilateral blur and the EMA absorb.
     let quad_offset = (px.x & 1u) + ((px.y & 1u) << 1u);
     let phase = (u.size.z + quad_offset) % N_PHASES;
+    var scanned = 0u;
+    var vis_min = 1.0;
+    var vis_max = 0.0;
     for (var k = 0u; k < N_DIRS_PER_FRAME; k = k + 1u) {
         let d = phase + k * N_PHASES;
         let angle = (f32(d) / f32(N_DIRS_TOTAL)) * PI + jitter_angle;
-        let dir = vec2<f32>(cos(angle), sin(angle));
-
-        var max_horizon_pos = -1.0;
-        var max_horizon_neg = -1.0;
-        var pos_on_sky = false;
-        var neg_on_sky = false;
-
-        for (var s = 1u; s <= N_STEPS; s = s + 1u) {
-            let offset = dir * step_size * f32(s);
-            let mip = mip_per_step[s - 1u];
-
-            if (!pos_on_sky) {
-                let uv_pos = uv + offset;
-                let z_pos = hiz_sample(uv_pos, mip);
-                if (z_pos >= HIZ_SKY_Z * 0.5) {
-                    pos_on_sky = true;
-                } else {
-                    let S_pos = view_pos_from_linear(uv_pos, z_pos);
-                    let diff_pos = S_pos - P;
-                    let dist_pos = length(diff_pos);
-                    if (dist_pos > 0.001) {
-                        let h_pos = dot(diff_pos, N) / dist_pos;
-                        let atten = saturate(1.0 - dist_pos * inv_radius);
-                        max_horizon_pos = max(max_horizon_pos, mix(-1.0, h_pos, atten));
-                    }
-                }
-            }
-
-            if (!neg_on_sky) {
-                let uv_neg = uv - offset;
-                let z_neg = hiz_sample(uv_neg, mip);
-                if (z_neg >= HIZ_SKY_Z * 0.5) {
-                    neg_on_sky = true;
-                } else {
-                    let S_neg = view_pos_from_linear(uv_neg, z_neg);
-                    let diff_neg = S_neg - P;
-                    let dist_neg = length(diff_neg);
-                    if (dist_neg > 0.001) {
-                        let h_neg = dot(diff_neg, N) / dist_neg;
-                        let atten = saturate(1.0 - dist_neg * inv_radius);
-                        max_horizon_neg = max(max_horizon_neg, mix(-1.0, h_neg, atten));
-                    }
-                }
-            }
-
-            if (pos_on_sky && neg_on_sky) { break; }
-        }
-
-        let vis_pos = 1.0 - saturate(max_horizon_pos);
-        let vis_neg = 1.0 - saturate(max_horizon_neg);
-        ao_sum = ao_sum + (vis_pos + vis_neg) * 0.5;
+        let vis = scan_direction(angle, P, N, uv, step_size, inv_radius);
+        ao_sum = ao_sum + vis;
+        scanned = scanned + 1u;
+        vis_min = min(vis_min, vis);
+        vis_max = max(vis_max, vis);
     }
 
-    // Per-frame partial AO: normalise by the N_DIRS_PER_FRAME we
-    // actually scanned. Temporal blend below reconstructs the full
-    // 8-direction signal via the 4-frame EMA.
-    let ao_raw = ao_sum / f32(N_DIRS_PER_FRAME);
+    // Adaptive full scan — the checkerboard fix. The quad dither above
+    // assumes its 2×2 phase noise is ABSORBED: spatially by the bilateral
+    // blur, temporally by the EMA. At alpha-cutout silhouettes (leaf cards
+    // up close) both absorbers fail at once — the blur edge-stops on the
+    // huge leaf-to-background depth delta, and wind sway keeps the history
+    // reprojecting onto what was sky or another card last frame — so the
+    // per-phase disagreement showed through as a stationary pale
+    // checkerboard at every leaf edge (scattered into 'white snow-dots' by
+    // TSR at renderScale < 1). Reconstruction can't be saved there, so
+    // remove the thing being reconstructed: when this pixel's own two
+    // directions disagree strongly (the anisotropy signature of a thin
+    // cutout edge — one axis runs along the card, the other falls off to
+    // sky/background), or the surface is in the near field (where the
+    // screen-radius clamp makes per-direction variance extreme), scan the
+    // remaining six directions too. The pixel then carries the FULL
+    // 8-direction estimate this frame: nothing left to disagree with its
+    // quad neighbours, checkerboard gone by construction. Flat walls,
+    // ground and grass-over-ground keep the cheap 2-direction path (their
+    // directions agree), so the 4× fan-out cost stays foliage-local.
+    let anisotropic = (vis_max - vis_min) > 0.3;
+    let near_field = (-P.z) < 1.5;
+    if (anisotropic || near_field) {
+        for (var d = 0u; d < N_DIRS_TOTAL; d = d + 1u) {
+            if ((d % N_PHASES) == phase) { continue; }
+            let angle = (f32(d) / f32(N_DIRS_TOTAL)) * PI + jitter_angle;
+            ao_sum = ao_sum + scan_direction(angle, P, N, uv, step_size, inv_radius);
+            scanned = scanned + 1u;
+        }
+    }
+
+    // Partial-scan AO: normalise by the directions actually scanned.
+    // For 2-direction pixels the temporal blend below reconstructs the
+    // full 8-direction signal via the 4-frame EMA; full-scan pixels
+    // already carry it.
+    let ao_raw = ao_sum / f32(scanned);
 
     // --- Screen-space contact shadows ---
     // Gate on surface/light orientation — a back-facing pixel has no
