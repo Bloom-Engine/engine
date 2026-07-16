@@ -646,6 +646,59 @@ pub fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f64, r: f64,
     }
 }
 
+/// EN-039 — immediate draws that can pitch and roll, not just yaw.
+///
+/// The web crate was the only platform without it, which failed ffi-parity:
+/// every manifest function must be reachable from every platform, and this one
+/// is NOT a legitimate gap. The documented WEB_GAP_ALLOWLIST entries are all
+/// pointer-taking calls blocked on the Perry-WASM linear-memory bridge — this
+/// takes the matrix as 16 loose f64 scalars precisely so it can cross any FFI,
+/// so allowlisting it would have been recording a TODO for work that is four
+/// lines of typing.
+///
+/// Mirrors the shared macro (ffi_core/models.rs) exactly, including the skinned
+/// early-out: a skinned model's pose is driven by the anim palette, so drawing
+/// it through the static cache would fight the skinning.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_draw_model_transform16(
+    handle: f64,
+    m0: f64, m1: f64, m2: f64, m3: f64,
+    m4: f64, m5: f64, m6: f64, m7: f64,
+    m8: f64, m9: f64, m10: f64, m11: f64,
+    m12: f64, m13: f64, m14: f64, m15: f64,
+    color_packed_argb: f64,
+) {
+    let bits = color_packed_argb as u32;
+    let a = ((bits >> 24) & 0xff) as f32 / 255.0;
+    let r = ((bits >> 16) & 0xff) as f32 / 255.0;
+    let g = ((bits >>  8) & 0xff) as f32 / 255.0;
+    let b = ( bits        & 0xff) as f32 / 255.0;
+    let s = [
+        m0, m1, m2, m3,
+        m4, m5, m6, m7,
+        m8, m9, m10, m11,
+        m12, m13, m14, m15,
+    ];
+    // Column-major, same unpacking as the shared macro.
+    let mut mat = [[0.0f32; 4]; 4];
+    for col in 0..4 {
+        for row in 0..4 {
+            mat[col][row] = s[col * 4 + row] as f32;
+        }
+    }
+    let eng = engine();
+    if let Some(model) = eng.models.get(handle) {
+        let handle_bits = handle.to_bits();
+        if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+            if eng.renderer.is_model_skinned(handle_bits) {
+                return;
+            }
+            eng.renderer.draw_model_cached_transform(handle_bits, mat, [r, g, b, a]);
+        }
+    }
+}
+
 #[wasm_bindgen]
 pub fn bloom_draw_model_rotated(
     handle: f64, x: f64, y: f64, z: f64,

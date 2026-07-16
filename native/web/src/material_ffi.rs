@@ -488,8 +488,13 @@ pub fn bloom_anim_update(handle: f64, dt: f64, scale: f64, px: f64, py: f64, pz:
     eng.models.advance_and_update(handle, dt as f32);
     if let Some(anim) = eng.models.get_animation(handle) {
         if !anim.joint_matrices.is_empty() {
+            // PT-7: the anim handle keys the prev-palette pairing for skinned
+            // motion vectors — the same key the shared FFI passes
+            // (ffi_core/models.rs). Without it this call does not compile: the
+            // web backend was left behind when `key` was added, which is what
+            // broke build-web on main.
             eng.renderer.set_joint_matrices_scaled(
-                &anim.joint_matrices, scale as f32,
+                handle.to_bits(), &anim.joint_matrices, scale as f32,
                 [px as f32, py as f32, pz as f32], rot_y_f.sin(), rot_y_f.cos());
         }
     }
