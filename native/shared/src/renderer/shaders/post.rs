@@ -690,7 +690,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 /// to a fully sub-pixel-resolved image.
 pub(in crate::renderer) const TAA_SHADER_WGSL: &str = "
 struct TaaParams {
-    /// x = blend factor (current-frame weight), yzw padding.
+    /// x = blend factor (current-frame weight); yz = the CURRENT frame's
+    /// jitter as a composed-texture UV offset (see the unjitter note at the
+    /// current-frame sample); w padding.
     params: vec4<f32>,
     /// Inverse of the current-frame view-projection matrix —
     /// reconstructs world-space position for history reprojection.
@@ -786,7 +788,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // composite pass reads to apply AO only to indirect-dominated
     // pixels; pass it through blended with the colour so history
     // stays consistent.
-    let current_sample = sample_catmull_rom(in.uv);
+    // UNJITTER the current-frame taps (2026-07-16 sparkle slice 2). The
+    // composed image was RENDERED with this frame's sub-pixel jitter, so a
+    // feature that belongs at pixel p sits at p + jitter — sampling at in.uv
+    // fed alpha x (jitter-phase difference) of shimmer into every output
+    // frame by construction, which the variance rig measured as TAA adding
+    // 2x flicker on static detail versus TAA off. Resampling the current
+    // frame at its true (unjittered) position is how the jitter becomes
+    // sub-pixel INFORMATION (via the Catmull-Rom fractional reconstruction)
+    // instead of output noise. History reprojection stays in jittered space
+    // on purpose: the velocity-ref VP already bakes the current jitter
+    // (EN-022), so prev_uv lands correctly without this offset.
+    let src_uv = in.uv + u.params.yz;
+    let current_sample = sample_catmull_rom(src_uv);
     let current = current_sample.rgb;
     let current_w = current_sample.a;
 
@@ -841,14 +855,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // hard min/max bound.
     let texel = vec2<f32>(1.0 / f32(textureDimensions(composed_tex).x),
                           1.0 / f32(textureDimensions(composed_tex).y));
-    let center_rgb = textureSample(composed_tex, composed_samp, in.uv).rgb;
+    // Neighborhood statistics track the same unjittered position, or the
+    // clamp window would wobble against the sample it bounds.
+    let center_rgb = textureSample(composed_tex, composed_samp, src_uv).rgb;
     var m1 = rgb_to_ycocg(center_rgb);
     var m2 = m1 * m1;
     let n_samples = 9.0;
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             if (x == 0 && y == 0) { continue; }
-            let s_uv = in.uv + vec2<f32>(f32(x), f32(y)) * texel;
+            let s_uv = src_uv + vec2<f32>(f32(x), f32(y)) * texel;
             let s_rgb = textureSample(composed_tex, composed_samp, s_uv).rgb;
             let s = rgb_to_ycocg(s_rgb);
             m1 = m1 + s;

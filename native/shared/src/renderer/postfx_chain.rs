@@ -369,8 +369,16 @@ impl Renderer {
         let s2 = self.render_scale * self.render_scale;
         let steady = 0.05 + 0.05 * s2;
         let alpha = if self.taa_frame_index < 4 { 1.0 } else { steady };
+        // yz = the current jitter as a composed-UV offset. Content shifts by
+        // -jitter_ndc through the GL-convention perspective divide (w = -z),
+        // so the rendered position of a feature is uv + (-0.5*jx, +0.5*jy)
+        // (v axis flips). Empirically arbitrated by the variance rig: the
+        // wrong sign DOUBLES the effective jitter and the numbers scream.
         let tp = TaaParams {
-            params: [alpha, 0.0, 0.0, 0.0],
+            params: [alpha,
+                     -0.5 * self.current_jitter_ndc[0],
+                      0.5 * self.current_jitter_ndc[1],
+                      0.0],
             inv_vp: self.current_inv_vp_matrix,
             prev_vp: self.prev_vp_matrix,
         };
