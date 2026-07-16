@@ -51,7 +51,11 @@ for (const dir of INCLUDE_DIRS) {
   const abs = path.join(ROOT, dir);
   if (!fs.existsSync(abs)) continue;
   for (const file of walk(abs)) {
-    const rel = path.relative(ROOT, file);
+    // Forward slashes ALWAYS — path.relative yields backslashes on Windows, so
+    // every baseline lookup missed there and the grandfather list was silently
+    // inert: the same tree passed in CI (Linux) and failed on a Windows dev box.
+    // The baseline file is checked in with '/' keys, so normalise to match it.
+    const rel = path.relative(ROOT, file).split(path.sep).join('/');
     if (!EXTENSIONS.has(path.extname(file))) continue;
     if (EXCLUDE.some((re) => re.test(rel))) continue;
     const lines = (fs.readFileSync(file, 'utf8').match(/\n/g) || []).length; // == wc -l
