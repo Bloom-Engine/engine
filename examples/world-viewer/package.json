@@ -1,0 +1,12 @@
+{
+  "name": "bloom-world-viewer",
+  "version": "0.1.0",
+  "dependencies": {
+    "bloom": "file:../../"
+  },
+  "perry": {
+    "allow": {
+      "nativeLibrary": ["bloom", "bloom/core", "bloom/world", "bloom/scene"]
+    }
+  }
+}
