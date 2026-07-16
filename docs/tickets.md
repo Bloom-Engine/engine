@@ -1776,9 +1776,18 @@ Two more things learned while verifying:
   single instant mixes tier-warmup states — trust 60 s averages only.
 - An apparent "HW loses the sun shadows" difference between screenshot pairs
   did NOT survive scrutiny: the drifting cloud deck (45% shadow strength)
-  confounds any two captures taken minutes apart. A real GI-quality A/B needs
-  clouds off (`setCloudShadows(0,...)`) and same-frame capture. UNRESOLVED —
-  do this before ever defaulting HW on.
+  confounds any two captures taken minutes apart.
+- **The clouds-off A/B was then done (same evening,
+  `setCloudShadows(0,...)` probe, 30 s settle each, gate prints verified):**
+  both paths render correct sun shadows; the difference is TONAL — HW GI is
+  mildly warmer/brighter in the indirect term (most visible on the house
+  facade picking up warm ground bounce; SW reads slightly greyer). At the
+  outdoor vantage it is a subtle grade-level difference, not a structural
+  quality win, for ~30% of the frame (14.4 vs 20.3 fps). Verdict: SW stays
+  the default; opt in per box with `BLOOM_HW_GI=1` where the GPU affords it.
+  Captures archived in the shooter's `tools/.testout/gi-ab-{sw,hw}.png`.
+  Re-open the default question for INDOOR scenes (bounce matters more there;
+  the menu backdrop cannot exercise INDOORCAM) or on stronger hardware.
 
 ## HW-vs-SW Lumen: MEASURED at last (2026-07-16 evening) — HW costs +20 ms/frame on the 760M
 
