@@ -83,16 +83,20 @@ pub struct AudioMixer {
     /// EN-029 — per-sound routing: (bus, reverb send, low-pass cutoff Hz).
     /// A property of the sound, not of each play call.
     routes: std::collections::HashMap<u64, (u8, f32, f32)>,
+    /// EN-062 — monotonic voice-id allocator. Every play gets one; the id is
+    /// the handle for moving/stopping/re-pitching that one voice later.
+    next_voice: u64,
     tx: spsc::Producer<Cmd>,
     /// Present until the platform takes it for its audio thread; used for
     /// inline mixing on single-threaded targets (web).
     renderer: Option<AudioRenderer>,
 }
 
-/// Command-ring capacity. 256 in-flight commands comfortably exceeds any
-/// realistic burst (a command is one play/stop/volume change; the ring
-/// drains every audio callback, i.e. every ~10ms).
-const CMD_CAPACITY: usize = 256;
+/// Command-ring capacity. Live emitters (EN-062) stream per-frame position
+/// and volume updates — a dozen tracked voices at 60 fps is ~25 commands per
+/// frame, and boot routes sounds in bursts of hundreds. 1024 gives a hitch
+/// two full callback intervals of headroom before anything drops.
+const CMD_CAPACITY: usize = 1024;
 
 impl Default for AudioMixer {
     fn default() -> Self {
@@ -109,6 +113,7 @@ impl AudioMixer {
             sound_volumes: Vec::new(),
             master_volume: 1.0,
             routes: std::collections::HashMap::new(),
+            next_voice: 0,
             tx,
             renderer: Some(AudioRenderer::new(rx)),
         }
@@ -141,27 +146,89 @@ impl AudioMixer {
         self.sounds.alloc(Arc::new(data))
     }
 
-    pub fn play_sound(&mut self, handle: f64) {
-        let Some(data) = self.sounds.get(handle).cloned() else { return };
+    /// Shared play path. Returns the new voice's id (0.0 = unknown sound).
+    /// `ref_dist`/`rolloff` of 1 with a huge `max_dist` is exactly the
+    /// pre-EN-062 1/d behaviour, which is what the plain play calls use.
+    fn send_play(
+        &mut self, handle: f64, spatial: Option<[f32; 3]>, looping: bool,
+        ref_dist: f32, max_dist: f32, rolloff: f32,
+    ) -> f64 {
+        let Some(data) = self.sounds.get(handle).cloned() else { return 0.0 };
         let volume = self.get_sound_volume(handle);
         let (bus, send, lowpass) = self.routing(handle);
+        self.next_voice += 1;
+        let voice_id = self.next_voice;
         self.send(Cmd::PlaySound {
-            sound_id: handle.to_bits(), data, volume, spatial: None,
+            sound_id: handle.to_bits(),
+            voice_id,
+            data,
+            volume,
+            spatial,
+            looping,
+            ref_dist,
+            max_dist,
+            rolloff,
+            pitch: 1.0,
             bus, send, lowpass,
         });
+        voice_id as f64
+    }
+
+    pub fn play_sound(&mut self, handle: f64) {
+        self.send_play(handle, None, false, 1.0, 1.0e9, 1.0);
     }
 
     pub fn play_sound_3d(&mut self, handle: f64, x: f32, y: f32, z: f32) {
-        let Some(data) = self.sounds.get(handle).cloned() else { return };
-        let volume = self.get_sound_volume(handle);
-        let (bus, send, lowpass) = self.routing(handle);
-        self.send(Cmd::PlaySound {
-            sound_id: handle.to_bits(),
-            data,
-            volume,
-            spatial: Some([x, y, z]),
-            bus, send, lowpass,
-        });
+        self.send_play(handle, Some([x, y, z]), false, 1.0, 1.0e9, 1.0);
+    }
+
+    // ---- EN-062: live emitters ------------------------------------------
+    //
+    // A voice you can hold onto. `play_sound_3d_ex` returns a voice id; the
+    // id drives position/volume/pitch/low-pass updates and a click-free stop.
+    // This is what looping ambient emitters (river, wind, a creature's crawl)
+    // are made of — fire-and-forget can't move and can't loop.
+
+    /// Play with full spatial control. `looping` voices persist until
+    /// [`Self::stop_voice`]. `ref_dist` is the range that plays at full
+    /// volume, `rolloff` how hard the level falls past it, `max_dist` where
+    /// the mixer culls entirely. Returns the voice id (0.0 = unknown sound).
+    pub fn play_sound_3d_ex(
+        &mut self, handle: f64, x: f32, y: f32, z: f32,
+        looping: bool, ref_dist: f32, max_dist: f32, rolloff: f32,
+    ) -> f64 {
+        self.send_play(
+            handle, Some([x, y, z]), looping,
+            ref_dist.max(1e-3),
+            if max_dist > 0.0 { max_dist } else { 1.0e9 },
+            rolloff.max(0.0),
+        )
+    }
+
+    pub fn set_voice_position(&mut self, voice: f64, x: f32, y: f32, z: f32) {
+        self.send(Cmd::SetVoicePosition { voice_id: voice as u64, pos: [x, y, z] });
+    }
+
+    /// Fades the voice out over one mix block (~10 ms) and removes it — a
+    /// hard cut mid-waveform on a looping bed is an audible click.
+    pub fn stop_voice(&mut self, voice: f64) {
+        self.send(Cmd::StopVoice { voice_id: voice as u64 });
+    }
+
+    pub fn set_voice_volume(&mut self, voice: f64, volume: f32) {
+        self.send(Cmd::SetVoiceVolume { voice_id: voice as u64, volume });
+    }
+
+    /// Playback-rate multiplier, clamped 0.25..4. Doppler multiplies on top.
+    pub fn set_voice_pitch(&mut self, voice: f64, pitch: f32) {
+        self.send(Cmd::SetVoicePitch { voice_id: voice as u64, pitch });
+    }
+
+    /// Per-voice occlusion low-pass (Hz; 0 = bypass). Unlike
+    /// [`Self::set_sound_lowpass`] this muffles ONE emitter, not every voice
+    /// sharing the asset.
+    pub fn set_voice_lowpass(&mut self, voice: f64, cutoff: f32) {
+        self.send(Cmd::SetVoiceLowpass { voice_id: voice as u64, cutoff });
     }
 
     // ---- EN-029 routing ------------------------------------------------
@@ -452,8 +519,13 @@ mod tests {
         let dry = peak(&out);
 
         // Duck hard, effectively instantly, and hold well past the block.
+        // EN-062 — per-voice gains ramp linearly across one mix block (the
+        // anti-zipper contract), so a gain change fully lands on the block
+        // AFTER the one it arrives in. Measure the settled block.
         a.duck_bus(render::bus::SFX, 0.9, 0.0001, 0.5, 1.0);
         let mut ducked = [0.0f32; 512];
+        a.mix_output(&mut ducked);
+        ducked = [0.0f32; 512];
         a.mix_output(&mut ducked);
         assert!(peak(&ducked) < dry * 0.5,
             "duck had no effect: {} vs {}", peak(&ducked), dry);
@@ -557,5 +629,235 @@ mod tests {
         let mut out = [0.0f32; 32];
         a.mix_output(&mut out); // voice still holds its Arc
         assert!(out.iter().any(|&s| s != 0.0));
+    }
+
+    // ---- EN-062: spatial voices ----------------------------------------
+
+    /// All-0.5 mono signal: peaks read gains directly.
+    fn flat(len: usize) -> SoundData {
+        SoundData { samples: vec![0.5; len], sample_rate: 44_100, channels: 1 }
+    }
+
+    fn sine(freq: f32, len: usize) -> SoundData {
+        SoundData {
+            samples: (0..len)
+                .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / 44_100.0).sin())
+                .collect(),
+            sample_rate: 44_100,
+            channels: 1,
+        }
+    }
+
+    fn peak_lr(buf: &[f32]) -> (f32, f32) {
+        let mut l = 0.0f32;
+        let mut r = 0.0f32;
+        let mut i = 0;
+        while i + 1 < buf.len() {
+            l = l.max(buf[i].abs());
+            r = r.max(buf[i + 1].abs());
+            i += 2;
+        }
+        (l, r)
+    }
+
+    #[test]
+    fn looping_voice_persists_until_stop_voice() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(flat(64)); // 64 frames — far shorter than a block
+        // Listener at origin looking down -Z; source dead ahead at 1 m.
+        let v = a.play_sound_3d_ex(h, 0.0, 0.0, -1.0, true, 1.0, 0.0, 1.0);
+        assert!(v > 0.0, "no voice id returned");
+        let mut out = [0.0f32; 512];
+        for _ in 0..10 {
+            out = [0.0f32; 512];
+            a.mix_output(&mut out);
+        }
+        assert!(peak(&out) > 0.1, "looping voice died before StopVoice");
+        a.stop_voice(v);
+        // Fade block, then confirmed-silent blocks.
+        for _ in 0..3 {
+            out = [0.0f32; 512];
+            a.mix_output(&mut out);
+        }
+        assert_eq!(peak(&out), 0.0, "voice still audible after StopVoice");
+    }
+
+    #[test]
+    fn moving_a_voice_crosses_the_stereo_field() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(flat(1 << 16));
+        // Screen-left for a -Z-forward listener is -X (right = cross(f, up) = +X).
+        let v = a.play_sound_3d_ex(h, -10.0, 0.0, 0.0, true, 1.0, 0.0, 1.0);
+        let mut out = [0.0f32; 512];
+        a.mix_output(&mut out);
+        let (l1, r1) = peak_lr(&out);
+        assert!(l1 > r1 * 2.0, "left source not left-dominant: L={} R={}", l1, r1);
+
+        a.set_voice_position(v, 10.0, 0.0, 0.0);
+        // One block to ramp, one to settle.
+        for _ in 0..2 {
+            out = [0.0f32; 512];
+            a.mix_output(&mut out);
+        }
+        let (l2, r2) = peak_lr(&out);
+        assert!(r2 > l2 * 2.0, "moved source not right-dominant: L={} R={}", l2, r2);
+    }
+
+    #[test]
+    fn default_distance_model_is_still_one_over_d() {
+        // play_sound_3d (the pre-EN-062 API) must keep its loudness curve.
+        let run = |dist: f32| -> f32 {
+            let mut a = AudioMixer::new();
+            let h = a.load_sound(flat(1 << 16));
+            a.play_sound_3d(h, 0.0, 0.0, -dist);
+            let mut out = [0.0f32; 512];
+            a.mix_output(&mut out);
+            let (l, r) = peak_lr(&out);
+            (l * l + r * r).sqrt() // combined energy — pan-independent
+        };
+        let near = run(1.0);
+        let far = run(10.0);
+        let ratio = far / near;
+        assert!((ratio - 0.1).abs() < 0.02,
+            "distance curve changed: 10m/1m = {} (want ~0.1)", ratio);
+    }
+
+    #[test]
+    fn centered_pan_is_equal_power() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(flat(1 << 16));
+        a.play_sound_3d(h, 0.0, 0.0, -1.0); // dead ahead, 1 m → att 1
+        let mut out = [0.0f32; 512];
+        a.mix_output(&mut out);
+        let (l, r) = peak_lr(&out);
+        // 0.5 sample × cos(π/4) ≈ 0.3536 per channel (linear pan gave 0.25).
+        assert!((l - r).abs() < 0.01, "center source unbalanced: L={} R={}", l, r);
+        assert!(l > 0.32 && l < 0.39, "not equal-power: L={} (want ~0.354)", l);
+    }
+
+    #[test]
+    fn air_absorption_dulls_with_distance() {
+        // Nyquist tone: any low-pass crushes it. Normalise by the distance
+        // gain so only the FILTER is compared.
+        let run = |dist: f32| -> f32 {
+            let mut a = AudioMixer::new();
+            let h = a.load_sound(tone(1 << 16));
+            a.play_sound_3d(h, 0.0, 0.0, -dist);
+            let mut out = [0.0f32; 2048];
+            a.mix_output(&mut out);
+            let att = 1.0 / dist;
+            peak(&out) / att
+        };
+        let near = run(2.0);
+        let far = run(150.0);
+        assert!(far < near * 0.7,
+            "no air absorption: near(norm)={} far(norm)={}", near, far);
+    }
+
+    #[test]
+    fn rear_sources_are_darker_and_dipped() {
+        let run = |z: f32| -> f32 {
+            let mut a = AudioMixer::new();
+            let h = a.load_sound(tone(1 << 16));
+            a.play_sound_3d(h, 0.0, 0.0, z); // forward is -Z: -5 ahead, +5 behind
+            let mut out = [0.0f32; 2048];
+            a.mix_output(&mut out);
+            peak(&out)
+        };
+        let front = run(-5.0);
+        let behind = run(5.0);
+        assert!(behind < front * 0.6,
+            "rear cue missing: front={} behind={}", front, behind);
+    }
+
+    #[test]
+    fn voice_pitch_scales_playback_rate() {
+        // A 1000-frame one-shot at pitch 2 must be finished by ~500 output
+        // frames; at pitch 1 it must still be sounding there.
+        let run = |pitch: f32| -> f32 {
+            let mut a = AudioMixer::new();
+            let h = a.load_sound(flat(1000));
+            let v = a.play_sound_3d_ex(h, 0.0, 0.0, -1.0, false, 1.0, 0.0, 1.0);
+            a.set_voice_pitch(v, pitch);
+            let mut first = [0.0f32; 1024]; // frames 0..512
+            a.mix_output(&mut first);
+            let mut second = [0.0f32; 1024]; // frames 512..1024
+            a.mix_output(&mut second);
+            peak(&second)
+        };
+        assert!(run(1.0) > 0.1, "pitch-1 voice ended early");
+        assert_eq!(run(2.0), 0.0, "pitch-2 voice still sounding past its data");
+    }
+
+    #[test]
+    fn doppler_raises_the_pitch_of_an_approaching_source() {
+        let crossings = |approach: bool| -> usize {
+            let mut a = AudioMixer::new();
+            let h = a.load_sound(sine(500.0, 1 << 17));
+            let mut z = -60.0f32;
+            let v = a.play_sound_3d_ex(h, 0.0, 0.0, z, true, 1.0, 0.0, 1.0);
+            let mut n = 0usize;
+            let mut last = 0.0f32;
+            for block in 0..40 {
+                if approach {
+                    // 0.25 m per 256-frame block ≈ 43 m/s toward the listener.
+                    z += 0.25;
+                    a.set_voice_position(v, 0.0, 0.0, z);
+                }
+                let mut out = [0.0f32; 512];
+                a.mix_output(&mut out);
+                if block < 10 { continue; } // let the smoothed rate settle
+                let mut i = 0;
+                while i < out.len() {
+                    let s = out[i]; // left channel
+                    if s != 0.0 {
+                        if last != 0.0 && (s > 0.0) != (last > 0.0) { n += 1; }
+                        last = s;
+                    }
+                    i += 2;
+                }
+            }
+            n
+        };
+        let moving = crossings(true);
+        let still = crossings(false);
+        assert!(moving as f32 > still as f32 * 1.05,
+            "no doppler: approaching={} static={}", moving, still);
+    }
+
+    #[test]
+    fn max_dist_culls_but_the_loop_survives() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(flat(1 << 12));
+        let v = a.play_sound_3d_ex(h, 0.0, 0.0, -500.0, true, 1.0, 100.0, 1.0);
+        let mut out = [0.0f32; 512];
+        a.mix_output(&mut out);
+        assert_eq!(peak(&out), 0.0, "voice audible past max_dist");
+        // Walk into range: the same voice comes back.
+        a.set_voice_position(v, 0.0, 0.0, -5.0);
+        for _ in 0..2 {
+            out = [0.0f32; 512];
+            a.mix_output(&mut out);
+        }
+        assert!(peak(&out) > 0.01, "culled loop never came back in range");
+    }
+
+    #[test]
+    fn per_voice_lowpass_muffles_one_emitter_only() {
+        let mut a = AudioMixer::new();
+        let h = a.load_sound(tone(1 << 16));
+        let muffled = a.play_sound_3d_ex(h, -2.0, 0.0, -2.0, true, 1.0, 0.0, 1.0);
+        a.set_voice_lowpass(muffled, 300.0);
+        let mut solo = [0.0f32; 2048];
+        a.mix_output(&mut solo);
+        let muffled_peak = peak(&solo);
+
+        let mut b = AudioMixer::new();
+        let h2 = b.load_sound(tone(1 << 16));
+        b.play_sound_3d_ex(h2, -2.0, 0.0, -2.0, true, 1.0, 0.0, 1.0);
+        let mut open = [0.0f32; 2048];
+        b.mix_output(&mut open);
+        assert!(muffled_peak < peak(&open) * 0.3,
+            "voice lowpass had no effect: {} vs {}", muffled_peak, peak(&open));
     }
 }

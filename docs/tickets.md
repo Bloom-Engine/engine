@@ -2003,3 +2003,45 @@ dielectrics should get IBL, not a mirror march), a firefly luminance clamp
 on hit radiance, and hit validation against the coarse Hi-Z level actually
 sampled. Re-enable in the shooter only after the interior capture stays
 clean.
+
+## EN-062 — Spatial audio v2: live voices, real distance/pan model, doppler ✅ *(shipped 2026-07-16)*
+
+The mixer could only fire-and-forget: `play_sound_3d` was a one-shot with a
+fixed position, 1/d attenuation, linear pan — no way to loop an emitter, move
+it, or stop it. Games faked ambience by re-triggering clips on timers (the
+shooter's wind), and a river/creature emitter was simply not expressible.
+
+Shipped, all engine-side so every game gets it for free:
+
+- **Voice ids** — every play returns a stable id; `play_sound_3d_ex` +
+  `voice_set_position/volume/pitch/lowpass/stop` steer one live voice.
+  Looping voices persist until stopped; stop fades over a block (no click).
+- **Inverse-clamped distance model** (`ref/(ref+rolloff·(d−ref))`, per-voice
+  ref/rolloff/max) — ref=1, rolloff=1 is byte-for-byte the old 1/d, so the
+  legacy API keeps its loudness. `max_dist` culls to a head-only advance.
+- **Equal-power pan at 0.85 width** (was linear — center sat 6 dB down and
+  hard sides were headphone-artifact absolute).
+- **STEREO WAS MIRRORED**: the listener "right" was `cross(up, fwd)` = screen
+  LEFT (mat4_look_at's `s` is `cross(fwd, up)`). Every spatial sound since
+  the beginning panned to the wrong side. Fixed and now pinned by a test.
+- **Air absorption** (distance-driven low-pass) and a **rear head-shadow
+  cue** (low-pass toward 4.5 kHz + ~1.5 dB dip behind the listener), folded
+  with the occlusion filter into one one-pole per voice.
+- **Doppler** from the per-block distance delta (listener + source motion
+  both count), clamped, smoothed, with a teleport guard so pool voices
+  re-targeted across the map don't chirp.
+- **Fractional resampling** (linear interp) — which also means assets now
+  play at their AUTHORED rate: a 44.1 kHz file on the typical 48 kHz WASAPI
+  endpoint used to play ~9% fast and sharp, forever. The Windows backend now
+  reports the device rate to the renderer (it never had). Music streams are
+  untouched (still device-rate; separate ticket if it ever matters).
+- Per-voice gains ramp linearly across each mix block — per-frame
+  position/volume rides cannot zipper. Consequence: any gain change fully
+  lands one block late (~5–20 ms); the duck test now measures the settled
+  block.
+- Command ring 256 → 1024 (per-frame emitter updates + boot routing bursts).
+
+Tests: 10 new (loop lifecycle, stereo crossing, legacy-curve equivalence,
+equal-power, air absorption, rear cue, pitch rate, doppler zero-crossing
+count, max-dist cull/return, per-voice occlusion). watchOS stubs regenerated;
+web target exports the same six calls. First consumer: shooter SH-050.

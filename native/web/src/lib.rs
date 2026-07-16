@@ -879,6 +879,43 @@ pub fn bloom_set_listener_position(x: f64, y: f64, z: f64, fx: f64, fy: f64, fz:
     engine().audio.set_listener_position(x as f32, y as f32, z as f32, fx as f32, fy as f32, fz as f32);
 }
 
+// ---- EN-062: live spatial voices (see shared audio_ffi.rs for docs) --------
+
+#[wasm_bindgen]
+pub fn bloom_play_sound_3d_ex(
+    handle: f64, x: f64, y: f64, z: f64,
+    looping: f64, ref_dist: f64, max_dist: f64, rolloff: f64,
+) -> f64 {
+    engine().audio.play_sound_3d_ex(
+        handle, x as f32, y as f32, z as f32,
+        looping != 0.0, ref_dist as f32, max_dist as f32, rolloff as f32)
+}
+
+#[wasm_bindgen]
+pub fn bloom_voice_set_position(voice: f64, x: f64, y: f64, z: f64) {
+    engine().audio.set_voice_position(voice, x as f32, y as f32, z as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_voice_stop(voice: f64) {
+    engine().audio.stop_voice(voice);
+}
+
+#[wasm_bindgen]
+pub fn bloom_voice_set_volume(voice: f64, volume: f64) {
+    engine().audio.set_voice_volume(voice, volume as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_voice_set_pitch(voice: f64, pitch: f64) {
+    engine().audio.set_voice_pitch(voice, pitch as f32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_voice_set_lowpass(voice: f64, cutoff: f64) {
+    engine().audio.set_voice_lowpass(voice, cutoff as f32);
+}
+
 #[wasm_bindgen]
 pub fn bloom_load_music(_path: f64) -> f64 { 0.0 }
 

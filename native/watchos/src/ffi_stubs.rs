@@ -34,6 +34,19 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_listener_position(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_play_sound_3d_ex(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_voice_set_position(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_voice_stop(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_voice_set_volume(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_voice_set_pitch(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_voice_set_lowpass(_p0: f64, _p1: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_load_image(_p0: i64) -> f64 {
     0.0
 }
@@ -162,8 +175,10 @@
 }
 #[no_mangle] pub extern "C" fn bloom_draw_material(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_instantiate_animation(_p0: f64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_load_model_animation(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_instantiate_animation(_p0: f64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_update_model_animation(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
