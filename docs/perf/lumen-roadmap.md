@@ -30,7 +30,7 @@ mandatory wgpu version bump. The HW path is on the critical path, not deferred.
 | 1a | [007a](007a-lumen-screen-probes-sw.md) | SSRC probe infrastructure + SW Hi-Z trace. Replaces current per-pixel SSGI. | Parallel with 007b |
 | 1b | [007b](007b-lumen-screen-probes-hw.md) | BLAS/TLAS lifecycle + `rayQueryProceed` trace variant + hit-lighting-lite shading; runtime fallback to 007a on adapters without RT. | Parallel with 007a, merges after |
 | 2 | [013](013-lumen-surface-cache.md) | Mesh Cards — 6-axis card capture at model load, per-frame card lighting pass, hits shade from card atlas. Upgrades HW quality to full Lumen. | After 007a+007b |
-| 3 | [014](014-lumen-mesh-sdfs.md) | Per-mesh SDFs + global SDF clipmap + WSRC 32×32 clipmap probes. SW-only path reaches feature parity with HW. | Deprioritized — HW covers mac/Win/Linux already |
+| 3 | [014](014-lumen-mesh-sdfs.md) | Per-mesh SDFs + global SDF clipmap + WSRC 32×32 clipmap probes. SW-only path reaches feature parity with HW. | Landed (V1-V15) — the SDF clipmap is now the default SW tier once baked |
 | 5 | [016](016-lumen-importance-sampling.md) | Prev-frame radiance-guided ray direction sampling + hierarchical probe refinement in high-variance tiles. | After 013 |
 
 Phase 4 from the original proposal was absorbed into Phase 1 (HW is no longer
@@ -47,6 +47,16 @@ deferred), so numbering skips directly from 013/014 to 016.
 | Linux | yes | adapter-gated (Vulkan ray-query) | Runtime feature check; SW fallback |
 | Android | yes | adapter-gated | Most Android GPUs lack RT; SW expected in practice |
 | Web | yes | never | No WebGPU RT spec; SW-only permanently |
+
+**As-built (2026-07):** all phases landed (see the [README](README.md)
+table). At runtime the probe trace selects a tier per frame:
+`hw-ray-query` > `sdf-clipmap` > `hiz-screen` (`renderer/ssgi_pass.rs`).
+Contrary to the matrix above, the HW path is now **opt-in**, not
+auto-enabled on capable adapters: on Windows the ray-query device feature
+is only requested when launched with `BLOOM_HW_GI=1`, `BLOOM_PT`, or
+`--pt` (66dad5b) — the measured A/B showed +20 ms/frame on the 760M for a
+tonal-only visual difference, so SW GI is the shipping default
+(b34c1f3, 9d1523f).
 
 ## Per-phase acceptance protocol
 

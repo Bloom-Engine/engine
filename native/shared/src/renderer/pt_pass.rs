@@ -373,8 +373,8 @@ impl Renderer {
         self.pt_accum_idx = written_idx;
 
         // ---- PT-3b: SVGF wavelet filter (realtime mode only) ----
-        // Four variance-guided à-trous iterations on the trace grid
-        // (steps 1/2/4/8), then the full-res upsample+modulate pass.
+        // Six variance-guided à-trous iterations on the trace grid
+        // (steps 1/2/4/8/16/1), then the full-res upsample+modulate pass.
         // After iteration 1 the once-filtered signal is copied back
         // over the accum buffer: SVGF feeds the first wavelet output
         // into next frame's colour history (moments stay raw). This is

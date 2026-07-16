@@ -83,8 +83,9 @@ multi-bounce colour bleed.
 - **PT-4**: ReSTIR DI — per-pixel weighted reservoirs over light candidates,
   temporal reuse with M-cap, spatial reuse over 3–5 neighbours, one shadow
   ray for the winner. **Experimental flag until validated against
-  bloom-reference.** With today's ≤6 analytic lights plain NEE is nearly as
-  good; the payoff arrives when emissive particles/muzzle flashes become
+  bloom-reference.** With today's handful of analytic lights (the engine
+  caps point lights at 16; arena_02 uses 5) plain NEE is nearly as good;
+  the payoff arrives when emissive particles/muzzle flashes become
   lights (Tier 2). Do not oversell it before then.
 
 An ML denoiser is explicitly out of scope: nothing in wgpu runs vendor
@@ -97,9 +98,16 @@ overdrive. That is the "as far as reasonable" line.
 | Situation | Behaviour |
 |---|---|
 | `ray_query=true` (DX12+DXC, Vulkan RQ, Metal) | all modes available |
-| `ray_query=false` | `bloom_set_path_tracing` is a no-op → Lumen; boot line + `bloom_pt_supported()` say why |
+| `ray_query=false` | `bloom_set_path_tracing` is a no-op → Lumen; boot line + `bloom_path_tracing_supported()` say why |
 | `TEXTURE_BINDING_ARRAY` absent | Tier 2 textures fall back to card albedo; everything else unaffected |
 | Web | never (no WebGPU RT); permanently Lumen SW |
+
+On Windows, `ray_query=true` is no longer automatic on capable hardware:
+since 66dad5b the `EXPERIMENTAL_RAY_QUERY` device feature is only requested
+when the process is launched with `BLOOM_HW_GI=1`, `BLOOM_PT`, or `--pt`
+(`native/windows/src/lib.rs`). Without one of those, the first row behaves
+as `ray_query=false` even on an RT-capable GPU. macOS/Linux still request
+ray query by default (`BLOOM_FORCE_SW_GI` disables it).
 
 ## Verification protocol (per the hard lessons)
 

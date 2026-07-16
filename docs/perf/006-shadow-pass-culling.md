@@ -21,7 +21,9 @@ On the panning-camera cache-miss path at `--quality 2 --fps-only 300`:
 The ticket's 14 ms → 7-10 ms target was set against the pre-95da6af
 baseline. `CASCADE_MAP_SIZE` dropped 2048 → 1024 in 95da6af, which already
 took the pass from 14 ms to ~3 ms on the cache-miss path, so absolute
-headroom is small. The proportional cut (34% on the GPU side) matches
+headroom is small. (The 1024 drop was itself later reverted —
+`shadows.rs:20` is back to `CASCADE_MAP_SIZE = 2048` today; the culling
+win measured here is independent of map size.) The proportional cut (34% on the GPU side) matches
 the ticket's intent. The 10% FPS target in the original acceptance is
 unreachable at today's baseline because shadow is no longer a 14 ms cost.
 
@@ -79,13 +81,16 @@ test — no need to compute the camera/light union manually.
 - `extract_frustum_planes` in `scene.rs` already does the Gribb-Hartmann
   extraction. Reuse.
 - `aabb_outside_frustum` also already there. Reuse.
-- Build the per-cascade draw list in the same loop that's currently at
-  `renderer.rs` ~line 8250 (look for `ShadowDrawEntry`). The existing loop
-  builds one shared list — extend to build `[Vec<ShadowDrawEntry>; 3]`.
+- Build the per-cascade draw list in the same loop as the existing shadow
+  draw-list construction (now in `renderer/shadow_pass.rs`; look for
+  `ShadowDrawEntry`). The existing loop builds one shared list — extend to
+  build `[Vec<ShadowDrawEntry>; 3]`.
 - Keep the `SHADOW_MAX_NODES` cap per cascade (currently 1024).
 - Don't cull by the light's near/far plane — in a static Sponza scene the
   light volume covers everything anyway.
 
-## Files likely to change
+## Files changed (as landed)
 
-- `native/shared/src/renderer.rs` — shadow-pass draw-list construction.
+- `native/shared/src/renderer/shadow_pass.rs` — shadow-pass draw-list
+  construction with per-cascade frustum culling (the old single
+  `renderer.rs` was split into the `renderer/` module).

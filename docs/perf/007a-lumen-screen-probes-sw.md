@@ -1,6 +1,6 @@
 # 007a — Lumen screen probes (SW trace, Hi-Z)
 
-**Effort:** 2-3 days · **Expected gain:** SSGI 2×+ faster · **Status:** open
+**Effort:** 2-3 days · **Expected gain:** SSGI 2×+ faster · **Status:** landed
 
 Supersedes the old ticket 007. Phase 1a of the [Lumen roadmap](lumen-roadmap.md).
 Runs in parallel with 007b; both depend on 007-prep.
@@ -20,10 +20,10 @@ current ~2.9 M — ~60× fewer rays.
 
 ## Approach — file-by-file
 
-### Shaders — `native/shared/src/renderer/shaders.rs`
+### Shaders — now `native/shared/src/renderer/shaders/ssgi.rs`
 
-Delete `SSGI_SHADER_WGSL` (lines 2219-2405) and `SSGI_TEMPORAL_SHADER_WGSL`
-(lines 2412-2496). Add:
+Delete `SSGI_SHADER_WGSL` and `SSGI_TEMPORAL_SHADER_WGSL` (both gone as
+landed — replaced by the `SSGI_PROBE_*` shaders). Add:
 
 - `PROBE_HELPERS_WGSL` — `oct_encode(dir) -> vec2<f32>`, `oct_decode(uv) -> vec3<f32>`,
   `view_pos_from_depth(uv, depth, inv_proj)`, `reconstruct_view_normal(view_pos)`

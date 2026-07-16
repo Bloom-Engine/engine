@@ -1,6 +1,6 @@
 # 007-prep — wgpu upgrade (Metal ray-query unlock)
 
-**Effort:** 2-3 days · **Expected gain:** none (enabler) · **Status:** open
+**Effort:** 2-3 days · **Expected gain:** none (enabler) · **Status:** landed (wgpu 29)
 
 ## Problem
 
@@ -25,7 +25,7 @@ at the time this ticket starts — verify at kickoff). Sweep API churn across:
 - `native/shared/src/renderer/mod.rs` — largest surface area; will touch most
   breaking changes (descriptor field renames, feature-flag bits, surface-config
   shapes, ray-tracing types if they became stable).
-- `native/shared/src/renderer/shaders.rs` — naga WGSL parser accepts a slightly
+- `native/shared/src/renderer/shaders/` — naga WGSL parser accepts a slightly
   different shape each release (e.g. attribute syntax, `override` semantics).
 - Platform crates — window creation / surface config wiring.
 
@@ -53,7 +53,7 @@ No renderer logic changes beyond what the compiler forces. No Lumen code yet.
 - 8 `Cargo.toml` files (native/shared + 7 platform crates).
 - 8 `Cargo.lock` files.
 - `native/shared/src/renderer/mod.rs` — descriptor / feature / surface churn.
-- `native/shared/src/renderer/shaders.rs` — WGSL parser churn if any.
+- `native/shared/src/renderer/shaders/` — WGSL parser churn if any.
 - `native/web/src/lib.rs` — `wasm-bindgen` interactions that touch wgpu types.
 - Platform `lib.rs` / `main.rs` files where surface creation happens.
 

@@ -4,10 +4,11 @@
 
 Phase 3 of the [Lumen roadmap](lumen-roadmap.md). Depends on 013.
 
-**Priority note:** With HW ray-tracing live on macOS / iOS / tvOS / Windows /
-Linux after 007b + 013, the SW SDF path is only critical for **Android and
-web**. Deprioritise behind 016 (importance sampling) and only land if
-Android / web traction demands it.
+**Priority note (superseded):** the original call — "SW SDF only matters
+for Android/web, deprioritise" — inverted twice: the ticket landed in full
+(V1-V15), and HW ray query later became **opt-in** (`BLOOM_HW_GI=1` /
+`BLOOM_PT` / `--pt`, 66dad5b; SW stays default per b34c1f3/9d1523f), so the
+SDF clipmap tier is now load-bearing on every platform, not just Android/web.
 
 ## Problem
 
@@ -108,15 +109,15 @@ for radiance.
 
 ## V15 closure (landed state)
 
-Landed as V1-V14 over 15 incremental commits. Summary and deltas vs. the
-original plan:
+Landed as V1-V15 over 15 incremental commits (V15 was the closure /
+VRAM-audit pass). Summary and deltas vs. the original plan:
 
 ### What landed
 
 | Sub-feature                   | Plan              | Landed                             |
 |-------------------------------|-------------------|------------------------------------|
 | Per-mesh MDFs                 | GPU jump-flood    | Brute-force point-triangle (V1)    |
-| Disk cache for MDFs           | Yes               | **Not landed** (in-memory only)    |
+| Disk cache for MDFs           | Yes               | Landed post-V15 (`sdf_cache.rs`, issue #22) |
 | Global SDF clipmap            | 4 cascades, sparse | 1 cascade dense, camera-follow (V2 / V5) |
 | Sphere-trace shader variant   | Runtime-selected   | Landed, 3-way HW > SDF > Hi-Z (V3) |
 | Textured SDF hits             | —                 | V4 — broad-phase AABB + card atlas |
@@ -188,9 +189,10 @@ access will build cleanly; CI would need host-matching runners.
 
 ### Deferred
 
-- **Disk cache for per-mesh SDFs** — builds are fast enough that the
-  first-frame bake amortises in-session; persisting would help on
-  cold launches but hasn't been load-bearing on Sponza.
+- ~~**Disk cache for per-mesh SDFs**~~ — landed after V15 closure
+  (`native/shared/src/sdf_cache.rs`, commit 068511e / issue #22):
+  content-hashed load in `scene.rs` skips the bake on hit, writes are
+  flushed per frame via `flush_sdf_cache_writes`.
 - **GPU jump-flood SDF bake** — V1's brute-force point-triangle
   works at current mesh sizes; jump-flood would matter if meshes
   scale up significantly.

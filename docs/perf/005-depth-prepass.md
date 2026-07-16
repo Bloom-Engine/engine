@@ -1,6 +1,6 @@
 # 005 — Depth prepass for main HDR pass
 
-**Effort:** ~1 day · **Expected gain:** main_hdr 17 ms → ~8 ms · **Status:** deprioritized (see Findings, 2026-04-21)
+**Effort:** ~1 day · **Expected gain:** main_hdr 17 ms → ~8 ms · **Status:** landed (revived as EN-044 after the 2026-04-21 prototype failed — see Postscript)
 
 ## Problem
 
@@ -79,7 +79,8 @@ Classic **Z-prepass**. Before `main_hdr_pass`:
 
 ## Files likely to change
 
-- `native/shared/src/renderer.rs` — new `scene_depth_pipeline`, new
+- `native/shared/src/renderer/` (as landed: `scene_pass.rs` + pipeline
+  creation in `mod.rs`) — new `scene_depth_pipeline`, new
   `scene_pipeline_equal`, new prepass block in `end_frame_with_scene`.
 - `native/shared/src/scene.rs` — add a `render_depth_only()` method mirroring
   `render()`.
@@ -152,3 +153,14 @@ That's a multi-day refactor, not the ~1 day this ticket originally
 estimated. Not worth it while the frame budget is dominated by bloom /
 TAA / SSGI / final-composite passes (the real targets of tickets 007 and
 010).
+
+## Postscript (2026-07) — revived and landed as EN-044
+
+The prepass was later rebuilt along the exact lines the Recommendation
+above sketched, and is now live: `renderer/scene_pass.rs` runs an
+unconditional `bloom_depth_prepass` render pass (alpha-cutout honored via
+the `fs_depth_prepass` fragment entry), with the main pass loading depth
+and drawing through `scene_pipeline_prepassed` (`Equal`/`LessEqual`).
+Both correctness gaps from the post-mortem — alpha discard and coplanar
+layering — are handled. The Findings above stand as the record of why
+the first attempt failed.

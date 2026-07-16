@@ -105,7 +105,11 @@ setting the bar. ([full design rationale](docs/design-api.md))
 | **Audio** | `@bloomengine/engine/audio` | Sound effects + music streaming |
 | **Models** | `@bloomengine/engine/models` | 3D model loading (glTF, OBJ), skeletal animation |
 | **Math** | `@bloomengine/engine/math` | Vectors, matrices, quaternions, easing |
+| **Scene** | `@bloomengine/engine/scene` | Retained scene graph, frame callbacks, lighting |
 | **Physics** | `@bloomengine/engine/physics` | Jolt-backed rigid + soft bodies, character, vehicles ([docs](docs/physics.md)) |
+| **VFX** | `@bloomengine/engine/vfx` | GPU particle systems + decals |
+| **World** | `@bloomengine/engine/world` | `.world.json` loading, validation, instantiation ([docs](docs/world-format.md)) |
+| **Mobile** | `@bloomengine/engine/mobile` | Virtual joystick/buttons, touch-input helpers |
 
 ## Platforms
 
@@ -116,7 +120,7 @@ setting the bar. ([full design rationale](docs/design-api.md))
 | Linux | Vulkan / OpenGL | Keyboard + mouse |
 | iOS | Metal | Touch + gamepad |
 | tvOS | Metal | Siri Remote + gamepad |
-| watchOS | SwiftUI Canvas (no Metal) | Digital Crown + taps ([docs](docs/watchos-target.md)) |
+| watchOS | SwiftUI Canvas (2D) + SceneKit (3D) | Digital Crown + taps ([docs](docs/watchos-target.md)) |
 | Android | Vulkan / OpenGL ES | Touch + gamepad |
 | **Web** | **WebGPU / WebGL** | **Keyboard + mouse + touch + gamepad** |
 

@@ -99,10 +99,11 @@ Bloom compiles TypeScript through [Perry](../../perry/perry) (our AOT compiler)
 and hands data across an FFI boundary to platform-specific Rust crates. The
 boundary has a specific shape, documented in `CLAUDE.md` and `package.json`:
 
-- **~230 `bloom_*` FFI functions** declared in `package.json` under
+- **~465 `bloom_*` FFI functions** declared in `package.json` under
   `perry.nativeLibrary.functions`.
 - **Native platforms** use `#[no_mangle] extern "C"` — a C ABI.
-- **Web** uses `#[wasm_bindgen]` with JS glue that NaN-boxes string IDs.
+- **Web** uses `#[wasm_bindgen]`; Perry's runtime decodes NaN-boxed args
+  (`wrapFfiForI64`) and the JS glue routes strings to `_str` variants.
 - **String parameters** are `i64` Perry StringHeader pointers on native, NaN-
   boxed IDs on web.
 - **Handles** (textures, sounds, models, physics bodies) are all `i64` / plain
@@ -139,7 +140,7 @@ single FFI call has to punch back through.
 interface Vec3    { x: number; y: number; z: number }
 interface Texture { handle: number; width: number; height: number }
 interface Sound   { handle: number }
-interface Model   { handle: number }
+interface Model   { handle: number; meshCount: number; materialCount: number; transform: Mat4 }
 
 // Functions operate on data:
 const tex  = loadTexture("assets/hero.png");

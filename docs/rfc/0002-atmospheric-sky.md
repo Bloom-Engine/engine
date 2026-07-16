@@ -237,4 +237,33 @@ both shipped 2026-04-26.
    the smaller tier shown in the LUT table. Tier picked at compile
    time via `cfg`.
 2. **Cubemap re-bake resolution** — 64×6 across all platforms.
+   *(Superseded — see as-built note: IBL bakes to a 128×64 equirect,
+   not a cubemap, matching Phase 3's own "chose equirect over cube".)*
 3. **API name** — `setProceduralSky(opts?)`.
+   *(As-built: `setProceduralSky(enabled: boolean, opts?)` — a leading
+   toggle was added.)*
+
+## As-built divergences (audit 2026-07-16)
+
+The LUT stack (names, formats, sizes, platform tiers), the per-frame
+sky-view + aerial-perspective compute, the sun disk, the sun-shaft
+transmittance tap, and the fog tint all shipped as specified. What differs:
+
+- **Sun → directional-light coupling was NOT built.** `setSunDirection`
+  drives the sky-view LUT, the sun disk, the IBL rebake, the sun-shaft
+  tint, and the fog tint — it does **not** write `lighting_uniforms.
+  light_dir`/`light_color`. Shadows and the directional light remain
+  governed solely by `setDirectionalLight`; games must keep the two in
+  sync themselves. (This also voids the "warms the directional light in
+  lockstep" acceptance bullet above.)
+- `setSunDirection` is **not** gated on the procedural sky being enabled —
+  no no-op, no debug warning; it always applies.
+- The sky render pass is `render_procedural_sky_pass` (selected via
+  `procedural_sky_enabled`), not `render_atmosphere_pass`; the panorama
+  path is `render_sky_pass`.
+- Transmittance + multi-scattering LUTs are **CPU-baked** at init
+  (`atmosphere_lut.rs`, threaded on native — mirrors `brdf_lut.rs`), not
+  compute passes. Only sky-view + aerial-perspective run as GPU compute.
+- IBL rebake renders the sky into a single-mip **128×64 equirect**
+  (`EQUIRECT_FROM_SKY_VIEW` shader), not a 64×64×6 cubemap.
+- `groundAlbedo` is a scalar grey (`number`, default 0.1), not a `Color`.

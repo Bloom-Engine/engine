@@ -52,7 +52,8 @@ existing four.
 
 ## Files likely to change
 
-- `native/shared/src/renderer.rs` — add 5 more cache fields, build/read
+- `native/shared/src/renderer/mod.rs` + `renderer/postfx_chain.rs` (the old
+  single `renderer.rs` was split) — add 5 more cache fields, build/read
   them in `end_frame_with_scene`, invalidate in `resize()`.
 
 ## Deferred — prototype notes

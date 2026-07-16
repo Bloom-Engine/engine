@@ -1,6 +1,6 @@
 # 013 — Lumen Surface Cache (Mesh Cards)
 
-**Effort:** 1-2 weeks · **Expected gain:** HW bounce reaches full Lumen quality · **Status:** open
+**Effort:** 1-2 weeks · **Expected gain:** HW bounce reaches full Lumen quality · **Status:** landed (V3 — as-built: 64×64 cards in a 4096² atlas, per-frame drained capture queue; see the [README](README.md) 013 row for the landed summary)
 
 Phase 2 of the [Lumen roadmap](lumen-roadmap.md). Depends on 007a + 007b.
 

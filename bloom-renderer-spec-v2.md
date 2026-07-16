@@ -7,7 +7,7 @@
 philosophy lives on in `README.md` and the raylib-modeled `src/` API).
 Both were removed 2026-07-06; git history has them.
 
-## Status vs. plan (as-built, 2026-07-06)
+## Status vs. plan (as-built, 2026-07-16)
 
 This document is the *plan*; the code has made choices where the plan
 offered options, and diverged where reality was cheaper:
@@ -26,6 +26,10 @@ offered options, and diverged where reality was cheaper:
   with material-path casters/receivers, material system with a stable
   5-bind-group ABI (`material_abi.wgsl`), CPU+GPU pass profiler with
   overlay, planar-reflection water, physical-resolution 2D text.
+- **GI default:** SW GI (SDF-clipmap / Hi-Z tiers) is the shipping
+  default; the HW ray-query tier is opt-in (`BLOOM_HW_GI=1` /
+  `BLOOM_PT` / `--pt` on Windows, 66dad5b) after the measured A/B showed
+  +20 ms/frame on the 760M for a tonal-only difference (b34c1f3).
 - **Live status lives in** `docs/perf/lumen-roadmap.md` (GI),
   `docs/tickets.md` (EN-xxx work items), and per-ticket docs in
   `docs/perf/`. When this spec and those disagree, those win.
