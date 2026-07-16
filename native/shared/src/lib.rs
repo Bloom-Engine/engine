@@ -14,6 +14,7 @@ pub mod text_renderer;
 pub mod audio;
 pub mod textures;
 #[cfg(feature = "models3d")]
+pub mod anim_mixer;
 pub mod models;
 pub mod scene;
 pub mod frame_callbacks;

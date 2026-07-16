@@ -1,5 +1,6 @@
 use crate::handles::HandleRegistry;
 use crate::renderer::Vertex3D;
+use std::sync::Arc;
 
 pub struct MeshData {
     pub vertices: Vec<Vertex3D>,
@@ -56,69 +57,20 @@ pub struct SkeletonData {
     pub root_joints: Vec<usize>,
 }
 
-/// EN-028 — per-model animation mixer.
-///
-/// Three things a single-clip sampler cannot do, all of which read as
-/// "cheap" on screen: transitions pop, an attacking character has to stop
-/// walking, and authored locomotion arcs (a pounce, a lunge) get replaced
-/// by hand-tuned kinematics because the root is nailed to the rest pose.
-///
-/// Layout: a base track that crossfades from `prev` to `cur` over
-/// `fade_dur`, plus one optional additive-by-mask layer (an attack driving
-/// the spine-up while the legs keep walking). All clocks advance in
-/// `advance_animation`, so the game hands over a dt and never tracks clip
-/// time itself.
-#[derive(Clone)]
-pub struct AnimMixer {
-    pub cur_clip: usize,
-    pub cur_time: f32,
-    pub cur_speed: f32,
-    pub cur_loop: bool,
-    /// Clip we are fading *out* of. `fade_dur <= 0` means no fade in flight.
-    pub prev_clip: usize,
-    pub prev_time: f32,
-    pub prev_speed: f32,
-    pub prev_loop: bool,
-    pub fade_t: f32,
-    pub fade_dur: f32,
-    /// Masked layer. `layer_clip < 0` = inactive.
-    pub layer_clip: i32,
-    pub layer_time: f32,
-    pub layer_speed: f32,
-    pub layer_loop: bool,
-    pub layer_weight: f32,
-    /// Root joint of the masked subtree (e.g. the spine). Every joint at or
-    /// below it takes the layer pose; everything else keeps the base pose.
-    pub layer_mask_root: i32,
-    /// Opt-in root motion. Off by default so existing games are unchanged.
-    pub root_motion: bool,
-    pub root_delta: [f32; 3],
-    /// True once a non-looping `cur_clip` has played past its duration.
-    pub finished: bool,
-    pub started: bool,
-}
-
-impl Default for AnimMixer {
-    fn default() -> Self {
-        Self {
-            cur_clip: 0, cur_time: 0.0, cur_speed: 1.0, cur_loop: true,
-            prev_clip: 0, prev_time: 0.0, prev_speed: 1.0, prev_loop: true,
-            fade_t: 0.0, fade_dur: 0.0,
-            layer_clip: -1, layer_time: 0.0, layer_speed: 1.0, layer_loop: false,
-            layer_weight: 0.0, layer_mask_root: -1,
-            root_motion: false, root_delta: [0.0; 3],
-            finished: false, started: false,
-        }
-    }
-}
+pub use crate::anim_mixer::AnimMixer;
 
 pub struct ModelAnimation {
-    pub skeleton: Option<SkeletonData>,
-    pub animations: Vec<AnimationData>,
-    pub joint_matrices: Vec<[[f32; 4]; 4]>,
+    /// EN-055 — the parsed clip data (skeleton, keyframe tracks, rest
+    /// rotations) is IMMUTABLE after load and shared between instances via
+    /// `Arc`: `instantiate_animation` clones the handles, not the data. Only
+    /// the fields below the shared block are per-instance state.
+    pub skeleton: Option<Arc<SkeletonData>>,
+    pub animations: Arc<Vec<AnimationData>>,
     /// Reference rest-pose rotations (from first animation, sampled at t=0).
     /// Used for retargeting when multiple armatures have different rest orientations.
-    pub ref_rest_rotations: Option<Vec<[f32; 4]>>,
+    pub ref_rest_rotations: Option<Arc<Vec<[f32; 4]>>>,
+    // ---- per-instance state from here down ---------------------------------
+    pub joint_matrices: Vec<[[f32; 4]; 4]>,
     /// EN-028 mixer state.
     pub mixer: AnimMixer,
     /// EN-033 — joint world transforms *before* the inverse-bind multiply.
@@ -548,6 +500,29 @@ impl ModelManager {
             Some(anim) => self.animations.alloc(anim),
             None => 0.0,
         }
+    }
+
+    /// EN-055 — a new animation INSTANCE over an already-loaded clip set.
+    /// The parsed data (skeleton, keyframe tracks, rest rotations) is shared
+    /// via `Arc`; the mixer, joint matrices and mask cache are fresh — so N
+    /// characters get independent clocks/fades without N GLB re-parses
+    /// (which was 5.5 s of the shooter's 8 s boot). Returns 0 for a dead
+    /// source handle, mirroring load's failure convention.
+    pub fn instantiate_animation(&mut self, src: f64) -> f64 {
+        let inst = match self.animations.get(src) {
+            Some(a) => ModelAnimation {
+                skeleton: a.skeleton.clone(),
+                animations: a.animations.clone(),
+                ref_rest_rotations: a.ref_rest_rotations.clone(),
+                joint_matrices: a.joint_matrices.clone(),
+                mixer: AnimMixer::default(),
+                joint_world: a.joint_world.clone(),
+                mask_weights: vec![0.0; a.mask_weights.len()],
+                mask_cached_root: -1,
+            },
+            None => return 0.0,
+        };
+        self.animations.alloc(inst)
     }
 
     pub fn update_model_animation(&mut self, handle: f64, anim_index: usize, time: f32) {
@@ -1425,10 +1400,10 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
     } else { None };
 
     Some(ModelAnimation {
-        skeleton,
-        animations,
+        skeleton: skeleton.map(Arc::new),
+        animations: Arc::new(animations),
         joint_matrices: vec![mat4_identity(); joint_count],
-        ref_rest_rotations,
+        ref_rest_rotations: ref_rest_rotations.map(Arc::new),
         mixer: AnimMixer::default(),
         joint_world: vec![mat4_identity(); joint_count],
         mask_weights: vec![0.0; joint_count],
@@ -1847,12 +1822,22 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         }
     }
 
+    // Pre-walk materials for the image indices used as normal maps — they
+    // must be registered via register_texture_kind's linear/LEADR path at
+    // commit time (same pre-walk as load_gltf_with_textures).
+    let mut normal_image_set: std::collections::HashSet<usize> = Default::default();
+    for mat in gltf.materials() {
+        if let Some(nt) = mat.normal_texture() {
+            normal_image_set.insert(nt.texture().source().index());
+        }
+    }
+
     // Decode textures to RGBA without GPU registration.
     // staged_textures[i] corresponds to glTF image index i.
     // texture_indices maps glTF image index -> 1-based index into staged_textures (0 = no texture).
     let mut staged_textures: Vec<StagedTexture> = Vec::new();
     let mut texture_indices: Vec<u32> = Vec::new();
-    for image in gltf.images() {
+    for (image_idx, image) in gltf.images().enumerate() {
         match image.source() {
             gltf::image::Source::View { view, .. } => {
                 let buf_idx = view.buffer().index();
@@ -1868,6 +1853,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                                 data: rgba.into_raw(),
                                 width: w,
                                 height: h,
+                                is_normal: normal_image_set.contains(&image_idx),
                             });
                             // 1-based index into staged_textures
                             texture_indices.push(staged_textures.len() as u32);

@@ -7,6 +7,11 @@ pub struct StagedTexture {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// Normal maps need `register_texture_kind`'s linear-space + LEADR mip
+    /// path at commit time; registering them like albedo (sRGB) visibly
+    /// flattens the shading. Set by `load_gltf_staged` from the material's
+    /// `normal_texture` references, mirroring `load_gltf_with_textures`.
+    pub is_normal: bool,
 }
 
 #[cfg(feature = "models3d")]
@@ -65,7 +70,9 @@ pub fn decode_and_stage_texture(file_data: &[u8]) -> f64 {
     };
     let width = img.width();
     let height = img.height();
-    stage_texture(StagedTexture { data: img.into_raw(), width, height })
+    // Standalone staged textures are albedo-class; nothing routes a normal
+    // map through this path (models carry theirs inside StagedModel).
+    stage_texture(StagedTexture { data: img.into_raw(), width, height, is_normal: false })
 }
 
 pub fn stage_texture(tex: StagedTexture) -> f64 {

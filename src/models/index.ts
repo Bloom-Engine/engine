@@ -50,6 +50,7 @@ declare function bloom_compile_material_from_file(path: number, bucketKind: numb
 declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_load_model_animation(path: number): number;
+declare function bloom_instantiate_animation(src: number): number;
 declare function bloom_update_model_animation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotY: number): void;
 declare function bloom_create_mesh(vertexPtr: number, vertexCount: number, indexPtr: number, indexCount: number): number;
 declare function bloom_mesh_scratch_reset(): void;
@@ -809,6 +810,14 @@ export function drawModelWithMaterial(
 
 export function loadModelAnimation(path: string): number {
   return bloom_load_model_animation(path as any);
+}
+
+/// EN-055 — a fresh animation INSTANCE (own mixer, own joint matrices) over
+/// an already-loaded clip set. The parsed keyframe data is shared, so a crowd
+/// of N characters costs one GLB parse + N cheap instances instead of N
+/// parses. Returns 0 if `src` is not a live animation handle.
+export function instantiateAnimation(src: number): number {
+  return bloom_instantiate_animation(src);
 }
 
 export function updateModelAnimation(handle: number, animIndex: number, time: number, scale: number, px: number, py: number, pz: number, rotY: number): void {

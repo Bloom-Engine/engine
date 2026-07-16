@@ -88,7 +88,7 @@ export {
   createPlanarReflection, setMaterialReflectionProbe, setMaterialProbeVisible,
   compileMaterialFromFile, loadMaterial,
   createMeshExplicit,
-  loadModelAnimation, updateModelAnimation, createMesh,
+  loadModelAnimation, instantiateAnimation, updateModelAnimation, createMesh,
   setAmbientLight, setDirectionalLight, setJointTest,
   setProceduralSky, setSunDirection,
   loadModelAsync, stageModels, commitModel,

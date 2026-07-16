@@ -162,6 +162,7 @@
 }
 #[no_mangle] pub extern "C" fn bloom_draw_material(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_instantiate_animation(_p0: f64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_load_model_animation(_p0: i64) -> f64 {
     0.0
 }

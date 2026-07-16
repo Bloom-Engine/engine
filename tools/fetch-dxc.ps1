@@ -14,8 +14,11 @@
 #
 # If the SDK is absent, take them from
 # https://github.com/microsoft/DirectXShaderCompiler/releases (v1.8.2502+).
-# Missing DLLs are not fatal: wgpu falls back to FXC and you are back on the
-# software GI path.
+# Missing DLLs ARE fatal on current wgpu when DynamicDxc is configured: the
+# DX12 backend drops out of the instance entirely, and since the Vulkan
+# surface path is broken on Windows, the game CRASHES at boot ("Failed to
+# create surface ... {Vulkan: ...}"). Verified 2026-07-16 by deleting them.
+# See EN-058.
 #
 # ASCII only on purpose - PowerShell reads .ps1 as ANSI, and a stray em-dash
 # is a parse error.
