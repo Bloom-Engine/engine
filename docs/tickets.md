@@ -1760,3 +1760,150 @@ nothing — it flagged vendored build artifacts (`typenum/out/tests.rs`, 20562
 lines) and `--update` would have written them straight into the baseline. The
 same tree passed in CI and failed locally, which is the worst way for a guard to
 behave. `rel` is now normalised to '/'. Run it on Windows: 0 failures.
+
+---
+
+## EN-053 — Shadows cost ~5.3 ms in SAMPLING, and four passes each pay it 🔴 *(2026-07-16 audit)*
+
+The shadow **pass** is fixed (EN-043/044/045 — 0.18 ms). What remains is the
+per-pixel PCF: the deferred lighting path runs a fixed **16-tap** Poisson
+kernel (`renderer/shaders/core.rs:535-564` — the ":516 comment still says
+4-tap"), cascade blending doubles that to 32 in the last 10% of each cascade,
+and the material path / GI card-light / planar probe all sample the cascades
+**independently**. Toggling shadows off on the shooter buys ~5.3 ms while the
+shadow pass itself renders in 0.18 — the sampling IS the cost, and it is the
+single biggest remaining GPU lever at shipped defaults.
+
+Fix shape: a screen-space **shadow-mask pass** at render resolution — compute
+the sun-shadow term once, sample the mask from every consumer. Optionally
+distance-adaptive tap counts. **Hard constraint: quality-neutral.** The
+product owner has explicitly rejected perf wins that cost image quality; the
+mask must be full render res, and any tap-count adaptation must be
+imperceptible and screenshot-verified (per the twice-earned rule: a shadow
+perf win bigger than the change justifies = deleted shadows).
+
+## EN-054 — SDF clipmap re-bake still does its whole CPU prep in one frame 🔴 *(2026-07-16 audit)*
+
+The GPU half is amortised (16 Z-layers/frame); the frame that STARTS a rebake
+still runs `scene.build_world_triangles()` synchronously —
+`renderer/scene.rs:476-506` re-transforms every vertex of every node into
+fresh Vecs with zero caching, then `gi_bake.rs:128-162` counting-sorts every
+triangle. 20-60 ms in one frame, triggered every ~10 m of camera travel
+(`gi_bake.rs:44-46`); the shooter's 50-68 ms wave-spawn spikes are this, and
+the shooter ships SSGI **on**, so it is live in the shipped game.
+
+Fix (from the July perf audit, still unimplemented): cache the world-triangle
+soup keyed on `tlas_version` — the scene is static, so travel-triggered
+rebakes should re-bin, not re-gather; then amortise the binning across the 4
+frames the GPU bake already takes.
+
+## EN-055 — No animation-instancing API: N enemies = N full GLB re-parses ✅ *(shipped same day — PR #107; and the boot claim was WRONG)*
+
+> **Measured before believing (2026-07-16, same day):** the shooter's per-slot
+> animation parses were **43 ms total**, not the 5.5 s SH-049 attributed to
+> them. `load_gltf_animation` re-parses the container but never decodes
+> images — the actual 4.9 s was SERIAL `loadModel` texture decode, fixed by
+> the shooter adopting the parallel `stageModels`/`commitModel` path (which
+> needed two staged-commit bugs fixed first — see PR #107). The API below
+> still landed: instances are the right semantics for crowds, and the boot
+> measured 8,702 → 4,372 ms end-to-end.
+
+`loadModelAnimation` -> `load_gltf_animation` re-decodes the container, clones
+every buffer blob, rebuilds the skeleton and duplicates all keyframe tracks
+**per instance** (`models.rs:546-551`, `1183-1437`). The shooter needs one
+mixer per enemy SLOT (correct — mixer state is per-instance), so its boot
+parses the same seven GLBs ~30 times: **5.5 s of an 8 s boot** (SH-049
+measured 61%).
+
+The struct already separates what could be shared (`skeleton`, `animations`,
+`ref_rest_rotations`) from per-instance state (`joint_matrices`, `mixer`,
+`joint_world`) — models.rs:116-130. Wanted: `instantiateAnimation(handle)`
+(Arc-share the clip data, fresh mixer state), callers stay handle-based. This
+is the whole boot-time story; EN-032 (async loading) is adjacent but does not
+remove the duplication.
+
+## EN-056 — Per-frame upload/allocation tail in the renderer 🟡 *(2026-07-16 audit)*
+
+Individually small, collectively the class of waste the frame no longer has
+budget for at 4K. All VERIFIED still present:
+
+- Lighting UBO (~8.7 KB, 256 point-light slots) uploaded whole **8-9x/frame**
+  with no dirty flag (`mod.rs:10245,11526,11919-11955`; `shadow_pass.rs:73`
+  is explicitly unconditional).
+- Bloom chain creates **9 uniform buffers + 9 bind groups per frame**
+  (`postfx_chain.rs:66-141` — the per-pass UBOs are argued for in comments;
+  the bind-group re-creation is not).
+- The render graph is rebuilt from scratch **twice per frame** — 17 boxed
+  closures, fresh HashMap + HashSets, O(n^3) topo sort (`graph.rs:103-224`,
+  `mod.rs:10650,10824,11067`); composite/post bind groups rebuilt per frame
+  (`mod.rs:10862,10946`).
+
+Fix: dirty-flag the lighting UBO, cache bloom + composite bind groups keyed
+on the views they wrap, build the graph once and rebuild on topology change.
+
+## EN-057 — Hi-Z occlusion runs every frame for zero consumers 🟡 *(2026-07-16 audit)*
+
+The pyramid build + occlusion reduce + readback gate only on `ssao_enabled`
+and the culler's own flag (`mod.rs:10707-10731`, `occlusion.rs:221-223`) —
+never on whether any rasterized scene node actually consumes the result. In
+the shooter, the only scene nodes are 267 `gi_only` proxies that are never
+drawn, so the readback benefits nothing, every frame. Gate the occlusion
+half on ">= 1 non-gi_only scene node"; the SSAO half of the pyramid stays.
+
+## EN-058 — DXC: missing DLLs are a BOOT CRASH, and nothing deploys them 🔴 *(severity raised 2026-07-16, same day)*
+
+> **Worse than written, verified by accident:** the DLLs vanished from the
+> shooter root mid-session and the game **crashed at boot** — with
+> `DynamicDxc` configured, a missing `dxcompiler.dll` drops the ENTIRE DX12
+> backend out of the wgpu instance (no FXC fallback at instance level), and
+> the Vulkan surface path is broken on Windows (`Win32::hinstance` never
+> set), so there is nothing left to present with. `tools/fetch-dxc.ps1`'s
+> "missing DLLs are not fatal" line was wrong and is fixed in PR #107. The
+> deployment automation below is now launch-critical, and the Vulkan
+> hinstance bug is a second, independent fix worth making (it is the only
+> reason the DXC failure is fatal rather than degraded).
+
+`Dx12Compiler::DynamicDxc` landed (`native/windows/src/lib.rs:611-620`) and
+HW ray query is REAL when `dxcompiler.dll`/`dxil.dll` sit beside the exe
+(shooter boot log: `ray_query=true`). But when the DLLs are absent, wgpu
+falls back to FXC **silently** — SM 5.x, ray query gone — which is exactly
+the pre-fix failure mode ("HW Lumen silently off on every Windows build"),
+now conditional on two files nothing installs: `tools/fetch-dxc.ps1` exists
+but is wired into no build, package, or CI step, and the shooter's copies
+are untracked strays (now at least gitignored + documented, shooter PR #29).
+
+Wanted: (a) a **loud boot warning** on DX12 when DXC was requested and FXC
+was used; (b) fetch-dxc wired into the Windows build/packaging path;
+(c) the still-unmeasured HW-vs-SW Lumen frame cost measured once on the dev
+box and recorded (docs/perf/014 has only "within ~1.5x" guesses).
+
+## EN-059 — File reads decode UTF-8 text as Latin-1: mojibake reaches the screen 🔴 *(2026-07-16 audit)*
+
+`arena_02.world.json` contains a clean UTF-8 em dash in its `name` field
+(verified byte-level). The shooter's diag bar renders it as
+`Arena 02 a-hat-euro-quote Outdoor plaza` — the three-char cp1252 image of
+the UTF-8 bytes. So somewhere between `readFile`/`loadWorld` and `drawText`,
+file bytes are decoded per-byte (Latin-1) instead of as UTF-8. Every
+non-ASCII character in any text asset (world names, future localized strings
+— the shooter's SH-043 localization table is planned work) will render wrong.
+
+First step is a probe to localise WHERE (Perry's readFile string
+materialisation vs the engine's world loader vs drawText's glyph lookup),
+because the fix lands in different repos depending on the answer. Note
+Perry-upstream involvement is plausible (same class as the EN-020 slice
+scanners: byte-level string handling).
+
+## EN-060 — Grass distance LOD (quality-gated) 🟡 *(2026-07-16 audit)*
+
+Grass tiles are frustum-culled (`material_system.rs:1776`) but in-frustum
+tiles draw at full authored density regardless of distance — 120k blades in
+the shooter, `material_pass` ~1.9 ms. The July audit's "concentric rings /
+instance_count by distance" idea remains unimplemented.
+
+**Hard constraint from the product owner: no visible quality loss.** A naive
+density cut reads as the far field thinning and is REJECTED by definition.
+Acceptable shapes: dithered per-instance dropout beyond the distance where a
+blade is sub-pixel (its coverage already handled by the shader's distance
+ramp), with A/B screenshots at multiple distances proving indistinguishable.
+If it cannot be made imperceptible, close as won't-do — 1.9 ms is not worth
+a visible regression here.
