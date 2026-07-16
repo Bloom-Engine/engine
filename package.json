@@ -500,6 +500,61 @@
           "returns": "void"
         },
         {
+          "name": "bloom_play_sound_3d_ex",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_voice_set_position",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_voice_stop",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_voice_set_volume",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_voice_set_pitch",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_voice_set_lowpass",
+          "params": [
+            "f64",
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
           "name": "bloom_load_texture",
           "params": [
             "string"

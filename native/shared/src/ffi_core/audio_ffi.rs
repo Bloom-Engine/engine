@@ -115,5 +115,70 @@ macro_rules! __bloom_ffi_audio_ffi {
         })
         }
 
+        // ---- EN-062: live spatial voices ---------------------------------
+        //
+        // bloom_play_sound_3d is fire-and-forget: it cannot loop and it cannot
+        // move. These six calls are the emitter API — a voice id you hold onto
+        // and steer. A river you walk along, wind in a treeline, a creature
+        // circling closer: all of them are one looping voice plus a per-frame
+        // position/volume ride.
+
+        // bloom_play_sound_3d_ex — returns the voice id (0 = unknown sound).
+        // looping != 0 loops until bloom_voice_stop. ref_dist = full-volume
+        // range, rolloff = fall-off steepness (1,1 == the classic 1/d),
+        // max_dist = cull range (<= 0 = never cull).
+        #[no_mangle]
+        pub extern "C" fn bloom_play_sound_3d_ex(
+            handle: f64, x: f64, y: f64, z: f64,
+            looping: f64, ref_dist: f64, max_dist: f64, rolloff: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_play_sound_3d_ex", move || {
+                engine().audio.play_sound_3d_ex(
+                    handle, x as f32, y as f32, z as f32,
+                    looping != 0.0, ref_dist as f32, max_dist as f32, rolloff as f32)
+        })
+        }
+
+        // bloom_voice_set_position — move a live voice (doppler falls out of
+        // the motion automatically).
+        #[no_mangle]
+        pub extern "C" fn bloom_voice_set_position(voice: f64, x: f64, y: f64, z: f64) {
+            $crate::ffi::guard("bloom_voice_set_position", move || {
+                engine().audio.set_voice_position(voice, x as f32, y as f32, z as f32);
+        })
+        }
+
+        // bloom_voice_stop — click-free: fades over one mix block, then drops.
+        #[no_mangle]
+        pub extern "C" fn bloom_voice_stop(voice: f64) {
+            $crate::ffi::guard("bloom_voice_stop", move || {
+                engine().audio.stop_voice(voice);
+        })
+        }
+
+        // bloom_voice_set_volume
+        #[no_mangle]
+        pub extern "C" fn bloom_voice_set_volume(voice: f64, volume: f64) {
+            $crate::ffi::guard("bloom_voice_set_volume", move || {
+                engine().audio.set_voice_volume(voice, volume as f32);
+        })
+        }
+
+        // bloom_voice_set_pitch — 0.25..4 playback-rate multiplier.
+        #[no_mangle]
+        pub extern "C" fn bloom_voice_set_pitch(voice: f64, pitch: f64) {
+            $crate::ffi::guard("bloom_voice_set_pitch", move || {
+                engine().audio.set_voice_pitch(voice, pitch as f32);
+        })
+        }
+
+        // bloom_voice_set_lowpass — per-VOICE occlusion (Hz; 0 = bypass).
+        #[no_mangle]
+        pub extern "C" fn bloom_voice_set_lowpass(voice: f64, cutoff: f64) {
+            $crate::ffi::guard("bloom_voice_set_lowpass", move || {
+                engine().audio.set_voice_lowpass(voice, cutoff as f32);
+        })
+        }
+
     };
 }

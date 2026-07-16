@@ -153,6 +153,72 @@ export function setListenerPosition(x: number, y: number, z: number, forwardX: n
   bloom_set_listener_position(x, y, z, forwardX, forwardY, forwardZ);
 }
 
+// ---- EN-062: live spatial voices --------------------------------------------
+//
+// playSound3D is fire-and-forget — it cannot loop and it cannot move. These
+// calls are the *emitter* API: play returns a voice id you hold onto and
+// steer per frame. A river you walk along, wind in a treeline, a creature
+// skittering closer — each is one looping voice plus a position/volume ride.
+//
+// What the mixer does with a spatial voice (all of it engine-side, free to
+// the game): equal-power panning, inverse-distance attenuation shaped by
+// refDist/rolloff, distance air-absorption, a rear-hemisphere head-shadow
+// cue, and doppler derived from the motion you feed voiceSetPosition.
+
+declare function bloom_play_sound_3d_ex(handle: number, x: number, y: number, z: number,
+  looping: number, refDist: number, maxDist: number, rolloff: number): number;
+declare function bloom_voice_set_position(voice: number, x: number, y: number, z: number): void;
+declare function bloom_voice_stop(voice: number): void;
+declare function bloom_voice_set_volume(voice: number, volume: number): void;
+declare function bloom_voice_set_pitch(voice: number, pitch: number): void;
+declare function bloom_voice_set_lowpass(voice: number, cutoffHz: number): void;
+
+/// Play a sound as a controllable 3D voice; returns its voice id (0 = the
+/// sound was not loaded — every voice* call ignores id 0, so the null-object
+/// pattern costs nothing at the call site).
+///
+/// `refDist` — range that plays at full volume. `rolloff` — how hard the
+/// level falls past it (1 = physical inverse law; < 1 gentler, audible
+/// farther). `maxDist` — the mixer culls past this (0 = never); a culled
+/// looping voice keeps its playback head moving and comes back mid-phrase,
+/// not from the top. refDist=1, rolloff=1 is exactly playSound3D's curve.
+export function playSound3DEx(sound: Sound, x: number, y: number, z: number,
+  looping: boolean, refDist: number, maxDist: number, rolloff: number): number {
+  return bloom_play_sound_3d_ex(sound.handle, x, y, z, looping ? 1 : 0, refDist, maxDist, rolloff);
+}
+
+/// Move a live voice. Feed it real motion — doppler is derived from how the
+/// emitter-to-listener distance changes, so a moving voice bends pitch the
+/// way a moving thing should. (Teleporting a pool voice to a new owner is
+/// fine too: impossible speeds are detected and skipped, not chirped.)
+export function voiceSetPosition(voice: number, x: number, y: number, z: number): void {
+  if (voice !== 0) bloom_voice_set_position(voice, x, y, z);
+}
+
+/// Stop a voice click-free: it fades over one mix block (~10 ms) and drops.
+export function voiceStop(voice: number): void {
+  if (voice !== 0) bloom_voice_stop(voice);
+}
+
+/// Per-voice volume (multiplies the sound's base volume and the bus). Ride it
+/// per frame — gains are ramped inside the mixer, so it never zippers.
+export function voiceSetVolume(voice: number, volume: number): void {
+  if (voice !== 0) bloom_voice_set_volume(voice, volume);
+}
+
+/// Playback-rate multiplier, clamped 0.25..4. Detune copies of one asset
+/// (three wind emitters at 0.94/1.0/1.07 stop sounding like one file) or
+/// size a creature (small = up, big = down).
+export function voiceSetPitch(voice: number, pitch: number): void {
+  if (voice !== 0) bloom_voice_set_pitch(voice, pitch);
+}
+
+/// Per-VOICE occlusion low-pass (Hz; 0 = bypass). Unlike setSoundLowpass this
+/// muffles ONE emitter, not every voice sharing the asset.
+export function voiceSetLowpass(voice: number, cutoffHz: number): void {
+  if (voice !== 0) bloom_voice_set_lowpass(voice, cutoffHz);
+}
+
 // Async / threaded loading
 
 declare function bloom_stage_sound(path: number): number;

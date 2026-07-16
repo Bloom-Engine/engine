@@ -9,6 +9,42 @@
 //! Sample data is shared with the control side via `Arc<SoundData>` — a
 //! sound unloaded mid-playback keeps its samples alive until the last
 //! voice playing it finishes, then the Arc drops on this thread.
+//!
+//! # Spatialization (EN-062)
+//!
+//! Every voice carries a stable `voice_id`, so a playing voice can be
+//! moved, re-volumed, re-pitched, filtered or stopped after the trigger —
+//! that is what turns "a sound played at a point" into an *emitter* (a
+//! river you walk along, a creature circling you). Spatial voices get:
+//!
+//! - **Inverse-clamped distance model** — `ref / (ref + rolloff·(d−ref))`,
+//!   which with ref=1, rolloff=1 is exactly the old 1/d curve, so the
+//!   pre-EN-062 API keeps its loudness. Past `max_dist` the voice is
+//!   culled from the mix but keeps its playback head advancing.
+//! - **Equal-power panning** (was linear, which dipped centered sources
+//!   6 dB and made walk-bys "swell" at the ears). Width is 0.85: a real
+//!   head leaks sound around itself; a 100%-one-ear source reads as a
+//!   headphone artifact, not a position.
+//! - **Air absorption** — a distance-driven low-pass (20 kHz at the ear
+//!   falling exponentially with range). Distant gunfire is dull *before*
+//!   it is quiet; that ordering is most of what "far away" sounds like.
+//! - **Rear cue** — sources behind the listener are low-passed toward
+//!   ~4.5 kHz and dipped ~1.5 dB. Cheap head-shadow approximation; it is
+//!   the difference between "somewhere" and "behind you".
+//! - **Doppler** — playback rate bends with radial velocity (343 m/s
+//!   speed of sound, clamped, smoothed). Computed from the *distance
+//!   delta* per block, so listener motion contributes symmetrically. A
+//!   teleporting emitter (pool voice re-targeted to a new enemy) is
+//!   detected by an impossible radial speed and resets cleanly instead
+//!   of chirping.
+//!
+//! All per-voice gains ramp linearly across each mix block — a moving
+//! emitter or a per-frame volume ride must never zipper or click.
+//!
+//! Voices resample with linear interpolation (`frame_pos` is fractional):
+//! this is what makes doppler/pitch possible, and it also plays each
+//! asset at its *authored* rate — previously a 44.1 kHz file on a 48 kHz
+//! device played ~9% fast and sharp. Music streams are untouched.
 
 use super::spsc::Consumer;
 #[cfg(not(target_arch = "wasm32"))]
@@ -23,11 +59,21 @@ use std::sync::Arc;
 pub enum Cmd {
     PlaySound {
         sound_id: u64,
+        /// Stable per-play id — the handle for every SetVoice*/StopVoice.
+        voice_id: u64,
         data: Arc<SoundData>,
         volume: f32,
         /// Some(world position) for spatial sounds.
         spatial: Option<[f32; 3]>,
-        /// EN-029 — mix bus (see [`Bus`]), reverb send (0..1) and low-pass
+        /// EN-062 — loop the sample seamlessly until StopVoice/StopSound.
+        looping: bool,
+        /// EN-062 — distance model. ref=1, rolloff=1 == the classic 1/d.
+        ref_dist: f32,
+        max_dist: f32,
+        rolloff: f32,
+        /// EN-062 — playback-rate multiplier (doppler multiplies on top).
+        pitch: f32,
+        /// EN-029 — mix bus (see [`bus`]), reverb send (0..1) and low-pass
         /// cutoff in Hz (<= 0 or >= NYQUIST = bypass).
         bus: u8,
         send: f32,
@@ -57,6 +103,17 @@ pub enum Cmd {
     /// raycasts and decides; the mixer just filters.
     SetSoundLowpass { sound_id: u64, cutoff: f32 },
     SetSoundSend { sound_id: u64, send: f32 },
+
+    // ---- EN-062: live-voice control ------------------------------------
+    SetVoicePosition { voice_id: u64, pos: [f32; 3] },
+    /// Fades out over ~1 block and removes — a hard cut on a looping bed
+    /// mid-waveform is an audible click.
+    StopVoice { voice_id: u64 },
+    SetVoiceVolume { voice_id: u64, volume: f32 },
+    SetVoicePitch { voice_id: u64, pitch: f32 },
+    /// Per-VOICE occlusion; SetSoundLowpass muffles every voice of a sound,
+    /// which is wrong the moment two emitters share an asset.
+    SetVoiceLowpass { voice_id: u64, cutoff: f32 },
 }
 
 /// Mix buses. Kept tiny and fixed: a general submix graph is a lot of
@@ -119,18 +176,60 @@ impl BusState {
     fn current(&self) -> f32 { (self.gain * (1.0 - self.duck)).clamp(0.0, 4.0) }
 }
 
+/// Speed of sound, m/s — the doppler constant.
+const SOUND_SPEED: f32 = 343.0;
+/// A radial speed past this is a teleport (voice re-targeted), not motion:
+/// reset doppler instead of bending pitch through the jump.
+const DOPPLER_TELEPORT: f32 = 150.0;
+/// Cutoffs above this bypass the one-pole entirely (inaudible + not free).
+const LP_ENGAGE_HZ: f32 = 16_000.0;
+
 struct Voice {
     sound_id: u64,
+    voice_id: u64,
     data: Arc<SoundData>,
-    position: usize,
+    /// Playback head in FRAMES, fractional — doppler and pitch resample.
+    frame_pos: f64,
     volume: f32,
     spatial: Option<[f32; 3]>,
+    looping: bool,
+    ref_dist: f32,
+    max_dist: f32,
+    rolloff: f32,
+    /// Game-set playback rate. Doppler multiplies on top of it.
+    pitch: f32,
+    /// Smoothed doppler rate.
+    doppler: f32,
+    /// Listener distance last block; < 0 = not yet seeded.
+    prev_dist: f32,
+    /// Current combined per-channel gains (spatial × volume × master × bus),
+    /// ramped toward each block's target so moving emitters never zipper.
+    g_l: f32,
+    g_r: f32,
+    /// False until the first block computes real targets (skip the ramp-in;
+    /// the asset's own attack handles the onset).
+    seeded: bool,
+    /// StopVoice: fade to silence over a block, then drop.
+    stopping: bool,
     bus: u8,
     send: f32,
     /// Low-pass cutoff, Hz. <= 0 = bypass.
     lowpass: f32,
     /// One-pole filter memory, per output channel.
     lp_z: [f32; 2],
+}
+
+impl Voice {
+    /// Read frame `idx` as stereo (mono duplicates).
+    #[inline]
+    fn frame(&self, idx: usize) -> (f32, f32) {
+        if self.data.channels <= 1 {
+            let s = self.data.samples[idx];
+            (s, s)
+        } else {
+            (self.data.samples[idx * 2], self.data.samples[idx * 2 + 1])
+        }
+    }
 }
 
 /// How a music voice gets its samples.
@@ -277,9 +376,20 @@ impl AudioRenderer {
 
     fn apply(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::PlaySound { sound_id, data, volume, spatial, bus, send, lowpass } => {
+            Cmd::PlaySound {
+                sound_id, voice_id, data, volume, spatial, looping,
+                ref_dist, max_dist, rolloff, pitch, bus, send, lowpass,
+            } => {
                 self.voices.push(Voice {
-                    sound_id, data, position: 0, volume, spatial,
+                    sound_id, voice_id, data, frame_pos: 0.0, volume, spatial,
+                    looping,
+                    ref_dist: ref_dist.max(1e-3),
+                    max_dist: max_dist.max(0.0),
+                    rolloff: rolloff.max(0.0),
+                    pitch: pitch.clamp(0.25, 4.0),
+                    doppler: 1.0,
+                    prev_dist: -1.0,
+                    g_l: 0.0, g_r: 0.0, seeded: false, stopping: false,
                     bus, send, lowpass, lp_z: [0.0; 2],
                 });
             }
@@ -357,6 +467,31 @@ impl AudioRenderer {
                     if v.sound_id == sound_id { v.send = send.clamp(0.0, 1.0); }
                 }
             }
+            Cmd::SetVoicePosition { voice_id, pos } => {
+                for v in &mut self.voices {
+                    if v.voice_id == voice_id { v.spatial = Some(pos); }
+                }
+            }
+            Cmd::StopVoice { voice_id } => {
+                for v in &mut self.voices {
+                    if v.voice_id == voice_id { v.stopping = true; }
+                }
+            }
+            Cmd::SetVoiceVolume { voice_id, volume } => {
+                for v in &mut self.voices {
+                    if v.voice_id == voice_id { v.volume = volume.max(0.0); }
+                }
+            }
+            Cmd::SetVoicePitch { voice_id, pitch } => {
+                for v in &mut self.voices {
+                    if v.voice_id == voice_id { v.pitch = pitch.clamp(0.25, 4.0); }
+                }
+            }
+            Cmd::SetVoiceLowpass { voice_id, cutoff } => {
+                for v in &mut self.voices {
+                    if v.voice_id == voice_id { v.lowpass = cutoff.max(0.0); }
+                }
+            }
         }
     }
 
@@ -375,7 +510,8 @@ impl AudioRenderer {
 
         // EN-029 — advance the per-bus duck envelopes once per block. Block
         // granularity is ~1-10 ms, far finer than any duck the ear resolves.
-        let block_dt = (output.len() as f32 / 2.0) / self.sample_rate;
+        let out_frames = output.len() / 2;
+        let block_dt = (out_frames as f32).max(1.0) / self.sample_rate;
         for b in self.buses.iter_mut() {
             b.advance(block_dt);
         }
@@ -398,9 +534,12 @@ impl AudioRenderer {
         // Spatial audio: listener-relative parameters, computed once.
         let [lx, ly, lz] = self.listener_pos;
         let [lfx, _lfy, lfz] = self.listener_forward; // "right" math projects out Y
-        // Listener right vector (cross of forward and up=[0,1,0])
-        let lrx = lfz;
-        let lrz = -lfx;
+        // Listener right = cross(forward, up=[0,1,0]) = (-fz, 0, fx) — the SAME
+        // vector mat4_look_at calls `s` (screen-right). EN-062 flipped the sign
+        // here: this used to be (fz, -fx), which is screen-LEFT, so the whole
+        // stereo field was mirrored — a shriek on screen-left panned right.
+        let lrx = -lfz;
+        let lrz = lfx;
         let lr_len = (lrx * lrx + lrz * lrz).sqrt().max(0.001);
         let master = self.master;
         let sample_rate = self.sample_rate;
@@ -412,53 +551,125 @@ impl AudioRenderer {
 
         // Sound effects
         voices.retain_mut(|v| {
-            let sound = &v.data;
+            let channels = v.data.channels.max(1) as usize;
+            let frames = v.data.samples.len() / channels;
+            if frames == 0 { return false; }
 
-            let (gain_l, gain_r) = if let Some([sx, sy, sz]) = v.spatial {
+            // ---- per-block spatial targets --------------------------------
+            // Manual (occlusion) low-pass; spatial cues can only lower it.
+            let mut cutoff = if v.lowpass > 0.0 { v.lowpass } else { f32::MAX };
+            let (sg_l, sg_r, dist) = if let Some([sx, sy, sz]) = v.spatial {
                 let dx = sx - lx;
                 let dy = sy - ly;
                 let dz = sz - lz;
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt().max(0.1);
-                // Distance attenuation: 1/distance, clamped
-                let attenuation = (1.0 / dist).min(1.0);
-                // Pan: dot of source direction with listener right
-                let pan = ((dx * lrx + dz * lrz) / (dist * lr_len)).clamp(-1.0, 1.0);
-                (attenuation * (1.0 - pan) * 0.5, attenuation * (1.0 + pan) * 0.5)
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-4);
+                // Inverse-clamped distance model. ref=1, rolloff=1 == the old
+                // 1/d exactly, so pre-EN-062 callers keep their loudness.
+                let refd = v.ref_dist;
+                let att = if dist > v.max_dist {
+                    0.0
+                } else {
+                    (refd / (refd + v.rolloff * (dist.max(refd) - refd))).min(1.0)
+                };
+                // Equal-power pan from the horizontal azimuth, at 0.85 width
+                // (a head is not an infinite baffle).
+                let pan = ((dx * lrx + dz * lrz) / (dist * lr_len)).clamp(-1.0, 1.0) * 0.85;
+                let theta = (pan + 1.0) * std::f32::consts::FRAC_PI_4;
+                let mut gl = att * theta.cos();
+                let mut gr = att * theta.sin();
+                // Air absorption: distance dulls before it silences.
+                cutoff = cutoff.min(20_000.0 * (-0.006 * dist).exp());
+                // Rear cue: head shadow behind the listener — darker and a
+                // touch quieter. Horizontal only; overhead stays neutral.
+                let f_len2 = lfx * lfx + lfz * lfz;
+                if f_len2 > 1e-6 {
+                    let back = (-(dx * lfx + dz * lfz) / (dist * f_len2.sqrt())).clamp(0.0, 1.0);
+                    if back > 0.0 {
+                        cutoff = cutoff.min(18_000.0 - 13_500.0 * back);
+                        let dip = 1.0 - 0.15 * back;
+                        gl *= dip;
+                        gr *= dip;
+                    }
+                }
+                (gl, gr, dist)
             } else {
-                (1.0, 1.0)
+                (1.0, 1.0, -1.0)
             };
 
-            let bg = bus_gain[(v.bus as usize).min(bus::COUNT - 1)];
-            let vol_l = v.volume * master * bg * gain_l;
-            let vol_r = v.volume * master * bg * gain_r;
+            // ---- doppler ---------------------------------------------------
+            // From the block-to-block distance delta, so listener motion and
+            // source motion both count. Impossible speeds are teleports
+            // (re-targeted pool voices) — snap, don't chirp.
+            if dist >= 0.0 {
+                if v.prev_dist >= 0.0 {
+                    let vr = (dist - v.prev_dist) / block_dt.max(1e-4);
+                    if vr.abs() > DOPPLER_TELEPORT {
+                        v.doppler = 1.0;
+                    } else {
+                        let target = (SOUND_SPEED / (SOUND_SPEED + vr)).clamp(0.5, 2.0);
+                        v.doppler += (target - v.doppler) * 0.25;
+                    }
+                }
+                v.prev_dist = dist;
+            }
+            let step = (v.pitch * v.doppler) as f64
+                * (v.data.sample_rate.max(8_000) as f64 / sample_rate as f64);
 
-            // One-pole low-pass coefficient. This is the occlusion knob: a
-            // muffled source is a source behind a wall, and it reads far more
-            // like geometry than simply turning the volume down does.
-            let lp_a = if v.lowpass > 0.0 && v.lowpass < sample_rate * 0.5 {
-                let x = (-2.0 * std::f32::consts::PI * v.lowpass / sample_rate).exp();
-                Some(x)
+            // ---- combined gain targets, ramped across the block ------------
+            let bg = bus_gain[(v.bus as usize).min(bus::COUNT - 1)];
+            let (t_l, t_r) = if v.stopping {
+                (0.0, 0.0)
+            } else {
+                (sg_l * v.volume * master * bg, sg_r * v.volume * master * bg)
+            };
+            if !v.seeded {
+                v.g_l = t_l;
+                v.g_r = t_r;
+                v.seeded = true;
+            }
+
+            // Fully silent (culled by distance, or a zero-volume ambient bed):
+            // advance the head arithmetically and skip the per-sample work.
+            if t_l < 1e-5 && t_r < 1e-5 && v.g_l < 1e-5 && v.g_r < 1e-5 {
+                if v.stopping { return false; }
+                v.g_l = t_l;
+                v.g_r = t_r;
+                v.frame_pos += step * out_frames as f64;
+                if v.frame_pos >= frames as f64 {
+                    if v.looping {
+                        v.frame_pos %= frames as f64;
+                    } else {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            let inv = 1.0 / (out_frames as f32).max(1.0);
+            let dg_l = (t_l - v.g_l) * inv;
+            let dg_r = (t_r - v.g_r) * inv;
+
+            // One-pole low-pass coefficient: occlusion, air and rear cues all
+            // fold into one cutoff. Muffling reads as geometry/distance in a
+            // way that turning the volume down never does.
+            let lp_a = if cutoff < LP_ENGAGE_HZ.min(sample_rate * 0.45) {
+                Some((-2.0 * std::f32::consts::PI * cutoff / sample_rate).exp())
             } else {
                 None
             };
             let send = v.send;
 
-            let mut i = 0;
-            while i < output.len() && v.position < sound.samples.len() {
-                let (mut sl, mut sr) = if sound.channels == 1 {
-                    let s = sound.samples[v.position];
-                    v.position += 1;
-                    (s, s)
-                } else {
-                    let l = sound.samples[v.position];
-                    v.position += 1;
-                    let r = if v.position < sound.samples.len() {
-                        let r = sound.samples[v.position];
-                        v.position += 1;
-                        r
-                    } else { l };
-                    (l, r)
-                };
+            let mut ended = false;
+            let mut f = 0usize;
+            while f < out_frames {
+                let idx = v.frame_pos as usize;
+                if idx >= frames { ended = !v.looping; break; }
+                let frac = (v.frame_pos - idx as f64) as f32;
+                let (s0l, s0r) = v.frame(idx);
+                let nidx = if idx + 1 < frames { idx + 1 } else if v.looping { 0 } else { idx };
+                let (s1l, s1r) = v.frame(nidx);
+                let mut sl = s0l + (s1l - s0l) * frac;
+                let mut sr = s0r + (s1r - s0r) * frac;
 
                 if let Some(a) = lp_a {
                     v.lp_z[0] = sl * (1.0 - a) + v.lp_z[0] * a;
@@ -467,8 +678,9 @@ impl AudioRenderer {
                     sr = v.lp_z[1];
                 }
 
-                let ol = sl * vol_l;
-                let or = sr * vol_r;
+                let i = f * 2;
+                let ol = sl * v.g_l;
+                let or = sr * v.g_r;
                 output[i] += ol;
                 if i + 1 < output.len() { output[i + 1] += or; }
 
@@ -476,9 +688,29 @@ impl AudioRenderer {
                     send_buf[i] += ol * send;
                     if i + 1 < output.len() { send_buf[i + 1] += or * send; }
                 }
-                i += 2;
+
+                v.g_l += dg_l;
+                v.g_r += dg_r;
+                v.frame_pos += step;
+                if v.frame_pos >= frames as f64 {
+                    if v.looping {
+                        v.frame_pos -= frames as f64;
+                    } else {
+                        ended = true;
+                        break;
+                    }
+                }
+                f += 1;
             }
-            v.position < sound.samples.len()
+            if !ended {
+                // Land exactly on the target — no float drift across blocks.
+                v.g_l = t_l;
+                v.g_r = t_r;
+            }
+            if v.stopping && v.g_l < 1e-4 && v.g_r < 1e-4 {
+                return false;
+            }
+            !ended
         });
 
         // Wet return. Processed after the dry voices so every send this block

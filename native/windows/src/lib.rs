@@ -1121,6 +1121,13 @@ unsafe fn wasapi_audio_thread(mut renderer: Option<bloom_shared::audio::AudioRen
 
     let _ = audio_client.Start();
 
+    // EN-062 — tell the renderer the DEVICE rate. It defaulted to 44.1 kHz
+    // forever, so on the typical 48 kHz endpoint every filter cutoff and
+    // block-dt was ~9% off (and, pre-resampler, every sound played sharp).
+    if let Some(r) = renderer.as_mut() {
+        r.set_sample_rate(sample_rate as f32);
+    }
+
     // Temporary buffer for mixing (always stereo f32 from our mixer)
     let mut mix_buf = vec![0.0f32; buffer_size * 2];
 
