@@ -76,7 +76,12 @@ examples/intel-sponza/assets/outdoor.hdr
 *.actual.png
 
 # Compiled example binaries — build artifacts, never commit.
-examples/**/main.exe
+# Match by EXTENSION, not by the name `main`: this list used to be main.exe /
+# main / main.app, which assumed every example compiles to `main`. The
+# world-viewer compiles to world-viewer.exe, sailed straight through, and a
+# 26 MB binary was committed and very nearly merged to main.
+examples/**/*.exe
+examples/**/*.pdb
 examples/**/main
 examples/**/main.app
 
