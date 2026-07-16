@@ -5,6 +5,28 @@
 
 use super::*;
 
+// EN-054 — cached world-triangle soup for the clipmap rebake. The soup is a
+// pure function of the scene graph (node set, geometry, transforms,
+// visibility), and every one of those bumps `tlas_version` — so a travel-
+// triggered rebake only needs to RE-BIN against its new origin, not re-gather
+// the whole scene. Before this, every ~10 m of camera travel re-transformed
+// every vertex of every node and allocated two multi-MB Vecs on the frame
+// that starts the rebake (measured 2–9 ms gather per event on the shooter's
+// 203k-triangle scene, on top of the origin-dependent binning that stays).
+// Module-local static, same pattern as staging.rs's stores — the ratcheted
+// renderer/mod.rs gains no field.
+struct SdfTriCache {
+    version: u64,
+    vertices: Vec<f32>,
+    indices: Vec<u32>,
+    tri_count: u32,
+}
+fn sdf_tri_cache() -> &'static std::sync::Mutex<Option<SdfTriCache>> {
+    static INSTANCE: std::sync::OnceLock<std::sync::Mutex<Option<SdfTriCache>>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 impl Renderer {
     /// Ticket 014 V2 — bake the scene-wide SDF clipmap once, on the
     /// frame when all per-mesh queues (BLAS, cards, per-mesh SDFs)
@@ -71,7 +93,24 @@ impl Renderer {
             return;
         }
 
-        let (vertices, indices, tri_count) = scene.build_world_triangles();
+        let mut cache_guard = sdf_tri_cache().lock().unwrap();
+        let stale = match &*cache_guard {
+            Some(c) => c.version != scene.tlas_version,
+            None => true,
+        };
+        if stale {
+            let (v, i, n) = scene.build_world_triangles();
+            *cache_guard = Some(SdfTriCache {
+                version: scene.tlas_version,
+                vertices: v,
+                indices: i,
+                tri_count: n,
+            });
+        }
+        let cached = cache_guard.as_ref().unwrap();
+        let vertices = &cached.vertices;
+        let indices = &cached.indices;
+        let tri_count = cached.tri_count;
         if tri_count == 0 {
             return;
         }
@@ -163,12 +202,12 @@ impl Renderer {
 
         let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_sdf_bake_vbuf"),
-            contents: bytemuck::cast_slice(&vertices),
+            contents: bytemuck::cast_slice(vertices.as_slice()),
             usage: wgpu::BufferUsages::STORAGE,
         });
         let ibuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_sdf_bake_ibuf"),
-            contents: bytemuck::cast_slice(&indices),
+            contents: bytemuck::cast_slice(indices.as_slice()),
             usage: wgpu::BufferUsages::STORAGE,
         });
         let cell_offsets_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
