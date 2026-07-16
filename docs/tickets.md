@@ -1797,7 +1797,16 @@ soup keyed on `tlas_version` — the scene is static, so travel-triggered
 rebakes should re-bin, not re-gather; then amortise the binning across the 4
 frames the GPU bake already takes.
 
-## EN-055 — No animation-instancing API: N enemies = N full GLB re-parses 🔴 *(2026-07-16 audit)*
+## EN-055 — No animation-instancing API: N enemies = N full GLB re-parses ✅ *(shipped same day — PR #107; and the boot claim was WRONG)*
+
+> **Measured before believing (2026-07-16, same day):** the shooter's per-slot
+> animation parses were **43 ms total**, not the 5.5 s SH-049 attributed to
+> them. `load_gltf_animation` re-parses the container but never decodes
+> images — the actual 4.9 s was SERIAL `loadModel` texture decode, fixed by
+> the shooter adopting the parallel `stageModels`/`commitModel` path (which
+> needed two staged-commit bugs fixed first — see PR #107). The API below
+> still landed: instances are the right semantics for crowds, and the boot
+> measured 8,702 → 4,372 ms end-to-end.
 
 `loadModelAnimation` -> `load_gltf_animation` re-decodes the container, clones
 every buffer blob, rebuilds the skeleton and duplicates all keyframe tracks
@@ -1841,7 +1850,18 @@ the shooter, the only scene nodes are 267 `gi_only` proxies that are never
 drawn, so the readback benefits nothing, every frame. Gate the occlusion
 half on ">= 1 non-gi_only scene node"; the SSAO half of the pyramid stays.
 
-## EN-058 — DXC: silent FXC fallback + nothing deploys the DLLs 🟡 *(2026-07-16 audit)*
+## EN-058 — DXC: missing DLLs are a BOOT CRASH, and nothing deploys them 🔴 *(severity raised 2026-07-16, same day)*
+
+> **Worse than written, verified by accident:** the DLLs vanished from the
+> shooter root mid-session and the game **crashed at boot** — with
+> `DynamicDxc` configured, a missing `dxcompiler.dll` drops the ENTIRE DX12
+> backend out of the wgpu instance (no FXC fallback at instance level), and
+> the Vulkan surface path is broken on Windows (`Win32::hinstance` never
+> set), so there is nothing left to present with. `tools/fetch-dxc.ps1`'s
+> "missing DLLs are not fatal" line was wrong and is fixed in PR #107. The
+> deployment automation below is now launch-critical, and the Vulkan
+> hinstance bug is a second, independent fix worth making (it is the only
+> reason the DXC failure is fatal rather than degraded).
 
 `Dx12Compiler::DynamicDxc` landed (`native/windows/src/lib.rs:611-620`) and
 HW ray query is REAL when `dxcompiler.dll`/`dxil.dll` sit beside the exe
