@@ -1763,6 +1763,23 @@ behave. `rel` is now normalised to '/'. Run it on Windows: 0 failures.
 
 ---
 
+## HW-vs-SW Lumen: MEASURED — and HW ray query is OPT-IN now (2026-07-16 evening)
+
+**Shipped the same evening:** the Windows host requests EXPERIMENTAL_RAY_QUERY
+only when opted in (`BLOOM_HW_GI=1`, `BLOOM_PT`, or a `--pt` arg) — merely
+having dxcompiler.dll beside the exe no longer converts a game to the HW GI
+path. Boot now prints the decision (`bloom: hw-gi opt-in: want_hw=... `).
+Two more things learned while verifying:
+
+- The SW path is itself TIERED at runtime: `hiz-screen` at boot, upgrading to
+  `sdf-clipmap` once the clipmap bakes (both print now). Any fps read at a
+  single instant mixes tier-warmup states — trust 60 s averages only.
+- An apparent "HW loses the sun shadows" difference between screenshot pairs
+  did NOT survive scrutiny: the drifting cloud deck (45% shadow strength)
+  confounds any two captures taken minutes apart. A real GI-quality A/B needs
+  clouds off (`setCloudShadows(0,...)`) and same-frame capture. UNRESOLVED —
+  do this before ever defaulting HW on.
+
 ## HW-vs-SW Lumen: MEASURED at last (2026-07-16 evening) — HW costs +20 ms/frame on the 760M
 
 The number EN-023 and EN-058(c) said nobody had ever measured. A/B on the
