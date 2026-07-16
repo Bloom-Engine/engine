@@ -1981,3 +1981,25 @@ blade is sub-pixel (its coverage already handled by the shader's distance
 ramp), with A/B screenshots at multiple distances proving indistinguishable.
 If it cannot be made imperceptible, close as won't-do — 1.9 ms is not worth
 a visible regression here.
+
+---
+
+## EN-061 — SSR fireflies blanket interior surfaces ("the indoor blizzard") 🔴 *(2026-07-16 night)*
+
+The user's "sparkles" report, run to ground with the f12-live bisect: white
+render-texel speckles blanketing every interior surface of the shooter's
+house (worst on the ceiling), present with SSGI, SSAO and SHADOWS each
+toggled off, **gone the instant SSR is off**. Mechanism: the SSR march on
+rough interior concrete hits bright window/sky content through the Hi-Z
+pyramid; single-texel hits become white fireflies against the dim interior,
+widened into blocks by the TSR upscale. Captures: shooter
+`tools/.testout/bliz-on.png` (blizzard) vs `bliz-fixed.png` (clean); repro:
+INDOORCAM+AITEST probe build + `--dbg-off ssr` A/B.
+
+The shooter ships SSR **off** now (its water uses the planar probe; the July
+audit measured SSR invisible outdoors — the toggle row stays for A/B). The
+engine-side fix this ticket wants: roughness cutoff for the march (rough
+dielectrics should get IBL, not a mirror march), a firefly luminance clamp
+on hit radiance, and hit validation against the coarse Hi-Z level actually
+sampled. Re-enable in the shooter only after the interior capture stays
+clean.
