@@ -304,8 +304,16 @@ mod win32 {
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_MOUSEMOVE => {
+                // lParam carries PHYSICAL client pixels. The rest of the
+                // engine — screenWidth, all 2D drawing, picking — works in
+                // LOGICAL units (see the WM_SIZE handler), so divide by the
+                // window's DPI scale before handing coordinates in. Without
+                // this, every hit-test on a scaled display (125%/150%…) lands
+                // scale× away from the pointer — buttons near the top-left
+                // almost work, everything else misses.
                 let x = (lparam.0 & 0xFFFF) as i16 as f64;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f64;
+                let scale = dpi_scale(hwnd);
                 if let Some(eng) = ENGINE.get_mut() {
                     if eng.input.cursor_disabled {
                         // FPS-style capture: accumulate the movement away from
@@ -314,6 +322,10 @@ mod win32 {
                         // edge. (begin_frame consumes raw_delta when the cursor
                         // is disabled.) The recenter generates another
                         // WM_MOUSEMOVE at the centre with zero delta — no loop.
+                        // Centre math and SetCursorPos stay PHYSICAL (that is
+                        // what GetClientRect/ClientToScreen speak); only the
+                        // delta handed to the engine converts to logical, so
+                        // look sensitivity matches macOS point-deltas.
                         let mut rect = RECT::default();
                         let _ = GetClientRect(hwnd, &mut rect);
                         let cx = ((rect.right - rect.left) / 2) as f64;
@@ -321,13 +333,13 @@ mod win32 {
                         let dx = x - cx;
                         let dy = y - cy;
                         if dx != 0.0 || dy != 0.0 {
-                            eng.input.accumulate_mouse_delta(dx, dy);
+                            eng.input.accumulate_mouse_delta(dx / scale, dy / scale);
                             let mut pt = POINT { x: cx as i32, y: cy as i32 };
                             let _ = ClientToScreen(hwnd, &mut pt);
                             let _ = SetCursorPos(pt.x, pt.y);
                         }
                     } else {
-                        eng.input.set_mouse_position(x, y);
+                        eng.input.set_mouse_position(x / scale, y / scale);
                     }
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -522,8 +534,10 @@ mod win32 {
                 if k > 0 { if let Some(eng) = ENGINE.get_mut() { eng.input.set_key_up(k); } }
             }
             WM_MOUSEMOVE => {
-                let x = (lparam.0 & 0xFFFF) as i16 as f64;
-                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f64;
+                // Physical -> logical, same as the standalone window proc.
+                let scale = dpi_scale(hwnd);
+                let x = ((lparam.0 & 0xFFFF) as i16 as f64) / scale;
+                let y = (((lparam.0 >> 16) & 0xFFFF) as i16 as f64) / scale;
                 if let Some(eng) = ENGINE.get_mut() { eng.input.set_mouse_position(x, y); }
             }
             WM_LBUTTONDOWN => { if let Some(eng) = ENGINE.get_mut() { eng.input.set_mouse_button_down(0); } }
