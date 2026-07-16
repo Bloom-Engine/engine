@@ -215,6 +215,99 @@ function checkVec3(errors: string[], path: string, v: Vec3Lit | null): void {
   }
 }
 
+// ---- unknown-field detection -------------------------------------------------
+//
+// The saver (`serialize.ts`) walks the schema by LITERAL KEY, so any field it
+// does not know about is silently dropped on the first save. Validation
+// deliberately tolerates unknown fields on load (a v3 file should still open in
+// a v2 tool) — which means the only honest behavior is to tell the user LOUDLY
+// at load time that those fields will not survive an edit-save cycle.
+//
+// Games that need to attach their own data must use the sanctioned extension
+// points, which DO round-trip: `world.metadata`, `entity.userData`,
+// `entity.tags`. Anything else is schema, and schema changes land in types.ts,
+// serialize.ts, validate.ts, and version.ts together.
+
+const WORLD_KEYS = ['schemaVersion', 'name', 'id', 'bounds', 'environment', 'terrain', 'entities', 'lights', 'water', 'rivers', 'metadata'];
+const BOUNDS_KEYS = ['min', 'max'];
+const ENVIRONMENT_KEYS = ['skyColor', 'ambientColor', 'ambientIntensity', 'sunDirection', 'sunColor', 'sunIntensity', 'fogStart', 'fogEnd', 'fogColor', 'shadowsEnabled'];
+const TERRAIN_KEYS = ['width', 'depth', 'cellSize', 'origin', 'heights', 'layers'];
+const TERRAIN_LAYER_KEYS = ['id', 'textureRef', 'weights', 'tileScale'];
+const ENTITY_KEYS = ['id', 'name', 'modelRef', 'prefabRef', 'transform', 'tint', 'tags', 'userData'];
+const TRANSFORM_KEYS = ['position', 'rotation', 'scale'];
+const LIGHT_KEYS = ['id', 'name', 'kind', 'position', 'color', 'intensity', 'range'];
+const WATER_KEYS = ['id', 'kind', 'center', 'size', 'surfaceHeight', 'color', 'waveAmplitude', 'waveSpeed'];
+const RIVER_KEYS = ['id', 'controlPoints', 'widths', 'depth', 'flowSpeed', 'color'];
+const PREFAB_KEYS = ['schemaVersion', 'id', 'name', 'children', 'bounds'];
+const PREFAB_CHILD_KEYS = ['id', 'modelRef', 'prefabRef', 'transform', 'tint', 'tags'];
+
+function pushUnknownKeys(obj: unknown, allowed: string[], path: string, out: string[]): void {
+  if (obj === null || obj === undefined || typeof obj !== 'object') return;
+  const keys = Object.keys(obj as Record<string, unknown>);
+  for (let i = 0; i < keys.length; i++) {
+    if (allowed.indexOf(keys[i]) < 0) {
+      out.push(path + '.' + keys[i]);
+    }
+  }
+}
+
+// List every field in a parsed world document that is not part of the current
+// schema, as dotted paths ("world.navmesh", "world.entities[3].loot"). Call on
+// the object returned by `loadWorld` — JSON.parse keeps unknown keys, the
+// static types just hide them. Empty result means a save is lossless.
+export function listUnknownWorldFields(w: WorldData): string[] {
+  const out: string[] = [];
+  pushUnknownKeys(w, WORLD_KEYS, 'world', out);
+  pushUnknownKeys(w.bounds, BOUNDS_KEYS, 'world.bounds', out);
+  pushUnknownKeys(w.environment, ENVIRONMENT_KEYS, 'world.environment', out);
+  if (w.terrain !== null && w.terrain !== undefined) {
+    pushUnknownKeys(w.terrain, TERRAIN_KEYS, 'world.terrain', out);
+    if (Array.isArray(w.terrain.layers)) {
+      for (let i = 0; i < w.terrain.layers.length; i++) {
+        pushUnknownKeys(w.terrain.layers[i], TERRAIN_LAYER_KEYS, 'world.terrain.layers[' + i + ']', out);
+      }
+    }
+  }
+  if (Array.isArray(w.entities)) {
+    for (let i = 0; i < w.entities.length; i++) {
+      const e = w.entities[i];
+      pushUnknownKeys(e, ENTITY_KEYS, 'world.entities[' + i + ']', out);
+      if (e) pushUnknownKeys(e.transform, TRANSFORM_KEYS, 'world.entities[' + i + '].transform', out);
+    }
+  }
+  if (Array.isArray(w.lights)) {
+    for (let i = 0; i < w.lights.length; i++) {
+      pushUnknownKeys(w.lights[i], LIGHT_KEYS, 'world.lights[' + i + ']', out);
+    }
+  }
+  if (Array.isArray(w.water)) {
+    for (let i = 0; i < w.water.length; i++) {
+      pushUnknownKeys(w.water[i], WATER_KEYS, 'world.water[' + i + ']', out);
+    }
+  }
+  if (Array.isArray(w.rivers)) {
+    for (let i = 0; i < w.rivers.length; i++) {
+      pushUnknownKeys(w.rivers[i], RIVER_KEYS, 'world.rivers[' + i + ']', out);
+    }
+  }
+  return out;
+}
+
+// Prefab counterpart of `listUnknownWorldFields`.
+export function listUnknownPrefabFields(p: PrefabData): string[] {
+  const out: string[] = [];
+  pushUnknownKeys(p, PREFAB_KEYS, 'prefab', out);
+  pushUnknownKeys(p.bounds, BOUNDS_KEYS, 'prefab.bounds', out);
+  if (Array.isArray(p.children)) {
+    for (let i = 0; i < p.children.length; i++) {
+      const c = p.children[i];
+      pushUnknownKeys(c, PREFAB_CHILD_KEYS, 'prefab.children[' + i + ']', out);
+      if (c) pushUnknownKeys(c.transform, TRANSFORM_KEYS, 'prefab.children[' + i + '].transform', out);
+    }
+  }
+  return out;
+}
+
 // Re-exported for use in loader/saver error formatting.
 export function formatValidationErrors(errors: string[]): string {
   if (errors.length === 0) return '';
