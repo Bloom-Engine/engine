@@ -1763,6 +1763,34 @@ behave. `rel` is now normalised to '/'. Run it on Windows: 0 failures.
 
 ---
 
+## HW-vs-SW Lumen: MEASURED at last (2026-07-16 evening) — HW costs +20 ms/frame on the 760M
+
+The number EN-023 and EN-058(c) said nobody had ever measured. A/B on the
+shooter (PERFTEST mode-1 gameplay, identical build, DXC DLLs present, PT off):
+
+| device features | gameplay | frame |
+|---|---|---|
+| EXPERIMENTAL_RAY_QUERY granted (HW Lumen active) | **14.4 fps** | ~69 ms |
+| `BLOOM_FORCE_SW_GI=1` (SW hiz-screen/SDF trace) | **20.3 fps** | ~49 ms |
+
+Three consequences:
+
+1. **Granting the feature IS enabling HW Lumen.** ssgi_pass/gi_bake pick the
+   HW trace the moment the TLAS exists ("HW still wins over both when the
+   feature was granted"), and model_draw registers every skinned draw for
+   per-frame compute pre-skin + BLAS builds. There is no separate "HW Lumen
+   on/off" knob — dropping the DXC DLLs beside a shooter exe silently
+   converted it to the HW path and cost ~40% of its frame rate. docs/perf/014's
+   "within ~1.5×" guess is dead; on this iGPU the HW path costs +20 ms/frame.
+2. **The boot line lies:** `ssgi trace backend = hiz-screen` is printed at
+   init, before the TLAS exists; per-frame the backend flips to HW with no
+   log. Diagnostics should report the backend actually used.
+3. **The choice is quality-vs-frame-rate and belongs to the product owner**
+   per the standing no-quality-tradeoffs rule: HW trace sees real proxy
+   geometry (off-screen bounce, no screen-space artifacts); SW is 20 ms
+   cheaper here. Needs a GI screenshot A/B on this scene before any default
+   is picked. `BLOOM_FORCE_SW_GI=1` is the per-box escape hatch meanwhile.
+
 ## EN-053 — Shadows cost ~5.3 ms in SAMPLING, and four passes each pay it ❌ *closed same day — the premise did not survive re-measurement*
 
 > **Measured before building (2026-07-16 evening, PERFTEST mode-0 bisect on
