@@ -699,10 +699,27 @@ unsafe fn init_engine_for_hwnd(
 
         // Ticket 007b: HW ray-query via DXR 1.1 / VK_KHR_ray_query.
         let supported = adapter.features();
-        let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
+        // 2026-07-16: HW ray query is OPT-IN now, not granted-by-default.
+        // Measured on the shooter (760M, PT off): merely granting the
+        // feature flips SSGI/WSRC to the HW trace and registers every
+        // skinned draw for per-frame pre-skin + BLAS builds — costing
+        // +20 ms/frame (14.4 vs 20.3 fps) AND losing the sun's cast
+        // shadows (screenshot-confirmed twice). Until the HW path is
+        // both cheaper and visually correct, nobody should get it by
+        // accident just because dxcompiler.dll sits beside the exe.
+        // Opt in with BLOOM_HW_GI=1; --pt / BLOOM_PT keep working (the
+        // path tracer needs the feature at device creation).
+        let want_hw = std::env::var("BLOOM_HW_GI")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || std::env::var("BLOOM_PT").is_ok()
+            || std::env::args().any(|a| a == "--pt");
+        let force_sw_gi = !want_hw
+            || std::env::var("BLOOM_FORCE_SW_GI")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
         let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        eprintln!("bloom: hw-gi opt-in: want_hw={want_hw} force_sw_gi={force_sw_gi}");
         let mut required_features = wgpu::Features::empty();
         // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
         // can record GPU timings. Optional — profiler falls back to CPU-only
