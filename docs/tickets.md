@@ -2081,3 +2081,28 @@ Tests: 10 new (loop lifecycle, stereo crossing, legacy-curve equivalence,
 equal-power, air absorption, rear cue, pitch rate, doppler zero-crossing
 count, max-dist cull/return, per-voice occlusion). watchOS stubs regenerated;
 web target exports the same six calls. First consumer: shooter SH-050.
+
+## EN-063 — build-web has been red on main since EN-055: models.rs no longer compiles without `models3d` 🔴 *(2026-07-16 evening)*
+
+Every `Tests` run on main from PR #107 (EN-055, 323a6c9) onward fails the
+`build-web` job at its first step, `cargo check --target
+wasm32-unknown-unknown --no-default-features --features web` in
+`native/shared` — the exact command CLAUDE.md tells every session to run.
+PRs #108–#116 all merged over the same inherited red. (Third occurrence of
+the pattern PR #105 fixed twice before: a change compiles on the platform
+that wrote it and breaks the one that didn't run.)
+
+Error classes (all in `models.rs`, all `models3d`-off builds):
+- `pub use crate::anim_mixer::AnimMixer` (`models.rs:60`) — `anim_mixer`
+  is `#[cfg(feature = "models3d")]`-gated in `lib.rs`, the re-export isn't.
+- `crate::staging::StagedModel` (`models.rs:~1803`) — the type is gated,
+  the use isn't.
+- ~29 bare `gltf::` paths — `gltf` is `dep:gltf` behind `models3d`.
+
+Fix wanted: make `bloom-shared` compile with `--no-default-features
+--features web` again — gate the re-export and the gltf/staging-touching
+`ModelManager` internals on `models3d` (the `ffi_core/models.rs` surface
+already has both gated variants; it's the module internals that lost their
+compileability). Then make the red gate LOUD: build-web has been failing
+for ~10 hours and five merged PRs without anyone noticing, which is the
+EN-058(a) lesson again — a gate nobody reads is not a gate.
