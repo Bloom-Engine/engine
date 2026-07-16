@@ -757,7 +757,8 @@ report: `shooter/docs/audit-round2.md` finding F1.
 ## EN-021 — SSR + IBL specular exclusive ownership ✅ implemented (PR #78)
 
 **Status 2026-07-04.** Landed on `feat/en021-ssr-ibl-ownership` (PR #78,
-pending merge): env-cubemap fallback bound into the SSR pass (miss
+since merged to main via the round-2 integration PR #83): env-cubemap
+fallback bound into the SSR pass (miss
 returns filtered env instead of black, `env_fallback()` in ssgi.rs;
 fresnel applied before the facing check so both miss paths agree), and
 `fs_main_scene` scales `ibl_spec` by the exact complement of the SSR
@@ -792,7 +793,8 @@ overlap engine-wide with zero shader work.
 ## EN-022 — Motion vectors for material-system draws ✅ implemented (PR #82 + shooter PR #4)
 
 **Status 2026-07-04.** Landed on `feat/en022-material-velocity` (PR #82,
-pending merge) + shooter PR #4: per-slot model history in
+since merged to main via the round-2 integration PR #83) + shooter PR #4:
+per-slot model history in
 MaterialSystem (`prev_models`/`cur_models` rotated in
 `reset_draw_slot(prev_vp)`, slot = submission order), `prev_mvp`
 reconstructed engine-side (the legacy caller-supplied param is
@@ -842,7 +844,17 @@ adapters that genuinely lack RT (most Android, web permanently), and the
 object-space-AABB bug below is still real there. But it is no longer urgent, and
 the interim "disable SSGI on SW adapters" is no longer needed on Windows.
 
-**Status 2026-07-04.** `feat/en023-gi-sw-cards` (PR #79, pending merge)
+**Update 2026-07-16 — priority inverted again; SW is now the *default* path
+everywhere.** The HW-vs-SW A/B finally ran (see the "HW-vs-SW Lumen" sections
+near the end of this file): granting ray query cost **+20 ms/frame on the
+760M** for a tonal-only difference (b34c1f3), so HW ray query became opt-in
+(`BLOOM_HW_GI=1` / `BLOOM_PT` / `--pt`, 66dad5b) and SW GI stays the shipping
+default (9d1523f). Consequence for this ticket: the SW colored-bounce data
+path is not an Android/web nicety — it is what every player sees. The
+remaining SW work items below inherit that priority.
+
+**Status 2026-07-04.** `feat/en023-gi-sw-cards` (PR #79, since merged to
+main via the round-2 integration)
 fixed the data path: world-space AABBs carried per instance
 (`world_aabb_min/max` in InstanceGiData, both HW and SDF struct
 mirrors), smallest-containing-box broad-phase pick (a scene-spanning
@@ -1047,8 +1059,9 @@ conforming to terrain slope and building walls, no lighting seams,
 
 **Why:** the animation FFI plays exactly one clip per model
 (`update_model_animation(handle, index, time)`), so every transition
-in every game pops. Root motion is unconditionally stripped at import
-(`models.rs:531`). This is the widest quality gap between Bloom
+in every game pops. Root motion was unconditionally stripped at import
+(now opt-in via `animSetRootMotion`; the logic lives around
+`models.rs:738-846`). This was the widest quality gap between Bloom
 content and AAA content — geometry and lighting are fine; the
 *motion* is 2005.
 
@@ -1367,6 +1380,16 @@ design.
   oversight. Revisit only with a design that needs it.
 
 
+
+## EN-040 — Unified cloud deck: sky clouds drive ground shadows ✅ *(shipped — 176bb83)*
+
+One cloud deck owns both the sky's clouds and the ground's moving cloud
+shadows, so the two can never disagree. Exposed as
+`setCloudShadows(strength, deckHeight, featureScale, driftSpeed)`
+(`src/core/index.ts:640` → `bloom_set_cloud_shadows`). This is the deck the
+HW-vs-SW GI A/B below turns off for its clouds-off protocol.
+*(Entry added retroactively during the 2026-07-16 doc audit — the ticket
+shipped without ever being registered here.)*
 
 ## EN-041 — Hierarchical foliage wind ✅ *(shipped 2026-07-12)*
 
@@ -1849,20 +1872,23 @@ mask must be full render res, and any tap-count adaptation must be
 imperceptible and screenshot-verified (per the twice-earned rule: a shadow
 perf win bigger than the change justifies = deleted shadows).
 
-## EN-054 — SDF clipmap re-bake still does its whole CPU prep in one frame 🔴 *(2026-07-16 audit)*
+## EN-054 — SDF clipmap re-bake still does its whole CPU prep in one frame ✅ *(shipped 2026-07-16 — PR #108 / d30fba9)*
 
-The GPU half is amortised (16 Z-layers/frame); the frame that STARTS a rebake
-still runs `scene.build_world_triangles()` synchronously —
-`renderer/scene.rs:476-506` re-transforms every vertex of every node into
-fresh Vecs with zero caching, then `gi_bake.rs:128-162` counting-sorts every
-triangle. 20-60 ms in one frame, triggered every ~10 m of camera travel
-(`gi_bake.rs:44-46`); the shooter's 50-68 ms wave-spawn spikes are this, and
-the shooter ships SSGI **on**, so it is live in the shipped game.
+The GPU half is amortised (16 Z-layers/frame); the frame that STARTED a rebake
+used to run `scene.build_world_triangles()` synchronously —
+`scene.rs:476-506` (top-level `native/shared/src/scene.rs`) re-transformed
+every vertex of every node into fresh Vecs with zero caching, then
+`gi_bake.rs:128-162` counting-sorted every triangle. 20-60 ms in one frame,
+triggered every ~10 m of camera travel (`gi_bake.rs:44-46`); the shooter's
+50-68 ms wave-spawn spikes were this, and the shooter ships SSGI **on**, so
+it was live in the shipped game.
 
-Fix (from the July perf audit, still unimplemented): cache the world-triangle
-soup keyed on `tlas_version` — the scene is static, so travel-triggered
-rebakes should re-bin, not re-gather; then amortise the binning across the 4
-frames the GPU bake already takes.
+Fix as shipped: the world-triangle soup is cached in a static
+`sdf_tri_cache` keyed on `tlas_version` (`gi_bake.rs:24,96-113`) — the
+scene is static, so travel-triggered rebakes re-bin without re-gathering.
+(The follow-up idea of also amortising the counting-sort across the 4
+frames the GPU bake takes was not part of d30fba9 — reopen if the re-bin
+alone ever shows up in a profile.)
 
 ## EN-055 — No animation-instancing API: N enemies = N full GLB re-parses ✅ *(shipped same day — PR #107; and the boot claim was WRONG)*
 
@@ -1882,12 +1908,13 @@ mixer per enemy SLOT (correct — mixer state is per-instance), so its boot
 parses the same seven GLBs ~30 times: **5.5 s of an 8 s boot** (SH-049
 measured 61%).
 
-The struct already separates what could be shared (`skeleton`, `animations`,
+The struct already separated what could be shared (`skeleton`, `animations`,
 `ref_rest_rotations`) from per-instance state (`joint_matrices`, `mixer`,
-`joint_world`) — models.rs:116-130. Wanted: `instantiateAnimation(handle)`
-(Arc-share the clip data, fresh mixer state), callers stay handle-based. This
-is the whole boot-time story; EN-032 (async loading) is adjacent but does not
-remove the duplication.
+`joint_world`). As shipped: `instantiateAnimation(handle)` Arc-shares the
+clip data with fresh mixer state (`models.rs:511` / `Arc<SkeletonData>` at
+`models.rs:65-67`; TS at `src/models/index.ts:819`), callers stay
+handle-based. This was the whole boot-time story; EN-032 (async loading) is
+adjacent but does not remove the duplication.
 
 ## EN-056 — Per-frame upload/allocation tail in the renderer 🟡 *(2026-07-16 audit)*
 
@@ -1948,8 +1975,12 @@ are untracked strays (now at least gitignored + documented, shooter PR #29).
 
 Wanted: (a) a **loud boot warning** on DX12 when DXC was requested and FXC
 was used; (b) fetch-dxc wired into the Windows build/packaging path;
-(c) the still-unmeasured HW-vs-SW Lumen frame cost measured once on the dev
-box and recorded (docs/perf/014 has only "within ~1.5x" guesses).
+(c) ~~the still-unmeasured HW-vs-SW Lumen frame cost measured once on the
+dev box and recorded~~ — **done 2026-07-16** (b34c1f3): HW costs
++20 ms/frame on the 760M (14.4 vs 20.3 fps); full protocol and verdict in
+the "HW-vs-SW Lumen" sections below. (a) and (b) remain open — though with
+HW ray query now opt-in (66dad5b) the silent-FXC failure mode only bites
+sessions launched with `BLOOM_HW_GI=1`/`BLOOM_PT`/`--pt`.
 
 ## EN-059 — File reads decode UTF-8 text as Latin-1: mojibake reaches the screen 🔴 *(2026-07-16 audit)*
 
@@ -1968,6 +1999,11 @@ Perry-upstream involvement is plausible (same class as the EN-020 slice
 scanners: byte-level string handling).
 
 ## EN-060 — Grass distance LOD (quality-gated) 🟡 *(2026-07-16 audit)*
+
+> **Numbering note (2026-07-16):** the spatial-audio-v2 work was developed
+> on a branch named `feat/en-060-spatial-audio-v2` but shipped as
+> **EN-062** (07c2c29, entry below) — the branch name is the only leftover
+> of the collision. This EN-060 remains the grass-LOD ticket.
 
 Grass tiles are frustum-culled (`material_system.rs:1776`) but in-frustum
 tiles draw at full authored density regardless of distance — 120k blades in

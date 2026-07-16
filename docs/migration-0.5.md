@@ -60,7 +60,9 @@ myAtlas.id           myAtlas.handle
   old exact-dt behavior. See docs/physics.md "Stepping".
 - Stale handles (use-after-free/destroy) now fail lookups instead of
   aliasing whatever object reused the slot.
-- `*Raw` function variants are documented `@internal` — they exist only
-  as a compiler workaround and will be removed.
+- Most `*Raw` function variants are documented `@internal`. They work
+  around an aarch64-Android Perry miscompilation of `obj.field` reads
+  feeding f64 FFI args; a few (e.g. `loadMusicRaw`) are actively
+  recommended on Android and are staying.
 - Coordinate system is now documented at the top of the physics and
   scene modules: right-handed, Y-up, meters, SI units.

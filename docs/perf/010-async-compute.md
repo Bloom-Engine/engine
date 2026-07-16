@@ -66,7 +66,8 @@ This ticket depends on having compute-shader versions of SSAO/SSR/SSGI first
 
 ## Files likely to change
 
-- `native/shared/src/renderer.rs` — encoder splitting, queue creation,
+- `native/shared/src/renderer/mod.rs` (the old single `renderer.rs` was
+  split into the `renderer/` module) — encoder splitting, queue creation,
   fence/semaphore plumbing.
 - Possibly `native/macos/src/lib.rs` — if wgpu-hal drop is needed for
   second queue.

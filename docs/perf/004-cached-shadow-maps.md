@@ -1,6 +1,6 @@
 # 004 — Cache shadow cascades for static casters
 
-**Effort:** ~2 days · **Expected gain:** Shadow pass → ~0 after first frame (was ~14 ms) · **Status:** open
+**Effort:** ~2 days · **Expected gain:** Shadow pass → ~0 after first frame (was ~14 ms) · **Status:** landed
 
 ## Problem
 
@@ -73,8 +73,11 @@ this per 128×128 page. For Bloom, per-cascade is enough for now.
 - Add a `setShadowsAlwaysFresh(bool)` TS toggle as an escape hatch for games
   that do a lot of dynamic light changes.
 
-## Files likely to change
+## Files changed (as landed)
 
-- `native/shared/src/shadows.rs` — add `dirty` flag + invalidation helpers.
-- `native/shared/src/renderer.rs` — gate the shadow pass on `dirty`.
-- `native/shared/src/scene.rs` — dirty the shadows when a transform changes.
+- `native/shared/src/shadows.rs` — `dirty` / `always_fresh` flags,
+  per-cascade `rendered_cascade_sig`, static caster caches.
+- `native/shared/src/renderer/shadow_pass.rs` — the shadow pass gates on
+  `scene.shadow_version` (the old single `renderer.rs` was split into the
+  `renderer/` module).
+- `native/shared/src/scene.rs` — bumps `shadow_version` when casters change.

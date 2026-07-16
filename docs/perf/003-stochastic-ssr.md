@@ -1,10 +1,10 @@
 # 003 — Stochastic SSR + temporal accumulation
 
-**Effort:** ~2 days · **Expected gain:** SSR 4× cheaper per frame · **Status:** open
+**Effort:** ~2 days · **Expected gain:** SSR 4× cheaper per frame · **Status:** landed
 
-## Problem
+## Problem (historical — pre-landing)
 
-The SSR pass (`SSR_SHADER_WGSL` in `renderer.rs`) marches 32 steps per pixel at
+The SSR pass (`SSR_SHADER_WGSL`, now in `renderer/shaders/ssgi.rs`) marched 32 steps per pixel at
 half-res. Every metallic fragment (and near-metal dielectric at low roughness)
 does the full march. With Sponza's chrome lamp fittings and polished marble,
 that's a significant pixel count × 32 steps.
@@ -58,7 +58,10 @@ pass is a smaller version of the same idea.
   existing TAA by writing both current + history.
 - Preserve the `ssr_enabled` toggle and the quality-preset plumbing.
 
-## Files likely to change
+## Files changed (as landed)
 
-- `native/shared/src/renderer.rs` — rewrite SSR_SHADER_WGSL, add history RT,
-  add (or extend existing) reprojection pass.
+- `native/shared/src/renderer/ssr_pass.rs` — stochastic GGX march (8 steps)
+  with 3×3 pre-filter + neighborhood-clamped temporal history
+  (`record_ssr_temporal`).
+- `native/shared/src/renderer/shaders/ssgi.rs` — `SSR_SHADER_WGSL` lives here
+  now (the old single `renderer.rs` was split into the `renderer/` module).

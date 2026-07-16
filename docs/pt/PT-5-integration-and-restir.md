@@ -44,6 +44,10 @@ combat by construction (see above) and converges when things go quiet.
   CLI flag; all four surfaces share one settings value.
 - `ray_query=false` → the row renders `N/A (NO RAY TRACING)` and the
   value is inert (`isPathTracingSupported` gate); boot line says why.
+- Since 66dad5b (2026-07-16), Windows only requests the HW ray-query
+  device feature when launched with `BLOOM_HW_GI=1`, `BLOOM_PT`, or
+  `--pt`. Without one of those triggers the row reads
+  `N/A (NO RAY TRACING)` and F9 is inert even on RT-capable hardware.
 - Mobile profile never applies PT (no headroom, no settings screen).
 - `TEXTURE_BINDING_ARRAY` absent → card-albedo hit shading fallback
   (unchanged since PT-2).

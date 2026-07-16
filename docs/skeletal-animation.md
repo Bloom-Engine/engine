@@ -18,11 +18,11 @@ Bloom Engine supports GPU-accelerated skeletal animation via glTF/GLB models wit
 
 The animation system is split into three layers:
 
-1. **Asset loading** (`models.rs`) -- parses glTF/GLB files, extracts skeleton hierarchy, inverse bind matrices, animation channels (translation/rotation/scale keyframes per joint), and skin data (JOINTS_0 + WEIGHTS_0 vertex attributes).
+1. **Asset loading** (`models.rs`) -- parses glTF/GLB files, extracts skeleton hierarchy, inverse bind matrices, animation channels (translation/rotation/scale keyframes per joint), and skin data (JOINTS_0 + WEIGHTS_0 vertex attributes). Since EN-055, the parsed clip data (`SkeletonData`, animations, rest rotations) is immutable and `Arc`-shared: `instantiateAnimation(src)` creates a new instance with a fresh mixer and joint state without re-parsing the GLB.
 
-2. **Animation update** (`models.rs`) -- each frame, samples keyframes at the current time, walks the joint hierarchy to compute world transforms, multiplies by inverse bind matrices to produce final joint matrices. These are stored in a pending buffer.
+2. **Animation update** (`models.rs` + `anim_mixer.rs`) -- each frame, the per-instance `AnimMixer` (EN-028) advances clip time, crossfades between clips, applies masked additive layers and optional root motion, samples keyframes, walks the joint hierarchy to compute world transforms, and multiplies by inverse bind matrices to produce final joint matrices. These are stored in a pending buffer. (The older raw-`time` sampling path still exists for direct `updateModelAnimation` calls.)
 
-3. **GPU skinning** (`renderer.rs`) -- the WGSL vertex shader applies 4-bone linear blend skinning using joint matrices from a 128-entry uniform buffer, flushed to the GPU in `end_frame()`.
+3. **GPU skinning** (`renderer/`) -- the WGSL vertex shader (`renderer/shaders/core.rs`) applies 4-bone linear blend skinning using joint matrices from a 1024-entry uniform buffer, flushed to the GPU in `end_frame()`. A second `joints_prev` buffer at `@group(3) @binding(1)` feeds motion vectors (EN-022).
 
 ```
 Game Loop                Engine                          GPU
@@ -45,7 +45,7 @@ endDrawing          → end_frame()                  ──→ render pass execu
 Every 3D vertex in Bloom includes joint/weight data, whether skinned or not:
 
 ```rust
-// native/shared/src/renderer.rs
+// native/shared/src/renderer/types.rs
 #[repr(C)]
 pub struct Vertex3D {
     pub position: [f32; 3],   // @location(0) — bind-pose position
@@ -54,8 +54,9 @@ pub struct Vertex3D {
     pub uv:       [f32; 2],   // @location(3) — texture coordinates
     pub joints:   [f32; 4],   // @location(4) — bone indices (as floats)
     pub weights:  [f32; 4],   // @location(5) — bone weights (sum to 1.0)
+    pub tangent:  [f32; 4],   // @location(6) — xyz tangent + w handedness
 }
-// Total stride: 80 bytes per vertex
+// Total stride: 96 bytes per vertex
 ```
 
 For unskinned geometry, `joints` and `weights` are all zeros. The shader checks `total_weight > 0.01` to decide whether to apply skinning.
@@ -66,12 +67,12 @@ Joint matrices are stored in a uniform buffer at **bind group 3, binding 0**:
 
 ```wgsl
 struct JointMatrices {
-    matrices: array<mat4x4<f32>, 128>,
+    matrices: array<mat4x4<f32>, 1024>,
 };
 @group(3) @binding(0) var<uniform> joints: JointMatrices;
 ```
 
-The buffer is 8192 bytes (128 matrices x 64 bytes each). Initialized to identity matrices at startup. Updated via `queue.write_buffer()` in `flush_joint_matrices()` during `end_frame()`, right before the render pass.
+The buffer is 65536 bytes (1024 matrices x 64 bytes each). Initialized to identity matrices at startup. Updated via `queue.write_buffer()` in `flush_joint_matrices()` during `end_frame()`, right before the render pass. Two additions since this doc was first written: a `joints_prev` uniform at `@group(3) @binding(1)` holds last frame's matrices for motion vectors (EN-022), and the material-system pipeline binds the same joint UBO in its per-draw group at binding 1 (`renderer/material_pipeline.rs`).
 
 ### WGSL Vertex Shader (Skinning)
 
@@ -118,7 +119,7 @@ The 3D pipeline uses four bind groups:
 | 0 | Transform | MVP matrix (4x4 uniform) |
 | 1 | Lighting | Ambient + directional light uniforms |
 | 2 | Texture | 2D texture + sampler |
-| 3 | Joints | 128 x mat4x4 uniform buffer |
+| 3 | Joints | 1024 x mat4x4 uniform buffer (+ `joints_prev` at binding 1) |
 
 ### Flush Timing
 
@@ -149,22 +150,51 @@ const animHandle = loadModelAnimation("assets/models/character.glb");
 
 `loadModelAnimation(path)` returns a numeric handle. Parses the glTF skin (skeleton hierarchy + inverse bind matrices) and all animation clips (translation/rotation/scale keyframes per joint).
 
-### Updating
+### Instancing (EN-055)
+
+Crowds should parse each GLB **once** and instantiate per entity:
+
+```typescript
+const src = loadModelAnimation("assets/models/enemy.glb");   // one parse
+const anim1 = instantiateAnimation(src);   // Arc-shared clips, fresh mixer
+const anim2 = instantiateAnimation(src);   // each instance animates freely
+```
+
+`instantiateAnimation(src)` shares the immutable parsed data (skeleton, clips, rest rotations) and gives the new handle its own mixer, joint matrices, and mask cache. The shooter's boot went from ~30 re-parses of seven GLBs to seven parses.
+
+### Updating — mixer API (preferred)
+
+The per-instance `AnimMixer` (EN-028, `native/shared/src/anim_mixer.rs`) owns clip time, crossfades, masked layers, and opt-in root motion:
+
+```typescript
+animPlay(anim, moving ? CLIP_WALK : CLIP_IDLE, 0.15); // crossfade; idempotent per frame
+const spine = findJoint(anim, "Spine");               // joint index — once, at load
+animSetLayer(anim, attacking ? CLIP_ATTACK : -1, 1.0, spine); // masked layer (-1 = off)
+animSetRootMotion(anim, true);                        // opt in (off by default)
+animUpdate(anim, dt, scale, px, py, pz, yawRadians);  // one call per model per frame
+if (animFinished(anim)) { /* non-looping clip ended */ }
+const dx = animRootDelta(anim, 0);                    // root-motion delta, axis 0/1/2
+```
+
+See `src/models/index.ts` for the full surface (`animPlay`, `animSetLayer`, `animSetRootMotion`, `animUpdate`, `animFinished`, `animClipDuration`, `animRootDelta`).
+
+### Updating — raw-time API (legacy, still supported)
 
 ```typescript
 // In your game loop:
 const time = getTime();  // seconds since start
-updateModelAnimation(animHandle, 0, time, 1.0, playerX, playerY, playerZ);
+updateModelAnimation(animHandle, 0, time, 1.0, playerX, playerY, playerZ, rotY);
 ```
 
-`updateModelAnimation(handle, animIndex, time, scale, px, py, pz)`:
+`updateModelAnimation(handle, animIndex, time, scale, px, py, pz, rotY)`:
 - `handle` -- animation handle from `loadModelAnimation()`
 - `animIndex` -- which animation clip to play (0-based, order matches GLB)
 - `time` -- current time in seconds (automatically wraps via modulo with clip duration)
 - `scale` -- model scale (baked into joint matrices for correct skinned positioning)
 - `px, py, pz` -- world position (baked into joint matrices)
+- `rotY` -- yaw in **radians** (baked into joint matrices; note `drawModelRotated` takes degrees — these two differ deliberately, see the FFI comment in `ffi_core/models.rs`)
 
-This function samples all animation channels at the given time, walks the skeleton hierarchy, and produces final joint matrices that include scale and position. The matrices are staged for GPU upload.
+This function samples all animation channels at the given time, walks the skeleton hierarchy, and produces final joint matrices that include scale, position, and yaw. The matrices are staged for GPU upload.
 
 ### Rendering
 
@@ -188,7 +218,7 @@ const anim = loadModelAnimation("assets/models/character.glb");
 
 while (!windowShouldClose()) {
     const t = getTime();
-    updateModelAnimation(anim, 0, t, 1.0, 0.0, 0.0, 0.0);
+    updateModelAnimation(anim, 0, t, 1.0, 0.0, 0.0, 0.0, 0.0);
 
     beginDrawing();
     clearBackground(Colors.SKYBLUE);
@@ -340,7 +370,7 @@ See `scripts/export_mixamo_glb.py` for full documentation.
 
 | Problem | Cause | Solution |
 |---------|-------|----------|
-| Character slides across ground | Root joint has translation keys | Root translation locked to rest pose in engine (line 315 of models.rs) |
+| Character slides across ground | Root joint has translation keys | Root translation is locked to rest pose by default (see `root_translation_at` in `models.rs`); enable it deliberately with `animSetRootMotion(handle, true)` and consume `animRootDelta` |
 | Character renders at wrong position | Scale mismatch between `updateModelAnimation` and `drawModel` | Use same scale value in both calls |
 | Character invisible / at origin | `loadModelAnimation` failed (returned 0) | Check file path; on iOS check `resolve_path()` |
 | Perry crash on animation call | NaN-boxed pointer from failed load used as handle | Check return value of `loadModelAnimation()` before using |
@@ -359,23 +389,26 @@ See `scripts/export_mixamo_glb.py` for full documentation.
 ### Rust (native layer)
 
 - **`native/shared/src/models.rs`** -- Core animation system:
-  - `ModelAnimation`, `SkeletonData`, `JointData`, `AnimationChannel`, `AnimationData` structs
+  - `ModelAnimation`, `SkeletonData` (Arc-shared since EN-055), `JointData`, `AnimationChannel`, `AnimationData` structs
   - `load_gltf_animation()` -- parses GLB skin + animation data
-  - `update_model_animation()` -- samples keyframes, walks hierarchy, computes joint matrices
+  - `instantiate_animation()` -- EN-055: Arc-shares parsed clips, fresh per-instance mixer/joint state
+  - `update_model_animation()` -- delegates clip time to the mixer, walks hierarchy, computes joint matrices
   - `load_gltf_with_textures()` -- loads skinned mesh with JOINTS_0/WEIGHTS_0
   - Matrix/quaternion math: `mat4_from_trs`, `quat_slerp`, `mat4_mul`, `compute_joint_transforms`
 
-- **`native/shared/src/renderer.rs`** -- GPU skinning:
-  - `Vertex3D` struct with `joints` and `weights` fields
-  - WGSL shader with `JointMatrices` uniform and 4-bone blend skinning
-  - `joint_buffer` + `joint_bind_group` at bind group 3
-  - `set_joint_matrices()`, `set_joint_matrices_scaled()`, `flush_joint_matrices()`
-  - `draw_model_mesh_tinted()` -- handles skinned vs unskinned vertex positioning
+- **`native/shared/src/anim_mixer.rs`** -- `AnimMixer` (EN-028): crossfades, masked additive layers, opt-in root motion, per-instance clip time.
 
-- **`native/macos/src/lib.rs`** (and `ios/`, `android/`, `windows/`, `linux/`) -- FFI functions:
+- **`native/shared/src/renderer/`** -- GPU skinning (the old single `renderer.rs` was split into this module):
+  - `types.rs` -- `Vertex3D` struct with `joints`, `weights`, `tangent` fields
+  - `shaders/core.rs` -- WGSL with `JointMatrices` uniform (1024 entries) + `joints_prev` for motion vectors, 4-bone blend skinning
+  - `mod.rs` -- `joint_buffer` + `joint_bind_group` at bind group 3; `set_joint_matrices()`, `set_joint_matrices_scaled()`, `flush_joint_matrices()`; `draw_model_mesh_tinted()` for skinned vs unskinned positioning
+
+- **`native/shared/src/ffi_core/models.rs`** -- FFI functions, generated once for every platform by the `define_core_ffi!` macro (each platform crate just invokes the macro in its `lib.rs`; web hand-writes `#[wasm_bindgen]` wrappers):
   - `bloom_load_model()` -- loads GLB mesh
   - `bloom_load_model_animation()` -- loads GLB skeleton + animations
+  - `bloom_instantiate_animation()` -- EN-055 instancing
   - `bloom_update_model_animation()` -- updates joint matrices from animation
+  - `bloom_anim_*` -- the mixer surface (play/layer/root-motion/update/…)
   - `bloom_draw_model()` -- renders model (skinned or static)
   - `bloom_set_joint_test()` -- debug: manually set a single joint rotation
 
@@ -384,8 +417,11 @@ See `scripts/export_mixamo_glb.py` for full documentation.
 - **`src/models/index.ts`** -- Public API:
   - `loadModel(path)` -- returns `Model` with handle
   - `loadModelAnimation(path)` -- returns numeric animation handle
-  - `updateModelAnimation(handle, animIndex, time, scale, px, py, pz)` -- updates animation state
+  - `instantiateAnimation(src)` -- EN-055: cheap per-entity instance of a parsed animation
+  - `animPlay` / `animSetLayer` / `animSetRootMotion` / `animUpdate` / `animFinished` / `animClipDuration` / `animRootDelta` -- the mixer API (EN-028)
+  - `updateModelAnimation(handle, animIndex, time, scale, px, py, pz, rotY)` -- legacy raw-time update
   - `drawModel(model, position, scale, tint)` -- renders
+  - `findJoint(handle, name)` / `jointWorld(handle, joint)` -- joint queries (EN-033)
   - `setJointTest(joint, angle)` -- debug function
 
 ### Blender Scripts
@@ -404,7 +440,7 @@ In debug builds (`#[cfg(debug_assertions)]`), the engine prints detailed animati
 [anim] Skeleton: 65 joints, 1 roots
 [anim]   joint 0: 'mixamorig:Hips' children=[1, 2, 3]
 [anim] Animation 'Run': 195 channels mapped, 0 skipped, duration=0.83s, avg 25/ch keyframes
-[anim] channels_applied=65, t=0.000, anim_index=0
+[anim] joints=65, t=0.000, anim_index=0
 [anim] Joint0 local: t=[0.00,96.47,0.00] r=[0.0000,0.0000,0.0000,1.0000]
 [anim] Joint0 final diag=[1.0000,1.0000,1.0000] trans=[0.0000,0.0000,0.0000]
 ```

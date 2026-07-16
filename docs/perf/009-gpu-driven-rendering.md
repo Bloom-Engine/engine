@@ -68,7 +68,8 @@ feature flags. Check adapter support at device creation.
 
 ## Files likely to change
 
-- `native/shared/src/renderer.rs` — shared VB/IB, descriptor buffer, GPU
+- `native/shared/src/renderer/mod.rs` (the old single `renderer.rs` was
+  split into the `renderer/` module) — shared VB/IB, descriptor buffer, GPU
   cull compute shader, new render pass using `draw_indexed_indirect_count`.
 - `native/shared/src/scene.rs` — reworking of per-node GPU resources.
 

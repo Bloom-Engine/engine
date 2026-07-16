@@ -33,7 +33,8 @@ temporal accumulation since PT-3 M1.
   by surface. Blending would leak blade lighting onto the ground
   (gray-blue mottle); resetting would pin the texel at 1 spp (speckle).
   Only a stored surface that left the footprint is a disocclusion.
-- **Variance-guided à-trous** — five iterations (steps 1/2/4/8/16), B3
+- **Variance-guided à-trous** — six iterations (steps 1/2/4/8/16, then a
+  closing step-1 pass; see the step array in `pt_pass.rs`), B3
   5×5 kernel, `sigma_l = 4·sqrt(gaussian3x3(variance))`, variance
   filtered alongside with squared weights, depth-gradient edge stop.
   Young history (< 4 frames) substitutes a spatial variance estimate

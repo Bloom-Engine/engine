@@ -6,13 +6,10 @@
 // nodes so a node that reads a resource always runs after the node
 // that writes it; explicit `after` / `before` hints break ties.
 //
-// This Phase 2 module lands the types, the scheduler, and a set of
-// unit tests that validate correct ordering. It is NOT yet wired into
-// `end_frame_with_scene` — that's Phase 2b, and is deliberately
-// separated because the port of ~15 existing passes is a high-risk
-// refactor that needs its own review window. The infrastructure here
-// is self-contained and dead-code-free because the tests exercise
-// every code path.
+// This module landed in two steps: Phase 2 brought the types, the
+// scheduler, and ordering unit tests; Phase 2b (complete — see the
+// frame-graph construction in `mod.rs`) ported the existing passes, so
+// the graph now drives the real frame in `end_frame_with_scene`.
 
 use std::collections::{HashMap, HashSet};
 

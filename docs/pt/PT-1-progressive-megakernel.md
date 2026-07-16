@@ -62,6 +62,9 @@ light pass needs them, and mode 0 must be switchable back per frame.
   visible as expected right after a camera cut.
 - Live mode switching verified: F9 → RT (EMA) mid-game, F9 → off
   restores the raster path bit-clean (SSGI/SSR resume, 13 → 46 fps).
+  (Reproducing this today on Windows requires launching with
+  `BLOOM_HW_GI=1`, `BLOOM_PT`, or `--pt` — since 66dad5b the ray-query
+  feature is opt-in, and F9 is inert without it.)
 - **M3 partially open**: point-light NEE + building-base colour bleed +
   `bloom-reference` RMSE not yet measured (needs a lit world + fixed
   exposure; folded into PT-2/PT-5 verification).

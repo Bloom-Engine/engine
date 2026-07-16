@@ -28,7 +28,7 @@ Jolt replaced the previous Rapier 3D backend — see ["Why Jolt (and not PhysX o
               ↓ extern "C" through                                JoltPhysics.js
    native/shared/src/jolt_sys.rs                      (standalone WASM module, ~1 MB)
               ↓ links
-   native/third_party/bloom_jolt/          ← C++ shim (~1200 LOC)
+   native/third_party/bloom_jolt/          ← C++ shim (~1800 LOC + 500-line header)
               ↓ depends on
    native/third_party/JoltPhysics/         ← Jolt 5.5.0 (git submodule, built via cmake crate)
 ```
@@ -46,13 +46,14 @@ identical in both cases.
   (~60 s); subsequent builds link against the cached `libJolt.a` + `libbloom_jolt.a`.
 - **WASM:** `build.rs` skips cmake when `CARGO_CFG_TARGET_ARCH == "wasm32"`. The web
   crate's `wasm-bindgen` import of `/jolt_bridge.js` is resolved at `wasm-pack`
-  time; the bridge file gets bundled into `pkg/snippets/`. The host page loads
-  JoltPhysics.js from the CDN and hands the module factory to
-  `bloom.bloom_physics_init_jolt()` before any physics call.
+  time; the bridge file gets bundled into `pkg/snippets/`. The JS glue
+  (`bloom_glue.js`) imports `jolt-physics@1.0.0` and hands the module factory
+  to `bloom.bloom_physics_init_jolt()` before any physics call.
 - **Feature flag:** physics is behind the `jolt` feature on every platform crate.
-  macOS defaults to `default = []` (opt-in) because Perry examples that don't
-  touch physics shouldn't pay the 60 s Jolt first-build cost; the other platforms
-  default to `default = ["jolt"]`.
+  Jolt defaults **ON** everywhere — each platform crate ships
+  `default = ["jolt", "models3d", "image-extras"]` so existing games are
+  unaffected. Opt *out* with `default-features = false` if a build shouldn't
+  pay the ~60 s Jolt first-build cost.
 
 ## Supported features
 
@@ -69,16 +70,22 @@ Matches or exceeds UE5's built-in physics surface.
 | 1 | Raycast closest + raycast all | ✅ | ✅ |
 | 1 | Shape cast (closest hit) | ✅ | native only |
 | 1 | Overlap sphere / box / point | ✅ | ✅ |
-| 1 | Fixed / point / hinge / slider / distance / six-DOF constraints | ✅ | fixed / point / hinge / slider / distance |
+| 1 | Fixed / point / hinge / slider / distance constraints | ✅ | ✅ |
 | 1 | Contact events (added / persisted / removed) via polled queue | ✅ | ✅ |
 | 1 | 16-layer collision matrix, object-layer filtering | ✅ | ✅ (create-time only) |
 | 2 | **Character controller** (`CharacterVirtual` — slope + stair handling) | ✅ | ✅ |
 | 2 | **Soft bodies** — cloth, rope, jelly (per-vertex pinning via `invMass=0`) | ✅ | ✅ |
 | 2 | **Wheeled vehicles** — 4-wheel, ray collision tester, engine + differential | ✅ | ✅ |
+| 2 | **Ragdolls** (EN-025) — built at runtime from the skinned skeleton; capsule-per-bone + limited six-DOF joints | ✅ (via `createRagdoll()` in `bloom/models`, `native/shared/src/ragdoll.rs`) | — |
 
-Gaps vs. full Jolt API: tracked vehicles, motorcycle controller, constraint runtime
-enable/disable round-tripping on web, body-lock damping setters on web, raycast
-world-space normals (currently returns (0,1,0) — body-lock read is the fix).
+Six-DOF constraints exist in the shim (`bj_constraint_six_dof`) but are
+internal-only — ragdoll articulation uses a locked-translation wrapper; there
+is no public `bloom_physics_*` export or TS API for them.
+
+Gaps vs. full Jolt API: tracked vehicles, motorcycle controller, public six-DOF
+constraints, constraint runtime enable/disable round-tripping on web, body-lock
+damping setters on web, raycast world-space normals (currently returns (0,1,0)
+— body-lock read is the fix).
 
 ## TypeScript API quick-start
 
@@ -319,12 +326,13 @@ native/shared/src/
                                        # define_physics_ffi! macro
 
 src/physics/index.ts                   # TypeScript game-facing API
-package.json                           # Perry FFI manifest (109 bloom_physics_* entries)
+package.json                           # Perry FFI manifest (121 bloom_physics_* entries)
 
 native/web/
 ├── jolt_bridge.js                     # JS-side implementation via JoltPhysics.js
 ├── src/lib.rs                         # wasm_bindgen imports → JS bridge
-└── index.html                         # loads JoltPhysics.js, calls bloom_physics_init_jolt
+└── bloom_glue.js                      # imports jolt-physics@1.0.0, hands the
+                                       # factory to bloom_physics_init_jolt()
 ```
 
 ## Extending

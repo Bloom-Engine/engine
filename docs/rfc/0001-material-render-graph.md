@@ -1,6 +1,6 @@
 # RFC 0001 — Material system & render graph
 
-**Status:** Draft
+**Status:** Implemented — Phases 1–8 + 10 shipped (ABI v3); Phase 3's pool is built but not wired (still Phase 3b); Phase 9 (water) is game-side. See §10 for as-built divergences.
 **Author:** Ralph + Claude (pair)
 **Target version:** 0.x → 0.(x+1), no public breakage for games on the existing
 `drawModel` / `drawCube` / `loadModel` / `loadModelAnimation` APIs.
@@ -556,17 +556,21 @@ committed to `main`.
 
 **Acceptance:** RFC reviewed and merged.
 
-### Phase 1 — Shader ABI header
+### Phase 1 — Shader ABI header ✅
 
-- [ ] Write `shared/shaders/material_abi.wgsl` with the definitions in §1.
-- [ ] Write `shared/shaders/common/{pbr,shadows,fog,tonemap,sky}.wgsl`.
-- [ ] Refactor the three existing 3D shaders in `shaders.rs` to include the
+- [x] Write `shared/shaders/material_abi.wgsl` with the definitions in §1.
+- [x] Write `shared/shaders/common/{pbr,shadows,fog,tonemap,sky}.wgsl`.
+- [x] Refactor the three existing 3D shaders to include the
       header and use group 0-3.
-- [ ] Rust-side: refactor `LightingUniforms`, `Uniforms3D`, etc. so
+- [x] Rust-side: refactor `LightingUniforms`, `Uniforms3D`, etc. so
       `PerFrame`, `PerView`, `PerMaterial`, `PerDraw` are distinct types
       mirroring the WGSL.
-- [ ] Pipeline creation (`pipeline_3d`, `scene_pipeline`) switches to new
+- [x] Pipeline creation (`pipeline_3d`, `scene_pipeline`) switches to new
       layouts. `custom_pipelines` path removed (dead code today anyway).
+
+(As-built: the ABI is at **version 3** — see §10 for what grew past this
+spec. The version check lives in `renderer/shader_include.rs` +
+`renderer/shader_library.rs`, not the long-gone `shaders.rs`.)
 
 **Acceptance:**
 - Shooter SELFTEST screenshots (stable seed): identical within 1-bit
@@ -574,28 +578,34 @@ committed to `main`.
 - Perry compilation succeeds; shooter runs; all features unchanged.
 - No public API changes.
 
-### Phase 2 — Render graph skeleton
+### Phase 2 — Render graph skeleton ✅
 
-- [ ] `renderer/graph.rs`: `PassNode`, `PassInput`, `PassOutput`,
+- [x] `renderer/graph.rs`: `PassNode`, `PassInput`, `PassOutput`,
       scheduler, executor.
-- [ ] Port the existing passes of `end_frame_with_scene` one by one to
+- [x] Port the existing passes of `end_frame_with_scene` one by one to
       `PassNode`s. The function becomes `build_graph() + graph.execute()`.
-- [ ] Nothing else changes. Pass bodies are moved verbatim into
+- [x] Nothing else changes. Pass bodies are moved verbatim into
       `run:` closures.
 
 **Acceptance:** same SELFTEST tolerance, same timings within 2%.
 
-### Phase 3 — Transient resource pool
+(As-built: the graph drives the real frame — `mod.rs` marks "RFC 0001
+Phase 2b — complete". Node names and the scheduler shape differ from §2 —
+see §10.)
 
-- [ ] `renderer/transient.rs`: `TransientDesc`, pool with reference
-      counting and aliasing.
+### Phase 3 — Transient resource pool 🟡 built, not wired
+
+- [x] `renderer/transient.rs`: `TransientDesc`, pool with reference
+      counting (aliasing was dropped — reuse only).
 - [ ] Ssao, ssgi, ssr, bloom mip chain, TAA history → all declared as
       transients.
 - [ ] Resize handling goes through the pool; the renderer's member fields
       shrink.
 
 **Acceptance:** GPU memory usage reduced (target: 20%+ on 1080p scene),
-SELFTEST identical.
+SELFTEST identical. **Not yet met** — the pool exists with unit tests, but
+in the live graph `Transient(u32)` ids are ordering tokens over persistent
+renderer fields ("Phase 3b" per `transient.rs`).
 
 ### Phase 4 — Translucency buckets + scene snapshot
 
@@ -850,4 +860,51 @@ Proceed with phases 1 through 10 in order. Each phase is a PR against
 amendments welcomed as we learn.
 
 The shooter is the primary test harness. Water is the forcing function.
+
+---
+
+## 10. As-built divergences (audit 2026-07-16)
+
+The design shipped, but the code moved past this spec in places. The
+proposal sections above are left as written; this section is the map from
+spec to reality. Ground truth: `native/shared/shaders/material_abi.wgsl`
+(ABI **v3**), `renderer/graph.rs`, `renderer/transient.rs`.
+
+**ABI (§1):**
+- `PerView` light arrays grew: `array<DirLight, 8>` and
+  `array<PointLight, 256>` (froxel-culled), not 4/16.
+- `PerFrame` gained `wind: vec4<f32>` (EN-013) and `cloud: vec4<f32>`
+  (EN-040) after `taa_jitter`.
+- `MaterialFactors._reserved` became `shading_model: vec4<f32>` +
+  `foliage_params: vec4<f32>` (EN-012).
+- Group 2 extends past binding 11: binding 11 is left for the shader's own
+  `user_params` declaration, bindings 12-13 are planar reflection (EN-011),
+  14-17 are terrain texture arrays (EN-014).
+- ABI version bumps: the `// ABI-VERSION: N` check works as described but
+  lives in `renderer/shader_include.rs` (`abi_version_of`) +
+  `renderer/shader_library.rs` (`verify_abi_version`). The promised
+  `docs/migration/abi-vN-to-vN+1.md` files were never created; v1→v3
+  changes are documented in the ABI header itself.
+
+**Render graph (§2):**
+- `PassNode` is generic `PassNode<'a, Ctx>` with `run: Box<dyn FnOnce(&mut
+  Ctx) + 'a>` — no `Renderer`/`NodeContext` split, `Send` dropped,
+  `PassInput::Transient(u32)` instead of a typed id.
+- The scheduler is a plain Kahn topological sort with `after`/`before`
+  tie-breaks. §2's step 3 (synthesized `CopyToSample` nodes) and step 4
+  (merging contiguous passes into one `wgpu::RenderPass`) were never
+  implemented; the live graph pins order with `with_after`.
+- As-built node names: `froxel_assign`, `shadow` (one node, all 3
+  cascades), `hdr_scene`, `pt`, `translucent`, `hiz_build`,
+  `occlusion_capture`, `gtao`, `ssao_blur`, `ssr_march`, `ssr_temporal`,
+  `ssgi`, `bloom`, `compose`, `postfx_tail`, `auto_exposure`, plus
+  sub-graphs `material_pass` and `overlay_2d`. (§2.3's `main_hdr`/`ssao`/
+  `taa`/`scene_compose`/`tonemap` names never existed as built.)
+- `TransientDesc` has no `id` field (separate `TransientId` handle), adds
+  `mips`/`samples`, and the pool ref-counts and reuses but does **not**
+  alias.
+
+**API (§3):**
+- `loadMaterial` takes a `MaterialDesc` object (`{shader, bucket}`), not a
+  JSON path (the JSON loader was deferred, as §5's note says).
 Glass is the generality check.

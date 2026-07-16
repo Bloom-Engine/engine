@@ -5,11 +5,11 @@ Bloom games can run in the browser via WebAssembly. The web target uses WebGPU (
 ## Architecture
 
 ```
-Game.ts ─(perry --target wasm)──> game.wasm  (game logic in WASM)
-                                      │
+Game.ts ─(perry --target wasm)──> game WASM  (game logic, base64-embedded
+                                      │       in Perry's self-contained HTML)
                                       │ FFI imports ("ffi" namespace)
                                       ▼
-                               index.html / JS glue  (bridges both WASM modules)
+                               bloom_glue.js  (bridges both WASM modules)
                                       │
                                       │ wasm-bindgen calls
                                       ▼
@@ -19,7 +19,7 @@ Game.ts ─(perry --target wasm)──> game.wasm  (game logic in WASM)
                               Browser: <canvas> + WebGPU + Web Audio + DOM Events
 ```
 
-Both game logic and rendering run in WebAssembly. A thin JS glue layer bridges the two modules, handles DOM events, string conversion, asset fetching, and audio output.
+Both game logic and rendering run in WebAssembly. A thin JS glue layer (`native/web/bloom_glue.js`, spliced into Perry's self-contained HTML by `splice_game.py`) bridges the two modules, handles DOM events, asset fetching, and audio output.
 
 ## Building
 
@@ -36,7 +36,7 @@ Both game logic and rendering run in WebAssembly. A thin JS glue layer bridges t
 ```
 
 This runs:
-1. `wasm-pack build` to compile `native/web/` → `bloom_web.wasm` + JS bindings
+1. `wasm-pack build` to compile `native/web/` → `pkg/bloom_web_bg.wasm` + `pkg/bloom_web.js` bindings
 2. `wasm-opt -Oz` for binary size optimization (if installed)
 3. `perry main.ts --target wasm` to compile game TypeScript → WASM
 4. Assembles output directory at `dist/web/`
@@ -133,16 +133,16 @@ The wgpu backend supports both WebGPU and WebGL. WebGL is used automatically as 
 
 ### String Handling
 
-Perry WASM uses NaN-boxed string IDs. The JS glue converts these to actual JS strings via `__perryToJsValue` (exposed by Perry's runtime), then passes them to Bloom's `_str` variants via wasm-bindgen.
+Perry WASM uses NaN-boxed values internally, but Perry's runtime wraps the entire `ffi` namespace with `wrapFfiForI64`, which decodes each NaN-boxed argument to a plain JS value before the glue is called. The glue therefore receives ordinary JS strings and simply routes them to Bloom's `_str` variants via wasm-bindgen — there is no manual NaN-boxing or decoding in the glue.
 
 ### Two-Module WASM
 
 Perry compiles game TypeScript to one WASM module. Bloom's Rust backend compiles to a second WASM module via wasm-pack. The JS glue:
 1. Loads bloom_web.wasm and extracts all `bloom_*` exports
-2. Wraps them as FFI imports (converting i64 BigInt args to f64)
-3. Provides string-param functions with NaN-box → string conversion
+2. Wraps every export as an FFI import, passing values straight through (Perry's `wrapFfiForI64` has already decoded them)
+3. Overrides string- and asset-param functions to route them to their `_str`/`_bytes` variants
 4. Boots Perry WASM with these imports under the `"ffi"` namespace
 
 ### Shared Code
 
-67% of Bloom's Rust code is in `native/shared/` — the renderer, audio mixer, text renderer, model loader, scene graph. This code compiles identically for native and WASM. Only the platform layer (~1300 lines in `native/web/src/lib.rs`) is web-specific.
+About two-thirds of Bloom's Rust code is in `native/shared/` — the renderer, audio mixer, text renderer, model loader, scene graph. This code compiles identically for native and WASM. Only the platform layer (~3300 lines across `native/web/src/`: `lib.rs`, `input_ffi.rs`, `material_ffi.rs`, `physics_ffi.rs`, `render_settings.rs`) is web-specific.

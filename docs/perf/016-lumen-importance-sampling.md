@@ -82,7 +82,7 @@ rather than in a second probe layer.
 
 ## Files changed
 
-- `native/shared/src/renderer/shaders.rs` — probe-trace shader (SW + HW
+- `native/shared/src/renderer/shaders/ssgi.rs` — probe-trace shader (SW + HW
   variants): R2 octahedral jitter (V1), probe_idx decorrelation (V2),
   prev-frame luma lookup + jitter-scale (V3); probe-resolve shader:
   delta-driven EMA alpha (V4).

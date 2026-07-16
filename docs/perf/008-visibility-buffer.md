@@ -77,7 +77,8 @@ modes. This is a ~2-day win instead of 2 weeks.
 
 ## Files likely to change
 
-- `native/shared/src/renderer.rs` — scene_pipeline, main_hdr_pass, shading
+- `native/shared/src/renderer/` (`mod.rs` + `scene_pass.rs`; the old single
+  `renderer.rs` was split) — scene_pipeline, main_hdr_pass, shading
   pass, SSR/SSGI/SSAO inputs.
 - `native/shared/src/scene.rs` — mesh_id assignment, vertex buffer layout.
 

@@ -1,6 +1,6 @@
 # 007b — Lumen screen probes (HW trace, ray-query)
 
-**Effort:** 1-2 weeks · **Expected gain:** off-screen occlusion + bleed · **Status:** open
+**Effort:** 1-2 weeks · **Expected gain:** off-screen occlusion + bleed · **Status:** landed (HW trace is opt-in since 66dad5b — `BLOOM_HW_GI=1` / `BLOOM_PT` / `--pt` on Windows; SW is the default tier)
 
 Phase 1b of the [Lumen roadmap](lumen-roadmap.md). Depends on 007-prep and
 007a; develops in parallel with 007a, merges after 007a lands so the probe

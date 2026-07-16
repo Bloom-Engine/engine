@@ -31,7 +31,7 @@ bloom_print_profiler_summary()
 ```
 
 Each one is a thin wrapper around an existing method on `engine().renderer`
-or `engine().profiler`. Shared code (`native/shared/src/renderer.rs`,
+or `engine().profiler`. Shared code (`native/shared/src/renderer/mod.rs`,
 `native/shared/src/profiler.rs`) is platform-agnostic and already exposes
 everything.
 
@@ -117,3 +117,18 @@ Verification:
   audit).
 - The TS API side (`src/core/index.ts` ~240-316) matches the FFI
   surface 1:1.
+
+## Superseded by `define_core_ffi!` (as-built today)
+
+The per-platform hand-copied FFI blocks described above no longer exist:
+they drifted badly enough (Android shipped 60 functions behind, Windows
+silently no-op'd the scene graph) that the whole non-physics FFI surface
+was consolidated into the shared `define_core_ffi!` macro in
+`native/shared/src/ffi_core/` (e.g. `bloom_set_quality_preset` lives in
+`ffi_core/visual.rs`, profiler getters in `ffi_core/game_loop.rs`). Each
+platform crate invokes the macro once in its `lib.rs`. New `bloom_*`
+functions are added to the macro — never hand-copied per platform — and
+`tools/validate-ffi.js` enforces parity in CI. The sole exception is web,
+which still hand-writes `#[wasm_bindgen]` wrappers in
+`native/web/src/lib.rs`. The TIMESTAMP_QUERY per-platform feature
+requests from this ticket survive unchanged.
