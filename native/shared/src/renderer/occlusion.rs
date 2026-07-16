@@ -75,6 +75,12 @@ pub struct OcclusionCuller {
     grid_valid: bool,
     grid_vp: [[f32; 4]; 4],
     pub enabled: bool,
+    /// EN-057 — false when no rasterized scene node exists to consume the
+    /// culling verdicts (e.g. a scene whose only nodes are gi_only proxies:
+    /// they never draw, so the reduce + readback benefited zero draws every
+    /// frame). Set per frame by the engine from the scene graph; defaults to
+    /// true so hosts that never call the setter keep today's behaviour.
+    has_consumers: bool,
     /// set when record() ran this frame so after_submit() knows to map
     recorded_this_frame: bool,
 }
@@ -173,8 +179,22 @@ impl OcclusionCuller {
             grid_valid: false,
             grid_vp: [[0.0; 4]; 4],
             enabled: true,
+            has_consumers: true,
             recorded_this_frame: false,
         }
+    }
+
+    /// EN-057 — tell the culler whether any rasterized consumer exists this
+    /// frame. Going consumer-less also invalidates the grid, so if a
+    /// consumer appears later the interim frames read the conservative
+    /// "potentially visible" answer (test_aabb on an invalid grid) instead
+    /// of a stale capture — the gate cannot cost a wrongly-culled draw by
+    /// construction.
+    pub fn set_has_consumers(&mut self, has: bool) {
+        if !has {
+            self.grid_valid = false;
+        }
+        self.has_consumers = has;
     }
 
     /// Drop cached bind group (call when the Hi-Z chain is reallocated,
@@ -218,7 +238,7 @@ impl OcclusionCuller {
         vp: [[f32; 4]; 4],
     ) {
         self.recorded_this_frame = false;
-        if !self.enabled {
+        if !self.enabled || !self.has_consumers {
             return;
         }
         let rb = &mut self.readbacks[self.parity];

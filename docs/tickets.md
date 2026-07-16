@@ -1763,7 +1763,20 @@ behave. `rel` is now normalised to '/'. Run it on Windows: 0 failures.
 
 ---
 
-## EN-053 — Shadows cost ~5.3 ms in SAMPLING, and four passes each pay it 🔴 *(2026-07-16 audit)*
+## EN-053 — Shadows cost ~5.3 ms in SAMPLING, and four passes each pay it ❌ *closed same day — the premise did not survive re-measurement*
+
+> **Measured before building (2026-07-16 evening, PERFTEST mode-0 bisect on
+> the shooter's current main):** toggling shadows off buys **0.4 ms**
+> (39.88 → 39.48 ms), with `shadow_pass` at 0.09 ms — while `no-ssgi` buys
+> **4.9 ms**. The 5.3 ms figure was measured 2026-07-12 and the frame changed
+> under it (house v2, 120k grass, photoscan terrain landed since). Building
+> the shadow-mask pass tonight would have repeated the SH-049 attribution
+> mistake with a week of renderer surgery attached. The file:line facts below
+> stay true (16 taps in a ±1-texel disk, four independent consumers) — they
+> are just not where the frame's time is. Re-open only from a fresh bisect
+> that shows sampling as a top-3 lever; today's top lever is SSGI cost
+> (quality-gated — the direction is making it cheaper, e.g. the HW ray-query
+> path, not turning it off).
 
 The shadow **pass** is fixed (EN-043/044/045 — 0.18 ms). What remains is the
 per-pixel PCF: the deferred lighting path runs a fixed **16-tap** Poisson
@@ -1841,7 +1854,14 @@ budget for at 4K. All VERIFIED still present:
 Fix: dirty-flag the lighting UBO, cache bloom + composite bind groups keyed
 on the views they wrap, build the graph once and rebuild on topology change.
 
-## EN-057 — Hi-Z occlusion runs every frame for zero consumers 🟡 *(2026-07-16 audit)*
+## EN-057 — Hi-Z occlusion runs every frame for zero consumers ✅ *(shipped same day)*
+
+> The occlusion reduce + readback now gates on a per-frame
+> `set_has_consumers` flag the engine derives from the scene graph (any
+> visible non-gi_only node). Going consumer-less also invalidates the grid,
+> so a consumer appearing later reads the conservative "potentially visible"
+> answer instead of a stale capture — the gate cannot wrongly cull a draw by
+> construction. The Hi-Z pyramid itself still builds: SSAO consumes it.
 
 The pyramid build + occlusion reduce + readback gate only on `ssao_enabled`
 and the culler's own flag (`mod.rs:10707-10731`, `occlusion.rs:221-223`) —
