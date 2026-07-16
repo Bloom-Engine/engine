@@ -56,6 +56,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_draw_model_rotated(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_draw_model_transform16(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_unload_model(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_gen_mesh_heightmap(_p0: f64, _p1: f64, _p2: f64, _p3: f64) -> f64 {
@@ -137,6 +139,9 @@
 #[no_mangle] pub extern "C" fn bloom_create_texture_array_ex(_p0: i64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_create_texture_array_scratch(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_material_texture_array(_p0: f64, _p1: f64, _p2: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_material_shading_model(_p0: f64, _p1: f64) {
@@ -161,6 +166,81 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_update_model_animation(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_play(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_layer(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_set_root_motion(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_update(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_anim_finished(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_anim_clip_duration(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_anim_root_delta(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_model_find_joint(_p0: f64, _p1: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_model_joint_world(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_create_texture_array_from_files(_p0: i64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_compile_material_instanced_bucket(_p0: i64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_ragdoll_create() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_ragdoll_activate(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_ragdoll_push(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_ragdoll_update(_p0: f64, _p1: f64, _p2: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_ragdoll_release(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_create(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_configure(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_emit(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_update(_p0: f64, _p1: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_instance_buffer(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_particles_clear(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_particles_live(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_init(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_spawn(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_decals_set_style(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_decals_update(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_instance_buffer() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_decals_clear() {
 }
 #[no_mangle] pub extern "C" fn bloom_create_mesh(_p0: i64, _p1: f64, _p2: i64, _p3: f64) -> f64 {
     0.0
@@ -215,6 +295,11 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssgi_enabled(_p0: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_set_path_tracing(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_path_tracing_supported() -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_ssgi_intensity(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssgi_radius(_p0: f64) {
@@ -245,15 +330,19 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_wind(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_set_cloud_shadows(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+#[no_mangle] pub extern "C" fn bloom_launch_process(_p0: i64, _p1: i64, _p2: i64) -> f64 {
+    0.0
 }
-#[no_mangle] pub extern "C" fn bloom_launch_process(_p0: i64, _p1: i64, _p2: i64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_set_output_scale(_p0: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_get_output_scale() -> f64 { 1.0 }
+#[no_mangle] pub extern "C" fn bloom_get_output_scale() -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_model_foliage_wind(_p0: f64, _p1: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_foliage_shadow_motion(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_cloud_shadows(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssr_enabled(_p0: f64) {
 }
@@ -276,6 +365,20 @@
 }
 #[no_mangle] pub extern "C" fn bloom_get_model_material_count(_p0: f64) -> f64 {
     0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_sound_bus(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_sound_reverb_send(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_sound_lowpass(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_bus_gain(_p0: f64, _p1: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_duck_bus(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_set_reverb(_p0: f64, _p1: f64, _p2: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_gamepad_rumble(_p0: f64, _p1: f64, _p2: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_toggle_fullscreen() {
 }
@@ -317,6 +420,12 @@
 #[no_mangle] pub extern "C" fn bloom_get_model_bounds_max_z(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_is_touch_active(_p0: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_max_touch_points() -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_register_frame_callback(_p0: f64, _p1: i64) -> f64 {
     0.0
 }
@@ -325,6 +434,10 @@
 #[no_mangle] pub extern "C" fn bloom_scene_set_gi_only(_p0: f64, _p1: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_scene_set_trs(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_transform16(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_scene_update_geometry_scratch(_p0: f64, _p1: f64, _p2: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_scene_set_lod(_p0: f64, _p1: f64, _p2: i64, _p3: f64, _p4: i64, _p5: f64, _p6: f64) {
 }
@@ -361,6 +474,9 @@
 #[no_mangle] pub extern "C" fn bloom_scene_set_material_water(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_gen_mesh_spline_ribbon(_p0: i64, _p1: f64, _p2: i64, _p3: f64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_gen_mesh_spline_ribbon_scratch(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_load_render_texture(_p0: f64, _p1: f64) -> f64 {
@@ -778,95 +894,3 @@
 #[no_mangle] pub extern "C" fn bloom_physics_vehicle_get_wheel_angular_velocity(_p0: f64, _p1: f64) -> f64 {
     0.0
 }
-
-// EN-028 / EN-033 / EN-026 / EN-027 — watchOS is a stub platform (no 3D
-// renderer), so these keep the symbol surface complete without behaviour.
-#[no_mangle] pub extern "C" fn bloom_anim_play(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_anim_set_layer(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_anim_set_root_motion(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_anim_update(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_anim_finished(_p0: f64) -> f64 {
-    1.0
-}
-#[no_mangle] pub extern "C" fn bloom_anim_clip_duration(_p0: f64, _p1: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_anim_root_delta(_p0: f64, _p1: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_model_find_joint(_p0: f64, _p1: i64) -> f64 {
-    -1.0
-}
-#[no_mangle] pub extern "C" fn bloom_model_joint_world(_p0: f64, _p1: f64, _p2: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_particles_create(_p0: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_particles_configure(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_particles_emit(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_particles_update(_p0: f64, _p1: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_particles_instance_buffer(_p0: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_particles_clear(_p0: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_particles_live(_p0: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_decals_init(_p0: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_decals_spawn(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_decals_set_style(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_decals_update(_p0: f64) -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_decals_instance_buffer() -> f64 {
-    0.0
-}
-#[no_mangle] pub extern "C" fn bloom_decals_clear() {
-}
-
-// EN-029 — audio bus/reverb/filter surface (watchOS stub platform).
-#[no_mangle] pub extern "C" fn bloom_set_sound_bus(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_sound_reverb_send(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_sound_lowpass(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_bus_gain(_p0: f64, _p1: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_duck_bus(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
-}
-#[no_mangle] pub extern "C" fn bloom_set_reverb(_p0: f64, _p1: f64, _p2: f64) {
-}
-
-// EN-031 — gamepad rumble (no vibration motor on watchOS).
-#[no_mangle] pub extern "C" fn bloom_gamepad_rumble(_p0: f64, _p1: f64, _p2: f64) {
-}
-
-#[no_mangle] pub extern "C" fn bloom_compile_material_instanced_bucket(_p0: i64, _p1: f64, _p2: f64) -> f64 {
-    0.0
-}
-
-#[no_mangle] pub extern "C" fn bloom_create_texture_array_from_files(_p0: i64, _p1: f64, _p2: f64) -> f64 {
-    0.0
-}
-
-// EN-025 — ragdolls (no 3D/physics on watchOS).
-#[no_mangle] pub extern "C" fn bloom_ragdoll_create() -> f64 { 0.0 }
-#[no_mangle] pub extern "C" fn bloom_ragdoll_activate(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64) -> f64 { 0.0 }
-#[no_mangle] pub extern "C" fn bloom_ragdoll_push(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {}
-#[no_mangle] pub extern "C" fn bloom_ragdoll_update(_p0: f64, _p1: f64, _p2: f64) -> f64 { 0.0 }
-#[no_mangle] pub extern "C" fn bloom_ragdoll_release(_p0: f64) {}

@@ -224,6 +224,21 @@ for (const platform of PLATFORMS) {
     'bloom_set_material_params_scratch',
     // Water-ripple impulse (round-2 splat compute) — not yet wired on web.
     'bloom_splat_impulse',
+    // Scratch-buffer consumers (EN-049) — same cross-module WASM linear-memory
+    // bridge TODO as the mesh scratch group above. Their payload arrives via
+    // bloom_mesh_scratch_*, which does not bridge between Perry's WASM module
+    // and bloom's, so the callee would read an empty buffer.
+    'bloom_create_texture_array_scratch',
+    'bloom_scene_update_geometry_scratch',
+    'bloom_gen_mesh_spline_ribbon_scratch',
+    // Scene-node transform setter — same group as bloom_scene_set_trs above;
+    // web's scene-node setters are only partially ported.
+    'bloom_scene_set_transform16',
+    // Path tracing (PT-1..8) — the PT backend requires wgpu's
+    // Features::EXPERIMENTAL_RAY_QUERY, which WebGPU does not expose. Same
+    // class of hard platform gap as the profiler's TIMESTAMP_QUERY entries.
+    'bloom_set_path_tracing',
+    'bloom_path_tracing_supported',
   ]);
   const missing = [];
   for (const name of manifest.keys()) {
