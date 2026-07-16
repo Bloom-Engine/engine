@@ -91,6 +91,14 @@ function parseNumber(s: string | undefined, fallback: number): number {
 }
 
 export function migratePrefabData(raw: PrefabData): PrefabData {
+  // Prefabs saved before 2026-07-15 are missing `schemaVersion` and `bounds`
+  // outright — serializePrefab dropped both (fixed the same day). Backfill
+  // bounds with a degenerate AABB so those files still load; consumers treat
+  // a zero-size bounds as "unknown".
+  if (!raw.bounds) {
+    raw.bounds = { min: [0, 0, 0], max: [0, 0, 0] };
+  }
+
   const from = raw.schemaVersion | 0;
 
   if (from === WORLD_SCHEMA_VERSION) {

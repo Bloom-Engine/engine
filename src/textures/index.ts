@@ -176,6 +176,12 @@ export function endTextureMode(): void {
 }
 
 export function getRenderTextureTexture(handle: number): Texture {
+  // `handle`, not `id` — Texture renamed the field in v0.5 and this function
+  // was never migrated. Every draw call reads texture.handle, so the old
+  // `{ id }` shape fed `undefined` into a native f64 param the first time
+  // anyone drew a render texture (nobody had, until editor thumbnails).
+  // Width/height are 0 because the FFI only returns the texture id; callers
+  // pass explicit source rects.
   const id = bloom_get_render_texture_texture(handle);
-  return { id, width: 0, height: 0 };
+  return { handle: id, width: 0, height: 0 };
 }

@@ -48,7 +48,7 @@ import {
   Vec4Lit,
 } from './types';
 import { migrateWorldData } from './version';
-import { validateWorld, formatValidationErrors } from './validate';
+import { validateWorld, formatValidationErrors, listUnknownWorldFields } from './validate';
 import {
   PrefabRegistry,
   PrefabLeaf,
@@ -118,6 +118,20 @@ export function loadWorld(path: string): WorldData {
   const check = validateWorld(migrated);
   if (!check.ok) {
     throw new Error('loadWorld: ' + path + '\n' + formatValidationErrors(check.errors));
+  }
+
+  // Unknown fields survive load (JSON.parse keeps them) but NOT save — the
+  // schema-explicit saver drops them. Warn loudly rather than lose data
+  // silently; game-specific data belongs in metadata/userData/tags.
+  // console.error, not console.log: stdout is block-buffered under Perry and
+  // lost if the process later crashes.
+  const unknown = listUnknownWorldFields(migrated);
+  for (let i = 0; i < unknown.length; i++) {
+    console.error(
+      'loadWorld: WARNING: ' + path + ' contains unknown field "' + unknown[i] +
+      '" — not part of schema v' + WORLD_SCHEMA_VERSION +
+      '; it will be DROPPED if this file is saved. Extensions belong in metadata/userData/tags.',
+    );
   }
 
   return migrated;

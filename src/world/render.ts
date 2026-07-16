@@ -15,7 +15,11 @@ import {
   attachModelToNode, setSceneNodeColor, addPointLight,
   SceneNodeHandle,
 } from '../scene/index';
-import { genMeshCube, genMeshSplineRibbon } from '../models/index';
+import {
+  genMeshCube, genMeshSplineRibbon, setAmbientLight, setDirectionalLight,
+} from '../models/index';
+import { setFog } from '../core/index';
+import { vec3 } from '../math/index';
 import { setSceneNodeTransform } from '../scene/index';
 import { WorldData, WaterVolume, RiverSpline } from './types';
 
@@ -36,6 +40,54 @@ export function applyWorldLights(world: WorldData): void {
       l.color[0], l.color[1], l.color[2],
       l.intensity,
     );
+  }
+}
+
+// Re-apply the world's ambient light, sun, and fog.
+//
+// MUST be called every frame, for the same reason as `applyWorldLights`: the
+// renderer clears its lighting block in begin_frame. `instantiateWorld` applies
+// the environment once so the FIRST frame is right, but a consumer that never
+// calls this per frame gets a world that goes dark on frame two. (Shadows are
+// deliberately NOT here — enabling/disabling swaps render passes and belongs
+// at load or on explicit change, which instantiateWorld already handles.)
+//
+// The world editor and the world-viewer example both drive their frames with
+// exactly this call, so lighting cannot look different in-game than in-editor.
+export function applyWorldEnvironment(world: WorldData): void {
+  const env = world.environment;
+  if (!env) return;
+
+  setAmbientLight(
+    {
+      r: Math.floor(env.ambientColor[0] * 255),
+      g: Math.floor(env.ambientColor[1] * 255),
+      b: Math.floor(env.ambientColor[2] * 255),
+      a: 255,
+    },
+    env.ambientIntensity,
+  );
+
+  setDirectionalLight(
+    vec3(env.sunDirection[0], env.sunDirection[1], env.sunDirection[2]),
+    {
+      r: Math.floor(env.sunColor[0] * 255),
+      g: Math.floor(env.sunColor[1] * 255),
+      b: Math.floor(env.sunColor[2] * 255),
+      a: 255,
+    },
+    env.sunIntensity,
+  );
+
+  applyWorldLights(world);
+
+  // The engine's fog is exponential height fog; the schema stores a linear
+  // start/end pair. Approximate with a density reaching ~95% extinction at
+  // fogEnd, near-uniform over height.
+  if (env.fogEnd > 0.0001) {
+    setFog(env.fogColor[0], env.fogColor[1], env.fogColor[2], 3.0 / env.fogEnd, 0, 0.02);
+  } else {
+    setFog(env.fogColor[0], env.fogColor[1], env.fogColor[2], 0, 0, 0.02);
   }
 }
 

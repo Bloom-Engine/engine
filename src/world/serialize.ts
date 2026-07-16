@@ -284,9 +284,18 @@ function prefabChild(c: PrefabChild, d: number): string {
 }
 
 export function serializePrefab(p: PrefabData): string {
+  // schemaVersion and bounds were MISSING here until 2026-07-15 — every prefab
+  // ever saved lost both (schemaVersion was silently backfilled by migration on
+  // reload; bounds came back as undefined). If you add a field to PrefabData,
+  // it must be added here too, or savePrefab drops it.
   let s = '{\n';
+  s = s + ind(1) + '"schemaVersion": ' + num(p.schemaVersion) + ',\n';
   s = s + ind(1) + '"id": ' + str(p.id) + ',\n';
   s = s + ind(1) + '"name": ' + str(p.name) + ',\n';
-  s = s + ind(1) + '"children": ' + arr(p.children, 1, prefabChild) + '\n';
+  s = s + ind(1) + '"children": ' + arr(p.children, 1, prefabChild) + ',\n';
+  s = s + ind(1) + '"bounds": {\n'
+        + ind(2) + '"min": ' + vec3(p.bounds.min) + ',\n'
+        + ind(2) + '"max": ' + vec3(p.bounds.max) + '\n'
+        + ind(1) + '}\n';
   return s + '}\n';
 }

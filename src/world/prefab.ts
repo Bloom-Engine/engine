@@ -23,13 +23,14 @@ import {
 } from '../math/index';
 import { Mat4, Vec3 } from '../core/types';
 import {
+  WORLD_SCHEMA_VERSION,
   PrefabData,
   PrefabChild,
   TransformData,
   Vec4Lit,
 } from './types';
 import { migratePrefabData } from './version';
-import { validatePrefab, formatValidationErrors } from './validate';
+import { validatePrefab, formatValidationErrors, listUnknownPrefabFields } from './validate';
 
 // One leaf of an expanded prefab — a single glb to spawn at a world-space
 // matrix. The loader turns each of these into one scene node.
@@ -86,6 +87,17 @@ export function loadPrefab(path: string): PrefabData {
   if (!check.ok) {
     throw new Error('loadPrefab: ' + path + '\n' + formatValidationErrors(check.errors));
   }
+
+  // Same policy as loadWorld: unknown fields don't survive a save, so say so
+  // at load time instead of losing them silently.
+  const unknown = listUnknownPrefabFields(migrated);
+  for (let i = 0; i < unknown.length; i++) {
+    console.error(
+      'loadPrefab: WARNING: ' + path + ' contains unknown field "' + unknown[i] +
+      '" — it will be DROPPED if this prefab is saved.',
+    );
+  }
+
   return migrated;
 }
 
@@ -196,7 +208,7 @@ function mergeTags(parent: ReadonlyArray<string>, child: ReadonlyArray<string>):
 // "New Prefab".
 export function createEmptyPrefab(id: string, name: string): PrefabData {
   return {
-    schemaVersion: 1,
+    schemaVersion: WORLD_SCHEMA_VERSION,
     id: id,
     name: name,
     children: [],
