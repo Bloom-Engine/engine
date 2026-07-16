@@ -175,6 +175,12 @@ impl EngineState {
             // Collect last frame's occlusion-grid readback (if it
             // completed) before culling against it.
             self.renderer.occlusion.poll(&self.renderer.device);
+            // EN-057 — skip the occlusion reduce + readback entirely when no
+            // rasterized node could consume a verdict (gi_only proxies never
+            // draw; the shooter's 267 of them paid this every frame for
+            // nothing). The Hi-Z pyramid itself stays: SSAO consumes it.
+            self.renderer.occlusion.set_has_consumers(
+                self.scene.nodes.iter().any(|(_, n)| n.visible && !n.gi_only));
             self.scene.prepare(
                 &self.renderer.device,
                 &self.renderer.queue,
