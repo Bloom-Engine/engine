@@ -899,7 +899,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // flushes chroma-poisoned history on static pixels (weakening it
     // green-tints the whole frame within seconds).
     let history_dist = abs(history_y_clamped - mean.x);
-    let disocclusion = smoothstep(stddev.x * 0.25, stddev.x * 1.0, history_dist);
+    // The reject's lower edge is MOTION-AWARE (2026-07-16 sparkle hunt).
+    // At rest, sub-pixel jitter walks high-frequency detail (pebble bank,
+    // grass tips) across the 0.25-sigma edge every few frames, so alpha
+    // oscillated between converged history and raw current - measured as
+    // 2x MORE temporal flicker with TAA on than off on static surfaces
+    // (bank 3.99 vs 1.94 high-pass stddev). Rest pixels now need 0.6 sigma
+    // before rejecting; under motion the tight 0.25 returns (the
+    // dark-column-in-history case lives there). The chroma-poison flush
+    // this reject exists for still fires at rest: poisoned history sits
+    // at ~1 sigma+, well past either edge.
+    let dis_lo = stddev.x * mix(0.6, 0.25, motion_alpha);
+    let disocclusion = smoothstep(dis_lo, stddev.x * 1.0, history_dist);
 
     let motion_ramped = mix(u.params.x, 0.85, motion_alpha);
     let alpha = max(motion_ramped, disocclusion);
