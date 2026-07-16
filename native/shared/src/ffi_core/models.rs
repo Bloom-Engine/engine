@@ -435,6 +435,24 @@ macro_rules! __bloom_ffi_models {
             0.0
         }
 
+        // bloom_instantiate_animation  [source: EN-055; gated: models3d]
+        // A fresh animation INSTANCE (own mixer/joint state) over an
+        // already-loaded clip set — clip data is Arc-shared, so N characters
+        // no longer cost N GLB re-parses at load.
+        #[cfg(feature = "models3d")]
+        #[no_mangle]
+        pub extern "C" fn bloom_instantiate_animation(src: f64) -> f64 {
+            $crate::ffi::guard("bloom_instantiate_animation", move || {
+                engine().models.instantiate_animation(src)
+        })
+        }
+        #[cfg(not(feature = "models3d"))]
+        #[no_mangle]
+        pub extern "C" fn bloom_instantiate_animation(_src: f64) -> f64 {
+            $crate::ffi::feature_off_warn_once("bloom_instantiate_animation", "models3d");
+            0.0
+        }
+
         // bloom_update_model_animation  [source: linux; gated: models3d]
         #[cfg(feature = "models3d")]
         #[no_mangle]
@@ -811,20 +829,36 @@ macro_rules! __bloom_ffi_models {
                     None => return 0.0,
                 };
                 let eng = engine();
+                // Normal maps must go through the kind-aware registration
+                // (linear space + LEADR mips) or the committed model shades
+                // visibly flatter than the same GLB through loadModel.
                 let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
                 for tex in &staged.textures {
-                    tex_map.push(eng.renderer.register_texture(tex.width, tex.height, &tex.data));
+                    tex_map.push(eng.renderer.register_texture_kind(
+                        tex.width, tex.height, &tex.data, tex.is_normal));
                 }
                 let mut model = staged.model;
-                for mesh in &mut model.meshes {
-                    if let Some(ref mut idx) = mesh.texture_idx {
-                        let staged_idx = *idx as usize;
-                        if staged_idx > 0 && staged_idx <= tex_map.len() {
-                            *idx = tex_map[staged_idx - 1];
+                // Remap EVERY texture slot, not just the base colour — this
+                // used to drop normal/MR/emissive/occlusion references on the
+                // floor (the round-5 "stale aux-texture remap" bug), which
+                // silently stripped the SH-046 character maps on any model
+                // loaded through the staged path.
+                let remap = |idx: &mut Option<u32>| {
+                    if let Some(i) = *idx {
+                        let s = i as usize;
+                        *idx = if s > 0 && s <= tex_map.len() {
+                            Some(tex_map[s - 1])
                         } else {
-                            mesh.texture_idx = None;
-                        }
+                            None
+                        };
                     }
+                };
+                for mesh in &mut model.meshes {
+                    remap(&mut mesh.texture_idx);
+                    remap(&mut mesh.normal_texture_idx);
+                    remap(&mut mesh.metallic_roughness_texture_idx);
+                    remap(&mut mesh.emissive_texture_idx);
+                    remap(&mut mesh.occlusion_texture_idx);
                 }
                 eng.models.models.alloc(model)
         })

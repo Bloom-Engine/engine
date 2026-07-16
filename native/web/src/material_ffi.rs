@@ -435,6 +435,11 @@ pub fn bloom_load_model_animation_bytes(data: &[u8]) -> f64 {
 }
 
 #[wasm_bindgen]
+pub fn bloom_instantiate_animation(src: f64) -> f64 {
+    engine().models.instantiate_animation(src)
+}
+
+#[wasm_bindgen]
 pub fn bloom_update_model_animation(_handle: f64, _anim_index: f64, _time: f64, _scale: f64, _px: f64, _py: f64, _pz: f64, _rot_sin: f64, _rot_cos: f64) {
     // TODO: Phase 4 — depends on bloom_load_model_animation
 }

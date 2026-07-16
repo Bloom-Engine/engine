@@ -1184,6 +1184,13 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_instantiate_animation",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_update_model_animation",
           "params": [
             "f64",
