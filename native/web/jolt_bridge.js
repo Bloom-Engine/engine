@@ -225,6 +225,16 @@ export function destroyWorld(h) {
   for (const [ch, c] of state.constraints) {
     if (c.world === h) { w.system.RemoveConstraint(c.constraint); state.constraints.delete(ch); }
   }
+  // Evict this world's cached query filters (queryFilters()) and free the
+  // native filter objects — otherwise repeated world create/destroy leaks
+  // one bp/obj/body/shape set per (world, layer) that was ever queried.
+  for (const [k, f] of queryFilterCache) {
+    if (k.startsWith(h + ':')) {
+      JoltModule.destroy(f.bp); JoltModule.destroy(f.obj);
+      JoltModule.destroy(f.body); JoltModule.destroy(f.shape);
+      queryFilterCache.delete(k);
+    }
+  }
   JoltModule.destroy(w.jolt);
   state.worlds.delete(h);
 }
@@ -924,8 +934,14 @@ export function constraintSixDofLockedTranslation(
   if (warnUninit('constraintSixDofLockedTranslation')) return 0;
   const ctx = resolveConstraintBodies(bodyA, bodyB); if (!ctx) return 0;
   const J = JoltModule;
+  // Release the body read-locks exactly once (idempotent), and destroy the
+  // temporary settings object on every exit — including the SixDOF-API-absent
+  // path, where `new SixDOFConstraintSettings()` itself throws.
+  let settings = null;
+  let released = false;
+  const release = () => { if (!released) { released = true; ctx.release(); } };
   try {
-    const settings = new J.SixDOFConstraintSettings();
+    settings = new J.SixDOFConstraintSettings();
     settings.mSpace = worldSpace ? J.EConstraintSpace_WorldSpace : J.EConstraintSpace_LocalToBodyCOM;
     settings.mPosition1 = rvec3(ax, ay, az);
     settings.mPosition2 = rvec3(bx, by, bz);
@@ -942,12 +958,14 @@ export function constraintSixDofLockedTranslation(
       else settings.SetLimitedAxis(axis, lo, hi);
     }
     const c = settings.Create(ctx.body1, ctx.body2);
-    ctx.release();
+    release(); // AddConstraint below does not need the body locks
     return registerConstraint(state.bodies.get(bodyA).world, c);
   } catch (e) {
-    ctx.release();
     console.warn('[jolt_bridge] SixDOF constraint unavailable:', e);
     return 0;
+  } finally {
+    release();
+    if (settings) J.destroy(settings);
   }
 }
 
@@ -1054,7 +1072,9 @@ export function shapeHeightfield(sampleCount, ox, oy, oz, sx, sy, sz, blockSize)
   );
   for (let i = 0; i < need; i++) heap[i] = state.scratchF32[i];
   const result = settings.Create();
-  return result.IsValid() ? registerShape(result.Get()) : 0;
+  const shapeH = result.IsValid() ? registerShape(result.Get()) : 0;
+  J.destroy(settings);
+  return shapeH;
 }
 
 // --- Compound builder ---

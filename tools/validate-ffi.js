@@ -166,7 +166,14 @@ for (const platform of PLATFORMS) {
 // _floats designs) are skipped: only signatures that are pure f64 mirrors
 // are compared, which is precisely where drift is a bug.
 {
-  const webSrc = readDirRust(path.join(ROOT, 'native/web/src'));
+  // Strip comments before parsing signatures: a commented-out
+  // `// pub fn bloom_old(...)` must not be scraped as a real export, and a
+  // trailing `x: f64 // note` inside a param list must not break the all-f64
+  // arity check. Block comments then line comments; string literals in this
+  // Rust source never contain `pub fn bloom_`, so this is safe.
+  const webSrc = readDirRust(path.join(ROOT, 'native/web/src'))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
   const names = new Set();
   // name -> {arity, allF64} for the Rust exports (the jolt bridge's JS
   // functions are name-only; physics arity is covered by its own manifest
