@@ -34,6 +34,16 @@ macro_rules! __bloom_ffi_input {
         })
         }
 
+        // bloom_is_key_repeated — OS auto-repeat as its own edge. isKeyPressed
+        // stays initial-press-only (a held jump key must not machine-gun);
+        // caret navigation in text fields is the consumer.
+        #[no_mangle]
+        pub extern "C" fn bloom_is_key_repeated(key: f64) -> f64 {
+            $crate::ffi::guard("bloom_is_key_repeated", move || {
+                if engine().input.is_key_repeated(key as usize) { 1.0 } else { 0.0 }
+        })
+        }
+
         // bloom_get_mouse_x  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_get_mouse_x() -> f64 {

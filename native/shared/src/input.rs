@@ -88,6 +88,14 @@ pub struct InputState {
     // chance to poll. Mark the slot here instead and clear at end_frame, so a
     // fast tap is still visible for one full frame.
     touch_pending_release: [bool; MAX_TOUCH_POINTS],
+
+    // OS key auto-repeat, surfaced as its OWN edge (isKeyRepeated) so that
+    // isKeyPressed semantics never change for games — a held jump key must
+    // not machine-gun. Text/caret navigation (arrows, Home/End, Delete) is
+    // what consumes these. The platform layer queues repeats as they arrive;
+    // begin_frame publishes them for exactly one frame.
+    keys_repeated: [bool; MAX_KEYS],
+    repeat_pending: [bool; MAX_KEYS],
 }
 
 impl InputState {
@@ -130,7 +138,21 @@ impl InputState {
             touch_points: [EMPTY_TOUCH; MAX_TOUCH_POINTS],
             touch_count: 0,
             touch_pending_release: [false; MAX_TOUCH_POINTS],
+            keys_repeated: [false; MAX_KEYS],
+            repeat_pending: [false; MAX_KEYS],
         }
+    }
+
+    /// Platform layer: an OS auto-repeat arrived for `key`. Published as a
+    /// one-frame isKeyRepeated edge by the next begin_frame.
+    pub fn queue_key_repeat(&mut self, key: usize) {
+        if key < MAX_KEYS {
+            self.repeat_pending[key] = true;
+        }
+    }
+
+    pub fn is_key_repeated(&self, key: usize) -> bool {
+        key < MAX_KEYS && self.keys_repeated[key]
     }
 
     pub fn begin_frame(&mut self) {
@@ -160,6 +182,8 @@ impl InputState {
         for i in 0..MAX_KEYS {
             self.keys_pressed[i] = self.keys_down[i] && !self.prev_keys_down[i];
             self.keys_released[i] = !self.keys_down[i] && self.prev_keys_down[i];
+            self.keys_repeated[i] = self.repeat_pending[i];
+            self.repeat_pending[i] = false;
         }
         for i in 0..MAX_MOUSE_BUTTONS {
             self.mouse_pressed[i] = self.mouse_down[i] && !self.prev_mouse_down[i];
