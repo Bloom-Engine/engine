@@ -223,6 +223,13 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_is_key_repeated",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_is_key_down",
           "params": [
             "f64"

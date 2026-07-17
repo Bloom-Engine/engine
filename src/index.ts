@@ -10,7 +10,7 @@ export {
   beginDrawing, endDrawing, takeScreenshot, clearBackground, setEnvClearFromHdr,
   setTargetFPS, getDeltaTime, getFPS, getTime,
   getScreenWidth, getScreenHeight,
-  isKeyPressed, isKeyDown, isKeyReleased,
+  isKeyPressed, isKeyDown, isKeyReleased, isKeyRepeated,
   getMouseX, getMouseY, isMouseButtonPressed, isMouseButtonDown, isMouseButtonReleased,
   getMousePosition, getTouchPosition,
   beginMode2D, endMode2D, beginMode3D, endMode3D,

@@ -10555,19 +10555,48 @@ impl Renderer {
         self.flush_model_uniforms();
         profiler.end("joint_flush");
 
+        // Q1-RT: the deferred path honors the render-target override too.
+        // When begin_texture_mode armed a target, this frame's FINAL passes
+        // (post/compose chain + 2D overlay) write into it instead of the
+        // swapchain, and nothing acquires or presents. The simple 2D
+        // end_frame always honored the override; this path ignored it, so
+        // render-to-texture silently no-oped for every 3D app — the frame
+        // rendered to the surface and the RT stayed at its initial contents
+        // (found via the editor's thumbnail work, 2026-07-17).
+        let rt_color = self.rt_color_view.take();
+        let rt_depth = self.rt_depth_view.take();
+        let using_rt = rt_color.is_some();
+
         profiler.begin("surface_acquire");
-        let output = match self.acquire_frame() {
-            Some(t) => t,
-            None => {
-                profiler.end("surface_acquire");
-                return;
+        let output = if using_rt {
+            None
+        } else {
+            match self.acquire_frame() {
+                Some(t) => Some(t),
+                None => {
+                    profiler.end("surface_acquire");
+                    self.rt_color_view = rt_color;
+                    self.rt_depth_view = rt_depth;
+                    return;
+                }
             }
         };
         profiler.end("surface_acquire");
-        let view = self.frame_texture(&output).create_view(&wgpu::TextureViewDescriptor {
-            format: Some(self.output_format),
-            ..Default::default()
-        });
+        let view = if let Some(ref rt_view) = rt_color {
+            rt_view.clone()
+        } else {
+            // EN-063 — name the format explicitly: the web surface view must be
+            // created as `output_format` (the swapchain's view format), not the
+            // texture's own, or the final blit format-mismatches on wasm. On
+            // native the two are equal, so this is a no-op there.
+            self.frame_texture(output.as_ref().unwrap()).create_view(&wgpu::TextureViewDescriptor {
+                format: Some(self.output_format),
+                ..Default::default()
+            })
+        };
+        // Restore so the views persist until end_texture_mode clears them.
+        self.rt_color_view = rt_color;
+        self.rt_depth_view = rt_depth;
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("bloom_encoder"),
@@ -11138,11 +11167,12 @@ impl Renderer {
 
         // If screenshot requested, copy rendered texture to staging buffer before submitting.
         // Synchronous GPU readback is not available on WASM (device.poll(Wait) blocks).
+        // RT frames have no surface — the request stays pending for the next real frame.
         #[cfg(not(target_arch = "wasm32"))]
-        if self.screenshot_requested {
+        if self.screenshot_requested && !using_rt {
             eprintln!("bloom: screenshot readback branch running");
             // Use actual texture dimensions (accounts for Retina/DPI scaling)
-            let tex_size = self.frame_texture(&output).size();
+            let tex_size = self.frame_texture(output.as_ref().unwrap()).size();
             let width = tex_size.width;
             let height = tex_size.height;
             let bytes_per_pixel = 4u32;
@@ -11159,7 +11189,7 @@ impl Renderer {
 
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: self.frame_texture(&output),
+                    texture: self.frame_texture(output.as_ref().unwrap()),
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -11252,7 +11282,9 @@ impl Renderer {
         }
 
         profiler.begin("swap_present");
-        self.present_frame(output);
+        if let Some(out) = output {
+            self.present_frame(out);
+        }
         profiler.end("swap_present");
 
         // After present: swap TAA ping-pong + advance the jitter
