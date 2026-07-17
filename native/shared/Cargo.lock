@@ -110,6 +110,7 @@ dependencies = [
  "notify",
  "pollster",
  "raw-window-handle",
+ "web-sys",
  "web-time",
  "wgpu",
 ]

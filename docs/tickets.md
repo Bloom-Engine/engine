@@ -2082,7 +2082,7 @@ equal-power, air absorption, rear cue, pitch rate, doppler zero-crossing
 count, max-dist cull/return, per-voice occlusion). watchOS stubs regenerated;
 web target exports the same six calls. First consumer: shooter SH-050.
 
-## EN-063 — build-web has been red on main since EN-055: models.rs no longer compiles without `models3d` 🔴 *(2026-07-16 evening)*
+## EN-063 — build-web has been red on main since EN-055: models.rs no longer compiles without `models3d` ✅ *(compile fix shipped 2026-07-17; loud-gate wish still open)*
 
 Every `Tests` run on main from PR #107 (EN-055, 323a6c9) onward fails the
 `build-web` job at its first step, `cargo check --target
@@ -2099,10 +2099,16 @@ Error classes (all in `models.rs`, all `models3d`-off builds):
   the use isn't.
 - ~29 bare `gltf::` paths — `gltf` is `dep:gltf` behind `models3d`.
 
-Fix wanted: make `bloom-shared` compile with `--no-default-features
---features web` again — gate the re-export and the gltf/staging-touching
-`ModelManager` internals on `models3d` (the `ffi_core/models.rs` surface
-already has both gated variants; it's the module internals that lost their
-compileability). Then make the red gate LOUD: build-web has been failing
+Fix as shipped (2026-07-17): `anim_mixer` is UN-gated in `lib.rs` — it is
+pure per-instance state embedded in the always-compiled `ModelAnimation`,
+no heavy deps, so gating it was wrong to begin with. Everything that
+actually touches `gltf`/`image_dds`/`StagedModel` — the four `ModelManager`
+loader methods, the five `load_gltf*` free functions, and their ten private
+helpers — got `#[cfg(feature = "models3d")]`. All FFI call sites already
+had feature-off stubs (`ffi_core/models.rs`), so no surface changed.
+Verified locally: wasm `--features web` (the failing check), wasm
+`--features web,models3d` (the native/web shape), and native default all
+compile. Still open from this ticket: make the red gate LOUD —
+build-web was failing
 for ~10 hours and five merged PRs without anyone noticing, which is the
 EN-058(a) lesson again — a gate nobody reads is not a gate.

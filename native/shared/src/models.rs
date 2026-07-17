@@ -152,6 +152,11 @@ impl ModelManager {
         ))
     }
 
+    // The gltf/image_dds-touching loaders below are gated on models3d
+    // (EN-014 binary-size story, re-broken by EN-055, fixed EN-063). The
+    // FFI layer (ffi_core/models.rs) carries feature-off stubs for all of
+    // them; everything else in this file compiles in every configuration.
+    #[cfg(feature = "models3d")]
     pub fn load_model(&mut self, file_data: &[u8]) -> f64 {
         match load_gltf(file_data) {
             Some(model) => self.models.alloc(model),
@@ -159,6 +164,7 @@ impl ModelManager {
         }
     }
 
+    #[cfg(feature = "models3d")]
     pub fn load_model_with_textures(&mut self, file_data: &[u8], renderer: &mut crate::renderer::Renderer) -> f64 {
         match load_gltf_with_textures(file_data, renderer, None) {
             Some(model) => self.models.alloc(model),
@@ -169,6 +175,7 @@ impl ModelManager {
     /// Like `load_model_with_textures` but also resolves external `.bin`
     /// and image URIs relative to `base_dir` — required for loose glTF
     /// files (as opposed to single-file .glb). Intel Sponza etc.
+    #[cfg(feature = "models3d")]
     pub fn load_model_with_textures_from_path(
         &mut self,
         file_data: &[u8],
@@ -495,6 +502,7 @@ impl ModelManager {
         self.models.alloc(model)
     }
 
+    #[cfg(feature = "models3d")]
     pub fn load_model_animation(&mut self, file_data: &[u8]) -> f64 {
         match load_gltf_animation(file_data) {
             Some(anim) => self.animations.alloc(anim),
@@ -930,6 +938,7 @@ fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
 /// instance — so glTF scenes with heavy mesh reuse (Bistro: 5910 nodes
 /// referencing 551 unique meshes) render every chair / bollard / chain
 /// / bush instead of collapsing to a single copy each.
+#[cfg(feature = "models3d")]
 fn walk_scene_collect_instances(
     node: &gltf::Node,
     parent: &[[f32; 4]; 4],
@@ -950,6 +959,7 @@ fn walk_scene_collect_instances(
 
 /// Transform a 3D point by a 4x4 matrix (column-major). Treats the
 /// point as having w=1 and drops w from the result.
+#[cfg(feature = "models3d")]
 fn mat4_transform_point(m: &[[f32; 4]; 4], p: &[f32; 3]) -> [f32; 3] {
     [
         m[0][0]*p[0] + m[1][0]*p[1] + m[2][0]*p[2] + m[3][0],
@@ -961,6 +971,7 @@ fn mat4_transform_point(m: &[[f32; 4]; 4], p: &[f32; 3]) -> [f32; 3] {
 /// Transform a direction vector by a 3x3 matrix (extracted from a 4x4
 /// column-major stored as the top-left 3x3). Used for normals under
 /// the inverse-transpose matrix.
+#[cfg(feature = "models3d")]
 fn mat3_transform_vec(m: &[[f32; 3]; 3], v: &[f32; 3]) -> [f32; 3] {
     [
         m[0][0]*v[0] + m[1][0]*v[1] + m[2][0]*v[2],
@@ -972,6 +983,7 @@ fn mat3_transform_vec(m: &[[f32; 3]; 3], v: &[f32; 3]) -> [f32; 3] {
 /// Inverse-transpose of the 3x3 rotation+scale part of a 4x4 matrix.
 /// Correct way to transform normals when the matrix has non-uniform
 /// scale; falls back to identity if the 3x3 block isn't invertible.
+#[cfg(feature = "models3d")]
 fn mat4_inverse_transpose_3x3(m: &[[f32; 4]; 4]) -> [[f32; 3]; 3] {
     let a = m[0][0]; let b = m[1][0]; let c = m[2][0];
     let d = m[0][1]; let e = m[1][1]; let f = m[2][1];
@@ -1119,6 +1131,7 @@ fn compute_joint_transforms(
 // glTF animation loader
 // ============================================================
 
+#[cfg(feature = "models3d")]
 fn read_accessor_f32(_gltf: &gltf::Gltf, buffer_data: &[Vec<u8>], accessor: &gltf::Accessor) -> Vec<f32> {
     let view = match accessor.view() {
         Some(v) => v,
@@ -1155,6 +1168,7 @@ fn read_accessor_f32(_gltf: &gltf::Gltf, buffer_data: &[Vec<u8>], accessor: &glt
     result
 }
 
+#[cfg(feature = "models3d")]
 fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
     let gltf = gltf::Gltf::from_slice(data).ok()?;
 
@@ -1411,6 +1425,7 @@ fn load_gltf_animation(data: &[u8]) -> Option<ModelAnimation> {
     })
 }
 
+#[cfg(feature = "models3d")]
 fn load_gltf_with_textures(
     data: &[u8],
     renderer: &mut crate::renderer::Renderer,
@@ -1799,6 +1814,7 @@ fn load_gltf_with_textures(
 
 /// Like load_gltf_with_textures but decodes textures to RGBA without GPU registration.
 /// Returns a StagedModel with decoded textures that can later be committed on the main thread.
+#[cfg(feature = "models3d")]
 pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
     use crate::staging::{StagedTexture, StagedModel};
 
@@ -2057,6 +2073,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
     })
 }
 
+#[cfg(feature = "models3d")]
 fn load_gltf(data: &[u8]) -> Option<ModelData> {
     let gltf = gltf::Gltf::from_slice(data).ok()?;
 
@@ -2169,6 +2186,7 @@ fn load_gltf(data: &[u8]) -> Option<ModelData> {
 ///          transparent pipeline. Better than silently rendering
 ///          foliage + fabric as fully opaque — an alpha-cutout leaf
 ///          card is at least the right *shape*.
+#[cfg(feature = "models3d")]
 fn alpha_cutoff_from_material(mat: &gltf::Material) -> f32 {
     match mat.alpha_mode() {
         gltf::material::AlphaMode::Opaque => 0.0,
@@ -2192,6 +2210,7 @@ fn alpha_cutoff_from_material(mat: &gltf::Material) -> f32 {
 /// Not physically correct for glass — real glass only reflects 4% at
 /// normal incidence — but it matches how windows *read* in photos
 /// (reflecting sky/buildings) far better than a flat diffuse surface.
+#[cfg(feature = "models3d")]
 fn apply_transmission_hack(
     transmission: f32,
     base_color: &mut [f32; 4],
@@ -2210,6 +2229,7 @@ fn apply_transmission_hack(
 
 /// Reference: Khronos glTF sample specGloss→metallicRoughness
 /// converter (https://github.com/KhronosGroup/glTF/pull/1355).
+#[cfg(feature = "models3d")]
 fn specgloss_to_metalrough(diffuse: [f32; 4], specular: [f32; 3]) -> ([f32; 4], f32) {
     let dielectric_specular = 0.04_f32;
     let epsilon = 1e-6_f32;
@@ -2248,6 +2268,7 @@ fn specgloss_to_metalrough(diffuse: [f32; 4], specular: [f32; 3]) -> ([f32; 4], 
 /// Replace the extension on a URI (keeps directories / query strings
 /// untouched). Used to fall back from `foo.png` → `foo.dds` when a
 /// glTF references a PNG URI that isn't on disk but the DDS sibling is.
+#[cfg(feature = "models3d")]
 fn swap_extension(uri: &str, new_ext: &str) -> String {
     let q = uri.find('?').unwrap_or(uri.len());
     let (path, query) = uri.split_at(q);
@@ -2264,6 +2285,7 @@ fn swap_extension(uri: &str, new_ext: &str) -> String {
 /// DDS first when the URI extension suggests it (for asset packs like
 /// Lumberyard Bistro that ship BC-compressed textures), falling back
 /// to the `image` crate for PNG/JPEG/etc. Returns None on failure.
+#[cfg(feature = "models3d")]
 fn decode_texture_bytes(bytes: &[u8], uri: &str) -> Option<(Vec<u8>, u32, u32)> {
     let is_dds = uri.to_ascii_lowercase().ends_with(".dds")
         || bytes.len() >= 4 && &bytes[..4] == b"DDS ";
@@ -2284,6 +2306,7 @@ fn decode_texture_bytes(bytes: &[u8], uri: &str) -> Option<(Vec<u8>, u32, u32)> 
     Some((rgba.into_raw(), w, h))
 }
 
+#[cfg(feature = "models3d")]
 fn base64_decode(input: &str, output: &mut Vec<u8>) {
     let mut buf = 0u32;
     let mut bits = 0u32;
