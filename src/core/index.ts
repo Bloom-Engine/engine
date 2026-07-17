@@ -106,6 +106,7 @@ declare function bloom_get_fps(): number;
 declare function bloom_get_screen_width(): number;
 declare function bloom_get_screen_height(): number;
 declare function bloom_is_key_pressed(key: number): number;
+declare function bloom_is_key_repeated(key: number): number;
 declare function bloom_is_key_down(key: number): number;
 declare function bloom_is_key_released(key: number): number;
 declare function bloom_get_mouse_x(): number;
@@ -807,6 +808,16 @@ export function getScreenHeight(): number {
 
 export function isKeyPressed(key: number): boolean {
   return bloom_is_key_pressed(key) !== 0;
+}
+
+/**
+ * True for one frame each time the OS auto-repeats a held key. A SEPARATE
+ * edge from isKeyPressed (which stays initial-press-only, so a held jump key
+ * never machine-guns). Use `isKeyPressed(k) || isKeyRepeated(k)` for caret
+ * navigation and other hold-to-repeat UI.
+ */
+export function isKeyRepeated(key: number): boolean {
+  return bloom_is_key_repeated(key) !== 0;
 }
 
 export function isKeyDown(key: number): boolean {

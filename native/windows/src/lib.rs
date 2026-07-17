@@ -202,6 +202,12 @@ mod win32 {
     use raw_window_handle::{RawWindowHandle, Win32WindowHandle, RawDisplayHandle, WindowsDisplayHandle};
 
     static mut HWND_GLOBAL: Option<HWND> = None;
+
+    /// The Bloom-owned top-level window, for platform features that need an
+    /// owner (dialogs, SetWindowTextW, clipboard). None in embedded mode.
+    pub fn main_hwnd() -> Option<HWND> {
+        unsafe { HWND_GLOBAL }
+    }
     static mut IS_FULLSCREEN: bool = false;
     static mut WINDOWED_STYLE: u32 = 0;
     static mut WINDOWED_RECT: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -270,6 +276,12 @@ mod win32 {
                 if bloom_key > 0 {
                     if let Some(eng) = ENGINE.get_mut() {
                         eng.input.set_key_down(bloom_key);
+                        // lParam bit 30 = previous key state: 1 means this is
+                        // an OS auto-repeat, surfaced as its own isKeyRepeated
+                        // edge (isKeyPressed stays initial-press-only).
+                        if (lparam.0 >> 30) & 1 == 1 {
+                            eng.input.queue_key_repeat(bloom_key);
+                        }
                     }
                 }
                 // F12 — native screenshot hotkey. Perry currently drops
@@ -527,7 +539,12 @@ mod win32 {
             }
             WM_KEYDOWN => {
                 let k = map_keycode(resolve_modifier_vk(wparam.0 as u32, lparam.0));
-                if k > 0 { if let Some(eng) = ENGINE.get_mut() { eng.input.set_key_down(k); } }
+                if k > 0 {
+                    if let Some(eng) = ENGINE.get_mut() {
+                        eng.input.set_key_down(k);
+                        if (lparam.0 >> 30) & 1 == 1 { eng.input.queue_key_repeat(k); }
+                    }
+                }
             }
             WM_KEYUP => {
                 let k = map_keycode(resolve_modifier_vk(wparam.0 as u32, lparam.0));
@@ -1220,7 +1237,16 @@ pub extern "C" fn bloom_toggle_fullscreen() {
     win32::toggle_fullscreen();
 }
 #[no_mangle]
-pub extern "C" fn bloom_set_window_title(title_ptr: *const u8) { let _ = str_from_header(title_ptr); }
+pub extern "C" fn bloom_set_window_title(title_ptr: *const u8) {
+    // Real since 2026-07-17 — the stub read the string and discarded it.
+    use windows::Win32::UI::WindowsAndMessaging::SetWindowTextW;
+    use windows::core::PCWSTR;
+    let title = str_from_header(title_ptr);
+    if let Some(hwnd) = win32::main_hwnd() {
+        let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe { let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr())); }
+    }
+}
 #[no_mangle]
 pub extern "C" fn bloom_set_window_icon(path_ptr: *const u8) { let _ = str_from_header(path_ptr); }
 
@@ -1237,17 +1263,144 @@ pub extern "C" fn bloom_enable_cursor() {
     unsafe { while windows::Win32::UI::WindowsAndMessaging::ShowCursor(true) < 0 {} }
 }
 
-// E4: Clipboard (stub on this platform)
+// E4: Clipboard — real Win32 implementation (was a stub until 2026-07-17,
+// so paste in the editor's text fields silently never worked on Windows).
 #[no_mangle]
-pub extern "C" fn bloom_set_clipboard_text(_text_ptr: *const u8) {}
-#[no_mangle]
-pub extern "C" fn bloom_get_clipboard_text() -> *const u8 { std::ptr::null() }
+pub extern "C" fn bloom_set_clipboard_text(text_ptr: *const u8) {
+    use windows::Win32::System::DataExchange::{
+        OpenClipboard, CloseClipboard, EmptyClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+    use windows::Win32::Foundation::{HANDLE, HWND};
 
-// E5b: File dialogs (stub on this platform)
+    let text = str_from_header(text_ptr);
+    unsafe {
+        let owner = win32::main_hwnd().unwrap_or(HWND(std::ptr::null_mut()));
+        if OpenClipboard(owner).is_err() {
+            return;
+        }
+        let _ = EmptyClipboard();
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        if let Ok(hmem) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) {
+            let dst = GlobalLock(hmem) as *mut u16;
+            if !dst.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
+                let _ = GlobalUnlock(hmem);
+                // The system owns the memory on success; on failure we leak a
+                // small block rather than double-free.
+                let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(hmem.0));
+            }
+        }
+        let _ = CloseClipboard();
+    }
+}
+
 #[no_mangle]
-pub extern "C" fn bloom_open_file_dialog(_filter_ptr: *const u8, _title_ptr: *const u8) -> *const u8 { std::ptr::null() }
+pub extern "C" fn bloom_get_clipboard_text() -> *const u8 {
+    use windows::Win32::System::DataExchange::{OpenClipboard, CloseClipboard, GetClipboardData};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+    use windows::Win32::Foundation::{HGLOBAL, HWND};
+
+    unsafe {
+        let owner = win32::main_hwnd().unwrap_or(HWND(std::ptr::null_mut()));
+        if OpenClipboard(owner).is_err() {
+            return alloc_perry_string("");
+        }
+        let mut out = String::new();
+        if let Ok(handle) = GetClipboardData(CF_UNICODETEXT.0 as u32) {
+            let hglobal = HGLOBAL(handle.0);
+            let ptr = GlobalLock(hglobal) as *const u16;
+            if !ptr.is_null() {
+                let mut len = 0usize;
+                while *ptr.add(len) != 0 {
+                    len += 1;
+                }
+                out = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+                let _ = GlobalUnlock(hglobal);
+            }
+        }
+        let _ = CloseClipboard();
+        alloc_perry_string(&out)
+    }
+}
+
+// E5b: File dialogs — real Win32 implementation (stubs until 2026-07-17: the
+// editor's Open/Save buttons silently did nothing on Windows). The filter
+// argument is a simple pattern like "*.world.json"; empty means all files.
+// OFN_NOCHANGEDIR is load-bearing: the common dialogs change the process CWD
+// by default, which would break every relative asset path afterward.
+#[cfg(windows)]
+fn run_file_dialog(filter: &str, title: &str, save: bool, default_name: &str) -> String {
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW,
+        OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    // Filter block: "Matching files\0<pattern>\0All files\0*.*\0\0".
+    let pattern = if filter.is_empty() { "*.*" } else { filter };
+    let mut filter_w: Vec<u16> = Vec::new();
+    filter_w.extend("Matching files".encode_utf16());
+    filter_w.push(0);
+    filter_w.extend(pattern.encode_utf16());
+    filter_w.push(0);
+    filter_w.extend("All files".encode_utf16());
+    filter_w.push(0);
+    filter_w.extend("*.*".encode_utf16());
+    filter_w.push(0);
+    filter_w.push(0);
+
+    let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut file_buf = [0u16; 4096];
+    if save && !default_name.is_empty() {
+        for (i, c) in default_name.encode_utf16().take(4000).enumerate() {
+            file_buf[i] = c;
+        }
+    }
+
+    let mut ofn = OPENFILENAMEW::default();
+    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    ofn.hwndOwner = win32::main_hwnd().unwrap_or_default();
+    ofn.lpstrFilter = PCWSTR(filter_w.as_ptr());
+    ofn.lpstrFile = PWSTR(file_buf.as_mut_ptr());
+    ofn.nMaxFile = file_buf.len() as u32;
+    if !title.is_empty() {
+        ofn.lpstrTitle = PCWSTR(title_w.as_ptr());
+    }
+    ofn.Flags = if save {
+        OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR
+    } else {
+        OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR
+    };
+
+    let ok = unsafe {
+        if save { GetSaveFileNameW(&mut ofn) } else { GetOpenFileNameW(&mut ofn) }
+    };
+    if !ok.as_bool() {
+        return String::new();
+    }
+    let len = file_buf.iter().position(|&c| c == 0).unwrap_or(0);
+    String::from_utf16_lossy(&file_buf[..len])
+}
+
 #[no_mangle]
-pub extern "C" fn bloom_save_file_dialog(_default_name_ptr: *const u8, _title_ptr: *const u8) -> *const u8 { std::ptr::null() }
+pub extern "C" fn bloom_open_file_dialog(filter_ptr: *const u8, title_ptr: *const u8) -> *const u8 {
+    let filter = str_from_header(filter_ptr);
+    let title = str_from_header(title_ptr);
+    let path = run_file_dialog(&filter, &title, false, "");
+    alloc_perry_string(&path)
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_save_file_dialog(default_name_ptr: *const u8, title_ptr: *const u8) -> *const u8 {
+    let default_name = str_from_header(default_name_ptr);
+    let title = str_from_header(title_ptr);
+    let path = run_file_dialog("", &title, true, &default_name);
+    alloc_perry_string(&path)
+}
 #[no_mangle]
 pub extern "C" fn bloom_get_platform() -> f64 { 3.0 }
 

@@ -3,6 +3,7 @@ import { Color, Model, Vec3, Mat4, BoundingBox } from '../core/types';
 
 // FFI declarations
 declare function bloom_load_model(path: number): number;
+declare function bloom_unload_model(handle: number): void;
 declare function bloom_draw_model(handle: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_model_rotated(handle: number, x: number, y: number, z: number, scale: number, rotY: number, colorPackedArgb: number): void;
 declare function bloom_draw_model_transform16(
@@ -144,6 +145,15 @@ function parseOBJ(text: string): { vertices: number[]; indices: number[] } | nul
 }
 
 declare function bloom_read_file(path: number): number;
+
+/**
+ * Free a loaded model's CPU + GPU resources. The FFI existed for years with
+ * no TS wrapper, so nothing could ever call it — long-lived tools (the world
+ * editor's project switching) leaked every model.
+ */
+export function unloadModel(model: Model): void {
+  bloom_unload_model(model.handle);
+}
 
 export function loadModel(path: string): Model {
   // Check for OBJ format
