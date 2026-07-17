@@ -668,11 +668,18 @@ pub fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f64, r: f64,
         let tint = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32];
         let handle_bits = handle.to_bits();
         if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
-            eng.renderer.draw_model_cached(handle_bits, position, scale, tint);
-        } else {
-            for mesh in &model.meshes {
-                let tex_idx = mesh.texture_idx.unwrap_or(0);
-                eng.renderer.draw_model_mesh_tinted(&mesh.vertices, &mesh.indices, position, scale, tint, tex_idx);
+            // Skinned models cache too (bind-pose VB with raw joint indices,
+            // skinned in the scene VS) — they MUST take the skinned cached
+            // draw, which pops the staged pose ONCE for the whole model and
+            // shares the joint offset across every primitive. Routing them
+            // through the unskinned draw (as this did) leaves each primitive
+            // reading joint offset 0 — another model's matrices — so every
+            // character animated wrongly on web while native was correct.
+            // Mirrors the shared macro in ffi_core/models.rs.
+            if eng.renderer.is_model_skinned(handle_bits) {
+                eng.renderer.draw_model_cached_skinned(handle_bits, position, scale, tint);
+            } else {
+                eng.renderer.draw_model_cached(handle_bits, position, scale, tint);
             }
         }
     }
@@ -747,18 +754,38 @@ pub fn bloom_draw_model_rotated(
         let position = [x as f32, y as f32, z as f32];
         let scale = scale as f32;
         let tint = [r, g, b, a];
-        for mesh in &model.meshes {
-            let tex_idx = mesh.texture_idx.unwrap_or(0);
-            eng.renderer.draw_model_mesh_tinted_rotated(
-                &mesh.vertices, &mesh.indices, position, scale, tint, tex_idx, rot_y as f32,
-            );
+        let handle_bits = handle.to_bits();
+        // Static models go through the cached scene pipeline (alpha cutout,
+        // normal/MR maps, foliage wind + transmission, cutout shadows,
+        // planar reflections) — the old immediate path had none of that and
+        // rendered cutout foliage as opaque cards. Skinned models take the
+        // skinned cached draw and IGNORE the rotation — their joint matrices
+        // bake orientation, exactly as the old immediate fallback behaved.
+        //
+        // This mirrors the shared macro (ffi_core/models.rs). It was still on
+        // the immediate path here: round 5 fixed native and the web copy was
+        // never updated, so every tree in a browser rendered as torn opaque
+        // sheets — the very artifact that fix was written for.
+        if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+            if eng.renderer.is_model_skinned(handle_bits) {
+                eng.renderer.draw_model_cached_skinned(handle_bits, position, scale, tint);
+            } else {
+                eng.renderer.draw_model_cached_rotated(
+                    handle_bits, position, scale, rot_y as f32, tint,
+                );
+            }
         }
     }
 }
 
 #[wasm_bindgen]
 pub fn bloom_unload_model(handle: f64) {
-    engine().models.unload_model(handle);
+    let eng = engine();
+    // Evict cached GPU meshes (keyed by handle bits) before the handle dies
+    // — without this the buffers leak and a slot-reusing future model would
+    // render the stale geometry. Mirrors the shared macro.
+    eng.renderer.evict_model_cache(handle.to_bits());
+    eng.models.unload_model(handle);
 }
 
 #[wasm_bindgen]
@@ -1030,7 +1057,18 @@ pub fn bloom_scene_set_parent(handle: f64, parent: f64) {
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_transform(
+pub fn bloom_scene_set_transform(_handle: f64, _matrix_ptr: f64) {
+    // Pointer-taking form — unreachable from Perry on wasm (a `number[]`
+    // cannot cross an i64 param), like the other pointer stubs here. The
+    // 16-scalar `_transform16` below is the live path; it used to carry
+    // THIS name, which meant setSceneNodeTransform resolved to nothing and
+    // was auto-stubbed by Perry's FFI proxy — a silent no-op on web while
+    // the working implementation sat one rename away.
+}
+
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_scene_set_transform16(
     handle: f64,
     m00: f64, m01: f64, m02: f64, m03: f64,
     m10: f64, m11: f64, m12: f64, m13: f64,
@@ -1116,6 +1154,9 @@ pub fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_index:
     let mr_tex = mesh.metallic_roughness_texture_idx;
     let emissive_tex = mesh.emissive_texture_idx;
     let emissive_factor = mesh.emissive_factor;
+    let roughness_factor = mesh.roughness_factor;
+    let metallic_factor = mesh.metallic_factor;
+    let alpha_cutoff = mesh.alpha_cutoff;
     eng.scene.update_geometry(node_handle, vertices, indices);
 
     if let Some(tex_idx) = base_color_tex {
@@ -1136,6 +1177,12 @@ pub fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_index:
         emissive_factor[1],
         emissive_factor[2],
     );
+    // Carry the glTF material factors + MASK cutoff too (mirrors the shared
+    // macro) — dropping them left attached foliage opaque (solid cards) and
+    // every attached mesh at the default roughness 0.8 regardless of its
+    // authored material.
+    eng.scene.set_material_pbr(node_handle, roughness_factor, metallic_factor);
+    eng.scene.set_material_alpha_cutoff(node_handle, alpha_cutoff);
 }
 
 // ============================================================

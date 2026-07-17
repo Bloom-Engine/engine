@@ -440,8 +440,32 @@ pub fn bloom_instantiate_animation(src: f64) -> f64 {
 }
 
 #[wasm_bindgen]
-pub fn bloom_update_model_animation(_handle: f64, _anim_index: f64, _time: f64, _scale: f64, _px: f64, _py: f64, _pz: f64, _rot_sin: f64, _rot_cos: f64) {
-    // TODO: Phase 4 — depends on bloom_load_model_animation
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_update_model_animation(
+    handle: f64, anim_index: f64, time: f64, scale: f64,
+    px: f64, py: f64, pz: f64, rot_y: f64,
+) {
+    // Mirrors the shared macro. This was an empty stub carrying the PRE-FIX
+    // 9-arg (rot_sin, rot_cos) signature that native abandoned — so the
+    // sampled-animation API silently did nothing on web (models frozen at
+    // bind pose) AND its arity disagreed with the manifest, shifting every
+    // argument. The engine takes a single Y angle and reconstructs sin/cos
+    // itself with full precision and correct signs.
+    let rot_y_f = rot_y as f32;
+    let rot_sin = rot_y_f.sin();
+    let rot_cos = rot_y_f.cos();
+    let eng = engine();
+    eng.models.update_model_animation(handle, anim_index as usize, time as f32);
+    if let Some(anim) = eng.models.get_animation(handle) {
+        if !anim.joint_matrices.is_empty() {
+            // PT-7: the anim handle keys the prev-palette pairing for
+            // skinned motion vectors.
+            eng.renderer.set_joint_matrices_scaled(
+                handle.to_bits(), &anim.joint_matrices, scale as f32,
+                [px as f32, py as f32, pz as f32], rot_sin, rot_cos,
+            );
+        }
+    }
 }
 
 #[wasm_bindgen]

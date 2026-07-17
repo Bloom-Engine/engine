@@ -869,6 +869,12 @@ pub struct Renderer {
     pub surface: Option<wgpu::Surface<'static>>,
     headless_target: Option<wgpu::Texture>,
     pub surface_config: wgpu::SurfaceConfiguration,
+    /// EN-063 — the format frames are rendered in: equals
+    /// `surface_config.format` on native (already sRGB), or its sRGB view
+    /// variant on hosts whose surfaces are non-sRGB (WebGPU canvases). Every
+    /// pipeline that targets the swapchain, and the per-frame surface view,
+    /// use THIS; `surface_config.format` is only for `surface.configure`.
+    pub output_format: wgpu::TextureFormat,
 
     // Logical (points / CSS px) size — what user code addresses via
     // `screenWidth`/HUD coords. Physical render target size is stored
@@ -2027,6 +2033,29 @@ impl Renderer {
         logical_width: u32,
         logical_height: u32,
     ) -> Self {
+        // EN-063 — the format frames are RENDERED in, as opposed to the
+        // format the surface is CONFIGURED with. The tonemapper writes
+        // LINEAR values and relies on hardware encode-on-store into an sRGB
+        // target — which every native platform's surface provides. Browsers
+        // don't: WebGPU canvases only offer bgra8/rgba8unorm, and rendering
+        // linear into them displayed the whole game roughly a stop dark. So
+        // when the surface format is non-sRGB, render through an sRGB VIEW
+        // of the swapchain image (registered via `view_formats`) — same
+        // hardware encode, no shader changes, and native platforms are
+        // untouched (their surface format already is sRGB, so
+        // output_format == surface_config.format there).
+        let mut surface_config = surface_config;
+        let output_format = match surface_config.format {
+            wgpu::TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8UnormSrgb,
+            f => f,
+        };
+        if output_format != surface_config.format
+            && !surface_config.view_formats.contains(&output_format)
+        {
+            surface_config.view_formats.push(output_format);
+        }
+
         // Ticket 007b: HW ray-tracing availability is a device-feature
         // query, set by whichever platform crate constructed this
         // device. Renderer internals branch on this flag when picking
@@ -2613,7 +2642,7 @@ impl Renderer {
                 module: &shader_2d,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_config.format,
+                    format: output_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -3923,7 +3952,7 @@ impl Renderer {
                 module: &composite_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_config.format,
+                    format: output_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -6912,7 +6941,7 @@ impl Renderer {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: surface_config.format,
+                    format: output_format,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                         | wgpu::TextureUsages::COPY_SRC
                         | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -6925,6 +6954,7 @@ impl Renderer {
             queue,
             surface,
             surface_config,
+            output_format,
             logical_width,
             logical_height,
             pipeline_2d,
@@ -7542,7 +7572,7 @@ impl Renderer {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: self.surface_config.format,
+                        format: self.output_format,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                             | wgpu::TextureUsages::COPY_SRC
                             | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -7692,14 +7722,14 @@ impl Renderer {
             // pass only pay for slot A.
             if self.composite_ldr_rt_a.is_some() {
                 let (t, v) = post_pass::create_composite_ldr_rt(
-                    &self.device, width, height, self.surface_config.format,
+                    &self.device, width, height, self.output_format,
                 );
                 self.composite_ldr_rt_a = Some(t);
                 self.composite_ldr_rt_a_view = Some(v);
             }
             if self.composite_ldr_rt_b.is_some() {
                 let (t, v) = post_pass::create_composite_ldr_rt(
-                    &self.device, width, height, self.surface_config.format,
+                    &self.device, width, height, self.output_format,
                 );
                 self.composite_ldr_rt_b = Some(t);
                 self.composite_ldr_rt_b_view = Some(v);
@@ -10356,7 +10386,10 @@ impl Renderer {
             view = rt_view.clone();
             owned_depth_view = rt_depth.as_ref().unwrap().clone();
         } else {
-            view = self.frame_texture(surface_output.as_ref().unwrap()).create_view(&wgpu::TextureViewDescriptor::default());
+            view = self.frame_texture(surface_output.as_ref().unwrap()).create_view(&wgpu::TextureViewDescriptor {
+                format: Some(self.output_format),
+                ..Default::default()
+            });
             owned_depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
         }
 
@@ -10531,7 +10564,10 @@ impl Renderer {
             }
         };
         profiler.end("surface_acquire");
-        let view = self.frame_texture(&output).create_view(&wgpu::TextureViewDescriptor::default());
+        let view = self.frame_texture(&output).create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.output_format),
+            ..Default::default()
+        });
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("bloom_encoder"),
@@ -12253,7 +12289,9 @@ impl Renderer {
     }
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {
-        self.surface_config.format
+        // The RENDER format (sRGB view on web), not the configure format —
+        // post passes and user post-pass pipelines target frame views.
+        self.output_format
     }
 
     /// Capture the current framebuffer as RGBA pixels.
@@ -12458,7 +12496,7 @@ impl Renderer {
                 module: &shader_module,
                 entry_point: Some("fs_main_3d"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_config.format,
+                    format: self.output_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -12622,7 +12660,7 @@ impl Renderer {
         &mut self, wgsl_source: &str,
     ) -> Result<u32, post_pass::PostPassCompileError> {
         let pipeline = post_pass::compile_post_pass(
-            &self.device, wgsl_source, self.surface_config.format,
+            &self.device, wgsl_source, self.output_format,
         )?;
 
         // Slot A is needed the moment we have any post-pass at all
@@ -12633,7 +12671,7 @@ impl Renderer {
                 &self.device,
                 self.surface_config.width,
                 self.surface_config.height,
-                self.surface_config.format,
+                self.output_format,
             );
             self.composite_ldr_rt_a = Some(t);
             self.composite_ldr_rt_a_view = Some(v);
@@ -12646,7 +12684,7 @@ impl Renderer {
                 &self.device,
                 self.surface_config.width,
                 self.surface_config.height,
-                self.surface_config.format,
+                self.output_format,
             );
             self.composite_ldr_rt_b = Some(t);
             self.composite_ldr_rt_b_view = Some(v);

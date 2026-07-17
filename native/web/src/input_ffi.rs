@@ -106,39 +106,40 @@ pub fn bloom_get_model_bounds_max_z(model_handle: f64) -> f64 {
 // Input - Gamepad
 // ============================================================
 
+// EN-063 — arity MUST match the manifest (and the shared macro): these
+// carried a leading `gamepad` param the manifest never declared, so the
+// game's single argument landed in it and the real one arrived undefined
+// -> NaN -> `as usize` = 0. Every axis read axis 0 and every button read
+// button 0 — silently, on the platform with no debugger. This is verbatim
+// the argument-shift class ffi_core/mod.rs says the shared macro exists to
+// prevent; the web crate hand-mirrors it and drifted.
 #[wasm_bindgen]
-pub fn bloom_is_gamepad_available(gamepad: f64) -> f64 {
-    let _ = gamepad;
+pub fn bloom_is_gamepad_available() -> f64 {
     if engine().input.is_gamepad_available() { 1.0 } else { 0.0 }
 }
 
 #[wasm_bindgen]
-pub fn bloom_get_gamepad_axis(gamepad: f64, axis: f64) -> f64 {
-    let _ = gamepad;
+pub fn bloom_get_gamepad_axis(axis: f64) -> f64 {
     engine().input.get_gamepad_axis(axis as usize) as f64
 }
 
 #[wasm_bindgen]
-pub fn bloom_is_gamepad_button_pressed(gamepad: f64, button: f64) -> f64 {
-    let _ = gamepad;
+pub fn bloom_is_gamepad_button_pressed(button: f64) -> f64 {
     if engine().input.is_gamepad_button_pressed(button as usize) { 1.0 } else { 0.0 }
 }
 
 #[wasm_bindgen]
-pub fn bloom_is_gamepad_button_down(gamepad: f64, button: f64) -> f64 {
-    let _ = gamepad;
+pub fn bloom_is_gamepad_button_down(button: f64) -> f64 {
     if engine().input.is_gamepad_button_down(button as usize) { 1.0 } else { 0.0 }
 }
 
 #[wasm_bindgen]
-pub fn bloom_is_gamepad_button_released(gamepad: f64, button: f64) -> f64 {
-    let _ = gamepad;
+pub fn bloom_is_gamepad_button_released(button: f64) -> f64 {
     if engine().input.is_gamepad_button_released(button as usize) { 1.0 } else { 0.0 }
 }
 
 #[wasm_bindgen]
-pub fn bloom_get_gamepad_axis_count(gamepad: f64) -> f64 {
-    let _ = gamepad;
+pub fn bloom_get_gamepad_axis_count() -> f64 {
     engine().input.get_gamepad_axis_count() as f64
 }
 
@@ -146,14 +147,18 @@ pub fn bloom_get_gamepad_axis_count(gamepad: f64) -> f64 {
 // Input - Touch
 // ============================================================
 
+// EN-063 — take the slot index, like the manifest and the shared macro.
+// Hardcoding slot 0 meant every finger reported the FIRST finger's
+// coordinates while `is_touch_active(i)` honoured the index: on a phone
+// both thumbsticks tracked one thumb.
 #[wasm_bindgen]
-pub fn bloom_get_touch_x() -> f64 {
-    engine().input.get_touch_x(0)
+pub fn bloom_get_touch_x(index: f64) -> f64 {
+    engine().input.get_touch_x(index as usize)
 }
 
 #[wasm_bindgen]
-pub fn bloom_get_touch_y() -> f64 {
-    engine().input.get_touch_y(0)
+pub fn bloom_get_touch_y(index: f64) -> f64 {
+    engine().input.get_touch_y(index as usize)
 }
 
 #[wasm_bindgen]
@@ -175,14 +180,19 @@ pub fn bloom_get_max_touch_points() -> f64 {
 // Input injection (called from JS event listeners)
 // ============================================================
 
+// Injection goes through inject_key_* (staged, applied at the top of
+// begin_frame), NOT set_key_* (which writes keys_down directly). A direct
+// write made outside the poll phase is folded into `prev` before the edge
+// is computed, so `isKeyPressed` never fires — the exact bug input.rs's
+// pending_key_down staging was added to cure. Mirrors the shared macro.
 #[wasm_bindgen]
 pub fn bloom_inject_key_down(key: f64) {
-    engine().input.set_key_down(key as usize);
+    engine().input.inject_key_down(key as usize);
 }
 
 #[wasm_bindgen]
 pub fn bloom_inject_key_up(key: f64) {
-    engine().input.set_key_up(key as usize);
+    engine().input.inject_key_up(key as usize);
 }
 
 // EN-063: mouse / touch / wheel / char injection. DOM event handlers run in

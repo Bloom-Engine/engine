@@ -254,7 +254,7 @@ extern "C" {
     #[wasm_bindgen(js_name = softBodySetVertexInvMass)]
     fn jb_soft_body_set_vertex_inv_mass(a0: f64, a1: f64, a2: f64);
     #[wasm_bindgen(js_name = vehicleCreate)]
-    fn jb_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64, a37: f64) -> f64;
+    fn jb_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64) -> f64;
     #[wasm_bindgen(js_name = vehicleDestroy)]
     fn jb_vehicle_destroy(a0: f64);
     #[wasm_bindgen(js_name = vehicleGetChassis)]
@@ -613,7 +613,10 @@ pub fn bloom_physics_soft_body_set_vertex(a0: f64, a1: f64, a2: f64, a3: f64, a4
 pub fn bloom_physics_soft_body_set_vertex_inv_mass(a0: f64, a1: f64, a2: f64) { jb_soft_body_set_vertex_inv_mass(a0, a1, a2) }
 #[cfg(feature = "jolt")]
 #[wasm_bindgen]
-pub fn bloom_physics_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64, a37: f64) -> f64 { jb_vehicle_create(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33, a34, a35, a36, a37) }
+// 37 params, matching the manifest, physics_jolt.rs, and jolt_bridge.js's
+// vehicleCreate. Carried a 38th (trailing, so nothing shifted) that arrived
+// NaN and was dropped on the JS floor.
+pub fn bloom_physics_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64) -> f64 { jb_vehicle_create(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33, a34, a35, a36) }
 #[cfg(feature = "jolt")]
 #[wasm_bindgen]
 pub fn bloom_physics_vehicle_destroy(a0: f64) { jb_vehicle_destroy(a0) }

@@ -27,10 +27,7 @@ const PLATFORMS = ['macos', 'linux', 'windows', 'android', 'ios', 'tvos', 'watch
 // deliberate TS API decision, not a parity bug.
 const NOT_IN_MANIFEST_ALLOWLIST = new Set([
   'bloom_compile_material_from_file',
-  'bloom_profiler_frame_history',
-  'bloom_profiler_overlay_text',
   'bloom_set_material_params',
-  'bloom_splat_impulse',
   'bloom_set_early_z_enabled',
   // Android host-glue entry points called from the NativeActivity shim,
   // not from Perry:
@@ -156,12 +153,32 @@ for (const platform of PLATFORMS) {
   console.log(`ok    ${platform}: ${effective.size} exports cover ${manifest.size} manifest functions${note}`);
 }
 
-// 4. web (wasm_bindgen + jolt_bridge.js) — name coverage only for now; the
-// web crate exposes _str/_bytes variants whose JS glue maps names, so the
-// strict check lives with the web FFI work.
+// 4. web (wasm_bindgen + jolt_bridge.js) — name coverage PLUS arity for the
+// all-f64 mirror functions (EN-063). The web crate hand-mirrors the shared
+// `define_core_ffi!` macro, and "name coverage only" let real drift through
+// for months: bloom_get_gamepad_axis grew a leading `gamepad` param the
+// manifest never declared, so the game's one argument landed in the wrong
+// slot and every axis read axis 0; bloom_get_touch_x dropped its index and
+// pinned every finger to slot 0. Both are exactly the argument-shift class
+// ffi_core/mod.rs says the macro exists to prevent — invisible on the one
+// platform with no debugger. Functions whose web ABI is deliberately
+// different (String / &[u8] / &[f32] / JsValue params — the _str/_bytes/
+// _floats designs) are skipped: only signatures that are pure f64 mirrors
+// are compared, which is precisely where drift is a bug.
 {
   const webSrc = readDirRust(path.join(ROOT, 'native/web/src'));
   const names = new Set();
+  // name -> {arity, allF64} for the Rust exports (the jolt bridge's JS
+  // functions are name-only; physics arity is covered by its own manifest
+  // generation).
+  const webSigs = new Map();
+  for (const m of webSrc.matchAll(/pub (?:async )?fn (bloom_[a-z0-9_]+)\s*\(([^)]*)\)/g)) {
+    const [, fname, params] = m;
+    names.add(fname);
+    const parts = params.split(',').map((s) => s.trim()).filter(Boolean);
+    const allF64 = parts.every((p) => /:\s*f64$/.test(p));
+    webSigs.set(fname, { arity: parts.length, allF64 });
+  }
   for (const m of webSrc.matchAll(/pub (?:async )?fn (bloom_[a-z0-9_]+)/g)) names.add(m[1]);
   const bridge = fs.readFileSync(path.join(ROOT, 'native/web/jolt_bridge.js'), 'utf8');
   for (const m of bridge.matchAll(/(bloom_physics_[a-z0-9_]+)\s*[:(=]/g)) names.add(m[1]);
@@ -169,30 +186,23 @@ for (const platform of PLATFORMS) {
   // pointer-taking geometry (cross-module WASM memory TODO) and
   // filesystem captures (no fs on wasm; need _bytes/_str designs).
   const WEB_GAP_ALLOWLIST = new Set([
+    // EN-063 — decodes image files from disk; wasm has no fs. The web route
+    // is the glue: it fetches each path in the list and feeds the bytes to
+    // bloom_texture_array_files_{reset,push,commit}, which decode with the
+    // same codecs. Name-mapped in bloom_glue.js, so it is not a direct export.
+    'bloom_create_texture_array_from_files',
     // EN-014 V3 — decodes image files from disk; wasm has no fs. The
     // byte-array path (bloom_create_texture_array_ex) is the web route.
-    'bloom_create_texture_array_from_files',
     // EN-025 — ragdolls are built on the native Jolt Rust wrapper
     // (physics_jolt.rs). Web routes bloom_physics_* through JoltPhysics.js
     // instead, so there is no Rust-side world to create bodies in.
-    'bloom_ragdoll_create',
-    'bloom_ragdoll_activate',
-    'bloom_ragdoll_push',
-    'bloom_ragdoll_update',
-    'bloom_ragdoll_release',
     'bloom_scene_set_lod',          // Perry-WASM linear-memory bridge TODO
-    'bloom_take_screenshot',        // no fs — needs a bytes-returning design
-    'bloom_set_env_clear_from_hdr', // no fs — needs a _bytes variant
     'bloom_dump_shadow_map',        // debug capture, no fs on wasm
     // Native host-window embed (#70) — N/A on web (no HWND; web builds its
     // surface from the canvas id). bloom_attach_native has a web no-op stub.
     'bloom_attach_hwnd',
     // Pointer-taking mesh scratch buffers (#69) — same cross-module WASM
     // linear-memory bridge TODO as bloom_scene_set_lod.
-    'bloom_create_mesh_scratch',
-    'bloom_mesh_scratch_reset',
-    'bloom_mesh_scratch_push_f32',
-    'bloom_mesh_scratch_push_u32',
     // Art-direction post-FX controls (#69) not yet wired in the web crate.
     'bloom_set_bloom_intensity',
     'bloom_set_tonemap',
@@ -202,38 +212,21 @@ for (const platform of PLATFORMS) {
     // Profiler ABI (round-2 EN-011 / EN-020) — GPU-timestamp profiling
     // needs TIMESTAMP_QUERY, which WebGPU does not expose, so neither the
     // numeric row/history accessors nor the text overlay have a web port.
-    'bloom_profiler_overlay_text',
-    'bloom_profiler_frame_history',
-    'bloom_profiler_row_count',
-    'bloom_profiler_row_label',
-    'bloom_profiler_row_cpu_us',
-    'bloom_profiler_row_gpu_us',
-    'bloom_profiler_hist_count',
-    'bloom_profiler_hist_cpu_us',
-    'bloom_profiler_hist_gpu_us',
     // Present mode (round-2 #80) — the browser owns swap/vsync; the
     // Fifo/Mailbox/Immediate selector is a no-op on web.
-    'bloom_set_present_mode',
     // Scene-node setters (round-2) — same Perry-WASM linear-memory bridge
     // TODO as bloom_scene_set_lod above.
-    'bloom_scene_set_gi_only',
     'bloom_scene_set_trs',
     // Pointer-taking scratch buffers (round-2) — same cross-module WASM
     // linear-memory bridge TODO as the mesh scratch group above.
-    'bloom_create_instance_buffer_scratch',
-    'bloom_set_material_params_scratch',
     // Water-ripple impulse (round-2 splat compute) — not yet wired on web.
-    'bloom_splat_impulse',
     // Scratch-buffer consumers (EN-049) — same cross-module WASM linear-memory
     // bridge TODO as the mesh scratch group above. Their payload arrives via
     // bloom_mesh_scratch_*, which does not bridge between Perry's WASM module
     // and bloom's, so the callee would read an empty buffer.
-    'bloom_create_texture_array_scratch',
     'bloom_scene_update_geometry_scratch',
-    'bloom_gen_mesh_spline_ribbon_scratch',
     // Scene-node transform setter — same group as bloom_scene_set_trs above;
     // web's scene-node setters are only partially ported.
-    'bloom_scene_set_transform16',
     // Path tracing (PT-1..8) — the PT backend requires wgpu's
     // Features::EXPERIMENTAL_RAY_QUERY, which WebGPU does not expose. Same
     // class of hard platform gap as the profiler's TIMESTAMP_QUERY entries.
@@ -251,6 +244,19 @@ for (const platform of PLATFORMS) {
   } else {
     console.log(`ok    web: full coverage (${WEB_GAP_ALLOWLIST.size} documented gaps)`);
   }
+
+  // Arity, for the pure-f64 mirrors only (see the note above).
+  let checked = 0;
+  for (const [name, arity] of manifest) {
+    const sig = webSigs.get(name);
+    if (!sig || !sig.allF64) continue;   // absent, or a deliberate _str/_bytes/slice ABI
+    checked++;
+    if (sig.arity !== arity) {
+      fail(`web: ${name} arity ${sig.arity} != manifest ${arity} `
+         + `(argument shift — the game's args land in the wrong slots)`);
+    }
+  }
+  console.log(`ok    web: arity checked on ${checked} all-f64 mirror functions`);
 }
 
 console.log(`\n${failures} failures, ${warnings} warnings`);

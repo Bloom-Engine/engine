@@ -102,6 +102,7 @@ dependencies = [
  "libc",
  "minimp3",
  "raw-window-handle",
+ "web-sys",
  "wgpu",
 ]
 

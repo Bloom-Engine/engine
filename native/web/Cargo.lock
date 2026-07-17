@@ -101,6 +101,7 @@ dependencies = [
  "lewton",
  "libc",
  "raw-window-handle",
+ "web-sys",
  "web-time",
  "wgpu",
 ]
