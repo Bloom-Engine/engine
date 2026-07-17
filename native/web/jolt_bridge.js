@@ -107,7 +107,10 @@ function buildSettings(J) {
   settings.mMaxBodies                    = 65536;
   settings.mMaxBodyPairs                 = 65536;
   settings.mMaxContactConstraints        = 10240;
-  return settings;
+  // The filter tables ride along: builds without
+  // system.GetDefaultBroadPhaseLayerFilter() need them to construct the
+  // per-layer query filters (see queryFilters).
+  return { settings, pairFilter, objectVsBp };
 }
 
 function motionTypeFrom(t) {
@@ -131,7 +134,7 @@ function activationFrom(flag) {
 export function createWorld(gx, gy, gz, maxBodies, numThreads) {
   if (warnUninit('createWorld')) return 0;
   const J = JoltModule;
-  const settings = buildSettings(J);
+  const { settings, pairFilter, objectVsBp } = buildSettings(J);
   if ((maxBodies | 0) > 0) settings.mMaxBodies = maxBodies | 0;
   const jolt = new J.JoltInterface(settings);
   const system = jolt.GetPhysicsSystem();
@@ -196,6 +199,8 @@ export function createWorld(gx, gy, gz, maxBodies, numThreads) {
     system,
     bodyInterface: system.GetBodyInterface(),
     settings,
+    pairFilter,                  // for DefaultObjectLayerFilter construction
+    objectVsBp,                  // for DefaultBroadPhaseLayerFilter construction
     listener,                    // hold ref so GC doesn't collect
   });
   return handle;
@@ -611,9 +616,16 @@ export function bodyGetRestitution(h)  { const b = resolveBody(h); const bi = b 
 export function bodyGetObjectLayer(h)  { const b = resolveBody(h); const bi = b && resolveBodyInterface(b); return bi && bi.GetObjectLayer ? bi.GetObjectLayer(b.bodyId) : 0; }
 export function bodySetUserData(h, lo, hi) {
   const b = resolveBody(h); const bi = b && resolveBodyInterface(b); if (!bi || !bi.SetUserData) return;
-  // JS BigInt path: pack lo (uint32) + hi (uint32) into uint64.
-  // Most call sites use just `lo`; `hi` stays 0.
-  bi.SetUserData(b.bodyId, BigInt(lo >>> 0) | (BigInt(hi >>> 0) << 32n));
+  // Pack lo (uint32) + hi (uint32) into uint64. Whether a u64 crosses
+  // JoltPhysics.js as BigInt or Number depends on how the build was linked
+  // (-sWASM_BIGINT or not) — the CDN 1.0.0 build wants Number and THROWS on
+  // BigInt, so probe once and remember. Number packing is exact here: call
+  // sites keep hi = 0, far below 2^53. Most call sites use just `lo`.
+  try {
+    bi.SetUserData(b.bodyId, BigInt(lo >>> 0) | (BigInt(hi >>> 0) << 32n));
+  } catch {
+    bi.SetUserData(b.bodyId, (hi >>> 0) * 0x100000000 + (lo >>> 0));
+  }
 }
 export function bodyGetUserData(h, part) {
   const b = resolveBody(h); const bi = b && resolveBodyInterface(b); if (!bi || !bi.GetUserData) return 0;
@@ -636,11 +648,21 @@ export function raycast(worldH, ox, oy, oz, dx, dy, dz, maxDist, layerMask) {
   if (dir.LengthSq() === 0) return 0;
   const scaled = dir.Mul ? dir.Mul(maxDist / Math.sqrt(dir.LengthSq())) : dir;
   const ray = new J.RRayCast(rvec3(ox, oy, oz), scaled);
-  const result = new J.RayCastResult();
-  const hit = w.system.GetNarrowPhaseQuery().CastRay(ray, result, new J.BroadPhaseLayerFilter(), new J.ObjectLayerFilter(), new J.BodyFilter());
+  // Layer 1 (MOVING) collides with every layer in the pair table, so its
+  // Default filters are the pass-all query. Two npm-build gotchas here:
+  // the abstract BroadPhaseLayerFilter/ObjectLayerFilter bases trap with a
+  // null vtable, and the closest-hit `CastRay(ray, RayCastResult, ...)`
+  // overload does not exist — only the collector form from the official
+  // examples is bound.
+  const qf = queryFilters(w, worldH, 1);
+  const rcSettings = new J.RayCastSettings();
+  const collector = new J.CastRayClosestHitCollisionCollector();
+  w.system.GetNarrowPhaseQuery().CastRay(ray, rcSettings, collector, qf.bp, qf.obj, qf.body, qf.shape);
+  const hit = collector.HadHit();
   void layerMask;  // layer filtering is handled by ObjectLayerFilter; Tier 2 adds mask support
   if (hit) {
     // Resolve body handle from BodyID.
+    const result = collector.mHit;
     const bodyId = result.mBodyID;
     let bodyHandle = 0;
     for (const [h, b] of state.bodies) { if (b.world === worldH && b.bodyId.GetIndexAndSequenceNumber() === bodyId.GetIndexAndSequenceNumber()) { bodyHandle = h; break; } }
@@ -652,8 +674,10 @@ export function raycast(worldH, ox, oy, oz, dx, dy, dz, maxDist, layerMask) {
       fraction,
       subShapeId: 0,
     });
+    J.destroy(collector); J.destroy(rcSettings); J.destroy(ray);
     return 1;
   }
+  J.destroy(collector); J.destroy(rcSettings); J.destroy(ray);
   return 0;
 }
 export function raycastAll(worldH, ox, oy, oz, dx, dy, dz, maxDist, layerMask, maxHits) {
@@ -667,9 +691,10 @@ export function raycastAll(worldH, ox, oy, oz, dx, dy, dz, maxDist, layerMask, m
   const ray = new J.RRayCast(rvec3(ox, oy, oz), scaled);
   const settings = new J.RayCastSettings();
   const collector = new J.CastRayAllHitCollisionCollectorJS();
+  const qf = queryFilters(w, worldH, 1);
   w.system.GetNarrowPhaseQuery().CastRay(
     ray, settings, collector,
-    new J.BroadPhaseLayerFilter(), new J.ObjectLayerFilter(), new J.BodyFilter(), new J.ShapeFilter(),
+    qf.bp, qf.obj, qf.body, qf.shape,
   );
   collector.Sort();
   const count = Math.min(maxHits | 0, collector.mHits.size());
@@ -727,7 +752,7 @@ export function overlapSphere(worldH, cx, cy, cz, r, layerMask, maxResults) {
   state.overlapBodies = collectOverlapBodies(worldH, collector => {
     w.system.GetBroadPhaseQuery().CollideSphere(
       vec3(cx, cy, cz), r, collector,
-      new J.BroadPhaseLayerFilter(), new J.ObjectLayerFilter(),
+      queryFilters(w, worldH, 1).bp, queryFilters(w, worldH, 1).obj,
     );
   }, maxResults);
   return state.overlapBodies.length;
@@ -740,7 +765,7 @@ export function overlapPoint(worldH, px, py, pz, layerMask, maxResults) {
   state.overlapBodies = collectOverlapBodies(worldH, collector => {
     w.system.GetBroadPhaseQuery().CollidePoint(
       vec3(px, py, pz), collector,
-      new J.BroadPhaseLayerFilter(), new J.ObjectLayerFilter(),
+      queryFilters(w, worldH, 1).bp, queryFilters(w, worldH, 1).obj,
     );
   }, maxResults);
   return state.overlapBodies.length;
@@ -761,7 +786,7 @@ export function overlapBox(worldH, px, py, pz, rx, ry, rz, rw, hx, hy, hz, layer
   state.overlapBodies = collectOverlapBodies(worldH, collector => {
     w.system.GetBroadPhaseQuery().CollideAABox(
       box, collector,
-      new J.BroadPhaseLayerFilter(), new J.ObjectLayerFilter(),
+      queryFilters(w, worldH, 1).bp, queryFilters(w, worldH, 1).obj,
     );
   }, maxResults);
   void rotMat;
@@ -886,6 +911,46 @@ export function constraintDistance(bodyA, bodyB, ax, ay, az, bx, by, bz, minD, m
   return registerConstraint(state.bodies.get(bodyA).world, c);
 }
 
+// EN-063 (web ragdolls): six-DOF with all three translation axes locked and
+// per-axis rotation limits — the articulation the engine's ragdoll builder
+// uses. Mirrors the native C++ shim's convention: a rotation axis whose
+// min >= max is LOCKED, otherwise limited to [min, max]. Wrapped in
+// try/catch so a JoltPhysics.js build without the SixDOF surface degrades
+// to "no ragdolls" instead of killing the frame.
+export function constraintSixDofLockedTranslation(
+  bodyA, bodyB, ax, ay, az, bx, by, bz,
+  rxMin, rxMax, ryMin, ryMax, rzMin, rzMax, worldSpace,
+) {
+  if (warnUninit('constraintSixDofLockedTranslation')) return 0;
+  const ctx = resolveConstraintBodies(bodyA, bodyB); if (!ctx) return 0;
+  const J = JoltModule;
+  try {
+    const settings = new J.SixDOFConstraintSettings();
+    settings.mSpace = worldSpace ? J.EConstraintSpace_WorldSpace : J.EConstraintSpace_LocalToBodyCOM;
+    settings.mPosition1 = rvec3(ax, ay, az);
+    settings.mPosition2 = rvec3(bx, by, bz);
+    const AX = [
+      [J.SixDOFConstraintSettings_EAxis_TranslationX, 1, -1],
+      [J.SixDOFConstraintSettings_EAxis_TranslationY, 1, -1],
+      [J.SixDOFConstraintSettings_EAxis_TranslationZ, 1, -1],
+      [J.SixDOFConstraintSettings_EAxis_RotationX, rxMin, rxMax],
+      [J.SixDOFConstraintSettings_EAxis_RotationY, ryMin, ryMax],
+      [J.SixDOFConstraintSettings_EAxis_RotationZ, rzMin, rzMax],
+    ];
+    for (const [axis, lo, hi] of AX) {
+      if (lo >= hi) settings.MakeFixedAxis(axis);
+      else settings.SetLimitedAxis(axis, lo, hi);
+    }
+    const c = settings.Create(ctx.body1, ctx.body2);
+    ctx.release();
+    return registerConstraint(state.bodies.get(bodyA).world, c);
+  } catch (e) {
+    ctx.release();
+    console.warn('[jolt_bridge] SixDOF constraint unavailable:', e);
+    return 0;
+  }
+}
+
 export function constraintDestroy(h) {
   const c = state.constraints.get(h); if (!c) return;
   const w = state.worlds.get(c.world); if (w) w.system.RemoveConstraint(c.constraint);
@@ -971,13 +1036,23 @@ export function shapeHeightfield(sampleCount, ox, oy, oz, sx, sy, sz, blockSize)
   const J = JoltModule;
   const need = sampleCount * sampleCount;
   if (state.scratchF32.length < need || sampleCount < 2) return 0;
-  // JoltPhysics.js expects a flat Float32Array for heightfield samples.
-  const samples = new Float32Array(need);
-  for (let i = 0; i < need; i++) samples[i] = state.scratchF32[i];
-  const settings = new J.HeightFieldShapeSettings(
-    samples, vec3(ox, oy, oz), vec3(sx, sy, sz), sampleCount
-  );
+  // The convenience constructor taking a JS Float32Array does not exist in
+  // the npm/CDN JoltPhysics.js builds (Create() returns invalid — the
+  // samples never reach the shape). Canonical pattern from the official
+  // examples: default-construct the settings, size mHeightSamples, and
+  // write the floats straight into the emscripten heap.
+  const settings = new J.HeightFieldShapeSettings();
+  settings.mOffset = vec3(ox, oy, oz);
+  settings.mScale = vec3(sx, sy, sz);
+  settings.mSampleCount = sampleCount;
   settings.mBlockSize = blockSize || 4;
+  settings.mHeightSamples.resize(need);
+  const heap = new Float32Array(
+    J.HEAPF32.buffer,
+    J.getPointer(settings.mHeightSamples.data()),
+    need,
+  );
+  for (let i = 0; i < need; i++) heap[i] = state.scratchF32[i];
   const result = settings.Create();
   return result.IsValid() ? registerShape(result.Get()) : 0;
 }
@@ -1004,6 +1079,35 @@ export function compoundEnd() {
 
 // --- Character controller (CharacterVirtual) ---
 
+// Query-filter compatibility + caching. Two JoltPhysics.js API generations
+// exist: some builds expose `system.GetDefaultBroadPhaseLayerFilter(layer)`,
+// the npm/CDN 1.0.0 build only has the constructor forms
+// (`new Jolt.DefaultBroadPhaseLayerFilter(system.GetObjectVsBroadPhaseLayerFilter(), layer)`).
+// Cached per (world, layer) — the character path runs every frame, and
+// constructing emscripten objects per call is a real leak.
+const queryFilterCache = new Map(); // "worldH:layer" → { bp, obj, body, shape }
+function queryFilters(w, worldH, layer) {
+  const key = worldH + ':' + (layer | 0);
+  let f = queryFilterCache.get(key);
+  if (f) return f;
+  const J = JoltModule;
+  let bp, obj;
+  if (typeof w.system.GetDefaultBroadPhaseLayerFilter === 'function') {
+    bp = w.system.GetDefaultBroadPhaseLayerFilter(layer);
+    obj = w.system.GetDefaultLayerFilter(layer);
+  } else {
+    // npm/CDN builds: the canonical form from the JoltPhysics.js examples —
+    // the filter getters live on the JoltInterface, and constructing the
+    // Default* filters from the raw tables instead trips a null virtual
+    // inside ExtendedUpdate.
+    bp = new J.DefaultBroadPhaseLayerFilter(w.jolt.GetObjectVsBroadPhaseLayerFilter(), layer);
+    obj = new J.DefaultObjectLayerFilter(w.jolt.GetObjectLayerPairFilter(), layer);
+  }
+  f = { bp, obj, body: new J.BodyFilter(), shape: new J.ShapeFilter() };
+  queryFilterCache.set(key, f);
+  return f;
+}
+
 export function characterCreate(
   worldH, shapeH,
   upX, upY, upZ,
@@ -1025,9 +1129,24 @@ export function characterCreate(
   settings.mPredictiveContactDistance = predictiveContactDistance;
   settings.mMaxStrength = maxStrength;
   settings.mMass = mass;
-  const character = new J.CharacterVirtual(
-    settings, rvec3(px, py, pz), quat(rx, ry, rz, rw), 0n, w.system
-  );
+  // Two constructor generations exist. -sWASM_BIGINT builds take
+  // (settings, pos, rot, userData: u64-as-BigInt, system); the npm/CDN
+  // builds bind FOUR args (settings, pos, rot, system). Crucially, do NOT
+  // fall back to a 5-arg call with a Number userData: emscripten dispatches
+  // by declared arity, so on a 4-arg build the `0` lands in the SYSTEM slot
+  // and the character is constructed around a null PhysicsSystem — nothing
+  // fails until ExtendedUpdate dies with "null function". The BigInt
+  // TypeError is the reliable discriminator between the generations.
+  let character;
+  try {
+    character = new J.CharacterVirtual(
+      settings, rvec3(px, py, pz), quat(rx, ry, rz, rw), 0n, w.system
+    );
+  } catch {
+    character = new J.CharacterVirtual(
+      settings, rvec3(px, py, pz), quat(rx, ry, rz, rw), w.system
+    );
+  }
   const h = state.nextCharacter++;
   state.characters.set(h, { world: worldH, character, layer: objectLayer | 0 });
   return h;
@@ -1048,15 +1167,14 @@ export function characterUpdate(h, dt, gx, gy, gz) {
   const newV = vec3(v.GetX() + gx * dt, v.GetY() + gy * dt, v.GetZ() + gz * dt);
   e.character.SetLinearVelocity(newV);
   const settings = new J.ExtendedUpdateSettings();
+  const f = queryFilters(w, e.world, e.layer);
   e.character.ExtendedUpdate(
     dt, vec3(gx, gy, gz),
     settings,
-    w.system.GetDefaultBroadPhaseLayerFilter(e.layer),
-    w.system.GetDefaultLayerFilter(e.layer),
-    new J.BodyFilter(),
-    new J.ShapeFilter(),
+    f.bp, f.obj, f.body, f.shape,
     w.jolt.GetTempAllocator()
   );
+  J.destroy(settings);
 }
 
 export function characterGetPosition(h, axis) {
@@ -1127,12 +1245,10 @@ export function characterSetShape(h, shapeH) {
   const w = state.worlds.get(e.world); if (!w) return;
   const s = state.shapes.get(shapeH); if (!s) return;
   const J = JoltModule;
+  const f = queryFilters(w, e.world, e.layer);
   e.character.SetShape(
     s, Number.MAX_VALUE,
-    w.system.GetDefaultBroadPhaseLayerFilter(e.layer),
-    w.system.GetDefaultLayerFilter(e.layer),
-    new J.BodyFilter(),
-    new J.ShapeFilter(),
+    f.bp, f.obj, f.body, f.shape,
     w.jolt.GetTempAllocator()
   );
 }

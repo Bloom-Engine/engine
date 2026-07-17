@@ -239,7 +239,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let aperture   = u.params.y;
     let max_blur   = u.params.z;
 
-    let center_depth_raw = textureSample(depth_tex, depth_samp, in.uv);
+    let center_depth_raw = textureSampleLevel(depth_tex, depth_samp, in.uv, 0u);
 
     // Sky pixels (depth ~1.0) get maximum blur — they are at infinity.
     var view_z: f32;
@@ -259,26 +259,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // If CoC is negligibly small, return the source pixel unchanged.
     let threshold = 0.0005;
     if (coc < threshold) {
-        return textureSample(color_tex, color_samp, in.uv);
+        return textureSampleLevel(color_tex, color_samp, in.uv, 0.0);
     }
 
     // Gather 16 Poisson disc samples scaled by CoC.
     var color_sum = vec3<f32>(0.0);
     var weight_sum = 0.0;
 
-    let center_color = textureSample(color_tex, color_samp, in.uv).rgb;
+    let center_color = textureSampleLevel(color_tex, color_samp, in.uv, 0.0).rgb;
 
     for (var i = 0u; i < 16u; i = i + 1u) {
         let offset = POISSON_16[i] * coc;
         let sample_uv = in.uv + offset;
 
-        let sample_color = textureSample(color_tex, color_samp, sample_uv).rgb;
+        let sample_color = textureSampleLevel(color_tex, color_samp, sample_uv, 0.0).rgb;
 
         // Read the depth at the sample location to compute its own CoC.
         // This prevents sharp foreground objects from bleeding into
         // blurred background — only samples that are themselves blurry
         // (or at least as blurry as this pixel) contribute fully.
-        let sample_depth_raw = textureSample(depth_tex, depth_samp, sample_uv);
+        let sample_depth_raw = textureSampleLevel(depth_tex, depth_samp, sample_uv, 0u);
         var sample_z: f32;
         if (sample_depth_raw >= 0.9999) {
             sample_z = 1000.0;
@@ -343,7 +343,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let strength = u.params.x;
     let max_blur = u.params.y;
 
-    let vel_raw = textureSample(velocity_tex, velocity_samp, in.uv).rg;
+    let vel_raw = textureSampleLevel(velocity_tex, velocity_samp, in.uv, 0.0).rg;
     // Scale velocity by strength and clamp to max_blur radius.
     var vel = vel_raw * strength;
     let vel_len = length(vel);
@@ -353,7 +353,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // If velocity is negligible, return source pixel unchanged.
     if (vel_len < 0.0001) {
-        return textureSample(color_tex, color_samp, in.uv);
+        return textureSampleLevel(color_tex, color_samp, in.uv, 0.0);
     }
 
     // 8-tap directional blur with tent (linear) weighting.
@@ -367,7 +367,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let t = (f32(i) + 0.5) / f32(n_samples) - 0.5; // range [-0.5, 0.5)
         let sample_uv = in.uv + vel * t;
         let w = 1.0 - abs(t * 2.0); // tent weight: 1.0 at center, 0 at edges
-        color_sum += textureSample(color_tex, color_samp, sample_uv).rgb * w;
+        color_sum += textureSampleLevel(color_tex, color_samp, sample_uv, 0.0).rgb * w;
         weight_sum += w;
     }
 
@@ -424,12 +424,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let width    = u.params.y;
     let falloff  = u.params.z;
 
-    let center_color = textureSample(color_tex, color_samp, in.uv);
+    let center_color = textureSampleLevel(color_tex, color_samp, in.uv, 0.0);
 
     // Sky pixels (raw depth ~1.0) skip SSS entirely — they have no
     // geometry to scatter through. This also avoids depth-edge halos
     // at the horizon.
-    let center_depth = textureSample(depth_tex, depth_samp, in.uv);
+    let center_depth = textureSampleLevel(depth_tex, depth_samp, in.uv, 0u);
     if (center_depth >= 0.9999) {
         return center_color;
     }
@@ -453,9 +453,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
         // Bilateral depth weight — each channel uses its own tap UV,
         // so we sample depth at each channel's location independently.
-        let d_r = textureSample(depth_tex, depth_samp, tap_r);
-        let d_g = textureSample(depth_tex, depth_samp, tap_g);
-        let d_b = textureSample(depth_tex, depth_samp, tap_b);
+        let d_r = textureSampleLevel(depth_tex, depth_samp, tap_r, 0u);
+        let d_g = textureSampleLevel(depth_tex, depth_samp, tap_g, 0u);
+        let d_b = textureSampleLevel(depth_tex, depth_samp, tap_b, 0u);
 
         let w_r = exp(-abs(d_r - center_depth) * falloff);
         let w_g = exp(-abs(d_g - center_depth) * falloff);
@@ -466,9 +466,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let dist2 = dot(DISC_9[i], DISC_9[i]);
         let gauss = exp(-dist2 * 2.0); // sigma ≈ 0.7 in disc-space
 
-        let c_r = textureSample(color_tex, color_samp, tap_r).r;
-        let c_g = textureSample(color_tex, color_samp, tap_g).g;
-        let c_b = textureSample(color_tex, color_samp, tap_b).b;
+        let c_r = textureSampleLevel(color_tex, color_samp, tap_r, 0.0).r;
+        let c_g = textureSampleLevel(color_tex, color_samp, tap_g, 0.0).g;
+        let c_b = textureSampleLevel(color_tex, color_samp, tap_b, 0.0).b;
 
         sum_r += c_r * w_r * gauss;
         sum_g += c_g * w_g * gauss;
@@ -555,10 +555,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // at its pass; SSGI is raw indirect radiance, multiplied here by
     // the receiver albedo so dark materials absorb correctly. Bloom
     // is scaled by the user-tuned intensity.
-    let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
-    let ssr = textureSample(ssr_tex, ssr_samp, in.uv).rgb;
-    let ssgi = textureSample(ssgi_tex, ssgi_samp, in.uv).rgb;
-    let albedo_sample = textureSample(albedo_tex, albedo_samp, in.uv);
+    let hdr = textureSampleLevel(hdr_tex, hdr_samp, in.uv, 0.0).rgb;
+    let ssr = textureSampleLevel(ssr_tex, ssr_samp, in.uv, 0.0).rgb;
+    let ssgi = textureSampleLevel(ssgi_tex, ssgi_samp, in.uv, 0.0).rgb;
+    let albedo_sample = textureSampleLevel(albedo_tex, albedo_samp, in.uv, 0.0);
     let albedo = albedo_sample.rgb;
     // albedo.a carries `1 - shadow_factor` from the scene pass — how
     // much of this pixel's illumination is indirect (IBL + bounce) vs.
@@ -567,11 +567,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // indirect-dominated portion. Sky pixels carry 0 here so fog / AO
     // don't touch them.
     let indirect_weight = albedo_sample.a;
-    let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
+    let bloom = textureSampleLevel(bloom_tex, bloom_samp, in.uv, 0.0).rgb;
     var color = hdr + ssr + ssgi * albedo + bloom * u.misc.x;
 
     // World-space position from depth for fog ray march.
-    let depth = textureSample(depth_tex, depth_samp, in.uv);
+    let depth = textureSampleLevel(depth_tex, depth_samp, in.uv, 0u);
     let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
     let world_h = u.inv_vp * ndc;
     let world = world_h.xyz / world_h.w;
@@ -660,7 +660,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             if (pos.x < 0.0 || pos.x > 1.0 || pos.y < 0.0 || pos.y > 1.0) {
                 continue;
             }
-            let d = textureSample(depth_tex, depth_samp, pos);
+            let d = textureSampleLevel(depth_tex, depth_samp, pos, 0u);
             let sky = smoothstep(0.998, 1.0, d);
             accum = accum + sky * weight;
             weight = weight * decay;
@@ -804,12 +804,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let current = current_sample.rgb;
     let current_w = current_sample.a;
 
-    let depth = textureSample(depth_tex, depth_samp, in.uv);
+    let depth = textureSampleLevel(depth_tex, depth_samp, in.uv, 0u);
     let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
     let world_h = u.inv_vp * ndc;
     let world = world_h.xyz / world_h.w;
 
-    let vel = textureSample(velocity_tex, velocity_samp, in.uv).rg;
+    let vel = textureSampleLevel(velocity_tex, velocity_samp, in.uv, 0.0).rg;
     let vel_len = length(vel);
     var prev_uv: vec2<f32>;
     if (vel_len > 0.00001) {
@@ -838,7 +838,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var history = current;
     var history_w = current_w;
     if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 && prev_uv.y >= 0.0 && prev_uv.y <= 1.0) {
-        let h_sample = textureSample(history_tex, history_samp, prev_uv);
+        let h_sample = textureSampleLevel(history_tex, history_samp, prev_uv, 0.0);
         history = h_sample.rgb;
         history_w = h_sample.a;
     }
@@ -857,7 +857,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                           1.0 / f32(textureDimensions(composed_tex).y));
     // Neighborhood statistics track the same unjittered position, or the
     // clamp window would wobble against the sample it bounds.
-    let center_rgb = textureSample(composed_tex, composed_samp, src_uv).rgb;
+    let center_rgb = textureSampleLevel(composed_tex, composed_samp, src_uv, 0.0).rgb;
     var m1 = rgb_to_ycocg(center_rgb);
     var m2 = m1 * m1;
     let n_samples = 9.0;
@@ -865,7 +865,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         for (var x = -1; x <= 1; x = x + 1) {
             if (x == 0 && y == 0) { continue; }
             let s_uv = src_uv + vec2<f32>(f32(x), f32(y)) * texel;
-            let s_rgb = textureSample(composed_tex, composed_samp, s_uv).rgb;
+            let s_rgb = textureSampleLevel(composed_tex, composed_samp, s_uv, 0.0).rgb;
             let s = rgb_to_ycocg(s_rgb);
             m1 = m1 + s;
             m2 = m2 + s * s;

@@ -50,7 +50,7 @@ extern "C" {
     #[wasm_bindgen(js_name = shapeSphere)]
     fn jb_shape_sphere(a0: f64) -> f64;
     #[wasm_bindgen(js_name = shapeCapsule)]
-    fn jb_shape_capsule(a0: f64, a1: f64) -> f64;
+    pub(crate) fn jb_shape_capsule(a0: f64, a1: f64) -> f64;
     #[wasm_bindgen(js_name = shapeCylinder)]
     fn jb_shape_cylinder(a0: f64, a1: f64, a2: f64) -> f64;
     #[wasm_bindgen(js_name = shapeScaled)]
@@ -82,9 +82,9 @@ extern "C" {
     #[wasm_bindgen(js_name = shapeVolume)]
     fn jb_shape_volume(a0: f64) -> f64;
     #[wasm_bindgen(js_name = bodyCreate)]
-    fn jb_body_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64;
+    pub(crate) fn jb_body_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64;
     #[wasm_bindgen(js_name = bodyDestroy)]
-    fn jb_body_destroy(a0: f64);
+    pub(crate) fn jb_body_destroy(a0: f64);
     #[wasm_bindgen(js_name = bodyActivate)]
     fn jb_body_activate(a0: f64);
     #[wasm_bindgen(js_name = bodyDeactivate)]
@@ -94,9 +94,9 @@ extern "C" {
     #[wasm_bindgen(js_name = bodyIsValid)]
     fn jb_body_is_valid(a0: f64) -> f64;
     #[wasm_bindgen(js_name = bodyGetPosition)]
-    fn jb_body_get_position(a0: f64, a1: f64) -> f64;
+    pub(crate) fn jb_body_get_position(a0: f64, a1: f64) -> f64;
     #[wasm_bindgen(js_name = bodyGetRotation)]
-    fn jb_body_get_rotation(a0: f64, a1: f64) -> f64;
+    pub(crate) fn jb_body_get_rotation(a0: f64, a1: f64) -> f64;
     #[wasm_bindgen(js_name = bodySetPosition)]
     fn jb_body_set_position(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64);
     #[wasm_bindgen(js_name = bodySetRotation)]
@@ -118,7 +118,7 @@ extern "C" {
     #[wasm_bindgen(js_name = bodyAddForce)]
     fn jb_body_add_force(a0: f64, a1: f64, a2: f64, a3: f64);
     #[wasm_bindgen(js_name = bodyAddImpulse)]
-    fn jb_body_add_impulse(a0: f64, a1: f64, a2: f64, a3: f64);
+    pub(crate) fn jb_body_add_impulse(a0: f64, a1: f64, a2: f64, a3: f64);
     #[wasm_bindgen(js_name = bodyAddTorque)]
     fn jb_body_add_torque(a0: f64, a1: f64, a2: f64, a3: f64);
     #[wasm_bindgen(js_name = bodyAddAngularImpulse)]
@@ -128,13 +128,13 @@ extern "C" {
     #[wasm_bindgen(js_name = bodyAddImpulseAt)]
     fn jb_body_add_impulse_at(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64);
     #[wasm_bindgen(js_name = bodySetFriction)]
-    fn jb_body_set_friction(a0: f64, a1: f64);
+    pub(crate) fn jb_body_set_friction(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetRestitution)]
-    fn jb_body_set_restitution(a0: f64, a1: f64);
+    pub(crate) fn jb_body_set_restitution(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetLinearDamping)]
-    fn jb_body_set_linear_damping(a0: f64, a1: f64);
+    pub(crate) fn jb_body_set_linear_damping(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetAngularDamping)]
-    fn jb_body_set_angular_damping(a0: f64, a1: f64);
+    pub(crate) fn jb_body_set_angular_damping(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetGravityFactor)]
     fn jb_body_set_gravity_factor(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetCcd)]
@@ -197,8 +197,16 @@ extern "C" {
     fn jb_constraint_slider(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64) -> f64;
     #[wasm_bindgen(js_name = constraintDistance)]
     fn jb_constraint_distance(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64;
+    // EN-063: the ragdoll joint — six-DOF with translation locked and
+    // per-axis rotation limits. Args: bodyA, bodyB, anchorA(x,y,z),
+    // anchorB(x,y,z), rotLimits(xMin,xMax,yMin,yMax,zMin,zMax), worldSpace.
+    #[wasm_bindgen(js_name = constraintSixDofLockedTranslation)]
+    pub(crate) fn jb_constraint_six_dof(
+        a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+        a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64,
+    ) -> f64;
     #[wasm_bindgen(js_name = constraintDestroy)]
-    fn jb_constraint_destroy(a0: f64);
+    pub(crate) fn jb_constraint_destroy(a0: f64);
     #[wasm_bindgen(js_name = constraintSetEnabled)]
     fn jb_constraint_set_enabled(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = contactCount)]

@@ -1018,6 +1018,19 @@ export function stageModels(paths: string[]): number[] {
   return parallelMap(paths, (path: string) => bloom_stage_model(path as any));
 }
 
+/// Sequential twin of stageModels for hosts where worker threads have no
+/// engine FFI (web: each Perry worker is its own WASM instance, but the
+/// engine lives on the main thread, so a staged load from a worker reaches
+/// nothing). Same tickets, same commitModel() contract — just decoded on
+/// the calling thread.
+export function stageModelsSync(paths: string[]): number[] {
+  const out = new Array<number>(paths.length);
+  for (let i = 0; i < paths.length; i++) {
+    out[i] = bloom_stage_model(paths[i] as any);
+  }
+  return out;
+}
+
 export function commitModel(stagingHandle: number): Model {
   const handle = bloom_commit_model(stagingHandle);
   return makeModel(handle);

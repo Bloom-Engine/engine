@@ -502,6 +502,9 @@ pub extern "C" fn bloom_close_window() {
     unsafe {
         WINDOW = None;
     }
+    // Dropping the NSWindow alone never flipped the loop's exit flag — a
+    // game's quit path calling closeWindow() would keep running headless.
+    engine().should_close = true;
 }
 
 #[no_mangle]

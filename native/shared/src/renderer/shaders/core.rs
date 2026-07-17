@@ -458,11 +458,11 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
 // results to pre-baked tangents for continuous UV mappings, which is
 // the common case for PBR assets. We use this as a fallback when the
 // mesh has no TANGENT accessor (very common — e.g., DamagedHelmet).
-fn compute_tbn(world_pos: vec3<f32>, n: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
-    let dp1 = dpdx(world_pos);
-    let dp2 = dpdy(world_pos);
-    let duv1 = dpdx(uv);
-    let duv2 = dpdy(uv);
+// The four screen-space derivatives are taken by the CALLER in uniform
+// control flow and passed in: this function is reached from the per-fragment
+// "mesh has no tangents" branch, and WGSL's uniformity analysis (enforced by
+// Tint on WebGPU) rejects dpdx/dpdy inside non-uniform flow.
+fn compute_tbn(dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>, n: vec3<f32>) -> mat3x3<f32> {
     let dp2perp = cross(dp2, n);
     let dp1perp = cross(n, dp1);
     let t = dp2perp * duv1.x + dp1perp * duv2.x;
@@ -554,11 +554,11 @@ fn sample_cascade(cascade: i32, shadow_uv: vec2<f32>, depth_ref: f32) -> f32 {
         let off = poisson[i] * texel * radius;
         let uv = shadow_uv + off;
         if (cascade == 0) {
-            sum += textureSampleCompare(shadow_tex_0, shadow_samp, uv, depth_ref);
+            sum += textureSampleCompareLevel(shadow_tex_0, shadow_samp, uv, depth_ref);
         } else if (cascade == 1) {
-            sum += textureSampleCompare(shadow_tex_1, shadow_samp, uv, depth_ref);
+            sum += textureSampleCompareLevel(shadow_tex_1, shadow_samp, uv, depth_ref);
         } else {
-            sum += textureSampleCompare(shadow_tex_2, shadow_samp, uv, depth_ref);
+            sum += textureSampleCompareLevel(shadow_tex_2, shadow_samp, uv, depth_ref);
         }
     }
     return sum / 16.0;
@@ -795,6 +795,13 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let baked_variance = nm_sample4.w;
     let toksvig_len2 = clamp(dot(nm_raw, nm_raw), 0.01, 1.0);
     let nm_sample = nm_raw * inverseSqrt(toksvig_len2);
+    // Derivatives for the no-tangent TBN fallback, taken here in uniform
+    // control flow (inside the branch below they would fail WGSL uniformity
+    // analysis on WebGPU).
+    let tbn_dp1 = dpdx(in.world_pos);
+    let tbn_dp2 = dpdy(in.world_pos);
+    let tbn_duv1 = dpdx(in.uv);
+    let tbn_duv2 = dpdy(in.uv);
     let tlen2 = dot(in.tangent.xyz, in.tangent.xyz);
     if (tlen2 > 0.0001) {
         let t = normalize(in.tangent.xyz);
@@ -802,7 +809,7 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         let b = cross(n, t_ortho) * in.tangent.w;
         n = normalize(t_ortho * nm_sample.x + b * nm_sample.y + n * nm_sample.z);
     } else {
-        let tbn = compute_tbn(in.world_pos, n, in.uv);
+        let tbn = compute_tbn(tbn_dp1, tbn_dp2, tbn_duv1, tbn_duv2, n);
         n = normalize(tbn * nm_sample);
     }
 

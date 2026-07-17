@@ -20,7 +20,9 @@ fn engine() -> &'static mut EngineState {
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = log)]
-    fn console_log(s: &str);
+    pub(crate) fn console_log(s: &str);
+    #[wasm_bindgen(js_namespace = console, js_name = warn)]
+    pub(crate) fn console_warn(s: &str);
 }
 
 /// Display handle for the wgpu-core (WebGL2) path.
@@ -126,11 +128,28 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
         // On GL, `Limits::default()` is unsatisfiable: WebGL2 has no compute, so
         // `max_compute_workgroups_per_dimension` is 0 against a default request of
         // 65535 and device creation fails outright. Ask that backend for exactly what
-        // it reports instead. WebGPU keeps the defaults it has always requested.
+        // it reports instead.
+        //
+        // On WebGPU, raise the per-stage resource limits to whatever the adapter
+        // offers (EN-063): the material ABI's fragment stage samples 19 textures
+        // once the wasm scene-inputs fold-in lands in group 0, and the WebGPU
+        // DEFAULT of 16 rejects the pipeline layout — while desktop adapters
+        // advertise 48+. requiredLimits is the sanctioned way to claim them
+        // (unlike maxBindGroups, which is a hard cap). Everything else keeps the
+        // defaults so we notice, rather than silently depend on, exotic limits.
         let required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
             adapter.limits()
         } else {
-            wgpu::Limits::default()
+            let a = adapter.limits();
+            let mut l = wgpu::Limits::default();
+            l.max_sampled_textures_per_shader_stage =
+                a.max_sampled_textures_per_shader_stage
+                    .max(l.max_sampled_textures_per_shader_stage);
+            l.max_samplers_per_shader_stage =
+                a.max_samplers_per_shader_stage.max(l.max_samplers_per_shader_stage);
+            l.max_texture_array_layers =
+                a.max_texture_array_layers.max(l.max_texture_array_layers);
+            l
         };
         let (device, queue) = adapter
             .request_device(
@@ -295,6 +314,19 @@ pub fn bloom_get_time() -> f64 {
 mod input_ffi;
 mod material_ffi;
 pub use input_ffi::*;
+
+// EN-063 — web FFI parity for full-3D games: mesh/instance/texture-array
+// scratch builders, staged-model bytes, env-HDR bytes, profiler text,
+// splat impulses, host stubs (parity_ffi) and ragdolls via the Jolt JS
+// bridge (ragdoll_ffi).
+#[cfg(feature = "models3d")]
+mod parity_ffi;
+#[cfg(feature = "models3d")]
+pub use parity_ffi::*;
+#[cfg(all(feature = "jolt", feature = "models3d"))]
+mod ragdoll_ffi;
+#[cfg(all(feature = "jolt", feature = "models3d"))]
+pub use ragdoll_ffi::*;
 
 // ============================================================
 // 2D Drawing - Shapes
@@ -1418,20 +1450,36 @@ pub fn bloom_commit_model(staging_handle: f64) -> f64 {
         None => return 0.0,
     };
     let eng = engine();
+    // Normal maps must go through the kind-aware registration (linear space
+    // + LEADR mips) or the committed model shades visibly flatter than the
+    // same GLB through loadModel. Kept in lockstep with the native
+    // bloom_commit_model in ffi_core/models.rs.
     let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
     for tex in &staged.textures {
-        tex_map.push(eng.renderer.register_texture(tex.width, tex.height, &tex.data));
+        tex_map.push(eng.renderer.register_texture_kind(
+            tex.width, tex.height, &tex.data, tex.is_normal));
     }
     let mut model = staged.model;
-    for mesh in &mut model.meshes {
-        if let Some(ref mut idx) = mesh.texture_idx {
-            let staged_idx = *idx as usize;
-            if staged_idx > 0 && staged_idx <= tex_map.len() {
-                *idx = tex_map[staged_idx - 1];
+    // Remap EVERY texture slot, not just the base colour — dropping the
+    // normal/MR/emissive/occlusion references silently strips the character
+    // maps on any model loaded through the staged path (the round-5 "stale
+    // aux-texture remap" bug, which this web copy used to reproduce).
+    let remap = |idx: &mut Option<u32>| {
+        if let Some(i) = *idx {
+            let s = i as usize;
+            *idx = if s > 0 && s <= tex_map.len() {
+                Some(tex_map[s - 1])
             } else {
-                mesh.texture_idx = None;
-            }
+                None
+            };
         }
+    };
+    for mesh in &mut model.meshes {
+        remap(&mut mesh.texture_idx);
+        remap(&mut mesh.normal_texture_idx);
+        remap(&mut mesh.metallic_roughness_texture_idx);
+        remap(&mut mesh.emissive_texture_idx);
+        remap(&mut mesh.occlusion_texture_idx);
     }
     eng.models.models.alloc(model)
 }

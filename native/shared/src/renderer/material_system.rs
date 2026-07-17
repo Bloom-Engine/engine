@@ -389,6 +389,10 @@ impl MaterialSystem {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // EN-063 — on wasm32 the per_frame group also carries the seven
+        // folded SceneInputs bindings, whose stub resources are only
+        // created further down; the wasm32 bind group is built there.
+        #[cfg(not(target_arch = "wasm32"))]
         let per_frame_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material_per_frame_bg"),
             layout: &layouts.per_frame,
@@ -634,6 +638,24 @@ impl MaterialSystem {
             view_formats: &[],
         });
         let scene_stub_depth_view = scene_stub_depth.create_view(&Default::default());
+
+        // EN-063 — wasm32 per_frame bind group: the UBO plus the seven
+        // folded SceneInputs slots, initially bound to the same stub
+        // resources `update_scene_inputs` falls back to. Rebuilt with
+        // the real snapshot views each frame by `update_scene_inputs`.
+        #[cfg(target_arch = "wasm32")]
+        let per_frame_bg = build_per_frame_bg_wasm(
+            device,
+            &layouts.per_frame,
+            &per_frame_buffer,
+            &scene_stub_view,        // scene_color_tex stub
+            &scene_color_sampler,
+            &scene_stub_depth_view,  // scene_depth_tex stub
+            &scene_depth_sampler,
+            &scene_stub_view,        // impulse_tex stub
+            &scene_depth_sampler,    // impulse_samp — NonFiltering, matches layout
+            &scene_stub_view,        // motion_vectors stub
+        );
 
         Self {
             layouts,
@@ -1871,6 +1893,28 @@ impl MaterialSystem {
             ],
         });
         self.scene_inputs_bg = Some(bg);
+
+        // EN-063 — on wasm32 the scene inputs are folded into the
+        // per_frame group (group 0), so the real snapshot views have
+        // to land there: rebuild per_frame_bg with the same seven
+        // resources bound above, at WASM_SCENE_INPUTS_BASE..+6. The
+        // opaque pass re-binds this group too, which is harmless —
+        // opaque materials never statically use the scene-input slots.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.per_frame_bg = build_per_frame_bg_wasm(
+                device,
+                &self.layouts.per_frame,
+                &self.per_frame_buffer,
+                scene_color_view,
+                &self._scene_color_sampler,
+                depth_view,
+                &self._scene_depth_sampler,
+                imp_view,
+                imp_samp,
+                &self._scene_stub_view,   // motion_vectors stub
+            );
+        }
     }
 
     /// Sort the translucent bucket back-to-front by view depth. Call
@@ -1912,7 +1956,10 @@ impl MaterialSystem {
                 pass.set_bind_group(0, &self.per_frame_bg, &[]);
                 pass.set_bind_group(1, &self.per_view_bg, &[]);
                 pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);
-                if mat.reads_scene {
+                // EN-063 — on wasm32 there is no group 4: the scene
+                // inputs are folded into per_frame (group 0), already
+                // bound above with the frame's snapshot views.
+                if mat.reads_scene && cfg!(not(target_arch = "wasm32")) {
                     if let Some(bg) = self.scene_inputs_bg.as_ref() {
                         pass.set_bind_group(4, bg, &[]);
                     }
@@ -1936,6 +1983,43 @@ impl MaterialSystem {
             }
         }
     }
+}
+
+/// EN-063 — wasm32-only per_frame bind group builder: the PerFrame UBO
+/// at binding 0 plus the seven folded SceneInputs resources at
+/// `WASM_SCENE_INPUTS_BASE..+6` (order and types mirror
+/// `update_scene_inputs` / `create_scene_inputs_layout` exactly). The
+/// single creation path for every bind group made against the wasm32
+/// `abi_per_frame` layout — that layout requires all eight entries.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn build_per_frame_bg_wasm(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    per_frame_buffer: &wgpu::Buffer,
+    scene_color_view: &wgpu::TextureView,
+    scene_color_samp: &wgpu::Sampler,
+    scene_depth_view: &wgpu::TextureView,
+    scene_depth_samp: &wgpu::Sampler,
+    impulse_view: &wgpu::TextureView,
+    impulse_samp: &wgpu::Sampler,
+    motion_vectors_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    use super::material_pipeline::WASM_SCENE_INPUTS_BASE as B;
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("material_per_frame_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0,     resource: per_frame_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: B,     resource: wgpu::BindingResource::TextureView(scene_color_view) },
+            wgpu::BindGroupEntry { binding: B + 1, resource: wgpu::BindingResource::Sampler(scene_color_samp) },
+            wgpu::BindGroupEntry { binding: B + 2, resource: wgpu::BindingResource::TextureView(scene_depth_view) },
+            wgpu::BindGroupEntry { binding: B + 3, resource: wgpu::BindingResource::Sampler(scene_depth_samp) },
+            wgpu::BindGroupEntry { binding: B + 4, resource: wgpu::BindingResource::TextureView(impulse_view) },
+            wgpu::BindGroupEntry { binding: B + 5, resource: wgpu::BindingResource::Sampler(impulse_samp) },
+            wgpu::BindGroupEntry { binding: B + 6, resource: wgpu::BindingResource::TextureView(motion_vectors_view) },
+        ],
+    })
 }
 
 // =====================================================================

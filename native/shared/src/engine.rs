@@ -39,7 +39,7 @@ pub struct EngineState {
     pub decals: crate::decals::DecalManager,
     /// EN-025 — ragdoll slots. Bodies live in the Jolt world; this owns the
     /// bone->body mapping that turns them back into a skinned pose.
-    #[cfg(all(feature = "models3d", feature = "jolt", not(target_arch = "wasm32")))]
+    #[cfg(all(feature = "models3d", feature = "jolt"))]
     pub ragdolls: crate::ragdoll::RagdollManager,
 
     // Timing
@@ -100,7 +100,7 @@ impl EngineState {
             drs: DrsController::new(),
             particles: crate::particles::ParticleManager::new(),
             decals: crate::decals::DecalManager::new(),
-            #[cfg(all(feature = "models3d", feature = "jolt", not(target_arch = "wasm32")))]
+            #[cfg(all(feature = "models3d", feature = "jolt"))]
             ragdolls: crate::ragdoll::RagdollManager::new(),
             target_fps: 60.0,
             delta_time: 0.0,

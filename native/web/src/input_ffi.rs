@@ -185,6 +185,59 @@ pub fn bloom_inject_key_up(key: f64) {
     engine().input.set_key_up(key as usize);
 }
 
+// EN-063: mouse / touch / wheel / char injection. DOM event handlers run in
+// their own tasks, which on a single-threaded wasm host always land BETWEEN
+// frames — i.e. before the next begin_frame(), exactly where a native
+// message pump writes. So the immediate setters are correct here (edges are
+// computed at begin_frame from prev-frame state); only same-gap taps need
+// care, which the JS glue handles by deferring the matching -up one frame.
+
+#[wasm_bindgen]
+pub fn bloom_inject_mouse_move(x: f64, y: f64) {
+    engine().input.set_mouse_position(x, y);
+}
+
+/// Relative movement (pointer-lock `movementX/Y`). Feeds the raw-delta
+/// accumulator that `begin_frame` prefers while the cursor is disabled —
+/// the camera-orbit path.
+#[wasm_bindgen]
+pub fn bloom_inject_mouse_delta(dx: f64, dy: f64) {
+    engine().input.accumulate_mouse_delta(dx, dy);
+}
+
+#[wasm_bindgen]
+pub fn bloom_inject_mouse_button_down(button: f64) {
+    engine().input.set_mouse_button_down(button as usize);
+}
+
+#[wasm_bindgen]
+pub fn bloom_inject_mouse_button_up(button: f64) {
+    engine().input.set_mouse_button_up(button as usize);
+}
+
+#[wasm_bindgen]
+pub fn bloom_inject_mouse_wheel(dy: f64) {
+    engine().input.accumulate_mouse_wheel(dy);
+}
+
+#[wasm_bindgen]
+pub fn bloom_inject_touch(index: f64, x: f64, y: f64, active: f64) {
+    engine().input.set_touch(index as usize, x, y, active != 0.0);
+}
+
+/// Deferred release: keeps the slot active for the current frame and clears
+/// it at end_frame, so a touch that begins and ends inside one frame is
+/// still seen by the game.
+#[wasm_bindgen]
+pub fn bloom_inject_touch_release(index: f64, x: f64, y: f64) {
+    engine().input.release_touch(index as usize, x, y);
+}
+
+#[wasm_bindgen]
+pub fn bloom_inject_char(codepoint: f64) {
+    engine().input.push_char(codepoint as u32);
+}
+
 #[wasm_bindgen]
 pub fn bloom_inject_gamepad_axis(axis: f64, value: f64) {
     engine().input.set_gamepad_axis(axis as usize, value as f32);
