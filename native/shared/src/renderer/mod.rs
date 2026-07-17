@@ -25,6 +25,10 @@ pub mod shader_include;
 pub mod shader_library;
 pub mod material_pipeline;
 pub mod material_system;
+// wasm32-only material bind-group helpers, split out to keep material_system.rs
+// under the 2000-line policy (EN-063).
+#[cfg(target_arch = "wasm32")]
+mod material_system_wasm;
 pub mod planar_reflection;
 pub mod graph;
 pub mod transient;

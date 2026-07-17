@@ -644,7 +644,7 @@ impl MaterialSystem {
         // resources `update_scene_inputs` falls back to. Rebuilt with
         // the real snapshot views each frame by `update_scene_inputs`.
         #[cfg(target_arch = "wasm32")]
-        let per_frame_bg = build_per_frame_bg_wasm(
+        let per_frame_bg = super::material_system_wasm::build_per_frame_bg_wasm(
             device,
             &layouts.per_frame,
             &per_frame_buffer,
@@ -1902,7 +1902,7 @@ impl MaterialSystem {
         // opaque materials never statically use the scene-input slots.
         #[cfg(target_arch = "wasm32")]
         {
-            self.per_frame_bg = build_per_frame_bg_wasm(
+            self.per_frame_bg = super::material_system_wasm::build_per_frame_bg_wasm(
                 device,
                 &self.layouts.per_frame,
                 &self.per_frame_buffer,
@@ -1985,48 +1985,10 @@ impl MaterialSystem {
     }
 }
 
-/// EN-063 — wasm32-only per_frame bind group builder: the PerFrame UBO
-/// at binding 0 plus the seven folded SceneInputs resources at
-/// `WASM_SCENE_INPUTS_BASE..+6` (order and types mirror
-/// `update_scene_inputs` / `create_scene_inputs_layout` exactly). The
-/// single creation path for every bind group made against the wasm32
-/// `abi_per_frame` layout — that layout requires all eight entries.
-#[cfg(target_arch = "wasm32")]
-#[allow(clippy::too_many_arguments)]
-fn build_per_frame_bg_wasm(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    per_frame_buffer: &wgpu::Buffer,
-    scene_color_view: &wgpu::TextureView,
-    scene_color_samp: &wgpu::Sampler,
-    scene_depth_view: &wgpu::TextureView,
-    scene_depth_samp: &wgpu::Sampler,
-    impulse_view: &wgpu::TextureView,
-    impulse_samp: &wgpu::Sampler,
-    motion_vectors_view: &wgpu::TextureView,
-) -> wgpu::BindGroup {
-    use super::material_pipeline::WASM_SCENE_INPUTS_BASE as B;
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("material_per_frame_bg"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0,     resource: per_frame_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: B,     resource: wgpu::BindingResource::TextureView(scene_color_view) },
-            wgpu::BindGroupEntry { binding: B + 1, resource: wgpu::BindingResource::Sampler(scene_color_samp) },
-            wgpu::BindGroupEntry { binding: B + 2, resource: wgpu::BindingResource::TextureView(scene_depth_view) },
-            wgpu::BindGroupEntry { binding: B + 3, resource: wgpu::BindingResource::Sampler(scene_depth_samp) },
-            wgpu::BindGroupEntry { binding: B + 4, resource: wgpu::BindingResource::TextureView(impulse_view) },
-            wgpu::BindGroupEntry { binding: B + 5, resource: wgpu::BindingResource::Sampler(impulse_samp) },
-            wgpu::BindGroupEntry { binding: B + 6, resource: wgpu::BindingResource::TextureView(motion_vectors_view) },
-        ],
-    })
-}
+// `build_per_frame_bg_wasm` (the wasm32-only per_frame bind-group builder)
+// lives in `material_system_wasm.rs` now — see the 2000-line policy note there.
 
-// =====================================================================
-// Tests
-// =====================================================================
-
-
+// ---- Tests ----------------------------------------------------------
 // GPU-backed tests live in material_system_tests.rs (2000-line file
 // policy); the #[path] keeps them a private child module of this one.
 #[cfg(test)]
