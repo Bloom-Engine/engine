@@ -50,7 +50,7 @@ extern "C" {
     #[wasm_bindgen(js_name = shapeSphere)]
     fn jb_shape_sphere(a0: f64) -> f64;
     #[wasm_bindgen(js_name = shapeCapsule)]
-    fn jb_shape_capsule(a0: f64, a1: f64) -> f64;
+    pub(crate) fn jb_shape_capsule(a0: f64, a1: f64) -> f64;
     #[wasm_bindgen(js_name = shapeCylinder)]
     fn jb_shape_cylinder(a0: f64, a1: f64, a2: f64) -> f64;
     #[wasm_bindgen(js_name = shapeScaled)]
@@ -82,9 +82,9 @@ extern "C" {
     #[wasm_bindgen(js_name = shapeVolume)]
     fn jb_shape_volume(a0: f64) -> f64;
     #[wasm_bindgen(js_name = bodyCreate)]
-    fn jb_body_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64;
+    pub(crate) fn jb_body_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64;
     #[wasm_bindgen(js_name = bodyDestroy)]
-    fn jb_body_destroy(a0: f64);
+    pub(crate) fn jb_body_destroy(a0: f64);
     #[wasm_bindgen(js_name = bodyActivate)]
     fn jb_body_activate(a0: f64);
     #[wasm_bindgen(js_name = bodyDeactivate)]
@@ -94,9 +94,9 @@ extern "C" {
     #[wasm_bindgen(js_name = bodyIsValid)]
     fn jb_body_is_valid(a0: f64) -> f64;
     #[wasm_bindgen(js_name = bodyGetPosition)]
-    fn jb_body_get_position(a0: f64, a1: f64) -> f64;
+    pub(crate) fn jb_body_get_position(a0: f64, a1: f64) -> f64;
     #[wasm_bindgen(js_name = bodyGetRotation)]
-    fn jb_body_get_rotation(a0: f64, a1: f64) -> f64;
+    pub(crate) fn jb_body_get_rotation(a0: f64, a1: f64) -> f64;
     #[wasm_bindgen(js_name = bodySetPosition)]
     fn jb_body_set_position(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64);
     #[wasm_bindgen(js_name = bodySetRotation)]
@@ -118,7 +118,7 @@ extern "C" {
     #[wasm_bindgen(js_name = bodyAddForce)]
     fn jb_body_add_force(a0: f64, a1: f64, a2: f64, a3: f64);
     #[wasm_bindgen(js_name = bodyAddImpulse)]
-    fn jb_body_add_impulse(a0: f64, a1: f64, a2: f64, a3: f64);
+    pub(crate) fn jb_body_add_impulse(a0: f64, a1: f64, a2: f64, a3: f64);
     #[wasm_bindgen(js_name = bodyAddTorque)]
     fn jb_body_add_torque(a0: f64, a1: f64, a2: f64, a3: f64);
     #[wasm_bindgen(js_name = bodyAddAngularImpulse)]
@@ -128,13 +128,13 @@ extern "C" {
     #[wasm_bindgen(js_name = bodyAddImpulseAt)]
     fn jb_body_add_impulse_at(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64);
     #[wasm_bindgen(js_name = bodySetFriction)]
-    fn jb_body_set_friction(a0: f64, a1: f64);
+    pub(crate) fn jb_body_set_friction(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetRestitution)]
-    fn jb_body_set_restitution(a0: f64, a1: f64);
+    pub(crate) fn jb_body_set_restitution(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetLinearDamping)]
-    fn jb_body_set_linear_damping(a0: f64, a1: f64);
+    pub(crate) fn jb_body_set_linear_damping(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetAngularDamping)]
-    fn jb_body_set_angular_damping(a0: f64, a1: f64);
+    pub(crate) fn jb_body_set_angular_damping(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetGravityFactor)]
     fn jb_body_set_gravity_factor(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = bodySetCcd)]
@@ -197,8 +197,16 @@ extern "C" {
     fn jb_constraint_slider(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64) -> f64;
     #[wasm_bindgen(js_name = constraintDistance)]
     fn jb_constraint_distance(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64) -> f64;
+    // EN-063: the ragdoll joint — six-DOF with translation locked and
+    // per-axis rotation limits. Args: bodyA, bodyB, anchorA(x,y,z),
+    // anchorB(x,y,z), rotLimits(xMin,xMax,yMin,yMax,zMin,zMax), worldSpace.
+    #[wasm_bindgen(js_name = constraintSixDofLockedTranslation)]
+    pub(crate) fn jb_constraint_six_dof(
+        a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+        a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64,
+    ) -> f64;
     #[wasm_bindgen(js_name = constraintDestroy)]
-    fn jb_constraint_destroy(a0: f64);
+    pub(crate) fn jb_constraint_destroy(a0: f64);
     #[wasm_bindgen(js_name = constraintSetEnabled)]
     fn jb_constraint_set_enabled(a0: f64, a1: f64);
     #[wasm_bindgen(js_name = contactCount)]
@@ -246,7 +254,7 @@ extern "C" {
     #[wasm_bindgen(js_name = softBodySetVertexInvMass)]
     fn jb_soft_body_set_vertex_inv_mass(a0: f64, a1: f64, a2: f64);
     #[wasm_bindgen(js_name = vehicleCreate)]
-    fn jb_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64, a37: f64) -> f64;
+    fn jb_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64) -> f64;
     #[wasm_bindgen(js_name = vehicleDestroy)]
     fn jb_vehicle_destroy(a0: f64);
     #[wasm_bindgen(js_name = vehicleGetChassis)]
@@ -605,7 +613,10 @@ pub fn bloom_physics_soft_body_set_vertex(a0: f64, a1: f64, a2: f64, a3: f64, a4
 pub fn bloom_physics_soft_body_set_vertex_inv_mass(a0: f64, a1: f64, a2: f64) { jb_soft_body_set_vertex_inv_mass(a0, a1, a2) }
 #[cfg(feature = "jolt")]
 #[wasm_bindgen]
-pub fn bloom_physics_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64, a37: f64) -> f64 { jb_vehicle_create(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33, a34, a35, a36, a37) }
+// 37 params, matching the manifest, physics_jolt.rs, and jolt_bridge.js's
+// vehicleCreate. Carried a 38th (trailing, so nothing shifted) that arrived
+// NaN and was dropped on the JS floor.
+pub fn bloom_physics_vehicle_create(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64, a12: f64, a13: f64, a14: f64, a15: f64, a16: f64, a17: f64, a18: f64, a19: f64, a20: f64, a21: f64, a22: f64, a23: f64, a24: f64, a25: f64, a26: f64, a27: f64, a28: f64, a29: f64, a30: f64, a31: f64, a32: f64, a33: f64, a34: f64, a35: f64, a36: f64) -> f64 { jb_vehicle_create(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33, a34, a35, a36) }
 #[cfg(feature = "jolt")]
 #[wasm_bindgen]
 pub fn bloom_physics_vehicle_destroy(a0: f64) { jb_vehicle_destroy(a0) }

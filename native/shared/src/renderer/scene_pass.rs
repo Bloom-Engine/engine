@@ -75,6 +75,17 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        // EN-063 — on wasm the prepass DRAWS are skipped (the pass still
+        // owns the depth clear). The prepass/main pairing requires the two
+        // pipelines to produce bit-identical depths; Tint (the browser's
+        // WGSL compiler) does not preserve that even under @invariant once
+        // the foliage-wind displacement is in the chain, and the main
+        // pass's Equal test then discards whole leaf cards (white torn
+        // canopies, streaks). The main pass runs the classic Less+write
+        // pipeline on wasm instead — overdraw over early-Z, correctness
+        // over speed.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
         pass.set_pipeline(&self.scene_depth_pipeline);
         pass.set_bind_group(1, &self.lighting_bind_group, &[]);
         pass.set_bind_group(3, &self.joint_bind_group, &[]);
@@ -102,6 +113,7 @@ impl Renderer {
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
             }
+        }
         }
     }
     profiler.end("depth_prepass");
@@ -230,7 +242,11 @@ impl Renderer {
             // write, Equal test), because the depth prepass above already stored
             // their exact depth. That is what lets the hardware early-Z reject the
             // occluded leaf cards instead of shading every one of them.
+            #[cfg(not(target_arch = "wasm32"))]
             pass.set_pipeline(&self.scene_pipeline_prepassed);
+            // wasm: no prepass priming (see above) — classic Less + write.
+            #[cfg(target_arch = "wasm32")]
+            pass.set_pipeline(&self.scene_pipeline);
             pass.set_bind_group(1, &self.lighting_bind_group, &[]);
             pass.set_bind_group(3, &self.joint_bind_group, &[]);
 

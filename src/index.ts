@@ -91,7 +91,7 @@ export {
   loadModelAnimation, instantiateAnimation, updateModelAnimation, createMesh,
   setAmbientLight, setDirectionalLight, setJointTest,
   setProceduralSky, setSunDirection,
-  loadModelAsync, stageModels, commitModel,
+  loadModelAsync, stageModels, stageModelsSync, commitModel,
 } from './models/index';
 
 export type { DrawCubeOpts, ProceduralSkyOptions } from './models/index';

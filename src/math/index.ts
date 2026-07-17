@@ -52,7 +52,7 @@ export function vec2Lerp(a: Vec2, b: Vec2, t: number): Vec2 {
 // Vec3 operations
 
 export function vec3(x: number, y: number, z: number): Vec3 {
-  return { x, y, z };
+  return { x: x, y: y, z: z };
 }
 
 export function vec3Add(a: Vec3, b: Vec3): Vec3 {

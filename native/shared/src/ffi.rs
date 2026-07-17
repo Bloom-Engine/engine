@@ -104,6 +104,13 @@ pub fn log_error(msg: &str) {
         }
         return;
     }
-    #[cfg(not(target_os = "android"))]
+    // EN-063 — a browser has no stderr, so eprintln! drops the message
+    // entirely. Every engine diagnostic was invisible on web until this.
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::console::error_1(&msg.into());
+        return;
+    }
+    #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
     eprintln!("{msg}");
 }

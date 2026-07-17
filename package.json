@@ -4271,10 +4271,7 @@
           ]
         },
         "web": {
-          "crate": "native/web/",
-          "target": "wasm32-unknown-unknown",
-          "buildTool": "wasm-pack",
-          "output": "native/web/pkg/"
+          "prebuilt": "./native/web/pkg/"
         }
       }
     }

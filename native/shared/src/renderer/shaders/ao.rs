@@ -526,7 +526,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel  = u.params.xy;
     let d_sigma = u.params.z;
 
-    let center_depth = textureSample(depth_tex, depth_samp, in.uv);
+    let center_depth = textureSampleLevel(depth_tex, depth_samp, in.uv, 0u);
 
     // Sky pixels: no occlusion, no contact shadow.
     if (center_depth >= 0.9999) {
@@ -546,8 +546,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let offset = vec2<f32>(f32(dx), f32(dy)) * texel;
             let s_uv   = in.uv + offset;
 
-            let s_ao    = textureSample(ao_tex, ao_samp, s_uv).r;
-            let s_depth = textureSample(depth_tex, depth_samp, s_uv);
+            let s_ao    = textureSampleLevel(ao_tex, ao_samp, s_uv, 0.0).r;
+            let s_depth = textureSampleLevel(depth_tex, depth_samp, s_uv, 0u);
 
             let gx = GAUSS5[dx + 2];
             let gy = GAUSS5[dy + 2];
@@ -562,7 +562,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    let center = textureSample(ao_tex, ao_samp, in.uv);
+    let center = textureSampleLevel(ao_tex, ao_samp, in.uv, 0.0);
     let ao_blurred = select(center.r, ao_sum / weight_sum, weight_sum > 0.0001);
     return vec4<f32>(ao_blurred, center.g, 0.0, 1.0);
 }

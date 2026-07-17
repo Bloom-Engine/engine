@@ -664,7 +664,11 @@ pub extern "C" fn bloom_resize(phys_w: f64, phys_h: f64, log_w: f64, log_h: f64)
 pub extern "C" fn bloom_attach_hwnd(_hwnd_bits: f64, _width: f64, _height: f64) {}
 
 #[no_mangle]
-pub extern "C" fn bloom_close_window() {}
+pub extern "C" fn bloom_close_window() {
+    // Request a clean exit — the game loop's next windowShouldClose() check
+    // reports true (mirrors the Windows implementation; was an empty stub).
+    engine().should_close = true;
+}
 
 #[no_mangle]
 pub extern "C" fn bloom_window_should_close() -> f64 {

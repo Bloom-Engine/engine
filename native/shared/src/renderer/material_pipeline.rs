@@ -40,6 +40,29 @@ impl MaterialAbiLayouts {
     }
 }
 
+/// EN-063 — wasm32 ABI contract. WebGPU in the browser caps
+/// `maxBindGroups` at 4, so the SceneInputs group (group 4 on native)
+/// cannot exist on the web: one reads_scene pipeline would fail
+/// creation and poison the whole frame's command buffer. On wasm32
+/// the seven scene-input bindings fold into the per_frame group
+/// (group 0) at bindings `WASM_SCENE_INPUTS_BASE .. +6`, in the same
+/// order and with the same types as `create_scene_inputs_layout`.
+/// per_frame's only native binding is 0 (the PerFrame UBO), so the
+/// folded block starts at 1.
+///
+/// Three places must agree on this contract and all read this
+/// constant:
+///   1. the shader-source rewrite in `compile_material`
+///      (`rewrite_scene_inputs_for_wasm`),
+///   2. the wasm32 `create_per_frame_layout` below,
+///   3. `MaterialSystem`'s per_frame bind-group builder
+///      (`build_per_frame_bg_wasm` in material_system.rs).
+///
+/// Native targets keep the five-group layout bit-identically.
+#[cfg(target_arch = "wasm32")]
+pub const WASM_SCENE_INPUTS_BASE: u32 = 1;
+
+#[cfg(not(target_arch = "wasm32"))]
 fn create_per_frame_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("abi_per_frame"),
@@ -53,6 +76,30 @@ fn create_per_frame_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             },
             count: None,
         }],
+    })
+}
+
+/// EN-063 — wasm32 variant: the PerFrame UBO at binding 0 plus the
+/// seven folded SceneInputs entries (same types, same order as
+/// `create_scene_inputs_layout`) at `WASM_SCENE_INPUTS_BASE..+6`.
+/// Every bind group created against this layout must supply all
+/// eight entries — see `build_per_frame_bg_wasm` in
+/// material_system.rs, the single creation site.
+#[cfg(target_arch = "wasm32")]
+fn create_per_frame_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    const B: u32 = WASM_SCENE_INPUTS_BASE;
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("abi_per_frame"),
+        entries: &[
+            entry_ubo(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+            entry_tex_f(B,         wgpu::ShaderStages::FRAGMENT),
+            entry_samp(B + 1,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
+            entry_tex_depth(B + 2, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(B + 3,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::NonFiltering),
+            entry_tex_f_nonfilt(B + 4, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(B + 5,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::NonFiltering),
+            entry_tex_f(B + 6,     wgpu::ShaderStages::FRAGMENT),
+        ],
     })
 }
 
@@ -363,6 +410,15 @@ pub fn compile_material(
     let source = BakedSource { entries: &entries };
     let expanded = process(&source, desc.entry_path)?;
 
+    // EN-063 — WebGPU in the browser caps maxBindGroups at 4, so no
+    // shader module may declare group 4 on wasm32. Rewrite the seven
+    // engine-owned SceneInputs declarations from material_abi.wgsl
+    // into the per_frame group (group 0) at WASM_SCENE_INPUTS_BASE..+6.
+    // String replacement is safe here: the declarations exist only in
+    // engine-owned material_abi.wgsl with exactly this formatting.
+    #[cfg(target_arch = "wasm32")]
+    let expanded = rewrite_scene_inputs_for_wasm(expanded);
+
     // 2. Create shader module. wgpu's WGSL parser surfaces errors as
     //    panics through the default handler; we catch them by
     //    pushing the scope and popping on failure.
@@ -383,7 +439,10 @@ pub fn compile_material(
         Some(&layouts.per_material),
         Some(&layouts.per_draw),
     ];
-    if desc.reads_scene {
+    // EN-063 — on wasm32 the scene inputs live inside per_frame
+    // (group 0, bindings WASM_SCENE_INPUTS_BASE..+6), so the pipeline
+    // layout stays at 4 groups: the browser caps maxBindGroups at 4.
+    if desc.reads_scene && cfg!(not(target_arch = "wasm32")) {
         bg_layouts.push(Some(&layouts.scene_inputs));
     }
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -540,6 +599,42 @@ pub fn compile_material(
         label:            desc.label.to_string(),
         reflection_pipeline,
     })
+}
+
+/// EN-063 — fold the SceneInputs declarations into group 0 for wasm32.
+///
+/// Rewrites each of the seven exact strings `@group(4) @binding(N)`
+/// (N = 0..6) that material_abi.wgsl declares to
+/// `@group(0) @binding(WASM_SCENE_INPUTS_BASE + N)`. The rewrite is
+/// unconditional (not gated on reads_scene): every material includes
+/// material_abi.wgsl, and a browser shader module must never declare
+/// group 4 at all. Materials that don't use the scene inputs simply
+/// leave the group-0 bindings statically unused, which wgpu ignores
+/// at pipeline-layout validation exactly as it did for group 4.
+#[cfg(target_arch = "wasm32")]
+fn rewrite_scene_inputs_for_wasm(expanded: String) -> String {
+    let had_group4 = expanded.contains("@group(4)");
+    let mut out = expanded;
+    let mut replaced: u32 = 0;
+    for n in 0..7u32 {
+        let from = format!("@group(4) @binding({n})");
+        let to   = format!("@group(0) @binding({})", WASM_SCENE_INPUTS_BASE + n);
+        replaced += out.matches(from.as_str()).count() as u32;
+        out = out.replace(from.as_str(), to.as_str());
+    }
+    if had_group4 {
+        debug_assert_eq!(
+            replaced, 7,
+            "material_abi.wgsl scene-input declarations changed; \
+             update the EN-063 wasm32 group-4 fold to match"
+        );
+        debug_assert!(
+            !out.contains("@group(4)"),
+            "a @group(4) binding survived the EN-063 wasm32 fold — \
+             group 4 exceeds the browser's maxBindGroups"
+        );
+    }
+    out
 }
 
 // =====================================================================

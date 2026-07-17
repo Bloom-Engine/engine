@@ -64,6 +64,16 @@ impl TextureManager {
         }
     }
 
+    /// Decode an in-memory image (PNG/JPEG/…, whatever `image` is built with)
+    /// to raw RGBA8. Shared by the web texture-array-from-files path, which
+    /// fetches file bytes in JS and needs the same decode the native
+    /// from-files FFI gets from `image::open`.
+    pub fn decode_rgba8(file_data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+        let img = image::load_from_memory(file_data).ok()?.to_rgba8();
+        let (w, h) = img.dimensions();
+        Some((img.into_raw(), w, h))
+    }
+
     pub fn load_texture(&mut self, renderer: &mut Renderer, file_data: &[u8]) -> f64 {
         // Cooked textures (bloom-cook BC7 DDS) take the compressed path:
         // direct mip-chain upload where the adapter has BC support, CPU

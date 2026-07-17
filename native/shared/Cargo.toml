@@ -50,5 +50,13 @@ web-time = { version = "0.2", optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notify = { version = "6", optional = true }
 
+# EN-063 — the engine's error channel on web. `log_error`'s eprintln! is a
+# black hole in a browser (no stderr), so every engine warning and error —
+# missing texture-array layers, surface-acquire failures, feature-off
+# warnings — was silently dropped on the one platform whose users can't
+# attach a debugger. Route them to console.error instead.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["console"] }
+
 [dev-dependencies]
 pollster = "0.4"

@@ -900,8 +900,14 @@ pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f
     }
 }
 
+/// Request a clean exit: makes `bloom_window_should_close` report true so the
+/// game loop (blocking `while` or `runGame`) falls out on its next check.
+/// Was an empty stub — callable from a game's quit path since SH-054 turned
+/// the shooter's `break`-based exits into closeWindow() calls.
 #[no_mangle]
-pub extern "C" fn bloom_close_window() {}
+pub extern "C" fn bloom_close_window() {
+    engine().should_close = true;
+}
 
 /// Attach the engine to a host-provided child window (a Perry UI `BloomView`).
 /// `hwnd_bits` is the raw HWND value as an integer (from `bloomViewGetHwnd`).

@@ -1287,7 +1287,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let current_raw = textureSample(current_tex, current_samp, in.uv);
+    let current_raw = textureSampleLevel(current_tex, current_samp, in.uv, 0.0);
 
     // 3×3 box pre-filter + neighborhood min/max. One texel spread
     // across 9 samples hides single-pixel glossy-ray sparkles in a
@@ -1299,7 +1299,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var prefilt = vec4<f32>(0.0);
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
-            let s = textureSample(current_tex, current_samp, in.uv + vec2<f32>(f32(x), f32(y)) * texel);
+            let s = textureSampleLevel(current_tex, current_samp, in.uv + vec2<f32>(f32(x), f32(y)) * texel, 0.0);
             nmin = min(nmin, s);
             nmax = max(nmax, s);
             prefilt = prefilt + s;
@@ -1310,12 +1310,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Velocity is full-res; UV mapping handles the half-res delta.
     // NDC-space velocity + UV Y-flip → `uv + vel.y` for the Y axis,
     // matching TAA + SSAO + the sibling SSGI temporal pass.
-    let vel = textureSample(velocity_tex, velocity_samp, in.uv).xy;
+    let vel = textureSampleLevel(velocity_tex, velocity_samp, in.uv, 0.0).xy;
     let prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
     let off_screen = prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0;
     if (off_screen) { return current; }
 
-    let history_raw = textureSample(history_tex, history_samp, prev_uv);
+    let history_raw = textureSampleLevel(history_tex, history_samp, prev_uv, 0.0);
     // Scrub NaN/Inf from the history read. Until a clean SSR frame
     // finishes draining the ping-pong pair, any poisoned history
     // pixel would otherwise survive the clamp (clamp(NaN, a, b) is
@@ -1452,7 +1452,15 @@ fn importance_sample_ggx(xi: vec2<f32>, n: vec3<f32>, roughness: f32) -> vec3<f3
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let depth = textureSample(depth_tex, depth_samp, in.uv);
+    let depth = textureSampleLevel(depth_tex, depth_samp, in.uv, 0i);
+    // Derivatives must come from uniform control flow (WGSL uniformity
+    // analysis; Tint/WebGPU enforces what naga lets slide) — take them
+    // BEFORE the early returns. A few ALU on sky pixels, and the quad
+    // derivatives are actually well-defined now instead of reading
+    // helper-lane garbage at the sky/geometry boundary.
+    let view_pos = view_pos_from_depth(in.uv, depth);
+    let dx = dpdx(view_pos);
+    let dy = dpdy(view_pos);
     if (depth >= 0.9999) { return vec4<f32>(0.0); } // sky
 
     // SSR for every smooth-enough surface — the metals-only gate is gone.
@@ -1466,16 +1474,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // spec by design and now get the coherent hit-or-env behaviour too.
     // Very rough surfaces still fade to pure IBL where one-ray-per-pixel
     // SSR noise would dominate even after temporal accumulation.
-    let mat = textureSample(mat_tex, mat_samp, in.uv).rg;
+    let mat = textureSampleLevel(mat_tex, mat_samp, in.uv, 0.0).rg;
     let metallic = mat.r;
     let roughness = mat.g;
-    let albedo = textureSample(albedo_tex, albedo_samp, in.uv).rgb;
+    let albedo = textureSampleLevel(albedo_tex, albedo_samp, in.uv, 0.0).rgb;
     let roughness_fade = 1.0 - smoothstep(0.5, 0.85, roughness);
     if (roughness_fade <= 0.001) { return vec4<f32>(0.0); }
 
-    let view_pos = view_pos_from_depth(in.uv, depth);
-    let dx = dpdx(view_pos);
-    let dy = dpdy(view_pos);
     let n = normalize(cross(dx, dy));
     let v = normalize(-view_pos);
 
@@ -1570,7 +1575,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // self-compare is applied to the HDR tap in case upstream writes a
     // bad sample (autoexposure ratios, rare shader ops on degenerate
     // triangles, etc).
-    let raw = textureSample(hdr_tex, hdr_samp, hit_uv).rgb;
+    let raw = textureSampleLevel(hdr_tex, hdr_samp, hit_uv, 0.0).rgb;
     let reflected = select(vec3<f32>(0.0), raw, raw == raw);
     let out = reflected * fresnel * roughness_fade * u.params.x * fade;
     let out_safe = select(vec3<f32>(0.0), out, out == out);
