@@ -512,6 +512,95 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
     if engine().should_close { 1.0 } else { 0.0 }
 }
 
+/// Poll the first connected game controller (MFi / Xbox / PlayStation) through
+/// the GameController framework and feed it into the shared input state.
+///
+/// Resolved dynamically via the ObjC runtime (`AnyClass::get`) so the crate
+/// needs no GameController link dependency; a no-op when the framework or a
+/// controller is absent. macOS had NO gamepad support before this — the FFI
+/// read `engine().input`, which nothing populated, so `isGamepadAvailable`
+/// was permanently false (audit finding). Button/axis indices match the
+/// tvOS/visionOS map so a game's controls carry across Apple targets.
+///
+/// `GCControllerAxisInput.value` / `GCControllerButtonInput.value` are ObjC
+/// `float`, so they are read as `f32` (reading them as `f64` is an ABI
+/// mismatch — float and double return in different-width registers).
+fn poll_game_controllers() {
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    // Read `isPressed` off a `GCControllerButtonInput` and, if set, mark the
+    // mapped button down. `$btn` is any expression yielding the button object.
+    macro_rules! btn_down {
+        ($btn:expr, $eng:expr, $idx:expr) => {{
+            let b: Retained<AnyObject> = $btn;
+            let pressed: Bool = msg_send![&*b, isPressed];
+            if pressed.as_bool() { $eng.input.set_gamepad_button_down($idx); }
+        }};
+    }
+    unsafe {
+        let gc_cls = match AnyClass::get(c"GCController") {
+            Some(c) => c,
+            None => return, // framework not present
+        };
+        let controllers: Retained<AnyObject> = msg_send![gc_cls, controllers];
+        let count: usize = msg_send![&*controllers, count];
+        if count == 0 {
+            return; // no pad: leave any injected gamepad state untouched
+        }
+        let controller: Retained<AnyObject> = msg_send![&*controllers, objectAtIndex: 0usize];
+        let extended: *mut AnyObject = msg_send![&*controller, extendedGamepad];
+        if extended.is_null() {
+            return; // e.g. a Siri Remote micro-gamepad; macOS games want a real pad
+        }
+        let extended: &AnyObject = &*extended;
+
+        let eng = engine();
+        // Clear last frame's polled inputs first: a poll only SETS the
+        // currently-pressed buttons/axes, so without this a released button
+        // stays down (begin_frame does not reset gamepad state).
+        eng.input.reset_gamepad();
+        eng.input.gamepad_available = true;
+
+        // Thumbsticks -> axes 0..3 (Y inverted so screen-up is +1).
+        let ls: Retained<AnyObject> = msg_send![extended, leftThumbstick];
+        let ls_x: Retained<AnyObject> = msg_send![&*ls, xAxis];
+        let ls_y: Retained<AnyObject> = msg_send![&*ls, yAxis];
+        let lx: f32 = msg_send![&*ls_x, value];
+        let ly: f32 = msg_send![&*ls_y, value];
+        eng.input.set_gamepad_axis(0, lx);
+        eng.input.set_gamepad_axis(1, -ly);
+        let rs: Retained<AnyObject> = msg_send![extended, rightThumbstick];
+        let rs_x: Retained<AnyObject> = msg_send![&*rs, xAxis];
+        let rs_y: Retained<AnyObject> = msg_send![&*rs, yAxis];
+        let rx: f32 = msg_send![&*rs_x, value];
+        let ry: f32 = msg_send![&*rs_y, value];
+        eng.input.set_gamepad_axis(2, rx);
+        eng.input.set_gamepad_axis(3, -ry);
+
+        // Face buttons A/B/X/Y -> 0/1/2/3.
+        btn_down!(msg_send![extended, buttonA], eng, 0);
+        btn_down!(msg_send![extended, buttonB], eng, 1);
+        btn_down!(msg_send![extended, buttonX], eng, 2);
+        btn_down!(msg_send![extended, buttonY], eng, 3);
+        // Shoulders -> 4/5.
+        btn_down!(msg_send![extended, leftShoulder], eng, 4);
+        btn_down!(msg_send![extended, rightShoulder], eng, 5);
+        // D-pad -> 12/13/14/15 (up/down/left/right).
+        let dpad: Retained<AnyObject> = msg_send![extended, dpad];
+        btn_down!(msg_send![&*dpad, up], eng, 12);
+        btn_down!(msg_send![&*dpad, down], eng, 13);
+        btn_down!(msg_send![&*dpad, left], eng, 14);
+        btn_down!(msg_send![&*dpad, right], eng, 15);
+
+        // Analog triggers -> axes 4/5.
+        let lt: Retained<AnyObject> = msg_send![extended, leftTrigger];
+        let rt: Retained<AnyObject> = msg_send![extended, rightTrigger];
+        let ltv: f32 = msg_send![&*lt, value];
+        let rtv: f32 = msg_send![&*rt, value];
+        eng.input.set_gamepad_axis(4, ltv);
+        eng.input.set_gamepad_axis(5, rtv);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
     // Poll events
@@ -642,6 +731,10 @@ pub extern "C" fn bloom_begin_drawing() {
         6 => objc2_app_kit::NSCursor::crosshairCursor().set(),
         _ => {},
     }
+
+    // Poll a connected game controller (no-op if none) before begin_frame
+    // snapshots input for the edge detectors.
+    poll_game_controllers();
 
     engine().begin_frame();
 }
