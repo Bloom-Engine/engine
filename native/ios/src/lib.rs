@@ -807,10 +807,91 @@ pub extern "C" fn bloom_window_should_close() -> f64 {
     if engine().should_close { 1.0 } else { 0.0 }
 }
 
+/// Poll the first connected game controller (MFi / Xbox / PlayStation) through
+/// the GameController framework and feed it into the shared input state.
+///
+/// iOS had NO gamepad support before this despite iPhone/iPad supporting MFi and
+/// console controllers — the shared gamepad FFI read `engine().input`, which
+/// nothing populated. Resolved dynamically via the ObjC runtime so no
+/// GameController link dep is needed; a no-op when absent. Identical to the
+/// macOS poll (compile-verified there); button/axis indices match the
+/// tvOS/visionOS map. Values are ObjC `float`, read as `f32` (reading them as
+/// `f64` is an ABI mismatch).
+///
+/// NOTE: compile-verified on the macOS twin; not yet run on an iOS device.
+fn poll_game_controllers() {
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    macro_rules! btn_down {
+        ($btn:expr, $eng:expr, $idx:expr) => {{
+            let b: Retained<AnyObject> = $btn;
+            let pressed: Bool = msg_send![&*b, isPressed];
+            if pressed.as_bool() { $eng.input.set_gamepad_button_down($idx); }
+        }};
+    }
+    unsafe {
+        let gc_cls = match AnyClass::get(c"GCController") {
+            Some(c) => c,
+            None => return,
+        };
+        let controllers: Retained<AnyObject> = msg_send![gc_cls, controllers];
+        let count: usize = msg_send![&*controllers, count];
+        if count == 0 {
+            return; // no pad: leave any injected gamepad state untouched
+        }
+        let controller: Retained<AnyObject> = msg_send![&*controllers, objectAtIndex: 0usize];
+        let extended: *mut AnyObject = msg_send![&*controller, extendedGamepad];
+        if extended.is_null() {
+            return;
+        }
+        let extended: &AnyObject = &*extended;
+
+        let eng = engine();
+        eng.input.reset_gamepad();
+        eng.input.gamepad_available = true;
+
+        let ls: Retained<AnyObject> = msg_send![extended, leftThumbstick];
+        let ls_x: Retained<AnyObject> = msg_send![&*ls, xAxis];
+        let ls_y: Retained<AnyObject> = msg_send![&*ls, yAxis];
+        let lx: f32 = msg_send![&*ls_x, value];
+        let ly: f32 = msg_send![&*ls_y, value];
+        eng.input.set_gamepad_axis(0, lx);
+        eng.input.set_gamepad_axis(1, -ly);
+        let rs: Retained<AnyObject> = msg_send![extended, rightThumbstick];
+        let rs_x: Retained<AnyObject> = msg_send![&*rs, xAxis];
+        let rs_y: Retained<AnyObject> = msg_send![&*rs, yAxis];
+        let rx: f32 = msg_send![&*rs_x, value];
+        let ry: f32 = msg_send![&*rs_y, value];
+        eng.input.set_gamepad_axis(2, rx);
+        eng.input.set_gamepad_axis(3, -ry);
+
+        btn_down!(msg_send![extended, buttonA], eng, 0);
+        btn_down!(msg_send![extended, buttonB], eng, 1);
+        btn_down!(msg_send![extended, buttonX], eng, 2);
+        btn_down!(msg_send![extended, buttonY], eng, 3);
+        btn_down!(msg_send![extended, leftShoulder], eng, 4);
+        btn_down!(msg_send![extended, rightShoulder], eng, 5);
+        let dpad: Retained<AnyObject> = msg_send![extended, dpad];
+        btn_down!(msg_send![&*dpad, up], eng, 12);
+        btn_down!(msg_send![&*dpad, down], eng, 13);
+        btn_down!(msg_send![&*dpad, left], eng, 14);
+        btn_down!(msg_send![&*dpad, right], eng, 15);
+
+        let lt: Retained<AnyObject> = msg_send![extended, leftTrigger];
+        let rt: Retained<AnyObject> = msg_send![extended, rightTrigger];
+        let ltv: f32 = msg_send![&*lt, value];
+        let rtv: f32 = msg_send![&*rt, value];
+        eng.input.set_gamepad_axis(4, ltv);
+        eng.input.set_gamepad_axis(5, rtv);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_begin_drawing() {
     // No run loop pumping needed — UIApplicationMain handles the main run loop
     // on its own thread. The game runs on the game thread.
+
+    // Poll a connected controller before either begin_frame path below.
+    poll_game_controllers();
 
     // Update drawable size to match actual view bounds (handles orientation changes)
     unsafe {
@@ -1010,6 +1091,22 @@ unsafe extern "C" fn audio_render_callback(
 #[no_mangle]
 pub extern "C" fn bloom_init_audio() {
     unsafe {
+        // Configure the audio session BEFORE bringing up RemoteIO. Without a
+        // category the session defaults to SoloAmbient: audio is silenced by
+        // the ring/silent switch and stops when the screen locks (audit gap).
+        // `Playback` keeps game audio audible over the silent switch. Done via
+        // the ObjC runtime so the crate needs no AVFAudio link dependency; the
+        // category constants' NSString VALUES equal their symbol names, so we
+        // build the string directly rather than linking the extern constant.
+        // NOTE: written blind (no iOS SDK here) — verify on device.
+        if let Some(av_cls) = objc2::runtime::AnyClass::get(c"AVAudioSession") {
+            let session: Retained<objc2::runtime::AnyObject> = msg_send![av_cls, sharedInstance];
+            let cat = objc2_foundation::NSString::from_str("AVAudioSessionCategoryPlayback");
+            let null_err: *mut *mut objc2::runtime::AnyObject = std::ptr::null_mut();
+            let _: objc2::runtime::Bool = msg_send![&*session, setCategory: &*cat, error: null_err];
+            let _: objc2::runtime::Bool = msg_send![&*session, setActive: true, error: null_err];
+        }
+
         // Hand the render half to the audio thread before the callback
         // can fire. Idempotent: a second init keeps the existing renderer.
         if AUDIO_RENDERER.is_none() {

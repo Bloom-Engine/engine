@@ -141,8 +141,8 @@ native/               Rust implementations
   macos/              Metal + AppKit + Core Audio
   ios/                Metal + UIKit + Core Audio
   tvos/               Metal + UIKit + GCController
-  windows/            DirectX 12 + Win32 + XAudio2
-  linux/              Vulkan/OpenGL + X11/Wayland + PulseAudio
+  windows/            DirectX 12 + Win32 + WASAPI
+  linux/              Vulkan/OpenGL + X11 + ALSA
   android/            Vulkan/OpenGL ES + NativeActivity + AAudio
   web/                WebGPU/WebGL + Canvas + Web Audio (WASM)
 

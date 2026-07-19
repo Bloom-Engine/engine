@@ -38,12 +38,17 @@ deferred), so numbering skips directly from 013/014 to 016.
 
 ## Platform matrix
 
-| Platform | SW path | HW path | Notes |
+> **As-built correction (2026-07):** the "HW path" column below describes
+> *capability*, not the default. The HW ray-query path is **opt-in**
+> everywhere (`BLOOM_HW_GI=1` / `BLOOM_PT` / `--pt`); SW GI is the shipping
+> default on every platform. See the as-built note under the table.
+
+| Platform | SW path | HW path (opt-in) | Notes |
 |---|---|---|---|
-| macOS | yes (Phase 1a) | yes after 007-prep (Metal ray-query) | Unblocked by wgpu upgrade |
-| iOS | yes | yes after 007-prep | Same |
-| tvOS | yes | yes after 007-prep | Same |
-| Windows | yes | yes (DXR) | Works today post-upgrade |
+| macOS | yes (Phase 1a) | capable after 007-prep (Metal ray-query) | Unblocked by wgpu upgrade |
+| iOS | yes | capable after 007-prep | Same |
+| tvOS | yes | capable after 007-prep | Same |
+| Windows | yes | capable (DXR) | Works post-upgrade; opt-in only |
 | Linux | yes | adapter-gated (Vulkan ray-query) | Runtime feature check; SW fallback |
 | Android | yes | adapter-gated | Most Android GPUs lack RT; SW expected in practice |
 | Web | yes | never | No WebGPU RT spec; SW-only permanently |
