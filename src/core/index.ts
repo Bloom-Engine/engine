@@ -95,7 +95,6 @@ declare function bloom_profiler_hist_count(): number;
 declare function bloom_profiler_hist_cpu_us(i: number): number;
 declare function bloom_profiler_hist_gpu_us(i: number): number;
 declare function bloom_splat_impulse(x: number, z: number, radius: number, strength: number): void;
-declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
 declare function bloom_set_material_params_scratch(handle: number, paramCount: number): void;
 declare function bloom_mesh_scratch_reset(): void;
 declare function bloom_mesh_scratch_push_f32(v: number): void;

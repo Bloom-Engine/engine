@@ -41,14 +41,12 @@ declare function bloom_submit_material_draw_instanced(material: number, meshHand
 declare function bloom_destroy_instance_buffer(handle: number): void;
 declare function bloom_create_planar_reflection(planeY: number, normalX: number, normalY: number, normalZ: number, resolution: number): number;
 declare function bloom_set_material_reflection_probe(material: number, probe: number): void;
-declare function bloom_create_texture_array(dataPtr: any, dataLen: number, width: number, height: number, layerCount: number): number;
-declare function bloom_create_texture_array_ex(dataPtr: any, dataLen: number, width: number, height: number, layerCount: number, format: number, mipLevels: number): number;
 declare function bloom_set_material_texture_array(material: number, slot: number, array: number): void;
 declare function bloom_set_material_shading_model(material: number, model: number): void;
 declare function bloom_set_material_probe_visible(material: number, visible: number): void;
 declare function bloom_set_material_foliage(material: number, transR: number, transG: number, transB: number, transAmount: number, wrapFactor: number): void;
 declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
-declare function bloom_set_material_params(handle: number, paramsPtr: any, paramCount: number): void;
+declare function bloom_set_material_params_scratch(handle: number, paramCount: number): void;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_load_model_animation(path: number): number;
 declare function bloom_instantiate_animation(src: number): number;
@@ -579,7 +577,21 @@ export function createTextureArray(
   bytes: number[], dataLen: number,
   width: number, height: number, layerCount: number,
 ): number {
-  return bloom_create_texture_array(bytes as any, dataLen, width, height, layerCount);
+  // Routes through the all-f64 mesh scratch (like createTextureArrayFromTexels):
+  // the raw *const u8 FFI is uncallable from Perry (number[] into an i64 pointer
+  // param throws). `bytes` is RGBA8 back-to-back, so pack each 4 bytes into one
+  // u32 the scratch consumer expects. SRGB / 1 mip to match the V1 semantics.
+  bloom_mesh_scratch_reset();
+  const texelCount = dataLen / 4;
+  for (let i = 0; i < texelCount; i = i + 1) {
+    const b = i * 4;
+    bloom_mesh_scratch_push_u32(
+      bytes[b] | (bytes[b + 1] << 8) | (bytes[b + 2] << 16) | (bytes[b + 3] << 24),
+    );
+  }
+  return bloom_create_texture_array_scratch(
+    width, height, layerCount, TEX_ARRAY_FORMAT_SRGB, 1,
+  );
 }
 
 /// EN-014 V2 — texture-array pixel format codes for `createTextureArrayEx`.
@@ -610,7 +622,16 @@ export function createTextureArrayEx(
   width: number, height: number, layerCount: number,
   format: number, mipLevels: number,
 ): number {
-  return bloom_create_texture_array_ex(bytes as any, dataLen, width, height, layerCount, format, mipLevels);
+  // Same scratch reroute as createTextureArray, with explicit format + mips.
+  bloom_mesh_scratch_reset();
+  const texelCount = dataLen / 4;
+  for (let i = 0; i < texelCount; i = i + 1) {
+    const b = i * 4;
+    bloom_mesh_scratch_push_u32(
+      bytes[b] | (bytes[b + 1] << 8) | (bytes[b + 2] << 16) | (bytes[b + 3] << 24),
+    );
+  }
+  return bloom_create_texture_array_scratch(width, height, layerCount, format, mipLevels);
 }
 
 declare function bloom_create_texture_array_scratch(
@@ -619,12 +640,13 @@ declare function bloom_create_texture_array_scratch(
 
 /// EN-049 — build a texture array from data you computed, not from files.
 ///
-/// `createTextureArray`/`createTextureArrayEx` take a `*const u8`, which the
-/// manifest must declare `i64` — and Perry cannot pass a `number[]` to an i64
-/// param ("Expected safe integer for native i64 parameter"). They are, from
-/// Perry, uncallable. That is fine for ART, which has files to name
-/// (`createTextureArrayFromFiles`), and useless for DATA: a terrain splat map is
-/// computed at load out of the world file and there is no file to point at.
+/// `createTextureArray`/`createTextureArrayEx` originally took a `*const u8`,
+/// which the manifest must declare `i64` — and Perry cannot pass a `number[]`
+/// to an i64 param ("Expected safe integer for native i64 parameter"). They now
+/// reroute through this same scratch path internally (repacking their RGBA8
+/// bytes into packed u32s), so they are callable again; this entry point is the
+/// direct one when your data is already packed u32-per-texel — e.g. a terrain
+/// splat map computed at load out of the world file, with no file to point at.
 ///
 /// So the payload goes through the mesh scratch buffer, exactly as
 /// `updateSceneNodeGeometry` already does for vertices. `texels` is one PACKED
@@ -772,13 +794,15 @@ export interface MaterialDesc {
 export function loadMaterial(desc: MaterialDesc): number {
   const handle = compileMaterialFromFile(desc.shader, desc.bucket);
   if (handle > 0 && desc.params) {
-    // Bind to a local first — Perry currently mishandles `.length`
-    // on an object field passed directly into an FFI call (the FFI
-    // sees count = 0). Re-binding to a local lets `.length` evaluate
-    // before the FFI call is laid out.
+    // Params go through the all-f64 mesh scratch, same as setMaterialParams:
+    // the raw pointer variant (bloom_set_material_params) is not in the FFI
+    // manifest, so Perry silently no-ops it, and it also hits the
+    // number[]-into-i64-pointer bug. The _scratch path avoids both.
     const p = desc.params;
     if (p.length > 0) {
-      bloom_set_material_params(handle, p as any, p.length);
+      bloom_mesh_scratch_reset();
+      for (let i = 0; i < p.length; i++) bloom_mesh_scratch_push_f32(p[i]);
+      bloom_set_material_params_scratch(handle, p.length);
     }
   }
   return handle;
