@@ -73,6 +73,9 @@ impl PtLayeredMaterialCpu {
         if material.has_anisotropy() {
             mask |= crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE;
         }
+        if material.anisotropy_texture.is_some() {
+            texture_mask |= crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE;
+        }
         if material.has_iridescence() {
             mask |= crate::models::MaterialLayeredPbr::IRIDESCENCE_LOBE;
         }
@@ -140,8 +143,14 @@ impl PtLayeredMaterialCpu {
             && self.sheen[..3].iter().any(|value| *value > 0.0)
     }
 
+    fn has_anisotropy(self) -> bool {
+        self.header[1] & crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE != 0
+            && self.header[2] & crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE == 0
+            && self.anisotropy[0] > 0.0
+    }
+
     fn has_qualified_transport(self) -> bool {
-        self.has_clearcoat() || self.has_specular_ior() || self.has_sheen()
+        self.has_clearcoat() || self.has_specular_ior() || self.has_sheen() || self.has_anisotropy()
     }
 }
 
@@ -185,7 +194,13 @@ var<storage, read> pt_layered_materials: array<PtLayeredMaterial>;
 
 const PT_LAYERED_TRANSPORT_WGSL: &str = r#"
 const PT_LAYERED_CLEARCOAT_LOBE: u32 = 1u;
+const PT_LAYERED_ANISOTROPY_LOBE: u32 = 4u;
 const PT_LAYERED_SPECULAR_IOR_LOBE: u32 = 16u;
+
+struct PtLayeredSurface {
+    material: PtLayeredMaterial,
+    tangent: vec4<f32>,
+};
 
 fn pt_layered_default() -> PtLayeredMaterial {
     return PtLayeredMaterial(
@@ -211,10 +226,19 @@ fn pt_layered_has_specular_ior(material: PtLayeredMaterial) -> bool {
         && (material.header.z & PT_LAYERED_SPECULAR_IOR_LOBE) == 0u;
 }
 
+fn pt_layered_has_anisotropy(material: PtLayeredMaterial) -> bool {
+    return PT_HAS_SCALAR_ANISOTROPY
+        && material.header.x == 1u
+        && (material.header.y & PT_LAYERED_ANISOTROPY_LOBE) != 0u
+        && (material.header.z & PT_LAYERED_ANISOTROPY_LOBE) == 0u
+        && material.anisotropy.x > 0.0;
+}
+
 fn pt_layered_has_transport(material: PtLayeredMaterial) -> bool {
     return pt_layered_has_clearcoat(material)
         || pt_layered_has_specular_ior(material)
-        || pt_layered_has_sheen(material);
+        || pt_layered_has_sheen(material)
+        || pt_layered_has_anisotropy(material);
 }
 
 fn pt_ior_f0(ior_value: f32) -> f32 {
@@ -281,11 +305,186 @@ fn pt_clearcoat_alpha(material: PtLayeredMaterial) -> f32 {
     return perceptual_roughness * perceptual_roughness;
 }
 
-fn pt_layered_primary_material(p: vec3<f32>) -> PtLayeredMaterial {
+fn pt_layered_default_tangent(n: vec3<f32>) -> vec4<f32> {
+    return vec4<f32>(onb(n)[0], 1.0);
+}
+
+fn pt_layered_vertex_tangent(slot: u32) -> vec4<f32> {
+    let offset = slot * PT_VSTRIDE + 20u;
+    return vec4<f32>(
+        geo_v[offset],
+        geo_v[offset + 1u],
+        geo_v[offset + 2u],
+        geo_v[offset + 3u],
+    );
+}
+
+fn pt_layered_hit_tangent(
+    geo: vec4<u32>,
+    primitive: u32,
+    barycentrics: vec2<f32>,
+    object_to_world: mat4x3<f32>,
+    n: vec3<f32>,
+) -> vec4<f32> {
+    if (geo.z == 0u) {
+        return pt_layered_default_tangent(n);
+    }
+    let base = geo.y + primitive * 3u;
+    let slot0 = geo.x + geo_i[base];
+    let slot1 = geo.x + geo_i[base + 1u];
+    let slot2 = geo.x + geo_i[base + 2u];
+    let weight0 = 1.0 - barycentrics.x - barycentrics.y;
+    let tangent_os = weight0 * pt_layered_vertex_tangent(slot0)
+        + barycentrics.x * pt_layered_vertex_tangent(slot1)
+        + barycentrics.y * pt_layered_vertex_tangent(slot2);
+    let tangent_raw = object_to_world * vec4<f32>(tangent_os.xyz, 0.0);
+    let tangent_ortho = tangent_raw - n * dot(n, tangent_raw);
+    let tangent_length = length(tangent_ortho);
+    if (tangent_length <= 1e-4) {
+        return pt_layered_default_tangent(n);
+    }
+    let model_handedness = select(
+        -1.0,
+        1.0,
+        dot(
+            cross(object_to_world[0], object_to_world[1]),
+            object_to_world[2],
+        ) >= 0.0,
+    );
+    let authored_handedness = select(-1.0, 1.0, tangent_os.w >= 0.0);
+    return vec4<f32>(
+        tangent_ortho / tangent_length,
+        authored_handedness * model_handedness,
+    );
+}
+
+fn pt_layered_anisotropy_basis(
+    n: vec3<f32>,
+    tangent: vec4<f32>,
+    material: PtLayeredMaterial,
+) -> mat3x3<f32> {
+    let tangent_ortho = tangent.xyz - n * dot(n, tangent.xyz);
+    let tangent_length = length(tangent_ortho);
+    if (tangent_length <= 1e-4) {
+        return onb(n);
+    }
+    let mesh_tangent = tangent_ortho / tangent_length;
+    let mesh_bitangent = normalize(cross(n, mesh_tangent)) * tangent.w;
+    let rotated_raw = mesh_tangent * material.anisotropy.y
+        + mesh_bitangent * material.anisotropy.z;
+    let rotated_tangent = normalize(
+        rotated_raw - n * dot(n, rotated_raw),
+    );
+    let rotated_bitangent = normalize(cross(n, rotated_tangent));
+    return mat3x3<f32>(rotated_tangent, rotated_bitangent, n);
+}
+
+fn pt_layered_anisotropy_alpha(
+    roughness: f32,
+    material: PtLayeredMaterial,
+) -> vec2<f32> {
+    let alpha = max(roughness * roughness, 1e-3);
+    let strength = clamp(material.anisotropy.x, 0.0, 1.0);
+    return vec2<f32>(
+        alpha + (1.0 - alpha) * strength * strength,
+        alpha,
+    );
+}
+
+fn pt_d_ggx_anisotropic(
+    n_dot_h: f32,
+    t_dot_h: f32,
+    b_dot_h: f32,
+    alpha: vec2<f32>,
+) -> f32 {
+    let product = alpha.x * alpha.y;
+    let projected = vec3<f32>(
+        alpha.y * t_dot_h,
+        alpha.x * b_dot_h,
+        product * n_dot_h,
+    );
+    let weight = product / max(dot(projected, projected), 1e-12);
+    return product * weight * weight / 3.14159265;
+}
+
+fn pt_v_smith_anisotropic(
+    light_local: vec3<f32>,
+    view_local: vec3<f32>,
+    alpha: vec2<f32>,
+) -> f32 {
+    let ggx_view = light_local.z * length(vec3<f32>(
+        alpha.x * view_local.x,
+        alpha.y * view_local.y,
+        view_local.z,
+    ));
+    let ggx_light = view_local.z * length(vec3<f32>(
+        alpha.x * light_local.x,
+        alpha.y * light_local.y,
+        light_local.z,
+    ));
+    return clamp(0.5 / (ggx_view + ggx_light + 1e-6), 0.0, 1.0);
+}
+
+fn pt_smith_g1_anisotropic(direction: vec3<f32>, alpha: vec2<f32>) -> f32 {
+    let n_dot = max(direction.z, 0.0);
+    if (n_dot <= 0.0) {
+        return 0.0;
+    }
+    let projected = length(vec3<f32>(
+        alpha.x * direction.x,
+        alpha.y * direction.y,
+        n_dot,
+    ));
+    return 2.0 * n_dot / (n_dot + projected + 1e-6);
+}
+
+fn pt_sample_ggx_vndf_anisotropic(
+    view: vec3<f32>,
+    alpha: vec2<f32>,
+    sample: vec2<f32>,
+) -> vec3<f32> {
+    let stretched_view = normalize(vec3<f32>(
+        alpha.x * view.x,
+        alpha.y * view.y,
+        view.z,
+    ));
+    let lensq = stretched_view.x * stretched_view.x
+        + stretched_view.y * stretched_view.y;
+    var tangent = vec3<f32>(1.0, 0.0, 0.0);
+    if (lensq > 0.0) {
+        tangent = vec3<f32>(
+            -stretched_view.y, stretched_view.x, 0.0,
+        ) / sqrt(lensq);
+    }
+    let bitangent = cross(stretched_view, tangent);
+    let radius = sqrt(sample.x);
+    let phi = 6.2831853 * sample.y;
+    let tangent_x = radius * cos(phi);
+    var tangent_y = radius * sin(phi);
+    let blend = 0.5 * (1.0 + stretched_view.z);
+    tangent_y = (1.0 - blend)
+        * sqrt(max(0.0, 1.0 - tangent_x * tangent_x))
+        + blend * tangent_y;
+    let stretched_normal = tangent_x * tangent
+        + tangent_y * bitangent
+        + sqrt(max(
+            0.0, 1.0 - tangent_x * tangent_x - tangent_y * tangent_y,
+        )) * stretched_view;
+    return normalize(vec3<f32>(
+        alpha.x * stretched_normal.x,
+        alpha.y * stretched_normal.y,
+        max(stretched_normal.z, 0.0),
+    ));
+}
+
+fn pt_layered_primary_surface(
+    p: vec3<f32>,
+    n: vec3<f32>,
+) -> PtLayeredSurface {
     let to_surface = p - u.cam_pos.xyz;
     let distance = length(to_surface);
     if (distance <= 1e-4) {
-        return pt_layered_default();
+        return PtLayeredSurface(pt_layered_default(), vec4<f32>(0.0));
     }
     var query: ray_query;
     rayQueryInitialize(
@@ -303,13 +502,26 @@ fn pt_layered_primary_material(p: vec3<f32>) -> PtLayeredMaterial {
     }
     let hit = rayQueryGetCommittedIntersection(&query);
     if (hit.kind == RAY_QUERY_INTERSECTION_NONE) {
-        return pt_layered_default();
+        return PtLayeredSurface(pt_layered_default(), vec4<f32>(0.0));
     }
-    return pt_layered_materials[hit.instance_custom_data];
+    let material = pt_layered_materials[hit.instance_custom_data];
+    if (!pt_layered_has_anisotropy(material)) {
+        return PtLayeredSurface(material, vec4<f32>(0.0));
+    }
+    let instance = instance_data[hit.instance_custom_data];
+    let tangent = pt_layered_hit_tangent(
+        instance.geo,
+        hit.primitive_index,
+        hit.barycentrics,
+        hit.object_to_world,
+        n,
+    );
+    return PtLayeredSurface(material, tangent);
 }
 
 fn pt_layered_base_nee(
     n: vec3<f32>,
+    tangent: vec4<f32>,
     view: vec3<f32>,
     ldir: vec3<f32>,
     ndl: f32,
@@ -318,7 +530,10 @@ fn pt_layered_base_nee(
     metal: f32,
     material: PtLayeredMaterial,
 ) -> vec3<f32> {
-    if (!pt_layered_has_specular_ior(material)) {
+    if (
+        !pt_layered_has_specular_ior(material)
+            && !pt_layered_has_anisotropy(material)
+    ) {
         return nee_diffuse(n, view, ldir, ndl, full_alb, rough, metal)
             + nee_spec(n, view, ldir, ndl, full_alb, rough, metal);
     }
@@ -331,11 +546,34 @@ fn pt_layered_base_nee(
     let ndh = max(dot(n, half), 0.0);
     let vdh = max(dot(view, half), 1e-4);
     let alpha = max(rough * rough, 1e-3);
-    let a2 = alpha * alpha;
-    let denominator = ndh * ndh * (a2 - 1.0) + 1.0;
-    let distribution = a2 / (3.14159265 * denominator * denominator);
+    var distribution: f32;
+    var visibility: f32;
+    if (pt_layered_has_anisotropy(material)) {
+        let basis = pt_layered_anisotropy_basis(n, tangent, material);
+        let view_local = vec3<f32>(
+            dot(view, basis[0]), dot(view, basis[1]), ndv,
+        );
+        let light_local = vec3<f32>(
+            dot(ldir, basis[0]), dot(ldir, basis[1]), ndl,
+        );
+        let anisotropic_alpha = pt_layered_anisotropy_alpha(rough, material);
+        distribution = pt_d_ggx_anisotropic(
+            ndh,
+            dot(half, basis[0]),
+            dot(half, basis[1]),
+            anisotropic_alpha,
+        );
+        visibility = pt_v_smith_anisotropic(
+            light_local, view_local, anisotropic_alpha,
+        );
+    } else {
+        let a2 = alpha * alpha;
+        let denominator = ndh * ndh * (a2 - 1.0) + 1.0;
+        distribution = a2 / (3.14159265 * denominator * denominator);
+        visibility = v_smith(ndv, ndl, alpha);
+    }
     let specular = pt_layered_base_fresnel(vdh, full_alb, metal, material)
-        * distribution * v_smith(ndv, ndl, alpha) * ndl;
+        * distribution * visibility * ndl;
     let diffuse_albedo = full_alb * (1.0 - metal)
         * pt_dielectric_transmission(ndv, material)
         * pt_dielectric_transmission(ndl, material);
@@ -346,6 +584,7 @@ fn pt_layered_base_nee(
 
 fn pt_layered_nee(
     n: vec3<f32>,
+    tangent: vec4<f32>,
     view: vec3<f32>,
     ldir: vec3<f32>,
     ndl: f32,
@@ -355,7 +594,7 @@ fn pt_layered_nee(
     material: PtLayeredMaterial,
 ) -> vec3<f32> {
     let undercoat = pt_layered_undercoat_nee(
-        n, view, ldir, ndl, full_alb, rough, metal, material,
+        n, tangent, view, ldir, ndl, full_alb, rough, metal, material,
     );
     let half_raw = view + ldir;
     if (!pt_layered_has_clearcoat(material) || dot(half_raw, half_raw) <= 1e-8) {
@@ -379,6 +618,7 @@ fn pt_layered_nee(
 fn pt_layered_direct_light(
     p: vec3<f32>,
     n: vec3<f32>,
+    tangent: vec4<f32>,
     sun_r2: vec2<f32>,
     view: vec3<f32>,
     full_alb: vec3<f32>,
@@ -396,7 +636,8 @@ fn pt_layered_direct_light(
         let visibility = sun_visibility(p, n, sun_r2);
         if (visibility > 0.0) {
             result += pt_layered_nee(
-                n, view, u.sun_dir.xyz, sun_ndl, full_alb, rough, metal, material,
+                n, tangent, view, u.sun_dir.xyz, sun_ndl,
+                full_alb, rough, metal, material,
             ) * u.sun_color.rgb * visibility;
         }
     }
@@ -415,7 +656,8 @@ fn pt_layered_direct_light(
                 let incident = light.color_int.rgb * light.color_int.w
                     * falloff * falloff * f32(count);
                 result += pt_layered_nee(
-                    n, view, direction, ndl, full_alb, rough, metal, material,
+                    n, tangent, view, direction, ndl,
+                    full_alb, rough, metal, material,
                 ) * incident;
             }
         }
@@ -425,26 +667,36 @@ fn pt_layered_direct_light(
 
 fn pt_sample_layered_base(
     n: vec3<f32>,
+    tangent: vec4<f32>,
     view: vec3<f32>,
     base_color: vec3<f32>,
     roughness: f32,
     metallic: f32,
     material: PtLayeredMaterial,
 ) -> BrdfSample {
-    if (!pt_layered_has_specular_ior(material)) {
+    if (
+        !pt_layered_has_specular_ior(material)
+            && !pt_layered_has_anisotropy(material)
+    ) {
         return sample_brdf(n, view, base_color, roughness, metallic);
     }
     var out: BrdfSample;
     out.valid = false;
     let alpha = max(roughness * roughness, 1e-3);
-    let basis = onb(n);
-    let view_tangent = vec3<f32>(
-        dot(view, basis[0]), dot(view, basis[1]), dot(view, n),
+    let anisotropic = pt_layered_has_anisotropy(material);
+    var specular_basis = onb(n);
+    if (anisotropic) {
+        specular_basis = pt_layered_anisotropy_basis(n, tangent, material);
+    }
+    let view_specular = vec3<f32>(
+        dot(view, specular_basis[0]),
+        dot(view, specular_basis[1]),
+        dot(view, n),
     );
-    if (view_tangent.z <= 0.0) {
+    if (view_specular.z <= 0.0) {
         return out;
     }
-    let n_dot_v = max(view_tangent.z, 1e-4);
+    let n_dot_v = max(view_specular.z, 1e-4);
     let fresnel_view = pt_layered_base_fresnel(
         n_dot_v, base_color, metallic, material,
     );
@@ -460,42 +712,68 @@ fn pt_sample_layered_base(
     }
     let sample = rand_2f();
     if (rand_f() < specular_probability) {
-        let half_tangent = sample_ggx_vndf(view_tangent, alpha, sample);
-        let light_tangent = reflect(-view_tangent, half_tangent);
-        if (light_tangent.z <= 0.0) {
+        let anisotropic_alpha = pt_layered_anisotropy_alpha(
+            roughness, material,
+        );
+        var half_specular: vec3<f32>;
+        if (anisotropic) {
+            half_specular = pt_sample_ggx_vndf_anisotropic(
+                view_specular, anisotropic_alpha, sample,
+            );
+        } else {
+            half_specular = sample_ggx_vndf(view_specular, alpha, sample);
+        }
+        let light_specular = reflect(-view_specular, half_specular);
+        if (light_specular.z <= 0.0) {
             return out;
         }
-        let n_dot_l = light_tangent.z;
-        let v_dot_h = max(dot(view_tangent, half_tangent), 1e-4);
-        let g2 = v_smith(n_dot_v, n_dot_l, alpha)
-            * 4.0 * n_dot_v * n_dot_l;
-        out.dir = basis * light_tangent;
+        let n_dot_l = light_specular.z;
+        let v_dot_h = max(dot(view_specular, half_specular), 1e-4);
+        var visibility: f32;
+        var g1_view: f32;
+        if (anisotropic) {
+            visibility = pt_v_smith_anisotropic(
+                light_specular, view_specular, anisotropic_alpha,
+            );
+            g1_view = pt_smith_g1_anisotropic(
+                view_specular, anisotropic_alpha,
+            );
+        } else {
+            visibility = v_smith(n_dot_v, n_dot_l, alpha);
+            g1_view = smith_g1(n_dot_v, alpha);
+        }
+        let g2 = visibility * 4.0 * n_dot_v * n_dot_l;
+        out.dir = specular_basis * light_specular;
         out.weight = pt_layered_base_fresnel(
             v_dot_h, base_color, metallic, material,
-        ) * g2 / max(smith_g1(n_dot_v, alpha) * specular_probability, 1e-6);
+        ) * g2 / max(g1_view * specular_probability, 1e-6);
         if (u.cfg.x >= 2.0) {
             out.weight = min(out.weight, vec3<f32>(4.0));
         }
         out.valid = true;
         return out;
     }
+    let diffuse_basis = onb(n);
+    let view_diffuse = vec3<f32>(
+        dot(view, diffuse_basis[0]), dot(view, diffuse_basis[1]), dot(view, n),
+    );
     let radius = sqrt(sample.x);
     let phi = 6.2831853 * sample.y;
-    let light_tangent = vec3<f32>(
+    let light_diffuse = vec3<f32>(
         radius * cos(phi),
         radius * sin(phi),
         sqrt(max(0.0, 1.0 - sample.x)),
     );
-    let n_dot_l = max(light_tangent.z, 1e-4);
-    let half_raw = view_tangent + light_tangent;
+    let n_dot_l = max(light_diffuse.z, 1e-4);
+    let half_raw = view_diffuse + light_diffuse;
     var l_dot_h = 0.0;
     if (dot(half_raw, half_raw) > 1e-8) {
-        l_dot_h = max(dot(light_tangent, normalize(half_raw)), 0.0);
+        l_dot_h = max(dot(light_diffuse, normalize(half_raw)), 0.0);
     }
     let diffuse_albedo = base_color * (1.0 - metallic)
         * pt_dielectric_transmission(n_dot_v, material)
         * pt_dielectric_transmission(n_dot_l, material);
-    out.dir = basis * light_tangent;
+    out.dir = diffuse_basis * light_diffuse;
     out.weight = diffuse_albedo
         * burley_diffuse(n_dot_l, n_dot_v, l_dot_h, roughness)
         * 3.14159265 / max(1.0 - specular_probability, 1e-6);
@@ -508,6 +786,7 @@ fn pt_sample_layered_base(
 
 fn pt_sample_layered_brdf(
     n: vec3<f32>,
+    tangent: vec4<f32>,
     view: vec3<f32>,
     base_color: vec3<f32>,
     roughness: f32,
@@ -519,7 +798,7 @@ fn pt_sample_layered_brdf(
     }
     if (!pt_layered_has_clearcoat(material)) {
         return pt_sample_layered_undercoat(
-            n, view, base_color, roughness, metallic, material,
+            n, tangent, view, base_color, roughness, metallic, material,
         );
     }
     var out: BrdfSample;
@@ -572,7 +851,7 @@ fn pt_sample_layered_brdf(
     }
 
     out = pt_sample_layered_undercoat(
-        n, view, base_color, roughness, metallic, material,
+        n, tangent, view, base_color, roughness, metallic, material,
     );
     if (!out.valid) {
         return out;
@@ -599,6 +878,7 @@ fn pt_layered_sheen_weight(material: PtLayeredMaterial) -> f32 {
 
 fn pt_layered_undercoat_nee(
     n: vec3<f32>,
+    tangent: vec4<f32>,
     view: vec3<f32>,
     ldir: vec3<f32>,
     ndl: f32,
@@ -608,12 +888,13 @@ fn pt_layered_undercoat_nee(
     material: PtLayeredMaterial,
 ) -> vec3<f32> {
     return pt_layered_base_nee(
-        n, view, ldir, ndl, full_alb, rough, metal, material,
+        n, tangent, view, ldir, ndl, full_alb, rough, metal, material,
     );
 }
 
 fn pt_sample_layered_undercoat(
     n: vec3<f32>,
+    tangent: vec4<f32>,
     view: vec3<f32>,
     base_color: vec3<f32>,
     roughness: f32,
@@ -621,7 +902,7 @@ fn pt_sample_layered_undercoat(
     material: PtLayeredMaterial,
 ) -> BrdfSample {
     return pt_sample_layered_base(
-        n, view, base_color, roughness, metallic, material,
+        n, tangent, view, base_color, roughness, metallic, material,
     );
 }
 "#;
@@ -716,6 +997,7 @@ fn pt_sheen_scale(
 
 fn pt_layered_undercoat_nee(
     n: vec3<f32>,
+    tangent: vec4<f32>,
     view: vec3<f32>,
     ldir: vec3<f32>,
     ndl: f32,
@@ -725,7 +1007,7 @@ fn pt_layered_undercoat_nee(
     material: PtLayeredMaterial,
 ) -> vec3<f32> {
     let base = pt_layered_base_nee(
-        n, view, ldir, ndl, full_alb, rough, metal, material,
+        n, tangent, view, ldir, ndl, full_alb, rough, metal, material,
     );
     if (!pt_layered_has_sheen(material)) {
         return base;
@@ -760,6 +1042,7 @@ fn pt_sample_charlie_half(
 
 fn pt_sample_layered_undercoat(
     n: vec3<f32>,
+    tangent: vec4<f32>,
     view: vec3<f32>,
     base_color: vec3<f32>,
     roughness: f32,
@@ -768,7 +1051,7 @@ fn pt_sample_layered_undercoat(
 ) -> BrdfSample {
     if (!pt_layered_has_sheen(material)) {
         return pt_sample_layered_base(
-            n, view, base_color, roughness, metallic, material,
+            n, tangent, view, base_color, roughness, metallic, material,
         );
     }
     var out: BrdfSample;
@@ -819,7 +1102,7 @@ fn pt_sample_layered_undercoat(
         return out;
     }
     out = pt_sample_layered_base(
-        n, view, base_color, roughness, metallic, material,
+        n, tangent, view, base_color, roughness, metallic, material,
     );
     if (!out.valid) {
         return out;
@@ -848,7 +1131,10 @@ fn layered_kernel_variant(base: &str) -> String {
     replace_once(
         &mut source,
         "    var rough_cur = mr0.g;",
-        "    var rough_cur = mr0.g;\n    var layered_cur = pt_layered_primary_material(p0);",
+        "    var rough_cur = mr0.g;\n\
+         \x20   let layered_primary = pt_layered_primary_surface(p0, n0);\n\
+         \x20   var layered_cur = layered_primary.material;\n\
+         \x20   var layered_tangent_cur = layered_primary.tangent;",
     );
     replace_once(
         &mut source,
@@ -863,7 +1149,7 @@ fn layered_kernel_variant(base: &str) -> String {
          \x20       albedo0, rough_cur, metal_cur, !use_restir,\n\
          \x20   );",
         "    var radiance = pt_layered_direct_light(\n\
-         \x20       p0 + n0 * 0.02, n0, sun_r2, view_cur,\n\
+         \x20       p0 + n0 * 0.02, n0, layered_tangent_cur, sun_r2, view_cur,\n\
          \x20       albedo0, rough_cur, metal_cur, !use_restir, layered_cur,\n\
          \x20   );",
     );
@@ -871,7 +1157,8 @@ fn layered_kernel_variant(base: &str) -> String {
         &mut source,
         "        let s = sample_brdf(n_cur, view_cur, alb_cur, rough_cur, metal_cur);",
         "        let s = pt_sample_layered_brdf(\n\
-         \x20           n_cur, view_cur, alb_cur, rough_cur, metal_cur, layered_cur,\n\
+         \x20           n_cur, layered_tangent_cur, view_cur,\n\
+         \x20           alb_cur, rough_cur, metal_cur, layered_cur,\n\
          \x20       );",
     );
     replace_once(
@@ -881,8 +1168,15 @@ fn layered_kernel_variant(base: &str) -> String {
          \x20           alb_hit, inst.mat_params.x, inst.mat_params.y, true,\n\
          \x20       );",
         "        let layered_hit = pt_layered_materials[hit.instance_custom_data];\n\
+         \x20       var layered_tangent_hit = vec4<f32>(0.0);\n\
+         \x20       if (pt_layered_has_anisotropy(layered_hit)) {\n\
+         \x20           layered_tangent_hit = pt_layered_hit_tangent(\n\
+         \x20               inst.geo, hit.primitive_index, hit.barycentrics,\n\
+         \x20               hit.object_to_world, n_hit,\n\
+         \x20           );\n\
+         \x20       }\n\
          \x20       radiance += throughput * pt_layered_direct_light(\n\
-         \x20           hit_p, n_hit, rand_2f(), -dir,\n\
+         \x20           hit_p, n_hit, layered_tangent_hit, rand_2f(), -dir,\n\
          \x20           alb_hit, inst.mat_params.x, inst.mat_params.y, true, layered_hit,\n\
          \x20       );",
     );
@@ -891,6 +1185,7 @@ fn layered_kernel_variant(base: &str) -> String {
         "        metal_cur = inst.mat_params.y;\n        view_cur = -dir;",
         "        metal_cur = inst.mat_params.y;\n\
          \x20       layered_cur = layered_hit;\n\
+         \x20       layered_tangent_cur = layered_tangent_hit;\n\
          \x20       view_cur = -dir;",
     );
     source
@@ -924,6 +1219,13 @@ impl Renderer {
             .any(PtLayeredMaterialCpu::has_sheen)
     }
 
+    pub(super) fn pt_layered_anisotropy_active(&self) -> bool {
+        self.pt_layered_records
+            .iter()
+            .copied()
+            .any(PtLayeredMaterialCpu::has_anisotropy)
+    }
+
     pub(super) fn set_pt_layered_records(
         &mut self,
         records: Option<Vec<PtLayeredMaterialCpu>>,
@@ -946,11 +1248,13 @@ impl Renderer {
             return;
         }
         let sheen = self.pt_layered_sheen_active();
-        let variant = sheen as usize;
+        let anisotropy = self.pt_layered_anisotropy_active();
+        let resource_variant = sheen as usize;
+        let pipeline_variant = resource_variant | ((anisotropy as usize) << 1);
         if sheen {
             self.ensure_scene_sheen_albedo_lut();
         }
-        if self.pt_layered_layouts[variant].is_none() {
+        if self.pt_layered_layouts[resource_variant].is_none() {
             let mut entries = vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
@@ -973,7 +1277,7 @@ impl Renderer {
                     count: None,
                 });
             }
-            self.pt_layered_layouts[variant] = Some(self.device.create_bind_group_layout(
+            self.pt_layered_layouts[resource_variant] = Some(self.device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
                     label: Some(if sheen {
                         "pt_layered_sheen_layout"
@@ -984,7 +1288,7 @@ impl Renderer {
                 },
             ));
         }
-        if self.pt_layered_pipelines[variant].is_none() {
+        if self.pt_layered_pipelines[pipeline_variant].is_none() {
             let query_diagnostics = std::env::var("BLOOM_GOLDEN_DIAGNOSTICS")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
@@ -996,12 +1300,17 @@ impl Renderer {
             let base_kernel = pt_kernel_variant(query_diagnostics);
             let layered_kernel = layered_kernel_variant(base_kernel.as_ref());
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
                 pt_fault_constants(fault.as_deref()),
                 layered_kernel,
                 texture_variant(self.pt_texture_arrays_enabled),
                 PT_LAYERED_BINDINGS_WGSL,
+                if anisotropy {
+                    "const PT_HAS_SCALAR_ANISOTROPY: bool = true;"
+                } else {
+                    "const PT_HAS_SCALAR_ANISOTROPY: bool = false;"
+                },
                 PT_LAYERED_TRANSPORT_WGSL,
                 if sheen {
                     PT_LAYERED_SHEEN_WGSL
@@ -1022,7 +1331,7 @@ impl Renderer {
             let groups = [
                 self.pt_layout.as_ref(),
                 self.pt_tex_layout.as_ref(),
-                self.pt_layered_layouts[variant].as_ref(),
+                self.pt_layered_layouts[resource_variant].as_ref(),
             ];
             let pipeline_layout =
                 self.device
@@ -1035,20 +1344,23 @@ impl Renderer {
                         bind_group_layouts: &groups,
                         immediate_size: 0,
                     });
-            self.pt_layered_pipelines[variant] = Some(self.device.create_compute_pipeline(
-                &wgpu::ComputePipelineDescriptor {
-                    label: Some(if sheen {
-                        "pt_layered_sheen_pipeline"
-                    } else {
-                        "pt_layered_pipeline"
+            self.pt_layered_pipelines[pipeline_variant] = Some(
+                self.device
+                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some(if anisotropy {
+                            "pt_layered_anisotropy_pipeline"
+                        } else if sheen {
+                            "pt_layered_sheen_pipeline"
+                        } else {
+                            "pt_layered_pipeline"
+                        }),
+                        layout: Some(&pipeline_layout),
+                        module: &shader,
+                        entry_point: Some("cs_main"),
+                        compilation_options: Default::default(),
+                        cache: None,
                     }),
-                    layout: Some(&pipeline_layout),
-                    module: &shader,
-                    entry_point: Some("cs_main"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                },
-            ));
+            );
         }
 
         let needed = PT_LAYERED_RECORD_BYTES * self.pt_layered_records.len() as u64;
@@ -1076,7 +1388,7 @@ impl Renderer {
             );
             self.pt_layered_dirty = false;
         }
-        if self.pt_layered_bgs[variant].is_none() {
+        if self.pt_layered_bgs[resource_variant].is_none() {
             let mut entries = vec![wgpu::BindGroupEntry {
                 binding: 0,
                 resource: self
@@ -1093,14 +1405,14 @@ impl Renderer {
                     ),
                 });
             }
-            self.pt_layered_bgs[variant] =
+            self.pt_layered_bgs[resource_variant] =
                 Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(if sheen {
                         "pt_layered_sheen_bg"
                     } else {
                         "pt_layered_bg"
                     }),
-                    layout: self.pt_layered_layouts[variant].as_ref().unwrap(),
+                    layout: self.pt_layered_layouts[resource_variant].as_ref().unwrap(),
                     entries: &entries,
                 }));
         }
@@ -1270,6 +1582,9 @@ mod tests {
             sheen_authored: true,
             sheen_color_factor: [0.3, 0.1, 0.05],
             sheen_color_texture: Some(texture),
+            anisotropy_authored: true,
+            anisotropy_strength: 0.6,
+            anisotropy_texture: Some(texture),
             ..Default::default()
         };
         let sheen = PtLayeredMaterialCpu::from_material(sheen);
@@ -1280,13 +1595,14 @@ mod tests {
         assert!(sheen.has_sheen() && sheen.has_qualified_transport());
         assert!(clearcoat.has_clearcoat() && clearcoat.has_qualified_transport());
         assert!(specular.has_specular_ior() && specular.has_qualified_transport());
-        assert!(!anisotropy.has_qualified_transport());
+        assert!(anisotropy.has_anisotropy() && anisotropy.has_qualified_transport());
         assert!(textured.active() && !textured.has_qualified_transport());
         assert_eq!(
             textured.header[2],
             crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
                 | crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE
                 | crate::models::MaterialLayeredPbr::SHEEN_LOBE
+                | crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE
         );
     }
 
@@ -1295,6 +1611,9 @@ mod tests {
         assert!(PT_LAYERED_BINDINGS_WGSL.contains("@group(2) @binding(0)"));
         assert!(!PT_LAYERED_SHEEN_DISABLED_WGSL.contains("@binding(1)"));
         assert!(PT_LAYERED_SHEEN_WGSL.contains("@group(2) @binding(1)"));
+        assert!(PT_LAYERED_TRANSPORT_WGSL.contains("PT_HAS_SCALAR_ANISOTROPY"));
+        assert!(PT_LAYERED_TRANSPORT_WGSL.contains("slot * PT_VSTRIDE + 20u"));
+        assert!(PT_LAYERED_TRANSPORT_WGSL.contains("hit.object_to_world"));
         assert!(!pt_kernel_variant(false).contains("pt_layered_materials"));
     }
 
@@ -1303,7 +1622,9 @@ mod tests {
         for diagnostics in [false, true] {
             let base = pt_kernel_variant(diagnostics);
             let specialized = layered_kernel_variant(base.as_ref());
-            assert!(specialized.contains("var layered_cur = pt_layered_primary_material(p0);"));
+            assert!(
+                specialized.contains("let layered_primary = pt_layered_primary_surface(p0, n0);")
+            );
             assert_eq!(specialized.matches("pt_sample_layered_brdf(").count(), 1);
             assert_eq!(
                 specialized
@@ -1312,6 +1633,7 @@ mod tests {
                 1
             );
             assert!(specialized.contains("layered_cur = layered_hit;"));
+            assert!(specialized.contains("layered_tangent_cur = layered_tangent_hit;"));
             assert_eq!(base.matches("pt_layered_").count(), 0);
         }
     }

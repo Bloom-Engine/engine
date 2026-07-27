@@ -74,11 +74,12 @@ multi-bounce colour bleed.
   `bloom-reference/src/tracer.rs` so the two tracers stay comparable.
 - **Layered-material sidecar**: a 96-byte scalar record and group-2 pipeline
   are created only after PT encounters a qualified layered TLAS instance.
-  Scalar clearcoat, dielectric specular/IOR, and Charlie sheen direct lighting
-  and bounce sampling match the CPU reference's reciprocal GGX, F0/F90,
-  diffuse-complement, and sheen directional-albedo contracts, including their
-  combined composition. The 32 KiB sheen LUT and its second group-2 variant are
-  lazy even for clearcoat/specular scenes. The base kernel, shared GI record,
+  Scalar clearcoat, dielectric specular/IOR, Charlie sheen, and anisotropic
+  GGX direct lighting and bounce sampling match the CPU reference's reciprocal
+  GGX, F0/F90, diffuse-complement, directional-albedo, authored-tangent, and
+  visible-normal sampling contracts, including their combined composition.
+  Sheen and anisotropy select independently lazy, constant-folded code
+  variants; only sheen adds the 32 KiB LUT. The base kernel, shared GI record,
   bindings, and cost remain unchanged; unqualified or texture-bearing lobes
   continue to dispatch the exact base pipeline until complete transport is
   qualified.

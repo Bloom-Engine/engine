@@ -640,14 +640,27 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             return Ok(None);
         };
         build_pt_scene(&mut eng);
+        // Replace the material target with the same cube carrying an explicit
+        // per-face tangent. The base PT shader ignores this attribute, while
+        // scalar anisotropy must recover it from the geometry megabuffer at
+        // both the primary and bounce intersections.
+        let (mut vertices, indices) = cube_verts(0.5, [0.85, 0.2, 0.15, 1.0]);
+        for vertex in &mut vertices {
+            vertex.tangent = if vertex.normal[0].abs() > 0.5 {
+                [0.0, 0.0, 1.0, 1.0]
+            } else {
+                [1.0, 0.0, 0.0, 1.0]
+            };
+        }
+        let node = eng
+            .scene
+            .nodes
+            .iter()
+            .nth(1)
+            .map(|(handle, _)| handle)
+            .expect("PT scene has a test object");
+        eng.scene.update_geometry(node, vertices, indices);
         if let Some(material) = layered {
-            let node = eng
-                .scene
-                .nodes
-                .iter()
-                .nth(1)
-                .map(|(handle, _)| handle)
-                .expect("PT scene has a test object");
             eng.scene.set_material_layered_pbr(node, material);
         }
         eng.renderer.set_path_tracing(1);
@@ -710,9 +723,10 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         return;
     };
     let (neutral, neutral_paths) = render_variant(Some(MaterialLayeredPbr {
-        anisotropy_authored: true,
-        anisotropy_strength: 0.6,
-        anisotropy_rotation: 0.3,
+        iridescence_authored: true,
+        iridescence_factor: 0.65,
+        iridescence_thickness_minimum: 120.0,
+        iridescence_thickness_maximum: 360.0,
         ..Default::default()
     }))
     .expect("neutral layered PT variant initializes")
@@ -743,6 +757,22 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     }))
     .expect("sheen PT variant initializes")
     .expect("same ray-query adapter remains available");
+    let (anisotropy, anisotropy_paths) = render_variant(Some(MaterialLayeredPbr {
+        anisotropy_authored: true,
+        anisotropy_strength: 0.75,
+        anisotropy_rotation: 0.3,
+        ..Default::default()
+    }))
+    .expect("anisotropy PT variant initializes")
+    .expect("same ray-query adapter remains available");
+    let (anisotropy_rotated, anisotropy_rotated_paths) = render_variant(Some(MaterialLayeredPbr {
+        anisotropy_authored: true,
+        anisotropy_strength: 0.75,
+        anisotropy_rotation: 0.3 + std::f32::consts::FRAC_PI_2,
+        ..Default::default()
+    }))
+    .expect("rotated anisotropy PT variant initializes")
+    .expect("same ray-query adapter remains available");
     let (combined, combined_paths) = render_variant(Some(MaterialLayeredPbr {
         clearcoat_authored: true,
         clearcoat_factor: 0.7,
@@ -755,6 +785,9 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         sheen_authored: true,
         sheen_color_factor: [0.35, 0.1, 0.04],
         sheen_roughness_factor: 0.4,
+        anisotropy_authored: true,
+        anisotropy_strength: 0.6,
+        anisotropy_rotation: 0.3,
         ..Default::default()
     }))
     .expect("combined clearcoat/specular PT variant initializes")
@@ -773,22 +806,48 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     assert!(neutral_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
     assert!(clearcoat_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(clearcoat_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
+    assert!(
+        clearcoat_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":false")
+    );
     assert!(clearcoat_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(clearcoat_paths.contains("\"path_tracing_active_instance_count\":1"));
     assert!(specular_ior_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(specular_ior_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
+    assert!(
+        specular_ior_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":false")
+    );
     assert!(specular_ior_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(specular_ior_paths.contains("\"path_tracing_active_instance_count\":1"));
     assert!(sheen_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_sheen_specialization_initialized\":true"));
+    assert!(sheen_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":false"));
     assert!(sheen_paths.contains("\"sheen_lut_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_active_instance_count\":1"));
+    assert!(anisotropy_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(anisotropy_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
+    assert!(
+        anisotropy_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":true")
+    );
+    assert!(anisotropy_paths.contains("\"sheen_lut_initialized\":false"));
+    assert!(anisotropy_paths.contains("\"path_tracing_active_instance_count\":1"));
+    assert!(anisotropy_rotated_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(anisotropy_rotated_paths
+        .contains("\"path_tracing_anisotropy_specialization_initialized\":true"));
+    assert!(anisotropy_rotated_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(combined_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(combined_paths.contains("\"path_tracing_sheen_specialization_initialized\":true"));
+    assert!(combined_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":true"));
     assert!(combined_paths.contains("\"path_tracing_active_instance_count\":1"));
 
     assert_transport_response("clearcoat", &base, &clearcoat);
     assert_transport_response("specular/IOR", &base, &specular_ior);
     assert_transport_response("sheen", &base, &sheen);
+    assert_transport_response("anisotropy", &base, &anisotropy);
+    assert_transport_response("rotated anisotropy", &base, &anisotropy_rotated);
+    let rotation_response = calculate_diff_metrics(&anisotropy, &anisotropy_rotated, W, H);
+    assert!(
+        rotation_response.mean_rgb >= 0.02,
+        "anisotropy rotation did not turn the path-traced highlight: {rotation_response:?}"
+    );
     assert_transport_response("combined scalar lobes", &base, &combined);
 }

@@ -190,21 +190,25 @@ mode produce bit-exact images, while the BRDF-energy and reprojection fault
 controls still fail their respective goldens. The realtime base shader already
 used the corrected Smith visibility.
 
-Scalar clearcoat, dielectric specular/IOR, and sheen path transport now live in
-lazy group-2 specializations. They identify the primary TLAS instance without
-growing the G-buffer, apply the CPU reference's reciprocal fixed-IOR clearcoat,
-KHR_materials_specular F0/F90, and energy-compensated Charlie sheen contracts
-for direct light, and sample every qualified lobe at each bounce. Clearcoat
-composes over the modified base and sheen with reciprocal attenuation, and pure
-metals remain independent of dielectric specular/IOR settings.
+Scalar clearcoat, dielectric specular/IOR, sheen, and anisotropic-GGX path
+transport now live in lazy group-2 specializations. They identify the primary
+TLAS instance without growing the G-buffer, apply the CPU reference's
+reciprocal fixed-IOR clearcoat, KHR_materials_specular F0/F90,
+energy-compensated Charlie sheen, and Burley anisotropy contracts for direct
+light, and sample every qualified lobe at each bounce. Anisotropy reconstructs
+the retained vertex tangent and mirrored handedness from the existing geometry
+megabuffer and committed object-to-world transform. Clearcoat composes over the
+modified base and sheen with reciprocal attenuation, and pure metals remain
+independent of dielectric specular/IOR settings.
 
 A scene without a qualified record dispatches the original base pipeline
-exactly. Clearcoat/specular-only scenes bind one sidecar buffer; only a scene
-with scalar sheen creates the separate sheen specialization and 32 KiB
+exactly. Clearcoat/specular-only scenes bind one sidecar buffer; scalar
+anisotropy selects a separately constant-folded code variant without adding a
+resource, and only a scene with scalar sheen creates the 32 KiB
 directional-albedo LUT. The sidecar marks texture-bearing lobes separately and
 leaves each one on established base PT semantics rather than applying an
-incorrect scalar approximation. Textured factors, clearcoat normals,
-anisotropy, and iridescence remain separate follow-up slices.
+incorrect scalar approximation. Textured factors, clearcoat normals, and
+iridescence remain separate follow-up slices.
 
 ## Runtime material-record ABI
 
@@ -278,12 +282,14 @@ the group-2 pipeline and allocates/binds its storage buffer. Base-only scenes
 retain the established shader source, pipeline, bindings, instance record, and
 GPU cost.
 
-The foundation specialization is intentionally behavior-neutral. A Metal
-ray-query test renders the same seeded scene through the base and sidecar
-pipelines, requires byte-identical output, and verifies telemetry reports zero
-base allocation versus one active layered instance. Clearcoat, specular/IOR,
-sheen, anisotropy, and iridescence sampling/evaluation are the next reviewed
-transport slice; texture authoring and texture-sampled PT parity follow that.
+Metal ray-query qualification renders the same seeded scene through base,
+clearcoat, specular/IOR, sheen, anisotropy, and combined scalar pipelines. It
+requires byte-identical output for an unqualified lobe, visible bounded-energy
+responses for every qualified lobe, and a distinct highlight after a 90-degree
+anisotropy rotation on explicit vertex tangents. Telemetry verifies that sheen
+and anisotropy code variants remain independently lazy. Iridescence is the next
+reviewed scalar transport slice; texture authoring and texture-sampled PT
+parity follow that.
 
 ## Public authoring API
 

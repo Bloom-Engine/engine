@@ -905,7 +905,7 @@ pub struct Renderer {
     pub pt_pipeline: Option<wgpu::ComputePipeline>,
     pub pt_layout: Option<wgpu::BindGroupLayout>,
     /// Lazy group-2 specialization. Base-only PT never creates or binds it.
-    pt_layered_pipelines: [Option<wgpu::ComputePipeline>; 2],
+    pt_layered_pipelines: [Option<wgpu::ComputePipeline>; 4],
     pt_layered_layouts: [Option<wgpu::BindGroupLayout>; 2],
     pt_layered_bgs: [Option<wgpu::BindGroup>; 2],
     pt_layered_instance_buffer: Option<wgpu::Buffer>,
@@ -7740,7 +7740,7 @@ impl Renderer {
             probe_trace_hw_bg_cache: [None, None],
             pt_pipeline,
             pt_layout,
-            pt_layered_pipelines: [None, None],
+            pt_layered_pipelines: [None, None, None, None],
             pt_layered_layouts: [None, None],
             pt_layered_bgs: [None, None],
             pt_layered_instance_buffer: None,

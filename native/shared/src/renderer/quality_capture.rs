@@ -655,11 +655,21 @@ impl Renderer {
             "false"
         });
         out.push_str(",\"path_tracing_sheen_specialization_initialized\":");
-        out.push_str(if self.pt_layered_pipelines[1].is_some() {
-            "true"
-        } else {
-            "false"
-        });
+        out.push_str(
+            if self.pt_layered_pipelines[1].is_some() || self.pt_layered_pipelines[3].is_some() {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        out.push_str(",\"path_tracing_anisotropy_specialization_initialized\":");
+        out.push_str(
+            if self.pt_layered_pipelines[2].is_some() || self.pt_layered_pipelines[3].is_some() {
+                "true"
+            } else {
+                "false"
+            },
+        );
         out.push_str(",\"path_tracing_active_instance_count\":");
         out.push_str(
             &self

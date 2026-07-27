@@ -73,6 +73,9 @@ impl Renderer {
         // transport is qualified, preserving the exact base path otherwise.
         let layered_active = self.pt_layered_transport_active();
         let layered_sheen = self.pt_layered_sheen_active();
+        let layered_anisotropy = layered_active && self.pt_layered_anisotropy_active();
+        let layered_pipeline_variant =
+            layered_sheen as usize | ((layered_anisotropy as usize) << 1);
         if layered_active {
             self.ensure_pt_layered_resources();
         }
@@ -527,7 +530,7 @@ impl Renderer {
                 timestamp_writes: ts,
             });
             pass.set_pipeline(if layered_active {
-                self.pt_layered_pipelines[layered_sheen as usize]
+                self.pt_layered_pipelines[layered_pipeline_variant]
                     .as_ref()
                     .unwrap()
             } else {
