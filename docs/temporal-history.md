@@ -155,7 +155,30 @@ four 256-byte-row-aligned RGBA8 buffers. Both are released after PNG encoding,
 so persistent diagnostic memory is zero. These values and the one-pass count
 are reported under `temporal_history.diagnostic_*`.
 
+## Camera-motion sequence gate
+
+The headless GPU corpus now evaluates a sequence rather than only a final
+still. It isolates TAA/TSR from unrelated temporal effects and covers:
+
+- a camera cut combined with a discontinuous FOV change;
+- a 1.2-radian fast rotation followed by 24 stationary recovery frames;
+- an eight-frame subpixel pan.
+
+The cut frame must be byte-identical to a fresh-history frame at the same
+camera. Fast-rotation recovery is compared with the mean of a settled
+16-frame Halton cycle: mean RGB error must contract within four frames,
+`>32/255` coherent outliers must cover at most 2% then, and severe
+`>64/255` trails must remain below 0.5% after at most four frames. The settled
+cycle's mean variation is bounded to 2 RGB levels. Slow-pan pairwise variation
+is bounded to 4 RGB levels with at most 3% coherent outliers.
+
+Each run reports temporal SSIM, mean variation, coherent and severe outlier
+fractions, ghost-trail duration, and the diagnostic rejection-reason ratio.
+These are relative sequence gates, so they do not require a GPU-family-specific
+still-image baseline.
+
 ## Remaining #135 work
 
 Extend shared reason/confidence semantics to SSR/GI/PT where their
-representations match, then build the sequence-based motion corpus.
+representations match, then add rigid/skinned/alpha-tested/emissive,
+transparent, dynamic-resolution, and resize sequences.

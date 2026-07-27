@@ -404,6 +404,46 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
                 pixels.pixels().any(|pixel| pixel != first),
                 "rejection map must distinguish at least two per-pixel outcomes"
             );
+            let palette = [
+                [64u8, 64, 64],
+                [255, 13, 5],
+                [0, 230, 255],
+                [255, 0, 204],
+                [255, 191, 0],
+                [13, 64, 255],
+                [13, 166, 26],
+            ];
+            let mut counts = [0usize; 7];
+            for pixel in pixels.pixels() {
+                let nearest = palette
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, color)| {
+                        (0..3)
+                            .map(|channel| {
+                                let delta = i32::from(pixel[channel]) - i32::from(color[channel]);
+                                delta * delta
+                            })
+                            .sum::<i32>()
+                    })
+                    .unwrap()
+                    .0;
+                counts[nearest] += 1;
+            }
+            let pixel_count = u64::from(pixels.width()) * u64::from(pixels.height());
+            let non_accepted = 1.0 - counts[6] as f64 / pixel_count as f64;
+            eprintln!(
+                "temporal-corpus rejection_ratio={:.4}% reasons={counts:?}",
+                non_accepted * 100.0
+            );
+            assert!(
+                counts[1] > 0,
+                "motion capture must expose off-screen history"
+            );
+            assert!(
+                counts[4] > 0,
+                "motion capture must exercise history clamping"
+            );
         }
     }
     assert!(eng.renderer.pending_quality_capture_dir.is_none());
@@ -416,4 +456,183 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
     } else {
         let _ = std::fs::remove_dir_all(directory);
     }
+}
+
+#[test]
+fn camera_motion_sequence_bounds_ghosting_flicker_and_cut_residue() {
+    fn severe_pixel_fraction(reference: &[u8], candidate: &[u8]) -> f64 {
+        let severe = reference
+            .chunks_exact(4)
+            .zip(candidate.chunks_exact(4))
+            .filter(|(a, b)| (0..3).any(|channel| a[channel].abs_diff(b[channel]) > 64))
+            .count();
+        severe as f64 / (reference.len() / 4) as f64
+    }
+
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(true);
+    r.set_render_scale(1.0);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+
+    let draw_pose = |eng: &mut EngineState, angle: f32, fov: f32| {
+        let radius = 7.2;
+        let r = &mut eng.renderer;
+        r.set_clear_color(8.0, 10.0, 18.0, 255.0);
+        r.begin_mode_3d(
+            angle.sin() * radius,
+            2.6,
+            angle.cos() * radius,
+            0.0,
+            0.7,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            fov,
+            0.0,
+        );
+        r.add_directional_light(-0.4, -1.0, -0.2, 1.0, 0.95, 0.88, 2.0);
+        r.add_point_light(0.0, 2.5, -1.5, 8.0, 1.0, 0.15, 0.05, 7.0);
+        r.draw_plane(0.0, 0.0, 0.0, 14.0, 14.0, 35.0, 42.0, 55.0, 255.0);
+        r.draw_cube(-1.5, 0.9, 0.2, 1.8, 1.8, 1.8, 240.0, 42.0, 35.0, 255.0);
+        r.draw_cube(1.2, 1.5, -1.2, 1.2, 3.0, 1.2, 25.0, 210.0, 245.0, 255.0);
+        r.draw_sphere(0.3, 0.8, 1.5, 0.8, 245.0, 220.0, 35.0, 255.0);
+    };
+    let advance = |eng: &mut EngineState, frames: u32, angle: f32, fov: f32| {
+        for _ in 0..frames {
+            eng.begin_frame();
+            draw_pose(eng, angle, fov);
+            eng.end_frame();
+        }
+    };
+    let capture = |eng: &mut EngineState, angle: f32, fov: f32| {
+        render(eng, 1, |eng| draw_pose(eng, angle, fov)).2
+    };
+
+    let old_angle = -0.55;
+    let new_angle = 0.65;
+    eng.renderer.reset_temporal_history();
+    let fresh_new_pose = capture(&mut eng, new_angle, 58.0);
+    advance(&mut eng, 8, old_angle, 42.0);
+    eng.renderer.reset_temporal_history();
+    let cut_new_pose = capture(&mut eng, new_angle, 58.0);
+    let cut_metrics = calculate_diff_metrics(&fresh_new_pose, &cut_new_pose, W, H);
+    assert_eq!(
+        cut_metrics.max_diff, 0,
+        "an explicit camera cut retained pixels from the prior camera"
+    );
+
+    advance(&mut eng, 8, old_angle, 42.0);
+    let mut fast_rotation = Vec::new();
+    for _ in 0..24 {
+        fast_rotation.push(capture(&mut eng, new_angle, 42.0));
+    }
+    let mut stable_sum = vec![0u32; fast_rotation[0].len()];
+    for frame in &fast_rotation[8..] {
+        for (sum, value) in stable_sum.iter_mut().zip(frame) {
+            *sum += u32::from(*value);
+        }
+    }
+    let stable_reference = stable_sum
+        .into_iter()
+        .map(|sum| ((sum + 8) / 16) as u8)
+        .collect::<Vec<_>>();
+    let convergence = fast_rotation[..8]
+        .iter()
+        .map(|frame| calculate_diff_metrics(&stable_reference, frame, W, H))
+        .collect::<Vec<_>>();
+    let severe_trails = fast_rotation[..8]
+        .iter()
+        .map(|frame| severe_pixel_fraction(&stable_reference, frame))
+        .collect::<Vec<_>>();
+    for (index, metrics) in convergence.iter().enumerate() {
+        eprintln!(
+            "temporal-corpus fast-rotation frame={index} mean_rgb={:.4} \
+             outliers={:.4}% severe_trail={:.4}% ssim={:.6}",
+            metrics.mean_rgb,
+            metrics.outlier_pixel_fraction * 100.0,
+            severe_trails[index] * 100.0,
+            metrics.ssim,
+        );
+    }
+    assert!(
+        convergence[4].mean_rgb <= convergence[0].mean_rgb * 0.6 + 0.25,
+        "fast-rotation history did not converge within four recovery frames"
+    );
+    assert!(
+        convergence[4].outlier_pixel_fraction <= 0.02,
+        "fast-rotation ghost trail exceeded 2% of pixels after four frames"
+    );
+    let ghost_trail_frames = severe_trails
+        .iter()
+        .enumerate()
+        .find(|(index, _)| {
+            severe_trails[*index..]
+                .iter()
+                .all(|fraction| *fraction <= 0.005)
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(severe_trails.len());
+    eprintln!("temporal-corpus ghost_trail_frames={ghost_trail_frames}");
+    assert!(
+        ghost_trail_frames <= 4,
+        "severe fast-rotation trail persisted beyond four frames"
+    );
+    let stable_metrics = fast_rotation[8..]
+        .iter()
+        .map(|frame| calculate_diff_metrics(&stable_reference, frame, W, H))
+        .collect::<Vec<_>>();
+    let stable_mean = stable_metrics
+        .iter()
+        .map(|metrics| metrics.mean_rgb)
+        .sum::<f64>()
+        / stable_metrics.len() as f64;
+    eprintln!("temporal-corpus stable-reference mean_flicker={stable_mean:.4}");
+    assert!(
+        stable_mean <= 2.0,
+        "settled TAA jitter cycle did not converge to a stable estimate"
+    );
+
+    eng.renderer.reset_temporal_history();
+    advance(&mut eng, 8, 0.0, 50.0);
+    let mut slow_pan = Vec::new();
+    for frame in 0..8 {
+        slow_pan.push(capture(&mut eng, frame as f32 * 0.0025, 50.0));
+    }
+    let slow_deltas = slow_pan
+        .windows(2)
+        .map(|pair| calculate_diff_metrics(&pair[0], &pair[1], W, H))
+        .collect::<Vec<_>>();
+    let mean_flicker = slow_deltas
+        .iter()
+        .map(|metrics| metrics.mean_rgb)
+        .sum::<f64>()
+        / slow_deltas.len() as f64;
+    let max_outliers = slow_deltas
+        .iter()
+        .map(|metrics| metrics.outlier_pixel_fraction)
+        .fold(0.0f64, f64::max);
+    eprintln!(
+        "temporal-corpus slow-pan mean_flicker={mean_flicker:.4} \
+         max_outliers={:.4}%",
+        max_outliers * 100.0,
+    );
+    assert!(
+        mean_flicker <= 4.0,
+        "slow-pan temporal flicker is unbounded"
+    );
+    assert!(
+        max_outliers <= 0.03,
+        "slow-pan coherent flicker exceeded 3% of pixels"
+    );
 }
