@@ -4,7 +4,7 @@ import {
   isMouseButtonPressed, closeWindow, beginMode3D, endMode3D,
   disableCursor, getMouseDeltaX, getMouseDeltaY,
 } from "bloom/core";
-import { Color, Key, Camera3D, MouseButton } from "bloom/core";
+import { ColorConstants, Color, Key, Camera3D, MouseButton } from "bloom/core";
 import { drawCube, drawCubeWires } from "bloom/models";
 import { drawText } from "bloom/text";
 import { drawRect } from "bloom/shapes";
@@ -284,15 +284,15 @@ function renderBlocks(): void {
 function drawHUD(): void {
   const cx = SCREEN_WIDTH / 2;
   const cy = SCREEN_HEIGHT / 2;
-  drawRect(cx - 10, cy - 1, 20, 2, Color.White);
-  drawRect(cx - 1, cy - 10, 2, 20, Color.White);
+  drawRect(cx - 10, cy - 1, 20, 2, ColorConstants.White);
+  drawRect(cx - 1, cy - 10, 2, 20, ColorConstants.White);
 
   const blockNames = ["", "Grass", "Dirt", "Stone", "Wood", "Leaves", "Sand", "Water"];
   drawRect(5, SCREEN_HEIGHT - 35, 200, 30, { r: 0, g: 0, b: 0, a: 150 });
-  drawText("Block: " + blockNames[selectedBlock] + " [1-7]", 10, SCREEN_HEIGHT - 30, 18, Color.White);
+  drawText("Block: " + blockNames[selectedBlock] + " [1-7]", 10, SCREEN_HEIGHT - 30, 18, ColorConstants.White);
   drawText(
     "Pos: " + Math.floor(camX).toString() + ", " + Math.floor(camY).toString() + ", " + Math.floor(camZ).toString(),
-    10, 10, 16, Color.White,
+    10, 10, 16, ColorConstants.White,
   );
 }
 
@@ -308,7 +308,7 @@ while (!windowShouldClose()) {
   if (highlightX >= 0) {
     drawCubeWires(
       { x: highlightX + 0.5, y: highlightY + 0.5, z: highlightZ + 0.5 },
-      1.02, 1.02, 1.02, Color.White,
+      1.02, 1.02, 1.02, ColorConstants.White,
     );
   }
   endMode3D();

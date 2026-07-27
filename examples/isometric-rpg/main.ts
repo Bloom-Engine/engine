@@ -5,7 +5,7 @@ import {
   getMouseX, getMouseY, isMouseButtonPressed,
   writeFile, fileExists,
 } from "bloom/core";
-import { Color, Key, Camera2D, MouseButton } from "bloom/core";
+import { ColorConstants, Color, Key, Camera2D, MouseButton } from "bloom/core";
 import {
   drawRect, drawRectLines, drawCircle, drawTriangle,
   checkCollisionPointRec,
@@ -138,7 +138,7 @@ function itemColor(t: number): Color {
   if (t === ITEM_SHIELD) return { r: 100, g: 100, b: 200, a: 255 };
   if (t === ITEM_KEY) return { r: 255, g: 220, b: 50, a: 255 };
   if (t === ITEM_COIN) return { r: 255, g: 200, b: 0, a: 255 };
-  return Color.White;
+  return ColorConstants.White;
 }
 
 function itemName(t: number): string {
@@ -409,7 +409,7 @@ while (!windowShouldClose()) {
     // HP bar
     const barW = TILE_W * camera.zoom * 0.6;
     const hpRatio = npcs[i].hp / npcs[i].maxHp;
-    drawRect(sx - barW / 2, sy - size - 4 + TILE_H * camera.zoom * 0.3, barW * hpRatio, 3, Color.Red);
+    drawRect(sx - barW / 2, sy - size - 4 + TILE_H * camera.zoom * 0.3, barW * hpRatio, 3, ColorConstants.Red);
   }
 
   // Draw player
@@ -424,15 +424,15 @@ while (!windowShouldClose()) {
 
   // HUD panel
   drawRect(0, 0, SCREEN_WIDTH, 45, { r: 20, g: 20, b: 30, a: 220 });
-  drawText(player.name + "  Lv." + level.toString(), 10, 5, 18, Color.White);
+  drawText(player.name + "  Lv." + level.toString(), 10, 5, 18, ColorConstants.White);
   // HP bar
   drawRect(10, 28, 120, 10, { r: 60, g: 0, b: 0, a: 255 });
-  drawRect(10, 28, Math.floor(120 * player.hp / player.maxHp), 10, Color.Red);
-  drawText(player.hp.toString() + "/" + player.maxHp.toString(), 15, 27, 10, Color.White);
+  drawRect(10, 28, Math.floor(120 * player.hp / player.maxHp), 10, ColorConstants.Red);
+  drawText(player.hp.toString() + "/" + player.maxHp.toString(), 15, 27, 10, ColorConstants.White);
 
   drawText("ATK: " + player.attack.toString(), 150, 8, 16, { r: 255, g: 150, b: 50, a: 255 });
   drawText("DEF: " + player.defense.toString(), 240, 8, 16, { r: 50, g: 150, b: 255, a: 255 });
-  drawText("Gold: " + gold.toString(), 330, 8, 16, Color.Yellow);
+  drawText("Gold: " + gold.toString(), 330, 8, 16, ColorConstants.Yellow);
   drawText("EXP: " + exp.toString() + "/" + (level * 20).toString(), 430, 8, 16, { r: 150, g: 255, b: 150, a: 255 });
 
   // Inventory
@@ -442,17 +442,17 @@ while (!windowShouldClose()) {
       if (i > 0) invStr = invStr + ", ";
       invStr = invStr + itemName(inventory[i]);
     }
-    drawText(invStr, 550, 8, 14, Color.LightGray);
+    drawText(invStr, 550, 8, 14, ColorConstants.LightGray);
   }
 
   // Dialogue box
   if (showDialogue) {
     drawRect(50, SCREEN_HEIGHT - 120, SCREEN_WIDTH - 100, 100, { r: 10, g: 10, b: 30, a: 230 });
-    drawRectLines(50, SCREEN_HEIGHT - 120, SCREEN_WIDTH - 100, 100, 2, Color.White);
+    drawRectLines(50, SCREEN_HEIGHT - 120, SCREEN_WIDTH - 100, 100, 2, ColorConstants.White);
     const npcName = npcs[dialogueNpc].name;
-    drawText(npcName, 70, SCREEN_HEIGHT - 110, 20, Color.Yellow);
-    drawText(dialogueText, 70, SCREEN_HEIGHT - 80, 18, Color.White);
-    drawText("[SPACE] to continue", 70, SCREEN_HEIGHT - 35, 14, Color.LightGray);
+    drawText(npcName, 70, SCREEN_HEIGHT - 110, 20, ColorConstants.Yellow);
+    drawText(dialogueText, 70, SCREEN_HEIGHT - 80, 18, ColorConstants.White);
+    drawText("[SPACE] to continue", 70, SCREEN_HEIGHT - 35, 14, ColorConstants.LightGray);
   }
 
   // Message log
@@ -464,8 +464,8 @@ while (!windowShouldClose()) {
   // Death
   if (player.hp <= 0) {
     drawRect(0, SCREEN_HEIGHT / 2 - 40, SCREEN_WIDTH, 80, { r: 0, g: 0, b: 0, a: 200 });
-    drawText("YOU DIED", SCREEN_WIDTH / 2 - measureText("YOU DIED", 50) / 2, SCREEN_HEIGHT / 2 - 30, 50, Color.Red);
-    drawText("Press ENTER to respawn", SCREEN_WIDTH / 2 - measureText("Press ENTER to respawn", 18) / 2, SCREEN_HEIGHT / 2 + 25, 18, Color.LightGray);
+    drawText("YOU DIED", SCREEN_WIDTH / 2 - measureText("YOU DIED", 50) / 2, SCREEN_HEIGHT / 2 - 30, 50, ColorConstants.Red);
+    drawText("Press ENTER to respawn", SCREEN_WIDTH / 2 - measureText("Press ENTER to respawn", 18) / 2, SCREEN_HEIGHT / 2 + 25, 18, ColorConstants.LightGray);
   }
 
   // Controls hint

@@ -4,5 +4,16 @@
   "main": "main.ts",
   "dependencies": {
     "bloom": "file:../../"
+  },
+  "perry": {
+    "allow": {
+      "nativeLibrary": [
+        "bloom/audio",
+        "bloom/core",
+        "bloom/math",
+        "bloom/shapes",
+        "bloom/text"
+      ]
+    }
   }
 }

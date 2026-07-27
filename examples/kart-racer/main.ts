@@ -3,7 +3,7 @@ import {
   clearBackground, setTargetFPS, getDeltaTime, isKeyDown, isKeyPressed,
   closeWindow, beginMode3D, endMode3D,
 } from "bloom/core";
-import { Color, Key, Camera3D } from "bloom/core";
+import { ColorConstants, Color, Key, Camera3D } from "bloom/core";
 import {
   drawCube, drawPlane, drawSphere, drawCubeWires, drawGrid,
 } from "bloom/models";
@@ -305,12 +305,12 @@ while (!windowShouldClose()) {
 
   // Start/finish line
   const startCp = checkpoints[0];
-  drawCube({ x: startCp.x, y: 0.2, z: startCp.z }, 1, 0.3, TRACK_WIDTH, Color.White);
+  drawCube({ x: startCp.x, y: 0.2, z: startCp.z }, 1, 0.3, TRACK_WIDTH, ColorConstants.White);
 
   // Checkpoint markers (small posts on track edges)
   for (let i = 0; i < NUM_CHECKPOINTS; i++) {
     const cp = checkpoints[i];
-    const color = i === 0 ? Color.White : { r: 200, g: 200, b: 50, a: 255 };
+    const color = i === 0 ? ColorConstants.White : { r: 200, g: 200, b: 50, a: 255 };
     drawCube({ x: cp.x, y: 1, z: cp.z - TRACK_WIDTH * 0.5 - 1 }, 0.5, 2, 0.5, color);
     drawCube({ x: cp.x, y: 1, z: cp.z + TRACK_WIDTH * 0.5 + 1 }, 0.5, 2, 0.5, color);
   }
@@ -357,21 +357,21 @@ while (!windowShouldClose()) {
 
   // Speed
   const speedKmh = Math.floor(Math.abs(player.speed) * 3.6);
-  drawText(speedKmh.toString() + " km/h", 10, 10, 22, Color.White);
+  drawText(speedKmh.toString() + " km/h", 10, 10, 22, ColorConstants.White);
 
   // Position
-  drawText(placeSuffix(playerPlace), 200, 10, 22, Color.Yellow);
+  drawText(placeSuffix(playerPlace), 200, 10, 22, ColorConstants.Yellow);
 
   // Lap
   const lapText = "Lap " + Math.min(player.lap + 1, TOTAL_LAPS).toString() + "/" + TOTAL_LAPS.toString();
-  drawText(lapText, 350, 10, 22, Color.White);
+  drawText(lapText, 350, 10, 22, ColorConstants.White);
 
   // Time
-  drawText(formatTime(raceTime), SCREEN_WIDTH - 150, 10, 22, Color.LightGray);
+  drawText(formatTime(raceTime), SCREEN_WIDTH - 150, 10, 22, ColorConstants.LightGray);
 
   // Best lap
   if (bestLapTime > 0) {
-    drawText("Best: " + formatTime(bestLapTime), SCREEN_WIDTH - 150, 35, 16, Color.Green);
+    drawText("Best: " + formatTime(bestLapTime), SCREEN_WIDTH - 150, 35, 16, ColorConstants.Green);
   }
 
   // Countdown
@@ -380,16 +380,16 @@ while (!windowShouldClose()) {
     const countText = countNum > 0 ? countNum.toString() : "GO!";
     const fontSize = 80;
     drawText(countText, SCREEN_WIDTH / 2 - measureText(countText, fontSize) / 2, SCREEN_HEIGHT / 2 - 50, fontSize,
-      countNum <= 1 ? Color.Green : Color.Red);
+      countNum <= 1 ? ColorConstants.Green : ColorConstants.Red);
   }
 
   // Race finish
   if (raceFinished) {
     drawRect(0, SCREEN_HEIGHT / 2 - 60, SCREEN_WIDTH, 120, { r: 0, g: 0, b: 0, a: 200 });
     const finishText = "RACE COMPLETE!";
-    drawText(finishText, SCREEN_WIDTH / 2 - measureText(finishText, 50) / 2, SCREEN_HEIGHT / 2 - 45, 50, Color.Gold);
+    drawText(finishText, SCREEN_WIDTH / 2 - measureText(finishText, 50) / 2, SCREEN_HEIGHT / 2 - 45, 50, ColorConstants.Gold);
     const resultText = "Finished " + placeSuffix(playerPlace) + " — Time: " + formatTime(raceTime);
-    drawText(resultText, SCREEN_WIDTH / 2 - measureText(resultText, 24) / 2, SCREEN_HEIGHT / 2 + 15, 24, Color.White);
+    drawText(resultText, SCREEN_WIDTH / 2 - measureText(resultText, 24) / 2, SCREEN_HEIGHT / 2 + 15, 24, ColorConstants.White);
   }
 
   // Controls hint (first few seconds)
