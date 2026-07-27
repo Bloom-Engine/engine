@@ -850,6 +850,11 @@ pub struct Renderer {
     pub probe_history_textures: [wgpu::Texture; 2],
     pub probe_history_views: [wgpu::TextureView; 2],
     pub probe_history_idx: usize,
+    /// True only after the probe temporal pass wrote a current history.
+    /// `probe_history_idx` points at the next write target after present.
+    /// Kept independent from TAA because SSGI can be disabled or temporarily
+    /// replaced by path tracing.
+    pub probe_history_valid: bool,
 
     /// Ticket 007b — true when the adapter granted
     /// `Features::EXPERIMENTAL_RAY_QUERY` at device creation. Flips the
@@ -7720,6 +7725,7 @@ impl Renderer {
             probe_history_textures,
             probe_history_views,
             probe_history_idx: 0,
+            probe_history_valid: false,
             hw_rt_enabled,
             tlas: None,
             tlas_max_instances: 1024,
@@ -8319,6 +8325,7 @@ impl Renderer {
             self.probe_history_textures = pht;
             self.probe_history_views = phv;
             self.probe_history_idx = 0;
+            self.probe_history_valid = false;
             self.probe_header_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("probe_header_buffer"),
                 size: (pg_w * pg_h) as u64 * std::mem::size_of::<ProbeHeaderCpu>() as u64,
@@ -8608,13 +8615,6 @@ impl Renderer {
     /// Current render-resolution multiplier in [0.5, 1.0].
     pub fn render_scale(&self) -> f32 {
         self.render_scale
-    }
-
-    /// Toggle SSGI (screen-space global illumination) on/off. Off
-    /// (default) = no SSGI pass, zero perf cost. On = single-bounce
-    /// indirect diffuse lighting via screen-space ray marching.
-    pub fn set_ssgi_enabled(&mut self, on: bool) {
-        self.ssgi_enabled = on;
     }
 
     /// Whether path tracing can run at all on this device: it needs the
@@ -9823,19 +9823,6 @@ impl Renderer {
             pass.set_bind_group(0, bg, &[]);
             pass.dispatch_workgroups(vc.div_ceil(64), 1, 1);
         }
-    }
-
-    /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
-    /// Controls the brightness of indirect bounce light.
-    pub fn set_ssgi_intensity(&mut self, intensity: f32) {
-        self.ssgi_intensity = intensity.max(0.0);
-    }
-
-    /// SSGI max march distance in view-space meters (default 20).
-    /// Tune to the scene scale: small for tight rooms, large for
-    /// open-world interiors.
-    pub fn set_ssgi_radius(&mut self, radius: f32) {
-        self.ssgi_radius = radius.max(0.1);
     }
 
     /// Toggle depth of field on/off. Off (default) = no DoF pass,
@@ -12589,7 +12576,7 @@ impl Renderer {
         // Swap probe-history ping-pong so next frame reads what we
         // just blended as the "previous" history and writes to the
         // other buffer. Ticket 007a.
-        if self.ssgi_enabled {
+        if self.ssgi_enabled && !self.pt_owns_frame() && self.probe_history_valid {
             self.probe_history_idx = 1 - self.probe_history_idx;
         }
         // Same ping-pong for SSR temporal accumulation.

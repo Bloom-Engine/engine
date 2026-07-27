@@ -6,6 +6,39 @@
 use super::*;
 
 impl Renderer {
+    /// Toggle SSGI (screen-space global illumination) on/off. Off means no
+    /// probe work; either transition invalidates radiance from the old route.
+    pub fn set_ssgi_enabled(&mut self, enabled: bool) {
+        if self.ssgi_enabled != enabled {
+            self.ssgi_enabled = enabled;
+            self.probe_history_idx = 0;
+            self.probe_history_valid = false;
+        }
+    }
+
+    /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
+    /// Controls the brightness of indirect bounce light.
+    pub fn set_ssgi_intensity(&mut self, intensity: f32) {
+        let intensity = intensity.max(0.0);
+        if self.ssgi_intensity != intensity {
+            self.ssgi_intensity = intensity;
+            self.probe_history_idx = 0;
+            self.probe_history_valid = false;
+        }
+    }
+
+    /// SSGI max march distance in view-space meters (default 20).
+    /// Tune to the scene scale: small for tight rooms, large for
+    /// open-world interiors.
+    pub fn set_ssgi_radius(&mut self, radius: f32) {
+        let radius = radius.max(0.1);
+        if self.ssgi_radius != radius {
+            self.ssgi_radius = radius;
+            self.probe_history_idx = 0;
+            self.probe_history_valid = false;
+        }
+    }
+
     pub(super) fn record_ssgi_passes(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -509,10 +542,10 @@ impl Renderer {
             }
 
             // ---- temporal (EMA) ----
-            // First frame forces alpha=1 so the history is seeded from
-            // the current trace rather than blending against a zero clear.
+            // Invalid SSGI history is replaced independently of the TAA
+            // counter: the effects have different enable/ownership lifetimes.
             let force_refresh =
-                if self.taa_frame_index == 0 || self.transparent_gi_force_probe_refresh {
+                if !self.probe_history_valid || self.transparent_gi_force_probe_refresh {
                     1.0_f32
                 } else {
                     0.0_f32
@@ -573,6 +606,7 @@ impl Renderer {
                 );
                 pass.dispatch_workgroups(gw, gh, 1);
             }
+            self.probe_history_valid = true;
 
             // ---- resolve ----
             let resolve_params = ProbeResolveParams {
@@ -646,6 +680,9 @@ impl Renderer {
             );
             pass.draw(0..3, 0..1);
         } else {
+            // Suppressed frames do not produce probe history. This also
+            // catches progressive PT changing ownership without a mode change.
+            self.probe_history_valid = false;
             // SSGI disabled — clear the resolve target so downstream
             // composite reads contribute zero.
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

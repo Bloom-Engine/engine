@@ -8,13 +8,15 @@ use super::*;
 
 impl Renderer {
     /// Path-tracing mode request (0 off / 1 progressive / 2 realtime).
-    /// Ownership transitions invalidate raster SSR history.
+    /// Ownership transitions invalidate raster SSR and SSGI history.
     pub fn set_path_tracing(&mut self, mode: u32) {
         let mode = mode.min(2);
         if self.pt_mode != mode {
             self.pt_mode = mode;
             self.ssr_history_idx = 0;
             self.ssr_history_valid = false;
+            self.probe_history_idx = 0;
+            self.probe_history_valid = false;
         }
     }
 

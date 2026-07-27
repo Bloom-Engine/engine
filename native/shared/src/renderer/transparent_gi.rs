@@ -120,6 +120,8 @@ impl Renderer {
             // Probe history and the long-lived WSRC encode the old visibility
             // representation. Refresh them on the exact frame the route flips.
             self.transparent_gi_force_probe_refresh = true;
+            self.probe_history_idx = 0;
+            self.probe_history_valid = false;
             self.wsrc_built = [false; WSRC_CASCADE_COUNT as usize];
             self.scene_sdf_clipmap_rebake_needed = true;
         }

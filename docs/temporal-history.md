@@ -56,8 +56,22 @@ SSR now owns `ssr_history_valid` independently of TAA:
 Telemetry exposes `temporal_history.ssr_valid` and `ssr_index`. Unit and
 headless-GPU tests pin initialization and every transition above.
 
+## SSGI implementation
+
+SSGI now owns `probe_history_valid` independently of TAA:
+
+- invalid history uses the existing force-refresh route (`alpha = 1.0`);
+- valid history keeps the existing variance-adaptive four-frame EMA;
+- resize, SSGI toggles, intensity/radius changes, transparent-GI route changes,
+  and PT ownership invalidate it;
+- suppressed frames neither preserve validity nor advance the probe ping-pong;
+- the existing two 3D history images, shader, pass count, and steady-state
+  filter are unchanged.
+
+Telemetry exposes `temporal_history.ssgi_probe_valid` and `ssgi_probe_index`.
+
 ## Remaining #135 work
 
-The next slices should give TAA/TSR, SSGI, PT, exposure, and any future temporal
-effect the same explicit lifetime rules, then add camera-cut/FOV-change resets,
+The next slices should give TAA/TSR, PT, exposure, and any future temporal effect
+the same explicit lifetime rules, then add camera-cut/FOV-change resets,
 per-pixel rejection diagnostics, and the sequence-based motion corpus.
