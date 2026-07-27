@@ -68,7 +68,10 @@ impl Renderer {
             self.pt_wrote_frame = false;
             return;
         }
-        let layered_active = !self.pt_layered_records.is_empty();
+        // A sidecar record can reserve a future lobe without changing the
+        // current renderer. Select the extra pipeline only for lobes whose
+        // transport is qualified, preserving the exact base path otherwise.
+        let layered_active = self.pt_layered_transport_active();
         if layered_active {
             self.ensure_pt_layered_resources();
         }

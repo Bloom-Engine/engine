@@ -109,6 +109,11 @@ impl PtLayeredMaterialCpu {
     pub(super) fn active(self) -> bool {
         self.header[1] != 0
     }
+
+    fn has_clearcoat(self) -> bool {
+        self.header[1] & crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE != 0
+            && self.clearcoat_ior[0] > 0.0
+    }
 }
 
 /// Append the record parallel to the next TLAS instance. The vector itself is
@@ -149,6 +154,276 @@ struct PtLayeredMaterial {
 var<storage, read> pt_layered_materials: array<PtLayeredMaterial>;
 "#;
 
+const PT_LAYERED_CLEARCOAT_WGSL: &str = r#"
+const PT_LAYERED_CLEARCOAT_LOBE: u32 = 1u;
+
+fn pt_layered_default() -> PtLayeredMaterial {
+    return PtLayeredMaterial(
+        vec4<u32>(1u, 0u, 0u, 0u),
+        vec4<f32>(0.0, 0.0, 1.0, 1.5),
+        vec4<f32>(1.0),
+        vec4<f32>(0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.3, 100.0, 400.0),
+    );
+}
+
+fn pt_layered_has_clearcoat(material: PtLayeredMaterial) -> bool {
+    return material.header.x == 1u
+        && (material.header.y & PT_LAYERED_CLEARCOAT_LOBE) != 0u
+        && material.clearcoat_ior.x > 0.0;
+}
+
+fn pt_clearcoat_fresnel(cos_theta: f32, material: PtLayeredMaterial) -> f32 {
+    let schlick = 0.04 + 0.96 * pow(1.0 - clamp(cos_theta, 0.0, 1.0), 5.0);
+    return clamp(material.clearcoat_ior.x, 0.0, 1.0) * schlick;
+}
+
+fn pt_clearcoat_transmission(cos_theta: f32, material: PtLayeredMaterial) -> f32 {
+    return 1.0 - pt_clearcoat_fresnel(cos_theta, material);
+}
+
+fn pt_clearcoat_alpha(material: PtLayeredMaterial) -> f32 {
+    let perceptual_roughness = max(clamp(material.clearcoat_ior.y, 0.0, 1.0), 0.04);
+    return perceptual_roughness * perceptual_roughness;
+}
+
+fn pt_layered_primary_material(p: vec3<f32>) -> PtLayeredMaterial {
+    let to_surface = p - u.cam_pos.xyz;
+    let distance = length(to_surface);
+    if (distance <= 1e-4) {
+        return pt_layered_default();
+    }
+    var query: ray_query;
+    rayQueryInitialize(
+        &query,
+        accel,
+        RayDesc(
+            0u, 0xFFu, 0.001, distance * 1.02 + 0.1,
+            u.cam_pos.xyz, to_surface / distance,
+        ),
+    );
+    if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+        loop {
+            if (!rayQueryProceed(&query)) { break; }
+        }
+    }
+    let hit = rayQueryGetCommittedIntersection(&query);
+    if (hit.kind == RAY_QUERY_INTERSECTION_NONE) {
+        return pt_layered_default();
+    }
+    return pt_layered_materials[hit.instance_custom_data];
+}
+
+fn pt_layered_nee(
+    n: vec3<f32>,
+    view: vec3<f32>,
+    ldir: vec3<f32>,
+    ndl: f32,
+    full_alb: vec3<f32>,
+    rough: f32,
+    metal: f32,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    let undercoat = nee_diffuse(n, view, ldir, ndl, full_alb, rough, metal)
+        + nee_spec(n, view, ldir, ndl, full_alb, rough, metal);
+    let half_raw = view + ldir;
+    if (!pt_layered_has_clearcoat(material) || dot(half_raw, half_raw) <= 1e-8) {
+        return undercoat;
+    }
+    let half = normalize(half_raw);
+    let ndv = max(dot(n, view), 1e-4);
+    let ndh = max(dot(n, half), 0.0);
+    let vdh = max(dot(view, half), 1e-4);
+    let alpha = pt_clearcoat_alpha(material);
+    let a2 = alpha * alpha;
+    let denominator = ndh * ndh * (a2 - 1.0) + 1.0;
+    let distribution = a2 / (3.14159265 * denominator * denominator);
+    let clearcoat = pt_clearcoat_fresnel(vdh, material)
+        * distribution * v_smith(ndv, ndl, alpha) * ndl;
+    let attenuation = pt_clearcoat_transmission(ndv, material)
+        * pt_clearcoat_transmission(ndl, material);
+    return undercoat * attenuation + vec3<f32>(clearcoat);
+}
+
+fn pt_layered_direct_light(
+    p: vec3<f32>,
+    n: vec3<f32>,
+    sun_r2: vec2<f32>,
+    view: vec3<f32>,
+    full_alb: vec3<f32>,
+    rough: f32,
+    metal: f32,
+    with_points: bool,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    if (!pt_layered_has_clearcoat(material)) {
+        return direct_light(p, n, sun_r2, view, full_alb, rough, metal, with_points);
+    }
+    var result = vec3<f32>(0.0);
+    let sun_ndl = max(dot(n, u.sun_dir.xyz), 0.0);
+    if (sun_ndl > 0.0) {
+        let visibility = sun_visibility(p, n, sun_r2);
+        if (visibility > 0.0) {
+            result += pt_layered_nee(
+                n, view, u.sun_dir.xyz, sun_ndl, full_alb, rough, metal, material,
+            ) * u.sun_color.rgb * visibility;
+        }
+    }
+    let count = u32(u.cfg.z);
+    if (count > 0u && with_points) {
+        let pick = min(u32(rand_f() * f32(count)), count - 1u);
+        let light = u.lights[pick];
+        let to_light = light.pos_range.xyz - p;
+        let distance = length(to_light);
+        let range = light.pos_range.w;
+        if (distance < range && distance > 1e-3) {
+            let direction = to_light / distance;
+            let ndl = dot(n, direction);
+            if (ndl > 0.0 && !occluded(p, direction, distance - 0.02)) {
+                let falloff = 1.0 - distance / range;
+                let incident = light.color_int.rgb * light.color_int.w
+                    * falloff * falloff * f32(count);
+                result += pt_layered_nee(
+                    n, view, direction, ndl, full_alb, rough, metal, material,
+                ) * incident;
+            }
+        }
+    }
+    return result;
+}
+
+fn pt_sample_layered_brdf(
+    n: vec3<f32>,
+    view: vec3<f32>,
+    base_color: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    material: PtLayeredMaterial,
+) -> BrdfSample {
+    if (!pt_layered_has_clearcoat(material)) {
+        return sample_brdf(n, view, base_color, roughness, metallic);
+    }
+    var out: BrdfSample;
+    out.valid = false;
+    let ndv = max(dot(n, view), 0.0);
+    if (ndv <= 0.0) {
+        return out;
+    }
+    let base_f0 = mix(vec3<f32>(0.04), base_color, metallic);
+    let base_f = fresnel_schlick3(ndv, base_f0);
+    let base_specular_weight = (base_f.x + base_f.y + base_f.z) / 3.0;
+    let diffuse_weight = (1.0 - base_specular_weight) * (1.0 - metallic);
+    let clearcoat_weight = pt_clearcoat_fresnel(ndv, material);
+    let clearcoat_probability = clearcoat_weight
+        / (base_specular_weight + diffuse_weight + clearcoat_weight + 1e-6);
+
+    if (rand_f() < clearcoat_probability) {
+        let basis = onb(n);
+        let view_tangent = vec3<f32>(
+            dot(view, basis[0]), dot(view, basis[1]), dot(view, n),
+        );
+        let alpha = pt_clearcoat_alpha(material);
+        let half_tangent = sample_ggx_vndf(view_tangent, alpha, rand_2f());
+        let light_tangent = reflect(-view_tangent, half_tangent);
+        if (light_tangent.z <= 0.0) {
+            return out;
+        }
+        let n_dot_l = light_tangent.z;
+        let n_dot_v = max(view_tangent.z, 1e-4);
+        let v_dot_h = max(dot(view_tangent, half_tangent), 1e-4);
+        let g2 = v_smith(n_dot_v, n_dot_l, alpha)
+            * 4.0 * n_dot_v * n_dot_l;
+        let g1_view = smith_g1(n_dot_v, alpha);
+        out.dir = basis * light_tangent;
+        out.weight = vec3<f32>(
+            pt_clearcoat_fresnel(v_dot_h, material) * g2
+                / max(g1_view * clearcoat_probability, 1e-6),
+        );
+        if (u.cfg.x >= 2.0) {
+            out.weight = min(out.weight, vec3<f32>(4.0));
+        }
+        out.valid = true;
+        return out;
+    }
+
+    out = sample_brdf(n, view, base_color, roughness, metallic);
+    if (!out.valid) {
+        return out;
+    }
+    let n_dot_l = max(dot(n, out.dir), 0.0);
+    let attenuation = pt_clearcoat_transmission(ndv, material)
+        * pt_clearcoat_transmission(n_dot_l, material);
+    out.weight *= attenuation / max(1.0 - clearcoat_probability, 1e-6);
+    if (u.cfg.x >= 2.0) {
+        out.weight = min(out.weight, vec3<f32>(4.0));
+    }
+    return out;
+}
+"#;
+
+fn replace_once(source: &mut String, needle: &str, replacement: &str) {
+    let count = source.matches(needle).count();
+    assert_eq!(
+        count, 1,
+        "layered PT specialization expected one source anchor, found {count}: {needle}"
+    );
+    *source = source.replacen(needle, replacement, 1);
+}
+
+fn clearcoat_kernel_variant(base: &str) -> String {
+    let mut source = base.to_owned();
+    replace_once(
+        &mut source,
+        "    var rough_cur = mr0.g;",
+        "    var rough_cur = mr0.g;\n    var layered_cur = pt_layered_primary_material(p0);",
+    );
+    replace_once(
+        &mut source,
+        "    let use_restir = u.ext.w == 1u && u.cfg.x >= 2.0;",
+        "    let use_restir = u.ext.w == 1u && u.cfg.x >= 2.0\n        \
+         && !pt_layered_has_clearcoat(layered_cur);",
+    );
+    replace_once(
+        &mut source,
+        "    var radiance = direct_light(\n\
+         \x20       p0 + n0 * 0.02, n0, sun_r2, view_cur,\n\
+         \x20       albedo0, rough_cur, metal_cur, !use_restir,\n\
+         \x20   );",
+        "    var radiance = pt_layered_direct_light(\n\
+         \x20       p0 + n0 * 0.02, n0, sun_r2, view_cur,\n\
+         \x20       albedo0, rough_cur, metal_cur, !use_restir, layered_cur,\n\
+         \x20   );",
+    );
+    replace_once(
+        &mut source,
+        "        let s = sample_brdf(n_cur, view_cur, alb_cur, rough_cur, metal_cur);",
+        "        let s = pt_sample_layered_brdf(\n\
+         \x20           n_cur, view_cur, alb_cur, rough_cur, metal_cur, layered_cur,\n\
+         \x20       );",
+    );
+    replace_once(
+        &mut source,
+        "        radiance += throughput * direct_light(\n\
+         \x20           hit_p, n_hit, rand_2f(), -dir,\n\
+         \x20           alb_hit, inst.mat_params.x, inst.mat_params.y, true,\n\
+         \x20       );",
+        "        let layered_hit = pt_layered_materials[hit.instance_custom_data];\n\
+         \x20       radiance += throughput * pt_layered_direct_light(\n\
+         \x20           hit_p, n_hit, rand_2f(), -dir,\n\
+         \x20           alb_hit, inst.mat_params.x, inst.mat_params.y, true, layered_hit,\n\
+         \x20       );",
+    );
+    replace_once(
+        &mut source,
+        "        metal_cur = inst.mat_params.y;\n        view_cur = -dir;",
+        "        metal_cur = inst.mat_params.y;\n\
+         \x20       layered_cur = layered_hit;\n\
+         \x20       view_cur = -dir;",
+    );
+    source
+}
+
 fn texture_variant(enabled: bool) -> &'static str {
     if enabled {
         "const PT_HAS_TEXTURES: bool = true;\n\
@@ -163,6 +438,13 @@ fn texture_variant(enabled: bool) -> &'static str {
 }
 
 impl Renderer {
+    pub(super) fn pt_layered_transport_active(&self) -> bool {
+        self.pt_layered_records
+            .iter()
+            .copied()
+            .any(PtLayeredMaterialCpu::has_clearcoat)
+    }
+
     pub(super) fn set_pt_layered_records(
         &mut self,
         records: Option<Vec<PtLayeredMaterialCpu>>,
@@ -210,13 +492,16 @@ impl Renderer {
                     .and_then(|value| value.parse::<u32>().ok())
                     .is_some_and(|view| (6..=19).contains(&view));
             let fault = std::env::var("BLOOM_PT_TEST_FAULT").ok();
+            let base_kernel = pt_kernel_variant(query_diagnostics);
+            let layered_kernel = clearcoat_kernel_variant(base_kernel.as_ref());
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
                 pt_fault_constants(fault.as_deref()),
-                pt_kernel_variant(query_diagnostics),
+                layered_kernel,
                 texture_variant(self.pt_texture_arrays_enabled),
                 PT_LAYERED_BINDINGS_WGSL,
+                PT_LAYERED_CLEARCOAT_WGSL,
             );
             let shader = self
                 .device
@@ -370,8 +655,66 @@ mod tests {
     }
 
     #[test]
+    fn only_nonzero_qualified_clearcoat_selects_layered_transport() {
+        let sheen = crate::models::MaterialLayeredPbr::from_authoring_factors(
+            crate::models::MaterialLayeredPbr::SHEEN_LOBE,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            [1.0; 3],
+            1.5,
+            [0.3, 0.1, 0.05],
+            0.4,
+            0.0,
+            0.0,
+            0.0,
+            1.3,
+            100.0,
+            400.0,
+        );
+        let clearcoat = crate::models::MaterialLayeredPbr::from_authoring_factors(
+            crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE,
+            0.8,
+            0.2,
+            1.0,
+            1.0,
+            [1.0; 3],
+            1.5,
+            [0.0; 3],
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.3,
+            100.0,
+            400.0,
+        );
+        assert!(!PtLayeredMaterialCpu::from_material(sheen).has_clearcoat());
+        assert!(PtLayeredMaterialCpu::from_material(clearcoat).has_clearcoat());
+    }
+
+    #[test]
     fn specialization_uses_separate_group_without_touching_base_kernel() {
         assert!(PT_LAYERED_BINDINGS_WGSL.contains("@group(2) @binding(0)"));
         assert!(!pt_kernel_variant(false).contains("pt_layered_materials"));
+    }
+
+    #[test]
+    fn clearcoat_specialization_rewrites_every_transport_vertex() {
+        for diagnostics in [false, true] {
+            let base = pt_kernel_variant(diagnostics);
+            let specialized = clearcoat_kernel_variant(base.as_ref());
+            assert!(specialized.contains("var layered_cur = pt_layered_primary_material(p0);"));
+            assert_eq!(specialized.matches("pt_sample_layered_brdf(").count(), 1);
+            assert_eq!(
+                specialized
+                    .matches("throughput * pt_layered_direct_light(")
+                    .count(),
+                1
+            );
+            assert!(specialized.contains("layered_cur = layered_hit;"));
+            assert_eq!(base.matches("pt_layered_").count(), 0);
+        }
     }
 }

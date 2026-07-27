@@ -632,13 +632,15 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
 }
 
 #[test]
-fn layered_path_tracing_sidecar_is_lazy_and_pixel_neutral() {
-    fn render_variant(layered: bool) -> Result<Option<(Vec<u8>, String)>, String> {
+fn layered_path_tracing_clearcoat_is_isolated_and_energy_bounded() {
+    fn render_variant(
+        layered: Option<MaterialLayeredPbr>,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
         let Some((mut eng, _adapter)) = try_engine_rt()? else {
             return Ok(None);
         };
         build_pt_scene(&mut eng);
-        if layered {
+        if let Some(material) = layered {
             let node = eng
                 .scene
                 .nodes
@@ -646,15 +648,7 @@ fn layered_path_tracing_sidecar_is_lazy_and_pixel_neutral() {
                 .nth(1)
                 .map(|(handle, _)| handle)
                 .expect("PT scene has a test object");
-            eng.scene.set_material_layered_pbr(
-                node,
-                MaterialLayeredPbr {
-                    clearcoat_authored: true,
-                    clearcoat_factor: 0.85,
-                    clearcoat_roughness_factor: 0.2,
-                    ..Default::default()
-                },
-            );
+            eng.scene.set_material_layered_pbr(node, material);
         }
         eng.renderer.set_path_tracing(1);
         eng.renderer.set_path_tracing_seed(0);
@@ -663,27 +657,83 @@ fn layered_path_tracing_sidecar_is_lazy_and_pixel_neutral() {
         Ok(Some((rgba, eng.renderer.quality_runtime_paths_json())))
     }
 
+    fn mean_display_luminance(rgba: &[u8]) -> f64 {
+        rgba.chunks_exact(4)
+            .map(|pixel| {
+                0.2126 * f64::from(pixel[0])
+                    + 0.7152 * f64::from(pixel[1])
+                    + 0.0722 * f64::from(pixel[2])
+            })
+            .sum::<f64>()
+            / (rgba.len() / 4) as f64
+    }
+
     let _guard = lock_rt_goldens();
-    let Some((base, base_paths)) = render_variant(false).expect("base PT variant initializes")
+    let Some((base, base_paths)) = render_variant(None).expect("base PT variant initializes")
     else {
         skip_rt_golden(
-            "layered_path_tracing_sidecar_is_lazy_and_pixel_neutral",
+            "layered_path_tracing_clearcoat_is_isolated_and_energy_bounded",
             "no-non-cpu-ray-query-adapter",
         );
         return;
     };
-    let (layered, layered_paths) = render_variant(true)
-        .expect("layered PT variant initializes")
-        .expect("same ray-query adapter remains available");
+    let (neutral, neutral_paths) = render_variant(Some(MaterialLayeredPbr {
+        sheen_authored: true,
+        sheen_color_factor: [0.3, 0.1, 0.05],
+        sheen_roughness_factor: 0.4,
+        ..Default::default()
+    }))
+    .expect("neutral layered PT variant initializes")
+    .expect("same ray-query adapter remains available");
+    let (clearcoat, clearcoat_paths) = render_variant(Some(MaterialLayeredPbr {
+        clearcoat_authored: true,
+        clearcoat_factor: 0.85,
+        clearcoat_roughness_factor: 0.2,
+        ..Default::default()
+    }))
+    .expect("clearcoat PT variant initializes")
+    .expect("same ray-query adapter remains available");
 
-    assert_eq!(
-        base, layered,
-        "binding the behavior-neutral layered sidecar changed PT output"
+    assert!(
+        base == neutral,
+        "an unqualified layered lobe changed PT output before its transport landed"
     );
     assert!(base_paths.contains("\"path_tracing_specialization_initialized\":false"));
     assert!(base_paths.contains("\"path_tracing_active_instance_count\":0"));
     assert!(base_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
-    assert!(layered_paths.contains("\"path_tracing_specialization_initialized\":true"));
-    assert!(layered_paths.contains("\"path_tracing_active_instance_count\":1"));
-    assert!(!layered_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
+    assert!(neutral_paths.contains("\"path_tracing_specialization_initialized\":false"));
+    assert!(neutral_paths.contains("\"path_tracing_active_instance_count\":1"));
+    assert!(neutral_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
+    assert!(clearcoat_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(clearcoat_paths.contains("\"path_tracing_active_instance_count\":1"));
+
+    let response = calculate_diff_metrics(&base, &clearcoat, W, H);
+    let changed_pixels = base
+        .chunks_exact(4)
+        .zip(clearcoat.chunks_exact(4))
+        .filter(|(base, clearcoat)| {
+            (0..3)
+                .map(|channel| base[channel].abs_diff(clearcoat[channel]) as u32)
+                .sum::<u32>()
+                >= 3
+        })
+        .count();
+    let changed_fraction = changed_pixels as f64 / (W * H) as f64;
+    assert!(
+        response.mean_rgb >= 0.05 && changed_fraction >= 0.002,
+        "clearcoat did not produce a visible transport response: \
+         metrics={response:?}, changed_fraction={changed_fraction:.6}"
+    );
+
+    // The physical top interface redistributes energy; it must not behave as
+    // a second unattenuated BRDF. This display-space guard complements the
+    // CPU reference white-furnace oracle and catches catastrophic GPU energy
+    // gain without over-constraining a legitimate sharp highlight.
+    let base_luminance = mean_display_luminance(&base);
+    let clearcoat_luminance = mean_display_luminance(&clearcoat);
+    assert!(
+        clearcoat_luminance <= base_luminance * 1.10 + 0.25,
+        "clearcoat created unbounded display energy: \
+         base={base_luminance:.4}, clearcoat={clearcoat_luminance:.4}"
+    );
 }

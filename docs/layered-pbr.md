@@ -188,8 +188,16 @@ The Metal progressive and moving-camera oracles were reviewed and regenerated
 for this intentional broad energy correction. Three identical reruns of each
 mode produce bit-exact images, while the BRDF-energy and reprojection fault
 controls still fail their respective goldens. The realtime base shader already
-used the corrected Smith visibility; completing full clearcoat, specular/IOR,
-sheen, anisotropy, and iridescence transport remains a separate specialization.
+used the corrected Smith visibility.
+
+Scalar clearcoat path transport now lives in a lazy group-2 specialization. It
+identifies the primary TLAS instance without growing the G-buffer, applies the
+same reciprocal top-interface attenuation and fixed-IOR GGX evaluation as the
+CPU reference for direct light, and samples clearcoat at every bounce. A scene
+without a nonzero clearcoat record dispatches the original base pipeline
+exactly; other reserved lobes neither bind nor execute the specialization until
+their transport is qualified. Textured clearcoat and the specular/IOR, sheen,
+anisotropy, and iridescence lobes remain separate follow-up slices.
 
 ## Runtime material-record ABI
 
