@@ -790,6 +790,9 @@ pub struct Renderer {
     pub ssr_history_textures: [wgpu::Texture; 2],
     pub ssr_history_views: [wgpu::TextureView; 2],
     pub ssr_history_idx: usize,
+    /// False after resize, feature/mode transitions, or parameter changes.
+    /// The next temporal pass then replaces history instead of blending it.
+    pub ssr_history_valid: bool,
     pub ssr_temporal_pipeline: wgpu::RenderPipeline,
     pub ssr_temporal_layout: wgpu::BindGroupLayout,
     pub ssr_temporal_uniform_buffer: wgpu::Buffer,
@@ -7680,6 +7683,7 @@ impl Renderer {
             ssr_history_textures,
             ssr_history_views,
             ssr_history_idx: 0,
+            ssr_history_valid: false,
             ssr_temporal_pipeline,
             ssr_temporal_layout,
             ssr_temporal_uniform_buffer,
@@ -8298,6 +8302,7 @@ impl Renderer {
             self.ssr_history_textures = ssr_ht;
             self.ssr_history_views = ssr_hv;
             self.ssr_history_idx = 0;
+            self.ssr_history_valid = false;
             let (ssgi_t, ssgi_v) = create_ssgi_rt(&self.device, rw, rh);
             self.ssgi_rt_texture = ssgi_t;
             self.ssgi_rt_view = ssgi_v;
@@ -8605,32 +8610,11 @@ impl Renderer {
         self.render_scale
     }
 
-    /// Toggle SSR on/off. SSR contributes nothing in scenes with
-    /// no on-screen geometry to reflect (e.g., single object
-    /// against sky) — turning it off there saves a fullscreen
-    /// pass.
-    pub fn set_ssr_enabled(&mut self, enabled: bool) {
-        self.ssr_enabled = enabled;
-    }
-
-    /// SSR strength multiplier (0 = off, 0.5 = default, 1+ = strong).
-    /// Applies on top of the prefiltered IBL specular reflection,
-    /// adding sharp on-screen reflections where they exist.
-    pub fn set_ssr_strength(&mut self, strength: f32) {
-        self.ssr_strength = strength.max(0.0);
-    }
-
     /// Toggle SSGI (screen-space global illumination) on/off. Off
     /// (default) = no SSGI pass, zero perf cost. On = single-bounce
     /// indirect diffuse lighting via screen-space ray marching.
     pub fn set_ssgi_enabled(&mut self, on: bool) {
         self.ssgi_enabled = on;
-    }
-
-    /// Path-tracing mode request (0 off / 1 progressive / 2 realtime).
-    /// Clamped; anything above realtime means realtime.
-    pub fn set_path_tracing(&mut self, mode: u32) {
-        self.pt_mode = mode.min(2);
     }
 
     /// Whether path tracing can run at all on this device: it needs the
@@ -12609,7 +12593,7 @@ impl Renderer {
             self.probe_history_idx = 1 - self.probe_history_idx;
         }
         // Same ping-pong for SSR temporal accumulation.
-        if self.ssr_enabled {
+        if self.ssr_enabled && !self.pt_owns_frame() && self.ssr_history_valid {
             self.ssr_history_idx = 1 - self.ssr_history_idx;
         }
         // Swap exposure ping-pong so next frame's exposure pass

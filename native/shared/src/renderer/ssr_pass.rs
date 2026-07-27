@@ -4,7 +4,37 @@
 
 use super::{Renderer, SsrParams, SsrTemporalParams};
 
+fn ssr_temporal_alpha(history_valid: bool) -> f32 {
+    if history_valid {
+        0.1
+    } else {
+        1.0
+    }
+}
+
 impl Renderer {
+    /// Toggle SSR on/off. SSR contributes nothing in scenes with
+    /// no on-screen geometry to reflect (e.g., single object
+    /// against sky) — turning it off there saves a fullscreen pass.
+    pub fn set_ssr_enabled(&mut self, enabled: bool) {
+        if self.ssr_enabled != enabled {
+            self.ssr_enabled = enabled;
+            self.ssr_history_idx = 0;
+            self.ssr_history_valid = false;
+        }
+    }
+
+    /// SSR strength multiplier (0 = off, 0.5 = default, 1+ = strong).
+    /// Changing the radiance multiplier invalidates incompatible history.
+    pub fn set_ssr_strength(&mut self, strength: f32) {
+        let strength = strength.max(0.0);
+        if self.ssr_strength != strength {
+            self.ssr_strength = strength;
+            self.ssr_history_idx = 0;
+            self.ssr_history_valid = false;
+        }
+    }
+
     fn create_ssr_bind_group(
         &self,
         label: &str,
@@ -221,13 +251,10 @@ impl Renderer {
             let prev_idx = 1 - self.ssr_history_idx;
             let cur_idx = self.ssr_history_idx;
 
-            // First frame: alpha=1 so we initialize history from the
-            // current noisy frame rather than blending with zeros.
-            let alpha = if self.taa_frame_index == 0 {
-                1.0_f32
-            } else {
-                0.1_f32
-            };
+            // Explicit validity owns initialization. TAA's frame counter is
+            // unrelated to SSR lifetime: SSR can be toggled, resized, or
+            // suspended by PT long after TAA frame zero.
+            let alpha = ssr_temporal_alpha(self.ssr_history_valid);
             let tp = SsrTemporalParams {
                 params: [alpha, 0.0, 0.0, 0.0],
             };
@@ -292,6 +319,19 @@ impl Renderer {
             pass.set_pipeline(&self.ssr_temporal_pipeline);
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..3, 0..1);
+            drop(pass);
+            self.ssr_history_valid = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ssr_temporal_alpha;
+
+    #[test]
+    fn invalid_ssr_history_is_replaced_before_temporal_blending() {
+        assert_eq!(ssr_temporal_alpha(false), 1.0);
+        assert_eq!(ssr_temporal_alpha(true), 0.1);
     }
 }

@@ -511,6 +511,16 @@ impl Renderer {
         } else {
             "false"
         });
+        out.push_str(",\"temporal_history\":{");
+        out.push_str("\"ssr_valid\":");
+        out.push_str(if self.ssr_history_valid {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"ssr_index\":");
+        out.push_str(&self.ssr_history_idx.to_string());
+        out.push('}');
         out.push_str(",\"transparent_gi\":{");
         out.push_str("\"enabled\":");
         out.push_str(if super::transparent_gi::transparent_gi_enabled() {

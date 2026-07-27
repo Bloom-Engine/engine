@@ -8,11 +8,8 @@
 //! intentional visual change shows up as an explicit golden update in
 //! the diff.
 //!
-//! - Runs on any machine/CI runner with a GPU adapter (CI: the macos-14
-//!   shared-tests job); skips gracefully without one.
-//! - TAA is disabled in the scenes (sub-pixel jitter is intentionally
-//!   non-deterministic across frame counts); a fixed number of warm-up
-//!   frames settles the temporal passes that remain.
+//! - Runs on a non-CPU GPU adapter and skips gracefully without one.
+//! - Most scenes disable TAA; fixed warm-up counts settle temporal passes.
 //! - Tolerances absorb GPU-family rasterization differences; goldens are
 //!   regenerated with BLOOM_UPDATE_GOLDEN=1 `cargo test golden`.
 
@@ -26,6 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
+#[path = "golden_render/temporal_history.rs"]
+mod temporal_history;
 #[path = "golden_render/transparency.rs"]
 mod transparency;
 
@@ -1428,7 +1427,7 @@ fn physical_transmission_gi_specializations_run_on_hardware_ray_query() {
     }
     eprintln!("transparent GI affected={affected} delta_rgb={delta:?}");
     assert!(
-        affected > 50 && delta[1] > delta[0],
+        affected > 50 && delta[1] > 0 && delta[2] > delta[1] && delta[1] + delta[2] > delta[0] * 2,
         "GI-only glass did not reveal the green/cyan-weighted emitter behind it: \
          affected={affected}, delta_rgb={delta:?}"
     );
