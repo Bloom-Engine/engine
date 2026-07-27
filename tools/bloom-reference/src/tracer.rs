@@ -2,6 +2,9 @@
 //! GGX/Burley BRDF, environment sampling, punctual lights, and the
 //! integrator. Split from main.rs (2000-line file policy).
 
+use crate::layered_pbr::{
+    burley_diffuse, d_ggx, evaluate_base_brdf, fresnel_schlick, v_smith, BaseMaterial,
+};
 use crate::*;
 
 // ============================================================
@@ -434,38 +437,11 @@ pub(crate) fn seed_for(pixel: UVec2, sample: u32, global_seed: u64) -> u64 {
 // BRDF (GGX + Burley diffuse, metalness-aware)
 // ============================================================
 
-/// Schlick's Fresnel approximation. `f0` is reflectance at normal
-/// incidence; `cos_theta` is dot(surface_normal, view_dir).
-pub(crate) fn fresnel_schlick(cos_theta: f32, f0: Vec3) -> Vec3 {
-    let m = (1.0 - cos_theta).clamp(0.0, 1.0);
-    f0 + (Vec3::ONE - f0) * (m * m * m * m * m)
-}
-
-/// GGX (Trowbridge-Reitz) normal distribution.
-pub(crate) fn d_ggx(n_dot_h: f32, alpha: f32) -> f32 {
-    let a2 = alpha * alpha;
-    let nh2 = n_dot_h * n_dot_h;
-    let denom = nh2 * (a2 - 1.0) + 1.0;
-    a2 / (std::f32::consts::PI * denom * denom)
-}
-
-/// Smith visibility term for GGX with height-correlated formulation.
-/// Closer to the ground truth than the separable G1*G2, and only
-/// marginally more expensive.
-pub(crate) fn v_smith(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
-    let a2 = alpha * alpha;
-    let ggx_v = n_dot_l * ((n_dot_v * (1.0 - a2) + a2) * n_dot_v).sqrt();
-    let ggx_l = n_dot_v * ((n_dot_l * (1.0 - a2) + a2) * n_dot_l).sqrt();
-    0.5 / (ggx_v + ggx_l + 1e-6)
-}
-
-/// Burley (Disney) diffuse term. Tracks the view-dependent darkening
-/// near grazing angles for rough dielectrics that Lambert gets wrong.
-pub(crate) fn burley_diffuse(n_dot_l: f32, n_dot_v: f32, l_dot_h: f32, roughness: f32) -> f32 {
-    let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * roughness;
-    let light = 1.0 + (fd90 - 1.0) * (1.0 - n_dot_l).powi(5);
-    let view = 1.0 + (fd90 - 1.0) * (1.0 - n_dot_v).powi(5);
-    light * view / std::f32::consts::PI
+fn specular_probability(f0: Vec3, n_dot_v: f32, metallic: f32) -> f32 {
+    let f_view = fresnel_schlick(n_dot_v, f0);
+    let specular_weight = (f_view.x + f_view.y + f_view.z) / 3.0;
+    let diffuse_weight = (1.0 - specular_weight) * (1.0 - metallic);
+    (specular_weight / (specular_weight + diffuse_weight + 1e-6)).clamp(0.05, 0.95)
 }
 
 #[derive(Clone, Copy)]
@@ -601,8 +577,9 @@ pub(crate) struct BrdfSample {
 }
 
 /// Sample an outgoing direction from the BRDF at a surface point.
-/// Uses a simple metal/dielectric split: metals are pure specular,
-/// dielectrics pick diffuse vs specular by Fresnel-at-normal weight.
+/// Uses a metal/dielectric split with view-angle Fresnel probabilities.
+/// The bounded probabilities keep finite-spp grazing paths stable while the
+/// reciprocal interface factors below preserve an unbiased estimator.
 pub(crate) fn sample_brdf(surface: &SurfaceSample, view_world: Vec3, rng: &mut Rng) -> BrdfSample {
     let n = surface.normal;
     let alpha = surface.roughness * surface.roughness;
@@ -614,14 +591,10 @@ pub(crate) fn sample_brdf(surface: &SurfaceSample, view_world: Vec3, rng: &mut R
     // f0: dielectrics use 0.04; metals use the base color as f0.
     let f0 = Vec3::splat(0.04).lerp(surface.base_color, surface.metallic);
 
-    // Decide diffuse vs specular lobe. Weighting by luminance of the
-    // Fresnel-at-normal-incidence gives a reasonable importance
-    // distribution without a second sample. Pure metals have ~zero
-    // diffuse so this collapses naturally.
-    let spec_weight = (f0.x + f0.y + f0.z) / 3.0;
-    let diff_weight = (1.0 - spec_weight) * (1.0 - surface.metallic);
-    let total = spec_weight + diff_weight + 1e-6;
-    let p_spec = spec_weight / total;
+    // Grazing Fresnel can approach one even for a 4%-F0 dielectric.
+    // Selecting from the actual view angle avoids rare 20x-25x specular
+    // weights while the lower bound keeps the estimator robust at endpoints.
+    let p_spec = specular_probability(f0, v_tangent.z.max(0.0), surface.metallic);
     let pick_spec = rng.next_f32() < p_spec;
 
     let rand = rng.next_vec2();
@@ -680,10 +653,13 @@ pub(crate) fn sample_brdf(surface: &SurfaceSample, view_world: Vec3, rng: &mut R
         let h_tangent = (v_tangent + l_tangent).normalize_or_zero();
         let l_dot_h = l_tangent.dot(h_tangent).max(0.0);
 
-        // Diffuse color is zero for metals; for dielectrics we scale
-        // base color by (1 - Fresnel-at-normal) so total reflectance
-        // stays ≤ 1.
-        let diffuse_albedo = surface.base_color * (1.0 - surface.metallic) * (Vec3::ONE - f0);
+        // Diffuse crosses the dielectric interface on entry and exit.
+        // Both directional transmission factors are required for reciprocity
+        // and to keep grazing specular from stacking on full diffuse energy.
+        let view_transmission = Vec3::ONE - fresnel_schlick(n_dot_v, f0);
+        let light_transmission = Vec3::ONE - fresnel_schlick(n_dot_l, f0);
+        let diffuse_albedo =
+            surface.base_color * (1.0 - surface.metallic) * view_transmission * light_transmission;
         let fd = burley_diffuse(n_dot_l, n_dot_v, l_dot_h, surface.roughness);
         // BRDF · cos / PDF, with PDF = cos / pi, collapses to
         // BRDF · pi. Burley already divides by pi, so multiply here.
@@ -1138,28 +1114,24 @@ pub(crate) fn evaluate_brdf(surface: &SurfaceSample, view: Vec3, light: Vec3) ->
 
     let f0 = Vec3::splat(0.04).lerp(surface.base_color, surface.metallic);
     let alpha = surface.roughness * surface.roughness;
-
-    // Specular: F * D * Vsmith. Vsmith is the height-correlated form
-    // that already includes the 1/(4·N·V·N·L) term.
-    let f = fresnel_schlick(v_dot_h, f0);
     let d = d_ggx(n_dot_h, alpha);
-    let vsmith = v_smith(n_dot_v, n_dot_l, alpha);
-    let specular = f * d * vsmith;
-
-    // Diffuse: Burley (already 1/pi-normalized). Scale by (1 - F) and
-    // (1 - metallic) for energy conservation.
-    let fd = burley_diffuse(n_dot_l, n_dot_v, v_dot_h, surface.roughness);
-    let diffuse_albedo = surface.base_color * (1.0 - surface.metallic) * (Vec3::ONE - f);
-    let diffuse = diffuse_albedo * fd;
-
-    let brdf_cos = (specular + diffuse) * n_dot_l;
+    // Lobe evaluation comes from the named layered-PBR base contract. Keep
+    // only the sampler-specific PDF here: its view-angle probabilities reduce
+    // finite-spp grazing variance without changing the evaluated response.
+    let evaluation = evaluate_base_brdf(
+        BaseMaterial {
+            base_color: surface.base_color,
+            metallic: surface.metallic,
+            perceptual_roughness: surface.roughness,
+        },
+        n,
+        view,
+        light,
+    );
 
     // Rough approximation of the BRDF sampler's PDF for MIS. Uses the
     // same spec/diff split heuristic as `sample_brdf`.
-    let spec_weight = (f0.x + f0.y + f0.z) / 3.0;
-    let diff_weight = (1.0 - spec_weight) * (1.0 - surface.metallic);
-    let total = spec_weight + diff_weight + 1e-6;
-    let p_spec = spec_weight / total;
+    let p_spec = specular_probability(f0, n_dot_v, surface.metallic);
     let p_diff = 1.0 - p_spec;
 
     // Spec PDF (GGX VNDF): D * G1(V) * max(0, V·H) / (4 * N·V * V·H).
@@ -1169,7 +1141,7 @@ pub(crate) fn evaluate_brdf(surface: &SurfaceSample, view: Vec3, light: Vec3) ->
     let pdf_diff = n_dot_l / std::f32::consts::PI;
     let pdf = p_spec * pdf_spec + p_diff * pdf_diff;
 
-    (brdf_cos, pdf.max(0.0))
+    (evaluation.brdf_cos, pdf.max(0.0))
 }
 
 /// Balance heuristic for MIS — weights a sample from strategy A by
@@ -1305,4 +1277,58 @@ pub(crate) fn trace_path(
         return Vec3::ZERO;
     }
     radiance.clamp(Vec3::ZERO, Vec3::splat(50.0))
+}
+
+#[cfg(test)]
+mod base_transport_contract_tests {
+    use super::*;
+
+    fn surface(base_color: Vec3, metallic: f32, roughness: f32) -> SurfaceSample {
+        SurfaceSample {
+            position: Vec3::ZERO,
+            normal: Vec3::Z,
+            base_color,
+            metallic,
+            roughness,
+            emissive: Vec3::ZERO,
+            occlusion: 1.0,
+        }
+    }
+
+    #[test]
+    fn grazing_rough_conductor_stays_bounded_in_white_furnace() {
+        let material = surface(Vec3::ONE, 1.0, 0.8);
+        let n_dot_v = 0.1_f32;
+        let view = Vec3::new((1.0 - n_dot_v * n_dot_v).sqrt(), 0.0, n_dot_v);
+        let theta_steps = 128_u32;
+        let phi_steps = 256_u32;
+        let mut reflected = Vec3::ZERO;
+        for y in 0..theta_steps {
+            let n_dot_l = (y as f32 + 0.5) / theta_steps as f32;
+            let radius = (1.0 - n_dot_l * n_dot_l).sqrt();
+            for x in 0..phi_steps {
+                let phi = std::f32::consts::TAU * (x as f32 + 0.5) / phi_steps as f32;
+                let light = Vec3::new(radius * phi.cos(), radius * phi.sin(), n_dot_l);
+                reflected += evaluate_brdf(&material, view, light).0;
+            }
+        }
+        reflected *= std::f32::consts::TAU / (theta_steps * phi_steps) as f32;
+        assert!(
+            reflected.max_element() <= 1.02,
+            "grazing rough conductor gained energy: {reflected:?}"
+        );
+    }
+
+    #[test]
+    fn dielectric_brdf_is_reciprocal_after_two_interface_attenuation() {
+        let material = surface(Vec3::new(0.8, 0.3, 0.1), 0.0, 0.65);
+        let view = Vec3::new(0.8, 0.0, 0.6).normalize();
+        let light = Vec3::new(-0.3, 0.4, 0.85).normalize();
+        let forward = evaluate_brdf(&material, view, light).0 / light.z;
+        let reverse = evaluate_brdf(&material, light, view).0 / view.z;
+        assert!(
+            forward.abs_diff_eq(reverse, 2e-5),
+            "{forward:?} != {reverse:?}"
+        );
+    }
 }

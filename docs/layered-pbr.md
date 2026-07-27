@@ -170,20 +170,26 @@ Recorded furnace channels range from `0.030422` to `0.834041`; broader tests
 also pin reciprocity, finite output, rotation periodicity, the version-2
 default, and LUT agreement with a 65,536-sample oracle.
 
-## Defect found by the foundation
+## Transport defect found by the foundation
 
-The audit found that the existing CPU scene tracer's Smith equation multiplies
-the alpha term by
-`NdotV`/`NdotL` inside the square root instead of using the squared cosine
-form. A rough white conductor at `NdotV = 0.1` returned about `2.06` units in a
-unit white furnace when evaluated with that equation. The version-1 target
-evaluator uses the correct correlated-GGX equation and pins that grazing case.
+The audit found that the former CPU and GPU path-tracing Smith equations
+multiplied the alpha term by `NdotV`/`NdotL` inside the square root instead of
+using the squared-cosine form. A rough white conductor at `NdotV = 0.1`
+returned about `2.06` units in a unit white furnace with that equation.
 
-The realtime base shader already uses the squared correlated form. The GPU
-path-tracing shader and CPU scene tracer still carry their older independent
-evaluators. Migrating either is a separate measured slice because the
-progressive/reference images change broadly and must be reviewed against an
-external model rather than silently overwritten.
+Both path tracers now use the corrected correlated-GGX visibility,
+energy-normalized Burley diffuse, and reciprocal view/light interface
+transmission. The CPU scene tracer imports the named version-1 evaluator
+directly rather than maintaining another copy. Its remaining sampler-specific
+code uses view-angle Fresnel lobe probabilities to control finite-sample
+grazing variance.
+
+The Metal progressive and moving-camera oracles were reviewed and regenerated
+for this intentional broad energy correction. Three identical reruns of each
+mode produce bit-exact images, while the BRDF-energy and reprojection fault
+controls still fail their respective goldens. The realtime base shader already
+used the corrected Smith visibility; completing full clearcoat, specular/IOR,
+sheen, anisotropy, and iridescence transport remains a separate specialization.
 
 ## Runtime material-record ABI
 
@@ -241,16 +247,18 @@ combined physical transmission. Scalar, textured UV0/UV1, double-sided,
 clustered-light, virtual-shadow, folded scene-input, and native reflection
 variants share the same injected source.
 
-All nine layered textures share one sampler. The sheen directional-albedo LUT
+All ten layered textures share one sampler. The sheen directional-albedo LUT
 is allocated only after the first contributing sheen material and consumes
 32,768 persistent bytes. It adds no render-graph pass or transient image.
 Base-only materials retain the exact established shader, bind-group layout,
 GPU-driven record, and pipeline selection; they do not load or branch on the
 layered ABI and do not allocate the LUT.
 
-The CPU scene tracer and GPU path tracer still require an explicit reviewed
-migration to these named equations. Iridescence is the next lobe package;
-public authoring/debug surfaces and transport parity follow it.
+The CPU scene tracer and GPU path tracer now share the version-1 base equations.
+Their full layered-lobe transport still requires an explicit, reviewed lazy
+specialization so base-only materials retain the established buffer, pipeline,
+and cost. The public descriptor already exposes every current scalar lobe;
+texture authoring and transport parity remain follow-up work.
 
 ## Public authoring API
 

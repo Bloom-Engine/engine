@@ -785,6 +785,10 @@ fn walk_node(
 
 // Path-tracing core (ray/BVH/camera/RNG/BRDF/environment/lights/
 // integrator) lives in tracer.rs (2000-line file policy).
+#[allow(dead_code)]
+mod layered_pbr;
+#[allow(dead_code)]
+mod sheen_lut;
 mod tracer;
 use tracer::*;
 

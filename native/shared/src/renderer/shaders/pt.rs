@@ -8,11 +8,10 @@
 //! own lighting at every vertex of the path — sampling pre-lit cards would
 //! bake Lumen's direct light into ours twice).
 //!
-//! Radiometric convention: light intensities are treated as π-premultiplied,
-//! i.e. diffuse contribution is `albedo * L * NdotL` with no 1/π — matching
-//! the raster shader (core.rs point-light loop has no 1/π either), so
-//! toggling PT on/off does not jump scene brightness. bloom-reference
-//! comparisons account for this in scene config (see the PT-1 ticket).
+//! Radiometric convention: analytic lights carry linear radiance, matching
+//! the raster shader. BRDF evaluation therefore retains its physical 1/π;
+//! cosine-sampled bounce throughput cancels that normalization against the
+//! sampling PDF in the usual way.
 //!
 //! Sky pixels are never written: the raster sky/cloud passes already drew
 //! them, and PT replacing a procedural cloud deck with an analytic gradient
@@ -422,8 +421,8 @@ fn smith_g1(n_dot_x: f32, alpha: f32) -> f32 {
 
 fn v_smith(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
-    let ggx_v = n_dot_l * sqrt((n_dot_v * (1.0 - a2) + a2) * n_dot_v);
-    let ggx_l = n_dot_v * sqrt((n_dot_l * (1.0 - a2) + a2) * n_dot_l);
+    let ggx_v = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
+    let ggx_l = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
     return 0.5 / (ggx_v + ggx_l + 1e-6);
 }
 
@@ -431,7 +430,10 @@ fn burley_diffuse(n_dot_l: f32, n_dot_v: f32, l_dot_h: f32, roughness: f32) -> f
     let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * roughness;
     let ml = pow(1.0 - n_dot_l, 5.0);
     let mv = pow(1.0 - n_dot_v, 5.0);
-    return (1.0 + (fd90 - 1.0) * ml) * (1.0 + (fd90 - 1.0) * mv) / 3.14159265;
+    let energy_factor = mix(1.0, 1.0 / 1.51, roughness);
+    return (1.0 + (fd90 - 1.0) * ml)
+        * (1.0 + (fd90 - 1.0) * mv)
+        * energy_factor / 3.14159265;
 }
 
 // Heitz 2018 VNDF sampler — visible-normal distribution, tangent frame.
@@ -456,8 +458,7 @@ fn sample_ggx_vndf(v_t: vec3<f32>, alpha: f32, r2: vec2<f32>) -> vec3<f32> {
 struct BrdfSample {
     dir: vec3<f32>,
     // BRDF * cos / pdf, physical convention. For the pure-diffuse case
-    // this reduces to plain albedo, so the game's pi-premultiplied
-    // light intensities are unaffected.
+    // this reduces to plain albedo.
     weight: vec3<f32>,
     valid: bool,
 };
@@ -529,7 +530,10 @@ fn sample_brdf(
     if (dot(h_un, h_un) > 1e-8) {
         l_dot_h = max(dot(l_t, normalize(h_un)), 0.0);
     }
-    let diffuse_albedo = base_color * (1.0 - metallic) * (vec3<f32>(1.0) - f0);
+    let view_transmission = vec3<f32>(1.0) - fresnel_schlick3(n_dot_v, f0);
+    let light_transmission = vec3<f32>(1.0) - fresnel_schlick3(n_dot_l, f0);
+    let diffuse_albedo =
+        base_color * (1.0 - metallic) * view_transmission * light_transmission;
     let fd = burley_diffuse(n_dot_l, n_dot_v, l_dot_h, roughness);
     out.dir = m * l_t;
     out.weight = diffuse_albedo * fd * 3.14159265 / (1.0 - p_spec);
@@ -618,8 +622,8 @@ fn albedo_at_hit(
 // ---- Next-event estimation ---------------------------------------------------------
 
 // Direct light at a surface point: sun through the solar cone + one point
-// light chosen uniformly (contribution / pdf). Game-radiometry convention:
-// no 1/pi (see file header).
+// light chosen uniformly (contribution / pdf). The BRDF retains 1/pi here;
+// unlike cosine-sampled bounce transport, NEE has no cosine PDF to cancel it.
 // Sun visibility at a surface point: shadow cascades in hybrid mode
 // (deterministic, matches the raster shadows exactly), a traced cone
 // ray otherwise (reference quality, soft penumbra).
@@ -657,17 +661,36 @@ fn nee_spec(n: vec3<f32>, view: vec3<f32>, ldir: vec3<f32>, ndl: f32,
     return fresnel_schlick3(vdh, f0s) * dterm * v_smith(ndv, ndl, alpha0) * ndl;
 }
 
-fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>,
+fn nee_diffuse(n: vec3<f32>, view: vec3<f32>, ldir: vec3<f32>, ndl: f32,
+               full_alb: vec3<f32>, rough: f32, metal: f32) -> vec3<f32> {
+    let half_raw = view + ldir;
+    if (dot(half_raw, half_raw) <= 1e-8) {
+        return vec3<f32>(0.0);
+    }
+    let half = normalize(half_raw);
+    let ndv = max(dot(n, view), 1e-4);
+    let ldh = max(dot(ldir, half), 0.0);
+    let f0 = mix(vec3<f32>(0.04), full_alb, metal);
+    let view_transmission = vec3<f32>(1.0) - fresnel_schlick3(ndv, f0);
+    let light_transmission = vec3<f32>(1.0) - fresnel_schlick3(ndl, f0);
+    let diffuse_albedo =
+        full_alb * (1.0 - metal) * view_transmission * light_transmission;
+    return diffuse_albedo * burley_diffuse(ndl, ndv, ldh, rough) * ndl;
+}
+
+fn direct_light(p: vec3<f32>, n: vec3<f32>, sun_r2: vec2<f32>,
                 view: vec3<f32>, full_alb: vec3<f32>, rough: f32, metal: f32,
                 with_points: bool) -> vec3<f32> {
-    var lit = vec3<f32>(0.0);
+    var diffuse = vec3<f32>(0.0);
     var spec = vec3<f32>(0.0);
 
     let ndl = max(dot(n, u.sun_dir.xyz), 0.0);
     if (ndl > 0.0) {
         let vis = sun_visibility(p, n, sun_r2);
-        lit += u.sun_color.rgb * ndl * vis;
         if (vis > 0.0) {
+            diffuse += nee_diffuse(
+                n, view, u.sun_dir.xyz, ndl, full_alb, rough, metal,
+            ) * u.sun_color.rgb * vis;
             spec += nee_spec(n, view, u.sun_dir.xyz, ndl, full_alb, rough, metal)
                 * u.sun_color.rgb * vis;
         }
@@ -687,12 +710,14 @@ fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>,
                 // Raster-parity falloff: (1 - d/range)^2, core.rs.
                 let att = 1.0 - d / range;
                 let li = l.color_int.rgb * l.color_int.w * att * att * f32(count);
-                lit += li * ndl2;
+                diffuse += nee_diffuse(
+                    n, view, dir, ndl2, full_alb, rough, metal,
+                ) * li;
                 spec += nee_spec(n, view, dir, ndl2, full_alb, rough, metal) * li;
             }
         }
     }
-    return alb * lit + spec;
+    return diffuse + spec;
 }
 
 // ---- PT-4 (EXPERIMENTAL) — ReSTIR DI over the analytic point lights -------
@@ -708,8 +733,7 @@ fn direct_light(p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>, sun_r2: vec2<f32>,
 
 // Unshadowed contribution of light `li` at the shading point.
 fn restir_contrib(li: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
-                  alb_diff: vec3<f32>, full_alb: vec3<f32>,
-                  rough: f32, metal: f32) -> vec3<f32> {
+                  full_alb: vec3<f32>, rough: f32, metal: f32) -> vec3<f32> {
     let l = u.lights[li];
     let to_l = l.pos_range.xyz - p;
     let d = length(to_l);
@@ -720,24 +744,22 @@ fn restir_contrib(li: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
     if (ndl <= 0.0) { return vec3<f32>(0.0); }
     let att = 1.0 - d / range;
     let li_rgb = l.color_int.rgb * l.color_int.w * att * att;
-    return alb_diff * li_rgb * ndl
+    return nee_diffuse(n, view, dir, ndl, full_alb, rough, metal) * li_rgb
         + nee_spec(n, view, dir, ndl, full_alb, rough, metal) * li_rgb;
 }
 
 // Scalar target density: luminance of the unshadowed contribution.
 // Correctness never depends on the target — only variance does.
 fn restir_target(li: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
-                 alb_diff: vec3<f32>, full_alb: vec3<f32>,
-                 rough: f32, metal: f32) -> f32 {
-    return dot(restir_contrib(li, p, n, view, alb_diff, full_alb, rough, metal),
+                 full_alb: vec3<f32>, rough: f32, metal: f32) -> f32 {
+    return dot(restir_contrib(li, p, n, view, full_alb, rough, metal),
         vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
 // Runs at the primary vertex when ext.w == 1; writes this frame's
 // reservoir and returns the winner's shadow-tested contribution.
 fn restir_point_light(idx: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
-                      alb_diff: vec3<f32>, full_alb: vec3<f32>,
-                      rough: f32, metal: f32) -> vec3<f32> {
+                      full_alb: vec3<f32>, rough: f32, metal: f32) -> vec3<f32> {
     let count = u32(u.cfg.z);
     if (count == 0u) {
         resv_out[idx] = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
@@ -750,7 +772,7 @@ fn restir_point_light(idx: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
     // RIS: 8 uniform candidates (pdf = 1/count => w = phat * count).
     for (var c = 0u; c < 8u; c = c + 1u) {
         let cand = min(u32(rand_f() * f32(count)), count - 1u);
-        let ph = restir_target(cand, p, n, view, alb_diff, full_alb, rough, metal);
+        let ph = restir_target(cand, p, n, view, full_alb, rough, metal);
         let w = ph * f32(count);
         r_wsum += w;
         r_m += 1.0;
@@ -767,7 +789,7 @@ fn restir_point_light(idx: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
         let pm = min(pr.z, 160.0);
         if (pm > 0.0 && pr.x >= 0.0 && u32(pr.x) < count) {
             let py = u32(pr.x);
-            let ph = restir_target(py, p, n, view, alb_diff, full_alb, rough, metal);
+            let ph = restir_target(py, p, n, view, full_alb, rough, metal);
             let w = ph * pr.y * pm;
             if (w > 0.0) {
                 r_wsum += w;
@@ -792,7 +814,7 @@ fn restir_point_light(idx: u32, p: vec3<f32>, n: vec3<f32>, view: vec3<f32>,
     if (d <= 1e-3) { return vec3<f32>(0.0); }
     let dir = to_l / d;
     if (occluded(p, dir, d - 0.02)) { return vec3<f32>(0.0); }
-    return restir_contrib(r_y, p, n, view, alb_diff, full_alb, rough, metal) * r_w;
+    return restir_contrib(r_y, p, n, view, full_alb, rough, metal) * r_w;
 }
 
 // ---- Main -----------------------------------------------------------------------------
@@ -1177,10 +1199,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ---- one path sample --------------------------------------------------
 
     // Primary surface material from the G-buffer (R = metallic,
-    // G = roughness). NEE stays diffuse-only, so scale it by
-    // (1 - metallic) — metals have no diffuse lobe. Specular NEE is a
-    // known gap (see the PT-2 ticket); specular reflection of sky and
-    // scene comes from the GGX bounce below.
+    // G = roughness). Direct NEE and bounce transport share the same
+    // energy-conserving base diffuse and GGX specular contract.
     let mr0 = textureLoad(material_tex, px_full, 0).rg;
     var metal_cur = mr0.r;
     var rough_cur = mr0.g;
@@ -1208,13 +1228,13 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Sun + point lights, diffuse AND specular (nee_spec inside) — the
     // GGX highlight rides the same visibility as the diffuse term.
     var radiance = direct_light(
-        p0 + n0 * 0.02, n0, albedo0 * (1.0 - metal_cur), sun_r2,
-        view_cur, albedo0, rough_cur, metal_cur, !use_restir,
+        p0 + n0 * 0.02, n0, sun_r2, view_cur,
+        albedo0, rough_cur, metal_cur, !use_restir,
     );
     if (use_restir) {
         radiance += restir_point_light(
             gid.y * u.size.x + gid.x, p0 + n0 * 0.02, n0, view_cur,
-            albedo0 * (1.0 - metal_cur), albedo0, rough_cur, metal_cur,
+            albedo0, rough_cur, metal_cur,
         );
     }
     var throughput = vec3<f32>(1.0);
@@ -1282,8 +1302,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Bounce vertices always use plain NEE (reservoirs are per
         // PRIMARY texel; reusing them off-surface would be biased).
         radiance += throughput * direct_light(
-            hit_p, n_hit, alb_hit * (1.0 - inst.mat_params.y), rand_2f(),
-            -dir, alb_hit, inst.mat_params.x, inst.mat_params.y, true,
+            hit_p, n_hit, rand_2f(), -dir,
+            alb_hit, inst.mat_params.x, inst.mat_params.y, true,
         );
 
         origin = hit_p;
@@ -1670,6 +1690,21 @@ mod pt_kernel_variant_tests {
         assert!(reprojection.contains("ENERGY_SCALE: f32 = 1.0"));
         assert!(reprojection.contains("REPROJECTION_OFFSET: f32 = 0.05"));
         assert!(reprojection.contains("BYPASS_VALIDATION: bool = true"));
+    }
+
+    #[test]
+    fn base_transport_uses_bounded_reciprocal_layered_contract() {
+        let production = pt_kernel_variant(false);
+        assert!(production.contains("sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2)"));
+        assert!(production.contains("sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2)"));
+        assert!(!production.contains("sqrt((n_dot_v * (1.0 - a2) + a2) * n_dot_v)"));
+        assert!(production.contains("let energy_factor = mix(1.0, 1.0 / 1.51, roughness)"));
+        assert!(production
+            .contains("base_color * (1.0 - metallic) * view_transmission * light_transmission"));
+        assert!(production
+            .contains("full_alb * (1.0 - metal) * view_transmission * light_transmission"));
+        assert!(production.contains("return diffuse + spec;"));
+        assert!(!production.contains("return alb * lit + spec;"));
     }
 }
 
