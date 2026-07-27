@@ -320,6 +320,10 @@ impl Renderer {
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..3, 0..1);
             drop(pass);
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.pending_quality_capture_dir.is_some() {
+                self.record_ssr_temporal_diagnostics(encoder, &bg);
+            }
             self.ssr_history_valid = true;
         }
     }

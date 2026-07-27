@@ -426,6 +426,22 @@ impl Renderer {
                     ));
                 }
             }
+            if let Some(textures) = self.ssr_temporal_diagnostic_textures() {
+                for (&name, texture) in
+                    super::ssr_temporal_diagnostics::SSR_TEMPORAL_DIAGNOSTIC_NAMES
+                        .iter()
+                        .zip(textures)
+                {
+                    quality_readbacks.push(self.record_quality_texture(
+                        encoder,
+                        texture,
+                        name,
+                        ReadbackKind::Rgba8,
+                        wgpu::TextureAspect::All,
+                        4,
+                    ));
+                }
+            }
         }
         FrameReadback {
             staging,
@@ -492,6 +508,7 @@ impl Renderer {
         }
         self.pending_quality_capture_dir.take();
         self.release_temporal_diagnostics();
+        self.release_ssr_temporal_diagnostics();
         self.screenshot_requested = false;
     }
 
@@ -756,12 +773,28 @@ impl Renderer {
             "false"
         });
         let ssr_size = self.ssr_rt_texture.size();
-        let ssr_row_bytes = u64::from((ssr_size.width * 8 + 255) & !255);
-        let ssr_capture_bytes = ssr_row_bytes * u64::from(ssr_size.height) * 2;
+        let ssr_hdr_row_bytes = u64::from((ssr_size.width * 8 + 255) & !255);
+        let ssr_rgba8_row_bytes = u64::from((ssr_size.width * 4 + 255) & !255);
+        let ssr_capture_texture_bytes = u64::from(ssr_size.width)
+            * u64::from(ssr_size.height)
+            * super::ssr_temporal_diagnostics::SSR_TEMPORAL_DIAGNOSTIC_NAMES.len() as u64
+            * 4;
+        let ssr_capture_bytes = ssr_hdr_row_bytes * u64::from(ssr_size.height) * 2
+            + ssr_rgba8_row_bytes
+                * u64::from(ssr_size.height)
+                * super::ssr_temporal_diagnostics::SSR_TEMPORAL_DIAGNOSTIC_NAMES.len() as u64;
         out.push_str(",\"ssr_diagnostic_persistent_bytes\":0");
+        out.push_str(",\"ssr_diagnostic_capture_texture_bytes\":");
+        out.push_str(&ssr_capture_texture_bytes.to_string());
         out.push_str(",\"ssr_diagnostic_capture_readback_bytes\":");
         out.push_str(&ssr_capture_bytes.to_string());
-        out.push_str(",\"ssr_diagnostic_capture_passes\":0");
+        out.push_str(",\"ssr_diagnostic_capture_passes\":1");
+        out.push_str(",\"ssr_diagnostic_resources_live\":");
+        out.push_str(if self.ssr_temporal_diagnostic_textures().is_some() {
+            "true"
+        } else {
+            "false"
+        });
         out.push('}');
         out.push_str(",\"transparent_gi\":{");
         out.push_str("\"enabled\":");

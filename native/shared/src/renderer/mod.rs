@@ -51,6 +51,8 @@ mod sorted_transparency;
 mod ssgi_pass;
 mod ssr_pass;
 #[cfg(not(target_arch = "wasm32"))]
+mod ssr_temporal_diagnostics;
+#[cfg(not(target_arch = "wasm32"))]
 mod temporal_diagnostics;
 mod temporal_history;
 mod temporal_reactive;
@@ -785,30 +787,24 @@ pub struct Renderer {
     /// sky's auto-derived transmittance tint so manual artistic
     /// overrides stick.
     sun_shaft_color_user_override: bool,
-    /// EN-005 Phase 3 — CPU copy of the transmittance LUT, kept
-    /// alongside the GPU texture so renderer-side code can sample
-    /// it for things like sun-shaft tint without a GPU readback.
+    /// EN-005 Phase 3 — CPU copy of the transmittance LUT for renderer-side
+    /// sampling such as sun-shaft tint, without a GPU readback.
     /// Sized identically to the GPU texture (`TRANSMITTANCE_W × _H`).
     transmittance_lut_cpu: Vec<u16>,
-    /// SSR (screen-space reflections) pass output — half-res HDR
-    /// holding the reflected color for each fragment. Composited
-    /// into the final image by the TAA pass.
+    /// Half-res HDR SSR output, composited into the final image by TAA.
     pub ssr_rt_texture: wgpu::Texture,
     pub ssr_rt_view: wgpu::TextureView,
     pub ssr_pipeline: wgpu::RenderPipeline,
     pub ssr_layout: wgpu::BindGroupLayout,
     pub ssr_uniform_buffer: wgpu::Buffer,
-    /// SSR strength multiplier (0 = off, 1 = full). Default 0.5
-    /// is conservative — too much SSR makes diffuse surfaces look
-    /// like wet floors. Applies on top of the prefiltered IBL.
+    /// SSR strength (0 = off, 1 = full). The conservative 0.5 default avoids
+    /// making diffuse surfaces look wet and applies on top of prefiltered IBL.
     pub ssr_strength: f32,
     pub ssr_enabled: bool,
 
-    /// SSR temporal denoiser: ping-pong history textures (same format/size
-    /// as ssr_rt). One GGX-importance-sampled ray per pixel per frame
-    /// converges over 4–8 frames of accumulation via velocity reprojection
-    /// + neighborhood clamp. Compose reads ssr_history[cur] instead of
-    /// ssr_rt when ssr_enabled.
+    /// SSR temporal ping-pong, matching ssr_rt. One GGX ray per pixel converges
+    /// over 4–8 velocity-reprojected, neighborhood-clamped frames; compose reads
+    /// the current history when SSR is enabled.
     pub ssr_history_textures: [wgpu::Texture; 2],
     pub ssr_history_views: [wgpu::TextureView; 2],
     pub ssr_history_idx: usize,
@@ -818,11 +814,11 @@ pub struct Renderer {
     pub ssr_temporal_pipeline: wgpu::RenderPipeline,
     pub ssr_temporal_layout: wgpu::BindGroupLayout,
     pub ssr_temporal_uniform_buffer: wgpu::Buffer,
+    #[cfg(not(target_arch = "wasm32"))]
+    ssr_temporal_diagnostics: Option<ssr_temporal_diagnostics::SsrTemporalDiagnosticResources>,
 
-    /// SSGI (screen-space global illumination) pass output — half-res
-    /// HDR holding the indirect diffuse bounce light for each fragment.
-    /// Ticket 007a: written by the probe-resolve pass, composited by
-    /// the TAA pass. No other code path touches `ssgi_rt_view`.
+    /// Half-res HDR SSGI indirect diffuse output. Ticket 007a: written by probe
+    /// resolve and composited by TAA; no other code path touches the view.
     pub ssgi_rt_texture: wgpu::Texture,
     pub ssgi_rt_view: wgpu::TextureView,
     /// SSGI intensity multiplier (0 = off, 0.5 = default, 1+ = strong).
@@ -7724,6 +7720,8 @@ impl Renderer {
             ssr_temporal_pipeline,
             ssr_temporal_layout,
             ssr_temporal_uniform_buffer,
+            #[cfg(not(target_arch = "wasm32"))]
+            ssr_temporal_diagnostics: None,
             ssgi_rt_texture,
             ssgi_rt_view,
             // 1.0 — stronger bounce than the earlier 0.5 default so

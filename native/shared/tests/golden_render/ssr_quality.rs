@@ -190,12 +190,28 @@ fn dark_interior_ssr_rejects_fireflies_and_preserves_smooth_reflections() {
     .unwrap();
     let raw_hit_alpha_pixels = raw_metrics["hit_alpha_pixels"].as_u64().unwrap();
     let raw_march_max = raw_metrics["max_luminance"].as_f64().unwrap();
+    let rejection = image::open(directory.join("ssr-rejection-reason.png"))
+        .expect("SSR qualification capture did not emit temporal rejection reasons")
+        .to_rgb8();
+    let accepted_history = rejection
+        .pixels()
+        .filter(|pixel| pixel[0] < 40 && pixel[1] > 140 && pixel[2] < 60)
+        .count();
+    let neighborhood_clamps = rejection
+        .pixels()
+        .filter(|pixel| pixel[0] > 220 && pixel[1] > 150 && pixel[2] < 40)
+        .count();
+    let confidence = image::open(directory.join("ssr-temporal-confidence.png"))
+        .expect("SSR qualification capture did not emit temporal confidence")
+        .to_rgb8();
+    let retained_history = confidence.pixels().filter(|pixel| pixel[2] > 200).count();
     eprintln!(
         "temporal-corpus dark-interior-ssr active={active} hot={hot} isolated={isolated} \
          raw_max={max_luminance:.4} raw_p999={p999_luminance:.4} \
          raw_isolated={raw_isolated} hit_alpha={hit_alpha_pixels} \
          march_max={raw_march_max:.4} march_hits={raw_hit_alpha_pixels} \
-         non_finite={non_finite}"
+         non_finite={non_finite} accepted={accepted_history} \
+         clamps={neighborhood_clamps} retained={retained_history}"
     );
     assert!(
         active >= 100,
@@ -209,6 +225,14 @@ fn dark_interior_ssr_rejects_fireflies_and_preserves_smooth_reflections() {
     assert_eq!(
         raw_isolated, 0,
         "SSR history contains isolated high-radiance fireflies"
+    );
+    assert!(
+        accepted_history >= 100 && retained_history >= 100,
+        "SSR diagnostics did not expose retained temporal history"
+    );
+    assert!(
+        neighborhood_clamps > 0,
+        "bright-interior scene did not exercise SSR neighborhood clamping"
     );
 
     eng.renderer.set_ssr_enabled(false);
@@ -225,7 +249,8 @@ fn dark_interior_ssr_rejects_fireflies_and_preserves_smooth_reflections() {
     );
     let paths = eng.renderer.quality_runtime_paths_json();
     assert!(paths.contains("\"ssr_diagnostic_persistent_bytes\":0"));
-    assert!(paths.contains("\"ssr_diagnostic_capture_passes\":0"));
+    assert!(paths.contains("\"ssr_diagnostic_capture_passes\":1"));
+    assert!(paths.contains("\"ssr_diagnostic_resources_live\":false"));
 
     if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
         eprintln!("kept dark-interior SSR diagnostics at {directory:?}");

@@ -191,9 +191,18 @@ quarter-resolution stochastic march and filtered history. Their accompanying
 mean/max/p99/p99.9 luminance, alpha hit coverage, and isolated local outliers.
 An isolated outlier is over 4 linear luminance and over four times every 3x3
 neighbor. These diagnostics reuse the two production SSR targets and add no
-normal-frame resource or pass; capture-only readback bytes, zero persistent
-diagnostic bytes, and zero diagnostic passes are reported under
-`temporal_history.ssr_diagnostic_*`.
+render or diagnostic pass by themselves.
+
+When SSR is active, the same request also emits
+`ssr-rejection-reason.png` and `ssr-temporal-confidence.png` from a
+capture-only pass that reuses the production temporal bind group. The reason
+palette shares TAA's gray seed, red off-screen, magenta invalid-history, yellow
+neighborhood-clamp, and green accepted-history meanings. Confidence RGB shares
+the local-variation, clamp-magnitude, and retained-history convention. The two
+half-resolution RGBA8 targets and one pass exist only for the capture and are
+released after readback; normal frames and production SSR output are
+unchanged. Telemetry includes their exact capture texture/readback byte counts,
+one diagnostic pass, and zero persistent bytes for the complete SSR capture.
 
 ## Temporal sequence gates
 
