@@ -210,19 +210,23 @@ anisotropy and iridescence select separately constant-folded code variants
 without adding a resource, and only a scene with scalar sheen creates the
 32 KiB directional-albedo LUT.
 
-Resolved UV0 `KHR_materials_specular` factor and color textures are the first
-qualified texture-bearing PT slice. They use the renderer's existing texture
-array, reconstruct the committed triangle UV at both primary and bounce hits,
-apply the exact authored offset/rotation/scale transform, read factor from
-alpha, and convert specular color from sRGB before modifying the same
-dielectric F0/F90 transport as the scalar path. Their transforms live in a
-separate, independently lazy 64-byte-per-instance sidecar, so the established
-96-byte scalar ABI and every scalar-only bind group remain unchanged.
-Resolved UV1 specular textures additionally use an aligned storage sidecar
-that is backfilled from retained or skinned CPU geometry only when a qualified
-texture actually selects `TEXCOORD_1`. Missing streams remain explicitly
-unqualified instead of receiving an incorrect scalar approximation. Other
-textured lobes and clearcoat normal textures remain follow-up slices.
+Resolved `KHR_materials_specular` factor/color and
+`KHR_materials_clearcoat` factor/roughness textures are the first qualified
+texture-bearing PT slices. They use the renderer's existing texture array,
+reconstruct the committed triangle UV at both primary and bounce hits, and
+apply the exact authored offset/rotation/scale transform. Specular reads
+factor from alpha and converts color from sRGB; clearcoat reads factor from
+red and roughness from green, matching glTF. Each lobe owns a separate,
+independently lazy 64-byte-per-instance transform sidecar, so adding clearcoat
+does not grow specular-only records and neither path changes the established
+96-byte scalar ABI or scalar-only bind groups.
+
+Resolved UV1 textures additionally use an aligned storage sidecar that is
+backfilled from retained or skinned CPU geometry only when a qualified texture
+actually selects `TEXCOORD_1`. Missing streams remain explicitly unqualified
+instead of receiving an incorrect scalar approximation. A material carrying a
+clearcoat normal texture keeps the exact established fallback until complete
+tangent-space clearcoat-normal transport lands.
 
 ## Runtime material-record ABI
 
@@ -294,12 +298,13 @@ instance lazily backfills a parallel 96-byte-per-instance scalar record.
 Only a frame that both enables PT and contains one of those records compiles
 the group-2 pipeline and allocates/binds its storage buffer. Base-only scenes
 retain the established shader source, pipeline, bindings, instance record, and
-GPU cost. Qualified specular textures independently backfill a 64-byte
-texture-transform record and select a texture-only pipeline/resource bit.
-UV1 adds a separate 8-byte-per-vertex stream and its own pipeline/layout bit
-only on texture-array-capable adapters; no texture record, binding, UV
-interpolation, or texture fetch exists in the base pipeline or scalar-only
-resource layouts.
+GPU cost. Qualified specular and clearcoat textures independently backfill
+separate 64-byte texture-transform records and select independent
+pipeline/resource bits. UV1 adds a separate 8-byte-per-vertex stream and its
+own pipeline/layout bit only on texture-array-capable adapters; no texture
+record, binding, UV interpolation, or texture fetch exists in the base
+pipeline or scalar-only resource layouts. Array-incapable adapters also skip
+building the unreachable CPU texture-record vectors.
 
 Metal ray-query qualification renders the same seeded scene through base,
 clearcoat, specular/IOR, sheen, anisotropy, iridescence, and combined scalar
@@ -308,13 +313,14 @@ visible bounded-energy responses for every qualified lobe, a distinct highlight
 after a 90-degree anisotropy rotation on explicit vertex tangents, and a
 spectral image change between 180 nm and 520 nm films. Telemetry verifies that
 sheen, anisotropy, iridescence, and texture code variants remain independently
-lazy. The texture corpus additionally requires white UV0 specular textures to
-be byte-identical to scalar specular transport, an alpha-varying factor texture
-to produce a visible bounded response, a 90-degree texture transform to turn
-that response, and UV1 to select independently retained coordinates on capable
-adapters. Adapters without PT texture arrays remain byte-identical to the base
-path and allocate no UV1 storage. The remaining factor textures and clearcoat
-normal transport are the next reviewed slices.
+lazy. The texture corpus additionally requires white UV0 specular and
+clearcoat textures to be byte-identical to their scalar transport, varying
+factor textures to produce visible bounded responses, 90-degree texture
+transforms to turn those responses, and UV1 to select independently retained
+coordinates on capable adapters. Adapters without PT texture arrays remain
+byte-identical to the base path and allocate no texture or UV1 storage. Sheen,
+anisotropy, and iridescence factor textures plus clearcoat-normal transport
+remain the next reviewed slices.
 
 ## Public authoring API
 

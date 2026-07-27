@@ -7,8 +7,15 @@
 
 use super::*;
 
+#[path = "layered_pbr_pt_clearcoat_texture.rs"]
+mod clearcoat_texture;
 #[path = "layered_pbr_pt_texture.rs"]
 mod texture;
+pub(super) use clearcoat_texture::PtClearcoatTextureCpu;
+use clearcoat_texture::{
+    PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL, PT_CLEARCOAT_TEXTURE_DISABLED_WGSL,
+    PT_CLEARCOAT_TEXTURE_RECORD_BYTES,
+};
 pub(super) use texture::{append_record, PtLayeredRuntimeState, PtLayeredTextureCpu};
 use texture::{
     texture_variant, PT_LAYERED_TEXTURE_BINDINGS_WGSL, PT_LAYERED_TEXTURE_DISABLED_WGSL,
@@ -522,6 +529,9 @@ fn pt_layered_primary_surface(
             instance.geo, hit.primitive_index, hit.barycentrics,
         );
         material = pt_layered_apply_textures(
+            material, hit.instance_custom_data, attributes.uv, secondary_uv,
+        );
+        material = pt_layered_apply_clearcoat_textures(
             material, hit.instance_custom_data, attributes.uv, secondary_uv,
         );
     }
@@ -1400,6 +1410,10 @@ fn layered_kernel_variant(base: &str) -> String {
          \x20               layered_hit, hit.instance_custom_data,\n\
          \x20               layered_attributes.uv, layered_secondary_uv,\n\
          \x20           );\n\
+         \x20           layered_hit = pt_layered_apply_clearcoat_textures(\n\
+         \x20               layered_hit, hit.instance_custom_data,\n\
+         \x20               layered_attributes.uv, layered_secondary_uv,\n\
+         \x20           );\n\
          \x20       }\n\
          \x20       var layered_tangent_hit = vec4<f32>(0.0);\n\
          \x20       if (pt_layered_has_anisotropy(layered_hit)) {\n\
@@ -1431,7 +1445,8 @@ impl Renderer {
             .iter()
             .copied()
             .any(PtLayeredMaterialCpu::has_qualified_transport)
-            || (self.pt_texture_arrays_enabled && self.pt_layered_texture_active())
+            || (self.pt_texture_arrays_enabled
+                && (self.pt_layered_texture_active() || self.pt_layered_clearcoat_texture_active()))
     }
 
     pub(super) fn pt_layered_sheen_active(&self) -> bool {
@@ -1466,27 +1481,54 @@ impl Renderer {
             .any(PtLayeredTextureCpu::has_specular_ior)
     }
 
+    pub(super) fn pt_layered_clearcoat_texture_active(&self) -> bool {
+        self.pt_layered
+            .clearcoat_texture_records
+            .iter()
+            .copied()
+            .any(PtClearcoatTextureCpu::active)
+    }
+
     pub(super) fn pt_layered_uv1_active(&self) -> bool {
         self.pt_layered
             .texture_records
             .iter()
             .copied()
             .any(PtLayeredTextureCpu::has_uv1)
+            || self
+                .pt_layered
+                .clearcoat_texture_records
+                .iter()
+                .copied()
+                .any(PtClearcoatTextureCpu::has_uv1)
     }
 
     pub(super) fn set_pt_layered_records(
         &mut self,
         records: Option<Vec<PtLayeredMaterialCpu>>,
         texture_records: Option<Vec<PtLayeredTextureCpu>>,
+        clearcoat_texture_records: Option<Vec<PtClearcoatTextureCpu>>,
         instance_count: usize,
     ) {
         let records = records.unwrap_or_default();
         let texture_records = texture_records.unwrap_or_default();
+        let clearcoat_texture_records = clearcoat_texture_records.unwrap_or_default();
         debug_assert!(records.is_empty() || records.len() == instance_count);
         debug_assert!(texture_records.is_empty() || texture_records.len() == instance_count);
+        debug_assert!(
+            clearcoat_texture_records.is_empty()
+                || clearcoat_texture_records.len() == instance_count
+        );
         if self.pt_layered.records != records {
             self.pt_layered.records = records;
             self.pt_layered.dirty = !self.pt_layered.records.is_empty();
+            self.pt_accum_count = 0;
+            self.pt_wrote_frame = false;
+        }
+        if self.pt_layered.clearcoat_texture_records != clearcoat_texture_records {
+            self.pt_layered.clearcoat_texture_records = clearcoat_texture_records;
+            self.pt_layered.clearcoat_texture_dirty =
+                !self.pt_layered.clearcoat_texture_records.is_empty();
             self.pt_accum_count = 0;
             self.pt_wrote_frame = false;
         }
@@ -1508,13 +1550,20 @@ impl Renderer {
         let anisotropy = self.pt_layered_anisotropy_active();
         let iridescence = self.pt_layered_iridescence_active();
         let textures = self.pt_texture_arrays_enabled && self.pt_layered_texture_active();
-        let uv1 = textures && self.pt_layered_uv1_active();
-        let resource_variant = sheen as usize | ((textures as usize) << 1) | ((uv1 as usize) << 2);
+        let clearcoat_textures =
+            self.pt_texture_arrays_enabled && self.pt_layered_clearcoat_texture_active();
+        let any_textures = textures || clearcoat_textures;
+        let uv1 = any_textures && self.pt_layered_uv1_active();
+        let resource_variant = sheen as usize
+            | ((textures as usize) << 1)
+            | ((uv1 as usize) << 2)
+            | ((clearcoat_textures as usize) << 3);
         let pipeline_variant = sheen as usize
             | ((anisotropy as usize) << 1)
             | ((iridescence as usize) << 2)
             | ((textures as usize) << 3)
-            | ((uv1 as usize) << 4);
+            | ((uv1 as usize) << 4)
+            | ((clearcoat_textures as usize) << 5);
         if sheen {
             self.ensure_scene_sheen_albedo_lut();
         }
@@ -1567,9 +1616,23 @@ impl Renderer {
                     count: None,
                 });
             }
+            if clearcoat_textures {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(
+                            PT_CLEARCOAT_TEXTURE_RECORD_BYTES,
+                        ),
+                    },
+                    count: None,
+                });
+            }
             self.pt_layered.layouts[resource_variant] = Some(self.device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
-                    label: Some(if textures {
+                    label: Some(if any_textures {
                         "pt_layered_texture_layout"
                     } else if sheen {
                         "pt_layered_sheen_layout"
@@ -1592,7 +1655,7 @@ impl Renderer {
             let base_kernel = pt_kernel_variant(query_diagnostics);
             let layered_kernel = layered_kernel_variant(base_kernel.as_ref());
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
                 pt_fault_constants(fault.as_deref()),
                 layered_kernel,
@@ -1602,6 +1665,11 @@ impl Renderer {
                     PT_LAYERED_TEXTURE_BINDINGS_WGSL
                 } else {
                     PT_LAYERED_TEXTURE_DISABLED_WGSL
+                },
+                if clearcoat_textures {
+                    PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL
+                } else {
+                    PT_CLEARCOAT_TEXTURE_DISABLED_WGSL
                 },
                 if uv1 {
                     PT_LAYERED_UV1_BINDINGS_WGSL
@@ -1628,7 +1696,7 @@ impl Renderer {
             let shader = self
                 .device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(if textures {
+                    label: Some(if any_textures {
                         "pt_layered_texture_shader"
                     } else if sheen {
                         "pt_layered_sheen_shader"
@@ -1646,12 +1714,12 @@ impl Renderer {
                 self.device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some(if sheen {
-                            if textures {
+                            if any_textures {
                                 "pt_layered_texture_pipeline_layout"
                             } else {
                                 "pt_layered_sheen_pipeline_layout"
                             }
-                        } else if textures {
+                        } else if any_textures {
                             "pt_layered_texture_pipeline_layout"
                         } else {
                             "pt_layered_pipeline_layout"
@@ -1662,7 +1730,7 @@ impl Renderer {
             self.pt_layered.pipelines[pipeline_variant] = Some(
                 self.device
                     .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some(if textures {
+                        label: Some(if any_textures {
                             "pt_layered_texture_pipeline"
                         } else if iridescence {
                             "pt_layered_iridescence_pipeline"
@@ -1737,6 +1805,39 @@ impl Renderer {
                 self.pt_layered.texture_dirty = false;
             }
         }
+        if clearcoat_textures {
+            let needed = PT_CLEARCOAT_TEXTURE_RECORD_BYTES
+                * self.pt_layered.clearcoat_texture_records.len() as u64;
+            let recreate = self
+                .pt_layered
+                .clearcoat_texture_buffer
+                .as_ref()
+                .is_none_or(|buffer| buffer.size() < needed);
+            if recreate {
+                let capacity = self
+                    .pt_layered
+                    .clearcoat_texture_records
+                    .len()
+                    .next_power_of_two() as u64;
+                self.pt_layered.clearcoat_texture_buffer =
+                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("pt_clearcoat_texture_instances"),
+                        size: PT_CLEARCOAT_TEXTURE_RECORD_BYTES * capacity,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                self.pt_layered.bind_groups = Default::default();
+                self.pt_layered.clearcoat_texture_dirty = true;
+            }
+            if self.pt_layered.clearcoat_texture_dirty {
+                self.queue.write_buffer(
+                    self.pt_layered.clearcoat_texture_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(&self.pt_layered.clearcoat_texture_records),
+                );
+                self.pt_layered.clearcoat_texture_dirty = false;
+            }
+        }
         if self.pt_layered.bind_groups[resource_variant].is_none() {
             let mut entries = vec![wgpu::BindGroupEntry {
                 binding: 0,
@@ -1777,9 +1878,20 @@ impl Renderer {
                         .as_entire_binding(),
                 });
             }
+            if clearcoat_textures {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self
+                        .pt_layered
+                        .clearcoat_texture_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                });
+            }
             self.pt_layered.bind_groups[resource_variant] =
                 Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(if textures {
+                    label: Some(if any_textures {
                         "pt_layered_texture_bg"
                     } else if sheen {
                         "pt_layered_sheen_bg"
@@ -1794,196 +1906,5 @@ impl Renderer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn record_abi_is_six_vec4s_and_default_is_inactive() {
-        assert_eq!(std::mem::size_of::<PtLayeredMaterialCpu>(), 96);
-        let record = PtLayeredMaterialCpu::default();
-        assert_eq!(record.header, [PT_LAYERED_RECORD_VERSION, 0, 0, 0]);
-        assert!(!record.active());
-    }
-
-    #[test]
-    fn scalar_record_preserves_every_current_lobe_bit() {
-        let mask = crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
-            | crate::models::MaterialLayeredPbr::SHEEN_LOBE
-            | crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE
-            | crate::models::MaterialLayeredPbr::IRIDESCENCE_LOBE
-            | crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE;
-        let material = crate::models::MaterialLayeredPbr::from_authoring_factors(
-            mask,
-            0.8,
-            0.2,
-            1.0,
-            0.7,
-            [0.9, 0.8, 0.7],
-            1.45,
-            [0.2, 0.1, 0.05],
-            0.4,
-            0.6,
-            0.3,
-            0.75,
-            1.3,
-            120.0,
-            360.0,
-        );
-        let record = PtLayeredMaterialCpu::from_material(material);
-        assert_eq!(record.header[1], mask);
-        assert_eq!(record.clearcoat_ior, [0.8, 0.2, 1.0, 1.45]);
-        assert_eq!(record.iridescence, [0.75, 1.3, 120.0, 360.0]);
-        assert!(record.has_iridescence() && record.has_qualified_transport());
-    }
-
-    #[test]
-    fn only_qualified_lobes_select_layered_transport() {
-        let sheen = crate::models::MaterialLayeredPbr::from_authoring_factors(
-            crate::models::MaterialLayeredPbr::SHEEN_LOBE,
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            [1.0; 3],
-            1.5,
-            [0.3, 0.1, 0.05],
-            0.4,
-            0.0,
-            0.0,
-            0.0,
-            1.3,
-            100.0,
-            400.0,
-        );
-        let clearcoat = crate::models::MaterialLayeredPbr::from_authoring_factors(
-            crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE,
-            0.8,
-            0.2,
-            1.0,
-            1.0,
-            [1.0; 3],
-            1.5,
-            [0.0; 3],
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.3,
-            100.0,
-            400.0,
-        );
-        let specular = crate::models::MaterialLayeredPbr::from_authoring_factors(
-            crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE,
-            0.0,
-            0.0,
-            1.0,
-            0.7,
-            [0.8, 0.6, 0.4],
-            1.8,
-            [0.0; 3],
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.3,
-            100.0,
-            400.0,
-        );
-        let anisotropy = crate::models::MaterialLayeredPbr::from_authoring_factors(
-            crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE,
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            [1.0; 3],
-            1.5,
-            [0.0; 3],
-            0.0,
-            0.6,
-            0.3,
-            0.0,
-            1.3,
-            100.0,
-            400.0,
-        );
-        let texture = crate::models::MaterialTextureBinding {
-            source_texture_index: 1,
-            source_image_index: 2,
-            runtime_texture_idx: Some(3),
-            transform: Default::default(),
-        };
-        let textured_material = crate::models::MaterialLayeredPbr {
-            clearcoat_authored: true,
-            clearcoat_factor: 0.8,
-            clearcoat_texture: Some(texture),
-            specular_authored: true,
-            specular_factor: 0.7,
-            specular_texture: Some(texture),
-            sheen_authored: true,
-            sheen_color_factor: [0.3, 0.1, 0.05],
-            sheen_color_texture: Some(texture),
-            anisotropy_authored: true,
-            anisotropy_strength: 0.6,
-            anisotropy_texture: Some(texture),
-            iridescence_authored: true,
-            iridescence_factor: 0.75,
-            iridescence_texture: Some(texture),
-            ..Default::default()
-        };
-        let sheen = PtLayeredMaterialCpu::from_material(sheen);
-        let clearcoat = PtLayeredMaterialCpu::from_material(clearcoat);
-        let specular = PtLayeredMaterialCpu::from_material(specular);
-        let anisotropy = PtLayeredMaterialCpu::from_material(anisotropy);
-        let textured = PtLayeredMaterialCpu::from_material(textured_material);
-        let textured_meta = PtLayeredTextureCpu::from_material(textured_material, 4, false);
-        assert!(sheen.has_sheen() && sheen.has_qualified_transport());
-        assert!(clearcoat.has_clearcoat() && clearcoat.has_qualified_transport());
-        assert!(specular.has_specular_ior() && specular.has_qualified_transport());
-        assert!(anisotropy.has_anisotropy() && anisotropy.has_qualified_transport());
-        assert!(textured.active() && !textured.has_qualified_transport());
-        assert!(textured_meta.has_specular_ior());
-        assert_eq!(
-            textured.header[2],
-            crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
-                | crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE
-                | crate::models::MaterialLayeredPbr::SHEEN_LOBE
-                | crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE
-                | crate::models::MaterialLayeredPbr::IRIDESCENCE_LOBE
-        );
-    }
-
-    #[test]
-    fn specialization_uses_separate_group_without_touching_base_kernel() {
-        assert!(PT_LAYERED_BINDINGS_WGSL.contains("@group(2) @binding(0)"));
-        assert!(PT_LAYERED_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(2)"));
-        assert!(!PT_LAYERED_SHEEN_DISABLED_WGSL.contains("@binding(1)"));
-        assert!(PT_LAYERED_SHEEN_WGSL.contains("@group(2) @binding(1)"));
-        assert!(PT_LAYERED_TRANSPORT_WGSL.contains("PT_HAS_SCALAR_ANISOTROPY"));
-        assert!(PT_LAYERED_TRANSPORT_WGSL.contains("slot * PT_VSTRIDE + 20u"));
-        assert!(PT_LAYERED_TRANSPORT_WGSL.contains("hit.object_to_world"));
-        assert!(PT_LAYERED_IRIDESCENCE_WGSL.contains("pt_eval_iridescence"));
-        assert!(!PT_LAYERED_IRIDESCENCE_DISABLED_WGSL.contains("exp("));
-        assert!(!pt_kernel_variant(false).contains("pt_layered_materials"));
-    }
-
-    #[test]
-    fn layered_specialization_rewrites_every_transport_vertex() {
-        for diagnostics in [false, true] {
-            let base = pt_kernel_variant(diagnostics);
-            let specialized = layered_kernel_variant(base.as_ref());
-            assert!(
-                specialized.contains("let layered_primary = pt_layered_primary_surface(p0, n0);")
-            );
-            assert_eq!(specialized.matches("pt_sample_layered_brdf(").count(), 1);
-            assert_eq!(
-                specialized
-                    .matches("throughput * pt_layered_direct_light(")
-                    .count(),
-                1
-            );
-            assert!(specialized.contains("layered_cur = layered_hit;"));
-            assert!(specialized.contains("layered_tangent_cur = layered_tangent_hit;"));
-            assert_eq!(base.matches("pt_layered_").count(), 0);
-        }
-    }
-}
+#[path = "layered_pbr_pt_tests.rs"]
+mod tests;

@@ -724,6 +724,20 @@ impl Renderer {
                 "false"
             },
         );
+        out.push_str(",\"path_tracing_clearcoat_texture_specialization_initialized\":");
+        out.push_str(
+            if self
+                .pt_layered
+                .pipelines
+                .iter()
+                .enumerate()
+                .any(|(index, pipeline)| index & 32 != 0 && pipeline.is_some())
+            {
+                "true"
+            } else {
+                "false"
+            },
+        );
         out.push_str(",\"path_tracing_active_instance_count\":");
         out.push_str(
             &self
@@ -756,6 +770,19 @@ impl Renderer {
             &self
                 .pt_layered
                 .texture_buffer
+                .as_ref()
+                .map_or(0, wgpu::Buffer::size)
+                .to_string(),
+        );
+        out.push_str(",\"path_tracing_clearcoat_texture_sidecar_record_bytes\":");
+        out.push_str(
+            &std::mem::size_of::<super::layered_pbr_pt::PtClearcoatTextureCpu>().to_string(),
+        );
+        out.push_str(",\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":");
+        out.push_str(
+            &self
+                .pt_layered
+                .clearcoat_texture_buffer
                 .as_ref()
                 .map_or(0, wgpu::Buffer::size)
                 .to_string(),

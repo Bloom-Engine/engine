@@ -10,22 +10,25 @@ const PT_LAYERED_FACTOR_UV1: u32 = 1 << 16;
 const PT_LAYERED_COLOR_UV1: u32 = 1 << 17;
 
 pub(in crate::renderer) struct PtLayeredRuntimeState {
-    pub(in crate::renderer) pipelines: [Option<wgpu::ComputePipeline>; 32],
-    pub(in crate::renderer) layouts: [Option<wgpu::BindGroupLayout>; 8],
-    pub(in crate::renderer) bind_groups: [Option<wgpu::BindGroup>; 8],
+    pub(in crate::renderer) pipelines: [Option<wgpu::ComputePipeline>; 64],
+    pub(in crate::renderer) layouts: [Option<wgpu::BindGroupLayout>; 16],
+    pub(in crate::renderer) bind_groups: [Option<wgpu::BindGroup>; 16],
     pub(in crate::renderer) instance_buffer: Option<wgpu::Buffer>,
     pub(in crate::renderer) records: Vec<PtLayeredMaterialCpu>,
     pub(in crate::renderer) texture_buffer: Option<wgpu::Buffer>,
     pub(in crate::renderer) uv1_buffer: Option<wgpu::Buffer>,
     pub(in crate::renderer) texture_records: Vec<PtLayeredTextureCpu>,
+    pub(in crate::renderer) clearcoat_texture_buffer: Option<wgpu::Buffer>,
+    pub(in crate::renderer) clearcoat_texture_records: Vec<PtClearcoatTextureCpu>,
     pub(in crate::renderer) dirty: bool,
     pub(in crate::renderer) texture_dirty: bool,
+    pub(in crate::renderer) clearcoat_texture_dirty: bool,
 }
 
 impl Default for PtLayeredRuntimeState {
     fn default() -> Self {
         Self {
-            pipelines: Default::default(),
+            pipelines: std::array::from_fn(|_| None),
             layouts: Default::default(),
             bind_groups: Default::default(),
             instance_buffer: None,
@@ -33,8 +36,11 @@ impl Default for PtLayeredRuntimeState {
             texture_buffer: None,
             uv1_buffer: None,
             texture_records: Vec::new(),
+            clearcoat_texture_buffer: None,
+            clearcoat_texture_records: Vec::new(),
             dirty: false,
             texture_dirty: false,
+            clearcoat_texture_dirty: false,
         }
     }
 }
@@ -164,6 +170,7 @@ impl PtLayeredTextureCpu {
 pub(in crate::renderer) fn append_record(
     records: &mut Option<Vec<PtLayeredMaterialCpu>>,
     texture_records: &mut Option<Vec<PtLayeredTextureCpu>>,
+    clearcoat_texture_records: &mut Option<Vec<PtClearcoatTextureCpu>>,
     instance_index: usize,
     material: crate::models::MaterialLayeredPbr,
     runtime_texture_count: usize,
@@ -194,6 +201,17 @@ pub(in crate::renderer) fn append_record(
     if let Some(texture_records) = texture_records {
         debug_assert_eq!(texture_records.len(), instance_index);
         texture_records.push(texture_record);
+    }
+
+    let clearcoat_texture_record =
+        PtClearcoatTextureCpu::from_material(material, runtime_texture_count, has_secondary_uv);
+    let uses_uv1 = uses_uv1 || clearcoat_texture_record.has_uv1();
+    if clearcoat_texture_records.is_none() && clearcoat_texture_record.active() {
+        *clearcoat_texture_records = Some(vec![PtClearcoatTextureCpu::default(); instance_index]);
+    }
+    if let Some(clearcoat_texture_records) = clearcoat_texture_records {
+        debug_assert_eq!(clearcoat_texture_records.len(), instance_index);
+        clearcoat_texture_records.push(clearcoat_texture_record);
     }
     uses_uv1
 }
@@ -352,9 +370,11 @@ mod tests {
     fn first_active_record_backfills_base_instances_lazily() {
         let mut records = None;
         let mut texture_records = None;
+        let mut clearcoat_texture_records = None;
         append_record(
             &mut records,
             &mut texture_records,
+            &mut clearcoat_texture_records,
             0,
             Default::default(),
             1,
@@ -363,6 +383,7 @@ mod tests {
         append_record(
             &mut records,
             &mut texture_records,
+            &mut clearcoat_texture_records,
             1,
             Default::default(),
             1,
@@ -370,6 +391,7 @@ mod tests {
         );
         assert!(records.is_none());
         assert!(texture_records.is_none());
+        assert!(clearcoat_texture_records.is_none());
 
         let layered = crate::models::MaterialLayeredPbr::from_authoring_factors(
             crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE,
@@ -388,7 +410,15 @@ mod tests {
             100.0,
             400.0,
         );
-        append_record(&mut records, &mut texture_records, 2, layered, 1, false);
+        append_record(
+            &mut records,
+            &mut texture_records,
+            &mut clearcoat_texture_records,
+            2,
+            layered,
+            1,
+            false,
+        );
         let records = records.unwrap();
         assert_eq!(records.len(), 3);
         assert!(!records[0].active());
@@ -398,6 +428,7 @@ mod tests {
             crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
         );
         assert!(texture_records.is_none());
+        assert!(clearcoat_texture_records.is_none());
     }
 
     #[test]
@@ -454,18 +485,30 @@ mod tests {
 
     #[test]
     fn scalar_uv0_and_uv1_specializations_parse() {
-        for (textures, uv1) in [(false, false), (true, false), (true, true)] {
+        for (textures, clearcoat_textures, uv1) in [
+            (false, false, false),
+            (true, false, false),
+            (true, false, true),
+            (false, true, false),
+            (false, true, true),
+            (true, true, true),
+        ] {
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 "const BLOOM_RAY_QUERY_NEEDS_PROCEED: bool = false;",
                 pt_fault_constants(None),
                 layered_kernel_variant(pt_kernel_variant(false).as_ref()),
-                texture_variant(textures),
+                texture_variant(textures || clearcoat_textures),
                 PT_LAYERED_BINDINGS_WGSL,
                 if textures {
                     PT_LAYERED_TEXTURE_BINDINGS_WGSL
                 } else {
                     PT_LAYERED_TEXTURE_DISABLED_WGSL
+                },
+                if clearcoat_textures {
+                    super::super::PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL
+                } else {
+                    super::super::PT_CLEARCOAT_TEXTURE_DISABLED_WGSL
                 },
                 if uv1 {
                     PT_LAYERED_UV1_BINDINGS_WGSL
@@ -478,7 +521,10 @@ mod tests {
                 PT_LAYERED_SHEEN_DISABLED_WGSL,
             );
             wgpu::naga::front::wgsl::parse_str(&source).unwrap_or_else(|error| {
-                panic!("layered PT WGSL (textures={textures}, uv1={uv1}) failed: {error}")
+                panic!(
+                    "layered PT WGSL (specular={textures}, clearcoat={clearcoat_textures}, \
+                     uv1={uv1}) failed: {error}"
+                )
             });
         }
     }
