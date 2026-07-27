@@ -647,6 +647,12 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
             MaterialTextureTransform,
         )>,
+        sheen_textures: Option<(
+            &[u8],
+            &[u8],
+            MaterialTextureTransform,
+            MaterialTextureTransform,
+        )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
         let Some((mut eng, _adapter)) = try_engine_rt()? else {
             return Ok(None);
@@ -687,6 +693,24 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
                 transform: roughness_transform,
             });
         }
+        if let (Some(material), Some((color, roughness, color_transform, roughness_transform))) =
+            (layered.as_mut(), sheen_textures)
+        {
+            let color_index = eng.renderer.register_texture_kind(2, 2, color, false);
+            let roughness_index = eng.renderer.register_texture_kind(2, 2, roughness, false);
+            material.sheen_color_texture = Some(MaterialTextureBinding {
+                source_texture_index: 0,
+                source_image_index: 0,
+                runtime_texture_idx: Some(color_index),
+                transform: color_transform,
+            });
+            material.sheen_roughness_texture = Some(MaterialTextureBinding {
+                source_texture_index: 1,
+                source_image_index: 1,
+                runtime_texture_idx: Some(roughness_index),
+                transform: roughness_transform,
+            });
+        }
         build_pt_scene(&mut eng);
         // Replace the material target with the same cube carrying an explicit
         // per-face tangent. The base PT shader ignores this attribute, while
@@ -720,6 +744,12 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
                 || material
                     .clearcoat_roughness_texture
                     .is_some_and(|binding| binding.transform.tex_coord == 1)
+                || material
+                    .sheen_color_texture
+                    .is_some_and(|binding| binding.transform.tex_coord == 1)
+                || material
+                    .sheen_roughness_texture
+                    .is_some_and(|binding| binding.transform.tex_coord == 1)
         });
         let secondary_uvs = uses_uv1.then(|| {
             vertices
@@ -748,7 +778,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, specular_textures, None)
+        render_variant_with_layered_textures(layered, specular_textures, None, None)
     }
 
     fn render_variant_with_clearcoat_textures(
@@ -760,13 +790,25 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, clearcoat_textures)
+        render_variant_with_layered_textures(layered, None, clearcoat_textures, None)
+    }
+
+    fn render_variant_with_sheen_textures(
+        layered: Option<MaterialLayeredPbr>,
+        sheen_textures: Option<(
+            &[u8],
+            &[u8],
+            MaterialTextureTransform,
+            MaterialTextureTransform,
+        )>,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
+        render_variant_with_layered_textures(layered, None, None, sheen_textures)
     }
 
     fn render_variant(
         layered: Option<MaterialLayeredPbr>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None)
+        render_variant_with_layered_textures(layered, None, None, None)
     }
 
     fn mean_display_luminance(rgba: &[u8]) -> f64 {
@@ -995,6 +1037,69 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     }))
     .expect("sheen PT variant initializes")
     .expect("same ray-query adapter remains available");
+    let directional_sheen_channels = [
+        255, 64, 32, 255, 32, 255, 64, 32, 255, 64, 32, 255, 32, 255, 64, 32,
+    ];
+    let textured_sheen_material = MaterialLayeredPbr {
+        sheen_authored: true,
+        sheen_color_factor: [0.45, 0.12, 0.04],
+        sheen_roughness_factor: 0.4,
+        ..Default::default()
+    };
+    let (textured_sheen_white, textured_sheen_white_paths) = render_variant_with_sheen_textures(
+        Some(textured_sheen_material),
+        Some((
+            &white_specular_texels,
+            &white_specular_texels,
+            Default::default(),
+            Default::default(),
+        )),
+    )
+    .expect("neutral textured sheen PT variant initializes")
+    .expect("same ray-query adapter remains available");
+    let (textured_sheen, textured_sheen_paths) = render_variant_with_sheen_textures(
+        Some(textured_sheen_material),
+        Some((
+            &directional_sheen_channels,
+            &directional_sheen_channels,
+            Default::default(),
+            Default::default(),
+        )),
+    )
+    .expect("textured sheen PT variant initializes")
+    .expect("same ray-query adapter remains available");
+    let (textured_sheen_rotated, textured_sheen_rotated_paths) =
+        render_variant_with_sheen_textures(
+            Some(textured_sheen_material),
+            Some((
+                &directional_sheen_channels,
+                &directional_sheen_channels,
+                MaterialTextureTransform {
+                    rotation: std::f32::consts::FRAC_PI_2,
+                    ..Default::default()
+                },
+                Default::default(),
+            )),
+        )
+        .expect("rotated textured sheen PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (textured_sheen_uv1, textured_sheen_uv1_paths) = render_variant_with_sheen_textures(
+        Some(textured_sheen_material),
+        Some((
+            &directional_sheen_channels,
+            &directional_sheen_channels,
+            MaterialTextureTransform {
+                tex_coord: 1,
+                ..Default::default()
+            },
+            MaterialTextureTransform {
+                tex_coord: 1,
+                ..Default::default()
+            },
+        )),
+    )
+    .expect("UV1 textured sheen PT variant initializes")
+    .expect("same ray-query adapter remains available");
     let (anisotropy, anisotropy_paths) = render_variant(Some(MaterialLayeredPbr {
         anisotropy_authored: true,
         anisotropy_strength: 0.75,
@@ -1069,6 +1174,8 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         base_paths.contains("\"path_tracing_clearcoat_texture_specialization_initialized\":false")
     );
     assert!(base_paths.contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
+    assert!(base_paths.contains("\"path_tracing_sheen_texture_specialization_initialized\":false"));
+    assert!(base_paths.contains("\"path_tracing_sheen_texture_sidecar_allocated_bytes\":0"));
     assert!(neutral_paths.contains("\"path_tracing_specialization_initialized\":false"));
     assert!(neutral_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false"));
     assert!(neutral_paths.contains("\"path_tracing_active_instance_count\":1"));
@@ -1099,6 +1206,10 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         assert!(
             textured_clearcoat_paths.contains("\"path_tracing_texture_sidecar_allocated_bytes\":0")
         );
+        assert!(textured_clearcoat_paths
+            .contains("\"path_tracing_sheen_texture_specialization_initialized\":false"));
+        assert!(textured_clearcoat_paths
+            .contains("\"path_tracing_sheen_texture_sidecar_allocated_bytes\":0"));
         assert!(textured_clearcoat_paths
             .contains("\"path_tracing_clearcoat_texture_sidecar_record_bytes\":64"));
         assert!(!textured_clearcoat_paths
@@ -1152,6 +1263,10 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             .contains("\"path_tracing_clearcoat_texture_specialization_initialized\":false"));
         assert!(textured_specular_paths
             .contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_specular_paths
+            .contains("\"path_tracing_sheen_texture_specialization_initialized\":false"));
+        assert!(textured_specular_paths
+            .contains("\"path_tracing_sheen_texture_sidecar_allocated_bytes\":0"));
     } else {
         assert_eq!(
             base, textured_specular_white,
@@ -1185,6 +1300,47 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     assert!(sheen_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false"));
     assert!(sheen_paths.contains("\"sheen_lut_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_active_instance_count\":1"));
+    let textured_sheen_supported = textured_sheen_white_paths
+        .contains("\"path_tracing_sheen_texture_specialization_initialized\":true");
+    if textured_sheen_supported {
+        assert_eq!(
+            sheen, textured_sheen_white,
+            "neutral UV0 sheen textures changed scalar path-traced transport"
+        );
+        assert!(textured_sheen_paths
+            .contains("\"path_tracing_sheen_texture_specialization_initialized\":true"));
+        assert!(
+            textured_sheen_paths.contains("\"path_tracing_sheen_specialization_initialized\":true")
+        );
+        assert!(textured_sheen_rotated_paths
+            .contains("\"path_tracing_sheen_texture_specialization_initialized\":true"));
+        assert!(textured_sheen_paths.contains("\"sheen_lut_initialized\":true"));
+        assert!(textured_sheen_paths.contains("\"path_tracing_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_sheen_paths
+            .contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
+        assert!(
+            textured_sheen_paths.contains("\"path_tracing_sheen_texture_sidecar_record_bytes\":64")
+        );
+        assert!(!textured_sheen_paths
+            .contains("\"path_tracing_sheen_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_sheen_uv1_paths
+            .contains("\"path_tracing_uv1_specialization_initialized\":true"));
+        assert!(
+            !textured_sheen_uv1_paths.contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0")
+        );
+    } else {
+        assert_eq!(
+            base, textured_sheen_white,
+            "an adapter without PT texture arrays must preserve sheen fallback"
+        );
+        assert_eq!(
+            base, textured_sheen_uv1,
+            "an adapter without PT texture arrays must not partially enable sheen UV1"
+        );
+        assert!(textured_sheen_white_paths
+            .contains("\"path_tracing_sheen_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_sheen_uv1_paths.contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0"));
+    }
     assert!(anisotropy_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(anisotropy_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
     assert!(
@@ -1265,6 +1421,21 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         );
     }
     assert_transport_response("sheen", &base, &sheen);
+    if textured_sheen_supported {
+        assert_transport_response("UV0 textured sheen", &textured_sheen_white, &textured_sheen);
+        let transform_response =
+            calculate_diff_metrics(&textured_sheen, &textured_sheen_rotated, W, H);
+        assert!(
+            transform_response.mean_rgb >= 0.02,
+            "sheen texture UV rotation did not turn the path-traced response: \
+             {transform_response:?}"
+        );
+        let uv_set_response = calculate_diff_metrics(&textured_sheen, &textured_sheen_uv1, W, H);
+        assert!(
+            uv_set_response.mean_rgb >= 0.02,
+            "sheen UV1 did not select retained secondary coordinates: {uv_set_response:?}"
+        );
+    }
     assert_transport_response("anisotropy", &base, &anisotropy);
     assert_transport_response("rotated anisotropy", &base, &anisotropy_rotated);
     let rotation_response = calculate_diff_metrics(&anisotropy, &anisotropy_rotated, W, H);

@@ -1,43 +1,42 @@
-//! Independently lazy clearcoat factor/roughness metadata for path tracing.
+//! Independently lazy sheen color/roughness metadata for path tracing.
 //!
-//! Clearcoat normal maps remain unqualified until their complete
-//! tangent-space hit-shading path lands. Keeping this record separate from
-//! specular textures preserves the established specular-only ABI and cost.
+//! This record is separate from specular and clearcoat texture transport so
+//! each previously qualified path preserves its established ABI and bandwidth.
 
 use super::*;
 
-const PT_CLEARCOAT_TEXTURE_RECORD_VERSION: u32 = 1;
-const PT_CLEARCOAT_FACTOR_UV1: u32 = 1 << 16;
-const PT_CLEARCOAT_ROUGHNESS_UV1: u32 = 1 << 17;
+const PT_SHEEN_TEXTURE_RECORD_VERSION: u32 = 1;
+const PT_SHEEN_COLOR_UV1: u32 = 1 << 16;
+const PT_SHEEN_ROUGHNESS_UV1: u32 = 1 << 17;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub(in crate::renderer) struct PtClearcoatTextureCpu {
+pub(in crate::renderer) struct PtSheenTextureCpu {
     /// x = ABI version, y = qualified lobe + UV flags,
-    /// z/w = clearcoat-factor/roughness runtime texture indices.
+    /// z/w = sheen-color/roughness runtime texture indices.
     header: [u32; 4],
     /// Column-major 2x2 UV matrices after authored scale + rotation.
-    factor_matrix: [f32; 4],
+    color_matrix: [f32; 4],
     roughness_matrix: [f32; 4],
-    /// xy = factor offset, zw = roughness offset.
+    /// xy = color offset, zw = roughness offset.
     offsets: [f32; 4],
 }
 
-pub(super) const PT_CLEARCOAT_TEXTURE_RECORD_BYTES: u64 =
-    std::mem::size_of::<PtClearcoatTextureCpu>() as u64;
+pub(super) const PT_SHEEN_TEXTURE_RECORD_BYTES: u64 =
+    std::mem::size_of::<PtSheenTextureCpu>() as u64;
 
-impl Default for PtClearcoatTextureCpu {
+impl Default for PtSheenTextureCpu {
     fn default() -> Self {
         Self {
-            header: [PT_CLEARCOAT_TEXTURE_RECORD_VERSION, 0, 0, 0],
-            factor_matrix: [1.0, 0.0, 0.0, 1.0],
+            header: [PT_SHEEN_TEXTURE_RECORD_VERSION, 0, 0, 0],
+            color_matrix: [1.0, 0.0, 0.0, 1.0],
             roughness_matrix: [1.0, 0.0, 0.0, 1.0],
             offsets: [0.0; 4],
         }
     }
 }
 
-impl PtClearcoatTextureCpu {
+impl PtSheenTextureCpu {
     pub(super) fn from_material(
         material: crate::models::MaterialLayeredPbr,
         runtime_texture_count: usize,
@@ -75,49 +74,45 @@ impl PtClearcoatTextureCpu {
             )
         }
 
-        let factor = material.clearcoat_texture;
-        let roughness = material.clearcoat_roughness_texture;
-        let has_texture = factor.is_some() || roughness.is_some();
-        let all_usable = factor
+        let color = material.sheen_color_texture;
+        let roughness = material.sheen_roughness_texture;
+        let has_texture = color.is_some() || roughness.is_some();
+        let all_usable = color
             .is_none_or(|binding| usable(binding, runtime_texture_count, has_secondary_uv))
             && roughness
                 .is_none_or(|binding| usable(binding, runtime_texture_count, has_secondary_uv));
-        if !material.has_clearcoat()
-            || !has_texture
-            || !all_usable
-            || material.clearcoat_normal_texture.is_some()
-        {
+        if !material.has_sheen() || !has_texture || !all_usable {
             return Self::default();
         }
 
-        let (factor_matrix, factor_offset) = transform(factor);
+        let (color_matrix, color_offset) = transform(color);
         let (roughness_matrix, roughness_offset) = transform(roughness);
         Self {
             header: [
-                PT_CLEARCOAT_TEXTURE_RECORD_VERSION,
-                crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
-                    | if factor.is_some_and(|binding| binding.transform.tex_coord == 1) {
-                        PT_CLEARCOAT_FACTOR_UV1
+                PT_SHEEN_TEXTURE_RECORD_VERSION,
+                crate::models::MaterialLayeredPbr::SHEEN_LOBE
+                    | if color.is_some_and(|binding| binding.transform.tex_coord == 1) {
+                        PT_SHEEN_COLOR_UV1
                     } else {
                         0
                     }
                     | if roughness.is_some_and(|binding| binding.transform.tex_coord == 1) {
-                        PT_CLEARCOAT_ROUGHNESS_UV1
+                        PT_SHEEN_ROUGHNESS_UV1
                     } else {
                         0
                     },
-                factor
+                color
                     .and_then(|binding| binding.runtime_texture_idx)
                     .unwrap_or(0),
                 roughness
                     .and_then(|binding| binding.runtime_texture_idx)
                     .unwrap_or(0),
             ],
-            factor_matrix,
+            color_matrix,
             roughness_matrix,
             offsets: [
-                factor_offset[0],
-                factor_offset[1],
+                color_offset[0],
+                color_offset[1],
                 roughness_offset[0],
                 roughness_offset[1],
             ],
@@ -125,31 +120,31 @@ impl PtClearcoatTextureCpu {
     }
 
     pub(super) fn active(self) -> bool {
-        self.header[0] == PT_CLEARCOAT_TEXTURE_RECORD_VERSION
-            && self.header[1] & crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE != 0
+        self.header[0] == PT_SHEEN_TEXTURE_RECORD_VERSION
+            && self.header[1] & crate::models::MaterialLayeredPbr::SHEEN_LOBE != 0
     }
 
     pub(super) fn has_uv1(self) -> bool {
-        self.active()
-            && self.header[1] & (PT_CLEARCOAT_FACTOR_UV1 | PT_CLEARCOAT_ROUGHNESS_UV1) != 0
+        self.active() && self.header[1] & (PT_SHEEN_COLOR_UV1 | PT_SHEEN_ROUGHNESS_UV1) != 0
     }
 }
 
-pub(super) const PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL: &str = r#"
-const PT_HAS_CLEARCOAT_TEXTURES: bool = true;
-const PT_CLEARCOAT_FACTOR_UV1: u32 = 65536u;
-const PT_CLEARCOAT_ROUGHNESS_UV1: u32 = 131072u;
+pub(super) const PT_SHEEN_TEXTURE_BINDINGS_WGSL: &str = r#"
+const PT_HAS_SHEEN_TEXTURES: bool = true;
+const PT_LAYERED_SHEEN_LOBE: u32 = 2u;
+const PT_SHEEN_COLOR_UV1: u32 = 65536u;
+const PT_SHEEN_ROUGHNESS_UV1: u32 = 131072u;
 
-struct PtClearcoatTexture {
+struct PtSheenTexture {
     header: vec4<u32>,
-    factor_matrix: vec4<f32>,
+    color_matrix: vec4<f32>,
     roughness_matrix: vec4<f32>,
     offsets: vec4<f32>,
 };
-@group(2) @binding(4)
-var<storage, read> pt_clearcoat_textures: array<PtClearcoatTexture>;
+@group(2) @binding(5)
+var<storage, read> pt_sheen_textures: array<PtSheenTexture>;
 
-fn pt_clearcoat_transform_uv(
+fn pt_sheen_transform_uv(
     uv: vec2<f32>,
     matrix: vec4<f32>,
     offset: vec2<f32>,
@@ -160,56 +155,63 @@ fn pt_clearcoat_transform_uv(
     ) + offset;
 }
 
-fn pt_layered_apply_clearcoat_textures(
+fn pt_sheen_srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
+    let low = color / 12.92;
+    let high = pow((color + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(high, low, color <= vec3<f32>(0.04045));
+}
+
+fn pt_layered_apply_sheen_textures(
     material_in: PtLayeredMaterial,
     instance_index: u32,
     uv0: vec2<f32>,
     uv1: vec2<f32>,
 ) -> PtLayeredMaterial {
     var material = material_in;
-    let texture_meta = pt_clearcoat_textures[instance_index];
+    let texture_meta = pt_sheen_textures[instance_index];
     if (
         texture_meta.header.x != 1u
-            || (texture_meta.header.y & PT_LAYERED_CLEARCOAT_LOBE) == 0u
+            || (texture_meta.header.y & PT_LAYERED_SHEEN_LOBE) == 0u
     ) {
         return material;
     }
-    var factor = material.clearcoat_ior.x;
-    var roughness = material.clearcoat_ior.y;
+    var color = material.sheen.xyz;
+    var roughness = material.sheen.w;
     if (texture_meta.header.z != 0u) {
-        let factor_uv = pt_clearcoat_transform_uv(
-            select(uv0, uv1, (texture_meta.header.y & PT_CLEARCOAT_FACTOR_UV1) != 0u),
-            texture_meta.factor_matrix,
+        let color_uv = pt_sheen_transform_uv(
+            select(uv0, uv1, (texture_meta.header.y & PT_SHEEN_COLOR_UV1) != 0u),
+            texture_meta.color_matrix,
             texture_meta.offsets.xy,
         );
-        factor *= pt_tex_sample_rgba(texture_meta.header.z, factor_uv).r;
+        color *= pt_sheen_srgb_to_linear(
+            pt_tex_sample_rgba(texture_meta.header.z, color_uv).rgb,
+        );
     }
     if (texture_meta.header.w != 0u) {
-        let roughness_uv = pt_clearcoat_transform_uv(
-            select(uv0, uv1, (texture_meta.header.y & PT_CLEARCOAT_ROUGHNESS_UV1) != 0u),
+        let roughness_uv = pt_sheen_transform_uv(
+            select(uv0, uv1, (texture_meta.header.y & PT_SHEEN_ROUGHNESS_UV1) != 0u),
             texture_meta.roughness_matrix,
             texture_meta.offsets.zw,
         );
-        roughness *= pt_tex_sample_rgba(texture_meta.header.w, roughness_uv).g;
+        roughness *= pt_tex_sample_rgba(texture_meta.header.w, roughness_uv).a;
     }
-    material.clearcoat_ior = vec4<f32>(
-        clamp(factor, 0.0, 1.0),
+    material.sheen = vec4<f32>(
+        max(color, vec3<f32>(0.0)),
         clamp(roughness, 0.0, 1.0),
-        material.clearcoat_ior.zw,
     );
     material.header = vec4<u32>(
         material.header.xy,
-        material.header.z & ~PT_LAYERED_CLEARCOAT_LOBE,
+        material.header.z & ~PT_LAYERED_SHEEN_LOBE,
         material.header.w,
     );
     return material;
 }
 "#;
 
-pub(super) const PT_CLEARCOAT_TEXTURE_DISABLED_WGSL: &str = r#"
-const PT_HAS_CLEARCOAT_TEXTURES: bool = false;
+pub(super) const PT_SHEEN_TEXTURE_DISABLED_WGSL: &str = r#"
+const PT_HAS_SHEEN_TEXTURES: bool = false;
 
-fn pt_layered_apply_clearcoat_textures(
+fn pt_layered_apply_sheen_textures(
     material: PtLayeredMaterial,
     instance_index: u32,
     uv0: vec2<f32>,
@@ -237,39 +239,33 @@ mod tests {
 
     #[test]
     fn record_is_independently_compact_and_inactive_by_default() {
-        assert_eq!(PT_CLEARCOAT_TEXTURE_RECORD_BYTES, 64);
-        assert!(!PtClearcoatTextureCpu::default().active());
+        assert_eq!(PT_SHEEN_TEXTURE_RECORD_BYTES, 64);
+        assert!(!PtSheenTextureCpu::default().active());
     }
 
     #[test]
-    fn qualification_requires_resolved_coordinates_and_no_normal_map() {
+    fn qualification_requires_resolved_coordinates() {
         let material = crate::models::MaterialLayeredPbr {
-            clearcoat_authored: true,
-            clearcoat_factor: 0.8,
-            clearcoat_texture: Some(binding(Some(2), 0)),
-            clearcoat_roughness_texture: Some(binding(Some(3), 1)),
+            sheen_authored: true,
+            sheen_color_factor: [0.4, 0.2, 0.1],
+            sheen_color_texture: Some(binding(Some(2), 0)),
+            sheen_roughness_texture: Some(binding(Some(3), 1)),
             ..Default::default()
         };
-        assert!(!PtClearcoatTextureCpu::from_material(material, 4, false).active());
-        let record = PtClearcoatTextureCpu::from_material(material, 4, true);
+        assert!(!PtSheenTextureCpu::from_material(material, 4, false).active());
+        let record = PtSheenTextureCpu::from_material(material, 4, true);
         assert!(record.active() && record.has_uv1());
         assert_eq!(record.header[2..], [2, 3]);
 
         let unresolved = crate::models::MaterialLayeredPbr {
-            clearcoat_texture: Some(binding(None, 0)),
+            sheen_color_texture: Some(binding(None, 0)),
             ..material
         };
-        assert!(!PtClearcoatTextureCpu::from_material(unresolved, 4, true).active());
-
-        let normal_mapped = crate::models::MaterialLayeredPbr {
-            clearcoat_normal_texture: Some(binding(Some(1), 0)),
-            ..material
-        };
-        assert!(!PtClearcoatTextureCpu::from_material(normal_mapped, 4, true).active());
+        assert!(!PtSheenTextureCpu::from_material(unresolved, 4, true).active());
     }
 
     #[test]
-    fn first_clearcoat_texture_backfills_parallel_records_and_reports_uv1() {
+    fn first_sheen_texture_backfills_parallel_records_and_reports_uv1() {
         let mut records = None;
         let mut specular_records = None;
         let mut clearcoat_records = None;
@@ -285,9 +281,9 @@ mod tests {
             true,
         ));
         let material = crate::models::MaterialLayeredPbr {
-            clearcoat_authored: true,
-            clearcoat_factor: 0.8,
-            clearcoat_texture: Some(binding(Some(2), 1)),
+            sheen_authored: true,
+            sheen_color_factor: [0.4, 0.2, 0.1],
+            sheen_color_texture: Some(binding(Some(2), 1)),
             ..Default::default()
         };
         assert!(super::super::texture::append_record(
@@ -301,8 +297,8 @@ mod tests {
             true,
         ));
         assert!(specular_records.is_none());
-        assert!(sheen_records.is_none());
-        let records = clearcoat_records.unwrap();
+        assert!(clearcoat_records.is_none());
+        let records = sheen_records.unwrap();
         assert_eq!(records.len(), 2);
         assert!(!records[0].active());
         assert!(records[1].active() && records[1].has_uv1());
