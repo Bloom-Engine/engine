@@ -45,15 +45,6 @@ pub fn bloom_is_key_released(key: f64) -> f64 {
     }
 }
 
-#[wasm_bindgen]
-pub fn bloom_is_key_repeated(key: f64) -> f64 {
-    if engine().input.is_key_repeated(key as usize) {
-        1.0
-    } else {
-        0.0
-    }
-}
-
 // ============================================================
 // Input - Mouse
 // ============================================================

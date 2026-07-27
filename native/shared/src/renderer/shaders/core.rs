@@ -1,13 +1,6 @@
 //! Core pipeline shaders: batched 2D, legacy 3D, and the main scene shader (forward MRT).
 //! Split from renderer/shaders.rs.
-
-//! WGSL shader strings used by the renderer.
-//!
-//! Pure data — no behavior, no struct definitions. Each `const`
-//! is `pub(super)` so the surrounding `renderer` module (and only
-//! that module) can see it, via `use super::shaders::*;` in
-//! `mod.rs`. Split out so the ~11 500-line renderer file shrinks
-//! to the Rust logic it actually contains.
+//! Pure WGSL data, private to the surrounding renderer module.
 
 pub(in crate::renderer) const SHADER_2D: &str = "
 struct Uniforms {
