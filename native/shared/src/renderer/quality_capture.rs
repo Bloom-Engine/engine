@@ -607,6 +607,13 @@ impl Renderer {
         } else {
             "false"
         });
+        let (cached_motion_entries, cached_motion_cpu_bytes) = self.cached_model_motion_stats();
+        out.push_str(",\"cached_model_motion_entries\":");
+        out.push_str(&cached_motion_entries.to_string());
+        out.push_str(",\"cached_model_motion_cpu_capacity_bytes\":");
+        out.push_str(&cached_motion_cpu_bytes.to_string());
+        out.push_str(",\"cached_model_motion_gpu_bytes\":0");
+        out.push_str(",\"cached_model_motion_passes\":0");
         out.push_str(",\"diagnostic_persistent_bytes\":0");
         let diagnostic_texture_bytes = u64::from(self.surface_config.width)
             * u64::from(self.surface_config.height)

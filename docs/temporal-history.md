@@ -130,6 +130,24 @@ from current data.
 Telemetry exposes `camera_cut_pending`, `camera_cut_active`, `ssao_frames`, and
 `ssao_index` under `temporal_history`.
 
+## Cached-model motion
+
+Ordinary cached-model draws now pair each stable submission slot with its
+previous model transform and compose `prev_mvp` from the common
+jitter-cancelled previous camera. The model handle is part of the pairing, so
+a different model entering a reused slot seeds from its current transform
+instead of inheriting a departed object's velocity. Explicit camera cuts clear
+the pairing before the next draw. Skinned cached models continue to use their
+keyed current/previous joint palettes because those matrices already contain
+world locomotion.
+
+This reuses the existing per-draw uniform and motion target: GPU memory, render
+passes, draws, bind groups, readbacks, and shader branches added are all zero.
+CPU storage is two grow-on-demand entries of one `u64` handle plus one 4x4
+matrix per live cached instance; its allocated capacity is reported as
+`cached_model_motion_cpu_capacity_bytes`. The current entry count, zero GPU
+bytes, and zero added passes are reported alongside it.
+
 ## Per-pixel TAA/TSR diagnostics
 
 `captureDebugIntermediates(directory)` now adds four surface-resolution PNGs
@@ -166,6 +184,7 @@ still. It isolates TAA/TSR from unrelated temporal effects and covers:
 - retained opaque rigid motion;
 - retained transparent motion through reactive TAA coverage;
 - cached skinned locomotion plus joint-palette deformation;
+- cached alpha-tested card translation and rotation;
 - a `1.0 -> 0.5` render-scale step;
 - a `320x192 -> 256x256` target resize.
 
@@ -177,13 +196,16 @@ camera. Fast-rotation recovery is compared with the mean of a settled
 cycle's mean variation is bounded to 2 RGB levels. Slow-pan pairwise variation
 is bounded to 4 RGB levels with at most 3% coherent outliers.
 
-The rigid, reactive, and skinned content sequences use the same recovery gate
-and include a negative control requiring a visibly different final pose. A
-motion trail may cover at most 2% of pixels after four frames, severe
-`>64/255` residue must settle below 0.5% within four frames, and the settled
-jitter cycle must vary by no more than 2 RGB levels. The skinned sequence uses
-the production cached-model draw, keyed previous palette, world locomotion,
-and two-joint deformation paths.
+The rigid, reactive, skinned, and alpha-tested content sequences use the same
+recovery gate and include a negative control requiring a visibly different
+final pose. A motion trail may cover at most 2% of pixels after four frames,
+severe `>64/255` residue must settle below 0.5% within four frames, and the
+settled jitter cycle must vary by no more than 2 RGB levels. The skinned
+sequence uses the production cached-model draw, keyed previous palette, world
+locomotion, and two-joint deformation paths. The foliage card uses the
+production cached alpha-mask/coverage-mip route and additionally requires at
+least 250 pixels of captured nonzero object velocity, preventing depth
+rejection from hiding a broken motion-vector path.
 
 Render-scale changes must produce a first frame byte-identical to a freshly
 seeded history at the new scale. Resize changes must have no `>32/255`
@@ -201,5 +223,5 @@ silently passing.
 ## Remaining #135 work
 
 Extend shared reason/confidence semantics to SSR/GI/PT where their
-representations match, then add alpha-tested foliage, emissive,
-interior-to-bright-exterior, and refractive motion sequences.
+representations match, then add emissive, interior-to-bright-exterior, and
+refractive motion sequences.

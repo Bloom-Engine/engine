@@ -1281,6 +1281,7 @@ pub struct Renderer {
     /// transmission primitive.
     model_refractive: std::collections::HashSet<u64>,
     model_draw_commands: Vec<CachedModelDraw>,
+    cached_model_motion: model_draw::CachedModelMotionHistory,
     /// Per-frame O(1) translucent-pass gate for cached-model draws.
     has_blend_model_draws: bool,
     has_layered_blend_model_draws: bool,
@@ -7942,6 +7943,7 @@ impl Renderer {
             model_layered_blended: std::collections::HashSet::new(),
             model_refractive: std::collections::HashSet::new(),
             model_draw_commands: Vec::with_capacity(64),
+            cached_model_motion: Default::default(),
             has_blend_model_draws: false,
             has_layered_blend_model_draws: false,
             has_refractive_model_draws: false,
@@ -11717,7 +11719,7 @@ impl Renderer {
         self.vertices_3d.clear();
         self.indices_3d.clear();
         self.draw_calls_3d.clear();
-        self.model_draw_commands.clear();
+        self.begin_cached_model_frame();
         self.has_blend_model_draws = false;
         self.has_layered_blend_model_draws = false;
         self.has_refractive_model_draws = false;
@@ -13051,8 +13053,7 @@ impl Renderer {
                 self.current_proj_matrix_unjittered,
                 self.current_view_matrix,
             );
-            self.material_system.reset_motion_history();
-            self.skin_prev_palettes.clear();
+            self.reset_model_motion_history();
             self.temporal_camera_cut_pending = false;
             self.temporal_camera_cut_active = true;
         }

@@ -5,7 +5,72 @@
 
 use super::*;
 
+/// Previous transform for one ordinary cached-model instance. Calls are paired
+/// by stable submission slot, with the handle preventing a newly spawned
+/// different model from inheriting the departed instance's velocity.
+#[derive(Clone, Copy)]
+struct CachedModelMotionEntry {
+    handle_bits: u64,
+    model: [[f32; 4]; 4],
+}
+
+#[derive(Default)]
+pub(super) struct CachedModelMotionHistory {
+    // CPU metadata only: feeds the existing prev_mvp uniform and adds no GPU
+    // allocation or pass. Skinned draws own keyed palette history instead.
+    previous: Vec<CachedModelMotionEntry>,
+    current: Vec<CachedModelMotionEntry>,
+    slot: usize,
+}
+
 impl Renderer {
+    pub(super) fn begin_cached_model_frame(&mut self) {
+        self.model_draw_commands.clear();
+        std::mem::swap(
+            &mut self.cached_model_motion.previous,
+            &mut self.cached_model_motion.current,
+        );
+        self.cached_model_motion.current.clear();
+        self.cached_model_motion.slot = 0;
+    }
+
+    pub(super) fn reset_model_motion_history(&mut self) {
+        self.material_system.reset_motion_history();
+        self.cached_model_motion.previous.clear();
+        self.skin_prev_palettes.clear();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn cached_model_motion_stats(&self) -> (usize, usize) {
+        let history = &self.cached_model_motion;
+        let bytes = (history.previous.capacity() + history.current.capacity())
+            * std::mem::size_of::<CachedModelMotionEntry>();
+        (history.current.len(), bytes)
+    }
+
+    /// Pair an ordinary cached instance with the same submission slot from the
+    /// prior frame. A missing/mismatched slot is a spawn and therefore seeds
+    /// with the current transform (zero object velocity).
+    fn track_cached_model_motion(
+        &mut self,
+        handle_bits: u64,
+        model: [[f32; 4]; 4],
+    ) -> [[f32; 4]; 4] {
+        let slot = self.cached_model_motion.slot;
+        self.cached_model_motion.slot += 1;
+        let previous = self
+            .cached_model_motion
+            .previous
+            .get(slot)
+            .filter(|entry| entry.handle_bits == handle_bits)
+            .map(|entry| entry.model)
+            .unwrap_or(model);
+        self.cached_model_motion
+            .current
+            .push(CachedModelMotionEntry { handle_bits, model });
+        previous
+    }
+
     /// Record a cached model draw command. The actual rendering happens in end_frame().
     pub fn draw_model_cached(
         &mut self,
@@ -24,6 +89,13 @@ impl Renderer {
         };
         // Foliage wind amount for this model (0 = not a plant). Rides in misc.z.
         let foliage = self.foliage_wind.get(&handle_bits).copied().unwrap_or(0.0);
+        let model_matrix = mat4_multiply(
+            mat4_translate(IDENTITY_MAT4, position),
+            mat4_scale(IDENTITY_MAT4, [scale, scale, scale]),
+        );
+        let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
+        let previous_model = self.track_cached_model_motion(handle_bits, model_matrix);
+        let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_model);
 
         for mesh_idx in 0..mesh_count {
             let slot = self.next_model_uniform_slot;
@@ -32,20 +104,13 @@ impl Renderer {
             // Grow uniform pool if needed
             self.ensure_model_uniform_slot(slot);
 
-            // Compute model MVP: VP * translate(position) * scale(s)
-            let model_matrix = mat4_multiply(
-                mat4_translate(IDENTITY_MAT4, position),
-                mat4_scale(IDENTITY_MAT4, [scale, scale, scale]),
-            );
-            let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
-
             // Stage uniform for this draw (flushed in one write at end-frame)
             self.stage_model_uniform(
                 slot,
                 &Uniforms3D {
                     mvp: model_mvp,
                     model: model_matrix,
-                    prev_mvp: model_mvp,
+                    prev_mvp: previous_mvp,
                     model_tint: tint,
                     misc: [0.0, 0.0, foliage, 0.0],
                 },
@@ -102,19 +167,21 @@ impl Renderer {
             mat4_translate(IDENTITY_MAT4, position),
             mat4_multiply(rot, mat4_scale(IDENTITY_MAT4, [scale, scale, scale])),
         );
+        let previous_model = self.track_cached_model_motion(handle_bits, model_matrix);
+        let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
+        let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_model);
 
         for mesh_idx in 0..mesh_count {
             let slot = self.next_model_uniform_slot;
             self.next_model_uniform_slot += 1;
             self.ensure_model_uniform_slot(slot);
 
-            let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
             self.stage_model_uniform(
                 slot,
                 &Uniforms3D {
                     mvp: model_mvp,
                     model: model_matrix,
-                    prev_mvp: model_mvp,
+                    prev_mvp: previous_mvp,
                     model_tint: tint,
                     misc: [0.0, 0.0, foliage, 0.0],
                 },
@@ -157,19 +224,21 @@ impl Renderer {
         };
 
         let foliage = self.foliage_wind.get(&handle_bits).copied().unwrap_or(0.0);
+        let previous_model = self.track_cached_model_motion(handle_bits, model_matrix);
+        let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
+        let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_model);
 
         for mesh_idx in 0..mesh_count {
             let slot = self.next_model_uniform_slot;
             self.next_model_uniform_slot += 1;
             self.ensure_model_uniform_slot(slot);
 
-            let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
             self.stage_model_uniform(
                 slot,
                 &Uniforms3D {
                     mvp: model_mvp,
                     model: model_matrix,
-                    prev_mvp: model_mvp,
+                    prev_mvp: previous_mvp,
                     model_tint: tint,
                     misc: [0.0, 0.0, foliage, 0.0],
                 },

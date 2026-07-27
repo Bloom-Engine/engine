@@ -910,6 +910,148 @@ fn cached_skinned_motion_sequence_bounds_animation_trails() {
 }
 
 #[test]
+fn cached_alpha_tested_card_motion_writes_velocity_and_bounds_trails() {
+    const HANDLE: u64 = 0x7AA5_F011;
+    const TEX_SIZE: u32 = 64;
+
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(true);
+    r.set_render_scale(1.0);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+
+    let mut pixels = Vec::with_capacity((TEX_SIZE * TEX_SIZE * 4) as usize);
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            let dx = (x as f32 + 0.5) / TEX_SIZE as f32 * 2.0 - 1.0;
+            let dy = (y as f32 + 0.5) / TEX_SIZE as f32 * 2.0 - 1.0;
+            let ellipse = dx * dx / 0.82f32.powi(2) + dy * dy / 0.96f32.powi(2) < 1.0;
+            let serrated_edge = ((y / 4 + x / 7) & 1) == 0 || dx.abs() < 0.68;
+            let vein_gap = (x as i32 - TEX_SIZE as i32 / 2).abs() == 5 && y % 9 < 6;
+            let opaque = ellipse && serrated_edge && !vein_gap;
+            pixels.extend_from_slice(if opaque {
+                &[30, 205, 55, 255]
+            } else {
+                &[0, 0, 0, 0]
+            });
+        }
+    }
+    let texture = eng.renderer.register_texture_kind_with_alpha_coverage(
+        TEX_SIZE,
+        TEX_SIZE,
+        &pixels,
+        false,
+        Some(0.5),
+    );
+    let vertex = |position, uv| Vertex3D {
+        position,
+        normal: [0.0, 0.0, 1.0],
+        color: [1.0; 4],
+        uv,
+        joints: [0.0; 4],
+        weights: [0.0; 4],
+        tangent: [1.0, 0.0, 0.0, 1.0],
+    };
+    let vertices = vec![
+        vertex([-1.0, 0.0, 0.0], [0.0, 1.0]),
+        vertex([1.0, 0.0, 0.0], [1.0, 1.0]),
+        vertex([1.0, 2.8, 0.0], [1.0, 0.0]),
+        vertex([-1.0, 2.8, 0.0], [0.0, 0.0]),
+    ];
+    assert!(eng.renderer.cache_model_if_static(
+        HANDLE,
+        &[MeshData {
+            vertices,
+            secondary_tex_coords: None,
+            indices: vec![0, 1, 2, 0, 2, 3],
+            texture_idx: Some(texture),
+            normal_texture_idx: None,
+            metallic_roughness_texture_idx: None,
+            emissive_texture_idx: None,
+            occlusion_texture_idx: None,
+            metallic_factor: 0.0,
+            roughness_factor: 0.72,
+            emissive_factor: [0.0; 3],
+            alpha_mode: MaterialAlphaMode::Mask,
+            alpha_cutoff: 0.5,
+            alpha_coverage_mips: true,
+            double_sided: true,
+            transmission: Default::default(),
+            layered_pbr: Default::default(),
+        }]
+    ));
+
+    let draw_scene = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(8.0, 12.0, 25.0, 255.0);
+        r.begin_mode_3d(0.0, 2.2, 6.5, 0.0, 1.3, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.add_directional_light(-0.35, -1.0, -0.2, 0.9, 1.0, 0.8, 2.0);
+        r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 38.0, 45.0, 55.0, 255.0);
+        r.draw_cube(0.0, 1.5, -1.1, 6.0, 3.4, 0.25, 35.0, 80.0, 125.0, 255.0);
+    };
+    let capture_pose = |eng: &mut EngineState, x: f32, angle: f32| {
+        render(eng, 1, |eng| {
+            draw_scene(eng);
+            eng.renderer
+                .draw_model_cached_rotated(HANDLE, [x, 0.0, 0.0], 1.0, angle, [1.0; 4]);
+        })
+        .2
+    };
+
+    eng.renderer.reset_temporal_history();
+    for _ in 0..8 {
+        capture_pose(&mut eng, -1.35, -0.35);
+    }
+    let old_pose = capture_pose(&mut eng, -1.35, -0.35);
+    let directory =
+        std::env::temp_dir().join(format!("bloom-foliage-motion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    let mut frames = Vec::new();
+    for _ in 0..24 {
+        frames.push(capture_pose(&mut eng, 1.35, 0.5));
+    }
+
+    let motion = image::open(directory.join("taa-motion.png"))
+        .expect("alpha-tested motion capture did not emit the TAA velocity map")
+        .to_rgb8();
+    let moving_pixels = motion.pixels().filter(|pixel| pixel[2] > 8).count();
+    eprintln!("temporal-corpus alpha-tested moving_pixels={moving_pixels}");
+    assert!(
+        moving_pixels >= 250,
+        "cached alpha-tested object motion wrote no meaningful velocity"
+    );
+    evaluate_motion_recovery("alpha-tested-card", &old_pose, &frames);
+
+    let paths = eng.renderer.quality_runtime_paths_json();
+    assert!(paths.contains("\"cached_model_motion_entries\":1"));
+    assert!(paths.contains("\"cached_model_motion_gpu_bytes\":0"));
+    assert!(paths.contains("\"cached_model_motion_passes\":0"));
+    let paths: serde_json::Value = serde_json::from_str(&paths).unwrap();
+    let cpu_capacity = paths["temporal_history"]["cached_model_motion_cpu_capacity_bytes"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        cpu_capacity <= 1024,
+        "one cached instance retained excessive transform history: {cpu_capacity} bytes"
+    );
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept alpha-tested motion diagnostics at {directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 fn render_scale_and_resize_steps_seed_without_prior_frame_residue() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
