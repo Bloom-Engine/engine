@@ -633,12 +633,36 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
 
 #[test]
 fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
-    fn render_variant(
-        layered: Option<MaterialLayeredPbr>,
+    fn render_variant_with_specular_textures(
+        mut layered: Option<MaterialLayeredPbr>,
+        specular_textures: Option<(
+            &[u8],
+            &[u8],
+            MaterialTextureTransform,
+            MaterialTextureTransform,
+        )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
         let Some((mut eng, _adapter)) = try_engine_rt()? else {
             return Ok(None);
         };
+        if let (Some(material), Some((factor, color, factor_transform, color_transform))) =
+            (layered.as_mut(), specular_textures)
+        {
+            let factor_index = eng.renderer.register_texture_kind(2, 2, factor, false);
+            let color_index = eng.renderer.register_texture_kind(2, 2, color, false);
+            material.specular_texture = Some(MaterialTextureBinding {
+                source_texture_index: 0,
+                source_image_index: 0,
+                runtime_texture_idx: Some(factor_index),
+                transform: factor_transform,
+            });
+            material.specular_color_texture = Some(MaterialTextureBinding {
+                source_texture_index: 1,
+                source_image_index: 1,
+                runtime_texture_idx: Some(color_index),
+                transform: color_transform,
+            });
+        }
         build_pt_scene(&mut eng);
         // Replace the material target with the same cube carrying an explicit
         // per-face tangent. The base PT shader ignores this attribute, while
@@ -668,6 +692,12 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         eng.renderer.reset_path_tracing_history(0);
         let (_, _, rgba) = render(&mut eng, 12, draw_pt_static_frame);
         Ok(Some((rgba, eng.renderer.quality_runtime_paths_json())))
+    }
+
+    fn render_variant(
+        layered: Option<MaterialLayeredPbr>,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
+        render_variant_with_specular_textures(layered, None)
     }
 
     fn mean_display_luminance(rgba: &[u8]) -> f64 {
@@ -755,6 +785,74 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     }))
     .expect("specular/IOR PT variant initializes")
     .expect("same ray-query adapter remains available");
+    let white_specular_texels = [255u8; 2 * 2 * 4];
+    let directional_specular_factor = [
+        255, 255, 255, 24, 255, 255, 255, 255, 255, 255, 255, 24, 255, 255, 255, 255,
+    ];
+    let textured_specular_material = MaterialLayeredPbr {
+        specular_authored: true,
+        specular_factor: 0.8,
+        specular_color_factor: [1.2, 0.6, 0.3],
+        ior_authored: true,
+        ior: 2.0,
+        ..Default::default()
+    };
+    let (textured_specular_white, textured_specular_white_paths) =
+        render_variant_with_specular_textures(
+            Some(textured_specular_material),
+            Some((
+                &white_specular_texels,
+                &white_specular_texels,
+                Default::default(),
+                Default::default(),
+            )),
+        )
+        .expect("neutral textured specular/IOR PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (textured_specular, textured_specular_paths) = render_variant_with_specular_textures(
+        Some(textured_specular_material),
+        Some((
+            &directional_specular_factor,
+            &white_specular_texels,
+            Default::default(),
+            Default::default(),
+        )),
+    )
+    .expect("textured specular/IOR PT variant initializes")
+    .expect("same ray-query adapter remains available");
+    let (textured_specular_rotated, textured_specular_rotated_paths) =
+        render_variant_with_specular_textures(
+            Some(textured_specular_material),
+            Some((
+                &directional_specular_factor,
+                &white_specular_texels,
+                MaterialTextureTransform {
+                    rotation: std::f32::consts::FRAC_PI_2,
+                    ..Default::default()
+                },
+                Default::default(),
+            )),
+        )
+        .expect("rotated textured specular/IOR PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (textured_specular_uv1, textured_specular_uv1_paths) =
+        render_variant_with_specular_textures(
+            Some(textured_specular_material),
+            Some((
+                &directional_specular_factor,
+                &white_specular_texels,
+                MaterialTextureTransform {
+                    tex_coord: 1,
+                    ..Default::default()
+                },
+                MaterialTextureTransform {
+                    tex_coord: 1,
+                    ..Default::default()
+                },
+            )),
+        )
+        .expect("UV1 textured specular/IOR PT variant initializes")
+        .expect("same ray-query adapter remains available");
     let (sheen, sheen_paths) = render_variant(Some(MaterialLayeredPbr {
         sheen_authored: true,
         sheen_color_factor: [0.45, 0.12, 0.04],
@@ -856,6 +954,40 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         .contains("\"path_tracing_iridescence_specialization_initialized\":false"));
     assert!(specular_ior_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(specular_ior_paths.contains("\"path_tracing_active_instance_count\":1"));
+    let textured_specular_supported = textured_specular_white_paths
+        .contains("\"path_tracing_texture_specialization_initialized\":true");
+    if textured_specular_supported {
+        assert_eq!(
+            specular_ior, textured_specular_white,
+            "neutral UV0 specular textures changed scalar path-traced transport"
+        );
+        assert!(textured_specular_paths
+            .contains("\"path_tracing_texture_specialization_initialized\":true"));
+        assert!(textured_specular_rotated_paths
+            .contains("\"path_tracing_texture_specialization_initialized\":true"));
+        assert!(
+            textured_specular_paths.contains("\"path_tracing_texture_sidecar_record_bytes\":64")
+        );
+        assert!(
+            !textured_specular_paths.contains("\"path_tracing_texture_sidecar_allocated_bytes\":0")
+        );
+    } else {
+        assert_eq!(
+            base, textured_specular_white,
+            "an adapter without PT texture arrays must preserve the exact base path"
+        );
+        assert!(textured_specular_white_paths
+            .contains("\"path_tracing_texture_sidecar_allocated_bytes\":0"));
+    }
+    assert_eq!(
+        base, textured_specular_uv1,
+        "unqualified UV1 specular textures changed established PT transport"
+    );
+    assert!(textured_specular_uv1_paths
+        .contains("\"path_tracing_texture_specialization_initialized\":false"));
+    assert!(
+        textured_specular_uv1_paths.contains("\"path_tracing_texture_sidecar_allocated_bytes\":0")
+    );
     assert!(sheen_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_sheen_specialization_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":false"));
@@ -895,6 +1027,25 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
 
     assert_transport_response("clearcoat", &base, &clearcoat);
     assert_transport_response("specular/IOR", &base, &specular_ior);
+    if textured_specular_supported {
+        assert_transport_response(
+            "UV0 textured specular/IOR",
+            &textured_specular_white,
+            &textured_specular,
+        );
+        let transform_response =
+            calculate_diff_metrics(&textured_specular, &textured_specular_rotated, W, H);
+        assert!(
+            transform_response.mean_rgb >= 0.02,
+            "specular texture UV rotation did not turn the path-traced response: \
+             {transform_response:?}"
+        );
+        assert_transport_response(
+            "UV0 rotated textured specular/IOR",
+            &base,
+            &textured_specular_rotated,
+        );
+    }
     assert_transport_response("sheen", &base, &sheen);
     assert_transport_response("anisotropy", &base, &anisotropy);
     assert_transport_response("rotated anisotropy", &base, &anisotropy_rotated);

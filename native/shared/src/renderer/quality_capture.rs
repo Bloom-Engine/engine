@@ -649,7 +649,7 @@ impl Renderer {
         out.push_str(&super::layered_pbr_scene::SHEEN_ALBEDO_LUT_BYTES.to_string());
         out.push_str(",\"layered_shared_sampler_count\":1");
         out.push_str(",\"path_tracing_specialization_initialized\":");
-        out.push_str(if self.pt_layered_pipelines.iter().any(Option::is_some) {
+        out.push_str(if self.pt_layered.pipelines.iter().any(Option::is_some) {
             "true"
         } else {
             "false"
@@ -657,7 +657,8 @@ impl Renderer {
         out.push_str(",\"path_tracing_sheen_specialization_initialized\":");
         out.push_str(
             if self
-                .pt_layered_pipelines
+                .pt_layered
+                .pipelines
                 .iter()
                 .enumerate()
                 .any(|(index, pipeline)| index & 1 != 0 && pipeline.is_some())
@@ -670,7 +671,8 @@ impl Renderer {
         out.push_str(",\"path_tracing_anisotropy_specialization_initialized\":");
         out.push_str(
             if self
-                .pt_layered_pipelines
+                .pt_layered
+                .pipelines
                 .iter()
                 .enumerate()
                 .any(|(index, pipeline)| index & 2 != 0 && pipeline.is_some())
@@ -683,7 +685,8 @@ impl Renderer {
         out.push_str(",\"path_tracing_iridescence_specialization_initialized\":");
         out.push_str(
             if self
-                .pt_layered_pipelines
+                .pt_layered
+                .pipelines
                 .iter()
                 .enumerate()
                 .any(|(index, pipeline)| index & 4 != 0 && pipeline.is_some())
@@ -693,10 +696,25 @@ impl Renderer {
                 "false"
             },
         );
+        out.push_str(",\"path_tracing_texture_specialization_initialized\":");
+        out.push_str(
+            if self
+                .pt_layered
+                .pipelines
+                .iter()
+                .enumerate()
+                .any(|(index, pipeline)| index & 8 != 0 && pipeline.is_some())
+            {
+                "true"
+            } else {
+                "false"
+            },
+        );
         out.push_str(",\"path_tracing_active_instance_count\":");
         out.push_str(
             &self
-                .pt_layered_records
+                .pt_layered
+                .records
                 .iter()
                 .filter(|record| record.active())
                 .count()
@@ -709,7 +727,21 @@ impl Renderer {
         out.push_str(",\"path_tracing_sidecar_allocated_bytes\":");
         out.push_str(
             &self
-                .pt_layered_instance_buffer
+                .pt_layered
+                .instance_buffer
+                .as_ref()
+                .map_or(0, wgpu::Buffer::size)
+                .to_string(),
+        );
+        out.push_str(",\"path_tracing_texture_sidecar_record_bytes\":");
+        out.push_str(
+            &std::mem::size_of::<super::layered_pbr_pt::PtLayeredTextureCpu>().to_string(),
+        );
+        out.push_str(",\"path_tracing_texture_sidecar_allocated_bytes\":");
+        out.push_str(
+            &self
+                .pt_layered
+                .texture_buffer
                 .as_ref()
                 .map_or(0, wgpu::Buffer::size)
                 .to_string(),

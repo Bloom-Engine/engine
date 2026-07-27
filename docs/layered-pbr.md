@@ -208,10 +208,19 @@ A scene without a qualified record dispatches the original base pipeline
 exactly. Clearcoat/specular-only scenes bind one sidecar buffer; scalar
 anisotropy and iridescence select separately constant-folded code variants
 without adding a resource, and only a scene with scalar sheen creates the
-32 KiB directional-albedo LUT. The sidecar marks texture-bearing lobes
-separately and leaves each one on established base PT semantics rather than
-applying an incorrect scalar approximation. Textured factors and clearcoat
-normals remain separate follow-up slices.
+32 KiB directional-albedo LUT.
+
+Resolved UV0 `KHR_materials_specular` factor and color textures are the first
+qualified texture-bearing PT slice. They use the renderer's existing texture
+array, reconstruct the committed triangle UV at both primary and bounce hits,
+apply the exact authored offset/rotation/scale transform, read factor from
+alpha, and convert specular color from sRGB before modifying the same
+dielectric F0/F90 transport as the scalar path. Their transforms live in a
+separate, independently lazy 64-byte-per-instance sidecar, so the established
+96-byte scalar ABI and every scalar-only bind group remain unchanged.
+Unresolved textures, UV1 textures, other textured lobes, and clearcoat normal
+textures remain explicitly unqualified instead of receiving an incorrect
+scalar approximation.
 
 ## Runtime material-record ABI
 
@@ -283,7 +292,10 @@ instance lazily backfills a parallel 96-byte-per-instance scalar record.
 Only a frame that both enables PT and contains one of those records compiles
 the group-2 pipeline and allocates/binds its storage buffer. Base-only scenes
 retain the established shader source, pipeline, bindings, instance record, and
-GPU cost.
+GPU cost. Qualified UV0 specular textures independently backfill a 64-byte
+texture-transform record and select a texture-only pipeline/resource bit; no
+texture record, binding, UV interpolation, or texture fetch exists in the base
+pipeline or scalar-only resource layouts.
 
 Metal ray-query qualification renders the same seeded scene through base,
 clearcoat, specular/IOR, sheen, anisotropy, iridescence, and combined scalar
@@ -291,8 +303,14 @@ pipelines. It requires byte-identical output for an unqualified textured lobe,
 visible bounded-energy responses for every qualified lobe, a distinct highlight
 after a 90-degree anisotropy rotation on explicit vertex tangents, and a
 spectral image change between 180 nm and 520 nm films. Telemetry verifies that
-sheen, anisotropy, and iridescence code variants remain independently lazy.
-Texture authoring and texture-sampled PT parity are the next reviewed slices.
+sheen, anisotropy, iridescence, and texture code variants remain independently
+lazy. The texture corpus additionally requires white UV0 specular textures to
+be byte-identical to scalar specular transport, an alpha-varying factor texture
+to produce a visible bounded response, and a 90-degree texture transform to
+turn that response. A resolved but unqualified UV1 texture must remain
+byte-identical to the established base path and allocate no texture sidecar.
+UV1 PT geometry retention, the remaining factor textures, and clearcoat normal
+transport are the next reviewed slices.
 
 ## Public authoring API
 

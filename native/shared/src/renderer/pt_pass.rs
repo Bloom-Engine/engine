@@ -75,9 +75,13 @@ impl Renderer {
         let layered_sheen = self.pt_layered_sheen_active();
         let layered_anisotropy = layered_active && self.pt_layered_anisotropy_active();
         let layered_iridescence = layered_active && self.pt_layered_iridescence_active();
+        let layered_textures =
+            layered_active && self.pt_texture_arrays_enabled && self.pt_layered_texture_active();
         let layered_pipeline_variant = layered_sheen as usize
             | ((layered_anisotropy as usize) << 1)
-            | ((layered_iridescence as usize) << 2);
+            | ((layered_iridescence as usize) << 2)
+            | ((layered_textures as usize) << 3);
+        let layered_resource_variant = layered_sheen as usize | ((layered_textures as usize) << 1);
         if layered_active {
             self.ensure_pt_layered_resources();
         }
@@ -532,7 +536,7 @@ impl Renderer {
                 timestamp_writes: ts,
             });
             pass.set_pipeline(if layered_active {
-                self.pt_layered_pipelines[layered_pipeline_variant]
+                self.pt_layered.pipelines[layered_pipeline_variant]
                     .as_ref()
                     .unwrap()
             } else {
@@ -545,7 +549,7 @@ impl Renderer {
             if layered_active {
                 pass.set_bind_group(
                     2,
-                    self.pt_layered_bgs[layered_sheen as usize]
+                    self.pt_layered.bind_groups[layered_resource_variant]
                         .as_ref()
                         .unwrap(),
                     &[],

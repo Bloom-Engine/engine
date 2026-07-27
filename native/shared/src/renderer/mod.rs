@@ -905,12 +905,7 @@ pub struct Renderer {
     pub pt_pipeline: Option<wgpu::ComputePipeline>,
     pub pt_layout: Option<wgpu::BindGroupLayout>,
     /// Lazy group-2 specialization. Base-only PT never creates or binds it.
-    pt_layered_pipelines: [Option<wgpu::ComputePipeline>; 8],
-    pt_layered_layouts: [Option<wgpu::BindGroupLayout>; 2],
-    pt_layered_bgs: [Option<wgpu::BindGroup>; 2],
-    pt_layered_instance_buffer: Option<wgpu::Buffer>,
-    pt_layered_records: Vec<layered_pbr_pt::PtLayeredMaterialCpu>,
-    pt_layered_dirty: bool,
+    pt_layered: layered_pbr_pt::PtLayeredRuntimeState,
     /// Accumulation ping-pong bind groups, invalidated with their resources.
     pt_bg: [Option<wgpu::BindGroup>; 2],
     pt_uniform_buffer: wgpu::Buffer,
@@ -7740,12 +7735,7 @@ impl Renderer {
             probe_trace_hw_bg_cache: [None, None],
             pt_pipeline,
             pt_layout,
-            pt_layered_pipelines: [None, None, None, None, None, None, None, None],
-            pt_layered_layouts: [None, None],
-            pt_layered_bgs: [None, None],
-            pt_layered_instance_buffer: None,
-            pt_layered_records: Vec::new(),
-            pt_layered_dirty: false,
+            pt_layered: Default::default(),
             pt_bg: [None, None],
             pt_uniform_buffer,
             pt_accum_buffers: [None, None],
@@ -9181,6 +9171,8 @@ impl Renderer {
         let mut geo_vertices: Vec<f32> = Vec::new();
         let mut geo_indices: Vec<u32> = Vec::new();
         let mut pt_layered_records = None;
+        let mut pt_layered_texture_records = None;
+        let runtime_texture_count = self.textures.len();
         for &h in instance_handles {
             let n = scene.nodes.get(h).unwrap();
             let e = n.material.emissive;
@@ -9220,8 +9212,10 @@ impl Renderer {
             }
             layered_pbr_pt::append_record(
                 &mut pt_layered_records,
+                &mut pt_layered_texture_records,
                 instance_data.len(),
                 n.material.layered_pbr,
+                runtime_texture_count,
             );
             instance_data.push(InstanceGiDataCpu {
                 albedo: n.flat_albedo,
@@ -9289,8 +9283,10 @@ impl Renderer {
             geo_indices.extend_from_slice(ci);
             layered_pbr_pt::append_record(
                 &mut pt_layered_records,
+                &mut pt_layered_texture_records,
                 instance_data.len(),
                 mesh.layered_pbr,
+                runtime_texture_count,
             );
             instance_data.push(InstanceGiDataCpu {
                 albedo: [1.0, 1.0, 1.0],
@@ -9325,7 +9321,11 @@ impl Renderer {
                 mesh_idx: d.mesh_idx,
             });
         }
-        self.set_pt_layered_records(pt_layered_records, instance_data.len());
+        self.set_pt_layered_records(
+            pt_layered_records,
+            pt_layered_texture_records,
+            instance_data.len(),
+        );
         // PT-2 — upload the megabuffers (grow-only; a minimum size keeps
         // bind-group creation valid before any geometry is committed).
         {

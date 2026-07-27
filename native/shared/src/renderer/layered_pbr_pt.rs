@@ -7,6 +7,14 @@
 
 use super::*;
 
+#[path = "layered_pbr_pt_texture.rs"]
+mod texture;
+pub(super) use texture::{append_record, PtLayeredRuntimeState, PtLayeredTextureCpu};
+use texture::{
+    texture_variant, PT_LAYERED_TEXTURE_BINDINGS_WGSL, PT_LAYERED_TEXTURE_DISABLED_WGSL,
+    PT_LAYERED_TEXTURE_RECORD_BYTES,
+};
+
 pub(super) const PT_LAYERED_RECORD_VERSION: u32 = 1;
 
 #[repr(C)]
@@ -167,31 +175,6 @@ impl PtLayeredMaterialCpu {
             || self.has_sheen()
             || self.has_anisotropy()
             || self.has_iridescence()
-    }
-}
-
-/// Append the record parallel to the next TLAS instance. The vector itself is
-/// absent until the first active record, then earlier base instances are
-/// backfilled. Base-only scenes therefore allocate no per-instance sidecar.
-pub(super) fn append_record(
-    records: &mut Option<Vec<PtLayeredMaterialCpu>>,
-    instance_index: usize,
-    material: crate::models::MaterialLayeredPbr,
-) {
-    let active = material.is_active();
-    if records.is_none() && !active {
-        return;
-    }
-    if records.is_none() {
-        *records = Some(vec![PtLayeredMaterialCpu::default(); instance_index]);
-    }
-    if let Some(records) = records {
-        debug_assert_eq!(records.len(), instance_index);
-        records.push(if active {
-            PtLayeredMaterialCpu::from_material(material)
-        } else {
-            PtLayeredMaterialCpu::default()
-        });
     }
 }
 
@@ -529,11 +512,19 @@ fn pt_layered_primary_surface(
     if (hit.kind == RAY_QUERY_INTERSECTION_NONE) {
         return PtLayeredSurface(pt_layered_default(), vec4<f32>(0.0));
     }
-    let material = pt_layered_materials[hit.instance_custom_data];
+    var material = pt_layered_materials[hit.instance_custom_data];
+    let instance = instance_data[hit.instance_custom_data];
+    if (PT_HAS_LAYERED_TEXTURES && instance.geo.z > 0u) {
+        let attributes = fetch_hit_attrs(
+            instance.geo, hit.primitive_index, hit.barycentrics,
+        );
+        material = pt_layered_apply_textures(
+            material, hit.instance_custom_data, attributes.uv,
+        );
+    }
     if (!pt_layered_has_anisotropy(material)) {
         return PtLayeredSurface(material, vec4<f32>(0.0));
     }
-    let instance = instance_data[hit.instance_custom_data];
     let tangent = pt_layered_hit_tangent(
         instance.geo,
         hit.primitive_index,
@@ -1394,7 +1385,15 @@ fn layered_kernel_variant(base: &str) -> String {
          \x20           hit_p, n_hit, rand_2f(), -dir,\n\
          \x20           alb_hit, inst.mat_params.x, inst.mat_params.y, true,\n\
          \x20       );",
-        "        let layered_hit = pt_layered_materials[hit.instance_custom_data];\n\
+        "        var layered_hit = pt_layered_materials[hit.instance_custom_data];\n\
+         \x20       if (PT_HAS_LAYERED_TEXTURES && inst.geo.z > 0u) {\n\
+         \x20           let layered_attributes = fetch_hit_attrs(\n\
+         \x20               inst.geo, hit.primitive_index, hit.barycentrics,\n\
+         \x20           );\n\
+         \x20           layered_hit = pt_layered_apply_textures(\n\
+         \x20               layered_hit, hit.instance_custom_data, layered_attributes.uv,\n\
+         \x20           );\n\
+         \x20       }\n\
          \x20       var layered_tangent_hit = vec4<f32>(0.0);\n\
          \x20       if (pt_layered_has_anisotropy(layered_hit)) {\n\
          \x20           layered_tangent_hit = pt_layered_hit_tangent(\n\
@@ -1418,58 +1417,67 @@ fn layered_kernel_variant(base: &str) -> String {
     source
 }
 
-fn texture_variant(enabled: bool) -> &'static str {
-    if enabled {
-        "const PT_HAS_TEXTURES: bool = true;\n\
-         @group(1) @binding(0) var pt_textures: binding_array<texture_2d<f32>>;\n\
-         fn pt_tex_sample(idx: u32, uv: vec2<f32>) -> vec3<f32> {\n\
-             return textureSampleLevel(pt_textures[idx], card_samp, uv, 0.0).rgb;\n\
-         }\n"
-    } else {
-        "const PT_HAS_TEXTURES: bool = false;\n\
-         fn pt_tex_sample(idx: u32, uv: vec2<f32>) -> vec3<f32> { return vec3<f32>(1.0); }\n"
-    }
-}
-
 impl Renderer {
     pub(super) fn pt_layered_transport_active(&self) -> bool {
-        self.pt_layered_records
+        self.pt_layered
+            .records
             .iter()
             .copied()
             .any(PtLayeredMaterialCpu::has_qualified_transport)
+            || (self.pt_texture_arrays_enabled && self.pt_layered_texture_active())
     }
 
     pub(super) fn pt_layered_sheen_active(&self) -> bool {
-        self.pt_layered_records
+        self.pt_layered
+            .records
             .iter()
             .copied()
             .any(PtLayeredMaterialCpu::has_sheen)
     }
 
     pub(super) fn pt_layered_anisotropy_active(&self) -> bool {
-        self.pt_layered_records
+        self.pt_layered
+            .records
             .iter()
             .copied()
             .any(PtLayeredMaterialCpu::has_anisotropy)
     }
 
     pub(super) fn pt_layered_iridescence_active(&self) -> bool {
-        self.pt_layered_records
+        self.pt_layered
+            .records
             .iter()
             .copied()
             .any(PtLayeredMaterialCpu::has_iridescence)
     }
 
+    pub(super) fn pt_layered_texture_active(&self) -> bool {
+        self.pt_layered
+            .texture_records
+            .iter()
+            .copied()
+            .any(PtLayeredTextureCpu::has_specular_ior)
+    }
+
     pub(super) fn set_pt_layered_records(
         &mut self,
         records: Option<Vec<PtLayeredMaterialCpu>>,
+        texture_records: Option<Vec<PtLayeredTextureCpu>>,
         instance_count: usize,
     ) {
         let records = records.unwrap_or_default();
+        let texture_records = texture_records.unwrap_or_default();
         debug_assert!(records.is_empty() || records.len() == instance_count);
-        if self.pt_layered_records != records {
-            self.pt_layered_records = records;
-            self.pt_layered_dirty = !self.pt_layered_records.is_empty();
+        debug_assert!(texture_records.is_empty() || texture_records.len() == instance_count);
+        if self.pt_layered.records != records {
+            self.pt_layered.records = records;
+            self.pt_layered.dirty = !self.pt_layered.records.is_empty();
+            self.pt_accum_count = 0;
+            self.pt_wrote_frame = false;
+        }
+        if self.pt_layered.texture_records != texture_records {
+            self.pt_layered.texture_records = texture_records;
+            self.pt_layered.texture_dirty = !self.pt_layered.texture_records.is_empty();
             self.pt_accum_count = 0;
             self.pt_wrote_frame = false;
         }
@@ -1478,19 +1486,22 @@ impl Renderer {
     /// Materialize the specialized pipeline and sidecar on the first frame
     /// where active layered instances actually reach the path tracer.
     pub(super) fn ensure_pt_layered_resources(&mut self) {
-        if self.pt_layered_records.is_empty() {
+        if self.pt_layered.records.is_empty() {
             return;
         }
         let sheen = self.pt_layered_sheen_active();
         let anisotropy = self.pt_layered_anisotropy_active();
         let iridescence = self.pt_layered_iridescence_active();
-        let resource_variant = sheen as usize;
-        let pipeline_variant =
-            resource_variant | ((anisotropy as usize) << 1) | ((iridescence as usize) << 2);
+        let textures = self.pt_texture_arrays_enabled && self.pt_layered_texture_active();
+        let resource_variant = sheen as usize | ((textures as usize) << 1);
+        let pipeline_variant = sheen as usize
+            | ((anisotropy as usize) << 1)
+            | ((iridescence as usize) << 2)
+            | ((textures as usize) << 3);
         if sheen {
             self.ensure_scene_sheen_albedo_lut();
         }
-        if self.pt_layered_layouts[resource_variant].is_none() {
+        if self.pt_layered.layouts[resource_variant].is_none() {
             let mut entries = vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
@@ -1513,9 +1524,25 @@ impl Renderer {
                     count: None,
                 });
             }
-            self.pt_layered_layouts[resource_variant] = Some(self.device.create_bind_group_layout(
+            if textures {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(
+                            PT_LAYERED_TEXTURE_RECORD_BYTES,
+                        ),
+                    },
+                    count: None,
+                });
+            }
+            self.pt_layered.layouts[resource_variant] = Some(self.device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
-                    label: Some(if sheen {
+                    label: Some(if textures {
+                        "pt_layered_texture_layout"
+                    } else if sheen {
                         "pt_layered_sheen_layout"
                     } else {
                         "pt_layered_layout"
@@ -1524,7 +1551,7 @@ impl Renderer {
                 },
             ));
         }
-        if self.pt_layered_pipelines[pipeline_variant].is_none() {
+        if self.pt_layered.pipelines[pipeline_variant].is_none() {
             let query_diagnostics = std::env::var("BLOOM_GOLDEN_DIAGNOSTICS")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
@@ -1536,12 +1563,17 @@ impl Renderer {
             let base_kernel = pt_kernel_variant(query_diagnostics);
             let layered_kernel = layered_kernel_variant(base_kernel.as_ref());
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
                 pt_fault_constants(fault.as_deref()),
                 layered_kernel,
                 texture_variant(self.pt_texture_arrays_enabled),
                 PT_LAYERED_BINDINGS_WGSL,
+                if textures {
+                    PT_LAYERED_TEXTURE_BINDINGS_WGSL
+                } else {
+                    PT_LAYERED_TEXTURE_DISABLED_WGSL
+                },
                 if anisotropy {
                     "const PT_HAS_SCALAR_ANISOTROPY: bool = true;"
                 } else {
@@ -1562,7 +1594,9 @@ impl Renderer {
             let shader = self
                 .device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(if sheen {
+                    label: Some(if textures {
+                        "pt_layered_texture_shader"
+                    } else if sheen {
                         "pt_layered_sheen_shader"
                     } else {
                         "pt_layered_shader"
@@ -1572,23 +1606,31 @@ impl Renderer {
             let groups = [
                 self.pt_layout.as_ref(),
                 self.pt_tex_layout.as_ref(),
-                self.pt_layered_layouts[resource_variant].as_ref(),
+                self.pt_layered.layouts[resource_variant].as_ref(),
             ];
             let pipeline_layout =
                 self.device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some(if sheen {
-                            "pt_layered_sheen_pipeline_layout"
+                            if textures {
+                                "pt_layered_texture_pipeline_layout"
+                            } else {
+                                "pt_layered_sheen_pipeline_layout"
+                            }
+                        } else if textures {
+                            "pt_layered_texture_pipeline_layout"
                         } else {
                             "pt_layered_pipeline_layout"
                         }),
                         bind_group_layouts: &groups,
                         immediate_size: 0,
                     });
-            self.pt_layered_pipelines[pipeline_variant] = Some(
+            self.pt_layered.pipelines[pipeline_variant] = Some(
                 self.device
                     .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some(if iridescence {
+                        label: Some(if textures {
+                            "pt_layered_texture_pipeline"
+                        } else if iridescence {
                             "pt_layered_iridescence_pipeline"
                         } else if anisotropy {
                             "pt_layered_anisotropy_pipeline"
@@ -1606,36 +1648,67 @@ impl Renderer {
             );
         }
 
-        let needed = PT_LAYERED_RECORD_BYTES * self.pt_layered_records.len() as u64;
+        let needed = PT_LAYERED_RECORD_BYTES * self.pt_layered.records.len() as u64;
         let recreate = self
-            .pt_layered_instance_buffer
+            .pt_layered
+            .instance_buffer
             .as_ref()
             .is_none_or(|buffer| buffer.size() < needed);
         if recreate {
-            let capacity = self.pt_layered_records.len().next_power_of_two() as u64;
-            self.pt_layered_instance_buffer =
+            let capacity = self.pt_layered.records.len().next_power_of_two() as u64;
+            self.pt_layered.instance_buffer =
                 Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("pt_layered_instances"),
                     size: PT_LAYERED_RECORD_BYTES * capacity,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }));
-            self.pt_layered_bgs = [None, None];
-            self.pt_layered_dirty = true;
+            self.pt_layered.bind_groups = [None, None, None, None];
+            self.pt_layered.dirty = true;
         }
-        if self.pt_layered_dirty {
+        if self.pt_layered.dirty {
             self.queue.write_buffer(
-                self.pt_layered_instance_buffer.as_ref().unwrap(),
+                self.pt_layered.instance_buffer.as_ref().unwrap(),
                 0,
-                bytemuck::cast_slice(&self.pt_layered_records),
+                bytemuck::cast_slice(&self.pt_layered.records),
             );
-            self.pt_layered_dirty = false;
+            self.pt_layered.dirty = false;
         }
-        if self.pt_layered_bgs[resource_variant].is_none() {
+        if textures {
+            let needed =
+                PT_LAYERED_TEXTURE_RECORD_BYTES * self.pt_layered.texture_records.len() as u64;
+            let recreate = self
+                .pt_layered
+                .texture_buffer
+                .as_ref()
+                .is_none_or(|buffer| buffer.size() < needed);
+            if recreate {
+                let capacity = self.pt_layered.texture_records.len().next_power_of_two() as u64;
+                self.pt_layered.texture_buffer =
+                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("pt_layered_texture_instances"),
+                        size: PT_LAYERED_TEXTURE_RECORD_BYTES * capacity,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                self.pt_layered.bind_groups = [None, None, None, None];
+                self.pt_layered.texture_dirty = true;
+            }
+            if self.pt_layered.texture_dirty {
+                self.queue.write_buffer(
+                    self.pt_layered.texture_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(&self.pt_layered.texture_records),
+                );
+                self.pt_layered.texture_dirty = false;
+            }
+        }
+        if self.pt_layered.bind_groups[resource_variant].is_none() {
             let mut entries = vec![wgpu::BindGroupEntry {
                 binding: 0,
                 resource: self
-                    .pt_layered_instance_buffer
+                    .pt_layered
+                    .instance_buffer
                     .as_ref()
                     .unwrap()
                     .as_entire_binding(),
@@ -1648,14 +1721,27 @@ impl Renderer {
                     ),
                 });
             }
-            self.pt_layered_bgs[resource_variant] =
+            if textures {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self
+                        .pt_layered
+                        .texture_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                });
+            }
+            self.pt_layered.bind_groups[resource_variant] =
                 Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(if sheen {
+                    label: Some(if textures {
+                        "pt_layered_texture_bg"
+                    } else if sheen {
                         "pt_layered_sheen_bg"
                     } else {
                         "pt_layered_bg"
                     }),
-                    layout: self.pt_layered_layouts[resource_variant].as_ref().unwrap(),
+                    layout: self.pt_layered.layouts[resource_variant].as_ref().unwrap(),
                     entries: &entries,
                 }));
         }
@@ -1672,41 +1758,6 @@ mod tests {
         let record = PtLayeredMaterialCpu::default();
         assert_eq!(record.header, [PT_LAYERED_RECORD_VERSION, 0, 0, 0]);
         assert!(!record.active());
-    }
-
-    #[test]
-    fn first_active_record_backfills_base_instances_lazily() {
-        let mut records = None;
-        append_record(&mut records, 0, Default::default());
-        append_record(&mut records, 1, Default::default());
-        assert!(records.is_none());
-
-        let layered = crate::models::MaterialLayeredPbr::from_authoring_factors(
-            crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE,
-            1.0,
-            0.2,
-            1.0,
-            1.0,
-            [1.0; 3],
-            1.5,
-            [0.0; 3],
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.3,
-            100.0,
-            400.0,
-        );
-        append_record(&mut records, 2, layered);
-        let records = records.unwrap();
-        assert_eq!(records.len(), 3);
-        assert!(!records[0].active());
-        assert!(!records[1].active());
-        assert_eq!(
-            records[2].header[1],
-            crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
-        );
     }
 
     #[test]
@@ -1816,7 +1867,7 @@ mod tests {
             runtime_texture_idx: Some(3),
             transform: Default::default(),
         };
-        let textured = crate::models::MaterialLayeredPbr {
+        let textured_material = crate::models::MaterialLayeredPbr {
             clearcoat_authored: true,
             clearcoat_factor: 0.8,
             clearcoat_texture: Some(texture),
@@ -1838,12 +1889,14 @@ mod tests {
         let clearcoat = PtLayeredMaterialCpu::from_material(clearcoat);
         let specular = PtLayeredMaterialCpu::from_material(specular);
         let anisotropy = PtLayeredMaterialCpu::from_material(anisotropy);
-        let textured = PtLayeredMaterialCpu::from_material(textured);
+        let textured = PtLayeredMaterialCpu::from_material(textured_material);
+        let textured_meta = PtLayeredTextureCpu::from_material(textured_material, 4);
         assert!(sheen.has_sheen() && sheen.has_qualified_transport());
         assert!(clearcoat.has_clearcoat() && clearcoat.has_qualified_transport());
         assert!(specular.has_specular_ior() && specular.has_qualified_transport());
         assert!(anisotropy.has_anisotropy() && anisotropy.has_qualified_transport());
         assert!(textured.active() && !textured.has_qualified_transport());
+        assert!(textured_meta.has_specular_ior());
         assert_eq!(
             textured.header[2],
             crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
@@ -1857,6 +1910,7 @@ mod tests {
     #[test]
     fn specialization_uses_separate_group_without_touching_base_kernel() {
         assert!(PT_LAYERED_BINDINGS_WGSL.contains("@group(2) @binding(0)"));
+        assert!(PT_LAYERED_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(2)"));
         assert!(!PT_LAYERED_SHEEN_DISABLED_WGSL.contains("@binding(1)"));
         assert!(PT_LAYERED_SHEEN_WGSL.contains("@group(2) @binding(1)"));
         assert!(PT_LAYERED_TRANSPORT_WGSL.contains("PT_HAS_SCALAR_ANISOTROPY"));
@@ -1865,6 +1919,32 @@ mod tests {
         assert!(PT_LAYERED_IRIDESCENCE_WGSL.contains("pt_eval_iridescence"));
         assert!(!PT_LAYERED_IRIDESCENCE_DISABLED_WGSL.contains("exp("));
         assert!(!pt_kernel_variant(false).contains("pt_layered_materials"));
+    }
+
+    #[test]
+    fn scalar_and_textured_specializations_parse() {
+        for textures in [false, true] {
+            let source = format!(
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "const BLOOM_RAY_QUERY_NEEDS_PROCEED: bool = false;",
+                pt_fault_constants(None),
+                layered_kernel_variant(pt_kernel_variant(false).as_ref()),
+                texture_variant(textures),
+                PT_LAYERED_BINDINGS_WGSL,
+                if textures {
+                    PT_LAYERED_TEXTURE_BINDINGS_WGSL
+                } else {
+                    PT_LAYERED_TEXTURE_DISABLED_WGSL
+                },
+                "const PT_HAS_SCALAR_ANISOTROPY: bool = false;",
+                PT_LAYERED_TRANSPORT_WGSL,
+                PT_LAYERED_IRIDESCENCE_DISABLED_WGSL,
+                PT_LAYERED_SHEEN_DISABLED_WGSL,
+            );
+            wgpu::naga::front::wgsl::parse_str(&source).unwrap_or_else(|error| {
+                panic!("layered PT WGSL (textures={textures}) failed: {error}")
+            });
+        }
     }
 
     #[test]

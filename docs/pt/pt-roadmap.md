@@ -81,8 +81,12 @@ multi-bounce colour bleed.
   including their combined composition. Sheen, anisotropy, and iridescence
   select independently lazy, constant-folded code variants; only sheen adds
   the 32 KiB LUT. The base kernel, shared GI record, bindings, and cost remain
-  unchanged; unqualified or texture-bearing lobes continue to dispatch the
-  exact base pipeline until complete transport is qualified.
+  unchanged. Resolved UV0 specular-factor/color textures use the existing
+  texture array plus a separately lazy 64-byte transform record, with
+  transformed UV reconstruction at primary and bounce hits. White textures
+  are byte-identical to the scalar path. Unresolved, UV1, and other
+  texture-bearing lobes continue to use exact established PT semantics until
+  their complete transport is qualified.
 - Emissive from material data (VFX/muzzle flashes become real light in PT).
 
 ### Tier 3 — PT-3/PT-4: gameplay
