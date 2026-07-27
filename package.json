@@ -17,7 +17,8 @@
     "./scene": "./src/scene/index.ts",
     "./physics": "./src/physics/index.ts",
     "./world": "./src/world/index.ts",
-    "./vfx": "./src/vfx/index.ts"
+    "./vfx": "./src/vfx/index.ts",
+    "./quality": "./src/quality/index.ts"
   },
   "files": [
     "src/",
@@ -163,6 +164,25 @@
             "string"
           ],
           "returns": "void"
+        },
+        {
+          "name": "bloom_capture_frame_to_png",
+          "params": [
+            "string"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_capture_debug_intermediates",
+          "params": [
+            "string"
+          ],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_capture_frame_ready",
+          "params": [],
+          "returns": "f64"
         },
         {
           "name": "bloom_clear_background",
@@ -1659,6 +1679,45 @@
           "returns": "void"
         },
         {
+          "name": "bloom_get_present_mode",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_material_binding_capabilities",
+          "params": [],
+          "returns": "string"
+        },
+        {
+          "name": "bloom_get_imported_refraction_mode",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_transparency_composition_mode",
+          "params": [
+            "f64"
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "bloom_get_transparency_composition_mode",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_get_active_transparency_composition_mode",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_set_material_binding_tier_override",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_sun_shafts",
           "params": [
             "f64",
@@ -1887,6 +1946,18 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_command_line_arg_count",
+          "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_command_line_arg",
+          "params": [
+            "f64"
+          ],
+          "returns": "string"
+        },
+        {
           "name": "bloom_set_output_scale",
           "params": [
             "f64"
@@ -1959,6 +2030,19 @@
         {
           "name": "bloom_get_profiler_frame_gpu_us",
           "params": [],
+          "returns": "f64"
+        },
+        {
+          "name": "bloom_write_quality_telemetry",
+          "params": [
+            "string",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
           "returns": "f64"
         },
         {

@@ -10,11 +10,17 @@
 
 use wgpu::util::DeviceExt;
 
+use super::layered_pbr::{
+    bound_material_lobe_mask_lane, bound_material_version_lane, MaterialLobeMask,
+};
+use super::material_indirection::{GpuMaterialRecord, MaterialId, MaterialIndirection, TextureId};
 use super::material_pipeline::{
-    MaterialAbiLayouts, MaterialPipeline, MaterialCompileDesc, FragmentProfile,
-    Bucket, compile_material, MaterialCompileError,
+    compile_material, Bucket, FragmentProfile, MaterialAbiLayouts, MaterialCompileDesc,
+    MaterialCompileError, MaterialPipeline,
 };
 use super::types::Vertex3D;
+
+mod texture_arrays;
 
 // =====================================================================
 // Uniform structs — repr(C), bytemuck-Pod, mirror the WGSL in
@@ -25,94 +31,100 @@ use super::types::Vertex3D;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PerFrameUniforms {
-    pub time:              f32,
-    pub delta_time:        f32,
-    pub frame_index:       u32,
-    pub _pad0:             u32,
+    pub time: f32,
+    pub delta_time: f32,
+    pub frame_index: u32,
+    pub _pad0: u32,
     pub screen_resolution: [f32; 2],
     pub render_resolution: [f32; 2],
-    pub taa_jitter:        [f32; 2],
-    pub _pad1:             [f32; 2],
+    pub taa_jitter: [f32; 2],
+    pub _pad1: [f32; 2],
     /// Global wind: x=dir_x, y=dir_z, z=amplitude, w=frequency.
-    pub wind:              [f32; 4],
+    pub wind: [f32; 4],
     /// Cloud deck: x = shadow strength, y = deck height (m), z = feature scale,
     /// w = drift speed (m/s). Materials feed this to `cloud_shadow_at` from
     /// common/clouds.wgsl — the same deck the sky pass draws.
-    pub cloud:             [f32; 4],
+    pub cloud: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PerViewDirLight {
-    pub direction: [f32; 4],  // xyz + intensity
-    pub color:     [f32; 4],
+    pub direction: [f32; 4], // xyz + intensity
+    pub color: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PerViewPointLight {
     pub position: [f32; 4],
-    pub color:    [f32; 4],
+    pub color: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PerViewUniforms {
-    pub view:           [[f32; 4]; 4],
-    pub proj:           [[f32; 4]; 4],
-    pub view_proj:      [[f32; 4]; 4],
+    pub view: [[f32; 4]; 4],
+    pub proj: [[f32; 4]; 4],
+    pub view_proj: [[f32; 4]; 4],
     pub prev_view_proj: [[f32; 4]; 4],
-    pub inv_proj:       [[f32; 4]; 4],
-    pub camera_pos:     [f32; 4],
-    pub camera_dir:     [f32; 4],
-    pub ambient:        [f32; 4],
-    pub fog:            [f32; 4],
-    pub sun_dir:        [f32; 4],
-    pub sun_color:      [f32; 4],
-    pub dir_light_count:   [f32; 4],
-    pub dir_lights:        [PerViewDirLight; 8],
+    pub inv_proj: [[f32; 4]; 4],
+    pub camera_pos: [f32; 4],
+    pub camera_dir: [f32; 4],
+    pub ambient: [f32; 4],
+    pub fog: [f32; 4],
+    pub sun_dir: [f32; 4],
+    pub sun_color: [f32; 4],
+    pub dir_light_count: [f32; 4],
+    pub dir_lights: [PerViewDirLight; 8],
     pub point_light_count: [f32; 4],
-    pub point_lights:      [PerViewPointLight; 256],
-    pub shadow_splits:   [f32; 4],
-    pub shadow_view:     [[f32; 4]; 4],
+    pub point_lights: [PerViewPointLight; 256],
+    pub shadow_splits: [f32; 4],
+    pub shadow_view: [[f32; 4]; 4],
     pub shadow_cascades: [[[f32; 4]; 4]; 3],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialFactorsUniforms {
-    pub metal_rough:    [f32; 4],
-    pub emissive:       [f32; 4],
-    pub base_color:     [f32; 4],
+    pub metal_rough: [f32; 4],
+    pub emissive: [f32; 4],
+    pub base_color: [f32; 4],
     /// EN-012 — shading-model selector + foliage transmission tint.
     /// x = shading_model enum (0 = default lit, 1 = foliage,
     ///                         2 = subsurface — V2 stub),
     /// yzw = transmission_color (rgb tint for back-lit foliage; ignored
     ///       when shading_model == 0).
-    pub shading_model:  [f32; 4],
+    pub shading_model: [f32; 4],
     /// EN-012 — foliage shading parameters. Only consumed when
     /// `shading_model.x == 1.0`.
     /// x = transmission_amount (0..1),
     /// y = wrap_factor          (0..1),
-    /// zw = reserved.
+    /// z = layered-PBR record version bits, w = lobe-mask bits. Stored with
+    /// `f32::from_bits` so the 80-byte legacy/custom UBO stays unchanged.
     pub foliage_params: [f32; 4],
 }
 
 impl Default for MaterialFactorsUniforms {
     fn default() -> Self {
         Self {
-            metal_rough:    [0.0, 1.0, 0.0, 0.0],   // non-metal, rough, no MR tex, no cutoff
-            emissive:       [0.0, 0.0, 0.0, 0.0],
-            base_color:     [1.0, 1.0, 1.0, 1.0],
+            metal_rough: [0.0, 1.0, 0.0, 0.0], // non-metal, rough, no MR tex, no cutoff
+            emissive: [0.0, 0.0, 0.0, 0.0],
+            base_color: [1.0, 1.0, 1.0, 1.0],
             // EN-012 — default lit, white transmission tint. Materials
             // that never call `setMaterialShadingModel` get standard PBR
             // (shading_model.x == 0.0).
-            shading_model:  [0.0, 1.0, 1.0, 1.0],
+            shading_model: [0.0, 1.0, 1.0, 1.0],
             // EN-012 — moderate defaults so a freshly-flagged foliage
             // material (shading_model = 1) looks reasonable before any
             // tuning. Wrap=0.5 + transmission=0.5 gives soft back-face
             // shading + a noticeable halo against the sun.
-            foliage_params: [0.5, 0.5, 0.0, 0.0],
+            foliage_params: [
+                0.5,
+                0.5,
+                bound_material_version_lane(),
+                bound_material_lobe_mask_lane(MaterialLobeMask::NONE),
+            ],
         }
     }
 }
@@ -120,11 +132,11 @@ impl Default for MaterialFactorsUniforms {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PerDrawUniforms {
-    pub mvp:        [[f32; 4]; 4],
-    pub model:      [[f32; 4]; 4],
-    pub prev_mvp:   [[f32; 4]; 4],
+    pub mvp: [[f32; 4]; 4],
+    pub model: [[f32; 4]; 4],
+    pub prev_mvp: [[f32; 4]; 4],
     pub model_tint: [f32; 4],
-    pub skin_info:  [u32; 4],
+    pub skin_info: [u32; 4],
 }
 
 // =====================================================================
@@ -134,22 +146,22 @@ pub struct PerDrawUniforms {
 pub type MaterialHandle = u32;
 
 pub struct MaterialDrawCommand {
-    pub material:    MaterialHandle,
-    pub mesh_handle: u64,       // matches model_gpu_cache keys
-    pub mesh_idx:    usize,     // sub-mesh index within that cached model
-    pub draw_slot:   usize,     // which slot in per_draw_buffers to bind
+    pub material: MaterialHandle,
+    pub mesh_handle: u64, // matches model_gpu_cache keys
+    pub mesh_idx: usize,  // sub-mesh index within that cached model
+    pub draw_slot: usize, // which slot in per_draw_buffers to bind
     /// Clip-space w of the object pivot at submit time (= view-space
     /// depth for a standard projection). Drives the back-to-front sort
     /// of the translucent bucket; opaque draws ignore it.
-    pub view_depth:  f32,
+    pub view_depth: f32,
     /// EN-001 — when set, the engine binds vertex slot 1 to this
     /// instance buffer and emits draw_indexed with `0..count` instances.
     /// `None` means a single-instance draw (the legacy path).
-    pub instance:    Option<InstanceDrawInfo>,
+    pub instance: Option<InstanceDrawInfo>,
     /// CPU-side copy of the model matrix (the GPU one lives in the
     /// per-draw UBO slot). The shadow pass needs it to re-render these
     /// draws into the sun cascades without reading buffers back.
-    pub model:       [[f32; 4]; 4],
+    pub model: [[f32; 4]; 4],
 }
 
 /// Reference to an instance buffer for an instanced draw command.
@@ -160,7 +172,7 @@ pub struct MaterialDrawCommand {
 #[derive(Copy, Clone, Debug)]
 pub struct InstanceDrawInfo {
     pub buffer_handle: u32,
-    pub count:         u32,
+    pub count: u32,
 }
 
 /// EN-001 — owned wgpu::Buffer + element count for an instance buffer.
@@ -168,7 +180,7 @@ pub struct InstanceDrawInfo {
 /// by 1-based handle (0 = invalid).
 pub struct InstanceBuffer {
     pub buffer: wgpu::Buffer,
-    pub count:  u32,
+    pub count: u32,
     /// Spatial tiles over the instances (built at creation by
     /// reordering instances into an XZ grid). Empty = untiled (small
     /// buffers). Opaque/cutout instanced draws use these to
@@ -198,8 +210,8 @@ pub struct InstanceTile {
 /// view over all `layer_count` layers (so `textureSample(arr, samp,
 /// uv, layer_idx)` resolves layers 0..layer_count-1).
 pub struct TextureArray {
-    pub texture:     wgpu::Texture,
-    pub view:        wgpu::TextureView,
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
     pub layer_count: u32,
 }
 
@@ -211,7 +223,7 @@ pub const MAX_TEXTURE_ARRAY_LAYERS: u32 = 16;
 /// EN-014 V2 — texture-array format codes, as exposed to the TS API
 /// via `TEX_ARRAY_FORMAT_*`. Anything unrecognised falls back to sRGB
 /// since albedo is the most common splat layer.
-pub const TEX_ARRAY_FORMAT_SRGB:   u32 = 0;
+pub const TEX_ARRAY_FORMAT_SRGB: u32 = 0;
 pub const TEX_ARRAY_FORMAT_LINEAR: u32 = 1;
 
 /// Map a TS-side format code to a wgpu format. sRGB suits albedo; linear
@@ -219,9 +231,9 @@ pub const TEX_ARRAY_FORMAT_LINEAR: u32 = 1;
 /// the encoded normals or rough/metal channels).
 pub fn map_texture_array_format(code: u32) -> wgpu::TextureFormat {
     match code {
-        TEX_ARRAY_FORMAT_SRGB   => wgpu::TextureFormat::Rgba8UnormSrgb,
+        TEX_ARRAY_FORMAT_SRGB => wgpu::TextureFormat::Rgba8UnormSrgb,
         TEX_ARRAY_FORMAT_LINEAR => wgpu::TextureFormat::Rgba8Unorm,
-        _                       => wgpu::TextureFormat::Rgba8UnormSrgb,
+        _ => wgpu::TextureFormat::Rgba8UnormSrgb,
     }
 }
 
@@ -234,6 +246,11 @@ pub struct MaterialSystem {
 
     // Compiled pipelines, indexed by MaterialHandle (1-based; 0 = invalid).
     pub pipelines: Vec<Option<MaterialPipeline>>,
+    /// Stable material IDs consumed by GPU-driven passes. Kept parallel to
+    /// `pipelines`; legacy handles remain the Tier C compatibility API.
+    pub material_ids: Vec<MaterialId>,
+    /// Capability-selected global/paged resource tables.
+    pub indirection: MaterialIndirection,
 
     // Per-material "render into planar reflection probes" flag (1-based
     // like `pipelines`, default true). Authoring control for content
@@ -244,12 +261,12 @@ pub struct MaterialSystem {
 
     // Per-frame UBO + bind group (rewritten at the start of every frame).
     pub per_frame_buffer: wgpu::Buffer,
-    pub per_frame_bg:     wgpu::BindGroup,
+    pub per_frame_bg: wgpu::BindGroup,
 
     // Per-view UBO — one for now (single camera). Phase 2 may add more
     // for split-screen / shadow cascades.
     pub per_view_buffer: wgpu::Buffer,
-    pub per_view_bg:     wgpu::BindGroup,
+    pub per_view_bg: wgpu::BindGroup,
 
     // Default per-material bind group: all white 1×1 textures, default
     // factors, zero-initialised user-params. Materials that don't
@@ -257,23 +274,23 @@ pub struct MaterialSystem {
     pub default_per_material_bg: wgpu::BindGroup,
     /// Kept alive so the BG it backs doesn't dangle.
     _default_material_factors_buffer: wgpu::Buffer,
-    _default_user_params_buffer:      wgpu::Buffer,
-    _default_white_tex:               wgpu::Texture,
-    _default_white_view:              wgpu::TextureView,
-    _default_sampler:                 wgpu::Sampler,
+    _default_user_params_buffer: wgpu::Buffer,
+    _default_white_tex: wgpu::Texture,
+    _default_white_view: wgpu::TextureView,
+    _default_sampler: wgpu::Sampler,
     /// EN-011 — 1×1 black texture bound at @group(2) @binding(12) for
     /// materials that don't have a planar reflection probe linked.
     /// Lets shaders unconditionally `textureSample(planar_reflection_tex,
     /// …)` without branching on probe presence.
-    _default_black_tex:               wgpu::Texture,
-    pub default_black_view:           wgpu::TextureView,
+    _default_black_tex: wgpu::Texture,
+    pub default_black_view: wgpu::TextureView,
     /// EN-014 — 1×1×1 transparent-black texture-array stub bound to
     /// bindings 14/15/16 (@group(2)) for materials that don't declare
     /// their own array. Has to be a real D2Array view (not a 2D
     /// texture cast) so the layout's `view_dimension: D2Array`
     /// matches at bind time.
-    _default_array_tex:               wgpu::Texture,
-    pub default_array_view:           wgpu::TextureView,
+    _default_array_tex: wgpu::Texture,
+    pub default_array_view: wgpu::TextureView,
 
     /// Phase 5 — per-material `user_params` UBOs. Indexed by
     /// `MaterialHandle - 1`; `None` means the material uses the default
@@ -295,7 +312,7 @@ pub struct MaterialSystem {
     // Each entry is `(PerDraw UBO, bind group binding it + the global
     // joint buffer at binding 1)`.
     pub per_draw_buffers: Vec<wgpu::Buffer>,
-    pub per_draw_bgs:     Vec<wgpu::BindGroup>,
+    pub per_draw_bgs: Vec<wgpu::BindGroup>,
 
     // Phase 4b — group 4 (SceneInputs) bind group. Rebuilt per-frame
     // when any Refractive material is submitted and a scene-colour
@@ -309,21 +326,21 @@ pub struct MaterialSystem {
     _scene_depth_sampler: wgpu::Sampler,
     /// 1×1 default texture for impulse / motion-vectors slots when
     /// no Phase 7 impulse system is wired up yet.
-    _scene_stub_tex:      wgpu::Texture,
-    _scene_stub_view:     wgpu::TextureView,
+    _scene_stub_tex: wgpu::Texture,
+    _scene_stub_view: wgpu::TextureView,
     /// 1×1 stub depth texture — bound to scene_depth_tex in Phase 4b
     /// because the live depth buffer can't be simultaneously sampled
     /// and used as a depth-stencil attachment. Phase 4c will add a
     /// copy-to-sample depth snapshot for shoreline-fade materials.
-    _scene_stub_depth:    wgpu::Texture,
+    _scene_stub_depth: wgpu::Texture,
     _scene_stub_depth_view: wgpu::TextureView,
 
     // Frame state — commands split by bucket so the graph can
     // schedule them into the right pass. Phase 4a keeps them in
     // parallel lists; Phase 4b dispatches the translucent lists in
     // their own sub-pass.
-    pub commands:              Vec<MaterialDrawCommand>,  // Bucket::Opaque + Bucket::Cutout
-    pub translucent_commands:  Vec<MaterialDrawCommand>,  // Transparent + Refractive + Additive
+    pub commands: Vec<MaterialDrawCommand>, // Bucket::Opaque + Bucket::Cutout
+    pub translucent_commands: Vec<MaterialDrawCommand>, // Transparent + Refractive + Additive
     next_draw_slot: usize,
 
     /// EN-022 — per-slot model matrices from the PREVIOUS frame, keyed
@@ -335,7 +352,7 @@ pub struct MaterialSystem {
     /// with the CURRENT mvp, making world velocity identically zero
     /// (round-2 audit F8).
     prev_models: Vec<[[f32; 4]; 4]>,
-    cur_models:  Vec<[[f32; 4]; 4]>,
+    cur_models: Vec<[[f32; 4]; 4]>,
     /// Previous frame's view-projection (set in reset_draw_slot).
     prev_vp: [[f32; 4]; 4],
 
@@ -352,6 +369,8 @@ pub struct MaterialSystem {
     /// Created via `create_texture_array`, linked to a material's
     /// per-material BG via `set_material_texture_array`.
     pub texture_arrays: Vec<Option<TextureArray>>,
+    /// Stable Tier B IDs parallel to `texture_arrays`.
+    pub texture_array_ids: Vec<TextureId>,
 
     /// EN-014 — per-material → array-handle link, one slot for each
     /// of the 3 array bindings (0 = albedo, 1 = normal, 2 = MR).
@@ -368,7 +387,7 @@ pub struct MaterialSystem {
     /// `material_factors_data` lets us partial-update one field at a
     /// time without losing the others.
     pub material_factors_buffers: Vec<Option<wgpu::Buffer>>,
-    pub material_factors_data:    Vec<MaterialFactorsUniforms>,
+    pub material_factors_data: Vec<MaterialFactorsUniforms>,
 }
 
 impl MaterialSystem {
@@ -392,12 +411,13 @@ impl MaterialSystem {
         // EN-063 — on wasm32 the per_frame group also carries the seven
         // folded SceneInputs bindings, whose stub resources are only
         // created further down; the wasm32 bind group is built there.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(fold_scene_inputs))]
         let per_frame_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material_per_frame_bg"),
             layout: &layouts.per_frame,
             entries: &[wgpu::BindGroupEntry {
-                binding: 0, resource: per_frame_buffer.as_entire_binding(),
+                binding: 0,
+                resource: per_frame_buffer.as_entire_binding(),
             }],
         });
 
@@ -406,7 +426,11 @@ impl MaterialSystem {
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("material_default_white"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -428,7 +452,11 @@ impl MaterialSystem {
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("material_default_black_reflection"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -453,7 +481,11 @@ impl MaterialSystem {
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("material_default_array_stub"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -503,7 +535,11 @@ impl MaterialSystem {
         // Use a 1×1 depth as a stub.
         let stub_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("material_stub_depth"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -512,37 +548,117 @@ impl MaterialSystem {
             view_formats: &[],
         });
         let stub_depth_view = stub_depth.create_view(&Default::default());
+        let stub_depth_array_view = stub_depth.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("material_stub_depth_array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let vsm_stub = crate::virtual_shadows::virtual_shadows_requested().then(|| {
+            let page_table = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("material_stub_vsm_page_table"),
+                size: wgpu::Extent3d {
+                    width: crate::virtual_shadows::VSM_VIRTUAL_PAGES_PER_AXIS as u32,
+                    height: crate::virtual_shadows::VSM_VIRTUAL_PAGES_PER_AXIS as u32,
+                    depth_or_array_layers: crate::virtual_shadows::VSM_CLIP_LEVELS as u32,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let page_table_view = page_table.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("material_stub_vsm_page_table_view"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            let params = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("material_stub_vsm_params"),
+                size: std::mem::size_of::<[u32; 4]>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM,
+                mapped_at_creation: false,
+            });
+            (page_table, page_table_view, params)
+        });
+        let mut per_view_entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: per_view_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(white_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(white_samp),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(white_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(white_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(white_samp),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&stub_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&stub_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&stub_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::Sampler(&cmp_sampler),
+            },
+        ];
+        if let Some((_, page_table_view, params)) = vsm_stub.as_ref() {
+            per_view_entries.extend([
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(page_table_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&stub_depth_array_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: params.as_entire_binding(),
+                },
+            ]);
+        }
         let per_view_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material_per_view_bg"),
             layout: &layouts.per_view,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: per_view_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(white_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(white_samp) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(white_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(white_view) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(white_samp) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&stub_depth_view) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&stub_depth_view) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&stub_depth_view) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&cmp_sampler) },
-            ],
+            entries: &per_view_entries,
         });
         // The stub_depth texture and cmp_sampler outlive the bind group via
         // wgpu internal Arc; we don't need to hold them in the struct.
         std::mem::forget(stub_depth);
         std::mem::forget(stub_depth_view);
+        std::mem::forget(stub_depth_array_view);
         std::mem::forget(cmp_sampler);
 
         // Default MaterialFactors UBO.
         let default_mf = MaterialFactorsUniforms::default();
-        let default_material_factors_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
+        let default_material_factors_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("material_default_factors"),
                 contents: bytemuck::bytes_of(&default_mf),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            },
-        );
+            });
         // Default user-params UBO — 256 bytes of zeros (ABI §1.4).
         let default_user_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("material_default_user_params"),
@@ -558,31 +674,85 @@ impl MaterialSystem {
             label: Some("material_default_per_material_bg"),
             layout: &layouts.per_material,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0,  resource: wgpu::BindingResource::TextureView(&default_white_view) },
-                wgpu::BindGroupEntry { binding: 1,  resource: wgpu::BindingResource::Sampler(&default_sampler) },
-                wgpu::BindGroupEntry { binding: 2,  resource: wgpu::BindingResource::TextureView(&default_white_view) },
-                wgpu::BindGroupEntry { binding: 3,  resource: wgpu::BindingResource::Sampler(&default_sampler) },
-                wgpu::BindGroupEntry { binding: 4,  resource: wgpu::BindingResource::TextureView(&default_white_view) },
-                wgpu::BindGroupEntry { binding: 5,  resource: wgpu::BindingResource::Sampler(&default_sampler) },
-                wgpu::BindGroupEntry { binding: 6,  resource: wgpu::BindingResource::TextureView(&default_white_view) },
-                wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&default_sampler) },
-                wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&default_white_view) },
-                wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&default_sampler) },
-                wgpu::BindGroupEntry { binding: 10, resource: default_material_factors_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 11, resource: default_user_params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::Sampler(&default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: default_material_factors_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: default_user_params_buffer.as_entire_binding(),
+                },
                 // EN-011 — default black 1×1 reflection texture +
                 // shared linear sampler. Replaced per-material when a
                 // game calls `set_material_reflection_probe`.
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&default_black_view) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&default_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&default_black_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&default_sampler),
+                },
                 // EN-014 — default 1×1×1 stub array bound to all 3
                 // texture-array slots, with the shared default
                 // sampler at binding 17. Replaced per-slot when a
                 // game calls `set_material_texture_array`.
-                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&default_array_view) },
-                wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&default_array_view) },
-                wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&default_array_view) },
-                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&default_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(&default_array_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: wgpu::BindingResource::TextureView(&default_array_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: wgpu::BindingResource::TextureView(&default_array_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::Sampler(&default_sampler),
+                },
             ],
         });
 
@@ -613,7 +783,11 @@ impl MaterialSystem {
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("scene_inputs_stub"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -629,7 +803,11 @@ impl MaterialSystem {
         // Stub depth texture — Depth32Float 1×1, cleared to 1.0 (far).
         let scene_stub_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("scene_depth_stub"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -643,23 +821,29 @@ impl MaterialSystem {
         // folded SceneInputs slots, initially bound to the same stub
         // resources `update_scene_inputs` falls back to. Rebuilt with
         // the real snapshot views each frame by `update_scene_inputs`.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(fold_scene_inputs)]
         let per_frame_bg = super::material_system_wasm::build_per_frame_bg_wasm(
             device,
             &layouts.per_frame,
             &per_frame_buffer,
-            &scene_stub_view,        // scene_color_tex stub
+            &scene_stub_view, // scene_color_tex stub
             &scene_color_sampler,
-            &scene_stub_depth_view,  // scene_depth_tex stub
+            &scene_stub_depth_view, // scene_depth_tex stub
             &scene_depth_sampler,
-            &scene_stub_view,        // impulse_tex stub
-            &scene_depth_sampler,    // impulse_samp — NonFiltering, matches layout
-            &scene_stub_view,        // motion_vectors stub
+            &scene_stub_view,     // impulse_tex stub
+            &scene_depth_sampler, // impulse_samp — NonFiltering, matches layout
+            &scene_stub_view,     // motion_vectors stub
         );
+
+        let mut indirection = MaterialIndirection::new(device);
+        indirection.initialize_fallbacks(device, &default_white_view, &default_sampler);
+        indirection.flush(device, queue);
 
         Self {
             layouts,
             pipelines: Vec::new(),
+            material_ids: Vec::new(),
+            indirection,
             probe_visible: Vec::new(),
             per_frame_buffer,
             per_frame_bg,
@@ -695,12 +879,13 @@ impl MaterialSystem {
             prev_vp: super::IDENTITY_MAT4,
             instance_buffers: Vec::new(),
             texture_arrays: Vec::new(),
+            texture_array_ids: Vec::new(),
             material_texture_arrays: Vec::new(),
             // EN-012 — per-material MaterialFactors UBOs are lazy.
             // Until a material calls `set_shading_model` /
             // `set_foliage`, it shares the default factors buffer.
             material_factors_buffers: Vec::new(),
-            material_factors_data:    Vec::new(),
+            material_factors_data: Vec::new(),
         }
     }
 
@@ -729,6 +914,7 @@ impl MaterialSystem {
             label: "user_material",
             entry_path,
             extra_sources: &[(entry_path, wgsl_source)],
+            lazy_reactive_source: Some(wgsl_source),
             profile,
             bucket,
             reads_scene,
@@ -742,6 +928,10 @@ impl MaterialSystem {
         };
         let pipeline = compile_material(device, &self.layouts, &desc)?;
         self.pipelines.push(Some(pipeline));
+        let material_id = self
+            .indirection
+            .allocate_material(device, GpuMaterialRecord::default());
+        self.material_ids.push(material_id);
         self.probe_visible.push(true);
         Ok(self.pipelines.len() as MaterialHandle)
     }
@@ -757,8 +947,13 @@ impl MaterialSystem {
     }
 
     pub fn material_probe_visible(&self, material: MaterialHandle) -> bool {
-        if material < 1 { return true; }
-        self.probe_visible.get(material as usize - 1).copied().unwrap_or(true)
+        if material < 1 {
+            return true;
+        }
+        self.probe_visible
+            .get(material as usize - 1)
+            .copied()
+            .unwrap_or(true)
     }
 
     // --- Frame lifecycle ----------------------------------------------
@@ -770,12 +965,14 @@ impl MaterialSystem {
     /// end_frame, so draws submitted during the frame survive).
     pub fn update_frame_uniforms(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         per_frame: &PerFrameUniforms,
-        per_view:  &PerViewUniforms,
+        per_view: &PerViewUniforms,
     ) {
         queue.write_buffer(&self.per_frame_buffer, 0, bytemuck::bytes_of(per_frame));
-        queue.write_buffer(&self.per_view_buffer,  0, bytemuck::bytes_of(per_view));
+        queue.write_buffer(&self.per_view_buffer, 0, bytemuck::bytes_of(per_view));
+        self.indirection.flush(device, queue);
     }
 
     /// Shadow-flicker fix — re-upload just PerView's trailing shadow
@@ -802,11 +999,15 @@ impl MaterialSystem {
             shadow_view: [[f32; 4]; 4],
             shadow_cascades: [[[f32; 4]; 4]; 3],
         }
-        let tail = ShadowTail { shadow_splits, shadow_view, shadow_cascades };
+        let tail = ShadowTail {
+            shadow_splits,
+            shadow_view,
+            shadow_cascades,
+        };
         // The shadow fields are the last three in PerViewUniforms; Pod
         // guarantees no padding, so the tail offset is exact.
-        let offset = (std::mem::size_of::<PerViewUniforms>()
-            - std::mem::size_of::<ShadowTail>()) as u64;
+        let offset =
+            (std::mem::size_of::<PerViewUniforms>() - std::mem::size_of::<ShadowTail>()) as u64;
         queue.write_buffer(&self.per_view_buffer, offset, bytemuck::bytes_of(&tail));
     }
 
@@ -849,7 +1050,9 @@ impl MaterialSystem {
         handle: MaterialHandle,
         params: &[u8],
     ) -> Result<(), &'static str> {
-        if handle == 0 { return Err("invalid material handle"); }
+        if handle == 0 {
+            return Err("invalid material handle");
+        }
         let idx = (handle - 1) as usize;
         if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
             return Err("material handle not registered");
@@ -888,7 +1091,8 @@ impl MaterialSystem {
             // material that previously called `set_shading_model` /
             // `set_foliage` keeps its custom factors at binding 10
             // when user_params is later set on it.
-            let factors_buf: &wgpu::Buffer = self.material_factors_buffers
+            let factors_buf: &wgpu::Buffer = self
+                .material_factors_buffers
                 .get(idx)
                 .and_then(|b| b.as_ref())
                 .unwrap_or(&self._default_material_factors_buffer);
@@ -903,24 +1107,78 @@ impl MaterialSystem {
                 label: Some("material_per_material_bg_user"),
                 layout: &self.layouts.per_material,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                    wgpu::BindGroupEntry { binding: 1,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                    wgpu::BindGroupEntry { binding: 2,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                    wgpu::BindGroupEntry { binding: 3,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                    wgpu::BindGroupEntry { binding: 4,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                    wgpu::BindGroupEntry { binding: 5,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                    wgpu::BindGroupEntry { binding: 6,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                    wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                    wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                    wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                    wgpu::BindGroupEntry { binding: 10, resource: factors_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 11, resource: buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.default_black_view) },
-                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(albedo_view) },
-                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(normal_view) },
-                    wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(mr_view) },
-                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: factors_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: wgpu::BindingResource::TextureView(&self.default_black_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 13,
+                        resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 14,
+                        resource: wgpu::BindingResource::TextureView(albedo_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: wgpu::BindingResource::TextureView(normal_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 16,
+                        resource: wgpu::BindingResource::TextureView(mr_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 17,
+                        resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                    },
                 ],
             });
             self.material_params_buffers[idx] = Some(buf);
@@ -936,9 +1194,10 @@ impl MaterialSystem {
     }
 
     /// Per-material BG when set, otherwise the shared default.
-    fn per_material_bg_for(&self, handle: MaterialHandle) -> &wgpu::BindGroup {
+    pub(crate) fn per_material_bg_for(&self, handle: MaterialHandle) -> &wgpu::BindGroup {
         let idx = (handle as usize).wrapping_sub(1);
-        self.material_per_material_bgs.get(idx)
+        self.material_per_material_bgs
+            .get(idx)
             .and_then(|b| b.as_ref())
             .unwrap_or(&self.default_per_material_bg)
     }
@@ -968,11 +1227,13 @@ impl MaterialSystem {
     pub fn set_reflection_probe(
         &mut self,
         device: &wgpu::Device,
-        handle:       MaterialHandle,
+        handle: MaterialHandle,
         probe_handle: u32,
-        probe_view:   &wgpu::TextureView,
+        probe_view: &wgpu::TextureView,
     ) -> Result<(), &'static str> {
-        if handle == 0 { return Err("invalid material handle"); }
+        if handle == 0 {
+            return Err("invalid material handle");
+        }
         let idx = (handle - 1) as usize;
         if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
             return Err("material handle not registered");
@@ -981,7 +1242,7 @@ impl MaterialSystem {
         // Grow parallel vectors so the index is in bounds. We grow
         // BOTH params + reflection registries together — they share
         // an index domain (MaterialHandle - 1).
-        while self.material_params_buffers.len()  <= idx {
+        while self.material_params_buffers.len() <= idx {
             self.material_params_buffers.push(None);
             self.material_per_material_bgs.push(None);
         }
@@ -992,7 +1253,8 @@ impl MaterialSystem {
 
         // Resolve binding 11 — per-material UBO if one's been
         // allocated, else the shared zero-init default.
-        let user_params_buf: &wgpu::Buffer = self.material_params_buffers
+        let user_params_buf: &wgpu::Buffer = self
+            .material_params_buffers
             .get(idx)
             .and_then(|b| b.as_ref())
             .unwrap_or(&self._default_user_params_buffer);
@@ -1002,7 +1264,8 @@ impl MaterialSystem {
         // `set_foliage`. Otherwise the reflection-probe rebind would
         // silently revert a foliage-flagged material back to the
         // default factors at binding 10.
-        let factors_buf: &wgpu::Buffer = self.material_factors_buffers
+        let factors_buf: &wgpu::Buffer = self
+            .material_factors_buffers
             .get(idx)
             .and_then(|b| b.as_ref())
             .unwrap_or(&self._default_material_factors_buffer);
@@ -1016,26 +1279,80 @@ impl MaterialSystem {
             label: Some("material_per_material_bg_reflection"),
             layout: &self.layouts.per_material,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 1,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 2,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 3,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 4,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 5,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 6,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 10, resource: factors_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 11, resource: user_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: factors_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: user_params_buf.as_entire_binding(),
+                },
                 // EN-011 — probe's color view + a filtering sampler.
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(probe_view) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(probe_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
                 // EN-014 — resolved texture arrays + shared sampler.
-                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(albedo_view) },
-                wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(normal_view) },
-                wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(mr_view) },
-                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(albedo_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: wgpu::BindingResource::TextureView(normal_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: wgpu::BindingResource::TextureView(mr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
             ],
         });
         self.material_per_material_bgs[idx] = Some(bg);
@@ -1088,23 +1405,24 @@ impl MaterialSystem {
     /// `flush_material_factors`. Grows `material_factors_buffers` /
     /// `material_factors_data` so `idx` is in bounds.
     fn ensure_material_factors(
-        &mut self, device: &wgpu::Device, idx: usize,
+        &mut self,
+        device: &wgpu::Device,
+        idx: usize,
     ) -> &mut MaterialFactorsUniforms {
         while self.material_factors_buffers.len() <= idx {
             self.material_factors_buffers.push(None);
-            self.material_factors_data.push(MaterialFactorsUniforms::default());
+            self.material_factors_data
+                .push(MaterialFactorsUniforms::default());
         }
         if self.material_factors_buffers[idx].is_none() {
             // Allocate a fresh per-material factors UBO seeded with the
             // current CPU-side data (defaults on first call).
             let init = self.material_factors_data[idx];
-            let buf = device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("material_factors_per_material"),
-                    contents: bytemuck::bytes_of(&init),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                },
-            );
+            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("material_factors_per_material"),
+                contents: bytemuck::bytes_of(&init),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
             self.material_factors_buffers[idx] = Some(buf);
         }
         &mut self.material_factors_data[idx]
@@ -1113,11 +1431,46 @@ impl MaterialSystem {
     /// EN-012 — write the current CPU-side `MaterialFactorsUniforms`
     /// for `idx` to the per-material UBO. Caller must have previously
     /// called `ensure_material_factors` so the buffer exists.
-    fn flush_material_factors(&self, queue: &wgpu::Queue, idx: usize) {
+    fn flush_material_factors(&mut self, queue: &wgpu::Queue, idx: usize) {
         if let Some(Some(buf)) = self.material_factors_buffers.get(idx) {
             let data = &self.material_factors_data[idx];
             queue.write_buffer(buf, 0, bytemuck::bytes_of(data));
         }
+        self.sync_gpu_material_record(idx);
+    }
+
+    fn sync_gpu_material_record(&mut self, idx: usize) {
+        let Some(&material_id) = self.material_ids.get(idx) else {
+            return;
+        };
+        let factors = self
+            .material_factors_data
+            .get(idx)
+            .copied()
+            .unwrap_or_default();
+        let mut record = GpuMaterialRecord {
+            base_color: factors.base_color,
+            metal_rough: factors.metal_rough,
+            emissive: factors.emissive,
+            shading_model: factors.shading_model,
+            foliage_params: factors.foliage_params,
+            ..GpuMaterialRecord::default()
+        };
+        if let Some(array_links) = self.material_texture_arrays.get(idx) {
+            let resolve = |link: Option<u32>| {
+                link.and_then(|handle| {
+                    self.texture_array_ids
+                        .get(handle.saturating_sub(1) as usize)
+                        .copied()
+                })
+                .unwrap_or(TextureId::FALLBACK)
+                .raw()
+            };
+            record.texture_ids_1[2] = resolve(array_links[0]);
+            record.texture_ids_1[3] = resolve(array_links[1]);
+            record.texture_ids_2[0] = resolve(array_links[2]);
+        }
+        self.indirection.update_material(material_id, record);
     }
 
     /// EN-012 — rebuild the per-material BG for `idx` after a
@@ -1130,8 +1483,8 @@ impl MaterialSystem {
     /// either the probe's RT view or the default 1×1 black view).
     fn rebuild_per_material_bg(
         &mut self,
-        device:     &wgpu::Device,
-        idx:        usize,
+        device: &wgpu::Device,
+        idx: usize,
         probe_view: &wgpu::TextureView,
     ) {
         // Grow parallel BG vector so `idx` is in bounds.
@@ -1141,7 +1494,8 @@ impl MaterialSystem {
         }
 
         let factors_buf: &wgpu::Buffer = self.resolve_factors_buffer(idx);
-        let user_params_buf: &wgpu::Buffer = self.material_params_buffers
+        let user_params_buf: &wgpu::Buffer = self
+            .material_params_buffers
             .get(idx)
             .and_then(|b| b.as_ref())
             .unwrap_or(&self._default_user_params_buffer);
@@ -1151,24 +1505,78 @@ impl MaterialSystem {
             label: Some("material_per_material_bg_factors"),
             layout: &self.layouts.per_material,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 1,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 2,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 3,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 4,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 5,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 6,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 10, resource: factors_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 11, resource: user_params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(probe_view) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(albedo_view) },
-                wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(normal_view) },
-                wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(mr_view) },
-                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: factors_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: user_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(probe_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(albedo_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: wgpu::BindingResource::TextureView(normal_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: wgpu::BindingResource::TextureView(mr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
             ],
         });
         self.material_per_material_bgs[idx] = Some(bg);
@@ -1183,12 +1591,14 @@ impl MaterialSystem {
     pub fn set_material_shading_model(
         &mut self,
         device: &wgpu::Device,
-        queue:  &wgpu::Queue,
-        material:   MaterialHandle,
-        model:      u32,
+        queue: &wgpu::Queue,
+        material: MaterialHandle,
+        model: u32,
         probe_view: &wgpu::TextureView,
     ) -> Result<(), &'static str> {
-        if material == 0 { return Err("invalid material handle"); }
+        if material == 0 {
+            return Err("invalid material handle");
+        }
         let idx = (material - 1) as usize;
         if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
             return Err("material handle not registered");
@@ -1210,14 +1620,16 @@ impl MaterialSystem {
     pub fn set_material_foliage(
         &mut self,
         device: &wgpu::Device,
-        queue:  &wgpu::Queue,
-        material:    MaterialHandle,
+        queue: &wgpu::Queue,
+        material: MaterialHandle,
         trans_color: [f32; 3],
         trans_amount: f32,
-        wrap_factor:  f32,
-        probe_view:  &wgpu::TextureView,
+        wrap_factor: f32,
+        probe_view: &wgpu::TextureView,
     ) -> Result<(), &'static str> {
-        if material == 0 { return Err("invalid material handle"); }
+        if material == 0 {
+            return Err("invalid material handle");
+        }
         let idx = (material - 1) as usize;
         if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
             return Err("material handle not registered");
@@ -1233,179 +1645,6 @@ impl MaterialSystem {
         self.flush_material_factors(queue, idx);
         self.rebuild_per_material_bg(device, idx, probe_view);
         Ok(())
-    }
-
-    /// EN-014 — create a 2D texture array from a slice of layer data.
-    /// Each `(bytes, w, h)` describes one layer's RGBA8 source. All
-    /// layers must share `w × h` (wgpu requires a uniform extent for
-    /// D2Array). V1 panics on mismatch — V2 may resize. Layer count
-    /// is capped at `MAX_TEXTURE_ARRAY_LAYERS`; extra layers are
-    /// dropped. Returns a 1-based handle (0 on failure: empty layers
-    /// or zero extent).
-    ///
-    /// Defaults: `format = 0` (Rgba8UnormSrgb, suitable for albedo),
-    /// `mip_levels = 1` (no mips). For data textures (normal / MR)
-    /// or auto-mip generation, see `create_texture_array_ex`.
-    pub fn create_texture_array(
-        &mut self,
-        device: &wgpu::Device,
-        queue:  &wgpu::Queue,
-        layers: &[(&[u8], u32, u32)],
-    ) -> u32 {
-        // V1 default: sRGB albedo, no mips. V2 callers use the _ex
-        // variant directly.
-        self.create_texture_array_ex(device, queue, layers, 0, 1)
-    }
-
-    /// EN-014 V2 — create a 2D texture array with explicit pixel format
-    /// and mip-level control. Layer extent / count rules match V1.
-    ///
-    /// `format`:
-    ///   0 → `Rgba8UnormSrgb` (albedo / colour textures; default)
-    ///   1 → `Rgba8Unorm`     (normal / MR / data textures — linear)
-    ///   _ → falls back to `Rgba8UnormSrgb`
-    ///
-    /// `mip_levels`:
-    ///   1     → no mips (matches V1 behaviour)
-    ///   0     → auto-generate `floor(log2(max(w,h))) + 1` mips, filled
-    ///           by point-downsample (`copy_texture_to_texture` halving
-    ///           the previous mip). Cheap, correct sized, but aliased
-    ///           — a render-pass box filter is the V2.5 follow-up.
-    ///   N > 1 → not yet supported (game-supplied per-mip bytes); V2
-    ///           treats this as auto-generate.
-    pub fn create_texture_array_ex(
-        &mut self,
-        device:     &wgpu::Device,
-        queue:      &wgpu::Queue,
-        layers:     &[(&[u8], u32, u32)],
-        format:     u32,
-        mip_levels: u32,
-    ) -> u32 {
-        let layer_count = (layers.len() as u32).min(MAX_TEXTURE_ARRAY_LAYERS);
-        if layer_count == 0 { return 0; }
-        let (_first_bytes, w, h) = layers[0];
-        if w == 0 || h == 0 { return 0; }
-        // Uniform extent check — V1 hard-fail surfaces obvious bugs at
-        // creation rather than during silent GPU truncation later.
-        for (i, (_, lw, lh)) in layers.iter().enumerate().take(layer_count as usize) {
-            if *lw != w || *lh != h {
-                eprintln!(
-                    "[texture_array] layer {} extent {}×{} does not match layer 0 ({}×{}); aborting create",
-                    i, lw, lh, w, h,
-                );
-                return 0;
-            }
-        }
-        let wgpu_format = map_texture_array_format(format);
-        // Resolve mip count. mip_levels = 1 → single mip. mip_levels = 0
-        // → engine-generated max. Anything else (game-supplied per-mip)
-        // is V2.5; for now treat N > 1 as auto so games opting into mips
-        // don't silently regress to no-mips.
-        let max_mips = (w.max(h) as f32).log2().floor() as u32 + 1;
-        let auto_generate = mip_levels == 0 || mip_levels > 1;
-        let mip_level_count = if mip_levels == 1 { 1 } else { max_mips.max(1) };
-        // Auto-gen needs COPY_SRC on the texture so we can ping-pong each
-        // mip into the next via copy_texture_to_texture.
-        let mut usage = wgpu::TextureUsages::TEXTURE_BINDING
-                      | wgpu::TextureUsages::COPY_DST;
-        if auto_generate && mip_level_count > 1 {
-            usage |= wgpu::TextureUsages::COPY_SRC;
-        }
-        let bytes_per_layer = (w as usize) * (h as usize) * 4;
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("material_texture_array"),
-            size: wgpu::Extent3d {
-                width:                  w,
-                height:                 h,
-                depth_or_array_layers:  layer_count,
-            },
-            mip_level_count,
-            sample_count:    1,
-            dimension:       wgpu::TextureDimension::D2,
-            format:          wgpu_format,
-            usage,
-            view_formats: &[],
-        });
-        for (i, (bytes, _, _)) in layers.iter().enumerate().take(layer_count as usize) {
-            // Defensive — a short layer slice would panic in
-            // write_texture; skip and emit a diagnostic instead.
-            if bytes.len() < bytes_per_layer {
-                eprintln!(
-                    "[texture_array] layer {} short: {} B < {} B (skipping)",
-                    i, bytes.len(), bytes_per_layer,
-                );
-                continue;
-            }
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &bytes[..bytes_per_layer],
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(w * 4),
-                    rows_per_image: Some(h),
-                },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            );
-        }
-        // EN-014 V2 — auto-generate the mip chain via point-sample copies.
-        // For each mip > 0, copy a half-size region of mip-1 into mip,
-        // for every layer. wgpu's copy_texture_to_texture covers a single
-        // mip level + array layer per call. This is point-filtered (not
-        // box-filtered): correct sizes, sampleable at distance, but
-        // aliased. V2.5 follow-up upgrades this to a render-pass box
-        // filter (one fullscreen draw per (mip, layer)).
-        if auto_generate && mip_level_count > 1 {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("material_texture_array_mipgen"),
-            });
-            for mip in 1..mip_level_count {
-                let src_w = (w >> (mip - 1)).max(1);
-                let src_h = (h >> (mip - 1)).max(1);
-                let dst_w = (w >> mip).max(1);
-                let dst_h = (h >> mip).max(1);
-                // Copy region is dst-sized so we read the top-left
-                // 2x2 reduction implicitly. Truly we'd want a filter,
-                // but copy is the cheapest "mips exist" path.
-                let copy_w = dst_w.min(src_w);
-                let copy_h = dst_h.min(src_h);
-                for layer in 0..layer_count {
-                    encoder.copy_texture_to_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &texture,
-                            mip_level: mip - 1,
-                            origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &texture,
-                            mip_level: mip,
-                            origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        wgpu::Extent3d {
-                            width: copy_w,
-                            height: copy_h,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                }
-            }
-            queue.submit(std::iter::once(encoder.finish()));
-        }
-        let view = texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("material_texture_array_view"),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        self.texture_arrays.push(Some(TextureArray {
-            texture, view, layer_count,
-        }));
-        self.texture_arrays.len() as u32
     }
 
     /// EN-014 — link a texture array to a material's per-material
@@ -1424,13 +1663,15 @@ impl MaterialSystem {
     /// unknown handles are no-ops with a diagnostic.
     pub fn set_material_texture_array(
         &mut self,
-        device:     &wgpu::Device,
-        material:   MaterialHandle,
-        slot:       u32,
-        array:      u32,
+        device: &wgpu::Device,
+        material: MaterialHandle,
+        slot: u32,
+        array: u32,
         probe_view: &wgpu::TextureView,
     ) {
-        if material == 0 { return; }
+        if material == 0 {
+            return;
+        }
         let idx = (material - 1) as usize;
         if idx >= self.pipelines.len() || self.pipelines[idx].is_none() {
             eprintln!("[texture_array] unknown material handle {material}");
@@ -1442,9 +1683,7 @@ impl MaterialSystem {
         }
         if array != 0 {
             let h = array as usize;
-            if h == 0 || h > self.texture_arrays.len()
-                || self.texture_arrays[h - 1].is_none()
-            {
+            if h == 0 || h > self.texture_arrays.len() || self.texture_arrays[h - 1].is_none() {
                 eprintln!("[texture_array] unknown array handle {array}");
                 return;
             }
@@ -1458,6 +1697,7 @@ impl MaterialSystem {
         }
         let link = if array == 0 { None } else { Some(array) };
         self.material_texture_arrays[idx][slot as usize] = link;
+        self.sync_gpu_material_record(idx);
 
         // Rebuild the per-material BG. Resolve user_params from
         // existing state so we don't clobber EN-005 links.
@@ -1465,13 +1705,15 @@ impl MaterialSystem {
             self.material_params_buffers.push(None);
             self.material_per_material_bgs.push(None);
         }
-        let user_params_buf: &wgpu::Buffer = self.material_params_buffers
+        let user_params_buf: &wgpu::Buffer = self
+            .material_params_buffers
             .get(idx)
             .and_then(|b| b.as_ref())
             .unwrap_or(&self._default_user_params_buffer);
         // EN-012 — preserve any per-material MaterialFactors UBO
         // across an EN-014 array rebind.
-        let factors_buf: &wgpu::Buffer = self.material_factors_buffers
+        let factors_buf: &wgpu::Buffer = self
+            .material_factors_buffers
             .get(idx)
             .and_then(|b| b.as_ref())
             .unwrap_or(&self._default_material_factors_buffer);
@@ -1482,24 +1724,78 @@ impl MaterialSystem {
             label: Some("material_per_material_bg_array"),
             layout: &self.layouts.per_material,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 1,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 2,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 3,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 4,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 5,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 6,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 7,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 8,  resource: wgpu::BindingResource::TextureView(&self._default_white_view) },
-                wgpu::BindGroupEntry { binding: 9,  resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 10, resource: factors_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 11, resource: user_params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(probe_view) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
-                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(albedo_view) },
-                wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(normal_view) },
-                wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(mr_view) },
-                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self._default_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&self._default_white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: factors_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: user_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(probe_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(albedo_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: wgpu::BindingResource::TextureView(normal_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: wgpu::BindingResource::TextureView(mr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::Sampler(&self._default_sampler),
+                },
             ],
         });
         self.material_per_material_bgs[idx] = Some(bg);
@@ -1511,7 +1807,9 @@ impl MaterialSystem {
     /// `set_material_texture_array`. Returns `None` for unset / out-
     /// of-range / unlinked materials.
     pub fn material_reflection_probe_handle(&self, material: MaterialHandle) -> Option<u32> {
-        if material == 0 { return None; }
+        if material == 0 {
+            return None;
+        }
         let idx = (material as usize).checked_sub(1)?;
         self.material_reflection_probe.get(idx).copied().flatten()
     }
@@ -1542,7 +1840,9 @@ impl MaterialSystem {
         skin_info: [u32; 4],
     ) {
         let idx = material as usize;
-        if material == 0 || idx > self.pipelines.len() { return; }
+        if material == 0 || idx > self.pipelines.len() {
+            return;
+        }
         let bucket = match self.pipelines[idx - 1].as_ref() {
             Some(p) => p.bucket,
             None => return,
@@ -1563,11 +1863,24 @@ impl MaterialSystem {
         }
         self.cur_models[slot] = model;
 
-        let per_draw = PerDrawUniforms { mvp, model, prev_mvp, model_tint: tint, skin_info };
-        queue.write_buffer(&self.per_draw_buffers[slot], 0, bytemuck::bytes_of(&per_draw));
+        let per_draw = PerDrawUniforms {
+            mvp,
+            model,
+            prev_mvp,
+            model_tint: tint,
+            skin_info,
+        };
+        queue.write_buffer(
+            &self.per_draw_buffers[slot],
+            0,
+            bytemuck::bytes_of(&per_draw),
+        );
 
         let cmd = MaterialDrawCommand {
-            material, mesh_handle, mesh_idx, draw_slot: slot,
+            material,
+            mesh_handle,
+            mesh_idx,
+            draw_slot: slot,
             view_depth: mvp[3][3],
             instance: None,
             model,
@@ -1608,7 +1921,9 @@ impl MaterialSystem {
         skin_info: [u32; 4],
     ) {
         let idx = material as usize;
-        if material == 0 || idx > self.pipelines.len() { return; }
+        if material == 0 || idx > self.pipelines.len() {
+            return;
+        }
         let bucket = match self.pipelines[idx - 1].as_ref() {
             Some(p) => p.bucket,
             None => return,
@@ -1630,18 +1945,31 @@ impl MaterialSystem {
         }
         self.cur_models[slot] = model;
 
-        let per_draw = PerDrawUniforms { mvp, model, prev_mvp, model_tint: tint, skin_info };
-        queue.write_buffer(&self.per_draw_buffers[slot], 0, bytemuck::bytes_of(&per_draw));
+        let per_draw = PerDrawUniforms {
+            mvp,
+            model,
+            prev_mvp,
+            model_tint: tint,
+            skin_info,
+        };
+        queue.write_buffer(
+            &self.per_draw_buffers[slot],
+            0,
+            bytemuck::bytes_of(&per_draw),
+        );
 
         let cmd = MaterialDrawCommand {
-            material, mesh_handle, mesh_idx, draw_slot: slot,
+            material,
+            mesh_handle,
+            mesh_idx,
+            draw_slot: slot,
             // Instanced draws sort as a group by their fallback-transform
             // pivot — per-instance ordering inside one buffer is the
             // standard engine limitation.
             view_depth: mvp[3][3],
             instance: Some(InstanceDrawInfo {
                 buffer_handle: instance_buffer,
-                count:         instance_count,
+                count: instance_count,
             }),
             model,
         };
@@ -1651,7 +1979,6 @@ impl MaterialSystem {
             self.commands.push(cmd);
         }
     }
-
 
     fn ensure_draw_slot(
         &mut self,
@@ -1670,8 +1997,14 @@ impl MaterialSystem {
                 label: Some("material_per_draw_bg"),
                 layout: &self.layouts.per_draw,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: joint_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: joint_buffer.as_entire_binding(),
+                    },
                 ],
             });
             self.per_draw_buffers.push(buf);
@@ -1682,16 +2015,16 @@ impl MaterialSystem {
     /// Dispatch all queued material draws. Caller owns the render pass;
     /// this method binds the pipelines + groups + meshes and issues
     /// indexed draws. `mesh_fetch` is a closure that returns
-    /// `(vertex_buffer, index_buffer, index_count)` for a given
+    /// a shared/dedicated [`MeshDrawRef`](super::MeshDrawRef) for a given
     /// (mesh_handle, mesh_idx) — lets the renderer hand over its
     /// `model_gpu_cache` without this module taking a dependency on it.
-    pub fn dispatch<'pass, F>(
+    pub(crate) fn dispatch<'pass, F>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
         planes: Option<&[[f32; 4]; 6]>,
         mesh_fetch: F,
-    )
-    where F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32, [f32; 3], [f32; 3])>
+    ) where
+        F: FnMut(u64, usize) -> Option<(super::MeshDrawRef<'pass>, [f32; 3], [f32; 3])>,
     {
         self.dispatch_with_view(pass, &self.per_view_bg, |_| true, false, planes, mesh_fetch);
     }
@@ -1713,26 +2046,29 @@ impl MaterialSystem {
     /// Falls back to the main pipeline if no reflection variant
     /// exists (translucent / cutout materials, where the original
     /// pipeline already cull-mode = None and no flip is needed).
-    pub fn dispatch_with_view<'pass, F, A>(
+    pub(crate) fn dispatch_with_view<'pass, F, A>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
         per_view_bg: &'pass wgpu::BindGroup,
-        mut accept:  A,
+        mut accept: A,
         use_reflection_pipeline: bool,
         // View frustum for instance-tile culling (`mesh_fetch` supplies
         // the mesh's local AABB). None = no per-tile culling.
         planes: Option<&[[f32; 4]; 6]>,
         mut mesh_fetch: F,
-    )
-    where
-        F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32, [f32; 3], [f32; 3])>,
+    ) where
+        F: FnMut(u64, usize) -> Option<(super::MeshDrawRef<'pass>, [f32; 3], [f32; 3])>,
         A: FnMut(MaterialHandle) -> bool,
     {
-        if self.commands.is_empty() { return; }
+        if self.commands.is_empty() {
+            return;
+        }
 
         let mut last_material: MaterialHandle = 0;
         for cmd in &self.commands {
-            if !accept(cmd.material) { continue; }
+            if !accept(cmd.material) {
+                continue;
+            }
             if cmd.material != last_material {
                 let mat = match self.pipelines.get(cmd.material as usize - 1) {
                     Some(Some(m)) => m,
@@ -1762,12 +2098,14 @@ impl MaterialSystem {
                 pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);
                 last_material = cmd.material;
             }
-            if let Some((vb, ib, icount, lmin, lmax)) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
+            if let Some((mesh, lmin, lmax)) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
                 pass.set_bind_group(3, &self.per_draw_bgs[cmd.draw_slot], &[]);
-                pass.set_vertex_buffer(0, vb.slice(..));
-                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+                pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 let instance_range = self.bind_instance_buffer(pass, &cmd.instance);
-                if instance_range.end <= instance_range.start { continue; }
+                if instance_range.end <= instance_range.start {
+                    continue;
+                }
                 // Instance-tile culling: `commands` holds only the
                 // opaque + cutout buckets (translucent draws dispatch
                 // elsewhere), so emitting the visible tile ranges is
@@ -1775,7 +2113,8 @@ impl MaterialSystem {
                 // AABBs are inflated by max_scale × the mesh's local
                 // half-diagonal (rotation-safe). Adjacent visible tiles
                 // merge into one draw.
-                let tiles = cmd.instance
+                let tiles = cmd
+                    .instance
                     .as_ref()
                     .filter(|_| planes.is_some() && lmin[0] <= lmax[0])
                     .and_then(|inst| {
@@ -1787,9 +2126,11 @@ impl MaterialSystem {
                     .filter(|t| !t.is_empty());
                 match (tiles, planes) {
                     (Some(tiles), Some(planes)) => {
-                        let half_diag = 0.5 * ((lmax[0] - lmin[0]).powi(2)
-                            + (lmax[1] - lmin[1]).powi(2)
-                            + (lmax[2] - lmin[2]).powi(2)).sqrt();
+                        let half_diag = 0.5
+                            * ((lmax[0] - lmin[0]).powi(2)
+                                + (lmax[1] - lmin[1]).powi(2)
+                                + (lmax[2] - lmin[2]).powi(2))
+                            .sqrt();
                         let mut run: Option<(u32, u32)> = None;
                         for tile in tiles.iter() {
                             let r = tile.max_scale * half_diag;
@@ -1797,25 +2138,27 @@ impl MaterialSystem {
                             let bmax = [tile.pmax[0] + r, tile.pmax[1] + r, tile.pmax[2] + r];
                             if crate::scene::aabb_outside_frustum(planes, bmin, bmax) {
                                 if let Some((s, e)) = run.take() {
-                                    pass.draw_indexed(0..icount, 0, s..e);
+                                    pass.draw_indexed(mesh.index_range(), mesh.base_vertex, s..e);
                                 }
                                 continue;
                             }
                             run = match run {
-                                Some((s, e)) if e == tile.first => Some((s, tile.first + tile.count)),
+                                Some((s, e)) if e == tile.first => {
+                                    Some((s, tile.first + tile.count))
+                                }
                                 Some((s, e)) => {
-                                    pass.draw_indexed(0..icount, 0, s..e);
+                                    pass.draw_indexed(mesh.index_range(), mesh.base_vertex, s..e);
                                     Some((tile.first, tile.first + tile.count))
                                 }
                                 None => Some((tile.first, tile.first + tile.count)),
                             };
                         }
                         if let Some((s, e)) = run {
-                            pass.draw_indexed(0..icount, 0, s..e);
+                            pass.draw_indexed(mesh.index_range(), mesh.base_vertex, s..e);
                         }
                     }
                     _ => {
-                        pass.draw_indexed(0..icount, 0, instance_range);
+                        pass.draw_indexed(mesh.index_range(), mesh.base_vertex, instance_range);
                     }
                 }
             }
@@ -1828,7 +2171,7 @@ impl MaterialSystem {
     /// with a missing/destroyed buffer slot we return an empty range
     /// so the caller skips the draw rather than crashing on a stale
     /// handle.
-    fn bind_instance_buffer<'pass>(
+    pub(crate) fn bind_instance_buffer<'pass>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
         info: &Option<InstanceDrawInfo>,
@@ -1836,7 +2179,9 @@ impl MaterialSystem {
         match info {
             None => 0..1,
             Some(inst) => {
-                if inst.buffer_handle == 0 { return 0..1; }
+                if inst.buffer_handle == 0 {
+                    return 0..1;
+                }
                 let slot_idx = inst.buffer_handle as usize - 1;
                 match self.instance_buffers.get(slot_idx).and_then(|s| s.as_ref()) {
                     Some(ib_slot) => {
@@ -1870,7 +2215,7 @@ impl MaterialSystem {
         // filtering color sampler so the layout matches either way.
         let (imp_view, imp_samp): (&wgpu::TextureView, &wgpu::Sampler) = match impulse_view {
             Some((v, s)) => (v, s),
-            None         => (&self._scene_stub_view, &self._scene_depth_sampler),
+            None => (&self._scene_stub_view, &self._scene_depth_sampler),
         };
         // Phase 4c — group 4 binding 2 receives a COPY_DST snapshot of
         // the opaque depth buffer, rather than the live depth-stencil
@@ -1883,13 +2228,34 @@ impl MaterialSystem {
             label: Some("scene_inputs_bg"),
             layout: &self.layouts.scene_inputs,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(scene_color_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self._scene_color_sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(depth_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self._scene_depth_sampler) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(imp_view) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(imp_samp) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self._scene_stub_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(scene_color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self._scene_color_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self._scene_depth_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(imp_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(imp_samp),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self._scene_stub_view),
+                },
             ],
         });
         self.scene_inputs_bg = Some(bg);
@@ -1900,7 +2266,7 @@ impl MaterialSystem {
         // resources bound above, at WASM_SCENE_INPUTS_BASE..+6. The
         // opaque pass re-binds this group too, which is harmless —
         // opaque materials never statically use the scene-input slots.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(fold_scene_inputs)]
         {
             self.per_frame_bg = super::material_system_wasm::build_per_frame_bg_wasm(
                 device,
@@ -1912,7 +2278,7 @@ impl MaterialSystem {
                 &self._scene_depth_sampler,
                 imp_view,
                 imp_samp,
-                &self._scene_stub_view,   // motion_vectors stub
+                &self._scene_stub_view, // motion_vectors stub
             );
         }
     }
@@ -1935,50 +2301,23 @@ impl MaterialSystem {
     /// materials additionally receive the SceneInputs bind group at
     /// group 4 — `update_scene_inputs` must have been called this
     /// frame for that to be non-None.
-    pub fn dispatch_translucent<'pass, F>(
+    pub(crate) fn dispatch_translucent<'pass, F>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
         mut mesh_fetch: F,
-    )
-    where F: FnMut(u64, usize) -> Option<(&'pass wgpu::Buffer, &'pass wgpu::Buffer, u32)>
+    ) where
+        F: FnMut(u64, usize) -> Option<super::MeshDrawRef<'pass>>,
     {
-        if self.translucent_commands.is_empty() { return; }
+        if self.translucent_commands.is_empty() {
+            return;
+        }
 
         let mut last_material: MaterialHandle = 0;
-        let mut last_reads_scene: bool = false;
         for cmd in &self.translucent_commands {
-            if cmd.material != last_material {
-                let mat = match self.pipelines.get(cmd.material as usize - 1) {
-                    Some(Some(m)) => m,
-                    _ => continue,
-                };
-                pass.set_pipeline(&mat.pipeline);
-                pass.set_bind_group(0, &self.per_frame_bg, &[]);
-                pass.set_bind_group(1, &self.per_view_bg, &[]);
-                pass.set_bind_group(2, self.per_material_bg_for(cmd.material), &[]);
-                // EN-063 — on wasm32 there is no group 4: the scene
-                // inputs are folded into per_frame (group 0), already
-                // bound above with the frame's snapshot views.
-                if mat.reads_scene && cfg!(not(target_arch = "wasm32")) {
-                    if let Some(bg) = self.scene_inputs_bg.as_ref() {
-                        pass.set_bind_group(4, bg, &[]);
-                    }
-                }
-                last_material = cmd.material;
-                last_reads_scene = mat.reads_scene;
-            }
-            // Re-bind group 4 if the material switches its reads_scene
-            // between subsequent draws — rarely happens with a
-            // stable bucket but keeps the state machine honest.
-            let _ = last_reads_scene;
-
-            if let Some((vb, ib, icount)) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
-                pass.set_bind_group(3, &self.per_draw_bgs[cmd.draw_slot], &[]);
-                pass.set_vertex_buffer(0, vb.slice(..));
-                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                let instance_range = self.bind_instance_buffer(pass, &cmd.instance);
-                if instance_range.end > instance_range.start {
-                    pass.draw_indexed(0..icount, 0, instance_range);
+            if let Some(mesh) = mesh_fetch(cmd.mesh_handle, cmd.mesh_idx) {
+                let bind_material_state = cmd.material != last_material;
+                if self.dispatch_translucent_command(pass, cmd, mesh, false, bind_material_state) {
+                    last_material = cmd.material;
                 }
             }
         }

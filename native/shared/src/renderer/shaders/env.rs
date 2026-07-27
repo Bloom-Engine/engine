@@ -796,7 +796,8 @@ fn sky_fs(in: VsOut) -> SkyOut {
     out.albedo = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     return out;
 }
-"#);
+"#
+);
 
 /// EN-011 — single-target reflection shader for rendering cached models
 /// (trees, house, etc.) into a planar-reflection probe with a mirrored
@@ -904,4 +905,3 @@ fn fs_reflect(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(lit, 1.0);   // alpha 1 = 'real reflection here' for the water blend
 }
 ";
-

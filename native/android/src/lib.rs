@@ -95,9 +95,40 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 // Window + Renderer init
 // ============================================================
 
+/// SH-055 diag — read an Android system property (empty string when unset).
+/// Debug levers settable from adb with no rebuild:
+///   adb shell setprop debug.bloom.backend gl|vulkan   (wgpu backend A/B)
+///   adb shell setprop debug.bloom.skipsky 1           (skip the sky draw)
+/// then force-stop + relaunch the app.
+fn sysprop(name: &str) -> String {
+    let cname = std::ffi::CString::new(name).unwrap();
+    let mut buf = [0u8; 92]; // PROP_VALUE_MAX
+    let n = unsafe {
+        libc::__system_property_get(cname.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char)
+    };
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf[..n as usize]).trim().to_string()
+}
+
+/// SH-055 diag — wgpu backend selection for the A/B experiment. Default keeps
+/// the shipped behavior (both allowed, wgpu prefers Vulkan).
+fn backend_choice() -> wgpu::Backends {
+    match sysprop("debug.bloom.backend").as_str() {
+        "gl" => wgpu::Backends::GL,
+        "vulkan" => wgpu::Backends::VULKAN,
+        _ => wgpu::Backends::VULKAN | wgpu::Backends::GL,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8, _fullscreen: f64) {
     let _title = str_from_header(title_ptr);
+
+    // Re-install after perry-runtime's own hook (set during main() init) so the
+    // upcoming wgpu/naga material-compile panics log their location (SH-055).
+    install_panic_logger();
 
     unsafe {
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: starting\0".as_ptr());
@@ -116,8 +147,15 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         let logical_w = (pixel_w / 2).max(1);
         let logical_h = (pixel_h / 2).max(1);
 
+        let backends = backend_choice();
+        {
+            let msg = std::ffi::CString::new(format!(
+                "bloom_init_window: requested backends={backends:?}"
+            )).unwrap();
+            __android_log_print(3, b"BloomEngine\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
+        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
@@ -214,6 +252,26 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             adapter_limits.max_storage_buffer_binding_size;
         required_limits.max_bind_groups =
             required_limits.max_bind_groups.max(5).min(adapter_limits.max_bind_groups);
+        // SH-055 — `downlevel_defaults` caps per-stage sampled-textures and
+        // samplers at 16, but the material fragment stage uses 19 (more so once
+        // the group-4 SceneInputs fold moves the scene colour/depth/impulse/
+        // motion textures + samplers into group 0 on Android). Adreno actually
+        // supports ~128 per stage — request the adapter's real maximum, same as
+        // the buffer/bind-group raises above.
+        required_limits.max_sampled_textures_per_shader_stage =
+            adapter_limits.max_sampled_textures_per_shader_stage;
+        required_limits.max_samplers_per_shader_stage =
+            adapter_limits.max_samplers_per_shader_stage;
+        bloom_shared::renderer::material_indirection::request_tier_a_if_supported(
+            supported,
+            &adapter_limits,
+            &mut required_features,
+            &mut required_limits,
+        );
+        bloom_shared::renderer::gpu_driven::request_features_if_supported(
+            supported,
+            &mut required_features,
+        );
         if required_features.intersects(rt_mask) {
             required_limits = required_limits
                 .using_minimum_supported_acceleration_structure_values();
@@ -228,6 +286,15 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             },
         )).expect("Failed to create device");
         __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: device created\0".as_ptr());
+
+        // SH-055 diag — capture wgpu validation/device errors with their full
+        // detail instead of wgpu's default "handle as fatal" panic (which the
+        // FFI guard swallows as "non-string panic payload"). This is what tells
+        // us WHY the instanced/from-file material pipelines fail on the Adreno
+        // Vulkan path. Logs to logcat tag "BloomWGPU".
+        device.on_uncaptured_error(std::sync::Arc::new(|err| {
+            log::error!("wgpu uncaptured error: {err}");
+        }));
 
         let surface_caps = surface.get_capabilities(&adapter);
         if surface_caps.formats.is_empty() {
@@ -299,7 +366,7 @@ pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f
         bloom_shared::attach::attach_engine(
             target,
             bloom_shared::attach::AttachParams {
-                backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+                backends: backend_choice(),
                 logical_w: (width as u32).max(1),
                 logical_h: (height as u32).max(1),
                 physical_w: (width as u32).max(1),
@@ -583,11 +650,51 @@ extern "C" {
     fn main() -> i32;
 }
 
+/// Install a panic hook that logs file:line + payload to logcat (tag
+/// "BloomPanic"). The FFI `guard` (native/shared/src/ffi.rs) catches panics at
+/// the boundary and only reports a generic "non-string panic payload",
+/// discarding the location; this hook fires *before* catch_unwind and records
+/// where it happened — the key to diagnosing the wgpu/naga material-compile
+/// panics on the Adreno Vulkan path. Called from both JNI_OnLoad and
+/// bloom_init_window because perry-runtime overrides the hook when main() runs.
+fn install_panic_logger() {
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string payload>".to_string()
+        };
+        let msg = format!("PANIC @ {loc}: {payload}\0");
+        unsafe {
+            __android_log_print(6, b"BloomPanic\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
+        }
+    }));
+}
+
 /// JNI_OnLoad: called when System.loadLibrary() loads this .so.
 /// Disables MTE heap tagging (required for Perry NaN-boxing) and
 /// reads the asset base path from BLOOM_ASSET_PATH env var.
 #[no_mangle]
 pub extern "C" fn JNI_OnLoad(_vm: *mut libc::c_void, _reserved: *mut libc::c_void) -> i32 {
+    // SH-055 diag — route the `log` facade (wgpu/naga emit shader-validation
+    // detail here) to logcat under tag "BloomWGPU". Warn-level keeps it quiet
+    // in the steady state but surfaces the Adreno Vulkan compile failures.
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Warn)
+            .with_tag("BloomWGPU"),
+    );
+
+    // Perry-runtime installs its own panic hook once `main()` runs, so this one
+    // gets overridden; `bloom_init_window` re-installs it (see
+    // `install_panic_logger`) after perry is up and before material compile.
+    install_panic_logger();
     unsafe {
         // Disable MTE heap tagging for Perry NaN-boxing compatibility.
         // Perry uses 48-bit pointers; Android's scudo allocator may tag
@@ -597,6 +704,27 @@ pub extern "C" fn JNI_OnLoad(_vm: *mut libc::c_void, _reserved: *mut libc::c_voi
         __android_log_print(
             3, b"BloomEngine\0".as_ptr(),
             b"JNI_OnLoad: MTE disabled\0".as_ptr(),
+        );
+    }
+
+    // SH-055 diag — propagate the skip-sky debug prop into an env var the
+    // platform-neutral renderer can read (see scene_pass.rs). JNI_OnLoad runs
+    // before main(), so the renderer's OnceLock sees the final value.
+    if sysprop("debug.bloom.skipsky") == "1" {
+        std::env::set_var("BLOOM_SKIP_SKY", "1");
+    }
+    // SH-055 diag — frame-graph bisection: comma list of pass-node names to
+    // skip (see Renderer::dbg_skip). e.g.
+    //   adb shell setprop debug.bloom.skip hdr_scene,translucent
+    let skip_list = sysprop("debug.bloom.skip");
+    if !skip_list.is_empty() {
+        std::env::set_var("BLOOM_SKIP", skip_list);
+    }
+    // SH-055 diag — cap the cached-model draw count (binary search for the
+    // pathological draw): adb shell setprop debug.bloom.maxmodels N
+    let max_models = sysprop("debug.bloom.maxmodels");
+    if !max_models.is_empty() {
+        std::env::set_var("BLOOM_MAX_MODELS", max_models
         );
     }
 

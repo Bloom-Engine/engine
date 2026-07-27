@@ -779,6 +779,16 @@ unsafe extern "C" fn scene_will_connect(
     required_limits.max_inter_stage_shader_variables = required_limits
         .max_inter_stage_shader_variables
         .min(adapter_limits.max_inter_stage_shader_variables);
+    bloom_shared::renderer::material_indirection::request_tier_a_if_supported(
+        supported,
+        &adapter_limits,
+        &mut required_features,
+        &mut required_limits,
+    );
+    bloom_shared::renderer::gpu_driven::request_features_if_supported(
+        supported,
+        &mut required_features,
+    );
     if required_features.intersects(rt_mask) {
         required_limits = required_limits
             .using_minimum_supported_acceleration_structure_values();
@@ -1072,6 +1082,16 @@ unsafe extern "C" fn deferred_init(_ctx: *mut c_void) {
     required_limits.max_inter_stage_shader_variables = required_limits
         .max_inter_stage_shader_variables
         .min(adapter_limits.max_inter_stage_shader_variables);
+    bloom_shared::renderer::material_indirection::request_tier_a_if_supported(
+        supported,
+        &adapter_limits,
+        &mut required_features,
+        &mut required_limits,
+    );
+    bloom_shared::renderer::gpu_driven::request_features_if_supported(
+        supported,
+        &mut required_features,
+    );
     if required_features.intersects(rt_mask) {
         required_limits = required_limits
             .using_minimum_supported_acceleration_structure_values();

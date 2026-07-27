@@ -5,10 +5,34 @@
 //! backing fields (`textures`, `texture_bind_groups`, `texture_sizes`)
 //! still live on [`Renderer`].
 
+use super::material_indirection::{ResidentTexture, TextureColorSpace, TextureId, TextureSemantic};
 use super::Renderer;
 use wgpu::util::DeviceExt;
 
 impl Renderer {
+    fn register_global_texture(
+        &mut self,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        mip_count: u32,
+        color_space: TextureColorSpace,
+        semantic: TextureSemantic,
+        hardware_srgb_decode: bool,
+    ) -> TextureId {
+        self.material_system
+            .indirection
+            .register_texture(ResidentTexture {
+                view: view.clone(),
+                width,
+                height,
+                mip_count,
+                color_space,
+                semantic,
+                hardware_srgb_decode,
+                global_2d: true,
+            })
+    }
 
     // (encode_png_simple is defined as a free function below the impl
     // block so it can be reused by other capture paths if needed.)
@@ -23,58 +47,111 @@ impl Renderer {
             &self.queue,
             &wgpu::TextureDescriptor {
                 label: Some("atlas_no_mips"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: 1, sample_count: 1,
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
-            wgpu::util::TextureDataOrder::LayerMajor, data,
+            wgpu::util::TextureDataOrder::LayerMajor,
+            data,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atlas_bg"), layout: &self.texture_bind_group_layout,
+            label: Some("atlas_bg"),
+            layout: &self.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
         let idx = self.texture_bind_groups.len() as u32;
+        let global_id = self.register_global_texture(
+            &view,
+            width,
+            height,
+            1,
+            TextureColorSpace::Srgb,
+            TextureSemantic::General,
+            false,
+        );
         self.texture_bind_groups.push(bind_group);
         self.textures.push(texture);
         self.texture_sizes.push((width, height));
+        self.global_texture_ids.push(global_id);
         idx
     }
 
     /// Replace an existing no-mips texture in-place.
     pub fn replace_texture_no_mips(&mut self, idx: u32, width: u32, height: u32, data: &[u8]) {
         let i = idx as usize;
-        if i >= self.textures.len() { return; }
+        if i >= self.textures.len() {
+            return;
+        }
         let texture = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
                 label: Some("atlas_replaced"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: 1, sample_count: 1,
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
-            wgpu::util::TextureDataOrder::LayerMajor, data,
+            wgpu::util::TextureDataOrder::LayerMajor,
+            data,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atlas_replaced_bg"), layout: &self.texture_bind_group_layout,
+            label: Some("atlas_replaced_bg"),
+            layout: &self.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
+        let global_id = self.register_global_texture(
+            &view,
+            width,
+            height,
+            1,
+            TextureColorSpace::Srgb,
+            TextureSemantic::General,
+            false,
+        );
+        if let Some(old_id) = self.global_texture_ids.get(i).copied() {
+            self.material_system
+                .indirection
+                .retire_texture(&self.queue, old_id);
+        }
         self.textures[i] = texture;
         self.texture_bind_groups[i] = bind_group;
         self.texture_sizes[i] = (width, height);
+        self.global_texture_ids[i] = global_id;
     }
 
     /// Register a texture with optional normal-map preprocessing.
@@ -94,7 +171,19 @@ impl Renderer {
         data: &[u8],
         is_normal_map: bool,
     ) -> u32 {
-        let max_dim = if width > height { width } else { height };
+        self.register_texture_kind_with_alpha_coverage(width, height, data, is_normal_map, None)
+    }
+
+    /// Kind-aware registration with MASK-only coverage mips. Ordinary color
+    /// and normal-map callers retain their exact established chains.
+    pub fn register_texture_kind_with_alpha_coverage(
+        &mut self,
+        width: u32,
+        height: u32,
+        data: &[u8],
+        is_normal_map: bool,
+        alpha_coverage_reference: Option<f32>,
+    ) -> u32 {
         // On Android/Vulkan, multi-level mipmap upload was observed to
         // fail silently (black textures) when this path was written.
         // Single mip costs aliasing + texture bandwidth on exactly the
@@ -105,11 +194,13 @@ impl Renderer {
         #[cfg(target_os = "android")]
         let mip_count = 1u32;
         #[cfg(not(target_os = "android"))]
-        let mip_count = (max_dim as f32).log2().floor() as u32 + 1;
+        let mip_count = {
+            let max_dim = if width > height { width } else { height };
+            (max_dim as f32).log2().floor() as u32 + 1
+        };
 
-        // Generate mip chain data
-        let mut mip_data = Vec::with_capacity(data.len() * 2); // overallocate
-        if is_normal_map {
+        let (mut mip_data, mut mip_offsets) = if is_normal_map {
+            let mut mip_data = Vec::with_capacity(data.len() * 2);
             // Level 0: normalize input RGB and clear alpha to 0 (no
             // variance at the finest level — each texel is assumed unit).
             mip_data.reserve(data.len());
@@ -122,13 +213,21 @@ impl Renderer {
                 mip_data.push(b);
                 mip_data.push(0);
             }
+            (mip_data, vec![0usize])
         } else {
-            mip_data.extend_from_slice(data);
-        }
-        let mut mip_offsets = vec![0usize]; // byte offset of each mip level
+            super::alpha_coverage::build_color_mip_chain(
+                width,
+                height,
+                data,
+                mip_count,
+                alpha_coverage_reference,
+            )
+        };
+
+        // Normal-map mips keep their established vector/variance filter.
         let mut mw = width;
         let mut mh = height;
-        for _ in 1..mip_count {
+        for _ in 1..if is_normal_map { mip_count } else { 1 } {
             let prev_offset = *mip_offsets.last().unwrap();
             let pw = mw as usize; // previous width
             let ph = mh as usize; // previous height
@@ -141,58 +240,61 @@ impl Renderer {
                     let sy = y * 2;
                     let sx1 = (sx + 1).min(pw - 1);
                     let sy1 = (sy + 1).min(ph - 1);
-                    if is_normal_map {
-                        // Decode 4 children to signed [-1, 1] vectors
-                        let dec = |r: u8, g: u8, b: u8| -> [f32; 3] {
-                            [
-                                r as f32 * (2.0 / 255.0) - 1.0,
-                                g as f32 * (2.0 / 255.0) - 1.0,
-                                b as f32 * (2.0 / 255.0) - 1.0,
-                            ]
-                        };
-                        let idx = |sx: usize, sy: usize| -> usize {
-                            prev_offset + (sy * pw + sx) * 4
-                        };
-                        let n00 = dec(mip_data[idx(sx, sy)], mip_data[idx(sx, sy) + 1], mip_data[idx(sx, sy) + 2]);
-                        let n10 = dec(mip_data[idx(sx1, sy)], mip_data[idx(sx1, sy) + 1], mip_data[idx(sx1, sy) + 2]);
-                        let n01 = dec(mip_data[idx(sx, sy1)], mip_data[idx(sx, sy1) + 1], mip_data[idx(sx, sy1) + 2]);
-                        let n11 = dec(mip_data[idx(sx1, sy1)], mip_data[idx(sx1, sy1) + 1], mip_data[idx(sx1, sy1) + 2]);
-                        // Previous-mip baked variances
-                        let v00 = mip_data[idx(sx, sy) + 3] as f32 / 255.0;
-                        let v10 = mip_data[idx(sx1, sy) + 3] as f32 / 255.0;
-                        let v01 = mip_data[idx(sx, sy1) + 3] as f32 / 255.0;
-                        let v11 = mip_data[idx(sx1, sy1) + 3] as f32 / 255.0;
-                        // Average the vectors
-                        let avg_x = (n00[0] + n10[0] + n01[0] + n11[0]) * 0.25;
-                        let avg_y = (n00[1] + n10[1] + n01[1] + n11[1]) * 0.25;
-                        let avg_z = (n00[2] + n10[2] + n01[2] + n11[2]) * 0.25;
-                        let len_sq = avg_x * avg_x + avg_y * avg_y + avg_z * avg_z;
-                        let len = len_sq.sqrt().max(1e-6);
-                        // Normalize direction (what the shader reads as
-                        // the shading normal). Re-encode to [0, 255].
-                        let encode = |v: f32| -> u8 {
-                            ((v * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-                        };
-                        mip_data.push(encode(avg_x / len));
-                        mip_data.push(encode(avg_y / len));
-                        mip_data.push(encode(avg_z / len));
-                        // Variance at this mip = disagreement among the
-                        // 4 children (1 - |avg|²) PLUS the weighted mean
-                        // of the children's own variances. Both live in
-                        // [0, 1]; combined variance clamped.
-                        let v_children_avg = (v00 + v10 + v01 + v11) * 0.25;
-                        let v_local = (1.0 - len_sq).max(0.0);
-                        let v_out = (v_local + v_children_avg).min(1.0);
-                        mip_data.push((v_out * 255.0).round().clamp(0.0, 255.0) as u8);
-                    } else {
-                        for c in 0..4usize {
-                            let p00 = mip_data[prev_offset + (sy * pw + sx) * 4 + c] as u32;
-                            let p10 = mip_data[prev_offset + (sy * pw + sx1) * 4 + c] as u32;
-                            let p01 = mip_data[prev_offset + (sy1 * pw + sx) * 4 + c] as u32;
-                            let p11 = mip_data[prev_offset + (sy1 * pw + sx1) * 4 + c] as u32;
-                            mip_data.push(((p00 + p10 + p01 + p11 + 2) / 4) as u8);
-                        }
-                    }
+                    // Decode 4 children to signed [-1, 1] vectors
+                    let dec = |r: u8, g: u8, b: u8| -> [f32; 3] {
+                        [
+                            r as f32 * (2.0 / 255.0) - 1.0,
+                            g as f32 * (2.0 / 255.0) - 1.0,
+                            b as f32 * (2.0 / 255.0) - 1.0,
+                        ]
+                    };
+                    let idx = |sx: usize, sy: usize| -> usize { prev_offset + (sy * pw + sx) * 4 };
+                    let n00 = dec(
+                        mip_data[idx(sx, sy)],
+                        mip_data[idx(sx, sy) + 1],
+                        mip_data[idx(sx, sy) + 2],
+                    );
+                    let n10 = dec(
+                        mip_data[idx(sx1, sy)],
+                        mip_data[idx(sx1, sy) + 1],
+                        mip_data[idx(sx1, sy) + 2],
+                    );
+                    let n01 = dec(
+                        mip_data[idx(sx, sy1)],
+                        mip_data[idx(sx, sy1) + 1],
+                        mip_data[idx(sx, sy1) + 2],
+                    );
+                    let n11 = dec(
+                        mip_data[idx(sx1, sy1)],
+                        mip_data[idx(sx1, sy1) + 1],
+                        mip_data[idx(sx1, sy1) + 2],
+                    );
+                    // Previous-mip baked variances
+                    let v00 = mip_data[idx(sx, sy) + 3] as f32 / 255.0;
+                    let v10 = mip_data[idx(sx1, sy) + 3] as f32 / 255.0;
+                    let v01 = mip_data[idx(sx, sy1) + 3] as f32 / 255.0;
+                    let v11 = mip_data[idx(sx1, sy1) + 3] as f32 / 255.0;
+                    // Average the vectors
+                    let avg_x = (n00[0] + n10[0] + n01[0] + n11[0]) * 0.25;
+                    let avg_y = (n00[1] + n10[1] + n01[1] + n11[1]) * 0.25;
+                    let avg_z = (n00[2] + n10[2] + n01[2] + n11[2]) * 0.25;
+                    let len_sq = avg_x * avg_x + avg_y * avg_y + avg_z * avg_z;
+                    let len = len_sq.sqrt().max(1e-6);
+                    // Normalize direction (what the shader reads as
+                    // the shading normal). Re-encode to [0, 255].
+                    let encode =
+                        |v: f32| -> u8 { ((v * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0 + 0.5) as u8 };
+                    mip_data.push(encode(avg_x / len));
+                    mip_data.push(encode(avg_y / len));
+                    mip_data.push(encode(avg_z / len));
+                    // Variance at this mip = disagreement among the
+                    // 4 children (1 - |avg|²) PLUS the weighted mean
+                    // of the children's own variances. Both live in
+                    // [0, 1]; combined variance clamped.
+                    let v_children_avg = (v00 + v10 + v01 + v11) * 0.25;
+                    let v_local = (1.0 - len_sq).max(0.0);
+                    let v_out = (v_local + v_children_avg).min(1.0);
+                    mip_data.push((v_out * 255.0).round().clamp(0.0, 255.0) as u8);
                 }
             }
         }
@@ -203,7 +305,11 @@ impl Renderer {
                 &self.queue,
                 &wgpu::TextureDescriptor {
                     label: Some("registered_texture"),
-                    size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -218,7 +324,11 @@ impl Renderer {
             // Multi-mip path: create texture, upload each level
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("registered_texture"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: mip_count,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -233,14 +343,22 @@ impl Renderer {
                 let level_size = (lw * lh * 4) as usize;
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
-                        texture: &tex, mip_level: level,
-                        origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                        texture: &tex,
+                        mip_level: level,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
                     },
                     &mip_data[offset..offset + level_size],
                     wgpu::TexelCopyBufferLayout {
-                        offset: 0, bytes_per_row: Some(4 * lw), rows_per_image: Some(lh),
+                        offset: 0,
+                        bytes_per_row: Some(4 * lw),
+                        rows_per_image: Some(lh),
                     },
-                    wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                    wgpu::Extent3d {
+                        width: lw,
+                        height: lh,
+                        depth_or_array_layers: 1,
+                    },
                 );
                 lw = if lw > 1 { lw / 2 } else { 1 };
                 lh = if lh > 1 { lh / 2 } else { 1 };
@@ -253,21 +371,50 @@ impl Renderer {
             label: Some("texture_bg"),
             layout: &self.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
 
         let idx = self.texture_bind_groups.len() as u32;
+        let global_id = self.register_global_texture(
+            &view,
+            width,
+            height,
+            mip_count,
+            if is_normal_map {
+                TextureColorSpace::Linear
+            } else {
+                TextureColorSpace::Srgb
+            },
+            if is_normal_map {
+                TextureSemantic::Normal
+            } else {
+                TextureSemantic::BaseColor
+            },
+            false,
+        );
         self.texture_bind_groups.push(bind_group);
         self.textures.push(texture);
         self.texture_sizes.push((width, height));
+        self.global_texture_ids.push(global_id);
+        if alpha_coverage_reference.is_some() && mip_count > 1 {
+            self.mask_coverage_texture_count = self.mask_coverage_texture_count.saturating_add(1);
+        }
         idx
     }
 
     pub fn update_texture(&mut self, idx: u32, width: u32, height: u32, data: &[u8]) {
         let i = idx as usize;
-        if i >= self.textures.len() { return; }
+        if i >= self.textures.len() {
+            return;
+        }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.textures[i],
@@ -281,7 +428,11 @@ impl Renderer {
                 bytes_per_row: Some(4 * width),
                 rows_per_image: Some(height),
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
     }
 
@@ -300,11 +451,21 @@ impl Renderer {
         if i == 0 || i >= self.textures.len() {
             return;
         }
+        if let Some(old_id) = self.global_texture_ids.get(i).copied() {
+            self.material_system
+                .indirection
+                .retire_texture(&self.queue, old_id);
+            self.global_texture_ids[i] = TextureId::FALLBACK;
+        }
         let white = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
                 label: Some("unloaded_texture_placeholder"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -321,8 +482,14 @@ impl Renderer {
             label: Some("unloaded_texture_placeholder_bg"),
             layout: &self.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
         self.textures[i] = white;
@@ -335,21 +502,51 @@ impl Renderer {
     /// the buffers leak — and a future model whose handle reuses the slot
     /// would render the stale cached geometry.
     pub fn evict_model_cache(&mut self, handle_bits: u64) {
-        self.model_gpu_cache.remove(&handle_bits);
+        if let Some(Some(meshes)) = self.model_gpu_cache.remove(&handle_bits) {
+            let shared_slices: Vec<_> = meshes
+                .iter()
+                .filter_map(|mesh| match &mesh.geometry {
+                    super::gpu_driven::MeshGeometry::Shared(slice) => Some(*slice),
+                    super::gpu_driven::MeshGeometry::Dedicated { .. } => None,
+                })
+                .collect();
+            for mesh in meshes {
+                self.material_system.indirection.retire_cached_mesh(
+                    &self.queue,
+                    mesh.material_id,
+                    mesh.mesh_id,
+                    &[mesh.vertex_buffer_view_id, mesh.index_buffer_view_id],
+                );
+            }
+            self.gpu_driven.retire_shared(&self.queue, shared_slices);
+        }
         self.model_skinned.remove(&handle_bits);
+        self.model_blended.remove(&handle_bits);
     }
 
     pub fn set_texture_filter(&mut self, idx: u32, nearest: bool) {
         let i = idx as usize;
-        if i >= self.textures.len() { return; }
+        if i >= self.textures.len() {
+            return;
+        }
         let view = self.textures[i].create_view(&wgpu::TextureViewDescriptor::default());
-        let chosen_sampler = if nearest { &self.nearest_sampler } else { &self.sampler };
+        let chosen_sampler = if nearest {
+            &self.nearest_sampler
+        } else {
+            &self.sampler
+        };
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("texture_bg_refiltered"),
             layout: &self.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(chosen_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(chosen_sampler),
+                },
             ],
         });
         self.texture_bind_groups[i] = bind_group;
@@ -358,8 +555,13 @@ impl Renderer {
     pub fn create_render_texture(&mut self, width: u32, height: u32) -> (u32, usize) {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("render_texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.surface_config.format,
             // COPY_SRC so render-target contents are readable (tests,
@@ -371,17 +573,39 @@ impl Renderer {
         });
         let tex_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rt_bg"), layout: &self.texture_bind_group_layout,
+            label: Some("rt_bg"),
+            layout: &self.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&tex_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
         let idx = self.texture_bind_groups.len() as u32;
         let tex_idx = self.textures.len();
+        let hardware_srgb_decode = self.surface_config.format.is_srgb();
+        let global_id = self.register_global_texture(
+            &tex_view,
+            width,
+            height,
+            1,
+            if hardware_srgb_decode {
+                TextureColorSpace::Srgb
+            } else {
+                TextureColorSpace::Linear
+            },
+            TextureSemantic::General,
+            hardware_srgb_decode,
+        );
         self.texture_bind_groups.push(bind_group);
         self.textures.push(texture);
         self.texture_sizes.push((width, height));
+        self.global_texture_ids.push(global_id);
         (idx, tex_idx)
     }
 
@@ -401,7 +625,11 @@ impl Renderer {
     /// decode through the normal RGBA path.
     #[cfg(feature = "image-extras")]
     pub fn register_texture_dds(&mut self, dds: &image_dds::ddsfile::Dds) -> Option<u32> {
-        if !self.device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+        if !self
+            .device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+        {
             return None;
         }
         let surface = image_dds::Surface::from_dds(dds).ok()?;
@@ -409,9 +637,14 @@ impl Renderer {
         // pipeline applies the transfer itself — see register_texture's
         // Rgba8Unorm). Both BC7 variants therefore map to the Unorm
         // view; the sRGB flag in the DDS only records authoring intent.
-        let format = match surface.image_format {
+        let dds_srgb = matches!(
+            surface.image_format,
             image_dds::ImageFormat::BC7RgbaUnormSrgb
-            | image_dds::ImageFormat::BC7RgbaUnorm => wgpu::TextureFormat::Bc7RgbaUnorm,
+        );
+        let format = match surface.image_format {
+            image_dds::ImageFormat::BC7RgbaUnormSrgb | image_dds::ImageFormat::BC7RgbaUnorm => {
+                wgpu::TextureFormat::Bc7RgbaUnorm
+            }
             // Other BCn variants can map here as the cook tool grows.
             _ => return None,
         };
@@ -421,7 +654,11 @@ impl Renderer {
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cooked_bc7"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: mip_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -451,7 +688,11 @@ impl Renderer {
                     bytes_per_row: Some(blocks_w * 16),
                     rows_per_image: Some(blocks_h),
                 },
-                wgpu::Extent3d { width: mw, height: mh, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: mw,
+                    height: mh,
+                    depth_or_array_layers: 1,
+                },
             );
         }
 
@@ -460,14 +701,34 @@ impl Renderer {
             label: Some("cooked_bc7_bg"),
             layout: &self.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
         let idx = self.texture_bind_groups.len() as u32;
+        let global_id = self.register_global_texture(
+            &view,
+            width,
+            height,
+            mip_count,
+            if dds_srgb {
+                TextureColorSpace::Srgb
+            } else {
+                TextureColorSpace::Linear
+            },
+            TextureSemantic::BaseColor,
+            false,
+        );
         self.texture_bind_groups.push(bind_group);
         self.textures.push(texture);
         self.texture_sizes.push((width, height));
+        self.global_texture_ids.push(global_id);
         Some(idx)
     }
 }

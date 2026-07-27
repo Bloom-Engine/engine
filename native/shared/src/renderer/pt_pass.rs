@@ -7,6 +7,41 @@
 use super::*;
 
 impl Renderer {
+    /// Reset path-tracing history and restart its deterministic sample stream.
+    /// Useful after a camera cut and by correctness captures that must not
+    /// inherit temporal state. Existing GPU allocations are retained.
+    pub fn reset_path_tracing_history(&mut self, sequence_start: u32) {
+        self.pt_accum_idx = 0;
+        self.pt_accum_count = 0;
+        self.pt_frame_index = sequence_start;
+        self.pt_last_tlas_version = self.tlas_built_version;
+        self.pt_wrote_frame = false;
+        self.pt_dump_written = false;
+    }
+
+    /// Number of samples accumulated at the current progressive view.
+    pub fn path_tracing_sample_count(&self) -> u32 {
+        self.pt_accum_count
+    }
+
+    /// Set the global scramble for deterministic per-pixel PT sampling.
+    /// Changing it invalidates history so samples from different sequences
+    /// are never blended accidentally.
+    pub fn set_path_tracing_seed(&mut self, seed: u32) {
+        if self.pt_rng_seed != seed {
+            self.pt_rng_seed = seed;
+            self.reset_path_tracing_history(0);
+        }
+    }
+
+    /// Select one of the diagnostic views documented in `shaders/pt.rs`.
+    /// Hidden from generated API docs because this is a renderer-validation
+    /// hook, not a game-facing quality setting.
+    #[doc(hidden)]
+    pub fn set_path_tracing_debug_view(&mut self, view: u32) {
+        self.pt_debug = view as f32;
+        self.reset_path_tracing_history(0);
+    }
     pub(super) fn record_pt_pass(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -148,7 +183,11 @@ impl Renderer {
             // and pt_accum_count = 0 marks the whole history invalid.
             for (i, slot) in self.pt_moments_buffers.iter_mut().enumerate() {
                 *slot = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(if i == 0 { "pt_moments_a" } else { "pt_moments_b" }),
+                    label: Some(if i == 0 {
+                        "pt_moments_a"
+                    } else {
+                        "pt_moments_b"
+                    }),
                     size: needed,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
@@ -180,16 +219,23 @@ impl Renderer {
                 mapped_at_creation: false,
             }));
             self.pt_bg = [None, None];
-            self.pt_atrous_bgs = [[None, None, None, None, None, None], [None, None, None, None, None, None]];
+            self.pt_atrous_bgs = [
+                [None, None, None, None, None, None],
+                [None, None, None, None, None, None],
+            ];
             self.pt_accum_count = 0;
             self.pt_accum_idx = 0;
         }
 
         // ---- uniforms ----
-        // Sun / sky derivation matches record_ssgi_passes exactly so PT
-        // brightness lines up with the raster + GI frame it replaces.
+        // The scene shader stores and consumes light_dir as the vector from
+        // the shaded point toward the sun. Preserve that convention here so
+        // raster and PT NdotL, shadow rays, and CPU-reference lighting agree.
         let ld = self.lighting_uniforms.light_dir;
-        let sun_inv_len = 1.0 / (ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2]).sqrt().max(1e-4);
+        let sun_inv_len = 1.0
+            / (ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2])
+                .sqrt()
+                .max(1e-4);
         let sun_intensity = ld[3].max(0.0);
         let lc = self.lighting_uniforms.light_color;
         let amb = self.lighting_uniforms.ambient;
@@ -234,9 +280,9 @@ impl Renderer {
             prev_vp: prev_vp_t,
             cam_pos: [cam[0], cam[1], cam[2], 0.0],
             sun_dir: [
-                -ld[0] * sun_inv_len,
-                -ld[1] * sun_inv_len,
-                -ld[2] * sun_inv_len,
+                ld[0] * sun_inv_len,
+                ld[1] * sun_inv_len,
+                ld[2] * sun_inv_len,
                 0.0,
             ],
             sun_color: [
@@ -256,7 +302,12 @@ impl Renderer {
             // headless tests), which froze the sample sequence and
             // silently stopped progressive accumulation from ever
             // converging (found by the pt_progressive golden).
-            size: [trace_w, trace_h, self.pt_frame_index, self.pt_accum_count],
+            size: [
+                trace_w,
+                trace_h,
+                self.pt_frame_index ^ self.pt_rng_seed,
+                self.pt_accum_count,
+            ],
             cfg: [
                 self.pt_mode as f32,
                 max_bounces,
@@ -270,9 +321,17 @@ impl Renderer {
             ext: [
                 surf_w,
                 surf_h,
-                if self.pt_mode >= 2 && self.shadow_map.enabled { 1 } else { 0 },
+                if self.pt_mode >= 2 && self.shadow_map.enabled {
+                    1
+                } else {
+                    0
+                },
                 // PT-4 experimental flag (BLOOM_PT_RESTIR=1), realtime only.
-                if self.pt_restir && self.pt_mode >= 2 { 1 } else { 0 },
+                if self.pt_restir && self.pt_mode >= 2 {
+                    1
+                } else {
+                    0
+                },
             ],
             // RAW upload, unlike inv_vp: the shadow VPs are consumed as
             // M*v by every existing WGSL user (scene shader, WSRC
@@ -282,7 +341,8 @@ impl Renderer {
             shadow_vps: self.shadow_map.light_vps,
             lights,
         };
-        self.queue.write_buffer(&self.pt_uniform_buffer, 0, bytemuck::bytes_of(&params));
+        self.queue
+            .write_buffer(&self.pt_uniform_buffer, 0, bytemuck::bytes_of(&params));
 
         // ---- bind groups (lazy; nulled on resize / TLAS or instance
         // buffer recreation). Two ping-pong variants: bg[i] reads accum
@@ -293,36 +353,132 @@ impl Renderer {
             }
             let tlas = self.tlas.as_ref().unwrap();
             let entries = vec![
-                    wgpu::BindGroupEntry { binding: 0, resource: self.pt_uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: tlas.as_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: self.tlas_instance_data_buffer.as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.material_rt_view) },
-                    // Raw albedo atlas, NOT the pre-lit radiance atlas the
-                    // GI probe trace uses — PT computes its own lighting at
-                    // hits; radiance would double-count.
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh_card_atlas_view) },
-                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
-                    wgpu::BindGroupEntry { binding: 8, resource: self.pt_accum_buffers[i].as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
-                    wgpu::BindGroupEntry { binding: 10, resource: self.pt_geo_vertex_buffer.as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 11, resource: self.pt_geo_index_buffer.as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 13, resource: self.pt_accum_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                    wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                    // SVGF moments: read prev (paired with accum read
-                    // side), write out (paired with the write side).
-                    wgpu::BindGroupEntry { binding: 18, resource: self.pt_moments_buffers[i].as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 19, resource: self.pt_moments_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
-                    // PT-4 ReSTIR reservoirs, same ping-pong pairing.
-                    wgpu::BindGroupEntry { binding: 20, resource: self.pt_resv_buffers[i].as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 21, resource: self.pt_resv_buffers[1 - i].as_ref().unwrap().as_entire_binding() },
-                    // PT-7 — velocity MRT (written by hdr_scene, which
-                    // runs before the PT node every frame).
-                    wgpu::BindGroupEntry { binding: 22, resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.pt_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: tlas.as_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self
+                        .tlas_instance_data_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&self.material_rt_view),
+                },
+                // Raw albedo atlas, NOT the pre-lit radiance atlas the
+                // GI probe trace uses — PT computes its own lighting at
+                // hits; radiance would double-count.
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self.mesh_card_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: self.pt_accum_buffers[i]
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: self
+                        .pt_geo_vertex_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: self
+                        .pt_geo_index_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: self.pt_accum_buffers[1 - i]
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler),
+                },
+                // SVGF moments: read prev (paired with accum read
+                // side), write out (paired with the write side).
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: self.pt_moments_buffers[i]
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: self.pt_moments_buffers[1 - i]
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                },
+                // PT-4 ReSTIR reservoirs, same ping-pong pairing.
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: self.pt_resv_buffers[i]
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 21,
+                    resource: self.pt_resv_buffers[1 - i]
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                },
+                // PT-7 — velocity MRT (written by hdr_scene, which
+                // runs before the PT node every frame).
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view),
+                },
             ];
             self.pt_bg[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pt_bg"),
@@ -336,8 +492,10 @@ impl Renderer {
         if self.pt_texture_arrays_enabled && self.pt_tex_bg.is_none() {
             let n = self.textures.len().min(PT_MAX_TEXTURES);
             let tex_views: Vec<wgpu::TextureView> = (0..n.max(1))
-                .map(|i| self.textures[i.min(self.textures.len() - 1)]
-                    .create_view(&wgpu::TextureViewDescriptor::default()))
+                .map(|i| {
+                    self.textures[i.min(self.textures.len() - 1)]
+                        .create_view(&wgpu::TextureViewDescriptor::default())
+                })
                 .collect();
             let tex_view_refs: Vec<&wgpu::TextureView> = (0..PT_MAX_TEXTURES)
                 .map(|i| &tex_views[if i < n { i } else { 0 }])
@@ -395,7 +553,8 @@ impl Renderer {
                     [*step, first, trace_w as f32, trace_h as f32],
                     [surf_w as f32, surf_h as f32, 0.0, 0.0],
                 ];
-                self.queue.write_buffer(&self.pt_atrous_params_bufs[i], 0, bytemuck::bytes_of(&p));
+                self.queue
+                    .write_buffer(&self.pt_atrous_params_bufs[i], 0, bytemuck::bytes_of(&p));
             }
 
             if self.pt_atrous_bgs[written_idx][0].is_none() {
@@ -417,19 +576,43 @@ impl Renderer {
                     (scratch, scratch2),
                 ];
                 for (i, (src, dst)) in chain.iter().enumerate() {
-                    self.pt_atrous_bgs[written_idx][i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("pt_atrous_bg"),
-                        layout: self.pt_atrous_layout.as_ref().unwrap(),
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: self.pt_atrous_params_bufs[i].as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 1, resource: src.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 2, resource: dst.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view) },
-                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
-                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view) },
-                            wgpu::BindGroupEntry { binding: 6, resource: moments_w.as_entire_binding() },
-                        ],
-                    }));
+                    self.pt_atrous_bgs[written_idx][i] =
+                        Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("pt_atrous_bg"),
+                            layout: self.pt_atrous_layout.as_ref().unwrap(),
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: self.pt_atrous_params_bufs[i].as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: src.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: dst.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 4,
+                                    resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 5,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.albedo_rt_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 6,
+                                    resource: moments_w.as_entire_binding(),
+                                },
+                            ],
+                        }));
                 }
             }
 
@@ -460,7 +643,11 @@ impl Renderer {
                 });
                 pass.set_pipeline(self.pt_atrous_mid_pipeline.as_ref().unwrap());
                 for i in 1..5 {
-                    pass.set_bind_group(0, self.pt_atrous_bgs[written_idx][i].as_ref().unwrap(), &[]);
+                    pass.set_bind_group(
+                        0,
+                        self.pt_atrous_bgs[written_idx][i].as_ref().unwrap(),
+                        &[],
+                    );
                     pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
                 }
                 pass.set_pipeline(self.pt_atrous_final_pipeline.as_ref().unwrap());
@@ -472,7 +659,7 @@ impl Renderer {
         // frame on screen until 8 samples exist (u.size.w carried the
         // pre-increment count), so SSGI/SSR must keep running for those
         // frames — the gates downstream check pt_owns_frame().
-        self.pt_wrote_frame = self.pt_mode >= 2 || self.pt_accum_count >= 8;
+        self.pt_wrote_frame = self.pt_debug != 0.0 || self.pt_mode >= 2 || self.pt_accum_count >= 8;
         self.pt_accum_count = self.pt_accum_count.saturating_add(1);
         self.pt_frame_index = self.pt_frame_index.wrapping_add(1);
 
@@ -494,12 +681,13 @@ impl Renderer {
             let row = (trace_h / 2) as u64;
             let offset = row * trace_w as u64 * 16;
             if self.pt_readback_buffer.is_none() {
-                self.pt_readback_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("pt_readback"),
-                    size: dump_pixels * 16,
-                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
+                self.pt_readback_buffer =
+                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("pt_readback"),
+                        size: dump_pixels * 16,
+                        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
                 encoder.copy_buffer_to_buffer(
                     // written_idx == pt_accum_idx here (already flipped):
                     // the buffer this frame's dispatch wrote.
@@ -514,7 +702,10 @@ impl Renderer {
                 let buf = self.pt_readback_buffer.as_ref().unwrap();
                 let slice = buf.slice(..);
                 slice.map_async(wgpu::MapMode::Read, |_| {});
-                let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                let _ = self.device.poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                });
                 let data = slice.get_mapped_range();
                 let vals: &[[f32; 4]] = bytemuck::cast_slice(&data);
                 let mut out = String::new();
@@ -552,9 +743,17 @@ impl Renderer {
                      unproject transposed: h={:?} p={:?}\n",
                     self.current_camera_pos,
                     h_col,
-                    [h_col[0] / h_col[3], h_col[1] / h_col[3], h_col[2] / h_col[3]],
+                    [
+                        h_col[0] / h_col[3],
+                        h_col[1] / h_col[3],
+                        h_col[2] / h_col[3]
+                    ],
                     h_row,
-                    [h_row[0] / h_row[3], h_row[1] / h_row[3], h_row[2] / h_row[3]],
+                    [
+                        h_row[0] / h_row[3],
+                        h_row[1] / h_row[3],
+                        h_row[2] / h_row[3]
+                    ],
                 ));
                 // Distinct instance-id count over the whole row.
                 let mut ids: Vec<i64> = vals

@@ -1,6 +1,11 @@
 {
   "name": "bloom-pbr-spheres",
   "version": "0.1.0",
+  "perry": {
+    "allow": {
+      "nativeLibrary": ["bloom/*"]
+    }
+  },
   "dependencies": {
     "bloom": "file:../../"
   }

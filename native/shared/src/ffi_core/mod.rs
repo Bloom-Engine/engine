@@ -58,16 +58,16 @@
 //!     (`crate::string_header`); array params are pointers to inline f64
 //!     data (the compiler skips the 8-byte ArrayHeader at the callsite).
 
-mod game_loop;
-mod input;
-mod draw;
 mod assets;
 mod audio_ffi;
+mod draw;
+mod game_loop;
+mod input;
 mod models;
-mod scene;
-mod visual;
-mod vfx;
 mod ragdoll_ffi;
+mod scene;
+mod vfx;
+mod visual;
 
 /// Expand the full shared (non-physics) FFI surface. Composed from the
 /// per-subsystem section macros in this directory; platform crates invoke
@@ -89,7 +89,6 @@ macro_rules! define_core_ffi {
         $crate::__bloom_ffi_ragdoll!();
     };
 }
-
 
 // Compile-coverage for the macro body: expand it against mock hooks so
 // `cargo test -p bloom-shared` catches breakage without building any

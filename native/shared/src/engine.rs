@@ -1,22 +1,22 @@
 use crate::audio::AudioMixer;
+use crate::drs::DrsController;
+use crate::frame_callbacks::FrameCallbackSystem;
 use crate::input::InputState;
-use crate::renderer::Renderer;
-use crate::text_renderer::TextRenderer;
-use crate::textures::TextureManager;
 #[cfg(feature = "models3d")]
 use crate::models::ModelManager;
-use crate::scene::SceneGraph;
-use crate::frame_callbacks::FrameCallbackSystem;
-use crate::postfx::PostFxPipeline;
-use crate::profiler::Profiler;
-use crate::drs::DrsController;
 #[cfg(all(feature = "jolt", not(target_arch = "wasm32")))]
 use crate::physics_jolt::JoltPhysics;
+use crate::postfx::PostFxPipeline;
+use crate::profiler::Profiler;
+use crate::renderer::Renderer;
+use crate::scene::SceneGraph;
+use crate::text_renderer::TextRenderer;
+use crate::textures::TextureManager;
 
-#[cfg(feature = "web")]
-use web_time::Instant;
 #[cfg(not(feature = "web"))]
 use std::time::Instant;
+#[cfg(feature = "web")]
+use web_time::Instant;
 
 pub struct EngineState {
     pub renderer: Renderer,
@@ -180,20 +180,12 @@ impl EngineState {
             // draw; the shooter's 267 of them paid this every frame for
             // nothing). The Hi-Z pyramid itself stays: SSAO consumes it.
             self.renderer.occlusion.set_has_consumers(
-                self.scene.nodes.iter().any(|(_, n)| n.visible && !n.gi_only));
-            self.scene.prepare(
-                &self.renderer.device,
-                &self.renderer.queue,
-                &self.renderer.vp_matrix(),
-                // EN-022 fix: the velocity reference (prev unjittered VP
-                // + current jitter) — NOT the raw jittered prev VP — so
-                // static scene nodes get true zero velocity instead of
-                // jitter-delta noise that flickers TAA history.
-                &self.renderer.velocity_ref_vp,
-                self.renderer.uniform_3d_layout(),
-                Some(&self.renderer.occlusion),
+                self.scene
+                    .nodes
+                    .iter()
+                    .any(|(_, n)| n.visible && !n.gi_only),
             );
-            self.scene.prepare_materials(&self.renderer);
+            self.renderer.prepare_scene_graph(&mut self.scene, true);
             self.profiler.end("scene_prepare");
 
             // Phase 6 — drain hot-reload events and rebuild any
@@ -206,12 +198,13 @@ impl EngineState {
             // material draws. Without this, group 1 (view/proj/camera/
             // lights/shadow) is zero and shaders that read e.g.
             // `view.view_proj` produce offscreen geometry.
-            let t  = self.get_time() as f32;
+            let t = self.get_time() as f32;
             let dt = self.delta_time as f32;
             self.renderer.material_system_begin_frame(t, dt);
 
             self.profiler.begin("render_total");
-            self.renderer.end_frame_with_scene(&mut self.scene, &mut self.profiler);
+            self.renderer
+                .end_frame_with_scene(&mut self.scene, &mut self.profiler);
             self.profiler.end("render_total");
         }
 
@@ -232,8 +225,16 @@ impl EngineState {
         }
     }
 
-    pub fn get_fps(&self) -> f64 { self.current_fps }
-    pub fn get_time(&self) -> f64 { self.start_time.elapsed().as_secs_f64() }
-    pub fn screen_width(&self) -> f64 { self.renderer.width() as f64 }
-    pub fn screen_height(&self) -> f64 { self.renderer.height() as f64 }
+    pub fn get_fps(&self) -> f64 {
+        self.current_fps
+    }
+    pub fn get_time(&self) -> f64 {
+        self.start_time.elapsed().as_secs_f64()
+    }
+    pub fn screen_width(&self) -> f64 {
+        self.renderer.width() as f64
+    }
+    pub fn screen_height(&self) -> f64 {
+        self.renderer.height() as f64
+    }
 }

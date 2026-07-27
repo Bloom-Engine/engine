@@ -1,9 +1,9 @@
 use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
 
-use wasm_bindgen::prelude::*;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use wasm_bindgen::prelude::*;
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut LAST_PROJECT: (f64, f64) = (0.0, 0.0);
@@ -53,7 +53,13 @@ impl wgpu::rwh::HasDisplayHandle for WebDisplay {
 /// orchestrator to gate Perry boot until the engine is actually usable.
 #[wasm_bindgen]
 pub fn bloom_is_initialized() -> f64 {
-    unsafe { if ENGINE.get().is_some() { 1.0 } else { 0.0 } }
+    unsafe {
+        if ENGINE.get().is_some() {
+            1.0
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Host-surface attach (PerryTS/perry#5519). Not applicable on web: the
@@ -123,8 +129,7 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
             .expect("No WebGPU/WebGL adapter found");
 
         // BC feature -> cooked BC7 textures upload compressed (else CPU-decode).
-        let required_features =
-            adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
+        let required_features = adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
         // On GL, `Limits::default()` is unsatisfiable: WebGL2 has no compute, so
         // `max_compute_workgroups_per_dimension` is 0 against a default request of
         // 65535 and device creation fails outright. Ask that backend for exactly what
@@ -142,24 +147,22 @@ pub fn bloom_init_window(width: f64, height: f64, _title: f64, fullscreen: f64) 
         } else {
             let a = adapter.limits();
             let mut l = wgpu::Limits::default();
-            l.max_sampled_textures_per_shader_stage =
-                a.max_sampled_textures_per_shader_stage
-                    .max(l.max_sampled_textures_per_shader_stage);
-            l.max_samplers_per_shader_stage =
-                a.max_samplers_per_shader_stage.max(l.max_samplers_per_shader_stage);
-            l.max_texture_array_layers =
-                a.max_texture_array_layers.max(l.max_texture_array_layers);
+            l.max_sampled_textures_per_shader_stage = a
+                .max_sampled_textures_per_shader_stage
+                .max(l.max_sampled_textures_per_shader_stage);
+            l.max_samplers_per_shader_stage = a
+                .max_samplers_per_shader_stage
+                .max(l.max_samplers_per_shader_stage);
+            l.max_texture_array_layers = a.max_texture_array_layers.max(l.max_texture_array_layers);
             l
         };
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("bloom_device"),
-                    required_features,
-                    required_limits,
-                    ..Default::default()
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("bloom_device"),
+                required_features,
+                required_limits,
+                ..Default::default()
+            })
             .await
             .expect("Failed to create device");
 
@@ -333,8 +336,20 @@ pub use ragdoll_ffi::*;
 // ============================================================
 
 #[wasm_bindgen]
-pub fn bloom_draw_line(x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_line(x1, y1, x2, y2, thickness, r, g, b, a);
+pub fn bloom_draw_line(
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    thickness: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    engine()
+        .renderer
+        .draw_line(x1, y1, x2, y2, thickness, r, g, b, a);
 }
 
 #[wasm_bindgen]
@@ -343,8 +358,20 @@ pub fn bloom_draw_rect(x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64, a
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_rect_lines(x: f64, y: f64, w: f64, h: f64, thickness: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_rect_lines(x, y, w, h, thickness, r, g, b, a);
+pub fn bloom_draw_rect_lines(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    thickness: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    engine()
+        .renderer
+        .draw_rect_lines(x, y, w, h, thickness, r, g, b, a);
 }
 
 #[wasm_bindgen]
@@ -354,17 +381,44 @@ pub fn bloom_draw_circle(cx: f64, cy: f64, radius: f64, r: f64, g: f64, b: f64, 
 
 #[wasm_bindgen]
 pub fn bloom_draw_circle_lines(cx: f64, cy: f64, radius: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_circle_lines(cx, cy, radius, r, g, b, a);
+    engine()
+        .renderer
+        .draw_circle_lines(cx, cy, radius, r, g, b, a);
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_triangle(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_triangle(x1, y1, x2, y2, x3, y3, r, g, b, a);
+pub fn bloom_draw_triangle(
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    x3: f64,
+    y3: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    engine()
+        .renderer
+        .draw_triangle(x1, y1, x2, y2, x3, y3, r, g, b, a);
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_poly(cx: f64, cy: f64, sides: f64, radius: f64, rotation: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_poly(cx, cy, sides, radius, rotation, r, g, b, a);
+pub fn bloom_draw_poly(
+    cx: f64,
+    cy: f64,
+    sides: f64,
+    radius: f64,
+    rotation: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    engine()
+        .renderer
+        .draw_poly(cx, cy, sides, radius, rotation, r, g, b, a);
 }
 
 // ============================================================
@@ -372,11 +426,21 @@ pub fn bloom_draw_poly(cx: f64, cy: f64, sides: f64, radius: f64, rotation: f64,
 // ============================================================
 
 #[wasm_bindgen]
-pub fn bloom_begin_mode_2d(offset_x: f64, offset_y: f64, target_x: f64, target_y: f64, rotation: f64, zoom: f64) {
+pub fn bloom_begin_mode_2d(
+    offset_x: f64,
+    offset_y: f64,
+    target_x: f64,
+    target_y: f64,
+    rotation: f64,
+    zoom: f64,
+) {
     engine().renderer.begin_mode_2d(
-        offset_x as f32, offset_y as f32,
-        target_x as f32, target_y as f32,
-        rotation as f32, zoom as f32,
+        offset_x as f32,
+        offset_y as f32,
+        target_x as f32,
+        target_y as f32,
+        rotation as f32,
+        zoom as f32,
     );
 }
 
@@ -391,16 +455,30 @@ pub fn bloom_end_mode_2d() {
 
 #[wasm_bindgen]
 pub fn bloom_begin_mode_3d(
-    pos_x: f64, pos_y: f64, pos_z: f64,
-    target_x: f64, target_y: f64, target_z: f64,
-    up_x: f64, up_y: f64, up_z: f64,
-    fovy: f64, projection: f64,
+    pos_x: f64,
+    pos_y: f64,
+    pos_z: f64,
+    target_x: f64,
+    target_y: f64,
+    target_z: f64,
+    up_x: f64,
+    up_y: f64,
+    up_z: f64,
+    fovy: f64,
+    projection: f64,
 ) {
     engine().renderer.begin_mode_3d(
-        pos_x as f32, pos_y as f32, pos_z as f32,
-        target_x as f32, target_y as f32, target_z as f32,
-        up_x as f32, up_y as f32, up_z as f32,
-        fovy as f32, projection as f32,
+        pos_x as f32,
+        pos_y as f32,
+        pos_z as f32,
+        target_x as f32,
+        target_y as f32,
+        target_z as f32,
+        up_x as f32,
+        up_y as f32,
+        up_z as f32,
+        fovy as f32,
+        projection as f32,
     );
 }
 
@@ -410,28 +488,78 @@ pub fn bloom_end_mode_3d() {
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_cube(x: f64, y: f64, z: f64, w: f64, h: f64, d: f64, r: f64, g: f64, b: f64, a: f64) {
+pub fn bloom_draw_cube(
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64,
+    h: f64,
+    d: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
     engine().renderer.draw_cube(x, y, z, w, h, d, r, g, b, a);
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_cube_wires(x: f64, y: f64, z: f64, w: f64, h: f64, d: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_cube_wires(x, y, z, w, h, d, r, g, b, a);
+pub fn bloom_draw_cube_wires(
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64,
+    h: f64,
+    d: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    engine()
+        .renderer
+        .draw_cube_wires(x, y, z, w, h, d, r, g, b, a);
 }
 
 #[wasm_bindgen]
 pub fn bloom_draw_sphere(cx: f64, cy: f64, cz: f64, radius: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_sphere(cx, cy, cz, radius, r, g, b, a);
+    engine()
+        .renderer
+        .draw_sphere(cx, cy, cz, radius, r, g, b, a);
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_sphere_wires(cx: f64, cy: f64, cz: f64, radius: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_sphere_wires(cx, cy, cz, radius, r, g, b, a);
+pub fn bloom_draw_sphere_wires(
+    cx: f64,
+    cy: f64,
+    cz: f64,
+    radius: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    engine()
+        .renderer
+        .draw_sphere_wires(cx, cy, cz, radius, r, g, b, a);
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_cylinder(x: f64, y: f64, z: f64, radius_top: f64, radius_bottom: f64, height: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_cylinder(x, y, z, radius_top, radius_bottom, height, r, g, b, a);
+pub fn bloom_draw_cylinder(
+    x: f64,
+    y: f64,
+    z: f64,
+    radius_top: f64,
+    radius_bottom: f64,
+    height: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    engine()
+        .renderer
+        .draw_cylinder(x, y, z, radius_top, radius_bottom, height, r, g, b, a);
 }
 
 #[wasm_bindgen]
@@ -445,8 +573,21 @@ pub fn bloom_draw_grid(slices: f64, spacing: f64) {
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_ray(origin_x: f64, origin_y: f64, origin_z: f64, dir_x: f64, dir_y: f64, dir_z: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().renderer.draw_ray(origin_x, origin_y, origin_z, dir_x, dir_y, dir_z, r, g, b, a);
+pub fn bloom_draw_ray(
+    origin_x: f64,
+    origin_y: f64,
+    origin_z: f64,
+    dir_x: f64,
+    dir_y: f64,
+    dir_z: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    engine().renderer.draw_ray(
+        origin_x, origin_y, origin_z, dir_x, dir_y, dir_z, r, g, b, a,
+    );
 }
 
 // ============================================================
@@ -456,20 +597,34 @@ pub fn bloom_draw_ray(origin_x: f64, origin_y: f64, origin_z: f64, dir_x: f64, d
 // The original FFI functions accept f64 (NaN-boxed string handles from Perry WASM).
 // The JS glue intercepts these and calls the _str variants below with actual strings.
 #[wasm_bindgen]
-pub fn bloom_draw_text(_text: f64, _x: f64, _y: f64, _size: f64, _r: f64, _g: f64, _b: f64, _a: f64) {
+pub fn bloom_draw_text(
+    _text: f64,
+    _x: f64,
+    _y: f64,
+    _size: f64,
+    _r: f64,
+    _g: f64,
+    _b: f64,
+    _a: f64,
+) {
     // No-op: JS glue calls bloom_draw_text_str instead
 }
 
 #[wasm_bindgen]
 pub fn bloom_draw_text_str(text: &str, x: f64, y: f64, size: f64, r: f64, g: f64, b: f64, a: f64) {
     let eng = engine();
-    let mut text_renderer = std::mem::replace(&mut eng.text, bloom_shared::text_renderer::TextRenderer::empty());
+    let mut text_renderer = std::mem::replace(
+        &mut eng.text,
+        bloom_shared::text_renderer::TextRenderer::empty(),
+    );
     text_renderer.draw_text(&mut eng.renderer, text, x, y, size as u32, r, g, b, a);
     eng.text = text_renderer;
 }
 
 #[wasm_bindgen]
-pub fn bloom_measure_text(_text: f64, _size: f64) -> f64 { 0.0 }
+pub fn bloom_measure_text(_text: f64, _size: f64) -> f64 {
+    0.0
+}
 
 #[wasm_bindgen]
 pub fn bloom_measure_text_str(text: &str, size: f64) -> f64 {
@@ -477,7 +632,9 @@ pub fn bloom_measure_text_str(text: &str, size: f64) -> f64 {
 }
 
 #[wasm_bindgen]
-pub fn bloom_load_font(_path: f64, _size: f64) -> f64 { 0.0 }
+pub fn bloom_load_font(_path: f64, _size: f64) -> f64 {
+    0.0
+}
 
 /// Load a font from raw bytes (fetched by JS glue via fetch()).
 #[wasm_bindgen]
@@ -491,24 +648,65 @@ pub fn bloom_unload_font(font_handle: f64) {
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_text_ex(_font_handle: f64, _text: f64, _x: f64, _y: f64, _size: f64, _spacing: f64, _r: f64, _g: f64, _b: f64, _a: f64) {
+pub fn bloom_draw_text_ex(
+    _font_handle: f64,
+    _text: f64,
+    _x: f64,
+    _y: f64,
+    _size: f64,
+    _spacing: f64,
+    _r: f64,
+    _g: f64,
+    _b: f64,
+    _a: f64,
+) {
     // No-op: JS glue calls bloom_draw_text_ex_str instead
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_text_ex_str(font_handle: f64, text: &str, x: f64, y: f64, size: f64, spacing: f64, r: f64, g: f64, b: f64, a: f64) {
+pub fn bloom_draw_text_ex_str(
+    font_handle: f64,
+    text: &str,
+    x: f64,
+    y: f64,
+    size: f64,
+    spacing: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
     let eng = engine();
-    let mut text_renderer = std::mem::replace(&mut eng.text, bloom_shared::text_renderer::TextRenderer::empty());
-    text_renderer.draw_text_ex(&mut eng.renderer, font_handle as usize, text, x, y, size as u32, spacing as f32, r, g, b, a);
+    let mut text_renderer = std::mem::replace(
+        &mut eng.text,
+        bloom_shared::text_renderer::TextRenderer::empty(),
+    );
+    text_renderer.draw_text_ex(
+        &mut eng.renderer,
+        font_handle as usize,
+        text,
+        x,
+        y,
+        size as u32,
+        spacing as f32,
+        r,
+        g,
+        b,
+        a,
+    );
     eng.text = text_renderer;
 }
 
 #[wasm_bindgen]
-pub fn bloom_measure_text_ex(_font_handle: f64, _text: f64, _size: f64, _spacing: f64) -> f64 { 0.0 }
+pub fn bloom_measure_text_ex(_font_handle: f64, _text: f64, _size: f64, _spacing: f64) -> f64 {
+    0.0
+}
 
 #[wasm_bindgen]
 pub fn bloom_measure_text_ex_str(font_handle: f64, text: &str, size: f64, spacing: f64) -> f64 {
-    engine().text.measure_text_ex(font_handle as usize, text, size as u32, spacing as f32)
+    engine()
+        .text
+        .measure_text_ex(font_handle as usize, text, size as u32, spacing as f32)
 }
 
 // --- Texture loading from bytes (fetched by JS glue) ---
@@ -518,7 +716,8 @@ pub fn bloom_measure_text_ex_str(font_handle: f64, text: &str, size: f64, spacin
 pub fn bloom_load_texture_bytes(data: &[u8]) -> f64 {
     let eng = engine();
     let renderer_ptr = &mut eng.renderer as *mut bloom_shared::renderer::Renderer;
-    eng.textures.load_texture(unsafe { &mut *renderer_ptr }, data)
+    eng.textures
+        .load_texture(unsafe { &mut *renderer_ptr }, data)
 }
 
 // ============================================================
@@ -535,35 +734,67 @@ pub fn bloom_load_texture(_path: f64) -> f64 {
 pub fn bloom_unload_texture(handle: f64) {
     let eng = engine();
     let renderer_ptr = &mut eng.renderer as *mut Renderer;
-    eng.textures.unload_texture(handle, unsafe { &mut *renderer_ptr });
+    eng.textures
+        .unload_texture(handle, unsafe { &mut *renderer_ptr });
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_texture(handle: f64, x: f64, y: f64, tint_r: f64, tint_g: f64, tint_b: f64, tint_a: f64) {
+pub fn bloom_draw_texture(
+    handle: f64,
+    x: f64,
+    y: f64,
+    tint_r: f64,
+    tint_g: f64,
+    tint_b: f64,
+    tint_a: f64,
+) {
     let eng = engine();
     if let Some(tex) = eng.textures.get(handle) {
         let bind_group_idx = tex.bind_group_idx;
-        eng.renderer.draw_texture(bind_group_idx, x, y, tint_r, tint_g, tint_b, tint_a);
+        eng.renderer
+            .draw_texture(bind_group_idx, x, y, tint_r, tint_g, tint_b, tint_a);
     }
 }
 
 #[wasm_bindgen]
 pub fn bloom_draw_texture_pro(
     handle: f64,
-    src_x: f64, src_y: f64, src_w: f64, src_h: f64,
-    dst_x: f64, dst_y: f64, dst_w: f64, dst_h: f64,
-    origin_x: f64, origin_y: f64, rotation: f64,
-    tint_r: f64, tint_g: f64, tint_b: f64, tint_a: f64,
+    src_x: f64,
+    src_y: f64,
+    src_w: f64,
+    src_h: f64,
+    dst_x: f64,
+    dst_y: f64,
+    dst_w: f64,
+    dst_h: f64,
+    origin_x: f64,
+    origin_y: f64,
+    rotation: f64,
+    tint_r: f64,
+    tint_g: f64,
+    tint_b: f64,
+    tint_a: f64,
 ) {
     let eng = engine();
     if let Some(tex) = eng.textures.get(handle) {
         let bind_group_idx = tex.bind_group_idx;
         eng.renderer.draw_texture_pro(
             bind_group_idx,
-            src_x, src_y, src_w, src_h,
-            dst_x, dst_y, dst_w, dst_h,
-            origin_x, origin_y, rotation,
-            tint_r, tint_g, tint_b, tint_a,
+            src_x,
+            src_y,
+            src_w,
+            src_h,
+            dst_x,
+            dst_y,
+            dst_w,
+            dst_h,
+            origin_x,
+            origin_y,
+            rotation,
+            tint_r,
+            tint_g,
+            tint_b,
+            tint_a,
         );
     }
 }
@@ -571,34 +802,58 @@ pub fn bloom_draw_texture_pro(
 #[wasm_bindgen]
 pub fn bloom_draw_texture_rec(
     handle: f64,
-    src_x: f64, src_y: f64, src_w: f64, src_h: f64,
-    dst_x: f64, dst_y: f64,
-    tint_r: f64, tint_g: f64, tint_b: f64, tint_a: f64,
+    src_x: f64,
+    src_y: f64,
+    src_w: f64,
+    src_h: f64,
+    dst_x: f64,
+    dst_y: f64,
+    tint_r: f64,
+    tint_g: f64,
+    tint_b: f64,
+    tint_a: f64,
 ) {
     let eng = engine();
     if let Some(tex) = eng.textures.get(handle) {
         let bind_group_idx = tex.bind_group_idx;
         eng.renderer.draw_texture_rec(
             bind_group_idx,
-            src_x, src_y, src_w, src_h,
-            dst_x, dst_y,
-            tint_r, tint_g, tint_b, tint_a,
+            src_x,
+            src_y,
+            src_w,
+            src_h,
+            dst_x,
+            dst_y,
+            tint_r,
+            tint_g,
+            tint_b,
+            tint_a,
         );
     }
 }
 
 #[wasm_bindgen]
 pub fn bloom_get_texture_width(handle: f64) -> f64 {
-    engine().textures.get(handle).map(|t| t.width as f64).unwrap_or(0.0)
+    engine()
+        .textures
+        .get(handle)
+        .map(|t| t.width as f64)
+        .unwrap_or(0.0)
 }
 
 #[wasm_bindgen]
 pub fn bloom_get_texture_height(handle: f64) -> f64 {
-    engine().textures.get(handle).map(|t| t.height as f64).unwrap_or(0.0)
+    engine()
+        .textures
+        .get(handle)
+        .map(|t| t.height as f64)
+        .unwrap_or(0.0)
 }
 
 #[wasm_bindgen]
-pub fn bloom_load_image(_path: f64) -> f64 { 0.0 }
+pub fn bloom_load_image(_path: f64) -> f64 {
+    0.0
+}
 
 #[wasm_bindgen]
 pub fn bloom_load_image_bytes(data: &[u8]) -> f64 {
@@ -612,7 +867,9 @@ pub fn bloom_image_resize(handle: f64, w: f64, h: f64) {
 
 #[wasm_bindgen]
 pub fn bloom_image_crop(handle: f64, x: f64, y: f64, w: f64, h: f64) {
-    engine().textures.image_crop(handle, x as u32, y as u32, w as u32, h as u32);
+    engine()
+        .textures
+        .image_crop(handle, x as u32, y as u32, w as u32, h as u32);
 }
 
 #[wasm_bindgen]
@@ -629,7 +886,8 @@ pub fn bloom_image_flip_v(handle: f64) {
 pub fn bloom_load_texture_from_image(handle: f64) -> f64 {
     let eng = engine();
     let renderer_ptr = &mut eng.renderer as *mut Renderer;
-    eng.textures.load_texture_from_image(handle, unsafe { &mut *renderer_ptr })
+    eng.textures
+        .load_texture_from_image(handle, unsafe { &mut *renderer_ptr })
 }
 
 #[wasm_bindgen]
@@ -651,7 +909,9 @@ pub fn bloom_set_texture_filter(handle: f64, mode: f64) {
 // ============================================================
 
 #[wasm_bindgen]
-pub fn bloom_load_model(_path: f64) -> f64 { 0.0 }
+pub fn bloom_load_model(_path: f64) -> f64 {
+    0.0
+}
 
 #[wasm_bindgen]
 pub fn bloom_load_model_bytes(data: &[u8]) -> f64 {
@@ -660,14 +920,32 @@ pub fn bloom_load_model_bytes(data: &[u8]) -> f64 {
 }
 
 #[wasm_bindgen]
-pub fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f64, r: f64, g: f64, b: f64, a: f64) {
+pub fn bloom_draw_model(
+    handle: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+    scale: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
     let eng = engine();
     if let Some(model) = eng.models.get(handle) {
         let position = [x as f32, y as f32, z as f32];
         let scale = scale as f32;
-        let tint = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32];
+        let tint = [
+            (r / 255.0) as f32,
+            (g / 255.0) as f32,
+            (b / 255.0) as f32,
+            (a / 255.0) as f32,
+        ];
         let handle_bits = handle.to_bits();
-        if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+        if eng
+            .renderer
+            .cache_model_if_static(handle_bits, &model.meshes)
+        {
             // Skinned models cache too (bind-pose VB with raw joint indices,
             // skinned in the scene VS) — they MUST take the skinned cached
             // draw, which pops the staged pose ONCE for the whole model and
@@ -677,9 +955,11 @@ pub fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f64, r: f64,
             // character animated wrongly on web while native was correct.
             // Mirrors the shared macro in ffi_core/models.rs.
             if eng.renderer.is_model_skinned(handle_bits) {
-                eng.renderer.draw_model_cached_skinned(handle_bits, position, scale, tint);
+                eng.renderer
+                    .draw_model_cached_skinned(handle_bits, position, scale, tint);
             } else {
-                eng.renderer.draw_model_cached(handle_bits, position, scale, tint);
+                eng.renderer
+                    .draw_model_cached(handle_bits, position, scale, tint);
             }
         }
     }
@@ -702,22 +982,31 @@ pub fn bloom_draw_model(handle: f64, x: f64, y: f64, z: f64, scale: f64, r: f64,
 #[allow(clippy::too_many_arguments)]
 pub fn bloom_draw_model_transform16(
     handle: f64,
-    m0: f64, m1: f64, m2: f64, m3: f64,
-    m4: f64, m5: f64, m6: f64, m7: f64,
-    m8: f64, m9: f64, m10: f64, m11: f64,
-    m12: f64, m13: f64, m14: f64, m15: f64,
+    m0: f64,
+    m1: f64,
+    m2: f64,
+    m3: f64,
+    m4: f64,
+    m5: f64,
+    m6: f64,
+    m7: f64,
+    m8: f64,
+    m9: f64,
+    m10: f64,
+    m11: f64,
+    m12: f64,
+    m13: f64,
+    m14: f64,
+    m15: f64,
     color_packed_argb: f64,
 ) {
     let bits = color_packed_argb as u32;
     let a = ((bits >> 24) & 0xff) as f32 / 255.0;
     let r = ((bits >> 16) & 0xff) as f32 / 255.0;
-    let g = ((bits >>  8) & 0xff) as f32 / 255.0;
-    let b = ( bits        & 0xff) as f32 / 255.0;
+    let g = ((bits >> 8) & 0xff) as f32 / 255.0;
+    let b = (bits & 0xff) as f32 / 255.0;
     let s = [
-        m0, m1, m2, m3,
-        m4, m5, m6, m7,
-        m8, m9, m10, m11,
-        m12, m13, m14, m15,
+        m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15,
     ];
     // Column-major, same unpacking as the shared macro.
     let mut mat = [[0.0f32; 4]; 4];
@@ -729,26 +1018,34 @@ pub fn bloom_draw_model_transform16(
     let eng = engine();
     if let Some(model) = eng.models.get(handle) {
         let handle_bits = handle.to_bits();
-        if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+        if eng
+            .renderer
+            .cache_model_if_static(handle_bits, &model.meshes)
+        {
             if eng.renderer.is_model_skinned(handle_bits) {
                 return;
             }
-            eng.renderer.draw_model_cached_transform(handle_bits, mat, [r, g, b, a]);
+            eng.renderer
+                .draw_model_cached_transform(handle_bits, mat, [r, g, b, a]);
         }
     }
 }
 
 #[wasm_bindgen]
 pub fn bloom_draw_model_rotated(
-    handle: f64, x: f64, y: f64, z: f64,
-    scale: f64, rot_y: f64,
+    handle: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+    scale: f64,
+    rot_y: f64,
     color_packed_argb: f64,
 ) {
     let bits = color_packed_argb as u32;
     let a = ((bits >> 24) & 0xff) as f32 / 255.0;
     let r = ((bits >> 16) & 0xff) as f32 / 255.0;
-    let g = ((bits >>  8) & 0xff) as f32 / 255.0;
-    let b = ( bits        & 0xff) as f32 / 255.0;
+    let g = ((bits >> 8) & 0xff) as f32 / 255.0;
+    let b = (bits & 0xff) as f32 / 255.0;
     let eng = engine();
     if let Some(model) = eng.models.get(handle) {
         let position = [x as f32, y as f32, z as f32];
@@ -766,12 +1063,20 @@ pub fn bloom_draw_model_rotated(
         // the immediate path here: round 5 fixed native and the web copy was
         // never updated, so every tree in a browser rendered as torn opaque
         // sheets — the very artifact that fix was written for.
-        if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+        if eng
+            .renderer
+            .cache_model_if_static(handle_bits, &model.meshes)
+        {
             if eng.renderer.is_model_skinned(handle_bits) {
-                eng.renderer.draw_model_cached_skinned(handle_bits, position, scale, tint);
+                eng.renderer
+                    .draw_model_cached_skinned(handle_bits, position, scale, tint);
             } else {
                 eng.renderer.draw_model_cached_rotated(
-                    handle_bits, position, scale, rot_y as f32, tint,
+                    handle_bits,
+                    position,
+                    scale,
+                    rot_y as f32,
+                    tint,
                 );
             }
         }
@@ -800,7 +1105,8 @@ pub fn bloom_gen_mesh_heightmap(image_handle: f64, size_x: f64, size_y: f64, siz
         let data = img.data.clone();
         let w = img.width;
         let h = img.height;
-        eng.models.gen_mesh_heightmap(&data, w, h, size_x as f32, size_y as f32, size_z as f32)
+        eng.models
+            .gen_mesh_heightmap(&data, w, h, size_x as f32, size_y as f32, size_z as f32)
     } else {
         0.0
     }
@@ -813,7 +1119,12 @@ pub fn bloom_load_shader(_source: f64) -> f64 {
 }
 
 #[wasm_bindgen]
-pub fn bloom_create_mesh(_vertex_ptr: f64, _vertex_count: f64, _index_ptr: f64, _index_count: f64) -> f64 {
+pub fn bloom_create_mesh(
+    _vertex_ptr: f64,
+    _vertex_count: f64,
+    _index_ptr: f64,
+    _index_count: f64,
+) -> f64 {
     // TODO: Phase 4 — need to handle pointer passing from WASM linear memory
     0.0
 }
@@ -828,12 +1139,27 @@ pub fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) {
 }
 
 #[wasm_bindgen]
-pub fn bloom_set_directional_light(dx: f64, dy: f64, dz: f64, r: f64, g: f64, b: f64, intensity: f64) {
-    engine().renderer.set_directional_light(dx, dy, dz, r, g, b, intensity);
+pub fn bloom_set_directional_light(
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    intensity: f64,
+) {
+    engine()
+        .renderer
+        .set_directional_light(dx, dy, dz, r, g, b, intensity);
 }
 
 #[wasm_bindgen]
-pub fn bloom_set_procedural_sky(enabled: f64, rayleigh_density: f64, mie_density: f64, ground_albedo: f64) {
+pub fn bloom_set_procedural_sky(
+    enabled: f64,
+    rayleigh_density: f64,
+    mie_density: f64,
+    ground_albedo: f64,
+) {
     engine().renderer.set_procedural_sky(
         enabled != 0.0,
         rayleigh_density as f32,
@@ -844,36 +1170,58 @@ pub fn bloom_set_procedural_sky(enabled: f64, rayleigh_density: f64, mie_density
 
 #[wasm_bindgen]
 pub fn bloom_set_sun_direction(dx: f64, dy: f64, dz: f64, intensity: f64) {
-    engine().renderer.set_sun_direction(dx as f32, dy as f32, dz as f32, intensity as f32);
+    engine()
+        .renderer
+        .set_sun_direction(dx as f32, dy as f32, dz as f32, intensity as f32);
 }
 
 #[wasm_bindgen]
 pub fn bloom_set_joint_test(joint_index: f64, angle: f64) {
-    engine().renderer.set_joint_test(joint_index as usize, angle as f32);
+    engine()
+        .renderer
+        .set_joint_test(joint_index as usize, angle as f32);
 }
 
 #[wasm_bindgen]
 pub fn bloom_add_directional_light(
-    dx: f64, dy: f64, dz: f64,
-    r: f64, g: f64, b: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    r: f64,
+    g: f64,
+    b: f64,
     intensity: f64,
 ) {
     engine().renderer.add_directional_light(
-        dx as f32, dy as f32, dz as f32,
-        r as f32, g as f32, b as f32,
+        dx as f32,
+        dy as f32,
+        dz as f32,
+        r as f32,
+        g as f32,
+        b as f32,
         intensity as f32,
     );
 }
 
 #[wasm_bindgen]
 pub fn bloom_add_point_light(
-    x: f64, y: f64, z: f64, range: f64,
-    r: f64, g: f64, b: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+    range: f64,
+    r: f64,
+    g: f64,
+    b: f64,
     intensity: f64,
 ) {
     engine().renderer.add_point_light(
-        x as f32, y as f32, z as f32, range as f32,
-        r as f32, g as f32, b as f32,
+        x as f32,
+        y as f32,
+        z as f32,
+        range as f32,
+        r as f32,
+        g as f32,
+        b as f32,
         intensity as f32,
     );
 }
@@ -894,13 +1242,15 @@ pub fn bloom_close_audio() {
 }
 
 #[wasm_bindgen]
-pub fn bloom_load_sound(_path: f64) -> f64 { 0.0 }
+pub fn bloom_load_sound(_path: f64) -> f64 {
+    0.0
+}
 
 /// Load a sound from raw file bytes (WAV or OGG). Fetched by JS glue via fetch().
 #[wasm_bindgen]
 pub fn bloom_load_sound_bytes(data: &[u8]) -> f64 {
-    if let Some(sound) = bloom_shared::audio::parse_wav(data)
-        .or_else(|| bloom_shared::audio::parse_ogg(data))
+    if let Some(sound) =
+        bloom_shared::audio::parse_wav(data).or_else(|| bloom_shared::audio::parse_ogg(data))
     {
         engine().audio.load_sound(sound)
     } else {
@@ -930,29 +1280,48 @@ pub fn bloom_set_master_volume(volume: f64) {
 
 #[wasm_bindgen]
 pub fn bloom_play_sound_3d(handle: f64, x: f64, y: f64, z: f64) {
-    engine().audio.play_sound_3d(handle, x as f32, y as f32, z as f32);
+    engine()
+        .audio
+        .play_sound_3d(handle, x as f32, y as f32, z as f32);
 }
 
 #[wasm_bindgen]
 pub fn bloom_set_listener_position(x: f64, y: f64, z: f64, fx: f64, fy: f64, fz: f64) {
-    engine().audio.set_listener_position(x as f32, y as f32, z as f32, fx as f32, fy as f32, fz as f32);
+    engine().audio.set_listener_position(
+        x as f32, y as f32, z as f32, fx as f32, fy as f32, fz as f32,
+    );
 }
 
 // ---- EN-062: live spatial voices (see shared audio_ffi.rs for docs) --------
 
 #[wasm_bindgen]
 pub fn bloom_play_sound_3d_ex(
-    handle: f64, x: f64, y: f64, z: f64,
-    looping: f64, ref_dist: f64, max_dist: f64, rolloff: f64,
+    handle: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+    looping: f64,
+    ref_dist: f64,
+    max_dist: f64,
+    rolloff: f64,
 ) -> f64 {
     engine().audio.play_sound_3d_ex(
-        handle, x as f32, y as f32, z as f32,
-        looping != 0.0, ref_dist as f32, max_dist as f32, rolloff as f32)
+        handle,
+        x as f32,
+        y as f32,
+        z as f32,
+        looping != 0.0,
+        ref_dist as f32,
+        max_dist as f32,
+        rolloff as f32,
+    )
 }
 
 #[wasm_bindgen]
 pub fn bloom_voice_set_position(voice: f64, x: f64, y: f64, z: f64) {
-    engine().audio.set_voice_position(voice, x as f32, y as f32, z as f32);
+    engine()
+        .audio
+        .set_voice_position(voice, x as f32, y as f32, z as f32);
 }
 
 #[wasm_bindgen]
@@ -976,13 +1345,15 @@ pub fn bloom_voice_set_lowpass(voice: f64, cutoff: f64) {
 }
 
 #[wasm_bindgen]
-pub fn bloom_load_music(_path: f64) -> f64 { 0.0 }
+pub fn bloom_load_music(_path: f64) -> f64 {
+    0.0
+}
 
 /// Load music from raw file bytes (WAV or OGG). Fetched by JS glue via fetch().
 #[wasm_bindgen]
 pub fn bloom_load_music_bytes(data: &[u8]) -> f64 {
-    if let Some(sound) = bloom_shared::audio::parse_wav(data)
-        .or_else(|| bloom_shared::audio::parse_ogg(data))
+    if let Some(sound) =
+        bloom_shared::audio::parse_wav(data).or_else(|| bloom_shared::audio::parse_ogg(data))
     {
         engine().audio.load_music(sound)
     } else {
@@ -1019,7 +1390,11 @@ pub fn bloom_set_music_volume(handle: f64, volume: f64) {
 
 #[wasm_bindgen]
 pub fn bloom_is_music_playing(handle: f64) -> f64 {
-    if engine().audio.is_music_playing(handle) { 1.0 } else { 0.0 }
+    if engine().audio.is_music_playing(handle) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 // ============================================================
@@ -1070,10 +1445,22 @@ pub fn bloom_scene_set_transform(_handle: f64, _matrix_ptr: f64) {
 #[allow(clippy::too_many_arguments)]
 pub fn bloom_scene_set_transform16(
     handle: f64,
-    m00: f64, m01: f64, m02: f64, m03: f64,
-    m10: f64, m11: f64, m12: f64, m13: f64,
-    m20: f64, m21: f64, m22: f64, m23: f64,
-    m30: f64, m31: f64, m32: f64, m33: f64,
+    m00: f64,
+    m01: f64,
+    m02: f64,
+    m03: f64,
+    m10: f64,
+    m11: f64,
+    m12: f64,
+    m13: f64,
+    m20: f64,
+    m21: f64,
+    m22: f64,
+    m23: f64,
+    m30: f64,
+    m31: f64,
+    m32: f64,
+    m33: f64,
 ) {
     // On web we pass the 16 matrix elements as individual f64 args
     // (no raw pointer passing from WASM)
@@ -1101,17 +1488,23 @@ pub fn bloom_scene_update_geometry(
 
 #[wasm_bindgen]
 pub fn bloom_scene_set_material_color(handle: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().scene.set_material_color(handle, r as f32, g as f32, b as f32, a as f32);
+    engine()
+        .scene
+        .set_material_color(handle, r as f32, g as f32, b as f32, a as f32);
 }
 
 #[wasm_bindgen]
 pub fn bloom_scene_set_material_pbr(handle: f64, roughness: f64, metalness: f64) {
-    engine().scene.set_material_pbr(handle, roughness as f32, metalness as f32);
+    engine()
+        .scene
+        .set_material_pbr(handle, roughness as f32, metalness as f32);
 }
 
 #[wasm_bindgen]
 pub fn bloom_scene_set_material_texture(handle: f64, texture_idx: f64) {
-    engine().scene.set_material_texture(handle, texture_idx as u32);
+    engine()
+        .scene
+        .set_material_texture(handle, texture_idx as u32);
 }
 
 #[wasm_bindgen]
@@ -1144,7 +1537,9 @@ pub fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_index:
         Some(md) => md,
         None => return,
     };
-    if mi >= model_data.meshes.len() { return; }
+    if mi >= model_data.meshes.len() {
+        return;
+    }
     let mesh = &model_data.meshes[mi];
 
     let vertices = mesh.vertices.clone();
@@ -1166,10 +1561,12 @@ pub fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_index:
         eng.scene.set_material_normal_texture(node_handle, tex_idx);
     }
     if let Some(tex_idx) = mr_tex {
-        eng.scene.set_material_metallic_roughness_texture(node_handle, tex_idx);
+        eng.scene
+            .set_material_metallic_roughness_texture(node_handle, tex_idx);
     }
     if let Some(tex_idx) = emissive_tex {
-        eng.scene.set_material_emissive_texture(node_handle, tex_idx);
+        eng.scene
+            .set_material_emissive_texture(node_handle, tex_idx);
     }
     eng.scene.set_material_emissive_factor(
         node_handle,
@@ -1181,8 +1578,10 @@ pub fn bloom_scene_attach_model(node_handle: f64, model_handle: f64, mesh_index:
     // macro) — dropping them left attached foliage opaque (solid cards) and
     // every attached mesh at the default roughness 0.8 regardless of its
     // authored material.
-    eng.scene.set_material_pbr(node_handle, roughness_factor, metallic_factor);
-    eng.scene.set_material_alpha_cutoff(node_handle, alpha_cutoff);
+    eng.scene
+        .set_material_pbr(node_handle, roughness_factor, metallic_factor);
+    eng.scene
+        .set_material_alpha_cutoff(node_handle, alpha_cutoff);
 }
 
 // ============================================================
@@ -1202,8 +1601,12 @@ pub fn bloom_scene_extrude_polygon(
 #[wasm_bindgen]
 pub fn bloom_scene_subtract_box(
     handle: f64,
-    min_x: f64, min_y: f64, min_z: f64,
-    max_x: f64, max_y: f64, max_z: f64,
+    min_x: f64,
+    min_y: f64,
+    min_z: f64,
+    max_x: f64,
+    max_y: f64,
+    max_z: f64,
 ) {
     let eng = engine();
     if let Some(node) = eng.scene.nodes.get(handle) {
@@ -1216,7 +1619,8 @@ pub fn bloom_scene_subtract_box(
             [min_x as f32, min_y as f32, min_z as f32],
             [max_x as f32, max_y as f32, max_z as f32],
         );
-        eng.scene.update_geometry(handle, result.vertices, result.indices);
+        eng.scene
+            .update_geometry(handle, result.vertices, result.indices);
     }
 }
 
@@ -1245,7 +1649,10 @@ pub fn bloom_enable_postfx() {
     let h = eng.renderer.height();
     let fmt = eng.renderer.surface_format();
     eng.postfx = Some(bloom_shared::postfx::PostFxPipeline::new(
-        &eng.renderer.device, w, h, fmt,
+        &eng.renderer.device,
+        w,
+        h,
+        fmt,
     ));
 }
 
@@ -1299,14 +1706,24 @@ pub fn bloom_scene_pick(screen_x: f64, screen_y: f64) -> f64 {
     let h = eng.renderer.height() as f32;
 
     let (origin, direction) = bloom_shared::picking::screen_to_ray(
-        screen_x as f32, screen_y as f32,
-        w, h, &inv_vp, &cam_pos,
+        screen_x as f32,
+        screen_y as f32,
+        w,
+        h,
+        &inv_vp,
+        &cam_pos,
     );
 
     let result = bloom_shared::picking::raycast_scene(&eng.scene, &origin, &direction);
     let hit = result.hit;
-    unsafe { LAST_PICK = Some(result); }
-    if hit { 1.0 } else { 0.0 }
+    unsafe {
+        LAST_PICK = Some(result);
+    }
+    if hit {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
@@ -1336,17 +1753,32 @@ pub fn bloom_pick_hit_z() -> f64 {
 
 #[wasm_bindgen]
 pub fn bloom_pick_hit_normal_x() -> f64 {
-    unsafe { LAST_PICK.as_ref().map(|r| r.normal[0] as f64).unwrap_or(0.0) }
+    unsafe {
+        LAST_PICK
+            .as_ref()
+            .map(|r| r.normal[0] as f64)
+            .unwrap_or(0.0)
+    }
 }
 
 #[wasm_bindgen]
 pub fn bloom_pick_hit_normal_y() -> f64 {
-    unsafe { LAST_PICK.as_ref().map(|r| r.normal[1] as f64).unwrap_or(0.0) }
+    unsafe {
+        LAST_PICK
+            .as_ref()
+            .map(|r| r.normal[1] as f64)
+            .unwrap_or(0.0)
+    }
 }
 
 #[wasm_bindgen]
 pub fn bloom_pick_hit_normal_z() -> f64 {
-    unsafe { LAST_PICK.as_ref().map(|r| r.normal[2] as f64).unwrap_or(0.0) }
+    unsafe {
+        LAST_PICK
+            .as_ref()
+            .map(|r| r.normal[2] as f64)
+            .unwrap_or(0.0)
+    }
 }
 
 // ============================================================
@@ -1363,12 +1795,14 @@ pub fn bloom_project_to_screen(wx: f64, wy: f64, wz: f64) -> f64 {
     let x = wx as f32;
     let y = wy as f32;
     let z = wz as f32;
-    let clip_x = vp[0][0]*x + vp[1][0]*y + vp[2][0]*z + vp[3][0];
-    let clip_y = vp[0][1]*x + vp[1][1]*y + vp[2][1]*z + vp[3][1];
-    let clip_w = vp[0][3]*x + vp[1][3]*y + vp[2][3]*z + vp[3][3];
+    let clip_x = vp[0][0] * x + vp[1][0] * y + vp[2][0] * z + vp[3][0];
+    let clip_y = vp[0][1] * x + vp[1][1] * y + vp[2][1] * z + vp[3][1];
+    let clip_w = vp[0][3] * x + vp[1][3] * y + vp[2][3] * z + vp[3][3];
 
     if clip_w <= 0.0 {
-        unsafe { LAST_PROJECT = (-9999.0, -9999.0); }
+        unsafe {
+            LAST_PROJECT = (-9999.0, -9999.0);
+        }
         return -9999.0;
     }
 
@@ -1377,7 +1811,9 @@ pub fn bloom_project_to_screen(wx: f64, wy: f64, wz: f64) -> f64 {
     let screen_x = ((ndc_x + 1.0) * 0.5 * w) as f64;
     let screen_y = ((1.0 - ndc_y) * 0.5 * h) as f64;
 
-    unsafe { LAST_PROJECT = (screen_x, screen_y); }
+    unsafe {
+        LAST_PROJECT = (screen_x, screen_y);
+    }
     screen_x
 }
 
@@ -1484,10 +1920,16 @@ pub fn bloom_commit_texture(staging_handle: f64) -> f64 {
         None => return 0.0,
     };
     let eng = engine();
-    let bind_group_idx = eng.renderer.register_texture(staged.width, staged.height, &staged.data);
-    eng.textures.textures.alloc(bloom_shared::textures::TextureData {
-        bind_group_idx, width: staged.width, height: staged.height,
-    })
+    let bind_group_idx = eng
+        .renderer
+        .register_texture(staged.width, staged.height, &staged.data);
+    eng.textures
+        .textures
+        .alloc(bloom_shared::textures::TextureData {
+            bind_group_idx,
+            width: staged.width,
+            height: staged.height,
+        })
 }
 
 #[wasm_bindgen]
@@ -1504,7 +1946,11 @@ pub fn bloom_commit_model(staging_handle: f64) -> f64 {
     let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
     for tex in &staged.textures {
         tex_map.push(eng.renderer.register_texture_kind(
-            tex.width, tex.height, &tex.data, tex.is_normal));
+            tex.width,
+            tex.height,
+            &tex.data,
+            tex.is_normal,
+        ));
     }
     let mut model = staged.model;
     // Remap EVERY texture slot, not just the base colour — dropping the
@@ -1559,21 +2005,30 @@ pub fn bloom_get_platform() -> f64 {
 #[wasm_bindgen]
 pub fn bloom_get_language() -> f64 {
     // navigator.language (e.g. "en-US" / "zh-Hans") -> packed 2-letter code.
-    let lang = web_sys::window().and_then(|w| w.navigator().language()).unwrap_or_default();
+    let lang = web_sys::window()
+        .and_then(|w| w.navigator().language())
+        .unwrap_or_default();
     let b = lang.to_ascii_lowercase().into_bytes();
-    if b.len() >= 2 { (b[0] as f64) * 256.0 + (b[1] as f64) } else { 25966.0 }
+    if b.len() >= 2 {
+        (b[0] as f64) * 256.0 + (b[1] as f64)
+    } else {
+        25966.0
+    }
 }
 
 #[wasm_bindgen]
 pub fn bloom_is_any_input_pressed() -> f64 {
-    if engine().input.is_any_input_pressed() { 1.0 } else { 0.0 }
+    if engine().input.is_any_input_pressed() {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
 pub fn bloom_get_crown_rotation() -> f64 {
     engine().input.consume_crown_rotation()
 }
-
 
 // Scene graph QoL — Q4/Q5/Q6/Q7
 #[wasm_bindgen]
@@ -1582,48 +2037,97 @@ pub fn bloom_scene_get_transform(handle: f64, index: f64) -> f64 {
     let i = index as usize;
     let col = i / 4;
     let row = i % 4;
-    if col < 4 && row < 4 { mat[col][row] as f64 } else { 0.0 }
+    if col < 4 && row < 4 {
+        mat[col][row] as f64
+    } else {
+        0.0
+    }
 }
 #[wasm_bindgen]
-pub fn bloom_scene_get_bounds_min_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[0] as f64 }
+pub fn bloom_scene_get_bounds_min_x(handle: f64) -> f64 {
+    engine().scene.get_bounds(handle).0[0] as f64
+}
 #[wasm_bindgen]
-pub fn bloom_scene_get_bounds_min_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[1] as f64 }
+pub fn bloom_scene_get_bounds_min_y(handle: f64) -> f64 {
+    engine().scene.get_bounds(handle).0[1] as f64
+}
 #[wasm_bindgen]
-pub fn bloom_scene_get_bounds_min_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).0[2] as f64 }
+pub fn bloom_scene_get_bounds_min_z(handle: f64) -> f64 {
+    engine().scene.get_bounds(handle).0[2] as f64
+}
 #[wasm_bindgen]
-pub fn bloom_scene_get_bounds_max_x(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[0] as f64 }
+pub fn bloom_scene_get_bounds_max_x(handle: f64) -> f64 {
+    engine().scene.get_bounds(handle).1[0] as f64
+}
 #[wasm_bindgen]
-pub fn bloom_scene_get_bounds_max_y(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[1] as f64 }
+pub fn bloom_scene_get_bounds_max_y(handle: f64) -> f64 {
+    engine().scene.get_bounds(handle).1[1] as f64
+}
 #[wasm_bindgen]
-pub fn bloom_scene_get_bounds_max_z(handle: f64) -> f64 { engine().scene.get_bounds(handle).1[2] as f64 }
+pub fn bloom_scene_get_bounds_max_z(handle: f64) -> f64 {
+    engine().scene.get_bounds(handle).1[2] as f64
+}
 #[wasm_bindgen]
-pub fn bloom_scene_set_user_data(handle: f64, data: f64) { engine().scene.set_user_data(handle, data as i64); }
+pub fn bloom_scene_set_user_data(handle: f64, data: f64) {
+    engine().scene.set_user_data(handle, data as i64);
+}
 #[wasm_bindgen]
-pub fn bloom_scene_get_user_data(handle: f64) -> f64 { engine().scene.get_user_data(handle) as f64 }
+pub fn bloom_scene_get_user_data(handle: f64) -> f64 {
+    engine().scene.get_user_data(handle) as f64
+}
 
 // Q1: Render texture FFI (stub)
 #[wasm_bindgen]
 pub fn bloom_load_render_texture(width: f64, height: f64) -> f64 {
-    engine().textures.load_render_texture(width as u32, height as u32)
+    engine()
+        .textures
+        .load_render_texture(width as u32, height as u32)
 }
 #[wasm_bindgen]
-pub fn bloom_unload_render_texture(handle: f64) { engine().textures.unload_render_texture(handle); }
+pub fn bloom_unload_render_texture(handle: f64) {
+    engine().textures.unload_render_texture(handle);
+}
 #[wasm_bindgen]
-pub fn bloom_begin_texture_mode(_handle: f64) { /* stub */ }
+pub fn bloom_begin_texture_mode(_handle: f64) { /* stub */
+}
 #[wasm_bindgen]
-pub fn bloom_end_texture_mode() { /* stub */ }
+pub fn bloom_end_texture_mode() { /* stub */
+}
 #[wasm_bindgen]
-pub fn bloom_get_render_texture_texture(handle: f64) -> f64 { engine().textures.get_render_texture_texture(handle) }
+pub fn bloom_get_render_texture_texture(handle: f64) -> f64 {
+    engine().textures.get_render_texture_texture(handle)
+}
 
 // Q8: Water material
 #[wasm_bindgen]
-pub fn bloom_scene_set_material_water(handle: f64, wave_amp: f64, wave_speed: f64, r: f64, g: f64, b: f64, a: f64) {
-    engine().scene.set_material_water(handle, wave_amp as f32, wave_speed as f32, r as f32, g as f32, b as f32, a as f32);
+pub fn bloom_scene_set_material_water(
+    handle: f64,
+    wave_amp: f64,
+    wave_speed: f64,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    engine().scene.set_material_water(
+        handle,
+        wave_amp as f32,
+        wave_speed as f32,
+        r as f32,
+        g as f32,
+        b as f32,
+        a as f32,
+    );
 }
 
 // Q9: Spline ribbon mesh
 #[wasm_bindgen]
-pub fn bloom_gen_mesh_spline_ribbon(points_ptr: *const u8, point_count: f64, widths_ptr: *const u8, width_count: f64) -> f64 {
+pub fn bloom_gen_mesh_spline_ribbon(
+    points_ptr: *const u8,
+    point_count: f64,
+    widths_ptr: *const u8,
+    width_count: f64,
+) -> f64 {
     let n = point_count as usize;
     let wn = width_count as usize;
     let points = unsafe { std::slice::from_raw_parts(points_ptr as *const f32, n * 3) };
@@ -1642,11 +2146,23 @@ pub fn bloom_scene_pick_all(screen_x: f64, screen_y: f64, max_results: f64) -> f
     let w = eng.renderer.width() as f32;
     let h = eng.renderer.height() as f32;
     let (origin, direction) = bloom_shared::picking::screen_to_ray(
-        screen_x as f32, screen_y as f32, w, h, &inv_vp, &cam_pos,
+        screen_x as f32,
+        screen_y as f32,
+        w,
+        h,
+        &inv_vp,
+        &cam_pos,
     );
-    let results = bloom_shared::picking::raycast_scene_all(&eng.scene, &origin, &direction, max_results as usize);
+    let results = bloom_shared::picking::raycast_scene_all(
+        &eng.scene,
+        &origin,
+        &direction,
+        max_results as usize,
+    );
     let count = results.len();
-    unsafe { LAST_PICK_ALL = results; }
+    unsafe {
+        LAST_PICK_ALL = results;
+    }
     count as f64
 }
 #[wasm_bindgen]
@@ -1657,7 +2173,12 @@ pub fn bloom_pick_all_handle(index: f64) -> f64 {
 #[wasm_bindgen]
 pub fn bloom_pick_all_distance(index: f64) -> f64 {
     let i = index as usize;
-    unsafe { LAST_PICK_ALL.get(i).map(|r| r.distance as f64).unwrap_or(0.0) }
+    unsafe {
+        LAST_PICK_ALL
+            .get(i)
+            .map(|r| r.distance as f64)
+            .unwrap_or(0.0)
+    }
 }
 
 // Q2: Cursor shape
@@ -1670,13 +2191,19 @@ pub fn bloom_set_cursor_shape(shape: f64) {
 #[wasm_bindgen]
 pub fn bloom_set_clipboard_text(_text_ptr: *const u8) {}
 #[wasm_bindgen]
-pub fn bloom_get_clipboard_text() -> f64 { 0.0 }
+pub fn bloom_get_clipboard_text() -> f64 {
+    0.0
+}
 
 // E5b: File dialogs (stub)
 #[wasm_bindgen]
-pub fn bloom_open_file_dialog(_filter_ptr: *const u8, _title_ptr: *const u8) -> f64 { 0.0 }
+pub fn bloom_open_file_dialog(_filter_ptr: *const u8, _title_ptr: *const u8) -> f64 {
+    0.0
+}
 #[wasm_bindgen]
-pub fn bloom_save_file_dialog(_default_name_ptr: *const u8, _title_ptr: *const u8) -> f64 { 0.0 }
+pub fn bloom_save_file_dialog(_default_name_ptr: *const u8, _title_ptr: *const u8) -> f64 {
+    0.0
+}
 
 // ============================================================
 // Render quality toggles (individual + preset) — ticket 011
@@ -1716,11 +2243,28 @@ pub fn bloom_set_ssao_radius(world_radius: f64) {
 }
 #[wasm_bindgen]
 pub fn bloom_set_wind(dir_x: f64, dir_z: f64, amplitude: f64, frequency: f64) {
-    engine().renderer.set_wind(dir_x as f32, dir_z as f32, amplitude as f32, frequency as f32);
+    engine().renderer.set_wind(
+        dir_x as f32,
+        dir_z as f32,
+        amplitude as f32,
+        frequency as f32,
+    );
 }
 #[wasm_bindgen]
 pub fn bloom_launch_process(_cmd: f64, _args: f64, _cwd: f64) -> f64 {
     // A web page does not get to launch processes.
+    0.0
+}
+#[no_mangle]
+pub fn bloom_command_line_arg_count() -> f64 {
+    0.0
+}
+
+#[no_mangle]
+pub fn bloom_command_line_arg(_index: f64) -> f64 {
+    // `count()` is always zero on web, so this ABI-compatible sentinel is
+    // unreachable through the public helper. Web has no Perry string
+    // allocator and must not pretend a native pointer exists.
     0.0
 }
 #[wasm_bindgen]
@@ -1733,16 +2277,27 @@ pub fn bloom_get_output_scale() -> f64 {
 }
 #[wasm_bindgen]
 pub fn bloom_set_model_foliage_wind(model: f64, amount: f64) {
-    engine().renderer.set_model_foliage_wind(model.to_bits(), amount as f32);
+    engine()
+        .renderer
+        .set_model_foliage_wind(model.to_bits(), amount as f32);
 }
 #[wasm_bindgen]
 pub fn bloom_set_foliage_shadow_motion(on: f64) {
     engine().renderer.set_foliage_shadow_motion(on > 0.5);
 }
 #[wasm_bindgen]
-pub fn bloom_set_cloud_shadows(strength: f64, deck_height: f64, feature_scale: f64, drift_speed: f64) {
+pub fn bloom_set_cloud_shadows(
+    strength: f64,
+    deck_height: f64,
+    feature_scale: f64,
+    drift_speed: f64,
+) {
     engine().renderer.set_cloud_shadows(
-        strength as f32, deck_height as f32, feature_scale as f32, drift_speed as f32);
+        strength as f32,
+        deck_height as f32,
+        feature_scale as f32,
+        drift_speed as f32,
+    );
 }
 #[wasm_bindgen]
 pub fn bloom_set_ssr_enabled(on: f64) {

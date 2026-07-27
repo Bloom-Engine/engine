@@ -134,7 +134,9 @@ struct MaterialFactors {
   // y = wrap_factor (0..1, how much wrap-lambert wraps the diffuse
   //                  term — 0 is standard lambert, 1 is light fully
   //                  wrapping around to the back face),
-  // zw = reserved.
+  // z = layered-PBR material-record version, w = lobe feature mask.
+  // Both are exact u32 bit patterns stored in f32 lanes so this UBO
+  // remains 80 bytes. Use the accessors below; do not numeric-cast.
   foliage_params: vec4<f32>,
 };
 
@@ -149,6 +151,16 @@ struct MaterialFactors {
 @group(2) @binding(8)  var occ_tex:          texture_2d<f32>;
 @group(2) @binding(9)  var occ_samp:         sampler;
 @group(2) @binding(10) var<uniform> material: MaterialFactors;
+
+const BLOOM_BOUND_MATERIAL_RECORD_VERSION: u32 = 1u;
+
+fn bloom_bound_material_record_version() -> u32 {
+  return bitcast<u32>(material.foliage_params.z);
+}
+
+fn bloom_bound_material_lobe_mask() -> u32 {
+  return bitcast<u32>(material.foliage_params.w);
+}
 
 // Binding 11 is reserved for per-material user params. Shaders that
 // declare user params do so via:

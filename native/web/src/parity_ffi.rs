@@ -114,8 +114,8 @@ pub fn bloom_create_texture_array_scratch(
     if w == 0 || h == 0 {
         return 0.0;
     }
-    let layers_count = (layer_count as u32)
-        .min(bloom_shared::renderer::material_system::MAX_TEXTURE_ARRAY_LAYERS);
+    let layers_count =
+        (layer_count as u32).min(bloom_shared::renderer::material_system::MAX_TEXTURE_ARRAY_LAYERS);
     if layers_count == 0 {
         return 0.0;
     }
@@ -336,8 +336,78 @@ pub fn bloom_profiler_hist_gpu_us(i: f64) -> f64 {
 #[wasm_bindgen]
 pub fn bloom_set_present_mode(_mode: f64) {}
 
+#[wasm_bindgen]
+pub fn bloom_get_present_mode() -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_material_binding_capabilities() -> String {
+    engine().renderer.material_binding_report_json()
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_imported_refraction_mode() -> f64 {
+    engine().renderer.imported_refraction_mode_code() as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_transparency_composition_mode(mode: f64) {
+    engine()
+        .renderer
+        .set_transparency_composition_mode(mode as u32);
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_transparency_composition_mode() -> f64 {
+    engine().renderer.transparency_composition_mode_code() as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_active_transparency_composition_mode() -> f64 {
+    engine()
+        .renderer
+        .active_transparency_composition_mode_code() as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_material_binding_tier_override(tier: f64) -> f64 {
+    engine()
+        .renderer
+        .set_material_binding_tier_override(tier as u32) as u8 as f64
+}
+
 /// Screenshot readback needs a blocking `device.poll(Wait)`, which a
 /// single-threaded wasm host cannot do. Right-click-save or the DOM
 /// `canvas.toBlob` path (from JS) are the web equivalents.
 #[wasm_bindgen]
 pub fn bloom_take_screenshot(_path: f64) {}
+
+#[wasm_bindgen]
+pub fn bloom_capture_frame_to_png(_path: f64) -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_capture_debug_intermediates(_path: f64) -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_capture_frame_ready() -> f64 {
+    0.0
+}
+
+/// Browser builds have no direct filesystem path for qualification output.
+#[wasm_bindgen]
+pub fn bloom_write_quality_telemetry(
+    _path: f64,
+    _warmup_frames: f64,
+    _measured_frames: f64,
+    _fixed_timestep: f64,
+    _quality_preset: f64,
+    _render_scale: f64,
+    _measurement_wall_ms: f64,
+) -> f64 {
+    0.0
+}
