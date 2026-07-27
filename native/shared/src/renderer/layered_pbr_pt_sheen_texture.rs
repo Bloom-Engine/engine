@@ -271,12 +271,14 @@ mod tests {
         let mut clearcoat_records = None;
         let mut sheen_records = None;
         let mut iridescence_records = None;
+        let mut anisotropy_records = None;
         assert!(!super::super::texture::append_record(
             &mut records,
             &mut specular_records,
             &mut clearcoat_records,
             &mut sheen_records,
             &mut iridescence_records,
+            &mut anisotropy_records,
             0,
             Default::default(),
             4,
@@ -294,6 +296,7 @@ mod tests {
             &mut clearcoat_records,
             &mut sheen_records,
             &mut iridescence_records,
+            &mut anisotropy_records,
             1,
             material,
             4,
@@ -302,6 +305,7 @@ mod tests {
         assert!(specular_records.is_none());
         assert!(clearcoat_records.is_none());
         assert!(iridescence_records.is_none());
+        assert!(anisotropy_records.is_none());
         let records = sheen_records.unwrap();
         assert_eq!(records.len(), 2);
         assert!(!records[0].active());

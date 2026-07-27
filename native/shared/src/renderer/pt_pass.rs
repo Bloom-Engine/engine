@@ -86,10 +86,14 @@ impl Renderer {
         let layered_iridescence_textures = layered_active
             && self.pt_texture_arrays_enabled
             && self.pt_layered_iridescence_texture_active();
+        let layered_anisotropy_textures = layered_active
+            && self.pt_texture_arrays_enabled
+            && self.pt_layered_anisotropy_texture_active();
         let layered_uv1 = (layered_textures
             || layered_clearcoat_textures
             || layered_sheen_textures
-            || layered_iridescence_textures)
+            || layered_iridescence_textures
+            || layered_anisotropy_textures)
             && self.pt_layered_uv1_active();
         let layered_pipeline_variant = layered_sheen as usize
             | ((layered_anisotropy as usize) << 1)
@@ -98,13 +102,15 @@ impl Renderer {
             | ((layered_uv1 as usize) << 4)
             | ((layered_clearcoat_textures as usize) << 5)
             | ((layered_sheen_textures as usize) << 6)
-            | ((layered_iridescence_textures as usize) << 7);
+            | ((layered_iridescence_textures as usize) << 7)
+            | ((layered_anisotropy_textures as usize) << 8);
         let layered_resource_variant = layered_sheen as usize
             | ((layered_textures as usize) << 1)
             | ((layered_uv1 as usize) << 2)
             | ((layered_clearcoat_textures as usize) << 3)
             | ((layered_sheen_textures as usize) << 4)
-            | ((layered_iridescence_textures as usize) << 5);
+            | ((layered_iridescence_textures as usize) << 5)
+            | ((layered_anisotropy_textures as usize) << 6);
         if layered_active {
             self.ensure_pt_layered_resources();
         }

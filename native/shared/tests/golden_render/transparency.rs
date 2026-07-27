@@ -659,6 +659,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
             MaterialTextureTransform,
         )>,
+        anisotropy_texture: Option<(&[u8], MaterialTextureTransform)>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
         let Some((mut eng, _adapter)) = try_engine_rt()? else {
             return Ok(None);
@@ -735,6 +736,16 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
                 transform: thickness_transform,
             });
         }
+        if let (Some(material), Some((texture, transform))) = (layered.as_mut(), anisotropy_texture)
+        {
+            let texture_index = eng.renderer.register_texture_kind(2, 2, texture, false);
+            material.anisotropy_texture = Some(MaterialTextureBinding {
+                source_texture_index: 0,
+                source_image_index: 0,
+                runtime_texture_idx: Some(texture_index),
+                transform,
+            });
+        }
         build_pt_scene(&mut eng);
         // Replace the material target with the same cube carrying an explicit
         // per-face tangent. The base PT shader ignores this attribute, while
@@ -780,6 +791,9 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
                 || material
                     .iridescence_thickness_texture
                     .is_some_and(|binding| binding.transform.tex_coord == 1)
+                || material
+                    .anisotropy_texture
+                    .is_some_and(|binding| binding.transform.tex_coord == 1)
         });
         let secondary_uvs = uses_uv1.then(|| {
             vertices
@@ -808,7 +822,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, specular_textures, None, None, None)
+        render_variant_with_layered_textures(layered, specular_textures, None, None, None, None)
     }
 
     fn render_variant_with_clearcoat_textures(
@@ -820,7 +834,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, clearcoat_textures, None, None)
+        render_variant_with_layered_textures(layered, None, clearcoat_textures, None, None, None)
     }
 
     fn render_variant_with_sheen_textures(
@@ -832,7 +846,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None, sheen_textures, None)
+        render_variant_with_layered_textures(layered, None, None, sheen_textures, None, None)
     }
 
     fn render_variant_with_iridescence_textures(
@@ -844,13 +858,20 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None, None, iridescence_textures)
+        render_variant_with_layered_textures(layered, None, None, None, iridescence_textures, None)
+    }
+
+    fn render_variant_with_anisotropy_texture(
+        layered: Option<MaterialLayeredPbr>,
+        anisotropy_texture: Option<(&[u8], MaterialTextureTransform)>,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
+        render_variant_with_layered_textures(layered, None, None, None, None, anisotropy_texture)
     }
 
     fn render_variant(
         layered: Option<MaterialLayeredPbr>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None, None, None)
+        render_variant_with_layered_textures(layered, None, None, None, None, None)
     }
 
     fn mean_display_luminance(rgba: &[u8]) -> f64 {
@@ -1158,6 +1179,57 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     }))
     .expect("rotated anisotropy PT variant initializes")
     .expect("same ray-query adapter remains available");
+    let neutral_anisotropy_channels = [
+        255, 128, 255, 255, 255, 128, 255, 255, 255, 128, 255, 255, 255, 128, 255, 255,
+    ];
+    let directional_anisotropy_channels = [
+        255, 128, 255, 255, 128, 255, 48, 255, 128, 255, 48, 255, 255, 128, 255, 255,
+    ];
+    let textured_anisotropy_material = MaterialLayeredPbr {
+        anisotropy_authored: true,
+        anisotropy_strength: 0.75,
+        anisotropy_rotation: 0.3,
+        ..Default::default()
+    };
+    let (textured_anisotropy_neutral, textured_anisotropy_neutral_paths) =
+        render_variant_with_anisotropy_texture(
+            Some(textured_anisotropy_material),
+            Some((&neutral_anisotropy_channels, Default::default())),
+        )
+        .expect("neutral textured anisotropy PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (textured_anisotropy, textured_anisotropy_paths) = render_variant_with_anisotropy_texture(
+        Some(textured_anisotropy_material),
+        Some((&directional_anisotropy_channels, Default::default())),
+    )
+    .expect("textured anisotropy PT variant initializes")
+    .expect("same ray-query adapter remains available");
+    let (textured_anisotropy_rotated, textured_anisotropy_rotated_paths) =
+        render_variant_with_anisotropy_texture(
+            Some(textured_anisotropy_material),
+            Some((
+                &directional_anisotropy_channels,
+                MaterialTextureTransform {
+                    rotation: std::f32::consts::FRAC_PI_2,
+                    ..Default::default()
+                },
+            )),
+        )
+        .expect("rotated textured anisotropy PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (textured_anisotropy_uv1, textured_anisotropy_uv1_paths) =
+        render_variant_with_anisotropy_texture(
+            Some(textured_anisotropy_material),
+            Some((
+                &directional_anisotropy_channels,
+                MaterialTextureTransform {
+                    tex_coord: 1,
+                    ..Default::default()
+                },
+            )),
+        )
+        .expect("UV1 textured anisotropy PT variant initializes")
+        .expect("same ray-query adapter remains available");
     let (iridescence, iridescence_paths) = render_variant(Some(MaterialLayeredPbr {
         iridescence_authored: true,
         iridescence_factor: 1.0,
@@ -1289,6 +1361,10 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     assert!(base_paths
         .contains("\"path_tracing_iridescence_texture_specialization_initialized\":false"));
     assert!(base_paths.contains("\"path_tracing_iridescence_texture_sidecar_allocated_bytes\":0"));
+    assert!(
+        base_paths.contains("\"path_tracing_anisotropy_texture_specialization_initialized\":false")
+    );
+    assert!(base_paths.contains("\"path_tracing_anisotropy_texture_sidecar_allocated_bytes\":0"));
     assert!(neutral_paths.contains("\"path_tracing_specialization_initialized\":false"));
     assert!(neutral_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false"));
     assert!(neutral_paths.contains("\"path_tracing_active_instance_count\":1"));
@@ -1468,6 +1544,56 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     assert!(anisotropy_rotated_paths
         .contains("\"path_tracing_anisotropy_specialization_initialized\":true"));
     assert!(anisotropy_rotated_paths.contains("\"sheen_lut_initialized\":false"));
+    let textured_anisotropy_supported = textured_anisotropy_neutral_paths
+        .contains("\"path_tracing_anisotropy_texture_specialization_initialized\":true");
+    if textured_anisotropy_supported {
+        // KHR_materials_anisotropy stores a centered direction in UNORM
+        // RG. Eight-bit 128 decodes to 0.50196 rather than exact 0.5, so the
+        // closest representable +X control uses an image-tolerance contract
+        // instead of the byte-exact neutral contract used by scalar channels.
+        let neutral_parity =
+            calculate_diff_metrics(&anisotropy, &textured_anisotropy_neutral, W, H);
+        assert!(
+            neutral_parity.mean_rgb <= 0.5 && neutral_parity.ssim >= 0.995,
+            "nearest representable neutral anisotropy texture drifted from scalar transport: \
+             {neutral_parity:?}"
+        );
+        assert!(textured_anisotropy_paths
+            .contains("\"path_tracing_anisotropy_texture_specialization_initialized\":true"));
+        assert!(textured_anisotropy_paths
+            .contains("\"path_tracing_anisotropy_specialization_initialized\":true"));
+        assert!(textured_anisotropy_rotated_paths
+            .contains("\"path_tracing_anisotropy_texture_specialization_initialized\":true"));
+        assert!(textured_anisotropy_paths
+            .contains("\"path_tracing_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_anisotropy_paths
+            .contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_anisotropy_paths
+            .contains("\"path_tracing_sheen_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_anisotropy_paths
+            .contains("\"path_tracing_iridescence_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_anisotropy_paths
+            .contains("\"path_tracing_anisotropy_texture_sidecar_record_bytes\":64"));
+        assert!(!textured_anisotropy_paths
+            .contains("\"path_tracing_anisotropy_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_anisotropy_uv1_paths
+            .contains("\"path_tracing_uv1_specialization_initialized\":true"));
+        assert!(!textured_anisotropy_uv1_paths
+            .contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0"));
+    } else {
+        assert_eq!(
+            base, textured_anisotropy_neutral,
+            "an adapter without PT texture arrays must preserve anisotropy fallback"
+        );
+        assert_eq!(
+            base, textured_anisotropy_uv1,
+            "an adapter without PT texture arrays must not partially enable anisotropy UV1"
+        );
+        assert!(textured_anisotropy_neutral_paths
+            .contains("\"path_tracing_anisotropy_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_anisotropy_uv1_paths
+            .contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0"));
+    }
     assert!(iridescence_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(iridescence_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
     assert!(
@@ -1597,6 +1723,26 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         rotation_response.mean_rgb >= 0.02,
         "anisotropy rotation did not turn the path-traced highlight: {rotation_response:?}"
     );
+    if textured_anisotropy_supported {
+        assert_transport_response(
+            "UV0 textured anisotropy",
+            &textured_anisotropy_neutral,
+            &textured_anisotropy,
+        );
+        let transform_response =
+            calculate_diff_metrics(&textured_anisotropy, &textured_anisotropy_rotated, W, H);
+        assert!(
+            transform_response.mean_rgb >= 0.02,
+            "anisotropy texture UV rotation did not turn the path-traced response: \
+             {transform_response:?}"
+        );
+        let uv_set_response =
+            calculate_diff_metrics(&textured_anisotropy, &textured_anisotropy_uv1, W, H);
+        assert!(
+            uv_set_response.mean_rgb >= 0.02,
+            "anisotropy UV1 did not select retained secondary coordinates: {uv_set_response:?}"
+        );
+    }
     assert_transport_response("iridescence", &base, &iridescence);
     if textured_iridescence_supported {
         assert_transport_response(

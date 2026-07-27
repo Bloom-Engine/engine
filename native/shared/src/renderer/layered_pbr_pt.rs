@@ -7,16 +7,25 @@
 
 use super::*;
 
+#[path = "layered_pbr_pt_anisotropy_texture.rs"]
+mod anisotropy_texture;
 #[path = "layered_pbr_pt_clearcoat_texture.rs"]
 mod clearcoat_texture;
 #[path = "layered_pbr_pt_iridescence_texture.rs"]
 mod iridescence_texture;
+#[path = "layered_pbr_pt_kernel.rs"]
+mod kernel;
 #[path = "layered_pbr_pt_runtime.rs"]
 mod runtime;
 #[path = "layered_pbr_pt_sheen_texture.rs"]
 mod sheen_texture;
 #[path = "layered_pbr_pt_texture.rs"]
 mod texture;
+pub(super) use anisotropy_texture::PtAnisotropyTextureCpu;
+use anisotropy_texture::{
+    PT_ANISOTROPY_TEXTURE_BINDINGS_WGSL, PT_ANISOTROPY_TEXTURE_DISABLED_WGSL,
+    PT_ANISOTROPY_TEXTURE_RECORD_BYTES,
+};
 pub(super) use clearcoat_texture::PtClearcoatTextureCpu;
 use clearcoat_texture::{
     PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL, PT_CLEARCOAT_TEXTURE_DISABLED_WGSL,
@@ -27,6 +36,7 @@ use iridescence_texture::{
     PT_IRIDESCENCE_TEXTURE_BINDINGS_WGSL, PT_IRIDESCENCE_TEXTURE_DISABLED_WGSL,
     PT_IRIDESCENCE_TEXTURE_RECORD_BYTES,
 };
+use kernel::layered_kernel_variant;
 pub(super) use sheen_texture::PtSheenTextureCpu;
 use sheen_texture::{
     PT_SHEEN_TEXTURE_BINDINGS_WGSL, PT_SHEEN_TEXTURE_DISABLED_WGSL, PT_SHEEN_TEXTURE_RECORD_BYTES,
@@ -550,6 +560,9 @@ fn pt_layered_primary_surface(
             material, hit.instance_custom_data, attributes.uv, secondary_uv,
         );
         material = pt_layered_apply_sheen_textures(
+            material, hit.instance_custom_data, attributes.uv, secondary_uv,
+        );
+        material = pt_layered_apply_anisotropy_texture(
             material, hit.instance_custom_data, attributes.uv, secondary_uv,
         );
         material = pt_layered_apply_iridescence_textures(
@@ -1369,104 +1382,6 @@ fn pt_sample_layered_undercoat(
 }
 "#;
 
-fn replace_once(source: &mut String, needle: &str, replacement: &str) {
-    let count = source.matches(needle).count();
-    assert_eq!(
-        count, 1,
-        "layered PT specialization expected one source anchor, found {count}: {needle}"
-    );
-    *source = source.replacen(needle, replacement, 1);
-}
-
-fn layered_kernel_variant(base: &str) -> String {
-    let mut source = base.to_owned();
-    replace_once(
-        &mut source,
-        "    var rough_cur = mr0.g;",
-        "    var rough_cur = mr0.g;\n\
-         \x20   let layered_primary = pt_layered_primary_surface(p0, n0);\n\
-         \x20   var layered_cur = layered_primary.material;\n\
-         \x20   var layered_tangent_cur = layered_primary.tangent;",
-    );
-    replace_once(
-        &mut source,
-        "    let use_restir = u.ext.w == 1u && u.cfg.x >= 2.0;",
-        "    let use_restir = u.ext.w == 1u && u.cfg.x >= 2.0\n        \
-         && !pt_layered_has_transport(layered_cur);",
-    );
-    replace_once(
-        &mut source,
-        "    var radiance = direct_light(\n\
-         \x20       p0 + n0 * 0.02, n0, sun_r2, view_cur,\n\
-         \x20       albedo0, rough_cur, metal_cur, !use_restir,\n\
-         \x20   );",
-        "    var radiance = pt_layered_direct_light(\n\
-         \x20       p0 + n0 * 0.02, n0, layered_tangent_cur, sun_r2, view_cur,\n\
-         \x20       albedo0, rough_cur, metal_cur, !use_restir, layered_cur,\n\
-         \x20   );",
-    );
-    replace_once(
-        &mut source,
-        "        let s = sample_brdf(n_cur, view_cur, alb_cur, rough_cur, metal_cur);",
-        "        let s = pt_sample_layered_brdf(\n\
-         \x20           n_cur, layered_tangent_cur, view_cur,\n\
-         \x20           alb_cur, rough_cur, metal_cur, layered_cur,\n\
-         \x20       );",
-    );
-    replace_once(
-        &mut source,
-        "        radiance += throughput * direct_light(\n\
-         \x20           hit_p, n_hit, rand_2f(), -dir,\n\
-         \x20           alb_hit, inst.mat_params.x, inst.mat_params.y, true,\n\
-         \x20       );",
-        "        var layered_hit = pt_layered_materials[hit.instance_custom_data];\n\
-         \x20       if (PT_HAS_LAYERED_TEXTURES && inst.geo.z > 0u) {\n\
-         \x20           let layered_attributes = fetch_hit_attrs(\n\
-         \x20               inst.geo, hit.primitive_index, hit.barycentrics,\n\
-         \x20           );\n\
-         \x20           let layered_secondary_uv = pt_layered_hit_uv1(\n\
-         \x20               inst.geo, hit.primitive_index, hit.barycentrics,\n\
-         \x20           );\n\
-         \x20           layered_hit = pt_layered_apply_textures(\n\
-         \x20               layered_hit, hit.instance_custom_data,\n\
-         \x20               layered_attributes.uv, layered_secondary_uv,\n\
-         \x20           );\n\
-         \x20           layered_hit = pt_layered_apply_clearcoat_textures(\n\
-         \x20               layered_hit, hit.instance_custom_data,\n\
-         \x20               layered_attributes.uv, layered_secondary_uv,\n\
-         \x20           );\n\
-         \x20           layered_hit = pt_layered_apply_sheen_textures(\n\
-         \x20               layered_hit, hit.instance_custom_data,\n\
-         \x20               layered_attributes.uv, layered_secondary_uv,\n\
-         \x20           );\n\
-         \x20           layered_hit = pt_layered_apply_iridescence_textures(\n\
-         \x20               layered_hit, hit.instance_custom_data,\n\
-         \x20               layered_attributes.uv, layered_secondary_uv,\n\
-         \x20           );\n\
-         \x20       }\n\
-         \x20       var layered_tangent_hit = vec4<f32>(0.0);\n\
-         \x20       if (pt_layered_has_anisotropy(layered_hit)) {\n\
-         \x20           layered_tangent_hit = pt_layered_hit_tangent(\n\
-         \x20               inst.geo, hit.primitive_index, hit.barycentrics,\n\
-         \x20               hit.object_to_world, n_hit,\n\
-         \x20           );\n\
-         \x20       }\n\
-         \x20       radiance += throughput * pt_layered_direct_light(\n\
-         \x20           hit_p, n_hit, layered_tangent_hit, rand_2f(), -dir,\n\
-         \x20           alb_hit, inst.mat_params.x, inst.mat_params.y, true, layered_hit,\n\
-         \x20       );",
-    );
-    replace_once(
-        &mut source,
-        "        metal_cur = inst.mat_params.y;\n        view_cur = -dir;",
-        "        metal_cur = inst.mat_params.y;\n\
-         \x20       layered_cur = layered_hit;\n\
-         \x20       layered_tangent_cur = layered_tangent_hit;\n\
-         \x20       view_cur = -dir;",
-    );
-    source
-}
-
 impl Renderer {
     /// Materialize the specialized pipeline and sidecar on the first frame
     /// where active layered instances actually reach the path tracer.
@@ -1484,14 +1399,21 @@ impl Renderer {
             self.pt_texture_arrays_enabled && self.pt_layered_sheen_texture_active();
         let iridescence_textures =
             self.pt_texture_arrays_enabled && self.pt_layered_iridescence_texture_active();
-        let any_textures = textures || clearcoat_textures || sheen_textures || iridescence_textures;
+        let anisotropy_textures =
+            self.pt_texture_arrays_enabled && self.pt_layered_anisotropy_texture_active();
+        let any_textures = textures
+            || clearcoat_textures
+            || sheen_textures
+            || iridescence_textures
+            || anisotropy_textures;
         let uv1 = any_textures && self.pt_layered_uv1_active();
         let resource_variant = sheen as usize
             | ((textures as usize) << 1)
             | ((uv1 as usize) << 2)
             | ((clearcoat_textures as usize) << 3)
             | ((sheen_textures as usize) << 4)
-            | ((iridescence_textures as usize) << 5);
+            | ((iridescence_textures as usize) << 5)
+            | ((anisotropy_textures as usize) << 6);
         let pipeline_variant = sheen as usize
             | ((anisotropy as usize) << 1)
             | ((iridescence as usize) << 2)
@@ -1499,7 +1421,21 @@ impl Renderer {
             | ((uv1 as usize) << 4)
             | ((clearcoat_textures as usize) << 5)
             | ((sheen_textures as usize) << 6)
-            | ((iridescence_textures as usize) << 7);
+            | ((iridescence_textures as usize) << 7)
+            | ((anisotropy_textures as usize) << 8);
+        if self.pt_layered.layouts.len() <= resource_variant {
+            self.pt_layered
+                .layouts
+                .resize_with(resource_variant + 1, || None);
+            self.pt_layered
+                .bind_groups
+                .resize_with(resource_variant + 1, || None);
+        }
+        if self.pt_layered.pipelines.len() <= pipeline_variant {
+            self.pt_layered
+                .pipelines
+                .resize_with(pipeline_variant + 1, || None);
+        }
         if sheen {
             self.ensure_scene_sheen_albedo_lut();
         }
@@ -1592,6 +1528,20 @@ impl Renderer {
                     count: None,
                 });
             }
+            if anisotropy_textures {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(
+                            PT_ANISOTROPY_TEXTURE_RECORD_BYTES,
+                        ),
+                    },
+                    count: None,
+                });
+            }
             self.pt_layered.layouts[resource_variant] = Some(self.device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
                     label: Some(if any_textures {
@@ -1617,7 +1567,7 @@ impl Renderer {
             let base_kernel = pt_kernel_variant(query_diagnostics);
             let layered_kernel = layered_kernel_variant(base_kernel.as_ref());
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
                 pt_fault_constants(fault.as_deref()),
                 layered_kernel,
@@ -1642,6 +1592,11 @@ impl Renderer {
                     PT_IRIDESCENCE_TEXTURE_BINDINGS_WGSL
                 } else {
                     PT_IRIDESCENCE_TEXTURE_DISABLED_WGSL
+                },
+                if anisotropy_textures {
+                    PT_ANISOTROPY_TEXTURE_BINDINGS_WGSL
+                } else {
+                    PT_ANISOTROPY_TEXTURE_DISABLED_WGSL
                 },
                 if uv1 {
                     PT_LAYERED_UV1_BINDINGS_WGSL
@@ -1737,7 +1692,10 @@ impl Renderer {
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }));
-            self.pt_layered.bind_groups = std::array::from_fn(|_| None);
+            self.pt_layered
+                .bind_groups
+                .iter_mut()
+                .for_each(|group| *group = None);
             self.pt_layered.dirty = true;
         }
         if self.pt_layered.dirty {
@@ -1765,7 +1723,10 @@ impl Renderer {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }));
-                self.pt_layered.bind_groups = std::array::from_fn(|_| None);
+                self.pt_layered
+                    .bind_groups
+                    .iter_mut()
+                    .for_each(|group| *group = None);
                 self.pt_layered.texture_dirty = true;
             }
             if self.pt_layered.texture_dirty {
@@ -1798,7 +1759,10 @@ impl Renderer {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }));
-                self.pt_layered.bind_groups = std::array::from_fn(|_| None);
+                self.pt_layered
+                    .bind_groups
+                    .iter_mut()
+                    .for_each(|group| *group = None);
                 self.pt_layered.clearcoat_texture_dirty = true;
             }
             if self.pt_layered.clearcoat_texture_dirty {
@@ -1831,7 +1795,10 @@ impl Renderer {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }));
-                self.pt_layered.bind_groups = std::array::from_fn(|_| None);
+                self.pt_layered
+                    .bind_groups
+                    .iter_mut()
+                    .for_each(|group| *group = None);
                 self.pt_layered.sheen_texture_dirty = true;
             }
             if self.pt_layered.sheen_texture_dirty {
@@ -1864,7 +1831,10 @@ impl Renderer {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }));
-                self.pt_layered.bind_groups = std::array::from_fn(|_| None);
+                self.pt_layered
+                    .bind_groups
+                    .iter_mut()
+                    .for_each(|group| *group = None);
                 self.pt_layered.iridescence_texture_dirty = true;
             }
             if self.pt_layered.iridescence_texture_dirty {
@@ -1874,6 +1844,42 @@ impl Renderer {
                     bytemuck::cast_slice(&self.pt_layered.iridescence_texture_records),
                 );
                 self.pt_layered.iridescence_texture_dirty = false;
+            }
+        }
+        if anisotropy_textures {
+            let needed = PT_ANISOTROPY_TEXTURE_RECORD_BYTES
+                * self.pt_layered.anisotropy_texture_records.len() as u64;
+            let recreate = self
+                .pt_layered
+                .anisotropy_texture_buffer
+                .as_ref()
+                .is_none_or(|buffer| buffer.size() < needed);
+            if recreate {
+                let capacity = self
+                    .pt_layered
+                    .anisotropy_texture_records
+                    .len()
+                    .next_power_of_two() as u64;
+                self.pt_layered.anisotropy_texture_buffer =
+                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("pt_anisotropy_texture_instances"),
+                        size: PT_ANISOTROPY_TEXTURE_RECORD_BYTES * capacity,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                self.pt_layered
+                    .bind_groups
+                    .iter_mut()
+                    .for_each(|group| *group = None);
+                self.pt_layered.anisotropy_texture_dirty = true;
+            }
+            if self.pt_layered.anisotropy_texture_dirty {
+                self.queue.write_buffer(
+                    self.pt_layered.anisotropy_texture_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(&self.pt_layered.anisotropy_texture_records),
+                );
+                self.pt_layered.anisotropy_texture_dirty = false;
             }
         }
         if self.pt_layered.bind_groups[resource_variant].is_none() {
@@ -1944,6 +1950,17 @@ impl Renderer {
                     resource: self
                         .pt_layered
                         .iridescence_texture_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                });
+            }
+            if anisotropy_textures {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self
+                        .pt_layered
+                        .anisotropy_texture_buffer
                         .as_ref()
                         .unwrap()
                         .as_entire_binding(),

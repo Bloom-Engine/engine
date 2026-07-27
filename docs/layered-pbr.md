@@ -213,17 +213,19 @@ without adding a resource, and only a scene with scalar sheen creates the
 Resolved `KHR_materials_specular` factor/color,
 `KHR_materials_clearcoat` factor/roughness, and `KHR_materials_sheen`
 color/roughness textures, plus `KHR_materials_iridescence` factor/thickness
-textures, are the first qualified texture-bearing PT slices.
+and `KHR_materials_anisotropy` direction/strength textures, are the first
+qualified texture-bearing PT slices.
 They use the renderer's existing texture array, reconstruct the committed
 triangle UV at both primary and bounce hits, and apply the exact authored
 offset/rotation/scale transform. Specular reads factor from alpha and converts
 color from sRGB; clearcoat reads factor from red and roughness from green;
 sheen converts color from sRGB and reads roughness from alpha; iridescence
 reads factor from red and maps thickness texture green across the authored
-minimum/maximum range, matching glTF. Each lobe owns a separate, independently
-lazy 64-byte-per-instance transform sidecar, so adding a new lobe does not grow
-prior texture records and none of the paths change the established 96-byte
-scalar ABI or scalar-only bind groups.
+minimum/maximum range; anisotropy reconstructs its tangent-space direction
+from centered red/green and scales strength by blue, matching glTF. Each lobe
+owns a separate, independently lazy 64-byte-per-instance transform sidecar, so
+adding a new lobe does not grow prior texture records and none of the paths
+change the established 96-byte scalar ABI or scalar-only bind groups.
 
 Resolved UV1 textures additionally use an aligned storage sidecar that is
 backfilled from retained or skinned CPU geometry only when a qualified texture
@@ -302,10 +304,10 @@ instance lazily backfills a parallel 96-byte-per-instance scalar record.
 Only a frame that both enables PT and contains one of those records compiles
 the group-2 pipeline and allocates/binds its storage buffer. Base-only scenes
 retain the established shader source, pipeline, bindings, instance record, and
-GPU cost. Qualified specular, clearcoat, sheen, and iridescence textures
-independently backfill separate 64-byte texture-transform records and select
-independent pipeline/resource bits. Textured sheen reuses the scalar path's
-lazily allocated directional-albedo LUT. UV1 adds a separate
+GPU cost. Qualified specular, clearcoat, sheen, iridescence, and anisotropy
+textures independently backfill separate 64-byte texture-transform records
+and select independent pipeline/resource bits. Textured sheen reuses the
+scalar path's lazily allocated directional-albedo LUT. UV1 adds a separate
 8-byte-per-vertex stream and its own pipeline/layout bit only on
 texture-array-capable adapters; no texture record, binding, UV interpolation,
 or texture fetch exists in the base pipeline or scalar-only resource layouts.
@@ -321,12 +323,14 @@ spectral image change between 180 nm and 520 nm films. Telemetry verifies that
 sheen, anisotropy, iridescence, and texture code variants remain independently
 lazy. The texture corpus additionally requires white UV0 specular, clearcoat,
 sheen, and iridescence textures to be byte-identical to their scalar
-transport, varying factor/color/roughness/thickness textures to produce
-visible bounded responses, 90-degree texture transforms to turn those
-responses, and UV1 to select independently retained coordinates on capable
-adapters. Adapters without PT texture arrays remain byte-identical to the base
-path and allocate no texture or UV1 storage. Anisotropy textures plus
-clearcoat-normal transport remain the next reviewed slices.
+transport, and the closest UNORM8 +X anisotropy direction to stay within the
+documented quantization tolerance. Varying factor/color/roughness/thickness
+and anisotropy direction/strength textures must produce visible bounded
+responses, 90-degree texture transforms must turn those responses, and UV1
+must select independently retained coordinates on capable adapters. Adapters
+without PT texture arrays remain byte-identical to the base path and allocate
+no texture or UV1 storage. Clearcoat-normal transport remains the next
+reviewed texture slice.
 
 ## Public authoring API
 

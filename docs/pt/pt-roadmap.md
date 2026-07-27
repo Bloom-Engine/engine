@@ -82,14 +82,16 @@ multi-bounce colour bleed.
   select independently lazy, constant-folded code variants; only sheen adds
   the 32 KiB LUT. The base kernel, shared GI record, bindings, and cost remain
   unchanged. Resolved specular-factor/color, clearcoat-factor/roughness,
-  sheen-color/roughness, and iridescence-factor/thickness textures use the
-  existing texture array plus separate lazy 64-byte transform records, with
-  transformed UV0/UV1 reconstruction at primary and bounce hits. UV1 is an
-  aligned 8-byte-per-vertex sidecar retained for static and skinned geometry
-  only when selected. White textures are byte-identical to the corresponding
-  scalar path. Missing UV1 streams, anisotropy textures, clearcoat normal maps,
-  and other unqualified texture-bearing lobes continue to use exact established
-  PT semantics until their complete transport is qualified.
+  sheen-color/roughness, iridescence-factor/thickness, and
+  anisotropy-direction/strength textures use the existing texture array plus
+  separate lazy 64-byte transform records, with transformed UV0/UV1
+  reconstruction at primary and bounce hits. UV1 is an aligned
+  8-byte-per-vertex sidecar retained for static and skinned geometry only when
+  selected. Neutral scalar-channel textures are byte-identical to the
+  corresponding scalar path; the centered UNORM8 anisotropy direction uses an
+  explicit quantization tolerance. Missing UV1 streams, clearcoat normal maps,
+  and other unqualified texture-bearing lobes continue to use exact
+  established PT semantics until their complete transport is qualified.
 - Emissive from material data (VFX/muzzle flashes become real light in PT).
 
 ### Tier 3 — PT-3/PT-4: gameplay
