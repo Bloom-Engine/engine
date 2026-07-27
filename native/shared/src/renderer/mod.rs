@@ -50,6 +50,8 @@ mod shadow_pass;
 mod sorted_transparency;
 mod ssgi_pass;
 mod ssr_pass;
+#[cfg(not(target_arch = "wasm32"))]
+mod temporal_diagnostics;
 mod temporal_history;
 mod temporal_reactive;
 mod texture_store;
@@ -681,6 +683,8 @@ pub struct Renderer {
     pub taa_pipeline: wgpu::RenderPipeline,
     pub taa_layout: wgpu::BindGroupLayout,
     pub taa_uniform_buffer: wgpu::Buffer,
+    #[cfg(not(target_arch = "wasm32"))]
+    temporal_diagnostics: Option<temporal_diagnostics::TaaDiagnosticResources>,
     /// Lazy TAA variant that consumes imported-transparency coverage.
     /// Opaque and TAA-disabled frames never compile or bind it.
     taa_reactive_pipeline: Option<wgpu::RenderPipeline>,
@@ -7675,6 +7679,8 @@ impl Renderer {
             taa_pipeline,
             taa_layout,
             taa_uniform_buffer,
+            #[cfg(not(target_arch = "wasm32"))]
+            temporal_diagnostics: None,
             taa_reactive_pipeline: None,
             taa_reactive_layout: None,
             taa_frame_index: 0,

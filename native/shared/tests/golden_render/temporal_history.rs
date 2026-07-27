@@ -342,3 +342,78 @@ fn common_camera_cut_reset_invalidates_every_temporal_owner() {
     assert!(after.contains("\"ssgi_probe_valid\":true"));
     assert!(after.contains("\"exposure_valid\":true"));
 }
+
+#[test]
+fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    eng.renderer.set_taa_enabled(true);
+    let draw_frame = |eng: &mut EngineState, camera_x: f32| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(13.0, 18.0, 26.0, 255.0);
+        r.begin_mode_3d(
+            4.0 + camera_x,
+            3.0,
+            6.0,
+            camera_x,
+            0.5,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            45.0,
+            0.0,
+        );
+        r.draw_plane(0.0, 0.0, 0.0, 10.0, 10.0, 120.0, 120.0, 125.0, 255.0);
+        r.draw_sphere(0.0, 0.75, 0.0, 0.75, 220.0, 228.0, 240.0, 255.0);
+    };
+    for _ in 0..6 {
+        eng.begin_frame();
+        draw_frame(&mut eng, 0.0);
+        eng.end_frame();
+    }
+
+    let directory =
+        std::env::temp_dir().join(format!("bloom-taa-diagnostics-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    eng.begin_frame();
+    draw_frame(&mut eng, 0.25);
+    eng.end_frame();
+
+    for name in [
+        "taa-rejection-reason",
+        "taa-motion",
+        "taa-reprojected-uv",
+        "taa-temporal-confidence",
+    ] {
+        let path = directory.join(format!("{name}.png"));
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("missing diagnostic {path:?}: {error}"));
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(
+            bytes.len() > 64,
+            "diagnostic {path:?} is unexpectedly empty"
+        );
+        if name == "taa-rejection-reason" {
+            let pixels = image::open(&path).unwrap().to_rgb8();
+            let first = pixels.get_pixel(0, 0);
+            assert!(
+                pixels.pixels().any(|pixel| pixel != first),
+                "rejection map must distinguish at least two per-pixel outcomes"
+            );
+        }
+    }
+    assert!(eng.renderer.pending_quality_capture_dir.is_none());
+    let paths = eng.renderer.quality_runtime_paths_json();
+    assert!(paths.contains("\"diagnostic_persistent_bytes\":0"));
+    assert!(paths.contains("\"diagnostic_capture_passes\":1"));
+    assert!(paths.contains("\"diagnostic_resources_live\":false"));
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept TAA diagnostics at {directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

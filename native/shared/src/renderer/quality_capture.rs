@@ -14,6 +14,7 @@ use super::Renderer;
 enum ReadbackKind {
     Hdr,
     Depth,
+    Rgba8,
 }
 
 pub(super) struct QualityReadback {
@@ -128,6 +129,18 @@ fn depth_rgb(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) ->
             };
             let gray = (normalized * 255.0 + 0.5) as u8;
             rgb.extend_from_slice(&[gray, gray, gray]);
+        }
+    }
+    rgb
+}
+
+fn rgba8_rgb(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for row in 0..height {
+        let row_start = (row * padded_bytes_per_row) as usize;
+        for column in 0..width {
+            let offset = row_start + (column * 4) as usize;
+            rgb.extend_from_slice(&data[offset..offset + 3]);
         }
     }
     rgb
@@ -274,7 +287,7 @@ impl Renderer {
         );
 
         let quality_capture_dir = self.pending_quality_capture_dir.clone();
-        let quality_readbacks = if quality_capture_dir.is_some() {
+        let mut quality_readbacks = if quality_capture_dir.is_some() {
             match self.record_quality_resources_by_name(
                 encoder,
                 &super::graph::QUALITY_CAPTURE_RESOURCE_NAMES,
@@ -288,6 +301,23 @@ impl Renderer {
         } else {
             Vec::new()
         };
+        if quality_capture_dir.is_some() {
+            if let Some(textures) = self.taa_diagnostic_textures() {
+                for (&name, texture) in super::temporal_diagnostics::TAA_DIAGNOSTIC_NAMES
+                    .iter()
+                    .zip(textures)
+                {
+                    quality_readbacks.push(self.record_quality_texture(
+                        encoder,
+                        texture,
+                        name,
+                        ReadbackKind::Rgba8,
+                        wgpu::TextureAspect::All,
+                        4,
+                    ));
+                }
+            }
+        }
         FrameReadback {
             staging,
             width,
@@ -352,6 +382,7 @@ impl Renderer {
             );
         }
         self.pending_quality_capture_dir.take();
+        self.release_temporal_diagnostics();
         self.screenshot_requested = false;
     }
 
@@ -398,6 +429,12 @@ impl Renderer {
                     readback.padded_bytes_per_row,
                 ),
                 ReadbackKind::Depth => depth_rgb(
+                    &data,
+                    readback.width,
+                    readback.height,
+                    readback.padded_bytes_per_row,
+                ),
+                ReadbackKind::Rgba8 => rgba8_rgb(
                     &data,
                     readback.width,
                     readback.height,
@@ -566,6 +603,26 @@ impl Renderer {
         });
         out.push_str(",\"camera_cut_active\":");
         out.push_str(if self.temporal_camera_cut_active {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"diagnostic_persistent_bytes\":0");
+        let diagnostic_texture_bytes = u64::from(self.surface_config.width)
+            * u64::from(self.surface_config.height)
+            * super::temporal_diagnostics::TAA_DIAGNOSTIC_NAMES.len() as u64
+            * 4;
+        let diagnostic_row_bytes = u64::from((self.surface_config.width * 4 + 255) & !255);
+        let diagnostic_readback_bytes = diagnostic_row_bytes
+            * u64::from(self.surface_config.height)
+            * super::temporal_diagnostics::TAA_DIAGNOSTIC_NAMES.len() as u64;
+        out.push_str(",\"diagnostic_capture_texture_bytes\":");
+        out.push_str(&diagnostic_texture_bytes.to_string());
+        out.push_str(",\"diagnostic_capture_readback_bytes\":");
+        out.push_str(&diagnostic_readback_bytes.to_string());
+        out.push_str(",\"diagnostic_capture_passes\":1");
+        out.push_str(",\"diagnostic_resources_live\":");
+        out.push_str(if self.taa_diagnostic_textures().is_some() {
             "true"
         } else {
             "false"

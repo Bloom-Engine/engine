@@ -762,6 +762,10 @@ impl Renderer {
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..3, 0..1);
             drop(pass);
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.pending_quality_capture_dir.is_some() {
+                self.record_taa_diagnostics(encoder, &bg, self.temporal_reactive_active);
+            }
             self.taa_history_valid = true;
             self.taa_history_written = true;
         }

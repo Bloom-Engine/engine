@@ -163,7 +163,7 @@ pub(super) fn create_taa_bind_group_layout(
     })
 }
 
-fn taa_reactive_shader_source() -> String {
+pub(super) fn taa_reactive_shader_source() -> String {
     let source = TAA_SHADER_WGSL.replacen(
         "@group(0) @binding(8) var velocity_samp: sampler;",
         "@group(0) @binding(8) var velocity_samp: sampler;\n\

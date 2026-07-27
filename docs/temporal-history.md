@@ -130,7 +130,32 @@ from current data.
 Telemetry exposes `camera_cut_pending`, `camera_cut_active`, `ssao_frames`, and
 `ssao_index` under `temporal_history`.
 
+## Per-pixel TAA/TSR diagnostics
+
+`captureDebugIntermediates(directory)` now adds four surface-resolution PNGs
+without changing the production TAA shader or its output:
+
+- `taa-rejection-reason.png`: gray = invalid-history seed, red = reprojected
+  UV outside the prior frame, cyan = reactive coverage, magenta =
+  disocclusion, yellow = neighborhood clamp, blue = motion weighting, and
+  green = accepted history;
+- `taa-motion.png`: red/green encode signed velocity around 0.5 and blue
+  encodes magnitude;
+- `taa-reprojected-uv.png`: red/green encode the previous-frame UV and blue is
+  one only when that coordinate is valid;
+- `taa-temporal-confidence.png`: red = local luma variance, green = history
+  clamp magnitude, and blue = the retained-history contribution.
+
+The maps are produced by one separate four-target pass only for a native debug
+capture, after the measured quality window. Normal frames execute no extra
+GPU pass, bind group, shader branch, or texture allocation; the CPU only checks
+the existing pending-capture flag. The four RGBA8 targets cost exactly
+`surface_width * surface_height * 16` bytes during capture; readback cost is
+four 256-byte-row-aligned RGBA8 buffers. Both are released after PNG encoding,
+so persistent diagnostic memory is zero. These values and the one-pass count
+are reported under `temporal_history.diagnostic_*`.
+
 ## Remaining #135 work
 
-Continue with per-pixel rejection diagnostics and the sequence-based motion
-corpus.
+Extend shared reason/confidence semantics to SSR/GI/PT where their
+representations match, then build the sequence-based motion corpus.

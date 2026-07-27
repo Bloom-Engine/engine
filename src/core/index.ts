@@ -293,7 +293,7 @@ export function captureFrameToPng(path: string): boolean {
   return bloom_capture_frame_to_png(path) !== 0.0;
 }
 
-/** Queue named HDR/depth/shadow diagnostics for the next captured frame. */
+/** Queue HDR/depth/shadow and per-pixel TAA diagnostics for the next frame. */
 export function captureDebugIntermediates(directory: string): boolean {
   return bloom_capture_debug_intermediates(directory) !== 0.0;
 }
