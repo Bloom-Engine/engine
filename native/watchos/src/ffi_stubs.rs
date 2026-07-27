@@ -345,6 +345,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_path_tracing(_p0: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_reset_temporal_history() {
+}
 #[no_mangle] pub extern "C" fn bloom_path_tracing_supported() -> f64 {
     0.0
 }

@@ -50,6 +50,7 @@ mod shadow_pass;
 mod sorted_transparency;
 mod ssgi_pass;
 mod ssr_pass;
+mod temporal_history;
 mod temporal_reactive;
 mod texture_store;
 mod transmitted_shadows;
@@ -748,6 +749,10 @@ pub struct Renderer {
     /// prev_mvp compositions must use so jitter cancels in the
     /// shader's (curr_ndc - prev_ndc).
     pub(crate) velocity_ref_vp: [[f32; 4]; 4],
+    /// An explicit cut pins the next camera as its own previous frame.
+    temporal_camera_cut_pending: bool,
+    /// True for the cut frame so retained scene motion can be zeroed.
+    temporal_camera_cut_active: bool,
     /// Fog color (rgb) — blended into scene where fog factor > 0.
     pub fog_color: [f32; 3],
     /// EN-005 Phase 4 — `true` once the user has called
@@ -7688,6 +7693,8 @@ impl Renderer {
             prev_view_matrix: IDENTITY_MAT4,
             current_jitter_ndc: [0.0, 0.0],
             velocity_ref_vp: IDENTITY_MAT4,
+            temporal_camera_cut_pending: false,
+            temporal_camera_cut_active: false,
             fog_color: [0.7, 0.75, 0.82],
             fog_color_user_override: false,
             fog_density: 0.0,
@@ -9915,13 +9922,6 @@ impl Renderer {
         self.tonemap_kind = kind;
     }
 
-    /// Manual exposure multiplier. Applied when auto_exposure
-    /// is off. 1.0 = no change. 2.0 = twice as bright. Clamp is
-    /// [0, +∞) — negative silently becomes 0.
-    pub fn set_manual_exposure(&mut self, value: f32) {
-        self.manual_exposure = value.max(0.0);
-    }
-
     /// Fog color that distant geometry fades to (rgb, 0-1).
     pub fn set_fog_color(&mut self, r: f32, g: f32, b: f32) {
         self.fog_color = [r, g, b];
@@ -11721,6 +11721,7 @@ impl Renderer {
         self.temporal_reactive_active = false;
         self.taa_history_written = false;
         self.exposure_history_written = false;
+        self.temporal_camera_cut_active = false;
         // PT-6 — normally consumed by rebuild_instance_data (mem::take);
         // this clear covers frames where the accel path is skipped
         // (PT and Lumen both off) so the registry can't grow unbounded.
@@ -13032,6 +13033,23 @@ impl Renderer {
         self.current_inv_proj_matrix = mat4_invert(proj);
         self.current_inv_vp_matrix = mat4_invert(vp);
         self.current_camera_pos = [pos_x, pos_y, pos_z];
+
+        if self.temporal_camera_cut_pending {
+            // A discontinuous camera has no meaningful predecessor. Pin every
+            // camera-space motion owner to this new view; effect histories were
+            // already invalidated by reset_temporal_history().
+            self.prev_vp_matrix = vp;
+            self.prev_proj_matrix_unjittered = self.current_proj_matrix_unjittered;
+            self.prev_view_matrix = view;
+            self.pt_prev_vp = mat4_multiply(
+                self.current_proj_matrix_unjittered,
+                self.current_view_matrix,
+            );
+            self.material_system.reset_motion_history();
+            self.skin_prev_palettes.clear();
+            self.temporal_camera_cut_pending = false;
+            self.temporal_camera_cut_active = true;
+        }
 
         // EN-022 fix — compose the velocity reference VP: the previous
         // frame's UNJITTERED projection with the CURRENT frame's jitter

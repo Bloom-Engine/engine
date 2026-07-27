@@ -292,3 +292,53 @@ fn path_tracing_mode_transitions_reset_incompatible_history() {
     eng.renderer.set_path_tracing(0);
     assert_eq!(eng.renderer.path_tracing_sample_count(), 0);
 }
+
+#[test]
+fn common_camera_cut_reset_invalidates_every_temporal_owner() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    eng.renderer.set_taa_enabled(true);
+    eng.renderer.set_ssao_enabled(true);
+    eng.renderer.set_ssr_enabled(true);
+    eng.renderer.set_ssgi_enabled(true);
+    eng.renderer.set_auto_exposure(true);
+
+    let draw_frame = |eng: &mut EngineState, fov: f32| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(13.0, 18.0, 26.0, 255.0);
+        r.begin_mode_3d(4.0, 3.0, 6.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, fov, 0.0);
+        r.draw_plane(0.0, 0.0, 0.0, 10.0, 10.0, 120.0, 120.0, 125.0, 255.0);
+    };
+    for _ in 0..2 {
+        eng.begin_frame();
+        draw_frame(&mut eng, 45.0);
+        eng.end_frame();
+    }
+    let before = eng.renderer.quality_runtime_paths_json();
+    assert!(before.contains("\"ssr_valid\":true"));
+    assert!(before.contains("\"ssgi_probe_valid\":true"));
+    assert!(before.contains("\"taa_valid\":true"));
+    assert!(before.contains("\"exposure_valid\":true"));
+
+    eng.renderer.reset_temporal_history();
+    let reset = eng.renderer.quality_runtime_paths_json();
+    assert!(reset.contains("\"ssr_valid\":false"));
+    assert!(reset.contains("\"ssgi_probe_valid\":false"));
+    assert!(reset.contains("\"taa_valid\":false"));
+    assert!(reset.contains("\"exposure_valid\":false"));
+    assert!(reset.contains("\"pt_samples\":0,\"pt_index\":0"));
+    assert!(reset.contains("\"ssao_frames\":0,\"ssao_index\":0"));
+    assert!(reset.contains("\"camera_cut_pending\":true,\"camera_cut_active\":false"));
+
+    eng.begin_frame();
+    draw_frame(&mut eng, 70.0);
+    eng.end_frame();
+    let after = eng.renderer.quality_runtime_paths_json();
+    assert!(after.contains("\"camera_cut_pending\":false,\"camera_cut_active\":true"));
+    assert!(after.contains("\"taa_valid\":true"));
+    assert!(after.contains("\"ssr_valid\":true"));
+    assert!(after.contains("\"ssgi_probe_valid\":true"));
+    assert!(after.contains("\"exposure_valid\":true"));
+}

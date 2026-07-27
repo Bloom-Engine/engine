@@ -64,6 +64,7 @@ declare function bloom_set_manual_exposure(value: number): void;
 declare function bloom_set_env_intensity(intensity: number): void;
 declare function bloom_set_ssgi_enabled(on: number): void;
 declare function bloom_set_path_tracing(mode: number): void;
+declare function bloom_reset_temporal_history(): void;
 declare function bloom_path_tracing_supported(): number;
 declare function bloom_set_ssgi_intensity(intensity: number): void;
 declare function bloom_set_ssgi_radius(radius: number): void;
@@ -592,6 +593,14 @@ export function setSsgiEnabled(on: boolean): void {
  */
 export function setPathTracing(mode: number): void {
   bloom_set_path_tracing(mode);
+}
+
+/**
+ * Reset every temporal rendering history after a camera cut, teleport,
+ * discontinuous FOV change, or world load. Call before the next beginMode3D.
+ */
+export function resetTemporalHistory(): void {
+  bloom_reset_temporal_history();
 }
 
 /** True when the device can hardware-path-trace (ray query + TLAS). */

@@ -465,6 +465,15 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_reset_temporal_history — call before the next 3D camera
+        // after a cut, teleport, FOV discontinuity, or world load.
+        #[no_mangle]
+        pub extern "C" fn bloom_reset_temporal_history() {
+            $crate::ffi::guard("bloom_reset_temporal_history", move || {
+                engine().renderer.reset_temporal_history();
+            })
+        }
+
         // bloom_path_tracing_supported — 1.0 when the device can trace
         // (same ray-query requirement as Lumen's HW backend), else 0.0.
         #[no_mangle]

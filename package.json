@@ -1822,6 +1822,11 @@
           "returns": "void"
         },
         {
+          "name": "bloom_reset_temporal_history",
+          "params": [],
+          "returns": "void"
+        },
+        {
           "name": "bloom_path_tracing_supported",
           "params": [],
           "returns": "f64"

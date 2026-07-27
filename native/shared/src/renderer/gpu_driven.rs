@@ -754,6 +754,9 @@ impl Renderer {
         scene: &mut crate::scene::SceneGraph,
         use_occlusion: bool,
     ) {
+        if self.temporal_camera_cut_active {
+            scene.reset_motion_history();
+        }
         let vp = self.current_vp_matrix;
         let prev_vp = self.velocity_ref_vp;
         let occlusion = use_occlusion.then_some(&self.occlusion);

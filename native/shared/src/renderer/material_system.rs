@@ -1025,24 +1025,20 @@ impl MaterialSystem {
         self.prev_vp = prev_vp;
     }
 
-    /// EN-022 fix — `begin_mode_3d` overrides the velocity reference
-    /// with the previous frame's UNJITTERED VP re-jittered with the
-    /// CURRENT frame's offsets, so prev_mvp cancels the TAA jitter
-    /// exactly. (reset_draw_slot runs at begin_frame, before the
-    /// current frame's jitter is known.)
+    /// EN-022: apply current jitter to the previous unjittered VP so
+    /// motion vectors exclude jitter (called after `reset_draw_slot`).
     pub fn set_velocity_reference_vp(&mut self, vp: [[f32; 4]; 4]) {
         self.prev_vp = vp;
     }
 
-    /// Phase 5 — set/replace `user_params` for a specific material. The
-    /// next dispatch of this handle binds a per-material BindGroup with
-    /// the given bytes uploaded to `@group(2) @binding(11)`. Materials
-    /// that never receive a `set_user_params` call keep using the
-    /// default zero-initialised UBO.
-    ///
-    /// `params.len()` must be ≤ 256 bytes (ABI §1.4 cap). The buffer
-    /// is allocated lazily on first call per handle and reused on
-    /// subsequent updates. Pass an empty slice to revert to the default.
+    /// A camera cut has no meaningful object-motion predecessor. Fresh draws
+    /// fall back to their current model, producing zero cut-frame velocity.
+    pub(super) fn reset_motion_history(&mut self) {
+        self.prev_models.clear();
+    }
+
+    /// Set/replace ≤256 B of per-material user parameters. Empty input
+    /// restores the shared zero UBO; storage is otherwise reused.
     pub fn set_user_params(
         &mut self,
         device: &wgpu::Device,

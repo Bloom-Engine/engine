@@ -54,6 +54,10 @@ pub fn bloom_set_taa_enabled(on: f64) {
     engine().renderer.set_taa_enabled(on != 0.0);
 }
 #[wasm_bindgen]
+pub fn bloom_reset_temporal_history() {
+    engine().renderer.reset_temporal_history();
+}
+#[wasm_bindgen]
 pub fn bloom_set_occlusion_culling(on: f64) {
     engine().renderer.occlusion.enabled = on != 0.0;
 }

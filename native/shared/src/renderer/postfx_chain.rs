@@ -1079,6 +1079,11 @@ impl Renderer {
 }
 
 impl Renderer {
+    /// Manual exposure multiplier used while auto-exposure is disabled.
+    pub fn set_manual_exposure(&mut self, value: f32) {
+        self.manual_exposure = value.max(0.0);
+    }
+
     /// Toggle auto-exposure. The first enabled frame measures and seeds the
     /// current scene instead of adapting from a value frozen while disabled.
     pub fn set_auto_exposure(&mut self, enabled: bool) {

@@ -114,8 +114,23 @@ kernel already receives as `size.w`:
 
 Telemetry exposes `temporal_history.pt_samples` and `pt_index`.
 
+## Camera cuts and discontinuities
+
+Games call `bloom_reset_temporal_history()` before the next 3D camera after a
+camera cut, teleport, discontinuous FOV/projection change, or world load. The
+same operation is available as `Renderer::reset_temporal_history()`.
+
+The reset invalidates TAA/TSR, SSAO, SSR, SSGI, PT, and auto-exposure without
+reallocating their storage. When the next camera begins, it is pinned as its
+own previous camera; material, skin-palette, and retained-scene transform
+history are also pinned for that frame. This prevents a cut from creating
+full-screen velocity or motion-blur streaks while every temporal filter seeds
+from current data.
+
+Telemetry exposes `camera_cut_pending`, `camera_cut_active`, `ssao_frames`, and
+`ssao_index` under `temporal_history`.
+
 ## Remaining #135 work
 
-The next slice should add the common camera-cut/FOV-change reset API, then
-continue with per-pixel rejection diagnostics and the sequence-based motion
+Continue with per-pixel rejection diagnostics and the sequence-based motion
 corpus.

@@ -554,6 +554,22 @@ impl Renderer {
         out.push_str(&self.pt_accum_count.to_string());
         out.push_str(",\"pt_index\":");
         out.push_str(&self.pt_accum_idx.to_string());
+        out.push_str(",\"ssao_frames\":");
+        out.push_str(&self.ssao_history_frame.to_string());
+        out.push_str(",\"ssao_index\":");
+        out.push_str(&self.ssao_history_idx.to_string());
+        out.push_str(",\"camera_cut_pending\":");
+        out.push_str(if self.temporal_camera_cut_pending {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"camera_cut_active\":");
+        out.push_str(if self.temporal_camera_cut_active {
+            "true"
+        } else {
+            "false"
+        });
         out.push('}');
         out.push_str(",\"transparent_gi\":{");
         out.push_str("\"enabled\":");

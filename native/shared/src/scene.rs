@@ -475,11 +475,13 @@ impl SceneGraph {
         }
     }
 
+    pub(crate) fn reset_motion_history(&mut self) {
+        self.nodes
+            .iter_mut()
+            .for_each(|(_, n)| n.prev_transform = n.transform);
+    }
+
     pub fn create_node(&mut self) -> f64 {
-        // New nodes default to `cast_shadow = true`, so the first
-        // `set_transform` + `update_geometry` will dirty shadows
-        // anyway. Bumping here too costs nothing and keeps the
-        // invalidation story simple.
         self.shadow_version = self.shadow_version.wrapping_add(1);
         self.tlas_version = self.tlas_version.wrapping_add(1);
         self.nodes.alloc(SceneNode::new())
@@ -495,9 +497,7 @@ impl SceneGraph {
             if node.visible {
                 self.tlas_version = self.tlas_version.wrapping_add(1);
             }
-            // Recycle the node's 6-slot card block. The freed node's GPU
-            // buffers/BLAS/SDF drop with the SceneNode itself (wgpu
-            // releases them once in-flight work completes).
+            // Recycle its card block; owned GPU resources drop with the node.
             if let Some(first) = node.card_first_slot {
                 self.free_card_blocks.push(first);
             }
