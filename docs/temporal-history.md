@@ -155,14 +155,19 @@ four 256-byte-row-aligned RGBA8 buffers. Both are released after PNG encoding,
 so persistent diagnostic memory is zero. These values and the one-pass count
 are reported under `temporal_history.diagnostic_*`.
 
-## Camera-motion sequence gate
+## Temporal sequence gates
 
 The headless GPU corpus now evaluates a sequence rather than only a final
 still. It isolates TAA/TSR from unrelated temporal effects and covers:
 
 - a camera cut combined with a discontinuous FOV change;
 - a 1.2-radian fast rotation followed by 24 stationary recovery frames;
-- an eight-frame subpixel pan.
+- an eight-frame subpixel pan;
+- retained opaque rigid motion;
+- retained transparent motion through reactive TAA coverage;
+- cached skinned locomotion plus joint-palette deformation;
+- a `1.0 -> 0.5` render-scale step;
+- a `320x192 -> 256x256` target resize.
 
 The cut frame must be byte-identical to a fresh-history frame at the same
 camera. Fast-rotation recovery is compared with the mean of a settled
@@ -172,13 +177,29 @@ camera. Fast-rotation recovery is compared with the mean of a settled
 cycle's mean variation is bounded to 2 RGB levels. Slow-pan pairwise variation
 is bounded to 4 RGB levels with at most 3% coherent outliers.
 
+The rigid, reactive, and skinned content sequences use the same recovery gate
+and include a negative control requiring a visibly different final pose. A
+motion trail may cover at most 2% of pixels after four frames, severe
+`>64/255` residue must settle below 0.5% within four frames, and the settled
+jitter cycle must vary by no more than 2 RGB levels. The skinned sequence uses
+the production cached-model draw, keyed previous palette, world locomotion,
+and two-joint deformation paths.
+
+Render-scale changes must produce a first frame byte-identical to a freshly
+seeded history at the new scale. Resize changes must have no `>32/255`
+outliers against a fresh target-size seed, with mean RGB error at most 0.5 and
+maximum channel error at most 32.
+
 Each run reports temporal SSIM, mean variation, coherent and severe outlier
 fractions, ghost-trail duration, and the diagnostic rejection-reason ratio.
 These are relative sequence gates, so they do not require a GPU-family-specific
-still-image baseline.
+still-image baseline. The capture-only diagnostic test also requires real
+off-screen, reactive, and neighborhood-clamp classifications from the
+production TAA inputs, preventing an unexercised diagnostic shader from
+silently passing.
 
 ## Remaining #135 work
 
 Extend shared reason/confidence semantics to SSR/GI/PT where their
-representations match, then add rigid/skinned/alpha-tested/emissive,
-transparent, dynamic-resolution, and resize sequences.
+representations match, then add alpha-tested foliage, emissive,
+interior-to-bright-exterior, and refractive motion sequences.

@@ -1,5 +1,77 @@
 use super::*;
 
+fn severe_pixel_fraction(reference: &[u8], candidate: &[u8]) -> f64 {
+    let severe = reference
+        .chunks_exact(4)
+        .zip(candidate.chunks_exact(4))
+        .filter(|(a, b)| (0..3).any(|channel| a[channel].abs_diff(b[channel]) > 64))
+        .count();
+    severe as f64 / (reference.len() / 4) as f64
+}
+
+fn average_rgba(frames: &[Vec<u8>]) -> Vec<u8> {
+    assert!(!frames.is_empty());
+    let mut sum = vec![0u32; frames[0].len()];
+    for frame in frames {
+        for (sum, value) in sum.iter_mut().zip(frame) {
+            *sum += u32::from(*value);
+        }
+    }
+    let count = frames.len() as u32;
+    sum.into_iter()
+        .map(|sum| ((sum + count / 2) / count) as u8)
+        .collect()
+}
+
+fn evaluate_motion_recovery(label: &str, old_pose: &[u8], frames: &[Vec<u8>]) {
+    let stable = average_rgba(&frames[8..]);
+    let movement = calculate_diff_metrics(old_pose, &stable, W, H);
+    let recovery = frames[..8]
+        .iter()
+        .map(|frame| calculate_diff_metrics(&stable, frame, W, H))
+        .collect::<Vec<_>>();
+    let severe = frames[..8]
+        .iter()
+        .map(|frame| severe_pixel_fraction(&stable, frame))
+        .collect::<Vec<_>>();
+    let trail_frames = severe
+        .iter()
+        .enumerate()
+        .find(|(index, _)| severe[*index..].iter().all(|fraction| *fraction <= 0.005))
+        .map(|(index, _)| index)
+        .unwrap_or(severe.len());
+    let stable_mean = frames[8..]
+        .iter()
+        .map(|frame| calculate_diff_metrics(&stable, frame, W, H).mean_rgb)
+        .sum::<f64>()
+        / (frames.len() - 8) as f64;
+    eprintln!(
+        "temporal-corpus {label} movement_mean={:.4} initial_mean={:.4} frame4_mean={:.4} \
+         frame4_outliers={:.4}% trail_frames={trail_frames} \
+         stable_flicker={stable_mean:.4}",
+        movement.mean_rgb,
+        recovery[0].mean_rgb,
+        recovery[4].mean_rgb,
+        recovery[4].outlier_pixel_fraction * 100.0,
+    );
+    assert!(
+        trail_frames <= 4,
+        "{label} left severe motion trails beyond four frames"
+    );
+    assert!(
+        movement.mean_rgb >= 1.0 && movement.outlier_pixel_fraction >= 0.01,
+        "{label} negative control did not produce visible object motion"
+    );
+    assert!(
+        recovery[4].outlier_pixel_fraction <= 0.02,
+        "{label} coherent trail covered over 2% after four frames"
+    );
+    assert!(
+        stable_mean <= 2.0,
+        "{label} did not settle to a stable jitter-cycle estimate"
+    );
+}
+
 #[test]
 fn ssr_history_lifetime_is_independent_from_the_taa_frame_counter() {
     let Some(mut eng) = try_engine() else {
@@ -350,6 +422,28 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
         return;
     };
     eng.renderer.set_taa_enabled(true);
+    eng.renderer.set_ssao_enabled(false);
+    eng.renderer.set_ssr_enabled(false);
+    eng.renderer.set_ssgi_enabled(false);
+    eng.renderer.set_bloom_enabled(false);
+    eng.renderer.set_shadows_enabled(false);
+    let (reactive_vertices, reactive_indices) = cube_verts(0.7, [0.1, 0.8, 1.0, 0.95]);
+    let reactive_node = eng.scene.create_node();
+    eng.scene
+        .update_geometry(reactive_node, reactive_vertices, reactive_indices);
+    eng.scene.set_transform(
+        reactive_node,
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.25, 0.0, 1.0],
+        ],
+    );
+    eng.scene
+        .set_material_gltf_alpha(reactive_node, MaterialAlphaMode::Blend, 0.0, false);
+    eng.scene
+        .set_material_color(reactive_node, 0.1, 0.8, 1.0, 0.95);
     let draw_frame = |eng: &mut EngineState, camera_x: f32| {
         let r = &mut eng.renderer;
         r.set_clear_color(13.0, 18.0, 26.0, 255.0);
@@ -441,6 +535,10 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
                 "motion capture must expose off-screen history"
             );
             assert!(
+                counts[2] > 0,
+                "transparent coverage must appear as a reactive rejection"
+            );
+            assert!(
                 counts[4] > 0,
                 "motion capture must exercise history clamping"
             );
@@ -460,15 +558,6 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
 
 #[test]
 fn camera_motion_sequence_bounds_ghosting_flicker_and_cut_residue() {
-    fn severe_pixel_fraction(reference: &[u8], candidate: &[u8]) -> f64 {
-        let severe = reference
-            .chunks_exact(4)
-            .zip(candidate.chunks_exact(4))
-            .filter(|(a, b)| (0..3).any(|channel| a[channel].abs_diff(b[channel]) > 64))
-            .count();
-        severe as f64 / (reference.len() / 4) as f64
-    }
-
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
         return;
@@ -537,16 +626,7 @@ fn camera_motion_sequence_bounds_ghosting_flicker_and_cut_residue() {
     for _ in 0..24 {
         fast_rotation.push(capture(&mut eng, new_angle, 42.0));
     }
-    let mut stable_sum = vec![0u32; fast_rotation[0].len()];
-    for frame in &fast_rotation[8..] {
-        for (sum, value) in stable_sum.iter_mut().zip(frame) {
-            *sum += u32::from(*value);
-        }
-    }
-    let stable_reference = stable_sum
-        .into_iter()
-        .map(|sum| ((sum + 8) / 16) as u8)
-        .collect::<Vec<_>>();
+    let stable_reference = average_rgba(&fast_rotation[8..]);
     let convergence = fast_rotation[..8]
         .iter()
         .map(|frame| calculate_diff_metrics(&stable_reference, frame, W, H))
@@ -634,5 +714,279 @@ fn camera_motion_sequence_bounds_ghosting_flicker_and_cut_residue() {
     assert!(
         max_outliers <= 0.03,
         "slow-pan coherent flicker exceeded 3% of pixels"
+    );
+}
+
+#[test]
+fn retained_rigid_and_reactive_motion_sequences_bound_trails() {
+    fn transform(x: f32, angle: f32) -> [[f32; 4]; 4] {
+        let (sin, cos) = angle.sin_cos();
+        [
+            [cos, 0.0, -sin, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [sin, 0.0, cos, 0.0],
+            [x, 1.0, 0.0, 1.0],
+        ]
+    }
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(true);
+    r.set_render_scale(1.0);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+    r.set_transparency_composition_mode(0);
+
+    let (vertices, indices) = cube_verts(0.9, [0.95, 0.08, 0.04, 1.0]);
+    let node = eng.scene.create_node();
+    eng.scene.update_geometry(node, vertices, indices);
+    eng.scene.set_material_pbr(node, 0.2, 0.35);
+    eng.scene.set_material_color(node, 0.95, 0.08, 0.04, 1.0);
+
+    let draw_scene = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(7.0, 10.0, 20.0, 255.0);
+        r.begin_mode_3d(0.0, 2.2, 6.5, 0.0, 0.8, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.add_directional_light(-0.4, -1.0, -0.25, 1.0, 0.95, 0.88, 2.2);
+        r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 30.0, 38.0, 52.0, 255.0);
+        r.draw_cube(0.0, 1.1, -1.8, 5.0, 3.2, 0.35, 30.0, 170.0, 235.0, 255.0);
+    };
+    let advance = |eng: &mut EngineState, frames: u32| {
+        for _ in 0..frames {
+            eng.begin_frame();
+            draw_scene(eng);
+            eng.end_frame();
+        }
+    };
+    let capture = |eng: &mut EngineState| render(eng, 1, draw_scene).2;
+    let run_motion = |eng: &mut EngineState, node: f64| {
+        eng.scene.set_transform(node, transform(-1.6, -0.7));
+        eng.renderer.reset_temporal_history();
+        advance(eng, 8);
+        let old_pose = capture(eng);
+        eng.scene.set_transform(node, transform(1.6, 0.9));
+        let mut frames = Vec::new();
+        for _ in 0..24 {
+            frames.push(capture(eng));
+        }
+        (old_pose, frames)
+    };
+
+    let (opaque_old, opaque) = run_motion(&mut eng, node);
+    evaluate_motion_recovery("rigid-opaque", &opaque_old, &opaque);
+
+    eng.scene
+        .set_material_gltf_alpha(node, MaterialAlphaMode::Blend, 0.0, false);
+    eng.scene.set_material_color(node, 0.1, 0.8, 1.0, 0.95);
+    let (reactive_old, reactive) = run_motion(&mut eng, node);
+    evaluate_motion_recovery("rigid-reactive", &reactive_old, &reactive);
+    assert!(
+        eng.renderer
+            .quality_runtime_paths_json()
+            .contains("\"temporal_reactive\":{\"enabled\":true,\"active\":true"),
+        "transparent retained motion did not select reactive TAA coverage"
+    );
+}
+
+#[test]
+fn cached_skinned_motion_sequence_bounds_animation_trails() {
+    const HANDLE: u64 = 0x7AA5_0001;
+    const PALETTE_KEY: u64 = 0x7AA5_1001;
+    const IDENTITY: [[f32; 4]; 4] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    fn palette(bend: f32) -> [[[f32; 4]; 4]; 2] {
+        let (sin, cos) = bend.sin_cos();
+        [
+            IDENTITY,
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, cos, sin, 0.0],
+                [0.0, -sin, cos, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        ]
+    }
+
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(true);
+    r.set_render_scale(1.0);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+
+    let (mut vertices, indices) = cube_verts(0.9, [0.95, 0.12, 0.035, 1.0]);
+    for vertex in &mut vertices {
+        let upper = vertex.position[1] > 0.0;
+        vertex.joints = if upper {
+            [1.0, 0.0, 0.0, 0.0]
+        } else {
+            [0.0; 4]
+        };
+        vertex.weights = [1.0, 0.0, 0.0, 0.0];
+    }
+    assert!(eng.renderer.cache_model_if_static(
+        HANDLE,
+        &[MeshData {
+            vertices,
+            secondary_tex_coords: None,
+            indices,
+            texture_idx: None,
+            normal_texture_idx: None,
+            metallic_roughness_texture_idx: None,
+            emissive_texture_idx: None,
+            occlusion_texture_idx: None,
+            metallic_factor: 0.15,
+            roughness_factor: 0.32,
+            emissive_factor: [0.0; 3],
+            alpha_mode: MaterialAlphaMode::Opaque,
+            alpha_cutoff: 0.0,
+            alpha_coverage_mips: false,
+            double_sided: false,
+            transmission: Default::default(),
+            layered_pbr: Default::default(),
+        }]
+    ));
+    assert!(
+        eng.renderer.is_model_skinned(HANDLE),
+        "weighted temporal test mesh did not select the cached skinned path"
+    );
+
+    let draw_scene = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(7.0, 10.0, 20.0, 255.0);
+        r.begin_mode_3d(0.0, 2.2, 6.5, 0.0, 0.8, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.add_directional_light(-0.4, -1.0, -0.25, 1.0, 0.95, 0.88, 2.2);
+        r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 30.0, 38.0, 52.0, 255.0);
+        r.draw_cube(0.0, 1.1, -1.8, 5.0, 3.2, 0.35, 30.0, 170.0, 235.0, 255.0);
+    };
+    let draw_pose = |eng: &mut EngineState, x: f32, bend: f32, facing: f32| {
+        draw_scene(eng);
+        let (rot_sin, rot_cos) = facing.sin_cos();
+        eng.renderer.set_joint_matrices_scaled(
+            PALETTE_KEY,
+            &palette(bend),
+            1.0,
+            [x, 1.0, 0.0],
+            rot_sin,
+            rot_cos,
+        );
+        eng.renderer
+            .draw_model_cached_skinned(HANDLE, [0.0; 3], 1.0, [1.0; 4]);
+    };
+    let capture_pose = |eng: &mut EngineState, x: f32, bend: f32, facing: f32| {
+        render(eng, 1, |eng| draw_pose(eng, x, bend, facing)).2
+    };
+
+    eng.renderer.reset_temporal_history();
+    for _ in 0..8 {
+        capture_pose(&mut eng, -1.5, -0.55, -0.45);
+    }
+    let old_pose = capture_pose(&mut eng, -1.5, -0.55, -0.45);
+    let mut frames = Vec::new();
+    for _ in 0..24 {
+        frames.push(capture_pose(&mut eng, 1.5, 0.75, 0.6));
+    }
+    evaluate_motion_recovery("cached-skinned", &old_pose, &frames);
+}
+
+#[test]
+fn render_scale_and_resize_steps_seed_without_prior_frame_residue() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(true);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+
+    let draw_scene = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(8.0, 12.0, 24.0, 255.0);
+        r.begin_mode_3d(4.0, 2.8, 6.0, 0.0, 0.8, 0.0, 0.0, 1.0, 0.0, 49.0, 0.0);
+        r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.9, 0.75, 2.0);
+        r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 35.0, 42.0, 58.0, 255.0);
+        for x in -2..=2 {
+            r.draw_cube(
+                x as f64 * 0.75,
+                0.45,
+                (x & 1) as f64 * 0.45,
+                0.42,
+                0.9,
+                0.42,
+                210.0,
+                55.0 + (x + 2) as f64 * 35.0,
+                35.0,
+                255.0,
+            );
+        }
+    };
+    let advance = |eng: &mut EngineState, frames: u32| {
+        for _ in 0..frames {
+            eng.begin_frame();
+            draw_scene(eng);
+            eng.end_frame();
+        }
+    };
+    let capture = |eng: &mut EngineState| render(eng, 1, draw_scene);
+
+    eng.renderer.set_render_scale(0.5);
+    eng.renderer.reset_temporal_history();
+    let (_, _, fresh_half_scale) = capture(&mut eng);
+    eng.renderer.set_render_scale(1.0);
+    advance(&mut eng, 8);
+    eng.renderer.set_render_scale(0.5);
+    let (_, _, stepped_half_scale) = capture(&mut eng);
+    let scale_metrics = calculate_diff_metrics(&fresh_half_scale, &stepped_half_scale, W, H);
+    assert_eq!(
+        scale_metrics.max_diff, 0,
+        "render-scale step blended pixels from the incompatible full-scale history"
+    );
+
+    eng.renderer.set_render_scale(1.0);
+    eng.renderer.reset_temporal_history();
+    let (_, _, fresh_native_size) = capture(&mut eng);
+    eng.renderer.resize(320, 192, 320, 192);
+    advance(&mut eng, 3);
+    eng.renderer.resize(W, H, W, H);
+    let (width, height, returned_native_size) = capture(&mut eng);
+    assert_eq!((width, height), (W, H));
+    let resize_metrics = calculate_diff_metrics(&fresh_native_size, &returned_native_size, W, H);
+    eprintln!("temporal-corpus resize metrics={resize_metrics:?}");
+    assert!(
+        resize_metrics.mean_rgb <= 0.5
+            && resize_metrics.outlier_pixel_fraction == 0.0
+            && resize_metrics.max_diff <= 32,
+        "window resize restored a coherent image from destroyed prior-size history: \
+         {resize_metrics:?}"
+    );
+    eprintln!(
+        "temporal-corpus scale_step_max={} resize_step_max={}",
+        scale_metrics.max_diff, resize_metrics.max_diff,
     );
 }
