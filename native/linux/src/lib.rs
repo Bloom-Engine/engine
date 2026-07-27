@@ -582,6 +582,17 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         // PerMaterial, PerDraw, SceneInputs). wgpu's default limit is
         // 4. Vulkan supports at least 7 here, so 5 is universally safe.
         required_limits.max_bind_groups = 5;
+        let adapter_limits = adapter.limits();
+        bloom_shared::renderer::material_indirection::request_tier_a_if_supported(
+            supported,
+            &adapter_limits,
+            &mut required_features,
+            &mut required_limits,
+        );
+        bloom_shared::renderer::gpu_driven::request_features_if_supported(
+            supported,
+            &mut required_features,
+        );
         if required_features.intersects(rt_mask) {
             required_limits = required_limits
                 .using_minimum_supported_acceleration_structure_values();
@@ -1046,17 +1057,9 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
     let eng = engine();
 
     eng.renderer.screenshot_requested = true;
-    eng.scene.prepare(
-        &eng.renderer.device,
-        &eng.renderer.queue,
-        &eng.renderer.vp_matrix(),
-        &eng.renderer.prev_vp_matrix,
-        eng.renderer.uniform_3d_layout(),
-        // Screenshot capture renders everything the camera might see —
-        // never occlusion-cull a one-shot capture.
-        None,
-    );
-    eng.scene.prepare_materials(&eng.renderer);
+    // Screenshot capture renders everything the camera might see —
+    // never occlusion-cull a one-shot capture.
+    eng.renderer.prepare_scene_graph(&mut eng.scene, false);
     {
         let t = eng.get_time() as f32;
         let dt = eng.delta_time as f32;

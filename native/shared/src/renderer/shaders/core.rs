@@ -358,6 +358,15 @@ fn env_sample(dir: vec3<f32>) -> vec3<f32> {
          * lighting.camera_pos.w;
 }
 
+fn safe_scene_tangent(tangent: vec3<f32>) -> vec3<f32> {
+    let length_squared = dot(tangent, tangent);
+    return select(
+        vec3<f32>(0.0),
+        tangent * inverseSqrt(max(length_squared, 1e-20)),
+        length_squared > 1e-8,
+    );
+}
+
 @vertex
 fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
     if (u.misc.y > 0.5) {
@@ -412,7 +421,7 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
         o.normal = normalize(nrm4.xyz);
         o.color = in.color * u.model_tint;
         o.uv = in.uv;
-        o.tangent = vec4<f32>(normalize(tan4.xyz), in.tangent.w);
+        o.tangent = vec4<f32>(safe_scene_tangent(tan4.xyz), in.tangent.w);
         return o;
     }
     var out: VertexOutputScene;
@@ -447,7 +456,10 @@ fn vs_main_scene(in: VertexInputScene) -> VertexOutputScene {
     out.normal = normalize((u.model * vec4<f32>(in.normal, 0.0)).xyz);
     out.color = in.color * u.model_tint;
     out.uv = in.uv;
-    out.tangent = vec4<f32>(normalize((u.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz), in.tangent.w);
+    out.tangent = vec4<f32>(
+        safe_scene_tangent((u.model * vec4<f32>(in.tangent.xyz, 0.0)).xyz),
+        in.tangent.w,
+    );
     return out;
 }
 
@@ -470,6 +482,49 @@ fn compute_tbn(dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>,
     let denom = max(dot(t, t), dot(b, b));
     let invmax = inverseSqrt(max(denom, 1e-20));
     return mat3x3<f32>(t * invmax, b * invmax, n);
+}
+
+// Stable 4x4 Bayer threshold. Bloom's scene targets are single-sample, so
+// hardware alpha-to-coverage is unavailable; this is its deterministic
+// spatial equivalent for subpixel MASK coverage. It is used only after the
+// sampler footprint reaches the coverage-encoded lower mip chain.
+fn mask_coverage_threshold(pixel: vec2<f32>) -> f32 {
+    let bayer = array<f32, 16>(
+         0.5 / 16.0,  8.5 / 16.0,  2.5 / 16.0, 10.5 / 16.0,
+        12.5 / 16.0,  4.5 / 16.0, 14.5 / 16.0,  6.5 / 16.0,
+         3.5 / 16.0, 11.5 / 16.0,  1.5 / 16.0,  9.5 / 16.0,
+        15.5 / 16.0,  7.5 / 16.0, 13.5 / 16.0,  5.5 / 16.0,
+    );
+    let x = u32(floor(pixel.x)) & 3u;
+    let y = u32(floor(pixel.y)) & 3u;
+    return bayer[y * 4u + x];
+}
+
+fn mask_texture_lod(
+    uv: vec2<f32>,
+    dimensions: vec2<u32>,
+    lod_bias: f32,
+) -> f32 {
+    let extent = vec2<f32>(dimensions);
+    let dx = dpdx(uv) * extent;
+    let dy = dpdy(uv) * extent;
+    let footprint2 = max(dot(dx, dx), dot(dy, dy));
+    return max(0.5 * log2(max(footprint2, 1.0)) + lod_bias, 0.0);
+}
+
+fn mask_coverage_survives(
+    authored_alpha: f32,
+    lower_mip_coverage: f32,
+    cutoff: f32,
+    lod: f32,
+    pixel: vec2<f32>,
+) -> bool {
+    let hard_coverage = select(0.0, 1.0, authored_alpha >= cutoff);
+    // Transition before LOD 1 avoids a pop while trilinear sampling moves
+    // from authored level-zero alpha to lower levels whose alpha is coverage.
+    let blend = smoothstep(0.5, 1.0, lod);
+    let probability = mix(hard_coverage, lower_mip_coverage, blend);
+    return probability >= mask_coverage_threshold(pixel);
 }
 
 // Exact piecewise sRGB → linear, matching bloom-reference's
@@ -762,13 +817,48 @@ struct SceneOut {
 fn fs_depth_prepass(in: VertexOutputScene) {
     let alpha_cutoff = material.metal_rough.w;
     if (alpha_cutoff > 0.0) {
-        let a = textureSample(base_color_tex, base_color_samp, in.uv).a * in.color.a;
-        if (a < alpha_cutoff) { discard; }
+        let lod_bias = lighting.shadow_cascade_splits.w;
+        var survives = true;
+        if (material.emissive.w > 0.5) {
+            let mask_lod = mask_texture_lod(
+                in.uv,
+                textureDimensions(base_color_tex),
+                lod_bias,
+            );
+            if (mask_lod <= 0.5) {
+                let authored_alpha =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    in.color.a;
+                survives = authored_alpha >= alpha_cutoff;
+            } else if (mask_lod >= 1.0) {
+                let coverage =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, mask_lod).a;
+                survives = coverage >= mask_coverage_threshold(in.clip_position.xy);
+            } else {
+                let authored_alpha =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    in.color.a;
+                let coverage =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 1.0).a;
+                survives = mask_coverage_survives(
+                    authored_alpha,
+                    coverage,
+                    alpha_cutoff,
+                    mask_lod,
+                    in.clip_position.xy,
+                );
+            }
+        } else {
+            let raw_alpha =
+                textureSampleBias(base_color_tex, base_color_samp, in.uv, lod_bias).a *
+                in.color.a;
+            survives = raw_alpha >= alpha_cutoff;
+        }
+        if (!survives) { discard; }
     }
 }
 
-@fragment
-fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
+fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     var n = normalize(in.normal);
 
     // --- Normal mapping (tangent-space) ---
@@ -830,16 +920,51 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     let base_color = srgb_to_linear_v(base_tex.rgb) * in.color.rgb;
     let base_alpha = base_tex.a * in.color.a;
 
-    // glTF MASK / BLEND alpha mode — discard fragments below the
-    // authored cutoff so alpha-cutout foliage, fences, chains, and
-    // fabric render as their actual shape instead of opaque billboards.
-    // OPAQUE materials carry cutoff = 0 so the branch collapses.
-    // BLEND is treated as MASK @ 0.5 (via the loader) pending a real
-    // sorted transparent pipeline.
+    // glTF alpha mode tag: MASK carries its positive authored cutoff,
+    // OPAQUE is zero, and BLEND is negative. Only MASK discards here;
+    // BLEND is routed through the sorted forward translucent pipeline.
     let alpha_cutoff = material.metal_rough.w;
-    if (alpha_cutoff > 0.0 && base_alpha < alpha_cutoff) {
-        discard;
+    //PREPASS_STRIP_BEGIN — SH-055: removed in the prepassed-pipeline variant.
+    // The prepassed main pass Equal-tests against prepass-exact depth, so a
+    // would-be-discarded pixel fails the depth test anyway; keeping `discard`
+    // in the shader disables Adreno LRZ/early-Z for the whole draw and made
+    // the canopy overdraw shade the full lighting shader per layer (~250 ms
+    // per frame on an Adreno 618). See mod.rs scene_shader_prepassed.
+    if (alpha_cutoff > 0.0) {
+        var survives = base_alpha >= alpha_cutoff;
+        if (material.emissive.w > 0.5) {
+            let mask_lod = mask_texture_lod(
+                in.uv,
+                textureDimensions(base_color_tex),
+                lod_bias,
+            );
+            if (mask_lod <= 0.5) {
+                let authored_alpha =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    in.color.a;
+                survives = authored_alpha >= alpha_cutoff;
+            } else if (mask_lod >= 1.0) {
+                let coverage =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, mask_lod).a;
+                survives = coverage >= mask_coverage_threshold(in.clip_position.xy);
+            } else {
+                let authored_alpha =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
+                    in.color.a;
+                let coverage =
+                    textureSampleLevel(base_color_tex, base_color_samp, in.uv, 1.0).a;
+                survives = mask_coverage_survives(
+                    authored_alpha,
+                    coverage,
+                    alpha_cutoff,
+                    mask_lod,
+                    in.clip_position.xy,
+                );
+            }
+        }
+        if (!survives) { discard; }
     }
+    //PREPASS_STRIP_END
 
     // Two-sided foliage normal. Alpha-cutout cards (leaves, grass blades)
     // are seen from both sides, but the geometric normal only faces one
@@ -848,6 +973,9 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // as solid black cards from one side. Flip the shading normal toward
     // the viewer for cutout materials only; opaque geometry is untouched.
     if (alpha_cutoff > 0.0 && dot(n, lighting.camera_pos.xyz - in.world_pos) < 0.0) {
+        n = -n;
+    }
+    if (alpha_cutoff < 0.0 && !front_facing) {
         n = -n;
     }
 
@@ -1029,6 +1157,10 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
     // convolution — that's the next refinement — but together with
     // the BRDF LUT it captures the bulk of correct PBR appearance.
 
+    //IBL_STRIP_BEGIN — SH-055 probe: replaced by a flat-ambient fallback when
+    // BLOOM_SKIP contains "ibl" (see mod.rs), to measure the split-sum IBL
+    // chain's per-fragment cost on mobile GPUs. Only ibl_diffuse/ibl_spec
+    // escape this block.
     let n_dot_v_ibl = max(dot(n, v), 0.0);
     let f0 = mix(vec3<f32>(0.04), base_color, metallic);
 
@@ -1162,6 +1294,7 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         0.0, 1.0);
     let ibl_spec = ibl_spec_raw
         * dielectric_scale * spec_occ * roughness_amp * cap2 * (1.0 - ssr_own);
+    //IBL_STRIP_END
 
     // Indirect-shadow attenuation. 0.15 — deep enough that windows
     // Shadow darkening floor. Prior 0.15 matched Cycles path-
@@ -1218,9 +1351,9 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
 
     // glTF OPAQUE materials (alpha_cutoff == 0) ignore texture alpha by
     // spec — armor/gloss masks stored in .a must not make the mesh
-    // translucent. MASK materials keep the sampled alpha (post-discard)
-    // for soft edges. Tint alpha survives so games can fade models.
-    let out_alpha = select(in.color.a, base_alpha, alpha_cutoff > 0.0);
+    // translucent. MASK keeps sampled alpha after its cutoff; BLEND
+    // keeps fractional alpha for forward compositing.
+    let out_alpha = select(in.color.a, base_alpha, alpha_cutoff != 0.0);
 
     return SceneOut(
         vec4<f32>(hdr, out_alpha),
@@ -1239,5 +1372,632 @@ fn fs_main_scene(in: VertexOutputScene) -> SceneOut {
         vec4<f32>(base_color, 1.0 - shadow_factor),
     );
 }
-"#);
 
+@fragment
+fn fs_main_scene(
+    in: VertexOutputScene,
+    @builtin(front_facing) front_facing: bool,
+) -> SceneOut {
+    return shade_main_scene(in, front_facing);
+}
+
+@fragment
+fn fs_transparent_scene(
+    in: VertexOutputScene,
+    @builtin(front_facing) front_facing: bool,
+) -> @location(0) vec4<f32> {
+    return shade_main_scene(in, front_facing).color;
+}
+"#
+);
+
+/// Build the dedicated imported-transmission scene shader without changing
+/// the shader compiled for ordinary scene materials.
+///
+/// Desktop/native backends add group 4 and sample the render-graph-owned
+/// pre-translucency color/depth snapshots. Four-bind-group targets
+/// (`fold_scene_inputs`: WebGPU/Android) compile the same physical lobe but
+/// source transmitted radiance from the environment map instead.
+pub(in crate::renderer) fn scene_refractive_shader_source(
+    base_scene_shader: &str,
+    folded_scene_inputs: bool,
+    screen_space_reflections: bool,
+    secondary_uv: bool,
+) -> String {
+    assert!(
+        !folded_scene_inputs || !screen_space_reflections,
+        "folded four-bind-group targets cannot add native reflection inputs"
+    );
+    const JOINT_DECLARATION: &str =
+        "@group(3) @binding(1) var<uniform> joints_prev: JointMatrices;";
+    let scene_inputs = if folded_scene_inputs {
+        ""
+    } else if screen_space_reflections {
+        r#"
+struct RefractiveReflectionParams {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    params: vec4<f32>,
+    planar_plane: vec4<f32>,
+};
+
+@group(4) @binding(0) var refractive_scene_color_tex: texture_2d<f32>;
+@group(4) @binding(1) var refractive_scene_color_samp: sampler;
+@group(4) @binding(2) var refractive_scene_depth_tex: texture_depth_2d;
+@group(4) @binding(3) var<uniform> refractive_reflection: RefractiveReflectionParams;
+@group(4) @binding(4) var refractive_planar_tex: texture_2d<f32>;
+"#
+    } else {
+        r#"
+@group(4) @binding(0) var refractive_scene_color_tex: texture_2d<f32>;
+@group(4) @binding(1) var refractive_scene_color_samp: sampler;
+@group(4) @binding(2) var refractive_scene_depth_tex: texture_depth_2d;
+"#
+    };
+    let physical_declarations = format!(
+        r#"{JOINT_DECLARATION}
+
+struct TransmissionFactors {{
+    transmission: vec4<f32>,
+    attenuation: vec4<f32>,
+    transmission_uv: vec4<f32>,
+    transmission_rotation: vec4<f32>,
+    thickness_uv: vec4<f32>,
+    thickness_rotation: vec4<f32>,
+}};
+
+@group(2) @binding(11) var transmission_tex: texture_2d<f32>;
+@group(2) @binding(12) var transmission_samp: sampler;
+@group(2) @binding(13) var thickness_tex: texture_2d<f32>;
+@group(2) @binding(14) var thickness_samp: sampler;
+@group(2) @binding(15) var<uniform> transmission_material: TransmissionFactors;
+{scene_inputs}"#
+    );
+    let mut source = base_scene_shader.replacen(JOINT_DECLARATION, &physical_declarations, 1);
+    assert_ne!(
+        source, base_scene_shader,
+        "scene shader joint declaration changed; refractive ABI injection must be updated"
+    );
+    let layered_secondary_uv =
+        secondary_uv && base_scene_shader.contains("fn layered_secondary_uv(in:");
+    let model_scale_location = if layered_secondary_uv { 8 } else { 7 };
+    // The ordinary per-draw group is vertex-visible only. Carry model scale as
+    // a refractive-variant-only interpolant instead of widening that established
+    // layout to the fragment stage for every scene material.
+    source = source.replacen(
+        "    @location(6) prev_clip: vec4<f32>,",
+        &format!(
+            "    @location(6) prev_clip: vec4<f32>,\n    @location({model_scale_location}) model_scale: f32,"
+        ),
+        1,
+    );
+    source = source.replacen(
+        "        o.prev_clip = u.prev_mvp * prev_world4;",
+        "        o.prev_clip = u.prev_mvp * prev_world4;\n\
+         o.model_scale = (length(u.model[0].xyz) + length(u.model[1].xyz) \
+         + length(u.model[2].xyz)) / 3.0;",
+        1,
+    );
+    source = source.replacen(
+        "    out.prev_clip = u.prev_mvp * vec4<f32>(prev_local, 1.0);",
+        "    out.prev_clip = u.prev_mvp * vec4<f32>(prev_local, 1.0);\n\
+         out.model_scale = (length(u.model[0].xyz) + length(u.model[1].xyz) \
+         + length(u.model[2].xyz)) / 3.0;",
+        1,
+    );
+    if secondary_uv && !layered_secondary_uv {
+        source = source.replacen(
+            "    @location(6) tangent: vec4<f32>,\n};",
+            "    @location(6) tangent: vec4<f32>,\n\
+             @location(7) secondary_uv: vec2<f32>,\n\
+             };",
+            1,
+        );
+        source = source.replacen(
+            "    @location(7) model_scale: f32,",
+            "    @location(7) model_scale: f32,\n\
+             @location(8) secondary_uv: vec2<f32>,",
+            1,
+        );
+        source = source.replacen(
+            "        o.uv = in.uv;",
+            "        o.uv = in.uv;\n        o.secondary_uv = in.secondary_uv;",
+            1,
+        );
+        source = source.replacen(
+            "    out.uv = in.uv;",
+            "    out.uv = in.uv;\n    out.secondary_uv = in.secondary_uv;",
+            1,
+        );
+        assert!(
+            source.contains("@location(8) secondary_uv"),
+            "scene vertex ABI changed; refractive UV1 injection must be updated"
+        );
+    } else if layered_secondary_uv {
+        assert!(
+            source.contains("@location(7) secondary_uv")
+                && source.contains("@location(8) model_scale"),
+            "layered refractive vertex ABI changed; specialization must be updated"
+        );
+    }
+
+    let transmitted_radiance = if folded_scene_inputs {
+        r#"
+    // Constrained four-bind-group fallback: preserve the refractive material
+    // type and its Fresnel/absorption response, but source off-screen
+    // transmitted radiance from the prefiltered environment.
+    let max_transmission_mip = max(f32(textureNumLevels(env_tex)) - 1.0, 0.0);
+    let transmitted_radiance = env_sample_lod(
+        refracted_direction,
+        roughness * max_transmission_mip,
+    );
+    let undistorted_radiance = env_sample_lod(-v, roughness * max_transmission_mip);
+"#
+    } else {
+        r#"
+    let scene_dimensions_u = textureDimensions(refractive_scene_color_tex, 0);
+    let scene_dimensions = vec2<f32>(scene_dimensions_u);
+    let current_ndc = in.curr_clip.xy / max(abs(in.curr_clip.w), 0.000001);
+    let current_uv = clamp(
+        vec2<f32>(current_ndc.x * 0.5 + 0.5, 0.5 - current_ndc.y * 0.5),
+        vec2<f32>(0.0001),
+        vec2<f32>(0.9999),
+    );
+
+    // Convert the refracted world-space direction into a stable screen-space
+    // travel distance using the fragment's world-position derivatives. The
+    // authored thickness remains in model units and is promoted to world units
+    // with the mean model scale. A 64-pixel cap prevents pathological assets
+    // from sampling unrelated parts of the frame.
+    let world_dx = dpdx(in.world_pos);
+    let world_dy = dpdy(in.world_pos);
+    let world_dx_len = max(length(world_dx), 0.000001);
+    let world_dy_len = max(length(world_dy), 0.000001);
+    let screen_tangent_x = world_dx / world_dx_len;
+    let screen_tangent_y = world_dy / world_dy_len;
+    let ray_distance = thickness_world
+        / max(abs(dot(refracted_direction, n)), 0.15);
+    var offset_pixels = vec2<f32>(
+        dot(refracted_direction, screen_tangent_x) * ray_distance / world_dx_len,
+        dot(refracted_direction, screen_tangent_y) * ray_distance / world_dy_len,
+    );
+    offset_pixels = clamp(offset_pixels, vec2<f32>(-64.0), vec2<f32>(64.0));
+    var refracted_uv = clamp(
+        current_uv + offset_pixels / scene_dimensions,
+        vec2<f32>(0.0001),
+        vec2<f32>(0.9999),
+    );
+
+    // Reject offsets that cross in front of this glass surface. This keeps a
+    // nearby opaque silhouette from being pulled through the refractor.
+    let candidate_pixel = clamp(
+        vec2<i32>(refracted_uv * scene_dimensions),
+        vec2<i32>(0),
+        vec2<i32>(scene_dimensions_u) - vec2<i32>(1),
+    );
+    let candidate_depth = textureLoad(
+        refractive_scene_depth_tex,
+        candidate_pixel,
+        0,
+    );
+    if (candidate_depth + 0.0005 < in.clip_position.z) {
+        refracted_uv = current_uv;
+    }
+
+    var transmitted_radiance = textureSampleLevel(
+        refractive_scene_color_tex,
+        refractive_scene_color_samp,
+        refracted_uv,
+        0.0,
+    ).rgb;
+    // Deterministic five-tap rough transmission. Smooth glass stays at one
+    // fetch; rough glass integrates a bounded footprint without temporal noise.
+    if (roughness > 0.08) {
+        let blur_uv = vec2<f32>(8.0 * roughness * roughness) / scene_dimensions;
+        transmitted_radiance = (
+            transmitted_radiance * 4.0
+            + textureSampleLevel(
+                refractive_scene_color_tex,
+                refractive_scene_color_samp,
+                refracted_uv + vec2<f32>(blur_uv.x, 0.0),
+                0.0,
+            ).rgb
+            + textureSampleLevel(
+                refractive_scene_color_tex,
+                refractive_scene_color_samp,
+                refracted_uv - vec2<f32>(blur_uv.x, 0.0),
+                0.0,
+            ).rgb
+            + textureSampleLevel(
+                refractive_scene_color_tex,
+                refractive_scene_color_samp,
+                refracted_uv + vec2<f32>(0.0, blur_uv.y),
+                0.0,
+            ).rgb
+            + textureSampleLevel(
+                refractive_scene_color_tex,
+                refractive_scene_color_samp,
+                refracted_uv - vec2<f32>(0.0, blur_uv.y),
+                0.0,
+            ).rgb
+        ) * 0.125;
+    }
+    let undistorted_radiance = textureSampleLevel(
+        refractive_scene_color_tex,
+        refractive_scene_color_samp,
+        current_uv,
+        0.0,
+    ).rgb;
+"#
+    };
+
+    let reflection_helpers = if screen_space_reflections {
+        r#"
+fn refractive_screen_reflection(
+    in: VertexOutputScene,
+    reflected_direction: vec3<f32>,
+    roughness: f32,
+    environment_fallback: vec3<f32>,
+) -> vec3<f32> {
+    // The ordinary SSR target cannot be reused here: it was traced from the
+    // opaque surface behind this fragment and therefore owns a different
+    // normal/reflection ray. Launch one bounded ray from the glass fragment
+    // against the immutable opaque snapshots instead.
+    if (refractive_reflection.params.x < 0.5
+        || roughness >= refractive_reflection.params.w) {
+        return environment_fallback;
+    }
+
+    let dimensions_u = textureDimensions(refractive_scene_color_tex, 0);
+    let dimensions = vec2<f32>(dimensions_u);
+    let step_count = u32(refractive_reflection.params.z);
+    let max_distance = refractive_reflection.params.y;
+    let start_view = (
+        refractive_reflection.view * vec4<f32>(in.world_pos, 1.0)
+    ).xyz;
+    let reflected_view = normalize((
+        refractive_reflection.view * vec4<f32>(reflected_direction, 0.0)
+    ).xyz);
+    let start_clip = refractive_reflection.proj * vec4<f32>(start_view, 1.0);
+    var previous_ray_depth = start_clip.z / max(abs(start_clip.w), 0.000001);
+    var hit_uv = vec2<f32>(-1.0);
+    var hit_confidence = 0.0;
+
+    // Quadratic spacing keeps the nearest samples dense enough for window
+    // frames and props while still reaching the same architectural range as
+    // the established opaque SSR pass. The loop bound and every texture read
+    // are fixed by the lazy uniform (currently eight).
+    for (var step = 0u; step < step_count; step = step + 1u) {
+        let fraction = f32(step + 1u) / f32(step_count);
+        let distance = max_distance * fraction * fraction;
+        let ray_view = start_view + reflected_view * distance;
+        let ray_clip = refractive_reflection.proj * vec4<f32>(ray_view, 1.0);
+        if (ray_clip.w <= 0.000001) {
+            break;
+        }
+        let ray_ndc = ray_clip.xyz / ray_clip.w;
+        if (ray_ndc.x <= -1.0 || ray_ndc.x >= 1.0
+            || ray_ndc.y <= -1.0 || ray_ndc.y >= 1.0
+            || ray_ndc.z <= 0.0 || ray_ndc.z >= 1.0) {
+            break;
+        }
+        let ray_uv = vec2<f32>(
+            ray_ndc.x * 0.5 + 0.5,
+            0.5 - ray_ndc.y * 0.5,
+        );
+        let pixel = clamp(
+            vec2<i32>(ray_uv * dimensions),
+            vec2<i32>(0),
+            vec2<i32>(dimensions_u) - vec2<i32>(1),
+        );
+        let scene_depth = textureLoad(refractive_scene_depth_tex, pixel, 0);
+        let depth_delta = ray_ndc.z - scene_depth;
+        let depth_stride = abs(ray_ndc.z - previous_ray_depth);
+        let thickness = max(depth_stride * 2.0, 0.00075);
+        if (scene_depth < 0.9999
+            && depth_delta >= 0.0
+            && depth_delta <= thickness) {
+            hit_uv = ray_uv;
+            hit_confidence = 1.0 - smoothstep(
+                thickness * 0.25,
+                thickness,
+                depth_delta,
+            );
+            break;
+        }
+        previous_ray_depth = ray_ndc.z;
+    }
+
+    if (hit_uv.x < 0.0) {
+        return environment_fallback;
+    }
+    // Suppress the screen boundary before it can pop. Rough glass fades to
+    // the prefiltered environment rather than returning an incorrectly sharp
+    // scene-color tap (the snapshot deliberately has no mip chain).
+    let edge_pixels = min(
+        min(hit_uv.x, 1.0 - hit_uv.x) * dimensions.x,
+        min(hit_uv.y, 1.0 - hit_uv.y) * dimensions.y,
+    );
+    let edge_weight = smoothstep(0.0, 8.0, edge_pixels);
+    let roughness_weight = 1.0 - smoothstep(
+        refractive_reflection.params.w * 0.45,
+        refractive_reflection.params.w,
+        roughness,
+    );
+    let raw = textureSampleLevel(
+        refractive_scene_color_tex,
+        refractive_scene_color_samp,
+        hit_uv,
+        0.0,
+    ).rgb;
+    let screen_radiance = select(vec3<f32>(0.0), raw, raw == raw);
+    let source_weight = clamp(
+        edge_weight * roughness_weight * hit_confidence,
+        0.0,
+        1.0,
+    );
+    return mix(environment_fallback, screen_radiance, source_weight);
+}
+
+fn refractive_planar_sample(
+    in: VertexOutputScene,
+    roughness: f32,
+) -> vec4<f32> {
+    let plane = refractive_reflection.planar_plane;
+    if (dot(plane.xyz, plane.xyz) < 0.5) {
+        return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    }
+    // A plane crossing unrelated vertical glass must not make the global
+    // first-probe choice leak onto that surface. Use the unperturbed vertex
+    // normal so authored water waves can still perturb the sampled reflection.
+    if (abs(dot(normalize(plane.xyz), normalize(in.normal))) < 0.8) {
+        return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    }
+    let plane_distance = abs(dot(plane.xyz, in.world_pos) - plane.w);
+    if (plane_distance > 0.075) {
+        return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    }
+    let ndc = in.curr_clip.xy / max(abs(in.curr_clip.w), 0.000001);
+    let uv = clamp(
+        vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5),
+        vec2<f32>(0.0001),
+        vec2<f32>(0.9999),
+    );
+    let planar = textureSampleLevel(
+        refractive_planar_tex,
+        refractive_scene_color_samp,
+        uv,
+        0.0,
+    );
+    let planar_safe = select(vec3<f32>(0.0), planar.rgb, planar.rgb == planar.rgb);
+    // The existing planar capture has no mip chain. Fade its exact reflection
+    // into the lower tiers as roughness grows instead of returning an
+    // incorrectly sharp image. Alpha zero is the probe's explicit miss value.
+    let roughness_weight = 1.0 - smoothstep(0.18, 0.45, roughness);
+    let source_weight = clamp(planar.a * roughness_weight, 0.0, 1.0);
+    return vec4<f32>(planar_safe, source_weight);
+}
+"#
+    } else {
+        ""
+    };
+    let reflected_radiance = if screen_space_reflections {
+        r#"
+    let reflected_environment = env_sample_lod(
+        reflected_direction,
+        roughness * max(f32(textureNumLevels(env_tex)) - 1.0, 0.0),
+    );
+    let planar_reflected = refractive_planar_sample(in, roughness);
+    var reflected = mix(
+        reflected_environment,
+        planar_reflected.rgb,
+        max(planar_reflected.a, 0.0),
+    );
+    // A matching explicit probe is authoritative for its plane: alpha zero is
+    // its documented geometry miss and therefore reveals the environment sky.
+    // Only glass without an applicable probe pays for the bounded screen march.
+    if (planar_reflected.a < 0.0) {
+        reflected = refractive_screen_reflection(
+            in,
+            reflected_direction,
+            roughness,
+            reflected_environment,
+        );
+    }
+"#
+    } else {
+        r#"
+    let reflected = env_sample_lod(
+        reflected_direction,
+        roughness * max(f32(textureNumLevels(env_tex)) - 1.0, 0.0),
+    );
+"#
+    };
+
+    let transmission_source_uv = if secondary_uv {
+        "select(\n            in.uv,\n            in.secondary_uv,\n            transmission_material.transmission_rotation.w > 0.5,\n        )"
+    } else {
+        "in.uv"
+    };
+    let thickness_source_uv = if secondary_uv {
+        "select(\n            in.uv,\n            in.secondary_uv,\n            transmission_material.thickness_rotation.z > 0.5,\n        )"
+    } else {
+        "in.uv"
+    };
+    source.push_str(&format!(
+        r#"
+
+{reflection_helpers}
+
+fn physical_texture_uv(
+    uv: vec2<f32>,
+    offset_scale: vec4<f32>,
+    rotation: vec2<f32>,
+) -> vec2<f32> {{
+    let scaled = uv * offset_scale.zw;
+    let rotated = vec2<f32>(
+        rotation.x * scaled.x - rotation.y * scaled.y,
+        rotation.y * scaled.x + rotation.x * scaled.y,
+    );
+    return offset_scale.xy + rotated;
+}}
+
+fn refractive_scene_normal(in: VertexOutputScene, front_facing: bool) -> vec3<f32> {{
+    var n = normalize(in.normal);
+    let normal_sample = textureSampleBias(
+        normal_tex,
+        normal_samp,
+        in.uv,
+        1.0 + lighting.shadow_cascade_splits.w,
+    ).xyz * 2.0 - 1.0;
+    let mapped = normal_sample / max(length(normal_sample), 0.000001);
+    let tangent_len2 = dot(in.tangent.xyz, in.tangent.xyz);
+    if (tangent_len2 > 0.0001) {{
+        let tangent = normalize(in.tangent.xyz);
+        let tangent_ortho = normalize(tangent - n * dot(n, tangent));
+        let bitangent = cross(n, tangent_ortho) * in.tangent.w;
+        n = normalize(
+            tangent_ortho * mapped.x + bitangent * mapped.y + n * mapped.z,
+        );
+    }} else {{
+        let tbn = compute_tbn(
+            dpdx(in.world_pos),
+            dpdy(in.world_pos),
+            dpdx(in.uv),
+            dpdy(in.uv),
+            n,
+        );
+        n = normalize(tbn * mapped);
+    }}
+    if (!front_facing) {{
+        n = -n;
+    }}
+    return n;
+}}
+
+struct RefractiveSceneOut {{
+    @location(0) color: vec4<f32>,
+    @location(1) velocity: vec2<f32>,
+}};
+
+@fragment
+fn fs_refractive_scene(
+    in: VertexOutputScene,
+    @builtin(front_facing) front_facing: bool,
+) -> RefractiveSceneOut {{
+    // Reuse the established direct/IBL PBR evaluation for the non-transmitted
+    // energy, then split the dielectric lobe below. This also preserves MASK
+    // discard semantics for the unusual but legal MASK+transmission case.
+    let surface = shade_main_scene(in, front_facing);
+    let n = refractive_scene_normal(in, front_facing);
+    let v = normalize(lighting.camera_pos.xyz - in.world_pos);
+
+    let base_texel = textureSample(base_color_tex, base_color_samp, in.uv);
+    let base_color = srgb_to_linear_v(base_texel.rgb) * in.color.rgb;
+    let base_alpha = base_texel.a * in.color.a;
+    let mr_texel = textureSample(mr_tex, mr_samp, in.uv);
+    let has_mr = material.metal_rough.z > 0.5;
+    let metallic = select(
+        clamp(material.metal_rough.x, 0.0, 1.0),
+        clamp(mr_texel.b * material.metal_rough.x, 0.0, 1.0),
+        has_mr,
+    );
+    let roughness = select(
+        clamp(material.metal_rough.y, 0.045, 1.0),
+        clamp(mr_texel.g * material.metal_rough.y, 0.045, 1.0),
+        has_mr,
+    );
+
+    let transmission_uv = physical_texture_uv(
+        {transmission_source_uv},
+        transmission_material.transmission_uv,
+        transmission_material.transmission_rotation.xy,
+    );
+    let texture_transmission = select(
+        1.0,
+        textureSample(
+            transmission_tex,
+            transmission_samp,
+            transmission_uv,
+        ).r,
+        transmission_material.transmission.w > 0.5,
+    );
+    let dielectric_weight = 1.0 - metallic;
+    let transmission_weight = clamp(
+        transmission_material.transmission.x
+            * texture_transmission
+            * dielectric_weight,
+        0.0,
+        1.0,
+    );
+
+    let thickness_uv = physical_texture_uv(
+        {thickness_source_uv},
+        transmission_material.thickness_uv,
+        transmission_material.thickness_rotation.xy,
+    );
+    let texture_thickness = select(
+        1.0,
+        textureSample(
+            thickness_tex,
+            thickness_samp,
+            thickness_uv,
+        ).g,
+        transmission_material.transmission_rotation.z > 0.5,
+    );
+    let mean_model_scale = max(in.model_scale, 0.0);
+    let thickness_world = max(
+        transmission_material.transmission.z
+            * texture_thickness
+            * mean_model_scale,
+        0.0,
+    );
+
+    let ior = max(transmission_material.transmission.y, 1.0);
+    let eta = 1.0 / ior;
+    var refracted_direction = refract(-v, n, eta);
+    if (dot(refracted_direction, refracted_direction) < 0.000001) {{
+        refracted_direction = reflect(-v, n);
+    }}
+    refracted_direction = normalize(refracted_direction);
+
+{transmitted_radiance}
+
+    var absorption = vec3<f32>(1.0);
+    if (transmission_material.attenuation.w > 0.0 && thickness_world > 0.0) {{
+        let optical_distance = thickness_world
+            / transmission_material.attenuation.w;
+        absorption = pow(
+            max(transmission_material.attenuation.rgb, vec3<f32>(0.000001)),
+            vec3<f32>(optical_distance),
+        );
+    }}
+    let transmitted = transmitted_radiance * base_color * absorption;
+
+    let f0_scalar = pow((ior - 1.0) / (ior + 1.0), 2.0);
+    let n_dot_v = clamp(dot(n, v), 0.0, 1.0);
+    let fresnel = f0_scalar
+        + (1.0 - f0_scalar) * pow(1.0 - n_dot_v, 5.0);
+    let reflected_direction = reflect(-v, n);
+{reflected_radiance}
+
+    // Energy partition: the ordinary PBR surface owns the opaque fraction;
+    // the transmission fraction is split exactly between Fresnel reflection
+    // and absorbed transmitted radiance.
+    let dielectric_transmission = mix(transmitted, reflected, fresnel);
+    var hdr = surface.color.rgb * (1.0 - transmission_weight)
+        + dielectric_transmission * transmission_weight;
+
+    // glTF BLEND+transmission additionally applies base-color alpha. Because
+    // this fragment already composites against the snapshot, write alpha=1
+    // to avoid applying the background a second time in fixed-function blend.
+    if (material.metal_rough.w < 0.0) {{
+        hdr = mix(undistorted_radiance, hdr, clamp(base_alpha, 0.0, 1.0));
+    }}
+    hdr = select(vec3<f32>(0.0), hdr, hdr == hdr);
+    return RefractiveSceneOut(vec4<f32>(hdr, 1.0), surface.velocity);
+}}
+"#
+    ));
+    source
+}

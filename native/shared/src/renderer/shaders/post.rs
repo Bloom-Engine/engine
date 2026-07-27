@@ -1555,4 +1555,3 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(max(sharpened, vec3<f32>(0.0)), center.a);
 }
 ";
-

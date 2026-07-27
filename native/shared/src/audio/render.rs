@@ -79,8 +79,13 @@ pub enum Cmd {
         send: f32,
         lowpass: f32,
     },
-    StopSound { sound_id: u64 },
-    SetSoundVolume { sound_id: u64, volume: f32 },
+    StopSound {
+        sound_id: u64,
+    },
+    SetSoundVolume {
+        sound_id: u64,
+        volume: f32,
+    },
     PlayMusic {
         music_id: u64,
         payload: MusicPayload,
@@ -88,32 +93,73 @@ pub enum Cmd {
         volume: f32,
         looping: bool,
     },
-    StopMusic { music_id: u64 },
-    SetMusicVolume { music_id: u64, volume: f32 },
+    StopMusic {
+        music_id: u64,
+    },
+    SetMusicVolume {
+        music_id: u64,
+        volume: f32,
+    },
     SetMaster(f32),
-    SetListener { pos: [f32; 3], forward: [f32; 3] },
+    SetListener {
+        pos: [f32; 3],
+        forward: [f32; 3],
+    },
 
     // ---- EN-029 -------------------------------------------------------
-    SetBusGain { bus: u8, gain: f32 },
+    SetBusGain {
+        bus: u8,
+        gain: f32,
+    },
     /// Momentary sidechain-style duck: pull `bus` down by `amount` (linear,
     /// 0..1) over `attack` seconds, hold, then release over `release`.
-    DuckBus { bus: u8, amount: f32, attack: f32, release: f32, hold: f32 },
-    SetReverbParams { size: f32, damp: f32, wet: f32 },
+    DuckBus {
+        bus: u8,
+        amount: f32,
+        attack: f32,
+        release: f32,
+        hold: f32,
+    },
+    SetReverbParams {
+        size: f32,
+        damp: f32,
+        wet: f32,
+    },
     /// Per-playing-voice sends — this is the occlusion primitive. The game
     /// raycasts and decides; the mixer just filters.
-    SetSoundLowpass { sound_id: u64, cutoff: f32 },
-    SetSoundSend { sound_id: u64, send: f32 },
+    SetSoundLowpass {
+        sound_id: u64,
+        cutoff: f32,
+    },
+    SetSoundSend {
+        sound_id: u64,
+        send: f32,
+    },
 
     // ---- EN-062: live-voice control ------------------------------------
-    SetVoicePosition { voice_id: u64, pos: [f32; 3] },
+    SetVoicePosition {
+        voice_id: u64,
+        pos: [f32; 3],
+    },
     /// Fades out over ~1 block and removes — a hard cut on a looping bed
     /// mid-waveform is an audible click.
-    StopVoice { voice_id: u64 },
-    SetVoiceVolume { voice_id: u64, volume: f32 },
-    SetVoicePitch { voice_id: u64, pitch: f32 },
+    StopVoice {
+        voice_id: u64,
+    },
+    SetVoiceVolume {
+        voice_id: u64,
+        volume: f32,
+    },
+    SetVoicePitch {
+        voice_id: u64,
+        pitch: f32,
+    },
     /// Per-VOICE occlusion; SetSoundLowpass muffles every voice of a sound,
     /// which is wrong the moment two emitters share an asset.
-    SetVoiceLowpass { voice_id: u64, cutoff: f32 },
+    SetVoiceLowpass {
+        voice_id: u64,
+        cutoff: f32,
+    },
 }
 
 /// Mix buses. Kept tiny and fixed: a general submix graph is a lot of
@@ -142,7 +188,14 @@ struct BusState {
 
 impl Default for BusState {
     fn default() -> Self {
-        Self { gain: 1.0, duck: 0.0, duck_target: 0.0, attack: 0.01, release: 0.3, hold_left: 0.0 }
+        Self {
+            gain: 1.0,
+            duck: 0.0,
+            duck_target: 0.0,
+            attack: 0.01,
+            release: 0.3,
+            hold_left: 0.0,
+        }
     }
 }
 
@@ -162,7 +215,11 @@ impl BusState {
         } else {
             0.0
         };
-        let rate = if target > self.duck { self.attack } else { self.release };
+        let rate = if target > self.duck {
+            self.attack
+        } else {
+            self.release
+        };
         if rate <= 0.0 {
             self.duck = target;
         } else {
@@ -173,7 +230,9 @@ impl BusState {
         }
     }
 
-    fn current(&self) -> f32 { (self.gain * (1.0 - self.duck)).clamp(0.0, 4.0) }
+    fn current(&self) -> f32 {
+        (self.gain * (1.0 - self.duck)).clamp(0.0, 4.0)
+    }
 }
 
 /// Speed of sound, m/s — the doppler constant.
@@ -238,11 +297,17 @@ pub enum MusicPayload {
     /// Chunks arrive from a background decode worker; the worker handles
     /// looping internally (End only arrives for finished non-loop tracks).
     #[cfg(not(target_arch = "wasm32"))]
-    Stream { consumer: StreamConsumer, channels: u16 },
+    Stream {
+        consumer: StreamConsumer,
+        channels: u16,
+    },
 }
 
 enum MusicSamples {
-    Full { data: Arc<SoundData>, position: usize },
+    Full {
+        data: Arc<SoundData>,
+        position: usize,
+    },
     #[cfg(not(target_arch = "wasm32"))]
     Stream {
         consumer: StreamConsumer,
@@ -371,17 +436,35 @@ impl AudioRenderer {
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {
-        if sr > 1000.0 { self.sample_rate = sr; }
+        if sr > 1000.0 {
+            self.sample_rate = sr;
+        }
     }
 
     fn apply(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::PlaySound {
-                sound_id, voice_id, data, volume, spatial, looping,
-                ref_dist, max_dist, rolloff, pitch, bus, send, lowpass,
+                sound_id,
+                voice_id,
+                data,
+                volume,
+                spatial,
+                looping,
+                ref_dist,
+                max_dist,
+                rolloff,
+                pitch,
+                bus,
+                send,
+                lowpass,
             } => {
                 self.voices.push(Voice {
-                    sound_id, voice_id, data, frame_pos: 0.0, volume, spatial,
+                    sound_id,
+                    voice_id,
+                    data,
+                    frame_pos: 0.0,
+                    volume,
+                    spatial,
                     looping,
                     ref_dist: ref_dist.max(1e-3),
                     max_dist: max_dist.max(0.0),
@@ -389,8 +472,14 @@ impl AudioRenderer {
                     pitch: pitch.clamp(0.25, 4.0),
                     doppler: 1.0,
                     prev_dist: -1.0,
-                    g_l: 0.0, g_r: 0.0, seeded: false, stopping: false,
-                    bus, send, lowpass, lp_z: [0.0; 2],
+                    g_l: 0.0,
+                    g_r: 0.0,
+                    seeded: false,
+                    stopping: false,
+                    bus,
+                    send,
+                    lowpass,
+                    lp_z: [0.0; 2],
                 });
             }
             Cmd::StopSound { sound_id } => {
@@ -403,7 +492,13 @@ impl AudioRenderer {
                     }
                 }
             }
-            Cmd::PlayMusic { music_id, payload, shared, volume, looping } => {
+            Cmd::PlayMusic {
+                music_id,
+                payload,
+                shared,
+                volume,
+                looping,
+            } => {
                 // Restart-from-zero semantics (matches the old mixer).
                 self.music.retain(|m| m.music_id != music_id);
                 shared.playing.store(true, Ordering::Relaxed);
@@ -419,7 +514,14 @@ impl AudioRenderer {
                         ended: false,
                     },
                 };
-                self.music.push(MusicVoice { music_id, samples, shared, volume, looping, consumed: 0 });
+                self.music.push(MusicVoice {
+                    music_id,
+                    samples,
+                    shared,
+                    volume,
+                    looping,
+                    consumed: 0,
+                });
             }
             Cmd::StopMusic { music_id } => {
                 if let Some(m) = self.music.iter().position(|m| m.music_id == music_id) {
@@ -445,7 +547,13 @@ impl AudioRenderer {
                     self.buses[bus as usize].gain = gain.max(0.0);
                 }
             }
-            Cmd::DuckBus { bus, amount, attack, release, hold } => {
+            Cmd::DuckBus {
+                bus,
+                amount,
+                attack,
+                release,
+                hold,
+            } => {
                 if (bus as usize) < bus::COUNT {
                     self.buses[bus as usize].set_duck(amount, attack, release, hold);
                 }
@@ -459,37 +567,51 @@ impl AudioRenderer {
             }
             Cmd::SetSoundLowpass { sound_id, cutoff } => {
                 for v in &mut self.voices {
-                    if v.sound_id == sound_id { v.lowpass = cutoff; }
+                    if v.sound_id == sound_id {
+                        v.lowpass = cutoff;
+                    }
                 }
             }
             Cmd::SetSoundSend { sound_id, send } => {
                 for v in &mut self.voices {
-                    if v.sound_id == sound_id { v.send = send.clamp(0.0, 1.0); }
+                    if v.sound_id == sound_id {
+                        v.send = send.clamp(0.0, 1.0);
+                    }
                 }
             }
             Cmd::SetVoicePosition { voice_id, pos } => {
                 for v in &mut self.voices {
-                    if v.voice_id == voice_id { v.spatial = Some(pos); }
+                    if v.voice_id == voice_id {
+                        v.spatial = Some(pos);
+                    }
                 }
             }
             Cmd::StopVoice { voice_id } => {
                 for v in &mut self.voices {
-                    if v.voice_id == voice_id { v.stopping = true; }
+                    if v.voice_id == voice_id {
+                        v.stopping = true;
+                    }
                 }
             }
             Cmd::SetVoiceVolume { voice_id, volume } => {
                 for v in &mut self.voices {
-                    if v.voice_id == voice_id { v.volume = volume.max(0.0); }
+                    if v.voice_id == voice_id {
+                        v.volume = volume.max(0.0);
+                    }
                 }
             }
             Cmd::SetVoicePitch { voice_id, pitch } => {
                 for v in &mut self.voices {
-                    if v.voice_id == voice_id { v.pitch = pitch.clamp(0.25, 4.0); }
+                    if v.voice_id == voice_id {
+                        v.pitch = pitch.clamp(0.25, 4.0);
+                    }
                 }
             }
             Cmd::SetVoiceLowpass { voice_id, cutoff } => {
                 for v in &mut self.voices {
-                    if v.voice_id == voice_id { v.lowpass = cutoff.max(0.0); }
+                    if v.voice_id == voice_id {
+                        v.lowpass = cutoff.max(0.0);
+                    }
                 }
             }
         }
@@ -528,16 +650,18 @@ impl AudioRenderer {
         }
         let reverb_active = self.reverb_l.wet > 0.0;
         if reverb_active {
-            for s in self.send_buf[..output.len()].iter_mut() { *s = 0.0; }
+            for s in self.send_buf[..output.len()].iter_mut() {
+                *s = 0.0;
+            }
         }
 
         // Spatial audio: listener-relative parameters, computed once.
         let [lx, ly, lz] = self.listener_pos;
         let [lfx, _lfy, lfz] = self.listener_forward; // "right" math projects out Y
-        // Listener right = cross(forward, up=[0,1,0]) = (-fz, 0, fx) — the SAME
-        // vector mat4_look_at calls `s` (screen-right). EN-062 flipped the sign
-        // here: this used to be (fz, -fx), which is screen-LEFT, so the whole
-        // stereo field was mirrored — a shriek on screen-left panned right.
+                                                      // Listener right = cross(forward, up=[0,1,0]) = (-fz, 0, fx) — the SAME
+                                                      // vector mat4_look_at calls `s` (screen-right). EN-062 flipped the sign
+                                                      // here: this used to be (fz, -fx), which is screen-LEFT, so the whole
+                                                      // stereo field was mirrored — a shriek on screen-left panned right.
         let lrx = -lfz;
         let lrz = lfx;
         let lr_len = (lrx * lrx + lrz * lrz).sqrt().max(0.001);
@@ -547,13 +671,22 @@ impl AudioRenderer {
         // Split the borrow: the voice loop needs `voices` and `send_buf`
         // mutably at once, and the compiler can only see they're disjoint if
         // we name them separately.
-        let Self { voices, send_buf, reverb_l, reverb_r, music, .. } = self;
+        let Self {
+            voices,
+            send_buf,
+            reverb_l,
+            reverb_r,
+            music,
+            ..
+        } = self;
 
         // Sound effects
         voices.retain_mut(|v| {
             let channels = v.data.channels.max(1) as usize;
             let frames = v.data.samples.len() / channels;
-            if frames == 0 { return false; }
+            if frames == 0 {
+                return false;
+            }
 
             // ---- per-block spatial targets --------------------------------
             // Manual (occlusion) low-pass; spatial cues can only lower it.
@@ -631,7 +764,9 @@ impl AudioRenderer {
             // Fully silent (culled by distance, or a zero-volume ambient bed):
             // advance the head arithmetically and skip the per-sample work.
             if t_l < 1e-5 && t_r < 1e-5 && v.g_l < 1e-5 && v.g_r < 1e-5 {
-                if v.stopping { return false; }
+                if v.stopping {
+                    return false;
+                }
                 v.g_l = t_l;
                 v.g_r = t_r;
                 v.frame_pos += step * out_frames as f64;
@@ -663,10 +798,19 @@ impl AudioRenderer {
             let mut f = 0usize;
             while f < out_frames {
                 let idx = v.frame_pos as usize;
-                if idx >= frames { ended = !v.looping; break; }
+                if idx >= frames {
+                    ended = !v.looping;
+                    break;
+                }
                 let frac = (v.frame_pos - idx as f64) as f32;
                 let (s0l, s0r) = v.frame(idx);
-                let nidx = if idx + 1 < frames { idx + 1 } else if v.looping { 0 } else { idx };
+                let nidx = if idx + 1 < frames {
+                    idx + 1
+                } else if v.looping {
+                    0
+                } else {
+                    idx
+                };
                 let (s1l, s1r) = v.frame(nidx);
                 let mut sl = s0l + (s1l - s0l) * frac;
                 let mut sr = s0r + (s1r - s0r) * frac;
@@ -682,11 +826,15 @@ impl AudioRenderer {
                 let ol = sl * v.g_l;
                 let or = sr * v.g_r;
                 output[i] += ol;
-                if i + 1 < output.len() { output[i + 1] += or; }
+                if i + 1 < output.len() {
+                    output[i + 1] += or;
+                }
 
                 if reverb_active && send > 0.0 {
                     send_buf[i] += ol * send;
-                    if i + 1 < output.len() { send_buf[i + 1] += or * send; }
+                    if i + 1 < output.len() {
+                        send_buf[i + 1] += or * send;
+                    }
                 }
 
                 v.g_l += dg_l;
@@ -760,7 +908,13 @@ impl AudioRenderer {
                     m.consumed = *position;
                 }
                 #[cfg(not(target_arch = "wasm32"))]
-                MusicSamples::Stream { consumer, channels, current, offset, ended } => {
+                MusicSamples::Stream {
+                    consumer,
+                    channels,
+                    current,
+                    offset,
+                    ended,
+                } => {
                     let mono = *channels == 1;
                     while i < output.len() {
                         if *offset >= current.len() {

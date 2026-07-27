@@ -146,7 +146,11 @@ impl OcclusionCuller {
         });
         let grid_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("occlusion_grid"),
-            size: wgpu::Extent3d { width: GRID_W, height: GRID_H, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: GRID_W,
+                height: GRID_H,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -257,9 +261,18 @@ impl OcclusionCuller {
                 label: Some("occlusion_reduce_bg"),
                 layout: &self.layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.uniform.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.grid_view) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(src),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&self.grid_view),
+                    },
                 ],
             }));
         }
@@ -287,7 +300,11 @@ impl OcclusionCuller {
                     rows_per_image: Some(GRID_H),
                 },
             },
-            wgpu::Extent3d { width: GRID_W, height: GRID_H, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: GRID_W,
+                height: GRID_H,
+                depth_or_array_layers: 1,
+            },
         );
         rb.vp = vp;
         self.recorded_this_frame = true;
@@ -302,14 +319,16 @@ impl OcclusionCuller {
         let rb = &mut self.readbacks[self.parity];
         let done = rb.map_done.clone();
         rb.in_flight = true;
-        rb.buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            if res.is_ok() {
-                done.store(true, std::sync::atomic::Ordering::Release);
-            }
-            // On error the buffer stays flagged in-flight until the next
-            // successful cycle on the other parity; culling simply keeps
-            // using the older grid.
-        });
+        rb.buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                if res.is_ok() {
+                    done.store(true, std::sync::atomic::Ordering::Release);
+                }
+                // On error the buffer stays flagged in-flight until the next
+                // successful cycle on the other parity; culling simply keeps
+                // using the older grid.
+            });
         self.parity = 1 - self.parity;
         self.recorded_this_frame = false;
     }

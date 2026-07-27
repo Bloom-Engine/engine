@@ -11,6 +11,30 @@ mod tests {
     use crate::renderer::formats;
     use crate::renderer::types::Vertex3D;
 
+    #[test]
+    fn base_material_factors_reuse_reserved_lanes_without_growing() {
+        assert_eq!(std::mem::size_of::<MaterialFactorsUniforms>(), 80);
+        let mut factors = MaterialFactorsUniforms::default();
+        assert_eq!(
+            factors.layered_pbr_version(),
+            crate::renderer::layered_pbr::MATERIAL_RECORD_VERSION
+        );
+        assert!(factors.layered_pbr_lobe_mask().is_empty());
+        let metadata_bits = [
+            factors.foliage_params[2].to_bits(),
+            factors.foliage_params[3].to_bits(),
+        ];
+        factors.foliage_params[0] = 0.9;
+        factors.foliage_params[1] = 0.1;
+        assert_eq!(
+            [
+                factors.foliage_params[2].to_bits(),
+                factors.foliage_params[3].to_bits(),
+            ],
+            metadata_bits,
+        );
+    }
+
     /// Headless wgpu device. See sibling helpers in `transient.rs` /
     /// `impulse_field.rs` — same fallback adapter pattern. Returns None
     /// (test skips gracefully) when no GPU is available.
@@ -23,7 +47,8 @@ mod tests {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: None,
             force_fallback_adapter: true,
-        })).ok()?;
+        }))
+        .ok()?;
         // The material ABI uses 5 bind groups (PerFrame, PerView,
         // PerMaterial, PerDraw, SceneInputs). downlevel_defaults caps
         // max_bind_groups at 4, which is fine on Metal (it silently
@@ -34,14 +59,13 @@ mod tests {
         let mut required_limits = wgpu::Limits::downlevel_defaults();
         required_limits.max_bind_groups = 5;
         required_limits.max_uniform_buffer_binding_size = 64 << 10;
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("material-test-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits,
-                ..Default::default()
-            },
-        )).ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("material-test-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits,
+            ..Default::default()
+        }))
+        .ok()?;
         Some((device, queue))
     }
 
@@ -91,11 +115,14 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
     /// at (-1,-1), (3,-1), (-1,3). The pipeline's MVP starts as
     /// identity (we override it below) so the triangle covers the
     /// whole viewport.
-    fn make_fullscreen_tri(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+    fn make_fullscreen_tri(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> (wgpu::Buffer, wgpu::Buffer, u32) {
         let mut verts: [Vertex3D; 3] = [Vertex3D::default(); 3];
         verts[0].position = [-1.0, -1.0, 0.5];
-        verts[1].position = [ 3.0, -1.0, 0.5];
-        verts[2].position = [-1.0,  3.0, 0.5];
+        verts[1].position = [3.0, -1.0, 0.5];
+        verts[2].position = [-1.0, 3.0, 0.5];
         // The MaterialPipeline's depth-stencil uses Less; the load-op
         // for a translucent pass clears to 1.0 (far) by default in
         // production but in this test we use a depth attachment with
@@ -141,37 +168,47 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
     /// Skipped on adapters where `try_create_device` returns None.
     #[test]
     fn dispatch_translucent_alpha_blends_into_hdr() {
-        let Some((device, queue)) = try_create_device() else { return; };
+        let Some((device, queue)) = try_create_device() else {
+            return;
+        };
         let joint_buf = make_joint_buffer(&device);
         let mut sys = MaterialSystem::new(&device, &queue, &joint_buf);
 
         // Compile a refractive (translucent) material. Use the engine's
         // production format constants so the pipeline matches what
         // Renderer::new would have produced.
-        let handle = sys.compile(
-            &device,
-            TRANSLUCENT_WGSL,
-            FragmentProfile::Translucent,
-            Bucket::Transparent,
-            false,                                                          // reads_scene
-            false,                                                          // wants_instancing
-            wgpu::TextureFormat::Rgba16Float,                               // hdr_format
-            wgpu::TextureFormat::Rg8Unorm,                                  // material_format (unused in translucent)
-            wgpu::TextureFormat::Rg16Float,                                 // velocity_format (unused)
-            wgpu::TextureFormat::Rgba8Unorm,                                // albedo_format (unused)
-            formats::DEPTH_FORMAT,
-        ).expect("translucent material compiles");
+        let handle = sys
+            .compile(
+                &device,
+                TRANSLUCENT_WGSL,
+                FragmentProfile::Translucent,
+                Bucket::Transparent,
+                false,                            // reads_scene
+                false,                            // wants_instancing
+                wgpu::TextureFormat::Rgba16Float, // hdr_format
+                wgpu::TextureFormat::Rg8Unorm,    // material_format (unused in translucent)
+                wgpu::TextureFormat::Rg16Float,   // velocity_format (unused)
+                wgpu::TextureFormat::Rgba8Unorm,  // albedo_format (unused)
+                formats::DEPTH_FORMAT,
+            )
+            .expect("translucent material compiles");
         assert!(handle != 0, "compile returns a 1-based handle");
 
         // Frame uniforms — zeros are fine for a constant-colour shader.
         let pf = PerFrameUniforms {
-            time: 0.0, delta_time: 0.0, frame_index: 0, _pad0: 0,
-            screen_resolution: [64.0, 64.0], render_resolution: [64.0, 64.0],
-            taa_jitter: [0.0; 2], _pad1: [0.0; 2], wind: [0.0; 4],
+            time: 0.0,
+            delta_time: 0.0,
+            frame_index: 0,
+            _pad0: 0,
+            screen_resolution: [64.0, 64.0],
+            render_resolution: [64.0, 64.0],
+            taa_jitter: [0.0; 2],
+            _pad1: [0.0; 2],
+            wind: [0.0; 4],
             cloud: [0.0; 4],
         };
         let pv = bytemuck::Zeroable::zeroed();
-        sys.update_frame_uniforms(&queue, &pf, &pv);
+        sys.update_frame_uniforms(&device, &queue, &pf, &pv);
         sys.reset_draw_slot(crate::renderer::IDENTITY_MAT4);
 
         // MVP = identity so the fullscreen tri stays in NDC.
@@ -184,19 +221,26 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         let (vb, ib, icount) = make_fullscreen_tri(&device, &queue);
 
         sys.submit_draw(
-            &device, &queue, &joint_buf,
-            handle, /* mesh_handle */ 1, /* mesh_idx */ 0,
-            identity, identity, identity,
-            [1.0; 4], [0; 4],
+            &device, &queue, &joint_buf, handle, /* mesh_handle */ 1, /* mesh_idx */ 0,
+            identity, identity, identity, [1.0; 4], [0; 4],
         );
-        assert_eq!(sys.translucent_commands.len(), 1, "draw queued in translucent bucket");
+        assert_eq!(
+            sys.translucent_commands.len(),
+            1,
+            "draw queued in translucent bucket"
+        );
 
         // Build the HDR + depth render targets for the dispatch.
         let (rt_w, rt_h) = (64u32, 64u32);
         let hdr_rt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test_hdr_rt"),
-            size: wgpu::Extent3d { width: rt_w, height: rt_h, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            size: wgpu::Extent3d {
+                width: rt_w,
+                height: rt_h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
@@ -205,8 +249,13 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         let hdr_view = hdr_rt.create_view(&Default::default());
         let depth_rt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test_depth_rt"),
-            size: wgpu::Extent3d { width: rt_w, height: rt_h, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            size: wgpu::Extent3d {
+                width: rt_w,
+                height: rt_h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: formats::DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -216,7 +265,12 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
 
         // Pre-clear HDR to opaque cyan so we can detect alpha-blended red:
         // (1, 0, 0, 0.5) over (0, 1, 1, 1) → (0.5, 0.5, 0.5, 1.0).
-        let bg_color = wgpu::Color { r: 0.0, g: 1.0, b: 1.0, a: 1.0 };
+        let bg_color = wgpu::Color {
+            r: 0.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("test_translucent_encoder"),
         });
@@ -272,7 +326,17 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
                 multiview_mask: None,
             });
             sys.dispatch_translucent(&mut pass, |mh, _idx| {
-                if mh == 1 { Some((&vb, &ib, icount)) } else { None }
+                if mh == 1 {
+                    Some(crate::renderer::MeshDrawRef {
+                        vertex: &vb,
+                        index: &ib,
+                        first_index: 0,
+                        index_count: icount,
+                        base_vertex: 0,
+                    })
+                } else {
+                    None
+                }
             });
         }
 
@@ -301,14 +365,23 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
                     rows_per_image: Some(rt_h),
                 },
             },
-            wgpu::Extent3d { width: rt_w, height: rt_h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: rt_w,
+                height: rt_h,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
         rx.recv().expect("map sender").expect("map failed");
         let data = slice.get_mapped_range();
 
@@ -319,7 +392,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         let row_start = (cy * bpr) as usize;
         let texel_start = row_start + (cx as usize) * 8;
         let halfs: [u16; 4] = [
-            u16::from_le_bytes([data[texel_start],     data[texel_start + 1]]),
+            u16::from_le_bytes([data[texel_start], data[texel_start + 1]]),
             u16::from_le_bytes([data[texel_start + 2], data[texel_start + 3]]),
             u16::from_le_bytes([data[texel_start + 4], data[texel_start + 5]]),
             u16::from_le_bytes([data[texel_start + 6], data[texel_start + 7]]),
@@ -340,8 +413,214 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         // Allow 1/256 tolerance for half-precision round-trip.
         let eps = 0.02;
         assert!((r - 0.5).abs() < eps, "red channel = {} (expected ~0.5)", r);
-        assert!((g - 0.5).abs() < eps, "green channel = {} (expected ~0.5)", g);
-        assert!((b - 0.5).abs() < eps, "blue channel = {} (expected ~0.5)", b);
+        assert!(
+            (g - 0.5).abs() < eps,
+            "green channel = {} (expected ~0.5)",
+            g
+        );
+        assert!(
+            (b - 0.5).abs() < eps,
+            "blue channel = {} (expected ~0.5)",
+            b
+        );
+    }
+
+    #[test]
+    fn reactive_custom_sibling_is_lazy_compatible_and_does_not_write_coverage() {
+        let Some((device, queue)) = try_create_device() else {
+            return;
+        };
+        let joint_buf = make_joint_buffer(&device);
+        let mut sys = MaterialSystem::new(&device, &queue, &joint_buf);
+        let handle = sys
+            .compile(
+                &device,
+                TRANSLUCENT_WGSL,
+                FragmentProfile::Translucent,
+                Bucket::Transparent,
+                false,
+                false,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rg8Unorm,
+                wgpu::TextureFormat::Rg16Float,
+                wgpu::TextureFormat::Rgba8Unorm,
+                formats::DEPTH_FORMAT,
+            )
+            .expect("translucent material compiles");
+        assert_eq!(
+            sys.reactive_translucent_pipeline_count(),
+            0,
+            "ordinary material compilation must not eagerly create the sibling"
+        );
+
+        let pf = PerFrameUniforms {
+            time: 0.0,
+            delta_time: 0.0,
+            frame_index: 0,
+            _pad0: 0,
+            screen_resolution: [8.0, 8.0],
+            render_resolution: [8.0, 8.0],
+            taa_jitter: [0.0; 2],
+            _pad1: [0.0; 2],
+            wind: [0.0; 4],
+            cloud: [0.0; 4],
+        };
+        let pv = bytemuck::Zeroable::zeroed();
+        sys.update_frame_uniforms(&device, &queue, &pf, &pv);
+        sys.reset_draw_slot(crate::renderer::IDENTITY_MAT4);
+        let identity = crate::renderer::IDENTITY_MAT4;
+        let (vertex, index, index_count) = make_fullscreen_tri(&device, &queue);
+        sys.submit_draw(
+            &device, &queue, &joint_buf, handle, 1, 0, identity, identity, identity, [1.0; 4],
+            [0; 4],
+        );
+
+        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        sys.ensure_translucent_reactive_pipelines(&device);
+        assert_eq!(sys.reactive_translucent_pipeline_count(), 1);
+
+        let extent = wgpu::Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        };
+        let hdr = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("reactive_custom_hdr"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let coverage = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("reactive_custom_coverage"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("reactive_custom_depth"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: formats::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let hdr_view = hdr.create_view(&Default::default());
+        let coverage_view = coverage.create_view(&Default::default());
+        let depth_view = depth.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("reactive_custom_two_attachment_pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &hdr_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &coverage_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.25,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let command = &sys.translucent_commands[0];
+            assert!(sys.dispatch_translucent_command(
+                &mut pass,
+                command,
+                crate::renderer::MeshDrawRef {
+                    vertex: &vertex,
+                    index: &index,
+                    first_index: 0,
+                    index_count,
+                    base_vertex: 0,
+                },
+                true,
+                true,
+            ));
+        }
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("reactive_custom_coverage_readback"),
+            size: 256 * 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &coverage,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(8),
+                },
+            },
+            extent,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let validation = pollster::block_on(validation_scope.pop());
+        assert!(
+            validation.is_none(),
+            "attachment-compatible sibling failed validation: {validation:?}"
+        );
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        rx.recv().expect("map sender").expect("map failed");
+        let bytes = slice.get_mapped_range();
+        let coverage_byte = bytes[4 * 256 + 4];
+        drop(bytes);
+        readback.unmap();
+        assert!(
+            (63..=65).contains(&coverage_byte),
+            "custom sibling wrote imported reactive coverage: {coverage_byte}"
+        );
     }
 
     /// IEEE-754 binary16 → binary32. We don't pull in the `half` crate
@@ -349,7 +628,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
     /// the values this test produces (no NaN / Inf / subnormal cases).
     fn f16_to_f32(bits: u16) -> f32 {
         let sign = (bits >> 15) & 0x1;
-        let exp  = (bits >> 10) & 0x1f;
+        let exp = (bits >> 10) & 0x1f;
         let frac = bits & 0x3ff;
         if exp == 0 {
             if frac == 0 {
@@ -360,10 +639,14 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             return if sign == 1 { -f } else { f };
         }
         if exp == 0x1f {
-            return f32::NAN;  // Inf or NaN — unexpected in this test.
+            return f32::NAN; // Inf or NaN — unexpected in this test.
         }
         let f = (1.0 + (frac as f32) / 1024.0) * (2.0f32).powi(exp as i32 - 15);
-        if sign == 1 { -f } else { f }
+        if sign == 1 {
+            -f
+        } else {
+            f
+        }
     }
 
     /// Samples layer 0 of the albedo texture array and writes it straight out.
@@ -411,28 +694,31 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
     /// not green.
     #[test]
     fn set_user_params_preserves_a_linked_texture_array() {
-        let Some((device, queue)) = try_create_device() else { return; };
+        let Some((device, queue)) = try_create_device() else {
+            return;
+        };
         let joint_buf = make_joint_buffer(&device);
         let mut sys = MaterialSystem::new(&device, &queue, &joint_buf);
 
-        let handle = sys.compile(
-            &device,
-            ARRAY_SAMPLING_WGSL,
-            FragmentProfile::Translucent,
-            Bucket::Transparent,
-            false,
-            false,
-            wgpu::TextureFormat::Rgba16Float,
-            wgpu::TextureFormat::Rg8Unorm,
-            wgpu::TextureFormat::Rg16Float,
-            wgpu::TextureFormat::Rgba8Unorm,
-            formats::DEPTH_FORMAT,
-        ).expect("array-sampling material compiles");
+        let handle = sys
+            .compile(
+                &device,
+                ARRAY_SAMPLING_WGSL,
+                FragmentProfile::Translucent,
+                Bucket::Transparent,
+                false,
+                false,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rg8Unorm,
+                wgpu::TextureFormat::Rg16Float,
+                wgpu::TextureFormat::Rgba8Unorm,
+                formats::DEPTH_FORMAT,
+            )
+            .expect("array-sampling material compiles");
 
         // One 2×2 layer of pure green (linear Rgba8 → format code 1).
         let px: [u8; 2 * 2 * 4] = [
-            0, 255, 0, 255,  0, 255, 0, 255,
-            0, 255, 0, 255,  0, 255, 0, 255,
+            0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
         ];
         let arr = sys.create_texture_array_ex(&device, &queue, &[(&px[..], 2, 2)], 1, 1);
         assert!(arr != 0, "texture array allocates");
@@ -442,31 +728,43 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         // mutably and would otherwise conflict with holding a & into it.)
         let probe_view = sys.default_black_view.clone();
         sys.set_material_texture_array(&device, handle, 0, arr, &probe_view);
-        sys.set_user_params(&device, &queue, handle, &[0u8; 16]).expect("params set");
+        sys.set_user_params(&device, &queue, handle, &[0u8; 16])
+            .expect("params set");
 
         // Render it.
         let pf = PerFrameUniforms {
-            time: 0.0, delta_time: 0.0, frame_index: 0, _pad0: 0,
-            screen_resolution: [64.0, 64.0], render_resolution: [64.0, 64.0],
-            taa_jitter: [0.0; 2], _pad1: [0.0; 2], wind: [0.0; 4],
+            time: 0.0,
+            delta_time: 0.0,
+            frame_index: 0,
+            _pad0: 0,
+            screen_resolution: [64.0, 64.0],
+            render_resolution: [64.0, 64.0],
+            taa_jitter: [0.0; 2],
+            _pad1: [0.0; 2],
+            wind: [0.0; 4],
             cloud: [0.0; 4],
         };
         let pv = bytemuck::Zeroable::zeroed();
-        sys.update_frame_uniforms(&queue, &pf, &pv);
+        sys.update_frame_uniforms(&device, &queue, &pf, &pv);
         sys.reset_draw_slot(crate::renderer::IDENTITY_MAT4);
 
         let identity = crate::renderer::IDENTITY_MAT4;
         let (vb, ib, icount) = make_fullscreen_tri(&device, &queue);
         sys.submit_draw(
-            &device, &queue, &joint_buf,
-            handle, 1, 0, identity, identity, identity, [1.0; 4], [0; 4],
+            &device, &queue, &joint_buf, handle, 1, 0, identity, identity, identity, [1.0; 4],
+            [0; 4],
         );
 
         let (rt_w, rt_h) = (64u32, 64u32);
         let hdr_rt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test_arr_hdr"),
-            size: wgpu::Extent3d { width: rt_w, height: rt_h, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            size: wgpu::Extent3d {
+                width: rt_w,
+                height: rt_h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
@@ -475,8 +773,13 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         let hdr_view = hdr_rt.create_view(&Default::default());
         let depth_rt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test_arr_depth"),
-            size: wgpu::Extent3d { width: rt_w, height: rt_h, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            size: wgpu::Extent3d {
+                width: rt_w,
+                height: rt_h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: formats::DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -496,7 +799,12 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
                         // Clear to RED: if the draw never lands, or the stub
                         // (white/black) is sampled, the assert below fails loudly
                         // instead of accidentally passing.
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 1.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -513,7 +821,17 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
                 multiview_mask: None,
             });
             sys.dispatch_translucent(&mut pass, |mh, _idx| {
-                if mh == 1 { Some((&vb, &ib, icount)) } else { None }
+                if mh == 1 {
+                    Some(crate::renderer::MeshDrawRef {
+                        vertex: &vb,
+                        index: &ib,
+                        first_index: 0,
+                        index_count: icount,
+                        base_vertex: 0,
+                    })
+                } else {
+                    None
+                }
             });
         }
 
@@ -526,28 +844,41 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &hdr_rt, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture: &hdr_rt,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
                 buffer: &staging,
                 layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(rt_h),
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(rt_h),
                 },
             },
-            wgpu::Extent3d { width: rt_w, height: rt_h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: rt_w,
+                height: rt_h,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
         rx.recv().expect("map sender").expect("map failed");
         let data = slice.get_mapped_range();
 
         let texel = ((rt_h / 2) * bpr) as usize + ((rt_w / 2) as usize) * 8;
-        let r = f16_to_f32(u16::from_le_bytes([data[texel],     data[texel + 1]]));
+        let r = f16_to_f32(u16::from_le_bytes([data[texel], data[texel + 1]]));
         let g = f16_to_f32(u16::from_le_bytes([data[texel + 2], data[texel + 3]]));
         drop(data);
         staging.unmap();
@@ -597,5 +928,4 @@ mod translucent_sort_tests {
         let order: Vec<MaterialHandle> = ms_cmds.iter().map(|c| c.material).collect();
         assert_eq!(order, vec![2, 3, 4, 1, 5]);
     }
-
 }

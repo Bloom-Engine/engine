@@ -10,6 +10,36 @@
 // scheduler, and ordering unit tests; Phase 2b (complete — see the
 // frame-graph construction in `mod.rs`) ported the existing passes, so
 // the graph now drives the real frame in `end_frame_with_scene`.
+//
+// Issue #129 adds the typed compiler and cached executor in the modules
+// below. The original scheduler remains as a compatibility/test surface; the
+// live retained renderer binds directly to `ExecutableGraph`.
+
+mod compiler;
+mod diagnostics;
+mod frame_plan;
+mod model;
+mod runtime;
+
+pub use compiler::{
+    CompileError, CompileOptions, CompiledAccess, CompiledAccessKind, CompiledGraph, CompiledPass,
+    CompiledResource, PhysicalAllocation, PhysicalAllocationId, UsageTransition,
+};
+pub use frame_plan::{build_renderer_frame_plan, QUALITY_CAPTURE_RESOURCE_NAMES};
+pub use model::{
+    AliasClass, BufferDesc, BufferHandle, BufferUsage, ClearColor, Extent, GraphBuilder,
+    LoadPolicy, Ownership, PassId, QueueClass, ResourceDesc, ResourceId, ResourceOrigin,
+    ResourceVersion, SideEffects, TextureDesc, TextureDimension, TextureHandle, TextureUsage,
+    Usage,
+};
+pub use runtime::{
+    CapabilityTier, ExecutableGraph, ExecutionError, ExecutionRunFn, FramePlanKey,
+    GraphDebugMarkerContext, PathTracingMode, PlanCache, PlanCacheStats, ResolutionClass,
+    FRAME_FEATURE_BLOOM, FRAME_FEATURE_CAPTURE_OUTPUT, FRAME_FEATURE_CAPTURE_QUALITY,
+    FRAME_FEATURE_IMPORTED_REFRACTION, FRAME_FEATURE_SCENE_SNAPSHOTS, FRAME_FEATURE_SSAO,
+    FRAME_FEATURE_SSGI, FRAME_FEATURE_SSR, FRAME_FEATURE_TEMPORAL_REACTIVE,
+    FRAME_FEATURE_TRANSMITTED_SHADOWS, FRAME_FEATURE_WEIGHTED_TRANSPARENCY,
+};
 
 use std::collections::{HashMap, HashSet};
 
@@ -75,38 +105,45 @@ pub enum PassOutput {
 pub type RunFn<'a, Ctx> = Box<dyn FnOnce(&mut Ctx) + 'a>;
 
 pub struct PassNode<'a, Ctx> {
-    pub name:   &'static str,
-    pub reads:  Vec<PassInput>,
+    pub name: &'static str,
+    pub reads: Vec<PassInput>,
     pub writes: Vec<PassOutput>,
     /// Hard "run this node after X" hints — used for ordering that the
     /// data dependencies alone can't express (e.g. two passes that
     /// share a read target but where one conceptually follows the
     /// other for timing reasons).
-    pub after:  Vec<&'static str>,
+    pub after: Vec<&'static str>,
     /// Hard "run this node before X" hints. Validator rejects cycles.
     pub before: Vec<&'static str>,
-    pub run:    RunFn<'a, Ctx>,
+    pub run: RunFn<'a, Ctx>,
 }
 
 impl<'a, Ctx> PassNode<'a, Ctx> {
     pub fn new(name: &'static str, run: RunFn<'a, Ctx>) -> Self {
         Self {
-            name, reads: Vec::new(), writes: Vec::new(),
-            after: Vec::new(), before: Vec::new(),
+            name,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            after: Vec::new(),
+            before: Vec::new(),
             run,
         }
     }
     pub fn with_reads(mut self, reads: &[PassInput]) -> Self {
-        self.reads = reads.to_vec(); self
+        self.reads = reads.to_vec();
+        self
     }
     pub fn with_writes(mut self, writes: &[PassOutput]) -> Self {
-        self.writes = writes.to_vec(); self
+        self.writes = writes.to_vec();
+        self
     }
     pub fn with_after(mut self, after: &[&'static str]) -> Self {
-        self.after = after.to_vec(); self
+        self.after = after.to_vec();
+        self
     }
     pub fn with_before(mut self, before: &[&'static str]) -> Self {
-        self.before = before.to_vec(); self
+        self.before = before.to_vec();
+        self
     }
 }
 
@@ -127,9 +164,12 @@ pub enum GraphError {
 }
 
 impl<'a, Ctx> Graph<'a, Ctx> {
-    pub fn new() -> Self { Self { nodes: Vec::new() } }
+    pub fn new() -> Self {
+        Self { nodes: Vec::new() }
+    }
     pub fn push(&mut self, node: PassNode<'a, Ctx>) -> &mut Self {
-        self.nodes.push(node); self
+        self.nodes.push(node);
+        self
     }
 
     /// Compute execution order. Returns indices into `self.nodes`.
@@ -153,7 +193,9 @@ impl<'a, Ctx> Graph<'a, Ctx> {
 }
 
 impl<'a, Ctx> Default for Graph<'a, Ctx> {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // =====================================================================
@@ -162,7 +204,9 @@ impl<'a, Ctx> Default for Graph<'a, Ctx> {
 
 fn schedule<'a, Ctx>(nodes: &[PassNode<'a, Ctx>]) -> Result<Vec<usize>, GraphError> {
     let n = nodes.len();
-    if n == 0 { return Ok(Vec::new()); }
+    if n == 0 {
+        return Ok(Vec::new());
+    }
 
     // Name → index lookup for `after` / `before` hint resolution.
     let mut name_to_idx: HashMap<&'static str, usize> = HashMap::new();
@@ -181,7 +225,9 @@ fn schedule<'a, Ctx>(nodes: &[PassNode<'a, Ctx>]) -> Result<Vec<usize>, GraphErr
     for b in 0..n {
         for read in &nodes[b].reads {
             for a in 0..n {
-                if a == b { continue; }
+                if a == b {
+                    continue;
+                }
                 for write in &nodes[a].writes {
                     if input_matches_write(read, write) {
                         preds[b].insert(a);
@@ -193,21 +239,29 @@ fn schedule<'a, Ctx>(nodes: &[PassNode<'a, Ctx>]) -> Result<Vec<usize>, GraphErr
     // 2) Explicit `after` hints: node B.after = [A] → A → B.
     for (b, node) in nodes.iter().enumerate() {
         for name in &node.after {
-            let a = name_to_idx.get(name).ok_or_else(|| GraphError::UnknownNode {
-                node: node.name.to_string(),
-                referenced: name.to_string(),
-            })?;
-            if *a != b { preds[b].insert(*a); }
+            let a = name_to_idx
+                .get(name)
+                .ok_or_else(|| GraphError::UnknownNode {
+                    node: node.name.to_string(),
+                    referenced: name.to_string(),
+                })?;
+            if *a != b {
+                preds[b].insert(*a);
+            }
         }
     }
     // 3) Explicit `before` hints: node A.before = [B] → A → B.
     for (a, node) in nodes.iter().enumerate() {
         for name in &node.before {
-            let b = name_to_idx.get(name).ok_or_else(|| GraphError::UnknownNode {
-                node: node.name.to_string(),
-                referenced: name.to_string(),
-            })?;
-            if *b != a { preds[*b].insert(a); }
+            let b = name_to_idx
+                .get(name)
+                .ok_or_else(|| GraphError::UnknownNode {
+                    node: node.name.to_string(),
+                    referenced: name.to_string(),
+                })?;
+            if *b != a {
+                preds[*b].insert(a);
+            }
         }
     }
 
@@ -223,7 +277,9 @@ fn schedule<'a, Ctx>(nodes: &[PassNode<'a, Ctx>]) -> Result<Vec<usize>, GraphErr
             Some(i) => {
                 out.push(i);
                 for j in 0..n {
-                    if preds[j].remove(&i) { in_degree[j] -= 1; }
+                    if preds[j].remove(&i) {
+                        in_degree[j] -= 1;
+                    }
                 }
             }
             None => break,
@@ -248,10 +304,10 @@ fn schedule<'a, Ctx>(nodes: &[PassNode<'a, Ctx>]) -> Result<Vec<usize>, GraphErr
 /// the same resource.
 fn input_matches_write(input: &PassInput, output: &PassOutput) -> bool {
     match (input, output) {
-        (PassInput::SceneColor,       PassOutput::HdrColor)    => true,
-        (PassInput::SceneDepth,       PassOutput::Depth)       => true,
-        (PassInput::Shadow(i),        PassOutput::Shadow(j))   => i == j,
-        (PassInput::Transient(i),     PassOutput::Transient(j)) => i == j,
+        (PassInput::SceneColor, PassOutput::HdrColor) => true,
+        (PassInput::SceneDepth, PassOutput::Depth) => true,
+        (PassInput::Shadow(i), PassOutput::Shadow(j)) => i == j,
+        (PassInput::Transient(i), PassOutput::Transient(j)) => i == j,
         // EnvCubemap, MotionVectors, Impulse are produced outside
         // the render graph for now (env is loaded at startup; motion
         // vectors are written as a G-buffer target but not individually
@@ -297,10 +353,9 @@ mod tests {
     fn data_dependency_orders_reads_after_writes() {
         // A writes HdrColor, B reads SceneColor. B must run after A.
         let mut graph = Graph::new();
-        graph.push(PassNode::new("B_reads_scene", record("B"))
-            .with_reads(&[PassInput::SceneColor]));
-        graph.push(PassNode::new("A_writes_hdr", record("A"))
-            .with_writes(&[PassOutput::HdrColor]));
+        graph
+            .push(PassNode::new("B_reads_scene", record("B")).with_reads(&[PassInput::SceneColor]));
+        graph.push(PassNode::new("A_writes_hdr", record("A")).with_writes(&[PassOutput::HdrColor]));
         let mut ctx = Vec::new();
         graph.execute(&mut ctx).unwrap();
         assert_eq!(ctx, vec!["A", "B"]);
@@ -309,8 +364,7 @@ mod tests {
     #[test]
     fn explicit_after_hint_orders_nodes() {
         let mut graph = Graph::new();
-        graph.push(PassNode::new("later", record("later"))
-            .with_after(&["earlier"]));
+        graph.push(PassNode::new("later", record("later")).with_after(&["earlier"]));
         graph.push(PassNode::new("earlier", record("earlier")));
         let mut ctx = Vec::new();
         graph.execute(&mut ctx).unwrap();
@@ -321,8 +375,7 @@ mod tests {
     fn explicit_before_hint_orders_nodes() {
         let mut graph = Graph::new();
         graph.push(PassNode::new("second", record("second")));
-        graph.push(PassNode::new("first", record("first"))
-            .with_before(&["second"]));
+        graph.push(PassNode::new("first", record("first")).with_before(&["second"]));
         let mut ctx = Vec::new();
         graph.execute(&mut ctx).unwrap();
         assert_eq!(ctx, vec!["first", "second"]);
@@ -332,13 +385,13 @@ mod tests {
     fn chain_of_three() {
         // A -> B -> C via data dependencies.
         let mut graph = Graph::new();
-        graph.push(PassNode::new("C", record("C"))
-            .with_reads(&[PassInput::Transient(1)]));
-        graph.push(PassNode::new("A", record("A"))
-            .with_writes(&[PassOutput::HdrColor]));
-        graph.push(PassNode::new("B", record("B"))
-            .with_reads(&[PassInput::SceneColor])
-            .with_writes(&[PassOutput::Transient(1)]));
+        graph.push(PassNode::new("C", record("C")).with_reads(&[PassInput::Transient(1)]));
+        graph.push(PassNode::new("A", record("A")).with_writes(&[PassOutput::HdrColor]));
+        graph.push(
+            PassNode::new("B", record("B"))
+                .with_reads(&[PassInput::SceneColor])
+                .with_writes(&[PassOutput::Transient(1)]),
+        );
         let mut ctx = Vec::new();
         graph.execute(&mut ctx).unwrap();
         assert_eq!(ctx, vec!["A", "B", "C"]);
@@ -349,12 +402,9 @@ mod tests {
         // Both X and Y depend on ROOT, neither depends on the other.
         // Order should be declaration order among the tied candidates.
         let mut graph = Graph::new();
-        graph.push(PassNode::new("X", record("X"))
-            .with_reads(&[PassInput::SceneColor]));
-        graph.push(PassNode::new("Y", record("Y"))
-            .with_reads(&[PassInput::SceneColor]));
-        graph.push(PassNode::new("ROOT", record("ROOT"))
-            .with_writes(&[PassOutput::HdrColor]));
+        graph.push(PassNode::new("X", record("X")).with_reads(&[PassInput::SceneColor]));
+        graph.push(PassNode::new("Y", record("Y")).with_reads(&[PassInput::SceneColor]));
+        graph.push(PassNode::new("ROOT", record("ROOT")).with_writes(&[PassOutput::HdrColor]));
         let mut ctx = Vec::new();
         graph.execute(&mut ctx).unwrap();
         assert_eq!(ctx, vec!["ROOT", "X", "Y"]);
@@ -363,8 +413,7 @@ mod tests {
     #[test]
     fn unknown_after_is_reported() {
         let mut graph: Graph<'_, TestCtx> = Graph::new();
-        graph.push(PassNode::new("a", record("a"))
-            .with_after(&["does_not_exist"]));
+        graph.push(PassNode::new("a", record("a")).with_after(&["does_not_exist"]));
         let err = graph.schedule().unwrap_err();
         match err {
             GraphError::UnknownNode { node, referenced } => {
@@ -378,10 +427,8 @@ mod tests {
     #[test]
     fn cycle_via_explicit_hints_is_rejected() {
         let mut graph: Graph<'_, TestCtx> = Graph::new();
-        graph.push(PassNode::new("a", record("a"))
-            .with_after(&["b"]));
-        graph.push(PassNode::new("b", record("b"))
-            .with_after(&["a"]));
+        graph.push(PassNode::new("a", record("a")).with_after(&["b"]));
+        graph.push(PassNode::new("b", record("b")).with_after(&["a"]));
         match graph.schedule() {
             Err(GraphError::Cycle(names)) => {
                 assert!(names.contains(&"a".to_string()));
@@ -397,45 +444,60 @@ mod tests {
         // → main_hdr → ssao → translucent → composite → swapchain —
         // proves the scheduler produces the expected order.
         let mut graph: Graph<'_, TestCtx> = Graph::new();
-        graph.push(PassNode::new("composite", record("composite"))
-            .with_reads(&[PassInput::Transient(10)])
-            // Composite is the terminal pass — explicit `after` on
-            // every predecessor so tie-breaking (declaration order)
-            // doesn't float composite past a sibling that hasn't run.
-            .with_after(&["bloom", "translucent", "ssao"])
-            .with_writes(&[PassOutput::Swapchain]));
-        graph.push(PassNode::new("bloom", record("bloom"))
-            .with_reads(&[PassInput::SceneColor])
-            .with_writes(&[PassOutput::Transient(10)]));
-        graph.push(PassNode::new("translucent", record("translucent"))
-            .with_reads(&[PassInput::SceneColor, PassInput::SceneDepth])
-            .with_writes(&[PassOutput::HdrColor])
-            .with_after(&["main_hdr"]));   // explicit so SceneColor is
-                                           // a snapshot, not a write-
-                                           // then-read loop
-        graph.push(PassNode::new("ssao", record("ssao"))
-            .with_reads(&[PassInput::SceneDepth])
-            .with_writes(&[PassOutput::Transient(20)]));
-        graph.push(PassNode::new("main_hdr", record("main_hdr"))
-            .with_reads(&[PassInput::Shadow(0)])
-            .with_writes(&[PassOutput::HdrColor, PassOutput::Depth,
-                           PassOutput::MaterialRt, PassOutput::VelocityRt,
-                           PassOutput::AlbedoRt]));
-        graph.push(PassNode::new("shadow_0", record("shadow_0"))
-            .with_writes(&[PassOutput::Shadow(0)]));
+        graph.push(
+            PassNode::new("composite", record("composite"))
+                .with_reads(&[PassInput::Transient(10)])
+                // Composite is the terminal pass — explicit `after` on
+                // every predecessor so tie-breaking (declaration order)
+                // doesn't float composite past a sibling that hasn't run.
+                .with_after(&["bloom", "translucent", "ssao"])
+                .with_writes(&[PassOutput::Swapchain]),
+        );
+        graph.push(
+            PassNode::new("bloom", record("bloom"))
+                .with_reads(&[PassInput::SceneColor])
+                .with_writes(&[PassOutput::Transient(10)]),
+        );
+        graph.push(
+            PassNode::new("translucent", record("translucent"))
+                .with_reads(&[PassInput::SceneColor, PassInput::SceneDepth])
+                .with_writes(&[PassOutput::HdrColor])
+                .with_after(&["main_hdr"]),
+        ); // explicit so SceneColor is
+           // a snapshot, not a write-
+           // then-read loop
+        graph.push(
+            PassNode::new("ssao", record("ssao"))
+                .with_reads(&[PassInput::SceneDepth])
+                .with_writes(&[PassOutput::Transient(20)]),
+        );
+        graph.push(
+            PassNode::new("main_hdr", record("main_hdr"))
+                .with_reads(&[PassInput::Shadow(0)])
+                .with_writes(&[
+                    PassOutput::HdrColor,
+                    PassOutput::Depth,
+                    PassOutput::MaterialRt,
+                    PassOutput::VelocityRt,
+                    PassOutput::AlbedoRt,
+                ]),
+        );
+        graph.push(
+            PassNode::new("shadow_0", record("shadow_0")).with_writes(&[PassOutput::Shadow(0)]),
+        );
 
         let mut ctx = Vec::new();
         graph.execute(&mut ctx).unwrap();
         // Invariants — strict total order isn't guaranteed, but these
         // data / explicit-hint dependencies must hold:
         let pos = |name: &str| ctx.iter().position(|&n| n == name).unwrap();
-        assert!(pos("shadow_0")   < pos("main_hdr"));
-        assert!(pos("main_hdr")   < pos("ssao"));
-        assert!(pos("main_hdr")   < pos("translucent"));
-        assert!(pos("main_hdr")   < pos("bloom"));
-        assert!(pos("bloom")      < pos("composite"));
+        assert!(pos("shadow_0") < pos("main_hdr"));
+        assert!(pos("main_hdr") < pos("ssao"));
+        assert!(pos("main_hdr") < pos("translucent"));
+        assert!(pos("main_hdr") < pos("bloom"));
+        assert!(pos("bloom") < pos("composite"));
         assert!(pos("translucent") < pos("composite"));
-        assert!(pos("ssao")        < pos("composite"));
+        assert!(pos("ssao") < pos("composite"));
         assert_eq!(pos("composite"), ctx.len() - 1);
     }
 
@@ -449,12 +511,18 @@ mod tests {
         let c2 = counter.clone();
 
         let mut graph: Graph<'_, TestCtx> = Graph::new();
-        graph.push(PassNode::new("a", Box::new(move |_ctx| {
-            *c1.lock().unwrap() += 1;
-        })));
-        graph.push(PassNode::new("b", Box::new(move |_ctx| {
-            *c2.lock().unwrap() += 10;
-        })));
+        graph.push(PassNode::new(
+            "a",
+            Box::new(move |_ctx| {
+                *c1.lock().unwrap() += 1;
+            }),
+        ));
+        graph.push(PassNode::new(
+            "b",
+            Box::new(move |_ctx| {
+                *c2.lock().unwrap() += 10;
+            }),
+        ));
         let mut ctx = Vec::new();
         graph.execute(&mut ctx).unwrap();
         assert_eq!(*counter.lock().unwrap(), 11);

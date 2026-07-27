@@ -20,7 +20,7 @@ pub struct ImageData {
 pub struct RenderTextureData {
     pub width: u32,
     pub height: u32,
-    pub texture_handle: f64,  // Points to the corresponding TextureData entry.
+    pub texture_handle: f64, // Points to the corresponding TextureData entry.
 }
 
 pub struct TextureManager {
@@ -42,7 +42,9 @@ impl TextureManager {
     /// is created by the calling FFI function which has access to the Renderer.
     pub fn load_render_texture(&mut self, width: u32, height: u32) -> f64 {
         self.render_textures.alloc(RenderTextureData {
-            width, height, texture_handle: 0.0,
+            width,
+            height,
+            texture_handle: 0.0,
         })
     }
 
@@ -97,7 +99,11 @@ impl TextureManager {
         let data = img.into_raw();
 
         let bind_group_idx = renderer.register_texture(width, height, &data);
-        self.textures.alloc(TextureData { bind_group_idx, width, height })
+        self.textures.alloc(TextureData {
+            bind_group_idx,
+            width,
+            height,
+        })
     }
 
     pub fn unload_texture(&mut self, handle: f64, renderer: &mut Renderer) {
@@ -119,14 +125,27 @@ impl TextureManager {
         let height = img.height();
         let data = img.into_raw();
 
-        self.images.alloc(ImageData { data, width, height })
+        self.images.alloc(ImageData {
+            data,
+            width,
+            height,
+        })
     }
 
     pub fn image_resize(&mut self, handle: f64, new_w: u32, new_h: u32) {
         if let Some(img_data) = self.images.get_mut(handle) {
-            let src = image::RgbaImage::from_raw(img_data.width, img_data.height, std::mem::take(&mut img_data.data));
+            let src = image::RgbaImage::from_raw(
+                img_data.width,
+                img_data.height,
+                std::mem::take(&mut img_data.data),
+            );
             if let Some(src) = src {
-                let resized = image::imageops::resize(&src, new_w, new_h, image::imageops::FilterType::Triangle);
+                let resized = image::imageops::resize(
+                    &src,
+                    new_w,
+                    new_h,
+                    image::imageops::FilterType::Triangle,
+                );
                 img_data.width = new_w;
                 img_data.height = new_h;
                 img_data.data = resized.into_raw();
@@ -136,7 +155,11 @@ impl TextureManager {
 
     pub fn image_crop(&mut self, handle: f64, x: u32, y: u32, w: u32, h: u32) {
         if let Some(img_data) = self.images.get_mut(handle) {
-            let src = image::RgbaImage::from_raw(img_data.width, img_data.height, std::mem::take(&mut img_data.data));
+            let src = image::RgbaImage::from_raw(
+                img_data.width,
+                img_data.height,
+                std::mem::take(&mut img_data.data),
+            );
             if let Some(mut src) = src {
                 let cropped = image::imageops::crop(&mut src, x, y, w, h).to_image();
                 img_data.width = w;
@@ -148,7 +171,11 @@ impl TextureManager {
 
     pub fn image_flip_h(&mut self, handle: f64) {
         if let Some(img_data) = self.images.get_mut(handle) {
-            let src = image::RgbaImage::from_raw(img_data.width, img_data.height, std::mem::take(&mut img_data.data));
+            let src = image::RgbaImage::from_raw(
+                img_data.width,
+                img_data.height,
+                std::mem::take(&mut img_data.data),
+            );
             if let Some(src) = src {
                 let flipped = image::imageops::flip_horizontal(&src);
                 img_data.data = flipped.into_raw();
@@ -158,7 +185,11 @@ impl TextureManager {
 
     pub fn image_flip_v(&mut self, handle: f64) {
         if let Some(img_data) = self.images.get_mut(handle) {
-            let src = image::RgbaImage::from_raw(img_data.width, img_data.height, std::mem::take(&mut img_data.data));
+            let src = image::RgbaImage::from_raw(
+                img_data.width,
+                img_data.height,
+                std::mem::take(&mut img_data.data),
+            );
             if let Some(src) = src {
                 let flipped = image::imageops::flip_vertical(&src);
                 img_data.data = flipped.into_raw();
@@ -173,14 +204,22 @@ impl TextureManager {
         };
         let (width, height) = (dds.get_width(), dds.get_height());
         if let Some(bind_group_idx) = renderer.register_texture_dds(&dds) {
-            return self.textures.alloc(TextureData { bind_group_idx, width, height });
+            return self.textures.alloc(TextureData {
+                bind_group_idx,
+                width,
+                height,
+            });
         }
         // No BC support on this adapter (mobile GL): CPU-decode the top
         // mip and feed the regular RGBA path (which regenerates mips).
         match image_dds::image_from_dds(&dds, 0) {
             Ok(rgba) => {
                 let bind_group_idx = renderer.register_texture(width, height, rgba.as_raw());
-                self.textures.alloc(TextureData { bind_group_idx, width, height })
+                self.textures.alloc(TextureData {
+                    bind_group_idx,
+                    width,
+                    height,
+                })
             }
             Err(_) => 0.0,
         }
@@ -188,8 +227,13 @@ impl TextureManager {
 
     pub fn load_texture_from_image(&mut self, handle: f64, renderer: &mut Renderer) -> f64 {
         if let Some(img_data) = self.images.get(handle) {
-            let bind_group_idx = renderer.register_texture(img_data.width, img_data.height, &img_data.data);
-            self.textures.alloc(TextureData { bind_group_idx, width: img_data.width, height: img_data.height })
+            let bind_group_idx =
+                renderer.register_texture(img_data.width, img_data.height, &img_data.data);
+            self.textures.alloc(TextureData {
+                bind_group_idx,
+                width: img_data.width,
+                height: img_data.height,
+            })
         } else {
             0.0
         }

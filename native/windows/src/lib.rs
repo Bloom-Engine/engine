@@ -760,6 +760,10 @@ unsafe fn init_engine_for_hwnd(
         if supported.contains(pt_tex_mask) {
             required_features |= pt_tex_mask;
         }
+        bloom_shared::renderer::gpu_driven::request_features_if_supported(
+            supported,
+            &mut required_features,
+        );
         let experimental_features = if required_features.intersects(rt_mask) {
             unsafe { wgpu::ExperimentalFeatures::enabled() }
         } else {
@@ -790,6 +794,8 @@ unsafe fn init_engine_for_hwnd(
         if required_features.contains(pt_tex_mask) {
             required_limits.max_binding_array_elements_per_shader_stage =
                 adapter_limits.max_binding_array_elements_per_shader_stage;
+            required_limits.max_binding_array_sampler_elements_per_shader_stage =
+                adapter_limits.max_binding_array_sampler_elements_per_shader_stage;
         }
         // PT-4: the path-trace kernel binds 9 storage buffers (accum +
         // moments + reservoir ping-pongs on top of instance/geo data);

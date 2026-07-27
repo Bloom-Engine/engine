@@ -177,12 +177,23 @@ pub(super) fn clustered_scene_shader(source: &str) -> String {
         .find("// BEGIN-POINT-LIGHT-LOOP")
         .expect("scene shader missing BEGIN-POINT-LIGHT-LOOP marker");
     let end_marker = "// END-POINT-LIGHT-LOOP";
-    let end = source.find(end_marker).expect("scene shader missing END marker") + end_marker.len();
+    let end = source
+        .find(end_marker)
+        .expect("scene shader missing END marker")
+        + end_marker.len();
+    let clustered_loop = if source.contains("fn shade_layered_base_pbr(") {
+        CLUSTERED_LOOP.replace(
+            "shade_pbr(n, v,",
+            "shade_layered_pbr(layered_surface, n, v,",
+        )
+    } else {
+        CLUSTERED_LOOP.to_owned()
+    };
     format!(
         "{}{}{}{}",
         CLUSTERED_BINDINGS,
         &source[..begin],
-        CLUSTERED_LOOP,
+        clustered_loop,
         &source[end..]
     )
 }
@@ -208,8 +219,18 @@ pub(super) fn extra_lighting_layout_entries() -> [wgpu::BindGroupLayoutEntry; 3]
             },
             count: None,
         },
-        wgpu::BindGroupLayoutEntry { binding: 11, visibility: wgpu::ShaderStages::FRAGMENT, ty: storage_ro, count: None },
-        wgpu::BindGroupLayoutEntry { binding: 12, visibility: wgpu::ShaderStages::FRAGMENT, ty: storage_ro, count: None },
+        wgpu::BindGroupLayoutEntry {
+            binding: 11,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: storage_ro,
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 12,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: storage_ro,
+            count: None,
+        },
     ]
 }
 
@@ -330,10 +351,22 @@ impl FroxelPass {
             label: Some("froxel_assign_bg"),
             layout: &assign_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: lights_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: counts_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: indices_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: lights_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: counts_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: indices_buffer.as_entire_binding(),
+                },
             ],
         });
         Self {
@@ -351,9 +384,18 @@ impl FroxelPass {
     /// appended to every lighting bind group the renderer builds.
     pub(super) fn extra_lighting_bind_entries(&self) -> [wgpu::BindGroupEntry<'_>; 3] {
         [
-            wgpu::BindGroupEntry { binding: 10, resource: self.params_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 11, resource: self.counts_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 12, resource: self.indices_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: self.params_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: self.counts_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: self.indices_buffer.as_entire_binding(),
+            },
         ]
     }
 
@@ -394,8 +436,7 @@ impl super::Renderer {
         // pass runs at render_extent (render_scale-aware), not surface
         // size.
         let (rw, rh) = self.render_extent();
-        let n = (self.lighting_uniforms.point_light_count[0] as u32)
-            .min(MAX_LIGHTS_PER_CLUSTER);
+        let n = (self.lighting_uniforms.point_light_count[0] as u32).min(MAX_LIGHTS_PER_CLUSTER);
         let params = FroxelParams {
             view: self.current_view_matrix,
             grid: [GRID_X, GRID_Y, GRID_Z, n],
@@ -408,9 +449,11 @@ impl super::Renderer {
             ],
             inv_proj: self.current_inv_proj_matrix,
         };
-        self.queue.write_buffer(&froxel.params_buffer, 0, bytemuck::bytes_of(&params));
+        self.queue
+            .write_buffer(&froxel.params_buffer, 0, bytemuck::bytes_of(&params));
         let count = [n as f32, 0.0, 0.0, 0.0_f32];
-        self.queue.write_buffer(&froxel.lights_buffer, 0, bytemuck::bytes_of(&count));
+        self.queue
+            .write_buffer(&froxel.lights_buffer, 0, bytemuck::bytes_of(&count));
         self.queue.write_buffer(
             &froxel.lights_buffer,
             16,

@@ -17,6 +17,7 @@ use super::*;
 // renderer/mod.rs gains no field.
 struct SdfTriCache {
     version: u64,
+    excludes_transmission: bool,
     vertices: Vec<f32>,
     indices: Vec<u32>,
     tri_count: u32,
@@ -74,10 +75,23 @@ impl Renderer {
         scene: &crate::scene::SceneGraph,
         encoder: &mut wgpu::CommandEncoder,
     ) {
+        let transparent_gi = self.transparent_gi_active;
+        if self.scene_sdf_clipmap_built
+            && (self.scene_sdf_clipmap_scene_version != scene.tlas_version
+                || self.scene_sdf_clipmap_transparent_gi != transparent_gi)
+        {
+            self.scene_sdf_clipmap_rebake_needed = true;
+        }
         // Continue an in-flight job first: one slice batch per frame.
         if let Some(job) = self.sdf_clipmap_job.take() {
-            self.encode_clipmap_bake_slices(job, encoder);
-            return;
+            if job.scene_version == scene.tlas_version && job.transparent_gi == transparent_gi {
+                self.encode_clipmap_bake_slices(job, encoder);
+                return;
+            }
+            // The staging volume is not live until its final atomic copy.
+            // Dropping an obsolete job is therefore safe and avoids publishing
+            // geometry/material state that changed while it was amortizing.
+            self.scene_sdf_clipmap_rebake_needed = true;
         }
         if !self.scene_sdf_clipmap_rebake_needed {
             return;
@@ -95,13 +109,14 @@ impl Renderer {
 
         let mut cache_guard = sdf_tri_cache().lock().unwrap();
         let stale = match &*cache_guard {
-            Some(c) => c.version != scene.tlas_version,
+            Some(c) => c.version != scene.tlas_version || c.excludes_transmission != transparent_gi,
             None => true,
         };
         if stale {
-            let (v, i, n) = scene.build_world_triangles();
+            let (v, i, n) = scene.build_world_triangles_for_gi(transparent_gi);
             *cache_guard = Some(SdfTriCache {
                 version: scene.tlas_version,
+                excludes_transmission: transparent_gi,
                 vertices: v,
                 indices: i,
                 tri_count: n,
@@ -200,26 +215,34 @@ impl Renderer {
             }
         }
 
-        let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene_sdf_bake_vbuf"),
-            contents: bytemuck::cast_slice(vertices.as_slice()),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let ibuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene_sdf_bake_ibuf"),
-            contents: bytemuck::cast_slice(indices.as_slice()),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let cell_offsets_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene_sdf_bake_cell_offsets"),
-            contents: bytemuck::cast_slice(&offsets),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let cell_tris_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene_sdf_bake_cell_tris"),
-            contents: bytemuck::cast_slice(&tri_refs),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let vbuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("scene_sdf_bake_vbuf"),
+                contents: bytemuck::cast_slice(vertices.as_slice()),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let ibuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("scene_sdf_bake_ibuf"),
+                contents: bytemuck::cast_slice(indices.as_slice()),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let cell_offsets_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("scene_sdf_bake_cell_offsets"),
+                contents: bytemuck::cast_slice(&offsets),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let cell_tris_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("scene_sdf_bake_cell_tris"),
+                contents: bytemuck::cast_slice(&tri_refs),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
         // Per-job uniform: sharing sdf_bake_uniform would alias with the
         // per-mesh bakes — queue.write_buffer applies before any of this
         // frame's commands, so the last write would win for every pass.
@@ -233,12 +256,32 @@ impl Renderer {
             label: Some("scene_sdf_clipmap_bake_bg"),
             layout: &self.sdf_clipmap_bake_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: vbuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: ibuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.scene_sdf_clipmap_staging_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: cell_offsets_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: cell_tris_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: vbuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: ibuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(
+                        &self.scene_sdf_clipmap_staging_view,
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: cell_offsets_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: cell_tris_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -247,6 +290,8 @@ impl Renderer {
             origin,
             aabb_min,
             aabb_max,
+            scene_version: scene.tlas_version,
+            transparent_gi,
             uniform,
             bind_group,
             next_z: 0,
@@ -273,7 +318,8 @@ impl Renderer {
             aabb_max: job.aabb_max,
             counts: [SCENE_SDF_CLIPMAP_BIN_CELLS, res, job.next_z, 0],
         };
-        self.queue.write_buffer(&job.uniform, 0, bytemuck::bytes_of(&params));
+        self.queue
+            .write_buffer(&job.uniform, 0, bytemuck::bytes_of(&params));
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("scene_sdf_clipmap_bake_slice"),
@@ -297,6 +343,8 @@ impl Renderer {
             );
             self.scene_sdf_clipmap_origin = job.origin;
             self.scene_sdf_clipmap_built = true;
+            self.scene_sdf_clipmap_scene_version = job.scene_version;
+            self.scene_sdf_clipmap_transparent_gi = job.transparent_gi;
         } else {
             self.sdf_clipmap_job = Some(job);
         }
@@ -368,10 +416,7 @@ impl Renderer {
     /// sun/sky math, roughly matching a single card-lighting pixel.
     /// Runs at most once per `WSRC_REBAKE_THRESHOLD × extent` of
     /// camera travel — same amortisation pattern as the clipmap.
-    pub(super) fn bake_wsrc(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-    ) {
+    pub(super) fn bake_wsrc(&mut self, encoder: &mut wgpu::CommandEncoder) {
         // V13 — bake only cascades that are marked not-built. Each
         // cascade snaps to its own cell grid (cell = extent / 16)
         // and writes into its own 16-slice block of the shared
@@ -393,8 +438,11 @@ impl Renderer {
         // across all cascades in one frame. Per-cascade differences
         // come from the origin + extent passed through the uniform.
         let ld = self.lighting_uniforms.light_dir;
-        let inv_len = 1.0 / (ld[0]*ld[0] + ld[1]*ld[1] + ld[2]*ld[2]).sqrt().max(1e-4);
-        let sun_dir_ws = [-ld[0]*inv_len, -ld[1]*inv_len, -ld[2]*inv_len, ld[3]];
+        let inv_len = 1.0
+            / (ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2])
+                .sqrt()
+                .max(1e-4);
+        let sun_dir_ws = [-ld[0] * inv_len, -ld[1] * inv_len, -ld[2] * inv_len, ld[3]];
         let lc = self.lighting_uniforms.light_color;
         let sun_intensity = ld[3].max(0.0);
         let sun_color = [
@@ -432,36 +480,102 @@ impl Renderer {
             if self.wsrc_bake_hw_bg_cache.is_none() {
                 let tlas = self.tlas.as_ref().unwrap();
                 let instance_buf = self.tlas_instance_data_buffer.as_ref().unwrap();
-                self.wsrc_bake_hw_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("wsrc_bake_hw_bg"),
-                    layout: self.wsrc_bake_hw_layout.as_ref().unwrap(),
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.wsrc_bake_uniform.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
-                        wgpu::BindGroupEntry { binding: 6, resource: tlas.as_binding() },
-                        wgpu::BindGroupEntry { binding: 7, resource: instance_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.mesh_card_radiance_view) },
-                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.mesh_card_atlas_sampler) },
-                    ],
-                }));
+                self.wsrc_bake_hw_bg_cache =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("wsrc_bake_hw_bg"),
+                        layout: self.wsrc_bake_hw_layout.as_ref().unwrap(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.wsrc_bake_uniform.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.shadow_map.depth_views[0],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.shadow_map.depth_views[1],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.shadow_map.depth_views[2],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: tlas.as_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: instance_buf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 8,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.mesh_card_radiance_view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 9,
+                                resource: wgpu::BindingResource::Sampler(
+                                    &self.mesh_card_atlas_sampler,
+                                ),
+                            },
+                        ],
+                    }));
             }
         } else if self.wsrc_bake_bg_cache.is_none() {
-            self.wsrc_bake_bg_cache = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("wsrc_bake_bg"),
-                layout: &self.wsrc_bake_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.wsrc_bake_uniform.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[0]) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[1]) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.shadow_map.depth_views[2]) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view) },
-                ],
-            }));
+            self.wsrc_bake_bg_cache =
+                Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("wsrc_bake_bg"),
+                    layout: &self.wsrc_bake_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.wsrc_bake_uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.shadow_map.depth_views[0],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.shadow_map.depth_views[1],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.shadow_map.depth_views[2],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_map.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&self.wsrc_atlas_view),
+                        },
+                    ],
+                }));
         }
 
         let cam = self.current_camera_world_pos();
@@ -506,18 +620,26 @@ impl Renderer {
                     0.0,
                 ],
             };
-            self.queue.write_buffer(
-                &self.wsrc_bake_uniform,
-                0,
-                bytemuck::bytes_of(&params),
-            );
+            self.queue
+                .write_buffer(&self.wsrc_bake_uniform, 0, bytemuck::bytes_of(&params));
 
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(if use_hw { "wsrc_bake_hw_pass" } else { "wsrc_bake_pass" }),
+                label: Some(if use_hw {
+                    "wsrc_bake_hw_pass"
+                } else {
+                    "wsrc_bake_pass"
+                }),
                 timestamp_writes: None,
             });
             if use_hw {
-                pass.set_pipeline(self.wsrc_bake_hw_pipeline.as_ref().unwrap());
+                let pipeline = if self.transparent_gi_active {
+                    self.wsrc_bake_hw_transparent_pipeline
+                        .as_ref()
+                        .expect("active transparent GI has a lazy HW WSRC specialization")
+                } else {
+                    self.wsrc_bake_hw_pipeline.as_ref().unwrap()
+                };
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, self.wsrc_bake_hw_bg_cache.as_ref().unwrap(), &[]);
             } else {
                 pass.set_pipeline(&self.wsrc_bake_pipeline);
@@ -562,11 +684,21 @@ impl Renderer {
 
         for handle in pending {
             let (sdf_tex, sdf_view, vb_ptr, ib_ptr, bmin, bmax, index_count, mesh_hash) = {
-                let Some(node) = scene.nodes.get(handle) else { continue; };
-                let Some(sdf_tex) = node.mesh_sdf.as_ref() else { continue; };
-                let Some(sdf_view) = node.mesh_sdf_view.as_ref() else { continue; };
-                let Some(vb) = node.gpu_vb.as_ref() else { continue; };
-                let Some(ib) = node.gpu_ib.as_ref() else { continue; };
+                let Some(node) = scene.nodes.get(handle) else {
+                    continue;
+                };
+                let Some(sdf_tex) = node.mesh_sdf.as_ref() else {
+                    continue;
+                };
+                let Some(sdf_view) = node.mesh_sdf_view.as_ref() else {
+                    continue;
+                };
+                let Some(vb) = node.gpu_vb.as_ref() else {
+                    continue;
+                };
+                let Some(ib) = node.gpu_ib.as_ref() else {
+                    continue;
+                };
                 (
                     sdf_tex.clone(),
                     sdf_view.clone(),
@@ -587,19 +719,28 @@ impl Renderer {
                 aabb_max: [bmax[0], bmax[1], bmax[2], 0.0],
                 counts: [tri_count, MESH_SDF_RES, 0, 0],
             };
-            self.queue.write_buffer(
-                &self.sdf_bake_uniform,
-                0,
-                bytemuck::bytes_of(&params),
-            );
+            self.queue
+                .write_buffer(&self.sdf_bake_uniform, 0, bytemuck::bytes_of(&params));
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("sdf_bake_bg"),
                 layout: &self.sdf_bake_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.sdf_bake_uniform.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: vb_ptr.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: ib_ptr.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&sdf_view) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.sdf_bake_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: vb_ptr.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ib_ptr.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&sdf_view),
+                    },
                 ],
             });
             {

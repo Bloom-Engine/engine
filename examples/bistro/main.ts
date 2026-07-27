@@ -20,7 +20,7 @@
 // below to open that one instead.
 
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
+  initWindow, closeWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
   setEnvClearFromHdr, setTargetFPS, getDeltaTime, getFPS,
   isKeyDown, isKeyPressed,
   getMouseDeltaX, getMouseDeltaY,
@@ -28,7 +28,9 @@ import {
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
+  getCommandLineArgs, resize,
 } from "bloom/core";
+import { parseQualityRun, QualityRun } from "bloom/quality";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
 import {
@@ -47,14 +49,15 @@ const MOVE_SPEED = 5.0;
 const SPRINT_MULT = 2.5;
 
 // Auto-capture args (matches the sponza examples' CLI)
-declare const process: { argv: string[] };
-const argv: string[] = process.argv;
+const argv: string[] = getCommandLineArgs();
+const qualityConfig = parseQualityRun(argv);
 let captureFrames = 0;
 let capturePath = "";
 let frameCount = 0;
 let initYaw = 0.0;
+let scenePath = "assets/bistro.gltf";
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
-for (let i = 2; i < argv.length; i = i + 1) {
+for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
     capturePath = argv[i + 2];
@@ -65,11 +68,16 @@ for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
   }
+  if (argv[i] === "--scene" && i + 1 < argv.length) {
+    scenePath = argv[i + 1];
+  }
 }
 
 // ---- Init ----
 initWindow(SCREEN_W, SCREEN_H, "Bloom Bistro", 0);
+if (qualityConfig !== null) resize(SCREEN_W, SCREEN_H, SCREEN_W, SCREEN_H);
 setTargetFPS(60);
+let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qualityConfig) : null;
 setEnvClearFromHdr("assets/outdoor.hdr");
 enableShadows();
 
@@ -95,7 +103,8 @@ setChromaticAberration(0.0005);
 // ---- Load Bistro into scene graph ----
 // `bistro.gltf` = exterior street corner. Swap to `bistrox.gltf`
 // for the interior wine-bar variant.
-const bistro = loadModel("assets/bistro.gltf");
+const bistro = loadModel(scenePath);
+console.error("BLOOM_QUALITY_SCENE bistro_meshes=" + bistro.meshCount);
 const identity = mat4Identity();
 for (let i = 0; i < bistro.meshCount; i = i + 1) {
   const node = createSceneNode();
@@ -117,7 +126,8 @@ let cursorLocked = false;
 
 // ---- Main loop ----
 while (!windowShouldClose()) {
-  const dt = getDeltaTime();
+  const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
+  const dt = qualityRun !== null ? qualityRun.deltaTime() : getDeltaTime();
 
   if (cursorLocked) {
     camYaw = camYaw - getMouseDeltaX() * MOUSE_SENS;
@@ -174,24 +184,30 @@ while (!windowShouldClose()) {
 
   endMode3D();
 
-  // HUD
-  drawText("Bloom Bistro", 10, 10, 20, { r: 255, g: 255, b: 255, a: 255 });
-  const fps = getFPS();
-  const ms = fps > 0.0 ? 1000.0 / fps : 0.0;
-  const fpsColor = fps >= 55.0
-    ? { r: 120, g: 230, b: 120, a: 255 }
-    : fps >= 30.0
-      ? { r: 230, g: 220, b: 120, a: 255 }
-      : { r: 230, g: 120, b: 120, a: 255 };
-  const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
-  drawText(fpsText, 10, 35, 16, fpsColor);
-  drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 30, 14, { r: 180, g: 180, b: 180, a: 255 });
+  if (qualityRun === null) {
+    drawText("Bloom Bistro", 10, 10, 20, { r: 255, g: 255, b: 255, a: 255 });
+    const fps = getFPS();
+    const ms = fps > 0.0 ? 1000.0 / fps : 0.0;
+    const fpsColor = fps >= 55.0
+      ? { r: 120, g: 230, b: 120, a: 255 }
+      : fps >= 30.0
+        ? { r: 230, g: 220, b: 120, a: 255 }
+        : { r: 230, g: 120, b: 120, a: 255 };
+    const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
+    drawText(fpsText, 10, 35, 16, fpsColor);
+    drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 30, 14, { r: 180, g: 180, b: 180, a: 255 });
+  }
 
-  if (captureFrames > 0) {
+  if (qualityCapture && qualityRun !== null) {
+    qualityRun.requestCapture();
+  } else if (qualityRun === null && captureFrames > 0) {
     frameCount = frameCount + 1;
     if (frameCount === captureFrames) { takeScreenshot(capturePath); }
     if (frameCount > captureFrames) { endDrawing(); break; }
   }
 
   endDrawing();
+  if (qualityRun !== null && qualityRun.endFrame()) break;
 }
+
+closeWindow();

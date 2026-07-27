@@ -11,7 +11,7 @@
 // from user WGSL against the ABI. Draw dispatch, per-draw uniform
 // writes, and FFI glue all land in follow-up phases.
 
-use super::shader_include::{BakedSource, IncludeError, process};
+use super::shader_include::{process, BakedSource, IncludeError};
 
 // =====================================================================
 // Bind-group layouts — one struct, five layouts, matching RFC §1
@@ -21,20 +21,20 @@ use super::shader_include::{BakedSource, IncludeError, process};
 /// Owned by Renderer once per process (not per pipeline). Cheap to clone
 /// references since `wgpu::BindGroupLayout` is Arc'd internally.
 pub struct MaterialAbiLayouts {
-    pub per_frame:        wgpu::BindGroupLayout,
-    pub per_view:         wgpu::BindGroupLayout,
-    pub per_material:     wgpu::BindGroupLayout,
-    pub per_draw:         wgpu::BindGroupLayout,
-    pub scene_inputs:     wgpu::BindGroupLayout,
+    pub per_frame: wgpu::BindGroupLayout,
+    pub per_view: wgpu::BindGroupLayout,
+    pub per_material: wgpu::BindGroupLayout,
+    pub per_draw: wgpu::BindGroupLayout,
+    pub scene_inputs: wgpu::BindGroupLayout,
 }
 
 impl MaterialAbiLayouts {
     pub fn create(device: &wgpu::Device) -> Self {
         Self {
-            per_frame:    create_per_frame_layout(device),
-            per_view:     create_per_view_layout(device),
+            per_frame: create_per_frame_layout(device),
+            per_view: create_per_view_layout(device),
             per_material: create_per_material_layout(device),
-            per_draw:     create_per_draw_layout(device),
+            per_draw: create_per_draw_layout(device),
             scene_inputs: create_scene_inputs_layout(device),
         }
     }
@@ -59,10 +59,10 @@ impl MaterialAbiLayouts {
 ///      (`build_per_frame_bg_wasm` in material_system.rs).
 ///
 /// Native targets keep the five-group layout bit-identically.
-#[cfg(target_arch = "wasm32")]
+#[cfg(fold_scene_inputs)]
 pub const WASM_SCENE_INPUTS_BASE: u32 = 1;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(fold_scene_inputs))]
 fn create_per_frame_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("abi_per_frame"),
@@ -85,20 +85,32 @@ fn create_per_frame_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 /// Every bind group created against this layout must supply all
 /// eight entries — see `build_per_frame_bg_wasm` in
 /// material_system.rs, the single creation site.
-#[cfg(target_arch = "wasm32")]
+#[cfg(fold_scene_inputs)]
 fn create_per_frame_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     const B: u32 = WASM_SCENE_INPUTS_BASE;
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("abi_per_frame"),
         entries: &[
             entry_ubo(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
-            entry_tex_f(B,         wgpu::ShaderStages::FRAGMENT),
-            entry_samp(B + 1,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
+            entry_tex_f(B, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(
+                B + 1,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::Filtering,
+            ),
             entry_tex_depth(B + 2, wgpu::ShaderStages::FRAGMENT),
-            entry_samp(B + 3,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::NonFiltering),
+            entry_samp(
+                B + 3,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::NonFiltering,
+            ),
             entry_tex_f_nonfilt(B + 4, wgpu::ShaderStages::FRAGMENT),
-            entry_samp(B + 5,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::NonFiltering),
-            entry_tex_f(B + 6,     wgpu::ShaderStages::FRAGMENT),
+            entry_samp(
+                B + 5,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::NonFiltering,
+            ),
+            entry_tex_f(B + 6, wgpu::ShaderStages::FRAGMENT),
         ],
     })
 }
@@ -107,20 +119,58 @@ fn create_per_view_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     // Mirror of the ABI header: UBO at 0, env colour + sampler at 1+2,
     // env diffuse at 3, BRDF LUT + sampler at 4+5, three cascades at
     // 6..8, comparison sampler at 9.
+    let frag = wgpu::ShaderStages::FRAGMENT;
+    let mut entries = vec![
+        entry_ubo(0, wgpu::ShaderStages::VERTEX | frag),
+        entry_tex_f(1, frag),
+        entry_samp(2, frag, wgpu::SamplerBindingType::Filtering),
+        entry_tex_f(3, frag),
+        entry_tex_f(4, frag),
+        entry_samp(5, frag, wgpu::SamplerBindingType::Filtering),
+        entry_tex_depth(6, frag),
+        entry_tex_depth(7, frag),
+        entry_tex_depth(8, frag),
+        entry_samp(9, frag, wgpu::SamplerBindingType::Comparison),
+    ];
+    if crate::virtual_shadows::virtual_shadows_requested() {
+        entries.extend([
+            wgpu::BindGroupLayoutEntry {
+                binding: 10,
+                visibility: frag,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 11,
+                visibility: frag,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 12,
+                visibility: frag,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(
+                        std::mem::size_of::<[u32; 4]>() as u64
+                    ),
+                },
+                count: None,
+            },
+        ]);
+    }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("abi_per_view"),
-        entries: &[
-            entry_ubo(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
-            entry_tex_f(1, wgpu::ShaderStages::FRAGMENT),
-            entry_samp(2, wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
-            entry_tex_f(3, wgpu::ShaderStages::FRAGMENT),
-            entry_tex_f(4, wgpu::ShaderStages::FRAGMENT),
-            entry_samp(5, wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
-            entry_tex_depth(6, wgpu::ShaderStages::FRAGMENT),
-            entry_tex_depth(7, wgpu::ShaderStages::FRAGMENT),
-            entry_tex_depth(8, wgpu::ShaderStages::FRAGMENT),
-            entry_samp(9, wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Comparison),
-        ],
+        entries: &entries,
     })
 }
 
@@ -139,26 +189,60 @@ fn create_per_material_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("abi_per_material"),
         entries: &[
-            entry_tex_f(0,  wgpu::ShaderStages::FRAGMENT),
-            entry_samp(1,   wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
-            entry_tex_f(2,  wgpu::ShaderStages::FRAGMENT),
-            entry_samp(3,   wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
-            entry_tex_f(4,  wgpu::ShaderStages::FRAGMENT),
-            entry_samp(5,   wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
-            entry_tex_f(6,  wgpu::ShaderStages::FRAGMENT),
-            entry_samp(7,   wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
-            entry_tex_f(8,  wgpu::ShaderStages::FRAGMENT),
-            entry_samp(9,   wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
-            entry_ubo(10,   wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
-            entry_ubo(11,   wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+            entry_tex_f(0, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(
+                1,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::Filtering,
+            ),
+            entry_tex_f(2, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(
+                3,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::Filtering,
+            ),
+            entry_tex_f(4, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(
+                5,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::Filtering,
+            ),
+            entry_tex_f(6, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(
+                7,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::Filtering,
+            ),
+            entry_tex_f(8, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(
+                9,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::Filtering,
+            ),
+            entry_ubo(
+                10,
+                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ),
+            entry_ubo(
+                11,
+                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ),
             // EN-011 — planar reflection RT (texture + sampler).
             entry_tex_f(12, wgpu::ShaderStages::FRAGMENT),
-            entry_samp(13,  wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
+            entry_samp(
+                13,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::Filtering,
+            ),
             // EN-014 — texture-array slots for splat-mapped terrain.
             entry_tex_f_array(14, wgpu::ShaderStages::FRAGMENT),
             entry_tex_f_array(15, wgpu::ShaderStages::FRAGMENT),
             entry_tex_f_array(16, wgpu::ShaderStages::FRAGMENT),
-            entry_samp(17, wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
+            entry_samp(
+                17,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::Filtering,
+            ),
         ],
     })
 }
@@ -168,7 +252,7 @@ fn create_per_draw_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         label: Some("abi_per_draw"),
         entries: &[
             entry_ubo(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
-            entry_ubo(1, wgpu::ShaderStages::VERTEX),   // JointMatrices (1024 × mat4)
+            entry_ubo(1, wgpu::ShaderStages::VERTEX), // JointMatrices (1024 × mat4)
         ],
     })
 }
@@ -177,24 +261,37 @@ fn create_scene_inputs_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("abi_scene_inputs"),
         entries: &[
-            entry_tex_f(0,     wgpu::ShaderStages::FRAGMENT),
-            entry_samp(1,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::Filtering),
+            entry_tex_f(0, wgpu::ShaderStages::FRAGMENT),
+            entry_samp(
+                1,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::Filtering,
+            ),
             entry_tex_depth(2, wgpu::ShaderStages::FRAGMENT),
-            entry_samp(3,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::NonFiltering),
+            entry_samp(
+                3,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::NonFiltering,
+            ),
             // Phase 7 — impulse_tex is R32Float which is non-filterable
             // in wgpu 29 without a feature flag, so the binding is
             // declared NonFiltering. Materials sample via textureLoad
             // (no filtering; 0.5 m / texel is already coarse).
             entry_tex_f_nonfilt(4, wgpu::ShaderStages::FRAGMENT),
-            entry_samp(5,      wgpu::ShaderStages::FRAGMENT, wgpu::SamplerBindingType::NonFiltering),
-            entry_tex_f(6,     wgpu::ShaderStages::FRAGMENT),
+            entry_samp(
+                5,
+                wgpu::ShaderStages::FRAGMENT,
+                wgpu::SamplerBindingType::NonFiltering,
+            ),
+            entry_tex_f(6, wgpu::ShaderStages::FRAGMENT),
         ],
     })
 }
 
 fn entry_tex_f_nonfilt(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
-        binding, visibility: vis,
+        binding,
+        visibility: vis,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: false },
             view_dimension: wgpu::TextureViewDimension::D2,
@@ -207,7 +304,8 @@ fn entry_tex_f_nonfilt(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroup
 // Small helpers for binding entry construction.
 fn entry_ubo(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
-        binding, visibility: vis,
+        binding,
+        visibility: vis,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
@@ -218,7 +316,8 @@ fn entry_ubo(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntr
 }
 fn entry_tex_f(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
-        binding, visibility: vis,
+        binding,
+        visibility: vis,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2,
@@ -233,7 +332,8 @@ fn entry_tex_f(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEn
 /// per-layer.
 fn entry_tex_f_array(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
-        binding, visibility: vis,
+        binding,
+        visibility: vis,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2Array,
@@ -244,7 +344,8 @@ fn entry_tex_f_array(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLa
 }
 fn entry_tex_depth(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
-        binding, visibility: vis,
+        binding,
+        visibility: vis,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Depth,
             view_dimension: wgpu::TextureViewDimension::D2,
@@ -253,10 +354,14 @@ fn entry_tex_depth(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayo
         count: None,
     }
 }
-fn entry_samp(binding: u32, vis: wgpu::ShaderStages, ty: wgpu::SamplerBindingType)
-              -> wgpu::BindGroupLayoutEntry {
+fn entry_samp(
+    binding: u32,
+    vis: wgpu::ShaderStages,
+    ty: wgpu::SamplerBindingType,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
-        binding, visibility: vis,
+        binding,
+        visibility: vis,
         ty: wgpu::BindingType::Sampler(ty),
         count: None,
     }
@@ -315,7 +420,10 @@ impl Bucket {
     /// (single HDR attachment, alpha/additive blending) rather than
     /// the main HDR pass.
     pub fn is_translucent(self) -> bool {
-        matches!(self, Bucket::Transparent | Bucket::Refractive | Bucket::Additive)
+        matches!(
+            self,
+            Bucket::Transparent | Bucket::Refractive | Bucket::Additive
+        )
     }
     /// True if this bucket requires a SceneColor snapshot before it
     /// runs. Only Refractive does today; future buckets (e.g.
@@ -329,12 +437,46 @@ impl Bucket {
 // Material pipeline — the compiled artefact
 // =====================================================================
 
+struct OwnedVertexBufferLayout {
+    array_stride: wgpu::BufferAddress,
+    step_mode: wgpu::VertexStepMode,
+    attributes: Vec<wgpu::VertexAttribute>,
+}
+
+/// CPU-only recipe retained until a custom translucent material first shares
+/// a TAA-reactive sorted pass with imported BLEND geometry. The sibling keeps
+/// the material's exact shader/blend/depth contract while declaring the
+/// reactive attachment with an empty write mask. Keeping source instead of an
+/// eagerly compiled GPU pipeline avoids startup work for the ordinary and
+/// unmixed paths; the recipe is dropped immediately after specialization.
+struct TranslucentReactiveRecipe {
+    source: TranslucentReactiveSource,
+    pipeline_layout: wgpu::PipelineLayout,
+    vertex_buffers: Vec<OwnedVertexBufferLayout>,
+    hdr_format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
+    bucket: Bucket,
+    label: String,
+}
+
+enum TranslucentReactiveSource {
+    /// General `compile_material` callers may supply an arbitrary include
+    /// overlay; retain its already validated expansion as the safe fallback.
+    Expanded(String),
+    /// The public custom-material API has one synthetic user source plus the
+    /// baked library. Retaining only the authored source avoids keeping a full
+    /// expanded shader per never-mixed translucent material.
+    User(String),
+}
+
 /// A pipeline ready to receive draws. Owns only the `RenderPipeline`;
 /// the layouts are borrowed from the shared `MaterialAbiLayouts`.
 pub struct MaterialPipeline {
     pub pipeline: wgpu::RenderPipeline,
-    pub profile:  FragmentProfile,
-    pub bucket:   Bucket,
+    pub(crate) reactive_pipeline: Option<wgpu::RenderPipeline>,
+    reactive_recipe: Option<TranslucentReactiveRecipe>,
+    pub profile: FragmentProfile,
+    pub bucket: Bucket,
     pub reads_scene: bool,
     /// EN-001 — true when the pipeline was compiled with the
     /// per-instance vertex layout (slot 1, step_mode = Instance). The
@@ -359,24 +501,125 @@ pub struct MaterialPipeline {
     pub reflection_pipeline: Option<wgpu::RenderPipeline>,
 }
 
+impl MaterialPipeline {
+    /// Lazily create the attachment-compatible sibling used only when this
+    /// custom material is globally interleaved with imported reactive BLEND.
+    ///
+    /// The shader has no location-1 output and the second target has an empty
+    /// write mask, so custom materials cannot fabricate reactive coverage.
+    /// They retain their exact location-0 blend behavior while imported draws
+    /// in the same render pass union real coverage into the R8 target.
+    pub(crate) fn ensure_reactive_pipeline(&mut self, device: &wgpu::Device) {
+        if self.reactive_pipeline.is_some() {
+            return;
+        }
+        let Some(recipe) = self.reactive_recipe.take() else {
+            return;
+        };
+        let source = match recipe.source {
+            TranslucentReactiveSource::Expanded(source) => source,
+            TranslucentReactiveSource::User(source) => {
+                expand_material_source("__user_material.wgsl", &[("__user_material.wgsl", &source)])
+                    .expect("custom material source was validated by its ordinary pipeline")
+            }
+        };
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(&recipe.label),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let vertex_buffers = recipe
+            .vertex_buffers
+            .iter()
+            .map(|layout| wgpu::VertexBufferLayout {
+                array_stride: layout.array_stride,
+                step_mode: layout.step_mode,
+                attributes: &layout.attributes,
+            })
+            .collect::<Vec<_>>();
+        let additive_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::OVER,
+        };
+        let color_blend = if recipe.bucket == Bucket::Additive {
+            additive_blend
+        } else {
+            wgpu::BlendState::ALPHA_BLENDING
+        };
+        let targets = [
+            Some(wgpu::ColorTargetState {
+                format: recipe.hdr_format,
+                blend: Some(color_blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::R8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::empty(),
+            }),
+        ];
+        self.reactive_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some(&format!("{}_reactive_compatible", recipe.label)),
+                layout: Some(&recipe.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &vertex_buffers,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: recipe.depth_format,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        ));
+    }
+}
+
 /// Options passed to compile a material. Matches the material-descriptor
 /// shape in RFC §3.1, minus the textures / parameters (those are game
 /// data, set per draw).
 pub struct MaterialCompileDesc<'a> {
-    pub label:         &'a str,
-    pub entry_path:    &'a str,                 // e.g. "materials/water.wgsl"
+    pub label: &'a str,
+    pub entry_path: &'a str, // e.g. "materials/water.wgsl"
     /// Additional (path, source) entries layered over the baked library.
     /// Game-supplied shaders live here.
     pub extra_sources: &'a [(&'a str, &'a str)],
-    pub profile:       FragmentProfile,
-    pub bucket:        Bucket,
-    pub reads_scene:   bool,
-    pub hdr_format:    wgpu::TextureFormat,
+    /// Compact source that can be re-expanded if a TAA-reactive mixed sorted
+    /// frame later needs an attachment-compatible sibling. `None` retains the
+    /// validated expanded source for general custom include overlays.
+    pub lazy_reactive_source: Option<&'a str>,
+    pub profile: FragmentProfile,
+    pub bucket: Bucket,
+    pub reads_scene: bool,
+    pub hdr_format: wgpu::TextureFormat,
     pub material_format: wgpu::TextureFormat,
     pub velocity_format: wgpu::TextureFormat,
-    pub albedo_format:   wgpu::TextureFormat,
-    pub depth_format:    wgpu::TextureFormat,
-    pub vertex_buffers:  &'a [wgpu::VertexBufferLayout<'a>],
+    pub albedo_format: wgpu::TextureFormat,
+    pub depth_format: wgpu::TextureFormat,
+    pub vertex_buffers: &'a [wgpu::VertexBufferLayout<'a>],
     /// EN-001 — when true, `compile_material` appends
     /// `InstanceData3D::desc()` to `vertex_buffers` so the pipeline
     /// expects a second VB at slot 1 with step_mode = Instance.
@@ -390,7 +633,28 @@ pub enum MaterialCompileError {
     Wgpu(String),
 }
 impl From<IncludeError> for MaterialCompileError {
-    fn from(e: IncludeError) -> Self { MaterialCompileError::Include(e) }
+    fn from(e: IncludeError) -> Self {
+        MaterialCompileError::Include(e)
+    }
+}
+
+fn expand_material_source(
+    entry_path: &str,
+    extra_sources: &[(&str, &str)],
+) -> Result<String, IncludeError> {
+    let mut entries: Vec<(&str, &str)> = BAKED_ENTRIES_SNAPSHOT.to_vec();
+    entries.extend(extra_sources.iter().copied());
+    let source = BakedSource { entries: &entries };
+    let expanded = process(&source, entry_path)?;
+    let expanded = if crate::virtual_shadows::virtual_shadows_requested() {
+        crate::virtual_shadows::directional_material_shader(expanded)
+    } else {
+        expanded
+    };
+    // Browser WebGPU and folded mobile tiers keep SceneInputs in group 0.
+    #[cfg(fold_scene_inputs)]
+    let expanded = rewrite_scene_inputs_for_wasm(expanded);
+    Ok(expanded)
 }
 
 /// Compile a material pipeline. This is the happy-path you call at
@@ -402,30 +666,15 @@ pub fn compile_material(
 ) -> Result<MaterialPipeline, MaterialCompileError> {
     // 1. Resolve #include chain against the baked library +
     //    game-supplied overlay.
-    let baked_entries = BAKED_ENTRIES_SNAPSHOT;    // from library snapshot below
-    let mut entries: Vec<(&str, &str)> = baked_entries.to_vec();
-    for &(p, s) in desc.extra_sources {
-        entries.push((p, s));
-    }
-    let source = BakedSource { entries: &entries };
-    let expanded = process(&source, desc.entry_path)?;
-
-    // EN-063 — WebGPU in the browser caps maxBindGroups at 4, so no
-    // shader module may declare group 4 on wasm32. Rewrite the seven
-    // engine-owned SceneInputs declarations from material_abi.wgsl
-    // into the per_frame group (group 0) at WASM_SCENE_INPUTS_BASE..+6.
-    // String replacement is safe here: the declarations exist only in
-    // engine-owned material_abi.wgsl with exactly this formatting.
-    #[cfg(target_arch = "wasm32")]
-    let expanded = rewrite_scene_inputs_for_wasm(expanded);
+    let expanded = expand_material_source(desc.entry_path, desc.extra_sources)?;
 
     // 2. Create shader module. wgpu's WGSL parser surfaces errors as
-    //    panics through the default handler; we catch them by
-    //    pushing the scope and popping on failure.
+    //    panics through the default handler; we catch them by pushing
+    //    the scope and popping on failure.
     let _ = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(desc.label),
-        source: wgpu::ShaderSource::Wgsl(expanded.into()),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(expanded.as_str())),
     });
     // Note: we don't poll the error scope here because wgpu 29 returns
     // validation errors synchronously via the device's uncaptured-error
@@ -442,7 +691,7 @@ pub fn compile_material(
     // EN-063 — on wasm32 the scene inputs live inside per_frame
     // (group 0, bindings WASM_SCENE_INPUTS_BASE..+6), so the pipeline
     // layout stays at 4 groups: the browser caps maxBindGroups at 4.
-    if desc.reads_scene && cfg!(not(target_arch = "wasm32")) {
+    if desc.reads_scene && cfg!(not(fold_scene_inputs)) {
         bg_layouts.push(Some(&layouts.scene_inputs));
     }
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -452,6 +701,32 @@ pub fn compile_material(
     });
 
     // 4. Colour targets based on profile.
+    // SH-055 — `lean_mrt` (Android): drop the `material` and `albedo` targets
+    // to `None`. Both are unread on Android (material only feeds SSR/PT,
+    // both off/unavailable there; albedo only feeds SSGI-modulation and
+    // SSAO-alpha-weighting in scene-compose, also both off), and dropping
+    // them from main_hdr_pass's simultaneous render-target set is what
+    // actually addresses the Adreno GMEM-overflow cost (see build.rs). The
+    // material's WGSL is unchanged — `out.material`/`out.albedo` writes are
+    // silently discarded with no backing attachment (wgpu-core requires the
+    // pipeline target and the render-pass attachment to agree index-for-index
+    // on `None`; scene_pass.rs's main_hdr_pass color_attachments mirrors this).
+    #[cfg(lean_mrt)]
+    let opaque_targets = [
+        Some(wgpu::ColorTargetState {
+            format: desc.hdr_format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+        None,
+        Some(wgpu::ColorTargetState {
+            format: desc.velocity_format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+        None,
+    ];
+    #[cfg(not(lean_mrt))]
     let opaque_targets = [
         Some(wgpu::ColorTargetState {
             format: desc.hdr_format,
@@ -481,13 +756,13 @@ pub fn compile_material(
         color: wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::One,
             dst_factor: wgpu::BlendFactor::One,
-            operation:  wgpu::BlendOperation::Add,
+            operation: wgpu::BlendOperation::Add,
         },
         alpha: wgpu::BlendComponent::OVER,
     };
     let translucent_blend = match desc.bucket {
         Bucket::Additive => additive_blend,
-        _                => wgpu::BlendState::ALPHA_BLENDING,
+        _ => wgpu::BlendState::ALPHA_BLENDING,
     };
     let translucent_targets = [Some(wgpu::ColorTargetState {
         format: desc.hdr_format,
@@ -495,7 +770,7 @@ pub fn compile_material(
         write_mask: wgpu::ColorWrites::ALL,
     })];
     let targets: &[Option<wgpu::ColorTargetState>] = match desc.profile {
-        FragmentProfile::Opaque      => &opaque_targets,
+        FragmentProfile::Opaque => &opaque_targets,
         FragmentProfile::Translucent => &translucent_targets,
     };
 
@@ -518,21 +793,35 @@ pub fn compile_material(
     //    enough to be referenced by the RenderPipelineDescriptor.
     let vertex_buffers_owned: Vec<wgpu::VertexBufferLayout<'_>>;
     let vertex_buffers: &[wgpu::VertexBufferLayout<'_>] = if desc.wants_instancing {
-        vertex_buffers_owned = desc.vertex_buffers
+        vertex_buffers_owned = desc
+            .vertex_buffers
             .iter()
             .cloned()
-            .chain(std::iter::once(crate::renderer::types::InstanceData3D::desc()))
+            .chain(std::iter::once(
+                crate::renderer::types::InstanceData3D::desc(),
+            ))
             .collect();
         &vertex_buffers_owned
     } else {
         desc.vertex_buffers
     };
+    let reactive_vertex_buffers = matches!(desc.profile, FragmentProfile::Translucent).then(|| {
+        vertex_buffers
+            .iter()
+            .map(|layout| OwnedVertexBufferLayout {
+                array_stride: layout.array_stride,
+                step_mode: layout.step_mode,
+                attributes: layout.attributes.to_vec(),
+            })
+            .collect::<Vec<_>>()
+    });
     // Translucent materials (water, glass, particles) are commonly
     // viewed from both sides, so they render double-sided. Cutout
     // materials (foliage cards, chain-link fences) likewise need to
     // be visible from both faces. Plain Opaque materials cull backfaces.
     let main_cull = if matches!(desc.profile, FragmentProfile::Translucent)
-            || matches!(desc.bucket, Bucket::Cutout) {
+        || matches!(desc.bucket, Bucket::Cutout)
+    {
         None
     } else {
         Some(wgpu::Face::Back)
@@ -585,18 +874,35 @@ pub fn compile_material(
     // than lazily at `set_reflection_probe` time so we never need to
     // stash the WGSL source for a later recompile.
     let reflection_pipeline = match main_cull {
-        Some(wgpu::Face::Back)  => Some(make_pipeline(Some(wgpu::Face::Front), "_reflection")),
-        Some(wgpu::Face::Front) => Some(make_pipeline(Some(wgpu::Face::Back),  "_reflection")),
-        None                    => None,
+        Some(wgpu::Face::Back) => Some(make_pipeline(Some(wgpu::Face::Front), "_reflection")),
+        Some(wgpu::Face::Front) => Some(make_pipeline(Some(wgpu::Face::Back), "_reflection")),
+        None => None,
     };
+    let reactive_recipe = reactive_vertex_buffers.map(|vertex_buffers| {
+        let source = match desc.lazy_reactive_source {
+            Some(source) => TranslucentReactiveSource::User(source.to_string()),
+            None => TranslucentReactiveSource::Expanded(expanded),
+        };
+        TranslucentReactiveRecipe {
+            source,
+            pipeline_layout,
+            vertex_buffers,
+            hdr_format: desc.hdr_format,
+            depth_format: desc.depth_format,
+            bucket: desc.bucket,
+            label: desc.label.to_string(),
+        }
+    });
 
     Ok(MaterialPipeline {
         pipeline,
-        profile:          desc.profile,
-        bucket:           desc.bucket,
-        reads_scene:      desc.reads_scene,
+        reactive_pipeline: None,
+        reactive_recipe,
+        profile: desc.profile,
+        bucket: desc.bucket,
+        reads_scene: desc.reads_scene,
         wants_instancing: desc.wants_instancing,
-        label:            desc.label.to_string(),
+        label: desc.label.to_string(),
         reflection_pipeline,
     })
 }
@@ -611,14 +917,14 @@ pub fn compile_material(
 /// group 4 at all. Materials that don't use the scene inputs simply
 /// leave the group-0 bindings statically unused, which wgpu ignores
 /// at pipeline-layout validation exactly as it did for group 4.
-#[cfg(target_arch = "wasm32")]
+#[cfg(fold_scene_inputs)]
 fn rewrite_scene_inputs_for_wasm(expanded: String) -> String {
     let had_group4 = expanded.contains("@group(4)");
     let mut out = expanded;
     let mut replaced: u32 = 0;
     for n in 0..7u32 {
         let from = format!("@group(4) @binding({n})");
-        let to   = format!("@group(0) @binding({})", WASM_SCENE_INPUTS_BASE + n);
+        let to = format!("@group(0) @binding({})", WASM_SCENE_INPUTS_BASE + n);
         replaced += out.matches(from.as_str()).count() as u32;
         out = out.replace(from.as_str(), to.as_str());
     }
@@ -647,14 +953,38 @@ fn rewrite_scene_inputs_for_wasm(expanded: String) -> String {
 // library contents here; kept in sync by a test.
 
 const BAKED_ENTRIES_SNAPSHOT: &[(&str, &str)] = &[
-    ("material_abi.wgsl",           include_str!("../../../shared/shaders/material_abi.wgsl")),
-    ("common/pbr.wgsl",             include_str!("../../../shared/shaders/common/pbr.wgsl")),
-    ("common/shadows.wgsl",         include_str!("../../../shared/shaders/common/shadows.wgsl")),
-    ("common/fog.wgsl",             include_str!("../../../shared/shaders/common/fog.wgsl")),
-    ("common/tonemap.wgsl",         include_str!("../../../shared/shaders/common/tonemap.wgsl")),
-    ("common/sky.wgsl",             include_str!("../../../shared/shaders/common/sky.wgsl")),
-    ("common/clouds.wgsl",          include_str!("../../../shared/shaders/common/clouds.wgsl")),
-    ("materials/test_minimal.wgsl", include_str!("../../../shared/shaders/materials/test_minimal.wgsl")),
+    (
+        "material_abi.wgsl",
+        include_str!("../../../shared/shaders/material_abi.wgsl"),
+    ),
+    (
+        "common/pbr.wgsl",
+        include_str!("../../../shared/shaders/common/pbr.wgsl"),
+    ),
+    (
+        "common/shadows.wgsl",
+        include_str!("../../../shared/shaders/common/shadows.wgsl"),
+    ),
+    (
+        "common/fog.wgsl",
+        include_str!("../../../shared/shaders/common/fog.wgsl"),
+    ),
+    (
+        "common/tonemap.wgsl",
+        include_str!("../../../shared/shaders/common/tonemap.wgsl"),
+    ),
+    (
+        "common/sky.wgsl",
+        include_str!("../../../shared/shaders/common/sky.wgsl"),
+    ),
+    (
+        "common/clouds.wgsl",
+        include_str!("../../../shared/shaders/common/clouds.wgsl"),
+    ),
+    (
+        "materials/test_minimal.wgsl",
+        include_str!("../../../shared/shaders/materials/test_minimal.wgsl"),
+    ),
 ];
 
 #[cfg(test)]
@@ -670,7 +1000,8 @@ mod tests {
         use super::super::shader_library;
         let lib = shader_library::library();
         for (path, body) in BAKED_ENTRIES_SNAPSHOT {
-            let from_lib = lib.fetch(path)
+            let from_lib = lib
+                .fetch(path)
                 .unwrap_or_else(|| panic!("snapshot includes '{}' not in library", path));
             assert_eq!(*body, from_lib, "mismatch for {}", path);
         }
@@ -688,13 +1019,18 @@ mod tests {
     /// exercised when `compile_material` runs at application startup.
     #[test]
     fn test_minimal_parses_through_naga() {
-        let source = BakedSource { entries: BAKED_ENTRIES_SNAPSHOT };
+        let source = BakedSource {
+            entries: BAKED_ENTRIES_SNAPSHOT,
+        };
         let expanded = process(&source, "materials/test_minimal.wgsl")
             .expect("preprocessor resolves test_minimal.wgsl");
         let result = wgpu::naga::front::wgsl::parse_str(&expanded);
         if let Err(ref e) = result {
             eprintln!("naga parse error:\n{}", e.emit_to_string(&expanded));
         }
-        assert!(result.is_ok(), "test_minimal.wgsl should parse via naga after include expansion");
+        assert!(
+            result.is_ok(),
+            "test_minimal.wgsl should parse via naga after include expansion"
+        );
     }
 }

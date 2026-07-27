@@ -62,7 +62,12 @@ pub(crate) fn intersect_triangle(ray: &Ray, tri: &Triangle, max_t: f32) -> Optio
 /// Slab-based ray vs AABB. Returns `Some((t_near, t_far))` when the ray
 /// intersects the box in front of the origin; used by the BVH walk to
 /// decide which children to descend into.
-pub(crate) fn intersect_aabb(ray: &Ray, bounds_min: Vec3, bounds_max: Vec3, max_t: f32) -> Option<f32> {
+pub(crate) fn intersect_aabb(
+    ray: &Ray,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    max_t: f32,
+) -> Option<f32> {
     let t1 = (bounds_min - ray.origin) * ray.inv_direction;
     let t2 = (bounds_max - ray.origin) * ray.inv_direction;
     let t_min = t1.min(t2);
@@ -334,7 +339,13 @@ pub(crate) struct Camera {
 }
 
 impl Camera {
-    pub(crate) fn looking_at(position: Vec3, target: Vec3, up_hint: Vec3, fov_y_degrees: f32, aspect: f32) -> Self {
+    pub(crate) fn looking_at(
+        position: Vec3,
+        target: Vec3,
+        up_hint: Vec3,
+        fov_y_degrees: f32,
+        aspect: f32,
+    ) -> Self {
         let forward = (target - position).normalize();
         let right = forward.cross(up_hint).normalize();
         let up = right.cross(forward).normalize();
@@ -495,8 +506,7 @@ pub(crate) fn surface_from_hit(scene: &Scene, ray: &Ray, hit: &Hit) -> SurfaceSa
     // has no tangents (length 0), skip normal mapping entirely.
     let tangent_interp = tri.t0 * w + tri.t1 * u + tri.t2 * v;
     let tangent_xyz = Vec3::new(tangent_interp.x, tangent_interp.y, tangent_interp.z);
-    let shading_normal = if material.normal_texture.is_some()
-        && tangent_xyz.length_squared() > 1e-8
+    let shading_normal = if material.normal_texture.is_some() && tangent_xyz.length_squared() > 1e-8
     {
         let t = tangent_xyz.normalize();
         // Re-orthogonalize the tangent against the normal (Gram-Schmidt)
@@ -554,7 +564,12 @@ pub(crate) fn sample_cosine_hemisphere(rand: Vec2) -> Vec3 {
 /// visible from the view direction.
 pub(crate) fn sample_ggx_vndf(view_tangent: Vec3, alpha: f32, rand: Vec2) -> Vec3 {
     // Transform view to hemisphere of ellipsoid.
-    let vh = Vec3::new(alpha * view_tangent.x, alpha * view_tangent.y, view_tangent.z).normalize();
+    let vh = Vec3::new(
+        alpha * view_tangent.x,
+        alpha * view_tangent.y,
+        view_tangent.z,
+    )
+    .normalize();
     let lensq = vh.x * vh.x + vh.y * vh.y;
     let t1 = if lensq > 0.0 {
         Vec3::new(-vh.y, vh.x, 0.0) / lensq.sqrt()
@@ -829,8 +844,8 @@ impl EnvDistribution {
         }
         // Reconstruct pixel weight / total.
         let row_base = y as usize * (w + 1);
-        let px_p_given_row = self.conditional[row_base + x as usize + 1]
-            - self.conditional[row_base + x as usize];
+        let px_p_given_row =
+            self.conditional[row_base + x as usize + 1] - self.conditional[row_base + x as usize];
         let row_total = self.marginal[y as usize + 1] - self.marginal[y as usize];
         row_total * px_p_given_row
     }
@@ -909,12 +924,43 @@ impl Environment {
                 let v = (y as f32 + 0.5) / h as f32;
                 let theta = v * std::f32::consts::PI; // 0 at +Y, PI at -Y
                 let phi = (u - 0.5) * 2.0 * std::f32::consts::PI;
-                let dir = Vec3::new(theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin());
+                let dir = Vec3::new(
+                    theta.sin() * phi.cos(),
+                    theta.cos(),
+                    theta.sin() * phi.sin(),
+                );
                 let horizon = Vec3::new(0.95, 0.85, 0.7);
                 let zenith = Vec3::new(0.4, 0.55, 0.85);
                 let sky = horizon.lerp(zenith, (0.5 * (dir.y + 1.0)).clamp(0.0, 1.0));
                 let sun = dir.dot(sun_dir).max(0.0).powf(512.0) * 8.0;
                 pixels.push(sky * 1.2 + Vec3::splat(sun));
+            }
+        }
+        let distribution = EnvDistribution::build(&pixels, w, h);
+        Self {
+            pixels,
+            width: w,
+            height: h,
+            intensity: 1.0,
+            distribution,
+        }
+    }
+
+    /// Analytic sky used by Bloom's GPU path-tracing golden: default ambient
+    /// is white at intensity 0.3, modulated from 0.45 at the nadir to 1.35 at
+    /// the zenith. It deliberately excludes a sun disc because the directional
+    /// light is sampled separately in both renderers.
+    pub(crate) fn bloom_pt_golden() -> Self {
+        let w = 256u32;
+        let h = 128u32;
+        let mut pixels = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            let v = (y as f32 + 0.5) / h as f32;
+            let dir_y = (v * std::f32::consts::PI).cos();
+            let t = (dir_y * 0.5 + 0.5).clamp(0.0, 1.0);
+            let radiance = 0.3 * (0.45 + (1.35 - 0.45) * t);
+            for _ in 0..w {
+                pixels.push(Vec3::splat(radiance));
             }
         }
         let distribution = EnvDistribution::build(&pixels, w, h);
@@ -1046,7 +1092,13 @@ pub(crate) struct SunLight {
 /// `origin` going toward `direction_to_light` within `max_distance`.
 /// The origin should already be offset along the surface normal to
 /// avoid self-intersection.
-pub(crate) fn visible(ray_origin: Vec3, direction_to_light: Vec3, max_distance: f32, scene: &Scene, bvh: &Bvh) -> bool {
+pub(crate) fn visible(
+    ray_origin: Vec3,
+    direction_to_light: Vec3,
+    max_distance: f32,
+    scene: &Scene,
+    bvh: &Bvh,
+) -> bool {
     let ray = Ray::new(ray_origin, direction_to_light);
     // We only need to know if ANY triangle is hit before max_distance;
     // a specialized "any-hit" traversal would be faster than
@@ -1184,7 +1236,13 @@ pub(crate) fn trace_path(
             let l = sun.direction_to_light;
             let n_dot_l = surface.normal.dot(l);
             if n_dot_l > 0.0
-                && visible(shadow_origin, l, f32::INFINITY, scenario.scene, scenario.bvh)
+                && visible(
+                    shadow_origin,
+                    l,
+                    f32::INFINITY,
+                    scenario.scene,
+                    scenario.bvh,
+                )
             {
                 let (brdf_cos, _pdf_brdf) = evaluate_brdf(&surface, view, l);
                 radiance += throughput * brdf_cos * sun.color * sun.intensity;
@@ -1194,8 +1252,7 @@ pub(crate) fn trace_path(
         // --- NEE B: env-map importance sample. Pick a direction from
         //     the env luminance CDF, test visibility, add (brdf·cos·L)
         //     / env_pdf with the MIS balance weight vs the BRDF PDF.
-        let (env_dir, env_radiance, env_pdf) =
-            scenario.environment.sample_importance(rng);
+        let (env_dir, env_radiance, env_pdf) = scenario.environment.sample_importance(rng);
         if env_pdf > 0.0 {
             let n_dot_l = surface.normal.dot(env_dir);
             if n_dot_l > 0.0
@@ -1249,4 +1306,3 @@ pub(crate) fn trace_path(
     }
     radiance.clamp(Vec3::ZERO, Vec3::splat(50.0))
 }
-

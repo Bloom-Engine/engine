@@ -1,0 +1,1920 @@
+//! Deterministic virtual-shadow page residency for issue #132.
+//!
+//! This module deliberately contains no renderer policy. It owns the bounded
+//! virtual-to-physical mapping, invalidation, and page-table encoding used by
+//! the directional VSM path. The existing cascaded shadow map remains the
+//! sampling fallback whenever a page is absent, dirty, over budget, or not yet
+//! rendered.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+pub const VSM_CLIP_LEVELS: u8 = 3;
+pub const VSM_VIRTUAL_PAGES_PER_AXIS: u16 = 32;
+pub const VSM_PAGE_INTERIOR: u16 = 128;
+pub const VSM_PAGE_BORDER: u16 = 2;
+pub const VSM_PHYSICAL_PAGE_SIZE: u16 = VSM_PAGE_INTERIOR + VSM_PAGE_BORDER * 2;
+pub const VSM_DEFAULT_PHYSICAL_PAGES: u16 = 256;
+pub const VSM_MAX_PAGE_RENDER_BUDGET: u16 = 64;
+const VSM_DIRECTIONAL_LEVEL_PAGE_CAPS: [usize; VSM_CLIP_LEVELS as usize] = [144, 64, 16];
+
+/// Page-table value zero means "sample the conventional shadow fallback".
+///
+/// Resident entries store physical page + 1 in the low 16 bits and a
+/// saturating residency age in the high 16 bits. The shader can therefore
+/// cross-fade a newly rendered VSM page over the CSM result without another
+/// texture or buffer.
+pub const VSM_PAGE_TABLE_MISSING: u32 = 0;
+
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct VirtualShadowPage {
+    pub light: u16,
+    pub level: u8,
+    pub x: u16,
+    pub y: u16,
+}
+
+impl VirtualShadowPage {
+    pub fn new(light: u16, level: u8, x: u16, y: u16) -> Option<Self> {
+        (level < VSM_CLIP_LEVELS
+            && x < VSM_VIRTUAL_PAGES_PER_AXIS
+            && y < VSM_VIRTUAL_PAGES_PER_AXIS)
+            .then_some(Self { light, level, x, y })
+    }
+
+    fn table_index(self) -> usize {
+        let axis = VSM_VIRTUAL_PAGES_PER_AXIS as usize;
+        self.level as usize * axis * axis + self.y as usize * axis + self.x as usize
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PageRequest {
+    pub page: VirtualShadowPage,
+    pub physical_page: u16,
+    pub needs_render: bool,
+    pub evicted: Option<VirtualShadowPage>,
+}
+
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct VirtualShadowCacheStats {
+    pub capacity: u16,
+    pub resident: u16,
+    pub requested: u32,
+    pub hits: u32,
+    pub misses: u32,
+    pub evictions: u32,
+    pub denied: u32,
+    pub dirty: u16,
+    pub rendered: u32,
+    pub invalidated: u32,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct PhysicalPage {
+    owner: Option<VirtualShadowPage>,
+    last_used_frame: u64,
+    rendered_frame: u64,
+    rendered_signature: u64,
+    dirty: bool,
+}
+
+impl Default for PhysicalPage {
+    fn default() -> Self {
+        Self {
+            owner: None,
+            last_used_frame: 0,
+            rendered_frame: 0,
+            rendered_signature: 0,
+            dirty: true,
+        }
+    }
+}
+
+/// Fixed-budget, deterministic LRU cache.
+///
+/// Pages requested earlier in the current frame are protected from eviction.
+/// If a frame requests more unique pages than the pool can hold, later
+/// requests are denied and sample CSM instead of churning already selected
+/// pages or exceeding the configured memory budget.
+pub struct VirtualShadowPageCache {
+    physical: Vec<PhysicalPage>,
+    mapping: HashMap<VirtualShadowPage, u16>,
+    frame: u64,
+    stats: VirtualShadowCacheStats,
+}
+
+impl VirtualShadowPageCache {
+    pub fn new(capacity: u16) -> Self {
+        assert!(capacity > 0, "VSM page cache requires at least one page");
+        Self {
+            physical: vec![PhysicalPage::default(); capacity as usize],
+            mapping: HashMap::with_capacity(capacity as usize),
+            frame: 0,
+            stats: VirtualShadowCacheStats {
+                capacity,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn begin_frame(&mut self, frame: u64) {
+        self.frame = frame.max(1);
+        self.stats.requested = 0;
+        self.stats.hits = 0;
+        self.stats.misses = 0;
+        self.stats.evictions = 0;
+        self.stats.denied = 0;
+        self.stats.rendered = 0;
+        self.stats.invalidated = 0;
+    }
+
+    pub fn request(
+        &mut self,
+        page: VirtualShadowPage,
+        content_signature: u64,
+    ) -> Option<PageRequest> {
+        self.stats.requested = self.stats.requested.saturating_add(1);
+        if let Some(&physical_page) = self.mapping.get(&page) {
+            self.stats.hits = self.stats.hits.saturating_add(1);
+            let slot = &mut self.physical[physical_page as usize];
+            slot.last_used_frame = self.frame;
+            if slot.rendered_signature != content_signature && !slot.dirty {
+                slot.dirty = true;
+                self.stats.invalidated = self.stats.invalidated.saturating_add(1);
+            }
+            let result = PageRequest {
+                page,
+                physical_page,
+                needs_render: slot.dirty,
+                evicted: None,
+            };
+            return Some(result);
+        }
+
+        self.stats.misses = self.stats.misses.saturating_add(1);
+        let candidate = self
+            .physical
+            .iter()
+            .position(|slot| slot.owner.is_none())
+            .or_else(|| {
+                self.physical
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| slot.last_used_frame < self.frame)
+                    .min_by_key(|(physical_page, slot)| (slot.last_used_frame, *physical_page))
+                    .map(|(physical_page, _)| physical_page)
+            });
+        let Some(physical_page) = candidate else {
+            self.stats.denied = self.stats.denied.saturating_add(1);
+            return None;
+        };
+
+        let evicted = self.physical[physical_page].owner;
+        if let Some(old_page) = evicted {
+            self.mapping.remove(&old_page);
+            self.stats.evictions = self.stats.evictions.saturating_add(1);
+        }
+        let physical_page = physical_page as u16;
+        self.physical[physical_page as usize] = PhysicalPage {
+            owner: Some(page),
+            last_used_frame: self.frame,
+            rendered_frame: 0,
+            rendered_signature: content_signature,
+            dirty: true,
+        };
+        self.mapping.insert(page, physical_page);
+        Some(PageRequest {
+            page,
+            physical_page,
+            needs_render: true,
+            evicted,
+        })
+    }
+
+    pub fn mark_rendered(&mut self, page: VirtualShadowPage, content_signature: u64) -> bool {
+        let Some(&physical_page) = self.mapping.get(&page) else {
+            return false;
+        };
+        let slot = &mut self.physical[physical_page as usize];
+        if slot.owner != Some(page) {
+            return false;
+        }
+        slot.rendered_frame = self.frame;
+        slot.rendered_signature = content_signature;
+        slot.dirty = false;
+        self.stats.rendered = self.stats.rendered.saturating_add(1);
+        true
+    }
+
+    pub fn finish_requests(&mut self) {
+        self.refresh_counts();
+    }
+
+    pub fn record_stable_requests(&mut self, requested: usize) {
+        let requested = requested.min(u32::MAX as usize) as u32;
+        let hits = requested.min(u32::from(self.stats.resident));
+        self.stats.requested = requested;
+        self.stats.hits = hits;
+        self.stats.misses = requested.saturating_sub(hits);
+        self.stats.denied = requested.saturating_sub(hits);
+    }
+
+    pub fn invalidate_light(&mut self, light: u16) {
+        for slot in &mut self.physical {
+            if slot.owner.is_some_and(|owner| owner.light == light) && !slot.dirty {
+                slot.dirty = true;
+                self.stats.invalidated = self.stats.invalidated.saturating_add(1);
+            }
+        }
+        self.refresh_counts();
+    }
+
+    pub fn invalidate_level(&mut self, light: u16, level: u8) {
+        for slot in &mut self.physical {
+            if slot
+                .owner
+                .is_some_and(|owner| owner.light == light && owner.level == level)
+                && !slot.dirty
+            {
+                slot.dirty = true;
+                self.stats.invalidated = self.stats.invalidated.saturating_add(1);
+            }
+        }
+        self.refresh_counts();
+    }
+
+    pub fn invalidate_all(&mut self) {
+        for slot in &mut self.physical {
+            if slot.owner.is_some() && !slot.dirty {
+                slot.dirty = true;
+                self.stats.invalidated = self.stats.invalidated.saturating_add(1);
+            }
+        }
+        self.refresh_counts();
+    }
+
+    pub fn page_table(&self, light: u16) -> Vec<u32> {
+        let axis = VSM_VIRTUAL_PAGES_PER_AXIS as usize;
+        let mut table = vec![VSM_PAGE_TABLE_MISSING; VSM_CLIP_LEVELS as usize * axis * axis];
+        for (&page, &physical_page) in &self.mapping {
+            if page.light != light {
+                continue;
+            }
+            let slot = &self.physical[physical_page as usize];
+            if slot.dirty || slot.rendered_frame == 0 {
+                continue;
+            }
+            let age = self
+                .frame
+                .saturating_sub(slot.rendered_frame)
+                .saturating_add(1)
+                // Only the first eight frames are meaningful: the shader
+                // reaches 100% VSM at age 8. Saturating here makes the page
+                // table byte-stable afterward, so it needs no steady upload.
+                .min(8) as u16;
+            table[page.table_index()] = (physical_page as u32 + 1) | ((age as u32) << 16);
+        }
+        table
+    }
+
+    pub fn stats(&self) -> VirtualShadowCacheStats {
+        self.stats
+    }
+
+    pub fn level_counts(&self, light: u16) -> [(u16, u16); VSM_CLIP_LEVELS as usize] {
+        let mut counts = [(0u16, 0u16); VSM_CLIP_LEVELS as usize];
+        for slot in &self.physical {
+            let Some(owner) = slot.owner else {
+                continue;
+            };
+            if owner.light != light {
+                continue;
+            }
+            counts[owner.level as usize].0 += 1;
+            if slot.dirty {
+                counts[owner.level as usize].1 += 1;
+            }
+        }
+        counts
+    }
+
+    pub fn debug_virtual_rgb(&self, light: u16, scale: u32) -> (u32, u32, Vec<u8>) {
+        let scale = scale.max(1);
+        let axis = VSM_VIRTUAL_PAGES_PER_AXIS as u32;
+        let width = axis * scale;
+        let height = axis * VSM_CLIP_LEVELS as u32 * scale;
+        let mut rgb = vec![8u8; (width * height * 3) as usize];
+        let level_colors = [[70u8, 210, 110], [70, 150, 255], [190, 100, 255]];
+        for (&page, &physical_page) in &self.mapping {
+            if page.light != light {
+                continue;
+            }
+            let slot = &self.physical[physical_page as usize];
+            let color = if slot.dirty || slot.rendered_frame == 0 {
+                [255, 55, 45]
+            } else {
+                level_colors[page.level as usize]
+            };
+            paint_debug_cell(
+                &mut rgb,
+                width,
+                scale,
+                u32::from(page.x),
+                u32::from(page.y) + u32::from(page.level) * axis,
+                color,
+            );
+        }
+        (width, height, rgb)
+    }
+
+    pub fn debug_physical_rgb(&self, scale: u32) -> (u32, u32, Vec<u8>) {
+        let scale = scale.max(1);
+        let columns = 16u32.min(self.physical.len().max(1) as u32);
+        let rows = (self.physical.len() as u32).div_ceil(columns);
+        let width = columns * scale;
+        let height = rows.max(1) * scale;
+        let mut rgb = vec![8u8; (width * height * 3) as usize];
+        let level_colors = [[70u8, 210, 110], [70, 150, 255], [190, 100, 255]];
+        for (index, slot) in self.physical.iter().enumerate() {
+            let Some(owner) = slot.owner else {
+                continue;
+            };
+            let color = if slot.dirty || slot.rendered_frame == 0 {
+                [255, 55, 45]
+            } else {
+                level_colors[owner.level as usize]
+            };
+            paint_debug_cell(
+                &mut rgb,
+                width,
+                scale,
+                index as u32 % columns,
+                index as u32 / columns,
+                color,
+            );
+        }
+        (width, height, rgb)
+    }
+
+    pub fn memory_bytes(&self) -> u64 {
+        let edge = VSM_PHYSICAL_PAGE_SIZE as u64;
+        edge * edge * std::mem::size_of::<f32>() as u64 * self.physical.len() as u64
+    }
+
+    fn refresh_counts(&mut self) {
+        self.stats.resident = self
+            .physical
+            .iter()
+            .filter(|slot| slot.owner.is_some())
+            .count() as u16;
+        self.stats.dirty = self
+            .physical
+            .iter()
+            .filter(|slot| slot.owner.is_some() && slot.dirty)
+            .count() as u16;
+    }
+}
+
+fn paint_debug_cell(
+    rgb: &mut [u8],
+    width: u32,
+    scale: u32,
+    cell_x: u32,
+    cell_y: u32,
+    color: [u8; 3],
+) {
+    for y in 0..scale {
+        for x in 0..scale {
+            let pixel_x = cell_x * scale + x;
+            let pixel_y = cell_y * scale + y;
+            let offset = ((pixel_y * width + pixel_x) * 3) as usize;
+            rgb[offset..offset + 3].copy_from_slice(&color);
+        }
+    }
+}
+
+/// Runtime policy wrapper for the directional prototype.
+///
+/// The cache foundation is intentionally opt-in until physical page rendering
+/// and sampling are connected and qualified. With the default environment it
+/// performs no demand walk and allocates no GPU memory, so landing the
+/// foundation cannot change images, frame time, or residency.
+pub struct DirectionalVirtualShadowMap {
+    requested: bool,
+    sampling_active: bool,
+    dynamic_global_fallback: bool,
+    dynamic_fallback_pages: Vec<VirtualShadowPage>,
+    cache: VirtualShadowPageCache,
+    gpu: Option<GpuVirtualShadowResources>,
+    frame: u64,
+    previous_level_vps: Option<[[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize]>,
+    previous_content_signatures: Option<[u64; VSM_CLIP_LEVELS as usize]>,
+    previous_demand_signature: u64,
+    fallback_demand: Vec<VirtualShadowPage>,
+    receiver_demand: Vec<VirtualShadowPage>,
+    receiver_bounds_signature: u64,
+    receiver_demand_level_vps: Option<[[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize]>,
+    last_demand_count: usize,
+    receiver_demand_active: bool,
+    pending: Vec<PageRequest>,
+    uploaded_page_table: Vec<u32>,
+    page_table_may_age_until: u64,
+    sampling_params_initialized: bool,
+    render_budget: usize,
+}
+
+impl DirectionalVirtualShadowMap {
+    pub fn new(device: &wgpu::Device, shadow_uniform_layout: &wgpu::BindGroupLayout) -> Self {
+        let requested = virtual_shadows_requested();
+        let requested_capacity = if requested {
+            env_u16(
+                "BLOOM_VSM_PHYSICAL_PAGES",
+                VSM_DEFAULT_PHYSICAL_PAGES,
+                1,
+                4096,
+            )
+        } else {
+            1
+        };
+        let capacity = requested_capacity.min(
+            device
+                .limits()
+                .max_texture_array_layers
+                .min(u16::MAX as u32) as u16,
+        );
+        let page_uniform_bytes =
+            crate::shadows::SHADOW_UNIFORM_STRIDE as u64 * crate::shadows::SHADOW_MAX_NODES as u64;
+        let buffer_limited_budget =
+            (device.limits().max_buffer_size / page_uniform_bytes).min(u16::MAX as u64) as u16;
+        let max_render_budget = capacity
+            .min(VSM_MAX_PAGE_RENDER_BUDGET)
+            .min(buffer_limited_budget.max(1));
+        let render_budget = env_u16("BLOOM_VSM_PAGE_BUDGET", 8, 1, max_render_budget).into();
+        let gpu = requested.then(|| {
+            GpuVirtualShadowResources::new(device, shadow_uniform_layout, capacity, render_budget)
+        });
+        let fallback_demand = if requested {
+            centered_directional_demand(0)
+        } else {
+            Vec::new()
+        };
+        Self {
+            requested,
+            sampling_active: false,
+            dynamic_global_fallback: false,
+            dynamic_fallback_pages: Vec::new(),
+            cache: VirtualShadowPageCache::new(capacity),
+            gpu,
+            frame: 0,
+            previous_level_vps: None,
+            previous_content_signatures: None,
+            previous_demand_signature: 0,
+            fallback_demand,
+            receiver_demand: Vec::new(),
+            receiver_bounds_signature: 0,
+            receiver_demand_level_vps: None,
+            last_demand_count: 0,
+            receiver_demand_active: false,
+            pending: Vec::with_capacity(render_budget),
+            uploaded_page_table: Vec::new(),
+            page_table_may_age_until: 0,
+            sampling_params_initialized: false,
+            render_budget,
+        }
+    }
+
+    pub fn prepare(
+        &mut self,
+        queue: &wgpu::Queue,
+        level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
+        content_signatures: [u64; VSM_CLIP_LEVELS as usize],
+        receiver_bounds: Option<&[([f32; 3], [f32; 3])]>,
+    ) {
+        self.frame = self.frame.wrapping_add(1).max(1);
+        self.cache.begin_frame(self.frame);
+        self.pending.clear();
+        if !self.requested {
+            return;
+        }
+        let receiver_bounds_signature = receiver_bounds
+            .filter(|bounds| !bounds.is_empty())
+            .map(receiver_bounds_signature);
+        if let Some(signature) = receiver_bounds_signature {
+            if self.receiver_bounds_signature != signature
+                || self.receiver_demand_level_vps != Some(level_vps)
+            {
+                self.receiver_demand =
+                    directional_receiver_demand(level_vps, receiver_bounds.unwrap(), 0);
+                self.receiver_bounds_signature = signature;
+                self.receiver_demand_level_vps = Some(level_vps);
+            }
+        } else {
+            self.receiver_demand.clear();
+            self.receiver_bounds_signature = 0;
+            self.receiver_demand_level_vps = None;
+        }
+        let (demand, receiver_demand_active) = if self.receiver_demand.is_empty() {
+            (&self.fallback_demand[..], false)
+        } else {
+            (&self.receiver_demand[..], true)
+        };
+        let demand_signature = demand_signature(demand);
+        self.last_demand_count = demand.len();
+        self.receiver_demand_active = receiver_demand_active;
+        let demand_unchanged = self.previous_level_vps == Some(level_vps)
+            && self.previous_content_signatures == Some(content_signatures)
+            && self.previous_demand_signature == demand_signature;
+        if demand_unchanged && self.cache.stats().dirty == 0 {
+            self.cache.record_stable_requests(demand.len());
+            if self.frame <= self.page_table_may_age_until {
+                self.upload_page_table_if_changed(queue);
+            }
+            return;
+        }
+        if let Some(previous) = self.previous_level_vps {
+            for level in 0..VSM_CLIP_LEVELS as usize {
+                if previous[level] != level_vps[level] {
+                    self.cache.invalidate_level(0, level as u8);
+                }
+            }
+        } else {
+            self.cache.invalidate_light(0);
+        }
+        self.previous_level_vps = Some(level_vps);
+        self.previous_content_signatures = Some(content_signatures);
+        self.previous_demand_signature = demand_signature;
+
+        for &page in demand {
+            let Some(request) = self
+                .cache
+                .request(page, content_signatures[page.level as usize])
+            else {
+                continue;
+            };
+            if request.needs_render && self.pending.len() < self.render_budget {
+                self.pending.push(request);
+            }
+        }
+        self.cache.finish_requests();
+        self.upload_page_table_if_changed(queue);
+    }
+
+    pub fn pending(&self) -> &[PageRequest] {
+        &self.pending
+    }
+
+    pub fn finish_rendered_pages(
+        &mut self,
+        queue: &wgpu::Queue,
+        rendered: &[(VirtualShadowPage, u64)],
+    ) {
+        for &(page, signature) in rendered {
+            self.cache.mark_rendered(page, signature);
+        }
+        if !rendered.is_empty() {
+            self.page_table_may_age_until = self
+                .page_table_may_age_until
+                .max(self.frame.saturating_add(7));
+        }
+        self.cache.finish_requests();
+        self.upload_page_table_if_changed(queue);
+    }
+
+    /// Route pages touched by dynamic casters through the live CSM.
+    ///
+    /// Static physical pages stay valid: moving a character changes which
+    /// page-table entries are masked, not cached depth. This avoids stale
+    /// animated shadows without invalidating or re-rendering unrelated pages.
+    pub fn set_dynamic_fallback_pages(
+        &mut self,
+        queue: &wgpu::Queue,
+        mut pages: Vec<VirtualShadowPage>,
+    ) {
+        pages.sort_unstable();
+        pages.dedup();
+        self.dynamic_global_fallback = false;
+        let mask_changed = pages != self.dynamic_fallback_pages;
+        self.dynamic_fallback_pages = pages;
+        let demand = if self.receiver_demand_active {
+            &self.receiver_demand
+        } else {
+            &self.fallback_demand
+        };
+        let all_demand_masked = !demand.is_empty()
+            && demand
+                .iter()
+                .all(|page| self.dynamic_fallback_pages.binary_search(page).is_ok());
+        let sampling_active = self.requested && self.gpu.is_some() && !all_demand_masked;
+        let sampling_changed = sampling_active != self.sampling_active;
+        if !self.sampling_params_initialized || sampling_active != self.sampling_active {
+            if let Some(gpu) = self.gpu.as_ref() {
+                gpu.upload_sampling_params(queue, sampling_active);
+            }
+            self.sampling_params_initialized = true;
+        }
+        self.sampling_active = sampling_active;
+        if sampling_active && (mask_changed || sampling_changed) {
+            self.upload_page_table_if_changed(queue);
+        }
+    }
+
+    /// Small receiver footprints cannot retain enough unmasked pages for a
+    /// dynamic page mask to repay its CPU work and shader indirection.
+    pub fn dynamic_page_mask_worthwhile(&self) -> bool {
+        self.requested && self.last_demand_count >= 128
+    }
+
+    pub fn set_global_dynamic_fallback(&mut self, queue: &wgpu::Queue, present: bool) {
+        let state_changed =
+            present != self.dynamic_global_fallback || !self.dynamic_fallback_pages.is_empty();
+        self.dynamic_global_fallback = present;
+        self.dynamic_fallback_pages.clear();
+        let sampling_active = self.requested && self.gpu.is_some() && !present;
+        let sampling_changed = sampling_active != self.sampling_active;
+        if !self.sampling_params_initialized || sampling_changed {
+            if let Some(gpu) = self.gpu.as_ref() {
+                gpu.upload_sampling_params(queue, sampling_active);
+            }
+            self.sampling_params_initialized = true;
+        }
+        self.sampling_active = sampling_active;
+        if sampling_active && (state_changed || sampling_changed) {
+            self.upload_page_table_if_changed(queue);
+        }
+    }
+
+    pub fn requested(&self) -> bool {
+        self.requested
+    }
+
+    pub fn physical_page_view(&self, physical_page: u16) -> Option<&wgpu::TextureView> {
+        self.gpu
+            .as_ref()?
+            .physical_page_views
+            .get(physical_page as usize)
+    }
+
+    pub fn render_uniform_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.gpu.as_ref().map(|gpu| &gpu.render_uniform_buffer)
+    }
+
+    pub fn render_uniform_bind_group(&self) -> Option<&wgpu::BindGroup> {
+        self.gpu.as_ref().map(|gpu| &gpu.render_uniform_bind_group)
+    }
+
+    pub fn physical_array_view(&self) -> Option<&wgpu::TextureView> {
+        self.gpu.as_ref().map(|gpu| &gpu.physical_array_view)
+    }
+
+    pub fn page_table_view(&self) -> Option<&wgpu::TextureView> {
+        self.gpu.as_ref().map(|gpu| &gpu.page_table_view)
+    }
+
+    pub fn sampling_params_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.gpu.as_ref().map(|gpu| &gpu.sampling_params_buffer)
+    }
+
+    fn upload_page_table_if_changed(&mut self, queue: &wgpu::Queue) {
+        if !self.sampling_active {
+            return;
+        }
+        let mut table = self.cache.page_table(0);
+        apply_dynamic_page_mask(&mut table, &self.dynamic_fallback_pages);
+        if table == self.uploaded_page_table {
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_ref() {
+            gpu.upload_page_table(queue, &table);
+        }
+        self.uploaded_page_table = table;
+    }
+
+    pub fn invalidate(&mut self) {
+        self.cache.invalidate_all();
+        self.previous_level_vps = None;
+        self.previous_content_signatures = None;
+        self.previous_demand_signature = 0;
+        self.dynamic_global_fallback = false;
+        self.dynamic_fallback_pages.clear();
+        self.pending.clear();
+        self.sampling_active = false;
+        self.sampling_params_initialized = false;
+    }
+
+    pub fn debug_images(&self) -> Vec<(&'static str, u32, u32, Vec<u8>)> {
+        if !self.requested {
+            return Vec::new();
+        }
+        let (virtual_width, virtual_height, virtual_rgb) = self.cache.debug_virtual_rgb(0, 4);
+        let (physical_width, physical_height, physical_rgb) = self.cache.debug_physical_rgb(4);
+        vec![
+            (
+                "virtual-shadow-pages",
+                virtual_width,
+                virtual_height,
+                virtual_rgb,
+            ),
+            (
+                "virtual-shadow-physical",
+                physical_width,
+                physical_height,
+                physical_rgb,
+            ),
+        ]
+    }
+
+    pub fn report_json(&self) -> String {
+        let stats = self.cache.stats();
+        let levels = self.cache.level_counts(0);
+        let page_table_bytes = VSM_VIRTUAL_PAGES_PER_AXIS as u64
+            * VSM_VIRTUAL_PAGES_PER_AXIS as u64
+            * VSM_CLIP_LEVELS as u64
+            * std::mem::size_of::<u32>() as u64;
+        let render_staging_bytes = crate::shadows::SHADOW_UNIFORM_STRIDE as u64
+            * crate::shadows::SHADOW_MAX_NODES as u64
+            * self.render_budget as u64;
+        let gpu_overhead_bytes =
+            page_table_bytes + render_staging_bytes + std::mem::size_of::<[u32; 4]>() as u64;
+        let (physical_capacity, physical_bytes, gpu_overhead_bytes, render_budget) =
+            if self.requested {
+                (
+                    stats.capacity,
+                    self.cache.memory_bytes(),
+                    gpu_overhead_bytes,
+                    self.render_budget,
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
+        format!(
+            concat!(
+                "{{\"requested\":{},\"active\":{},",
+                "\"fallback\":\"csm\",\"dynamic_fallback\":{},",
+                "\"dynamic_fallback_mode\":\"{}\",\"dynamic_fallback_pages\":{},",
+                "\"physical_capacity\":{},\"physical_bytes\":{},",
+                "\"gpu_overhead_bytes\":{},\"gpu_total_bytes\":{},",
+                "\"resident\":{},\"dirty\":{},\"requested_pages\":{},",
+                "\"cache_hits\":{},\"cache_misses\":{},\"evictions\":{},",
+                "\"denied\":{},\"invalidated\":{},\"rendered\":{},",
+                "\"pending_render\":{},\"render_budget\":{},",
+                "\"demand_source\":\"{}\",\"demand_count\":{},",
+                "\"levels\":[",
+                "{{\"level\":0,\"resident\":{},\"dirty\":{}}},",
+                "{{\"level\":1,\"resident\":{},\"dirty\":{}}},",
+                "{{\"level\":2,\"resident\":{},\"dirty\":{}}}]}}"
+            ),
+            self.requested,
+            self.sampling_active,
+            self.dynamic_global_fallback || !self.dynamic_fallback_pages.is_empty(),
+            if self.dynamic_global_fallback {
+                "whole-frame-csm"
+            } else if self.dynamic_fallback_pages.is_empty() {
+                "none"
+            } else if !self.sampling_active {
+                "full-demand-csm"
+            } else {
+                "per-page-csm"
+            },
+            self.dynamic_fallback_pages.len(),
+            physical_capacity,
+            physical_bytes,
+            gpu_overhead_bytes,
+            physical_bytes + gpu_overhead_bytes,
+            stats.resident,
+            stats.dirty,
+            stats.requested,
+            stats.hits,
+            stats.misses,
+            stats.evictions,
+            stats.denied,
+            stats.invalidated,
+            stats.rendered,
+            self.pending.len(),
+            render_budget,
+            if !self.requested {
+                "disabled"
+            } else if self.receiver_demand_active {
+                "receiver-bounds"
+            } else {
+                "bounded-center-fallback"
+            },
+            self.last_demand_count,
+            levels[0].0,
+            levels[0].1,
+            levels[1].0,
+            levels[1].1,
+            levels[2].0,
+            levels[2].1,
+        )
+    }
+}
+
+struct GpuVirtualShadowResources {
+    _physical_texture: wgpu::Texture,
+    physical_array_view: wgpu::TextureView,
+    physical_page_views: Vec<wgpu::TextureView>,
+    page_table_texture: wgpu::Texture,
+    page_table_view: wgpu::TextureView,
+    render_uniform_buffer: wgpu::Buffer,
+    render_uniform_bind_group: wgpu::BindGroup,
+    sampling_params_buffer: wgpu::Buffer,
+}
+
+impl GpuVirtualShadowResources {
+    fn new(
+        device: &wgpu::Device,
+        shadow_uniform_layout: &wgpu::BindGroupLayout,
+        physical_pages: u16,
+        render_budget: usize,
+    ) -> Self {
+        let physical_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("vsm_physical_depth_pages"),
+            size: wgpu::Extent3d {
+                width: VSM_PHYSICAL_PAGE_SIZE as u32,
+                height: VSM_PHYSICAL_PAGE_SIZE as u32,
+                depth_or_array_layers: physical_pages as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let physical_array_view = physical_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("vsm_physical_depth_array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let physical_page_views = (0..physical_pages as u32)
+            .map(|physical_page| {
+                physical_texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("vsm_physical_depth_page"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: physical_page,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let page_table_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("vsm_directional_page_table"),
+            size: wgpu::Extent3d {
+                width: VSM_VIRTUAL_PAGES_PER_AXIS as u32,
+                height: VSM_VIRTUAL_PAGES_PER_AXIS as u32,
+                depth_or_array_layers: VSM_CLIP_LEVELS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let page_table_view = page_table_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("vsm_directional_page_table_array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        // Queue writes become visible at submit, not at encode time. VSM page
+        // matrices therefore cannot share the CSM uniform buffer: doing so
+        // would replace matrices referenced by already-encoded cascade draws.
+        let render_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vsm_render_uniforms"),
+            size: crate::shadows::SHADOW_UNIFORM_STRIDE as u64
+                * crate::shadows::SHADOW_MAX_NODES as u64
+                * render_budget as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let render_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vsm_render_uniform_bg"),
+            layout: shadow_uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &render_uniform_buffer,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(std::mem::size_of::<
+                        crate::shadows::ShadowUniforms,
+                    >() as u64),
+                }),
+            }],
+        });
+        let sampling_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vsm_sampling_params"),
+            size: std::mem::size_of::<[u32; 4]>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            _physical_texture: physical_texture,
+            physical_array_view,
+            physical_page_views,
+            page_table_texture,
+            page_table_view,
+            render_uniform_buffer,
+            render_uniform_bind_group,
+            sampling_params_buffer,
+        }
+    }
+
+    fn upload_page_table(&self, queue: &wgpu::Queue, table: &[u32]) {
+        let axis = VSM_VIRTUAL_PAGES_PER_AXIS as usize;
+        let layers = VSM_CLIP_LEVELS as usize;
+        debug_assert_eq!(table.len(), axis * axis * layers);
+        // WebGPU texture copies require 256-byte row alignment. A 32-wide
+        // R32Uint row is 128 bytes, so stage each logical row into a padded
+        // 256-byte row before queue upload.
+        const PADDED_ROW_BYTES: usize = 256;
+        let row_words = PADDED_ROW_BYTES / std::mem::size_of::<u32>();
+        let mut padded = vec![0u32; row_words * axis * layers];
+        for layer in 0..layers {
+            for y in 0..axis {
+                let source = (layer * axis + y) * axis;
+                let destination = (layer * axis + y) * row_words;
+                padded[destination..destination + axis]
+                    .copy_from_slice(&table[source..source + axis]);
+            }
+        }
+        queue.write_texture(
+            self.page_table_texture.as_image_copy(),
+            bytemuck::cast_slice(&padded),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(PADDED_ROW_BYTES as u32),
+                rows_per_image: Some(axis as u32),
+            },
+            wgpu::Extent3d {
+                width: axis as u32,
+                height: axis as u32,
+                depth_or_array_layers: layers as u32,
+            },
+        );
+    }
+
+    fn upload_sampling_params(&self, queue: &wgpu::Queue, sampling_active: bool) {
+        let params = [
+            u32::from(sampling_active),
+            VSM_VIRTUAL_PAGES_PER_AXIS as u32,
+            VSM_PAGE_INTERIOR as u32,
+            VSM_PAGE_BORDER as u32,
+        ];
+        queue.write_buffer(
+            &self.sampling_params_buffer,
+            0,
+            bytemuck::cast_slice(&params),
+        );
+    }
+}
+
+/// Crop one full cascade VP to a single virtual page, including the physical
+/// page's guard texels. Virtual page Y is texture-space (zero at the top), so
+/// it is intentionally inverted when converted to WebGPU NDC.
+pub fn directional_page_vp(level_vp: [[f32; 4]; 4], page: VirtualShadowPage) -> [[f32; 4]; 4] {
+    let axis = VSM_VIRTUAL_PAGES_PER_AXIS as f32;
+    let physical_over_interior = VSM_PHYSICAL_PAGE_SIZE as f32 / VSM_PAGE_INTERIOR as f32;
+    let half_ndc = physical_over_interior / axis;
+    let scale = half_ndc.recip();
+    let center_x = (f32::from(page.x) + 0.5) * (2.0 / axis) - 1.0;
+    let center_y = 1.0 - (f32::from(page.y) + 0.5) * (2.0 / axis);
+    let crop = [
+        [scale, 0.0, 0.0, 0.0],
+        [0.0, scale, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [-center_x * scale, -center_y * scale, 0.0, 1.0],
+    ];
+    crate::renderer::mat4_multiply(crop, level_vp)
+}
+
+const DIRECTIONAL_VSM_SCENE_BINDINGS: &str = r#"
+struct DirectionalVsmParams {
+    enabled: u32,
+    virtual_pages_per_axis: u32,
+    page_interior: u32,
+    page_border: u32,
+};
+@group(1) @binding(13) var vsm_page_table: texture_2d_array<u32>;
+@group(1) @binding(14) var vsm_physical_pages: texture_depth_2d_array;
+@group(1) @binding(15) var<uniform> vsm_params: DirectionalVsmParams;
+"#;
+
+const DIRECTIONAL_VSM_SCENE_HELPER: &str = r#"
+fn sample_virtual_shadow(
+    cascade: i32,
+    shadow_uv: vec2<f32>,
+    depth_ref: f32,
+) -> f32 {
+    if (vsm_params.enabled == 0u) {
+        return sample_cascade(cascade, shadow_uv, depth_ref);
+    }
+    if (any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0))) {
+        return sample_cascade(cascade, shadow_uv, depth_ref);
+    }
+    let axis = vsm_params.virtual_pages_per_axis;
+    let scaled_uv = shadow_uv * f32(axis);
+    let page_xy = min(vec2<u32>(scaled_uv), vec2<u32>(axis - 1u));
+    let encoded = textureLoad(
+        vsm_page_table,
+        vec2<i32>(page_xy),
+        cascade,
+        0,
+    ).x;
+    if (encoded == 0u) {
+        return sample_cascade(cascade, shadow_uv, depth_ref);
+    }
+
+    let physical_layer = i32((encoded & 0xffffu) - 1u);
+    let interior = f32(vsm_params.page_interior);
+    let border = f32(vsm_params.page_border);
+    let physical_size = interior + 2.0 * border;
+    let local_uv = clamp(
+        scaled_uv - vec2<f32>(page_xy),
+        vec2<f32>(0.0),
+        vec2<f32>(1.0),
+    );
+    let page_uv = (vec2<f32>(border) + local_uv * interior)
+                / physical_size;
+    let texel = vec2<f32>(1.0 / physical_size);
+    let offsets = array<vec2<f32>, 4>(
+        vec2<f32>(-0.5, -0.5),
+        vec2<f32>( 0.5, -0.5),
+        vec2<f32>(-0.5,  0.5),
+        vec2<f32>( 0.5,  0.5),
+    );
+    var virtual_value = 0.0;
+    for (var i = 0; i < 4; i = i + 1) {
+        virtual_value += textureSampleCompareLevel(
+            vsm_physical_pages,
+            shadow_samp,
+            page_uv + offsets[i] * texel,
+            physical_layer,
+            depth_ref,
+        );
+    }
+    virtual_value *= 0.25;
+    let residency_age = f32(encoded >> 16u);
+    if (residency_age < 8.0) {
+        return mix(
+            sample_cascade(cascade, shadow_uv, depth_ref),
+            virtual_value,
+            residency_age / 8.0,
+        );
+    }
+    return virtual_value;
+}
+"#;
+
+/// Build the opt-in scene-shader variant. The canonical source remains
+/// byte-for-byte unchanged when VSM is disabled, avoiding an extra branch or
+/// binding in the default renderer.
+pub(crate) fn directional_scene_shader(source: &str) -> String {
+    let helper_marker = "fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {";
+    let helper_offset = source
+        .find(helper_marker)
+        .expect("scene shader missing sample_shadow marker");
+    let mut output = String::with_capacity(
+        source.len() + DIRECTIONAL_VSM_SCENE_BINDINGS.len() + DIRECTIONAL_VSM_SCENE_HELPER.len(),
+    );
+    output.push_str(DIRECTIONAL_VSM_SCENE_BINDINGS);
+    output.push_str(&source[..helper_offset]);
+    output.push_str(DIRECTIONAL_VSM_SCENE_HELPER);
+    output.push_str(&source[helper_offset..]);
+    output = output.replace(
+        "let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);",
+        "let shadow_val = sample_virtual_shadow(cascade, shadow_uv, depth_ref);",
+    );
+    output.replace(
+        "let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);",
+        "let next_val = sample_virtual_shadow(next_cascade, next_uv, next_depth_ref);",
+    )
+}
+
+const DIRECTIONAL_VSM_MATERIAL_BINDINGS: &str = r#"
+struct DirectionalVsmParams {
+    enabled: u32,
+    virtual_pages_per_axis: u32,
+    page_interior: u32,
+    page_border: u32,
+};
+@group(1) @binding(10) var vsm_page_table: texture_2d_array<u32>;
+@group(1) @binding(11) var vsm_physical_pages: texture_depth_2d_array;
+@group(1) @binding(12) var<uniform> vsm_params: DirectionalVsmParams;
+"#;
+
+const DIRECTIONAL_VSM_MATERIAL_HELPER: &str = r#"
+fn sample_shadow_cascade(
+    cascade_idx: u32,
+    world_pos: vec3<f32>,
+) -> f32 {
+    if (vsm_params.enabled == 0u) {
+        return sample_shadow_cascade_csm(cascade_idx, world_pos);
+    }
+    let light_clip = view.shadow_cascades[cascade_idx]
+                   * vec4<f32>(world_pos, 1.0);
+    let light_ndc = light_clip.xyz / light_clip.w;
+    if (abs(light_ndc.x) > 1.0 || abs(light_ndc.y) > 1.0
+        || light_ndc.z < 0.0 || light_ndc.z > 1.0) {
+        return 1.0;
+    }
+    let shadow_uv = vec2<f32>(
+        light_ndc.x * 0.5 + 0.5,
+        1.0 - (light_ndc.y * 0.5 + 0.5),
+    );
+    let depth_ref = light_ndc.z - 0.001;
+    let axis = vsm_params.virtual_pages_per_axis;
+    let scaled_uv = shadow_uv * f32(axis);
+    let page_xy = min(vec2<u32>(scaled_uv), vec2<u32>(axis - 1u));
+    let encoded = textureLoad(
+        vsm_page_table,
+        vec2<i32>(page_xy),
+        i32(cascade_idx),
+        0,
+    ).x;
+    if (encoded == 0u) {
+        return sample_shadow_cascade_csm(cascade_idx, world_pos);
+    }
+    let physical_layer = i32((encoded & 0xffffu) - 1u);
+    let interior = f32(vsm_params.page_interior);
+    let border = f32(vsm_params.page_border);
+    let physical_size = interior + 2.0 * border;
+    let local_uv = clamp(
+        scaled_uv - vec2<f32>(page_xy),
+        vec2<f32>(0.0),
+        vec2<f32>(1.0),
+    );
+    let page_uv = (vec2<f32>(border) + local_uv * interior)
+                / physical_size;
+    let texel = vec2<f32>(1.0 / physical_size);
+    let offsets = array<vec2<f32>, 4>(
+        vec2<f32>(-0.5, -0.5),
+        vec2<f32>( 0.5, -0.5),
+        vec2<f32>(-0.5,  0.5),
+        vec2<f32>( 0.5,  0.5),
+    );
+    var virtual_value = 0.0;
+    for (var i = 0; i < 4; i = i + 1) {
+        virtual_value += textureSampleCompareLevel(
+            vsm_physical_pages,
+            shadow_samp,
+            page_uv + offsets[i] * texel,
+            physical_layer,
+            depth_ref,
+        );
+    }
+    virtual_value *= 0.25;
+    let residency_age = f32(encoded >> 16u);
+    if (residency_age < 8.0) {
+        return mix(
+            sample_shadow_cascade_csm(cascade_idx, world_pos),
+            virtual_value,
+            residency_age / 8.0,
+        );
+    }
+    return virtual_value;
+}
+"#;
+
+/// Add VSM sampling to ABI materials that include the engine shadow helper.
+/// Materials that do not receive sun shadows only gain unused declarations
+/// in this opt-in shader variant.
+pub(crate) fn directional_material_shader(source: String) -> String {
+    let mut output = String::with_capacity(
+        source.len()
+            + DIRECTIONAL_VSM_MATERIAL_BINDINGS.len()
+            + DIRECTIONAL_VSM_MATERIAL_HELPER.len(),
+    );
+    output.push_str(DIRECTIONAL_VSM_MATERIAL_BINDINGS);
+    if !source.contains("fn sample_shadow_cascade(") {
+        output.push_str(&source);
+        return output;
+    }
+    let renamed = source.replacen(
+        "fn sample_shadow_cascade(",
+        "fn sample_shadow_cascade_csm(",
+        1,
+    );
+    let marker = "fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {";
+    let offset = renamed
+        .find(marker)
+        .expect("material shadow helper missing sample_sun_shadow");
+    output.push_str(&renamed[..offset]);
+    output.push_str(DIRECTIONAL_VSM_MATERIAL_HELPER);
+    output.push_str(&renamed[offset..]);
+    output
+}
+
+pub(crate) fn virtual_shadows_requested() -> bool {
+    static REQUESTED: OnceLock<bool> = OnceLock::new();
+    *REQUESTED.get_or_init(|| {
+        std::env::var("BLOOM_VSM")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "on" | "true" | "enabled"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn env_u16(name: &str, default: u16, min: u16, max: u16) -> u16 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn demand_signature(demand: &[VirtualShadowPage]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for byte in (demand.len() as u64).to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for page in demand {
+        for byte in page.light.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        for byte in [page.level] {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        for byte in page.x.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        for byte in page.y.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    hash
+}
+
+fn receiver_bounds_signature(receiver_bounds: &[([f32; 3], [f32; 3])]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for byte in (receiver_bounds.len() as u64).to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for (bmin, bmax) in receiver_bounds {
+        for value in bmin.iter().chain(bmax.iter()) {
+            for byte in value.to_bits().to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
+        }
+    }
+    hash
+}
+
+fn projected_directional_page_rect(
+    level_vp: &[[f32; 4]; 4],
+    planes: &[[f32; 4]; 6],
+    bmin: [f32; 3],
+    bmax: [f32; 3],
+    guard_pages: i32,
+) -> Option<(u16, u16, u16, u16)> {
+    if bmin[0] > bmax[0]
+        || bmin
+            .iter()
+            .chain(bmax.iter())
+            .any(|value| !value.is_finite())
+        || crate::scene::aabb_outside_frustum(planes, bmin, bmax)
+    {
+        return None;
+    }
+
+    let mut ndc_min = [f32::INFINITY; 2];
+    let mut ndc_max = [f32::NEG_INFINITY; 2];
+    for corner in 0..8 {
+        let world = [
+            if corner & 1 == 0 { bmin[0] } else { bmax[0] },
+            if corner & 2 == 0 { bmin[1] } else { bmax[1] },
+            if corner & 4 == 0 { bmin[2] } else { bmax[2] },
+            1.0,
+        ];
+        let clip = crate::renderer::mat4_mul_vec4(level_vp, &world);
+        if !clip[3].is_finite() || clip[3].abs() <= f32::EPSILON {
+            continue;
+        }
+        let x = clip[0] / clip[3];
+        let y = clip[1] / clip[3];
+        if x.is_finite() && y.is_finite() {
+            ndc_min[0] = ndc_min[0].min(x);
+            ndc_min[1] = ndc_min[1].min(y);
+            ndc_max[0] = ndc_max[0].max(x);
+            ndc_max[1] = ndc_max[1].max(y);
+        }
+    }
+    if !ndc_min[0].is_finite() {
+        return None;
+    }
+
+    let uv_min = [
+        (ndc_min[0] * 0.5 + 0.5).clamp(0.0, 1.0),
+        (1.0 - (ndc_max[1] * 0.5 + 0.5)).clamp(0.0, 1.0),
+    ];
+    let uv_max = [
+        (ndc_max[0] * 0.5 + 0.5).clamp(0.0, 1.0),
+        (1.0 - (ndc_min[1] * 0.5 + 0.5)).clamp(0.0, 1.0),
+    ];
+    let axis = i32::from(VSM_VIRTUAL_PAGES_PER_AXIS);
+    let page_min_x = ((uv_min[0] * axis as f32).floor() as i32 - guard_pages).clamp(0, axis - 1);
+    let page_min_y = ((uv_min[1] * axis as f32).floor() as i32 - guard_pages).clamp(0, axis - 1);
+    let page_max_x = ((uv_max[0] * axis as f32).floor() as i32 + guard_pages).clamp(0, axis - 1);
+    let page_max_y = ((uv_max[1] * axis as f32).floor() as i32 + guard_pages).clamp(0, axis - 1);
+    Some((
+        page_min_x as u16,
+        page_min_y as u16,
+        page_max_x as u16,
+        page_max_y as u16,
+    ))
+}
+
+fn apply_dynamic_page_mask(table: &mut [u32], pages: &[VirtualShadowPage]) {
+    for &page in pages {
+        if page.light == 0
+            && page.level < VSM_CLIP_LEVELS
+            && page.x < VSM_VIRTUAL_PAGES_PER_AXIS
+            && page.y < VSM_VIRTUAL_PAGES_PER_AXIS
+        {
+            if let Some(entry) = table.get_mut(page.table_index()) {
+                *entry = VSM_PAGE_TABLE_MISSING;
+            }
+        }
+    }
+}
+
+/// Virtual pages whose light-space rays intersect a dynamic caster.
+///
+/// These pages sample the live CSM instead of static VSM depth. Two guard
+/// pages cover PCF taps, temporal jitter, and conservative AABB projection.
+/// An unbounded caster returns the complete virtual address space, preserving
+/// the former whole-frame fallback rather than risking a stale shadow.
+pub fn directional_dynamic_fallback_pages(
+    level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
+    dynamic_bounds: &[([f32; 3], [f32; 3])],
+    light: u16,
+) -> Vec<VirtualShadowPage> {
+    if dynamic_bounds.is_empty() {
+        return Vec::new();
+    }
+    let page_count = VSM_VIRTUAL_PAGES_PER_AXIS as usize
+        * VSM_VIRTUAL_PAGES_PER_AXIS as usize
+        * VSM_CLIP_LEVELS as usize;
+    let unbounded = dynamic_bounds.iter().any(|(bmin, bmax)| {
+        bmin[0] > bmax[0]
+            || bmin
+                .iter()
+                .chain(bmax.iter())
+                .any(|value| !value.is_finite())
+    });
+    let mut marked = vec![unbounded; page_count];
+    if !unbounded {
+        for level in 0..VSM_CLIP_LEVELS as usize {
+            let planes = crate::scene::extract_frustum_planes(&level_vps[level]);
+            for &(bmin, bmax) in dynamic_bounds {
+                let Some((min_x, min_y, max_x, max_y)) =
+                    projected_directional_page_rect(&level_vps[level], &planes, bmin, bmax, 2)
+                else {
+                    continue;
+                };
+                for y in min_y..=max_y {
+                    for x in min_x..=max_x {
+                        let page = VirtualShadowPage {
+                            light,
+                            level: level as u8,
+                            x,
+                            y,
+                        };
+                        marked[page.table_index()] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let axis = VSM_VIRTUAL_PAGES_PER_AXIS as usize;
+    marked
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, is_marked)| {
+            is_marked.then(|| {
+                let level = index / (axis * axis);
+                let within_level = index % (axis * axis);
+                VirtualShadowPage {
+                    light,
+                    level: level as u8,
+                    x: (within_level % axis) as u16,
+                    y: (within_level / axis) as u16,
+                }
+            })
+        })
+        .collect()
+}
+
+/// Mark directional virtual pages touched by camera-visible receiver bounds.
+///
+/// Bounds are projected into each fitted cascade. A one-page guard band keeps
+/// PCF taps, temporal jitter, and small camera motion inside resident pages.
+/// Coverage count wins over center distance so large shared surfaces (ground,
+/// walls) are filled before isolated geometry. Per-level caps keep CPU work,
+/// residency, and upload size bounded even when one receiver covers the full
+/// clipmap; any omitted page continues to sample the conventional CSM.
+pub fn directional_receiver_demand(
+    level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
+    receiver_bounds: &[([f32; 3], [f32; 3])],
+    light: u16,
+) -> Vec<VirtualShadowPage> {
+    let center = i32::from(VSM_VIRTUAL_PAGES_PER_AXIS);
+    let per_level: [Vec<VirtualShadowPage>; VSM_CLIP_LEVELS as usize] =
+        std::array::from_fn(|level| {
+            let planes = crate::scene::extract_frustum_planes(&level_vps[level]);
+            let mut coverage: HashMap<VirtualShadowPage, u32> = HashMap::new();
+            for &(bmin, bmax) in receiver_bounds {
+                let Some((page_min_x, page_min_y, page_max_x, page_max_y)) =
+                    projected_directional_page_rect(&level_vps[level], &planes, bmin, bmax, 1)
+                else {
+                    continue;
+                };
+                for y in page_min_y..=page_max_y {
+                    for x in page_min_x..=page_max_x {
+                        let page = VirtualShadowPage {
+                            light,
+                            level: level as u8,
+                            x,
+                            y,
+                        };
+                        coverage
+                            .entry(page)
+                            .and_modify(|count| *count = count.saturating_add(1))
+                            .or_insert(1);
+                    }
+                }
+            }
+
+            let mut ranked: Vec<(VirtualShadowPage, u32)> = coverage.into_iter().collect();
+            ranked.sort_unstable_by_key(|(page, count)| {
+                let dx = (i32::from(page.x) * 2 + 1 - center).unsigned_abs();
+                let dy = (i32::from(page.y) * 2 + 1 - center).unsigned_abs();
+                (
+                    std::cmp::Reverse(*count),
+                    dx.max(dy),
+                    dx + dy,
+                    page.y,
+                    page.x,
+                )
+            });
+            ranked
+                .into_iter()
+                .take(VSM_DIRECTIONAL_LEVEL_PAGE_CAPS[level])
+                .map(|(page, _)| page)
+                .collect()
+        });
+
+    // Interleave clip levels so an invalidated near level cannot consume the
+    // full render budget before mid/far receiver coverage gets a page.
+    let mut pages = Vec::with_capacity(per_level.iter().map(Vec::len).sum());
+    let mut next = [0usize; VSM_CLIP_LEVELS as usize];
+    loop {
+        let mut appended = false;
+        for level in 0..VSM_CLIP_LEVELS as usize {
+            if next[level] < per_level[level].len() {
+                pages.push(per_level[level][next[level]]);
+                next[level] += 1;
+                appended = true;
+            }
+        }
+        if !appended {
+            break;
+        }
+    }
+    pages
+}
+
+/// Deterministic center-first demand used by the directional prototype.
+///
+/// The returned footprint is intentionally bounded. Missing outer pages use
+/// CSM, and later receiver-driven marking can replace this policy without
+/// changing the cache or page-table ABI.
+pub fn centered_directional_demand(light: u16) -> Vec<VirtualShadowPage> {
+    const HALF_WIDTHS: [u16; VSM_CLIP_LEVELS as usize] = [6, 4, 2];
+    let center = VSM_VIRTUAL_PAGES_PER_AXIS / 2;
+    let mut per_level: [Vec<VirtualShadowPage>; VSM_CLIP_LEVELS as usize] =
+        std::array::from_fn(|_| Vec::new());
+    for (level, half_width) in HALF_WIDTHS.into_iter().enumerate() {
+        let min = center - half_width;
+        let max = center + half_width;
+        for y in min..max {
+            for x in min..max {
+                per_level[level].push(
+                    VirtualShadowPage::new(light, level as u8, x, y)
+                        .expect("centered demand stays in the virtual address space"),
+                );
+            }
+        }
+        // Prioritize the pages closest to the clipmap center. Use doubled
+        // page-center coordinates so the even-sized footprint has four
+        // equally-near center pages without floating-point ordering.
+        per_level[level].sort_by_key(|page| {
+            let dx = (i32::from(page.x) * 2 + 1 - i32::from(center) * 2).unsigned_abs();
+            let dy = (i32::from(page.y) * 2 + 1 - i32::from(center) * 2).unsigned_abs();
+            (dx.max(dy), dx + dy, page.y, page.x)
+        });
+    }
+
+    // Interleave levels so a frequently-invalidated near clipmap cannot
+    // consume the whole per-frame render budget and starve mid/far coverage.
+    let mut pages = Vec::with_capacity(per_level.iter().map(Vec::len).sum());
+    let mut next = [0usize; VSM_CLIP_LEVELS as usize];
+    loop {
+        let mut appended = false;
+        for level in 0..VSM_CLIP_LEVELS as usize {
+            if next[level] < per_level[level].len() {
+                pages.push(per_level[level][next[level]]);
+                next[level] += 1;
+                appended = true;
+            }
+        }
+        if !appended {
+            break;
+        }
+    }
+    pages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transform_ndc(matrix: &[[f32; 4]; 4], point: [f32; 4]) -> [f32; 3] {
+        let clip = crate::renderer::mat4_mul_vec4(matrix, &point);
+        [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]]
+    }
+
+    fn page(x: u16) -> VirtualShadowPage {
+        VirtualShadowPage::new(0, 0, x, 0).unwrap()
+    }
+
+    #[test]
+    fn invalid_virtual_coordinates_are_rejected() {
+        assert!(VirtualShadowPage::new(0, VSM_CLIP_LEVELS, 0, 0).is_none());
+        assert!(VirtualShadowPage::new(0, 0, VSM_VIRTUAL_PAGES_PER_AXIS, 0).is_none());
+    }
+
+    #[test]
+    fn reuse_is_stable_and_signature_changes_dirty_the_page() {
+        let mut cache = VirtualShadowPageCache::new(2);
+        cache.begin_frame(1);
+        let first = cache.request(page(0), 7).unwrap();
+        assert!(first.needs_render);
+        assert!(cache.mark_rendered(page(0), 7));
+        let hit = cache.request(page(0), 7).unwrap();
+        assert_eq!(first.physical_page, hit.physical_page);
+        assert!(!hit.needs_render);
+        assert!(cache.request(page(0), 8).unwrap().needs_render);
+    }
+
+    #[test]
+    fn current_frame_pages_are_never_evicted() {
+        let mut cache = VirtualShadowPageCache::new(2);
+        cache.begin_frame(1);
+        cache.request(page(0), 1).unwrap();
+        cache.request(page(1), 1).unwrap();
+        assert!(cache.request(page(2), 1).is_none());
+        assert_eq!(cache.stats().denied, 1);
+    }
+
+    #[test]
+    fn stable_request_accounting_skips_cache_walk_without_hiding_fallbacks() {
+        let mut cache = VirtualShadowPageCache::new(2);
+        cache.begin_frame(1);
+        cache.request(page(0), 1).unwrap();
+        cache.request(page(1), 1).unwrap();
+        cache.finish_requests();
+        cache.begin_frame(2);
+        cache.record_stable_requests(3);
+        assert_eq!(cache.stats().requested, 3);
+        assert_eq!(cache.stats().hits, 2);
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().denied, 1);
+    }
+
+    #[test]
+    fn debug_images_expose_virtual_and_physical_occupancy() {
+        let mut cache = VirtualShadowPageCache::new(2);
+        cache.begin_frame(1);
+        cache.request(page(0), 1).unwrap();
+        cache.mark_rendered(page(0), 1);
+        cache.finish_requests();
+        let (virtual_width, virtual_height, virtual_rgb) = cache.debug_virtual_rgb(0, 2);
+        assert_eq!(virtual_width, u32::from(VSM_VIRTUAL_PAGES_PER_AXIS) * 2);
+        assert_eq!(
+            virtual_height,
+            u32::from(VSM_VIRTUAL_PAGES_PER_AXIS) * u32::from(VSM_CLIP_LEVELS) * 2,
+        );
+        assert_eq!(
+            virtual_rgb.len(),
+            (virtual_width * virtual_height * 3) as usize
+        );
+        let (physical_width, physical_height, physical_rgb) = cache.debug_physical_rgb(2);
+        assert_eq!(
+            physical_rgb.len(),
+            (physical_width * physical_height * 3) as usize
+        );
+        assert!(physical_rgb.iter().any(|channel| *channel > 8));
+    }
+
+    #[test]
+    fn lru_eviction_is_deterministic() {
+        let mut cache = VirtualShadowPageCache::new(2);
+        cache.begin_frame(1);
+        cache.request(page(0), 1).unwrap();
+        cache.request(page(1), 1).unwrap();
+        cache.begin_frame(2);
+        cache.request(page(1), 1).unwrap();
+        let request = cache.request(page(2), 1).unwrap();
+        assert_eq!(request.evicted, Some(page(0)));
+        assert_eq!(request.physical_page, 0);
+    }
+
+    #[test]
+    fn dirty_pages_are_missing_until_rendered_and_then_age() {
+        let mut cache = VirtualShadowPageCache::new(1);
+        cache.begin_frame(1);
+        cache.request(page(0), 42).unwrap();
+        assert_eq!(cache.page_table(0)[page(0).table_index()], 0);
+        cache.mark_rendered(page(0), 42);
+        let first = cache.page_table(0)[page(0).table_index()];
+        assert_eq!(first & 0xffff, 1);
+        assert_eq!(first >> 16, 1);
+        cache.begin_frame(4);
+        let aged = cache.page_table(0)[page(0).table_index()];
+        assert_eq!(aged >> 16, 4);
+        cache.begin_frame(100);
+        let saturated = cache.page_table(0)[page(0).table_index()];
+        assert_eq!(saturated >> 16, 8);
+        cache.invalidate_light(0);
+        assert_eq!(cache.page_table(0)[page(0).table_index()], 0);
+    }
+
+    #[test]
+    fn configured_capacity_is_a_hard_memory_bound() {
+        let cache = VirtualShadowPageCache::new(8);
+        let edge = VSM_PHYSICAL_PAGE_SIZE as u64;
+        assert_eq!(cache.memory_bytes(), edge * edge * 4 * 8);
+        assert_eq!(cache.stats().capacity, 8);
+    }
+
+    #[test]
+    fn centered_demand_fits_default_pool() {
+        let demand = centered_directional_demand(0);
+        assert_eq!(demand.len(), 224);
+        assert!(demand.len() <= VSM_DEFAULT_PHYSICAL_PAGES as usize);
+        let mut sorted = demand.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), demand.len());
+        assert_eq!(
+            demand[..3]
+                .iter()
+                .map(|page| page.level)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+        );
+        assert!(demand[..3]
+            .iter()
+            .all(|page| (15..=16).contains(&page.x) && (15..=16).contains(&page.y)));
+    }
+
+    #[test]
+    fn receiver_demand_is_bounded_unique_and_fair_across_levels() {
+        let demand = directional_receiver_demand(
+            [crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize],
+            &[([-1.0; 3], [1.0; 3])],
+            7,
+        );
+        assert_eq!(
+            demand.len(),
+            VSM_DIRECTIONAL_LEVEL_PAGE_CAPS
+                .iter()
+                .copied()
+                .sum::<usize>()
+        );
+        let mut sorted = demand.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), demand.len());
+        assert_eq!(
+            demand[..3]
+                .iter()
+                .map(|page| page.level)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+        );
+        assert!(demand.iter().all(|page| page.light == 7));
+    }
+
+    #[test]
+    fn receiver_demand_marks_local_footprint_with_guard_pages() {
+        let demand = directional_receiver_demand(
+            [crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize],
+            &[([-0.02, -0.02, 0.4], [0.02, 0.02, 0.6])],
+            0,
+        );
+        assert_eq!(demand.iter().filter(|page| page.level == 0).count(), 16);
+        assert!(demand
+            .iter()
+            .all(|page| { (14..=17).contains(&page.x) && (14..=17).contains(&page.y) }));
+    }
+
+    #[test]
+    fn receiver_demand_rejects_bounds_outside_light_volume() {
+        let demand = directional_receiver_demand(
+            [crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize],
+            &[([2.0, 2.0, 2.0], [3.0, 3.0, 3.0])],
+            0,
+        );
+        assert!(demand.is_empty());
+    }
+
+    #[test]
+    fn dynamic_fallback_masks_only_guarded_caster_pages() {
+        let pages = directional_dynamic_fallback_pages(
+            [crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize],
+            &[([-0.02, -0.02, 0.4], [0.02, 0.02, 0.6])],
+            0,
+        );
+        assert_eq!(pages.len(), 36 * VSM_CLIP_LEVELS as usize);
+        assert!(pages
+            .iter()
+            .all(|page| { (13..=18).contains(&page.x) && (13..=18).contains(&page.y) }));
+
+        let mut table = vec![
+            99;
+            VSM_VIRTUAL_PAGES_PER_AXIS as usize
+                * VSM_VIRTUAL_PAGES_PER_AXIS as usize
+                * VSM_CLIP_LEVELS as usize
+        ];
+        apply_dynamic_page_mask(&mut table, &pages);
+        assert_eq!(
+            table.iter().filter(|entry| **entry == 0).count(),
+            pages.len()
+        );
+        assert_eq!(
+            table.iter().filter(|entry| **entry == 99).count(),
+            table.len() - pages.len()
+        );
+    }
+
+    #[test]
+    fn unbounded_dynamic_caster_preserves_whole_frame_fallback() {
+        let pages = directional_dynamic_fallback_pages(
+            [crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize],
+            &[([1.0, 1.0, 1.0], [-1.0, -1.0, -1.0])],
+            0,
+        );
+        assert_eq!(
+            pages.len(),
+            VSM_VIRTUAL_PAGES_PER_AXIS as usize
+                * VSM_VIRTUAL_PAGES_PER_AXIS as usize
+                * VSM_CLIP_LEVELS as usize
+        );
+    }
+
+    #[test]
+    fn offscreen_dynamic_caster_does_not_mask_resident_pages() {
+        let pages = directional_dynamic_fallback_pages(
+            [crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize],
+            &[([2.0, 2.0, 2.0], [3.0, 3.0, 3.0])],
+            0,
+        );
+        assert!(pages.is_empty());
+    }
+
+    #[test]
+    fn receiver_demand_and_signature_are_deterministic() {
+        let bounds = [
+            ([-0.8, -0.4, 0.2], [-0.2, 0.1, 0.8]),
+            ([0.1, -0.2, 0.1], [0.7, 0.6, 0.9]),
+        ];
+        let vps = [crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize];
+        let first = directional_receiver_demand(vps, &bounds, 0);
+        let second = directional_receiver_demand(vps, &bounds, 0);
+        assert_eq!(first, second);
+        assert_eq!(demand_signature(&first), demand_signature(&second));
+        assert_ne!(
+            demand_signature(&first),
+            demand_signature(&centered_directional_demand(0))
+        );
+    }
+
+    #[test]
+    fn coordinator_is_inert_without_explicit_request() {
+        if virtual_shadows_requested() {
+            return;
+        }
+        // Runtime construction requires a device; the non-GPU cache already
+        // proves inert behavior above. Keep the environment contract here.
+        let cache = VirtualShadowPageCache::new(1);
+        assert_eq!(cache.stats().resident, 0);
+        assert_eq!(
+            cache
+                .page_table(0)
+                .iter()
+                .filter(|entry| **entry != 0)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn page_crop_maps_interior_edges_to_guard_texels() {
+        let page = VirtualShadowPage::new(0, 0, 9, 12).unwrap();
+        let crop = directional_page_vp(crate::renderer::IDENTITY_MAT4, page);
+        let axis = VSM_VIRTUAL_PAGES_PER_AXIS as f32;
+        let left = f32::from(page.x) * (2.0 / axis) - 1.0;
+        let right = f32::from(page.x + 1) * (2.0 / axis) - 1.0;
+        let top = 1.0 - f32::from(page.y) * (2.0 / axis);
+        let bottom = 1.0 - f32::from(page.y + 1) * (2.0 / axis);
+        let expected = VSM_PAGE_INTERIOR as f32 / VSM_PHYSICAL_PAGE_SIZE as f32;
+
+        let left_ndc = transform_ndc(&crop, [left, 0.5 * (top + bottom), 0.5, 1.0]);
+        let right_ndc = transform_ndc(&crop, [right, 0.5 * (top + bottom), 0.5, 1.0]);
+        let top_ndc = transform_ndc(&crop, [0.5 * (left + right), top, 0.5, 1.0]);
+        let bottom_ndc = transform_ndc(&crop, [0.5 * (left + right), bottom, 0.5, 1.0]);
+
+        assert!((left_ndc[0] + expected).abs() < 1.0e-5);
+        assert!((right_ndc[0] - expected).abs() < 1.0e-5);
+        assert!((top_ndc[1] - expected).abs() < 1.0e-5);
+        assert!((bottom_ndc[1] + expected).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn page_crop_preserves_depth() {
+        let page = VirtualShadowPage::new(0, 2, 16, 16).unwrap();
+        let crop = directional_page_vp(crate::renderer::IDENTITY_MAT4, page);
+        let transformed = transform_ndc(&crop, [0.03125, -0.03125, 0.37, 1.0]);
+        assert!((transformed[2] - 0.37).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn scene_shader_variant_injects_bindings_and_both_cascade_samples() {
+        let source = r#"
+let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);
+fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
+let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);
+}
+"#;
+        let variant = directional_scene_shader(source);
+        assert!(variant.contains("@binding(13) var vsm_page_table"));
+        assert!(variant.contains("@binding(14) var vsm_physical_pages"));
+        assert!(variant.contains("@binding(15) var<uniform> vsm_params"));
+        assert_eq!(variant.matches("sample_virtual_shadow(").count(), 3);
+        assert!(!source.contains("vsm_page_table"));
+    }
+
+    #[test]
+    fn material_shader_variant_wraps_the_canonical_cascade_sampler() {
+        let source = r#"
+fn sample_shadow_cascade(
+  cascade_idx: u32, world_pos: vec3<f32>,
+) -> f32 {
+  return 1.0;
+}
+fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
+  return sample_shadow_cascade(0u, world_pos);
+}
+"#;
+        let variant = directional_material_shader(source.to_owned());
+        assert!(variant.contains("@binding(10) var vsm_page_table"));
+        assert!(variant.contains("fn sample_shadow_cascade_csm("));
+        assert_eq!(variant.matches("fn sample_shadow_cascade(").count(), 1);
+        assert!(variant.contains("sample_shadow_cascade_csm(cascade_idx, world_pos)"));
+    }
+
+    #[test]
+    fn material_shadow_variant_parses_through_naga() {
+        let source = format!(
+            "{}\n{}",
+            include_str!("../shaders/material_abi.wgsl"),
+            include_str!("../shaders/common/shadows.wgsl"),
+        );
+        let variant = directional_material_shader(source);
+        let result = wgpu::naga::front::wgsl::parse_str(&variant);
+        if let Err(error) = result.as_ref() {
+            panic!(
+                "VSM material shadow variant failed WGSL parsing:\n{}",
+                error.emit_to_string(&variant),
+            );
+        }
+    }
+}

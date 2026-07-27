@@ -38,6 +38,8 @@
 //!       (pt_trace_dump.txt): 16 = t/instance/prim/kind, 17 = p0 +
 //!       raw depth. These found the transposed inv_vp: when every
 //!       probe looks "constant", dump numbers before theorizing.
+//!   20 = temporal history length       21 = temporal variance
+//!   24 = raw, unaccumulated radiance   25 = raster motion vectors
 
 pub(in crate::renderer) const PT_KERNEL_WGSL: &str = r#"
 struct PtLight {
@@ -103,14 +105,14 @@ struct InstanceGiData {
 // moments = (mu1, mu2, history length, raw depth). Progressive mode
 // keeps its original (radiance sum, sample count) layout in accum and
 // leaves the moments buffers untouched.
-@group(0) @binding(8) var<storage, read_write> accum: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read> accum: array<vec4<f32>>;
 @group(0) @binding(9) var out_hdr: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(13) var<storage, read_write> accum_out: array<vec4<f32>>;
-@group(0) @binding(18) var<storage, read_write> moments: array<vec4<f32>>;
+@group(0) @binding(18) var<storage, read> moments: array<vec4<f32>>;
 @group(0) @binding(19) var<storage, read_write> moments_out: array<vec4<f32>>;
 // PT-4 (EXPERIMENTAL, ext.w == 1) — ReSTIR DI reservoirs, ping-pong
 // with the accum pair: (light index, W, M, target pdf) per trace texel.
-@group(0) @binding(20) var<storage, read_write> resv: array<vec4<f32>>;
+@group(0) @binding(20) var<storage, read> resv: array<vec4<f32>>;
 @group(0) @binding(21) var<storage, read_write> resv_out: array<vec4<f32>>;
 // PT-7 — the raster velocity MRT (uv-space delta, current − previous,
 // no Y flip at write; see core.rs). Non-zero where a surface MOVED —
@@ -156,6 +158,10 @@ fn compute_reproj(p0: vec3<f32>, px_full: vec2<i32>, depth_cur: f32) {
     if (uv_prev.x < 0.0 || uv_prev.x >= 1.0 || uv_prev.y < 0.0 || uv_prev.y >= 1.0) {
         return;
     }
+    // Negative-control hook for the hardware oracle. The production variant
+    // injects zero; scheduled validation can deliberately shift history and
+    // prove that the motion golden rejects the known reprojection fault.
+    uv_prev.x += PT_TEST_REPROJECTION_OFFSET;
     let pos = uv_prev * vec2<f32>(f32(u.size.x), f32(u.size.y)) - 0.5;
     rp_base = vec2<i32>(floor(pos));
     rp_fr = pos - floor(pos);
@@ -539,8 +545,10 @@ fn sample_brdf(
 fn occluded(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
     var rq: ray_query;
     rayQueryInitialize(&rq, accel, RayDesc(0u, 0xFFu, 0.001, max_t, origin, dir));
-    loop {
-        if (!rayQueryProceed(&rq)) { break; }
+    if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+        loop {
+            if (!rayQueryProceed(&rq)) { break; }
+        }
     }
     let hit = rayQueryGetCommittedIntersection(&rq);
     return hit.kind != RAY_QUERY_INTERSECTION_NONE;
@@ -843,6 +851,17 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
+    if (debug == 25.0) {
+        let vel = textureLoad(velocity_tex, px_full, 0).rg;
+        let motion = vec3<f32>(
+            clamp(0.5 + vel.x * 16.0, 0.0, 1.0),
+            clamp(0.5 + vel.y * 16.0, 0.0, 1.0),
+            clamp(length(vel) * 64.0, 0.0, 1.0),
+        );
+        textureStore(out_hdr, px_full, vec4<f32>(motion, 1.0));
+        return;
+    }
+
     let p0 = world_at(px_full, depth);
     let n0 = normal_from_depth(px_full, p0);
     let albedo0 = textureLoad(albedo_tex, px_full, 0).rgb;
@@ -861,6 +880,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out_hdr, px_full, vec4<f32>(vec3<f32>(vis), 1.0));
         return;
     }
+    // The DX12 bring-up probes below declare ten additional ray-query
+    // objects. Metal reserves their full intersection/transform state per
+    // thread even when the runtime debug selector is zero, which can spill or
+    // exhaust local state for an otherwise healthy production path. Compile
+    // the block out unless a query-heavy diagnostic was explicitly requested.
+    // PT_QUERY_DIAGNOSTICS_BEGIN
     if (debug == 8.0) {
         // Binary probe: white = traced hit has a geometry window,
         // black = geo.z reads 0, red = TLAS miss. HDR-large values so
@@ -868,8 +893,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dir0 = normalize(p0 - u.cam_pos.xyz);
         var rq8: ray_query;
         rayQueryInitialize(&rq8, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
-        loop {
-            if (!rayQueryProceed(&rq8)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rq8)) { break; }
+            }
         }
         let h8 = rayQueryGetCommittedIntersection(&rq8);
         var c8 = vec3<f32>(100.0, 0.0, 0.0);
@@ -888,8 +915,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dir0 = normalize(p0 - u.cam_pos.xyz);
         var rq9: ray_query;
         rayQueryInitialize(&rq9, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
-        loop {
-            if (!rayQueryProceed(&rq9)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rq9)) { break; }
+            }
         }
         let h9 = rayQueryGetCommittedIntersection(&rq9);
         var c9 = vec3<f32>(5.0, 5.0, 5.0);
@@ -922,8 +951,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dir0 = normalize(p0 - u.cam_pos.xyz);
         var rq10: ray_query;
         rayQueryInitialize(&rq10, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
-        loop {
-            if (!rayQueryProceed(&rq10)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rq10)) { break; }
+            }
         }
         let h10 = rayQueryGetCommittedIntersection(&rq10);
         var c10 = vec3<f32>(0.0);
@@ -941,8 +972,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dir0 = normalize(p0 - u.cam_pos.xyz);
         var rq11: ray_query;
         rayQueryInitialize(&rq11, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
-        loop {
-            if (!rayQueryProceed(&rq11)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rq11)) { break; }
+            }
         }
         let h11 = rayQueryGetCommittedIntersection(&rq11);
         var c11 = vec3<f32>(0.0);
@@ -973,8 +1006,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dir0 = to_p / max(gdist, 1e-4);
         var rq13: ray_query;
         rayQueryInitialize(&rq13, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
-        loop {
-            if (!rayQueryProceed(&rq13)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rq13)) { break; }
+            }
         }
         let h13 = rayQueryGetCommittedIntersection(&rq13);
         var c13 = vec3<f32>(0.0, 0.0, 50.0);
@@ -995,8 +1030,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dir0 = normalize(p0 - u.cam_pos.xyz);
         var rq14: ray_query;
         rayQueryInitialize(&rq14, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
-        loop {
-            if (!rayQueryProceed(&rq14)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rq14)) { break; }
+            }
         }
         let h14 = rayQueryGetCommittedIntersection(&rq14);
         var c14 = vec3<f32>(0.0, 0.0, 30.0);
@@ -1018,13 +1055,17 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dirA = normalize(p0 - u.cam_pos.xyz);
         var rqA: ray_query;
         rayQueryInitialize(&rqA, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dirA));
-        loop {
-            if (!rayQueryProceed(&rqA)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rqA)) { break; }
+            }
         }
         var rqB: ray_query;
         rayQueryInitialize(&rqB, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, vec3<f32>(0.0, -1.0, 0.0)));
-        loop {
-            if (!rayQueryProceed(&rqB)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rqB)) { break; }
+            }
         }
         let hA = rayQueryGetCommittedIntersection(&rqA);
         let hB = rayQueryGetCommittedIntersection(&rqB);
@@ -1044,8 +1085,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dir0 = normalize(p0 - u.cam_pos.xyz);
         var rq16: ray_query;
         rayQueryInitialize(&rq16, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
-        loop {
-            if (!rayQueryProceed(&rq16)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rq16)) { break; }
+            }
         }
         let h16 = rayQueryGetCommittedIntersection(&rq16);
         let idx16 = gid.y * u.size.x + gid.x;
@@ -1104,8 +1147,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dir0 = normalize(p0 - u.cam_pos.xyz);
         var rq0: ray_query;
         rayQueryInitialize(&rq0, accel, RayDesc(0u, 0xFFu, 0.001, 1000.0, u.cam_pos.xyz, dir0));
-        loop {
-            if (!rayQueryProceed(&rq0)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rq0)) { break; }
+            }
         }
         let h = rayQueryGetCommittedIntersection(&rq0);
         var col = vec3<f32>(1.0, 0.0, 1.0);        // magenta: TLAS miss
@@ -1127,6 +1172,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out_hdr, px_full, vec4<f32>(col, 1.0));
         return;
     }
+    // PT_QUERY_DIAGNOSTICS_END
 
     // ---- one path sample --------------------------------------------------
 
@@ -1187,8 +1233,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         var rq: ray_query;
         rayQueryInitialize(&rq, accel, RayDesc(0u, 0xFFu, 0.001, 500.0, origin, dir));
-        loop {
-            if (!rayQueryProceed(&rq)) { break; }
+        if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+            loop {
+                if (!rayQueryProceed(&rq)) { break; }
+            }
         }
         let hit = rayQueryGetCommittedIntersection(&rq);
 
@@ -1256,6 +1304,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // NaN/Inf guard so one bad sample cannot poison the accumulator.
     if (radiance.r != radiance.r || radiance.g != radiance.g || radiance.b != radiance.b) {
         radiance = vec3<f32>(0.0);
+    }
+
+    // Negative-control hook paired with the progressive transport golden.
+    // Production injects 1.0, so the compiler removes the multiplication.
+    radiance *= PT_TEST_BRDF_ENERGY_SCALE;
+    if (debug == 24.0) {
+        textureStore(out_hdr, px_full, vec4<f32>(radiance, 1.0));
+        return;
     }
 
     // ---- accumulate ---------------------------------------------------------
@@ -1346,11 +1402,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let m = moments[qidx];
                     // Sky texels and depth-inconsistent taps carry
                     // another surface's lighting — skip them.
-                    if (m.w >= 0.9999999) {
+                    if (m.w >= 0.9999999 && !PT_TEST_REPROJECTION_BYPASS_VALIDATION) {
                         continue;
                     }
                     let zl_hist = lin_depth(m.w);
-                    if (abs(zl_hist - rp_zl_here) > tol) {
+                    if (abs(zl_hist - rp_zl_here) > tol
+                        && !PT_TEST_REPROJECTION_BYPASS_VALIDATION) {
                         continue;
                     }
                     let wx = mix(1.0 - rp_fr.x, rp_fr.x, f32(tx));
@@ -1470,7 +1527,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // only delays indirect/ambient changes (~10 frames).
         let n_new = min(n_hist + 1.0, 32.0);
         let alpha_c = max(1.0 / n_new, 0.1);
-        let out_irr = mix(hist_rgb, irr, alpha_c);
+        var out_irr = mix(hist_rgb, irr, alpha_c);
+        // Negative control: trust misaddressed history so fresh radiance
+        // cannot repair the ghost. Production compiles this branch away.
+        if (PT_TEST_REPROJECTION_BYPASS_VALIDATION && rp_valid) {
+            out_irr = hist_rgb;
+        }
         let m1 = mix(hist_m1, l_new, alpha_c);
         let m2 = mix(hist_m2, l_new * l_new, alpha_c);
         // Temporal luminance variance — the signal that drives the
@@ -1531,6 +1593,85 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out_hdr, px_full, vec4<f32>(out, 1.0));
 }
 "#;
+
+pub(in crate::renderer) fn pt_kernel_variant(
+    query_diagnostics: bool,
+) -> std::borrow::Cow<'static, str> {
+    if query_diagnostics {
+        return PT_KERNEL_WGSL.into();
+    }
+    const BEGIN: &str = "// PT_QUERY_DIAGNOSTICS_BEGIN";
+    const END: &str = "// PT_QUERY_DIAGNOSTICS_END";
+    let begin = PT_KERNEL_WGSL
+        .find(BEGIN)
+        .expect("PT query diagnostics begin marker");
+    let end = PT_KERNEL_WGSL
+        .find(END)
+        .map(|offset| offset + END.len())
+        .expect("PT query diagnostics end marker");
+    format!("{}{}", &PT_KERNEL_WGSL[..begin], &PT_KERNEL_WGSL[end..]).into()
+}
+
+pub(in crate::renderer) fn pt_fault_constants(fault: Option<&str>) -> &'static str {
+    match fault {
+        Some("brdf-energy") => {
+            "const PT_TEST_BRDF_ENERGY_SCALE: f32 = 1.25;\n\
+             const PT_TEST_REPROJECTION_OFFSET: f32 = 0.0;\n\
+             const PT_TEST_REPROJECTION_BYPASS_VALIDATION: bool = false;\n"
+        }
+        Some("reprojection") => {
+            "const PT_TEST_BRDF_ENERGY_SCALE: f32 = 1.0;\n\
+             const PT_TEST_REPROJECTION_OFFSET: f32 = 0.05;\n\
+             const PT_TEST_REPROJECTION_BYPASS_VALIDATION: bool = true;\n"
+        }
+        _ => {
+            "const PT_TEST_BRDF_ENERGY_SCALE: f32 = 1.0;\n\
+             const PT_TEST_REPROJECTION_OFFSET: f32 = 0.0;\n\
+             const PT_TEST_REPROJECTION_BYPASS_VALIDATION: bool = false;\n"
+        }
+    }
+}
+
+#[cfg(test)]
+mod pt_kernel_variant_tests {
+    use super::{pt_fault_constants, pt_kernel_variant};
+
+    #[test]
+    fn production_variant_removes_query_heavy_debug_locals() {
+        let production = pt_kernel_variant(false);
+        assert!(!production.contains("var rq8: ray_query"));
+        assert!(!production.contains("PT_QUERY_DIAGNOSTICS"));
+        assert!(production.contains("var rq: ray_query"));
+        assert_eq!(production.matches(": ray_query").count(), 2);
+        assert!(production.contains("debug == 24.0"));
+        assert!(production.contains("debug == 25.0"));
+        assert!(production.contains("@binding(8) var<storage, read> accum"));
+        assert!(production.contains("@binding(18) var<storage, read> moments"));
+        assert!(production.contains("@binding(20) var<storage, read> resv"));
+
+        let diagnostics = pt_kernel_variant(true);
+        assert!(diagnostics.contains("var rq8: ray_query"));
+        assert_eq!(diagnostics.matches(": ray_query").count(), 12);
+    }
+
+    #[test]
+    fn negative_control_constants_change_only_the_targeted_input() {
+        let production = pt_fault_constants(None);
+        assert!(production.contains("ENERGY_SCALE: f32 = 1.0"));
+        assert!(production.contains("REPROJECTION_OFFSET: f32 = 0.0"));
+        assert!(production.contains("BYPASS_VALIDATION: bool = false"));
+
+        let energy = pt_fault_constants(Some("brdf-energy"));
+        assert!(energy.contains("ENERGY_SCALE: f32 = 1.25"));
+        assert!(energy.contains("REPROJECTION_OFFSET: f32 = 0.0"));
+        assert!(energy.contains("BYPASS_VALIDATION: bool = false"));
+
+        let reprojection = pt_fault_constants(Some("reprojection"));
+        assert!(reprojection.contains("ENERGY_SCALE: f32 = 1.0"));
+        assert!(reprojection.contains("REPROJECTION_OFFSET: f32 = 0.05"));
+        assert!(reprojection.contains("BYPASS_VALIDATION: bool = true"));
+    }
+}
 
 /// PT-3b — SVGF wavelet filter (Schied et al. 2017) for the realtime
 /// mode. Four `cs_mid` à-trous iterations (steps 1/2/4/8) run on the

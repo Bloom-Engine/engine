@@ -9,7 +9,6 @@
 #[macro_export]
 macro_rules! __bloom_ffi_assets {
     () => {
-
         // bloom_take_screenshot  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_take_screenshot(path_ptr: *const u8) {
@@ -19,7 +18,63 @@ macro_rules! __bloom_ffi_assets {
                 let eng = engine();
                 eng.renderer.screenshot_requested = true;
                 eng.renderer.pending_screenshot_path = Some(path);
-        })
+            })
+        }
+
+        // Status-returning capture entry point for deterministic tooling.
+        // This distinct ABI avoids Perry's legacy void-import lowering for
+        // bloom_take_screenshot while preserving that public API unchanged.
+        #[no_mangle]
+        pub extern "C" fn bloom_capture_frame_to_png(path_ptr: *const u8) -> f64 {
+            $crate::ffi::guard("bloom_capture_frame_to_png", move || {
+                let path = match $crate::string_header::try_str_from_header(path_ptr) {
+                    Some(path) if !path.is_empty() => path.to_string(),
+                    _ => return 0.0,
+                };
+                eprintln!("bloom: deterministic capture requested -> '{}'", path);
+                let eng = engine();
+                eng.renderer.screenshot_requested = true;
+                eng.renderer.pending_screenshot_path = Some(path);
+                // Native fallback for Perry builds that lose the sibling
+                // debug-capture call while lowering a class method. The
+                // qualification runner sets this variable explicitly.
+                if eng.renderer.pending_quality_capture_dir.is_none() {
+                    if let Ok(directory) = std::env::var("BLOOM_QUALITY_INTERMEDIATES") {
+                        if !directory.is_empty() {
+                            eng.renderer.pending_quality_capture_dir = Some(directory);
+                        }
+                    }
+                }
+                1.0
+            })
+        }
+
+        /// Queue the standard named render-graph diagnostics alongside the
+        /// next frame capture. This path is qualification-only and executes
+        /// after the measured window.
+        #[no_mangle]
+        pub extern "C" fn bloom_capture_debug_intermediates(path_ptr: *const u8) -> f64 {
+            $crate::ffi::guard("bloom_capture_debug_intermediates", move || {
+                let path = match $crate::string_header::try_str_from_header(path_ptr) {
+                    Some(path) if !path.is_empty() => path.to_string(),
+                    _ => return 0.0,
+                };
+                engine().renderer.pending_quality_capture_dir = Some(path);
+                1.0
+            })
+        }
+
+        #[no_mangle]
+        pub extern "C" fn bloom_capture_frame_ready() -> f64 {
+            let renderer = &engine().renderer;
+            if renderer.screenshot_requested
+                || renderer.pending_screenshot_path.is_some()
+                || renderer.pending_quality_capture_dir.is_some()
+            {
+                0.0
+            } else {
+                1.0
+            }
         }
 
         // bloom_load_font  [source: macos]
@@ -32,7 +87,7 @@ macro_rules! __bloom_ffi_assets {
                     Ok(data) => engine().text.load_font(&data) as f64,
                     Err(_) => 0.0,
                 }
-        })
+            })
         }
 
         // bloom_unload_font  [source: macos]
@@ -40,7 +95,7 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_unload_font(font_handle: f64) {
             $crate::ffi::guard("bloom_unload_font", move || {
                 engine().text.unload_font(font_handle as usize);
-        })
+            })
         }
 
         // bloom_load_sound  [source: curated]
@@ -56,7 +111,7 @@ macro_rules! __bloom_ffi_assets {
                     },
                     Err(_) => 0.0,
                 }
-        })
+            })
         }
 
         // bloom_load_texture  [source: curated]
@@ -68,12 +123,16 @@ macro_rules! __bloom_ffi_assets {
                 match std::fs::read(path) {
                     Ok(data) => {
                         let eng = engine();
-                        let $crate::engine::EngineState { ref mut textures, ref mut renderer, .. } = *eng;
+                        let $crate::engine::EngineState {
+                            ref mut textures,
+                            ref mut renderer,
+                            ..
+                        } = *eng;
                         textures.load_texture(renderer, &data)
                     }
                     Err(_) => 0.0,
                 }
-        })
+            })
         }
 
         // bloom_unload_texture  [source: curated]
@@ -81,9 +140,13 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_unload_texture(handle: f64) {
             $crate::ffi::guard("bloom_unload_texture", move || {
                 let eng = engine();
-                let $crate::engine::EngineState { ref mut textures, ref mut renderer, .. } = *eng;
+                let $crate::engine::EngineState {
+                    ref mut textures,
+                    ref mut renderer,
+                    ..
+                } = *eng;
                 textures.unload_texture(handle, renderer);
-        })
+            })
         }
 
         // bloom_get_texture_width  [source: macos]
@@ -91,8 +154,11 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_get_texture_width(handle: f64) -> f64 {
             $crate::ffi::guard("bloom_get_texture_width", move || {
                 let eng = engine();
-                eng.textures.get(handle).map(|t| t.width as f64).unwrap_or(0.0)
-        })
+                eng.textures
+                    .get(handle)
+                    .map(|t| t.width as f64)
+                    .unwrap_or(0.0)
+            })
         }
 
         // bloom_get_texture_height  [source: macos]
@@ -100,8 +166,11 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_get_texture_height(handle: f64) -> f64 {
             $crate::ffi::guard("bloom_get_texture_height", move || {
                 let eng = engine();
-                eng.textures.get(handle).map(|t| t.height as f64).unwrap_or(0.0)
-        })
+                eng.textures
+                    .get(handle)
+                    .map(|t| t.height as f64)
+                    .unwrap_or(0.0)
+            })
         }
 
         // bloom_load_image  [source: macos]
@@ -114,7 +183,7 @@ macro_rules! __bloom_ffi_assets {
                     Ok(data) => engine().textures.load_image(&data),
                     Err(_) => 0.0,
                 }
-        })
+            })
         }
 
         // bloom_image_resize  [source: macos]
@@ -122,15 +191,17 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_image_resize(handle: f64, w: f64, h: f64) {
             $crate::ffi::guard("bloom_image_resize", move || {
                 engine().textures.image_resize(handle, w as u32, h as u32);
-        })
+            })
         }
 
         // bloom_image_crop  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_image_crop(handle: f64, x: f64, y: f64, w: f64, h: f64) {
             $crate::ffi::guard("bloom_image_crop", move || {
-                engine().textures.image_crop(handle, x as u32, y as u32, w as u32, h as u32);
-        })
+                engine()
+                    .textures
+                    .image_crop(handle, x as u32, y as u32, w as u32, h as u32);
+            })
         }
 
         // bloom_image_flip_h  [source: macos]
@@ -138,7 +209,7 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_image_flip_h(handle: f64) {
             $crate::ffi::guard("bloom_image_flip_h", move || {
                 engine().textures.image_flip_h(handle);
-        })
+            })
         }
 
         // bloom_image_flip_v  [source: macos]
@@ -146,7 +217,7 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_image_flip_v(handle: f64) {
             $crate::ffi::guard("bloom_image_flip_v", move || {
                 engine().textures.image_flip_v(handle);
-        })
+            })
         }
 
         // bloom_load_texture_from_image  [source: curated]
@@ -154,9 +225,13 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_load_texture_from_image(handle: f64) -> f64 {
             $crate::ffi::guard("bloom_load_texture_from_image", move || {
                 let eng = engine();
-                let $crate::engine::EngineState { ref mut textures, ref mut renderer, .. } = *eng;
+                let $crate::engine::EngineState {
+                    ref mut textures,
+                    ref mut renderer,
+                    ..
+                } = *eng;
                 textures.load_texture_from_image(handle, renderer)
-        })
+            })
         }
 
         // bloom_gen_texture_mipmaps  [source: macos]
@@ -165,7 +240,7 @@ macro_rules! __bloom_ffi_assets {
             $crate::ffi::guard("bloom_gen_texture_mipmaps", move || {
                 // Mipmap generation is handled by the GPU texture creation pipeline
                 // This is a no-op for now as wgpu handles mipmaps internally
-        })
+            })
         }
 
         // bloom_load_shader  [source: macos]
@@ -174,7 +249,7 @@ macro_rules! __bloom_ffi_assets {
             $crate::ffi::guard("bloom_load_shader", move || {
                 let source = $crate::string_header::str_from_header(source_ptr);
                 engine().renderer.load_custom_shader(source) as f64
-        })
+            })
         }
 
         // bloom_load_music  [source: curated]
@@ -189,7 +264,7 @@ macro_rules! __bloom_ffi_assets {
                     Ok(data) => engine().audio.load_music_bytes(path, data),
                     Err(_) => 0.0,
                 }
-        })
+            })
         }
 
         // bloom_write_file  [source: macos]
@@ -210,7 +285,7 @@ macro_rules! __bloom_ffi_assets {
                     Ok(_) => 1.0,
                     Err(_) => 0.0,
                 }
-        })
+            })
         }
 
         // bloom_launch_process  [EN-048]
@@ -228,11 +303,15 @@ macro_rules! __bloom_ffi_assets {
         // there is no shell here, which is also why there is nothing to inject into.
         #[no_mangle]
         pub extern "C" fn bloom_launch_process(
-            cmd_ptr: *const u8, args_ptr: *const u8, cwd_ptr: *const u8,
+            cmd_ptr: *const u8,
+            args_ptr: *const u8,
+            cwd_ptr: *const u8,
         ) -> f64 {
             $crate::ffi::guard("bloom_launch_process", move || {
                 let cmd = $crate::string_header::str_from_header(cmd_ptr);
-                if cmd.is_empty() { return 0.0; }
+                if cmd.is_empty() {
+                    return 0.0;
+                }
                 let args = $crate::string_header::str_from_header(args_ptr);
                 let cwd = $crate::string_header::str_from_header(cwd_ptr);
 
@@ -243,7 +322,9 @@ macro_rules! __bloom_ffi_assets {
                 // parent's context. So launching "main.exe" with cwd "<project>"
                 // fails with "program not found" even though main.exe is sitting
                 // right there in <project>. Which is exactly what it did.
-                let bare = !cmd.chars().any(|ch| ch == '/' || ch == std::path::MAIN_SEPARATOR);
+                let bare = !cmd
+                    .chars()
+                    .any(|ch| ch == '/' || ch == std::path::MAIN_SEPARATOR);
                 let resolved: std::path::PathBuf = if !cwd.is_empty() && bare {
                     std::path::Path::new(cwd).join(cmd)
                 } else {
@@ -251,19 +332,40 @@ macro_rules! __bloom_ffi_assets {
                 };
                 let mut c = std::process::Command::new(&resolved);
                 for a in args.split('\n') {
-                    if !a.is_empty() { c.arg(a); }
+                    if !a.is_empty() {
+                        c.arg(a);
+                    }
                 }
-                if !cwd.is_empty() { c.current_dir(cwd); }
+                if !cwd.is_empty() {
+                    c.current_dir(cwd);
+                }
                 // Detach: we never wait on it, and we do not want its output in ours.
                 c.stdin(std::process::Stdio::null())
-                 .stdout(std::process::Stdio::null())
-                 .stderr(std::process::Stdio::null());
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
                 let r = c.spawn();
                 match r {
                     Ok(child) => child.id() as f64,
                     Err(_) => 0.0,
                 }
-        })
+            })
+        }
+
+        // Perry native executables do not expose Node's `process` global.
+        // Keep argv access in the engine ABI so command-line tools work on
+        // every native host without runtime-specific globals.
+        #[no_mangle]
+        pub extern "C" fn bloom_command_line_arg_count() -> f64 {
+            std::env::args_os().count() as f64
+        }
+
+        #[no_mangle]
+        pub extern "C" fn bloom_command_line_arg(index: f64) -> *const u8 {
+            let value = std::env::args_os()
+                .nth(index.max(0.0) as usize)
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            $crate::string_header::alloc_perry_string(&value)
         }
 
         // bloom_file_exists  [source: macos]
@@ -272,8 +374,12 @@ macro_rules! __bloom_ffi_assets {
             $crate::ffi::guard("bloom_file_exists", move || {
                 let path = $crate::string_header::str_from_header(path_ptr);
                 let path: &str = &bloom_resolve_asset_path(path);
-                if std::path::Path::new(path).exists() { 1.0 } else { 0.0 }
-        })
+                if std::path::Path::new(path).exists() {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
         }
 
         // bloom_read_file  [source: curated]
@@ -286,7 +392,7 @@ macro_rules! __bloom_ffi_assets {
                     Ok(contents) => $crate::string_header::alloc_perry_string(&contents),
                     Err(_) => $crate::string_header::alloc_perry_string(""),
                 }
-        })
+            })
         }
 
         // bloom_load_render_texture  [source: macos]
@@ -303,12 +409,15 @@ macro_rules! __bloom_ffi_assets {
 
                 // Register as a texture handle so drawTexture can sample it.
                 let tex_handle = eng.textures.textures.alloc($crate::textures::TextureData {
-                    bind_group_idx, width: w, height: h,
+                    bind_group_idx,
+                    width: w,
+                    height: h,
                 });
-                eng.textures.set_render_texture_handle(rt_handle, tex_handle);
+                eng.textures
+                    .set_render_texture_handle(rt_handle, tex_handle);
 
                 rt_handle
-        })
+            })
         }
 
         // bloom_unload_render_texture  [source: macos]
@@ -316,7 +425,7 @@ macro_rules! __bloom_ffi_assets {
         pub extern "C" fn bloom_unload_render_texture(handle: f64) {
             $crate::ffi::guard("bloom_unload_render_texture", move || {
                 engine().textures.unload_render_texture(handle);
-        })
+            })
         }
 
         // bloom_stage_texture  [source: macos]
@@ -329,7 +438,7 @@ macro_rules! __bloom_ffi_assets {
                     Ok(data) => $crate::staging::decode_and_stage_texture(&data),
                     Err(_) => 0.0,
                 }
-        })
+            })
         }
 
         // bloom_stage_sound  [source: curated]
@@ -338,12 +447,15 @@ macro_rules! __bloom_ffi_assets {
             $crate::ffi::guard("bloom_stage_sound", move || {
                 let path = $crate::string_header::str_from_header(path_ptr);
                 let path: &str = &bloom_resolve_asset_path(path);
-                let data = match std::fs::read(path) { Ok(d) => d, Err(_) => return 0.0 };
+                let data = match std::fs::read(path) {
+                    Ok(d) => d,
+                    Err(_) => return 0.0,
+                };
                 match $crate::audio::decode_audio(path, &data) {
                     Some(s) => $crate::staging::stage_sound(s),
                     None => 0.0,
                 }
-        })
+            })
         }
 
         // bloom_commit_texture  [source: macos]
@@ -355,34 +467,43 @@ macro_rules! __bloom_ffi_assets {
                     None => return 0.0,
                 };
                 let eng = engine();
-                let bind_group_idx = eng.renderer.register_texture(staged.width, staged.height, &staged.data);
+                let bind_group_idx = eng.renderer.register_texture_kind_with_alpha_coverage(
+                    staged.width,
+                    staged.height,
+                    &staged.data,
+                    staged.is_normal,
+                    staged.alpha_coverage_reference,
+                );
                 eng.textures.textures.alloc($crate::textures::TextureData {
-                    bind_group_idx, width: staged.width, height: staged.height,
+                    bind_group_idx,
+                    width: staged.width,
+                    height: staged.height,
                 })
-        })
+            })
         }
 
         // bloom_commit_sound  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_commit_sound(staging_handle: f64) -> f64 {
-            $crate::ffi::guard("bloom_commit_sound", move || {
-                match $crate::staging::take_sound(staging_handle) {
+            $crate::ffi::guard(
+                "bloom_commit_sound",
+                move || match $crate::staging::take_sound(staging_handle) {
                     Some(sd) => engine().audio.load_sound(sd),
                     None => 0.0,
-                }
-        })
+                },
+            )
         }
 
         // bloom_commit_music  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_commit_music(staging_handle: f64) -> f64 {
-            $crate::ffi::guard("bloom_commit_music", move || {
-                match $crate::staging::take_sound(staging_handle) {
+            $crate::ffi::guard(
+                "bloom_commit_music",
+                move || match $crate::staging::take_sound(staging_handle) {
                     Some(sd) => engine().audio.load_music(sd),
                     None => 0.0,
-                }
-        })
+                },
+            )
         }
-
     };
 }

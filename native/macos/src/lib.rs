@@ -24,6 +24,10 @@ static mut WINDOW: Option<Retained<NSWindow>> = None;
 // 'closed', just invisible) so headless --capture can run to
 // completion.
 static mut HEADLESS: bool = false;
+// Qualification captures name exact physical pixel dimensions. Retina's
+// backing scale must not silently turn a 512x512 case into a 1024x1024
+// render (and a 4x fill-rate benchmark) when this opt-in is enabled.
+static mut HEADLESS_PIXEL_EXACT: bool = false;
 static mut AUDIO_UNIT: Option<AudioUnitInstance> = None;
 // Render half of the audio system. Moved here from EngineState by
 // bloom_init_audio (AudioMixer::take_renderer) BEFORE the CoreAudio
@@ -275,7 +279,12 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     let headless = std::env::var("BLOOM_HEADLESS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    unsafe { HEADLESS = headless; }
+    let headless_pixel_exact = headless
+        && std::env::var("BLOOM_HEADLESS_PIXEL_EXACT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    unsafe { HEADLESS = headless;
+        HEADLESS_PIXEL_EXACT = headless_pixel_exact; }
 
     let app = NSApplication::sharedApplication(mtm);
     if headless {
@@ -359,7 +368,9 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     // upscales a low-res image. `backingScaleFactor` is 2.0 on Retina,
     // 1.0 otherwise (tracks the window's current screen).
     let scale: f64 = unsafe { msg_send![&*window, backingScaleFactor] };
-    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let scale = if headless_pixel_exact {
+        1.0
+    } else if scale > 0.0 { scale } else { 1.0 };
 
     let target = {
         let view_ptr = Retained::as_ptr(&content_view) as *mut std::ffi::c_void;
@@ -371,7 +382,14 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             raw_window_handle: RawWindowHandle::AppKit(handle),
         }
     };
-    let engine_state = unsafe {
+    let engine_state = if headless_pixel_exact {
+        bloom_shared::attach::attach_headless_engine(
+            wgpu::Backends::METAL,
+            width as u32,
+            height as u32,
+        )
+        .expect("Failed to attach headless engine")
+    } else { unsafe {
         bloom_shared::attach::attach_engine(
             target,
             bloom_shared::attach::AttachParams {
@@ -384,6 +402,7 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             },
         )
         .expect("Failed to attach engine")
+        }
     };
 
     unsafe {
@@ -606,7 +625,8 @@ pub extern "C" fn bloom_begin_drawing() {
 
     // Handle window resize — track physical (backing) size for the
     // swapchain while keeping the logical (points) size for user code.
-    if let Some(window) = unsafe { &WINDOW } {
+    if !unsafe { HEADLESS_PIXEL_EXACT } {
+        if let Some(window) = unsafe { &WINDOW } {
         if let Some(content_view) = window.contentView() {
             let frame = content_view.frame();
             let logical_w = frame.size.width as u32;
@@ -623,6 +643,7 @@ pub extern "C" fn bloom_begin_drawing() {
                     || logical_h != eng.renderer.height())
             {
                 eng.renderer.resize(physical_w, physical_h, logical_w, logical_h);
+            }
             }
         }
     }
@@ -1024,17 +1045,9 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
 
     // Set capture flag and render inline
     eng.renderer.screenshot_requested = true;
-    eng.scene.prepare(
-        &eng.renderer.device,
-        &eng.renderer.queue,
-        &eng.renderer.vp_matrix(),
-        &eng.renderer.prev_vp_matrix,
-        eng.renderer.uniform_3d_layout(),
-        // Screenshot capture renders everything the camera might see —
-        // never occlusion-cull a one-shot capture.
-        None,
-    );
-    eng.scene.prepare_materials(&eng.renderer);
+    // Screenshot capture renders everything the camera might see —
+    // never occlusion-cull a one-shot capture.
+    eng.renderer.prepare_scene_graph(&mut eng.scene, false);
     // Phase 1c: sync material PerFrame + PerView UBOs with the
     // current engine clock before the main HDR pass dispatches any
     // material draws that were submitted during this frame.
@@ -1206,4 +1219,3 @@ fn bloom_jolt_ffi_physics() -> &'static mut bloom_shared::physics_jolt::JoltPhys
 
 #[cfg(feature = "jolt")]
 bloom_shared::define_physics_ffi!();
-

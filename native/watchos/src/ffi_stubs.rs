@@ -15,7 +15,19 @@
 }
 #[no_mangle] pub extern "C" fn bloom_take_screenshot(_p0: i64) {
 }
+#[no_mangle] pub extern "C" fn bloom_capture_frame_to_png(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_capture_debug_intermediates(_p0: i64) -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_capture_frame_ready() -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_env_clear_from_hdr(_p0: i64) {
+}
+#[no_mangle] pub extern "C" fn bloom_is_key_repeated(_p0: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_get_mouse_x() -> f64 {
     0.0
@@ -286,6 +298,26 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_present_mode(_p0: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_get_present_mode() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_material_binding_capabilities() -> i64 {
+    0
+}
+#[no_mangle] pub extern "C" fn bloom_get_imported_refraction_mode() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_transparency_composition_mode(_p0: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_get_transparency_composition_mode() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_get_active_transparency_composition_mode() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_set_material_binding_tier_override(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_taa_enabled(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_set_occlusion_culling(_p0: f64) {
@@ -349,6 +381,12 @@
 #[no_mangle] pub extern "C" fn bloom_launch_process(_p0: i64, _p1: i64, _p2: i64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_command_line_arg_count() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_command_line_arg(_p0: f64) -> i64 {
+    0
+}
 #[no_mangle] pub extern "C" fn bloom_set_output_scale(_p0: f64) {
 }
 #[no_mangle] pub extern "C" fn bloom_get_output_scale() -> f64 {
@@ -372,6 +410,9 @@
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_get_profiler_frame_gpu_us() -> f64 {
+    0.0
+}
+#[no_mangle] pub extern "C" fn bloom_write_quality_telemetry(_p0: i64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64) -> f64 {
     0.0
 }
 #[no_mangle] pub extern "C" fn bloom_print_profiler_summary() {

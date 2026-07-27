@@ -37,39 +37,39 @@ pub const IMPULSE_DECAY_PER_FRAME: f32 = 0.968;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct SplatData {
-    pos:     [f32; 2],  // world xz
-    radius:  f32,
+    pos: [f32; 2], // world xz
+    radius: f32,
     strength: f32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct InfoUniforms {
-    world_min:   [f32; 2],  // meters
-    world_size:  [f32; 2],  // meters
-    decay:       f32,
-    _pad0:       f32,
+    world_min: [f32; 2],  // meters
+    world_size: [f32; 2], // meters
+    decay: f32,
+    _pad0: f32,
     splat_count: u32,
-    _pad1:       u32,
-    splats:      [SplatData; MAX_SPLATS_PER_FRAME],
+    _pad1: u32,
+    splats: [SplatData; MAX_SPLATS_PER_FRAME],
 }
 
 pub struct ImpulseField {
-    pipeline:   wgpu::ComputePipeline,
-    bg_layout:  wgpu::BindGroupLayout,
-    info_buf:   wgpu::Buffer,
+    pipeline: wgpu::ComputePipeline,
+    bg_layout: wgpu::BindGroupLayout,
+    info_buf: wgpu::Buffer,
     /// Backing textures for view_a/view_b — kept alive so the views
     /// don't dangle. Sampling and binding go through the views; these
     /// fields are write-only handles.
-    _tex_a:     wgpu::Texture,
-    _tex_b:     wgpu::Texture,
-    view_a:     wgpu::TextureView,
-    view_b:     wgpu::TextureView,
-    sampler:    wgpu::Sampler,
+    _tex_a: wgpu::Texture,
+    _tex_b: wgpu::Texture,
+    view_a: wgpu::TextureView,
+    view_b: wgpu::TextureView,
+    sampler: wgpu::Sampler,
     /// When true, view_a is the "front" that scene_inputs reads and
     /// the next compute pass reads-from. After dispatch we swap.
     front_is_a: bool,
-    splats:     Vec<SplatData>,
+    splats: Vec<SplatData>,
 }
 
 impl ImpulseField {
@@ -79,7 +79,8 @@ impl ImpulseField {
             entries: &[
                 // 0: src (previous-frame sampled texture)
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
@@ -89,7 +90,8 @@ impl ImpulseField {
                 },
                 // 1: dst (write-only storage)
                 wgpu::BindGroupLayoutEntry {
-                    binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
                         format: wgpu::TextureFormat::R32Float,
@@ -99,7 +101,8 @@ impl ImpulseField {
                 },
                 // 2: info UBO (splats + bounds + decay)
                 wgpu::BindGroupLayoutEntry {
-                    binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -116,7 +119,8 @@ impl ImpulseField {
             immediate_size: 0,
         });
 
-        let shader_src = library().fetch("impulse_field.wgsl")
+        let shader_src = library()
+            .fetch("impulse_field.wgsl")
             .expect("impulse_field.wgsl must be present in shader_library")
             .to_string();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -143,15 +147,17 @@ impl ImpulseField {
             let tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
-                    width: IMPULSE_SIZE, height: IMPULSE_SIZE,
+                    width: IMPULSE_SIZE,
+                    height: IMPULSE_SIZE,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: 1, sample_count: 1,
+                mip_level_count: 1,
+                sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::R32Float,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
-                     | wgpu::TextureUsages::STORAGE_BINDING
-                     | wgpu::TextureUsages::COPY_SRC,
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             let view = tex.create_view(&Default::default());
@@ -171,8 +177,14 @@ impl ImpulseField {
         });
 
         Self {
-            pipeline, bg_layout, info_buf,
-            _tex_a: tex_a, _tex_b: tex_b, view_a, view_b, sampler,
+            pipeline,
+            bg_layout,
+            info_buf,
+            _tex_a: tex_a,
+            _tex_b: tex_b,
+            view_a,
+            view_b,
+            sampler,
             front_is_a: true,
             splats: Vec::with_capacity(MAX_SPLATS_PER_FRAME),
         }
@@ -181,9 +193,13 @@ impl ImpulseField {
     /// Gameplay API — queue a splat at world xz with given radius (m)
     /// and peak strength. Silently drops overflow.
     pub fn submit_splat(&mut self, world_x: f32, world_z: f32, radius: f32, strength: f32) {
-        if self.splats.len() >= MAX_SPLATS_PER_FRAME { return; }
+        if self.splats.len() >= MAX_SPLATS_PER_FRAME {
+            return;
+        }
         self.splats.push(SplatData {
-            pos: [world_x, world_z], radius, strength,
+            pos: [world_x, world_z],
+            radius,
+            strength,
         });
     }
 
@@ -192,8 +208,12 @@ impl ImpulseField {
     /// After this, `front_view()` returns the view containing the new
     /// field and `update_scene_inputs` should bind it at group 4
     /// binding 4.
-    pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue,
-                  encoder: &mut wgpu::CommandEncoder) {
+    pub fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
         // Ping-pong: read from the CURRENT front (last frame's output),
         // write into the other side, then flip `front_is_a`.
         let (src_view, dst_view) = if self.front_is_a {
@@ -204,14 +224,20 @@ impl ImpulseField {
 
         // Build info UBO from the queued splats.
         let mut info = InfoUniforms {
-            world_min:   [-IMPULSE_WORLD_HALF_EXTENT, -IMPULSE_WORLD_HALF_EXTENT],
-            world_size:  [IMPULSE_WORLD_HALF_EXTENT * 2.0, IMPULSE_WORLD_HALF_EXTENT * 2.0],
-            decay:       IMPULSE_DECAY_PER_FRAME,
-            _pad0:       0.0,
+            world_min: [-IMPULSE_WORLD_HALF_EXTENT, -IMPULSE_WORLD_HALF_EXTENT],
+            world_size: [
+                IMPULSE_WORLD_HALF_EXTENT * 2.0,
+                IMPULSE_WORLD_HALF_EXTENT * 2.0,
+            ],
+            decay: IMPULSE_DECAY_PER_FRAME,
+            _pad0: 0.0,
             splat_count: self.splats.len() as u32,
-            _pad1:       0,
-            splats:      [SplatData { pos: [0.0; 2], radius: 0.0, strength: 0.0 };
-                          MAX_SPLATS_PER_FRAME],
+            _pad1: 0,
+            splats: [SplatData {
+                pos: [0.0; 2],
+                radius: 0.0,
+                strength: 0.0,
+            }; MAX_SPLATS_PER_FRAME],
         };
         for (i, s) in self.splats.iter().enumerate() {
             info.splats[i] = *s;
@@ -223,9 +249,18 @@ impl ImpulseField {
             label: Some("impulse_field_bg"),
             layout: &self.bg_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: self.info_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(dst_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.info_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -246,10 +281,16 @@ impl ImpulseField {
     /// The view containing the latest impulse field — what materials
     /// should sample. Available AFTER `update` ran this frame.
     pub fn front_view(&self) -> &wgpu::TextureView {
-        if self.front_is_a { &self.view_a } else { &self.view_b }
+        if self.front_is_a {
+            &self.view_a
+        } else {
+            &self.view_b
+        }
     }
 
-    pub fn sampler(&self) -> &wgpu::Sampler { &self.sampler }
+    pub fn sampler(&self) -> &wgpu::Sampler {
+        &self.sampler
+    }
 }
 
 // =====================================================================
@@ -280,21 +321,21 @@ mod tests {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: None,
             force_fallback_adapter: true,
-        })).ok()?;
+        }))
+        .ok()?;
         // Only proceed if the adapter advertises R32Float storage support.
         let needed = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
         let supported = adapter.features();
         if !supported.contains(needed) {
             return None;
         }
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("impulse-test-device"),
-                required_features: needed,
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                ..Default::default()
-            },
-        )).ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("impulse-test-device"),
+            required_features: needed,
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            ..Default::default()
+        }))
+        .ok()?;
         Some((device, queue))
     }
 
@@ -315,7 +356,11 @@ mod tests {
             mapped_at_creation: false,
         });
         // Pull the actual texture handle that backs `front_view`.
-        let front_tex = if field.front_is_a { &field._tex_a } else { &field._tex_b };
+        let front_tex = if field.front_is_a {
+            &field._tex_a
+        } else {
+            &field._tex_b
+        };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("impulse_test_readback"),
         });
@@ -334,14 +379,25 @@ mod tests {
                     rows_per_image: Some(IMPULSE_SIZE),
                 },
             },
-            wgpu::Extent3d { width: IMPULSE_SIZE, height: IMPULSE_SIZE, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: IMPULSE_SIZE,
+                height: IMPULSE_SIZE,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit(std::iter::once(encoder.finish()));
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-        rx.recv().expect("map_async sender dropped").expect("map failed");
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        rx.recv()
+            .expect("map_async sender dropped")
+            .expect("map failed");
         let data = slice.get_mapped_range();
         let mut out: Vec<f32> = Vec::with_capacity((IMPULSE_SIZE * IMPULSE_SIZE) as usize);
         for row in 0..IMPULSE_SIZE {
@@ -376,7 +432,9 @@ mod tests {
     /// (R32Float storage textures).
     #[test]
     fn splat_appears_then_decays_across_frames() {
-        let Some((device, queue)) = try_create_device() else { return; };
+        let Some((device, queue)) = try_create_device() else {
+            return;
+        };
         let mut field = ImpulseField::new(&device);
 
         // Submit a splat at world origin with a generous radius so it
@@ -398,7 +456,9 @@ mod tests {
         assert!(
             center_v1 > 0.0,
             "splat should write a positive value at the centre texel ({}, {}); got {}",
-            tx, ty, center_v1,
+            tx,
+            ty,
+            center_v1,
         );
 
         // A texel far outside the splat radius (16 m away ≫ 2 m radius)
@@ -425,15 +485,23 @@ mod tests {
             assert!(
                 v < prev,
                 "frame {} centre value {} should be < previous {}",
-                frame, v, prev,
+                frame,
+                v,
+                prev,
             );
-            assert!(v > 0.0, "frame {} centre value should still be positive (decay, not clear)", frame);
+            assert!(
+                v > 0.0,
+                "frame {} centre value should still be positive (decay, not clear)",
+                frame
+            );
             // Verify the multiplier is roughly the documented decay.
             let ratio = v / prev;
             assert!(
                 (ratio - IMPULSE_DECAY_PER_FRAME).abs() < 1e-3,
                 "frame {} ratio {} should match documented decay {}",
-                frame, ratio, IMPULSE_DECAY_PER_FRAME,
+                frame,
+                ratio,
+                IMPULSE_DECAY_PER_FRAME,
             );
             prev = v;
         }
@@ -448,7 +516,11 @@ mod tests {
         let mut splats: Vec<SplatData> = Vec::with_capacity(MAX_SPLATS_PER_FRAME);
         for _ in 0..(MAX_SPLATS_PER_FRAME + 5) {
             if splats.len() < MAX_SPLATS_PER_FRAME {
-                splats.push(SplatData { pos: [0.0, 0.0], radius: 1.0, strength: 1.0 });
+                splats.push(SplatData {
+                    pos: [0.0, 0.0],
+                    radius: 1.0,
+                    strength: 1.0,
+                });
             }
         }
         assert_eq!(splats.len(), MAX_SPLATS_PER_FRAME);

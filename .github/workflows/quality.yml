@@ -1,0 +1,185 @@
+name: Renderer quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Qualification suite
+        type: choice
+        options: [full, quick]
+        default: full
+      machine:
+        description: Hardware runner
+        type: choice
+        options: [all, apple-m1-max-metal, nvidia-rtx4080-vulkan]
+        default: all
+
+concurrency:
+  group: renderer-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  contract:
+    name: Quality contract
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Python orchestration and governance tests
+        run: |
+          python3 -m py_compile \
+            tools/quality/run.py \
+            tools/quality/build_example.py \
+            tools/quality/prepare_bistro.py
+          python3 -m unittest tools/quality/test_run.py -v
+
+      - name: Visual metric and fault-engine tests
+        run: cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
+
+  metal:
+    name: Full quality — Apple M1 Max / Metal
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.machine == 'all' || inputs.machine == 'apple-m1-max-metal'))
+    runs-on: [self-hosted, bloom-quality, macos, apple-m1-max]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Runner preflight
+        run: |
+          python3 --version
+          cargo --version
+          command -v perry
+
+      - name: Validate manifest, assets, and approved baselines
+        run: python3 tools/quality/run.py check
+
+      - name: Prove seeded regressions are detected
+        run: >-
+          python3 tools/quality/run.py faults
+          --out tools/quality/out/ci-faults
+          --timeout 900
+
+      - name: Run selected high-end suite
+        if: always()
+        env:
+          REQUESTED_SUITE: ${{ inputs.suite }}
+        run: |
+          suite="${REQUESTED_SUITE:-full}"
+          python3 tools/quality/run.py run "$suite" \
+            --machine-class apple-m1-max-metal \
+            --out tools/quality/out/ci-metal \
+            --timeout 1800
+
+      - name: Hard-gate the constrained tier
+        if: always()
+        run: |
+          python3 tools/quality/run.py run full \
+            --case pbr-spheres-constrained \
+            --machine-class apple-m1-metal-constrained \
+            --out tools/quality/out/ci-metal-constrained \
+            --timeout 1800
+
+      - name: Publish compact job summary
+        if: always()
+        run: |
+          if [[ -f tools/quality/out/ci-metal/summary.md ]]; then
+            cat tools/quality/out/ci-metal/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f tools/quality/out/ci-metal-constrained/summary.md ]]; then
+            cat tools/quality/out/ci-metal-constrained/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload all success/failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-apple-m1-max-metal-${{ github.run_attempt }}
+          path: |
+            tools/quality/out/ci-metal
+            tools/quality/out/ci-metal-constrained
+            tools/quality/out/ci-faults
+          if-no-files-found: warn
+          retention-days: 30
+
+  vulkan:
+    name: Full quality — RTX 4080 / Vulkan
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.machine == 'all' || inputs.machine == 'nvidia-rtx4080-vulkan'))
+    runs-on: [self-hosted, bloom-quality, linux, nvidia-rtx4080]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Runner preflight
+        run: |
+          python3 --version
+          cargo --version
+          command -v perry
+          nvidia-smi
+
+      - name: Validate manifest, assets, and approved baselines
+        run: python3 tools/quality/run.py check
+
+      - name: Prove seeded regressions are detected
+        run: >-
+          python3 tools/quality/run.py faults
+          --out tools/quality/out/ci-faults
+          --timeout 900
+
+      - name: Run selected high-end suite
+        if: always()
+        env:
+          REQUESTED_SUITE: ${{ inputs.suite }}
+        run: |
+          suite="${REQUESTED_SUITE:-full}"
+          python3 tools/quality/run.py run "$suite" \
+            --machine-class nvidia-rtx4080-vulkan \
+            --out tools/quality/out/ci-vulkan \
+            --timeout 1800
+
+      - name: Publish compact job summary
+        if: always()
+        run: |
+          if [[ -f tools/quality/out/ci-vulkan/summary.md ]]; then
+            cat tools/quality/out/ci-vulkan/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload all success/failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-nvidia-rtx4080-vulkan-${{ github.run_attempt }}
+          path: |
+            tools/quality/out/ci-vulkan
+            tools/quality/out/ci-faults
+          if-no-files-found: warn
+          retention-days: 30

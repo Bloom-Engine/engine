@@ -365,7 +365,18 @@ unsafe extern "C" fn scene_will_connect(
     } else {
         wgpu::ExperimentalFeatures::disabled()
     };
+    let adapter_limits = adapter.limits();
     let mut required_limits = wgpu::Limits::default();
+    bloom_shared::renderer::material_indirection::request_tier_a_if_supported(
+        supported,
+        &adapter_limits,
+        &mut required_features,
+        &mut required_limits,
+    );
+    bloom_shared::renderer::gpu_driven::request_features_if_supported(
+        supported,
+        &mut required_features,
+    );
     if required_features.intersects(rt_mask) {
         required_limits = required_limits
             .using_minimum_supported_acceleration_structure_values();
@@ -565,7 +576,18 @@ pub unsafe extern "C" fn perry_scene_will_connect(scene: *const c_void) {
     } else {
         wgpu::ExperimentalFeatures::disabled()
     };
+    let adapter_limits = adapter.limits();
     let mut required_limits = wgpu::Limits::default();
+    bloom_shared::renderer::material_indirection::request_tier_a_if_supported(
+        supported,
+        &adapter_limits,
+        &mut required_features,
+        &mut required_limits,
+    );
+    bloom_shared::renderer::gpu_driven::request_features_if_supported(
+        supported,
+        &mut required_features,
+    );
     if required_features.intersects(rt_mask) {
         required_limits = required_limits
             .using_minimum_supported_acceleration_structure_values();
@@ -1167,4 +1189,3 @@ fn bloom_jolt_ffi_physics() -> &'static mut bloom_shared::physics_jolt::JoltPhys
 
 #[cfg(feature = "jolt")]
 bloom_shared::define_physics_ffi!();
-

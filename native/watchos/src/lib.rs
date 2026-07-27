@@ -397,6 +397,7 @@ pub extern "C" fn bloom_is_any_input_pressed() -> f64 {
 }
 
 #[no_mangle] pub extern "C" fn bloom_is_key_pressed(_k: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn bloom_is_key_repeated(_k: f64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_is_key_down(_k: f64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn bloom_is_key_released(_k: f64) -> f64 { 0.0 }
 

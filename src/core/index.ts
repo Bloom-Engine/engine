@@ -26,6 +26,9 @@ declare function bloom_window_should_close(): number;
 declare function bloom_begin_drawing(): void;
 declare function bloom_end_drawing(): void;
 declare function bloom_take_screenshot(path: number): void;
+declare function bloom_capture_frame_to_png(path: string): number;
+declare function bloom_capture_debug_intermediates(path: string): number;
+declare function bloom_capture_frame_ready(): number;
 declare function bloom_clear_background(r: number, g: number, b: number, a: number): void;
 declare function bloom_set_env_clear_from_hdr(path: number): void;
 declare function bloom_set_fog(r: number, g: number, b: number, density: number, height_ref: number, height_falloff: number): void;
@@ -34,6 +37,13 @@ declare function bloom_set_vignette(strength: number, softness: number): void;
 declare function bloom_set_film_grain(strength: number): void;
 declare function bloom_set_sharpen_strength(strength: number): void;
 declare function bloom_set_present_mode(mode: number): void;
+declare function bloom_get_present_mode(): number;
+declare function bloom_get_material_binding_capabilities(): string;
+declare function bloom_get_imported_refraction_mode(): number;
+declare function bloom_set_transparency_composition_mode(mode: number): void;
+declare function bloom_get_transparency_composition_mode(): number;
+declare function bloom_get_active_transparency_composition_mode(): number;
+declare function bloom_set_material_binding_tier_override(tier: number): number;
 declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): void;
 declare function bloom_set_auto_exposure(on: number): void;
 declare function bloom_set_taa_enabled(on: number): void;
@@ -41,6 +51,8 @@ declare function bloom_set_occlusion_culling(on: number): void;
 declare function bloom_set_render_scale(scale: number): void;
 declare function bloom_set_output_scale(scale: number): void;
 declare function bloom_launch_process(cmd: string, args: string, cwd: string): number;
+declare function bloom_command_line_arg_count(): number;
+declare function bloom_command_line_arg(index: number): string;
 declare function bloom_get_output_scale(): number;
 declare function bloom_get_render_scale(): number;
 declare function bloom_set_upscale_mode(mode: number): void;
@@ -79,6 +91,15 @@ declare function bloom_set_sss_enabled(on: number): void;
 declare function bloom_set_profiler_enabled(on: number): void;
 declare function bloom_get_profiler_frame_cpu_us(): number;
 declare function bloom_get_profiler_frame_gpu_us(): number;
+declare function bloom_write_quality_telemetry(
+  path: string,
+  warmupFrames: number,
+  measuredFrames: number,
+  fixedTimestep: number,
+  qualityPreset: number,
+  renderScale: number,
+  measurementWallMs: number,
+): number;
 declare function bloom_print_profiler_summary(): void;
 declare function bloom_profiler_overlay_text(): string;
 declare function bloom_profiler_frame_history(): string;
@@ -267,6 +288,21 @@ export function takeScreenshot(path: string): void {
   bloom_take_screenshot(path as any);
 }
 
+/** Queue a PNG readback and report whether the native renderer accepted it. */
+export function captureFrameToPng(path: string): boolean {
+  return bloom_capture_frame_to_png(path) !== 0.0;
+}
+
+/** Queue named HDR/depth/shadow diagnostics for the next captured frame. */
+export function captureDebugIntermediates(directory: string): boolean {
+  return bloom_capture_debug_intermediates(directory) !== 0.0;
+}
+
+/** True after the most recently accepted PNG readback has completed. */
+export function isFrameCaptureReady(): boolean {
+  return bloom_capture_frame_ready() !== 0.0;
+}
+
 export function clearBackground(color: Color): void {
   bloom_clear_background(color.r, color.g, color.b, color.a);
 }
@@ -318,12 +354,123 @@ export function setSharpenStrength(strength: number): void {
 
 /**
  * Swapchain present mode: 0 = Fifo (vsync, default), 1 = Mailbox
- * (uncapped, no tearing), 2 = Immediate (uncapped, tearing allowed).
+ * (uncapped, no tearing), 2 = Immediate (uncapped, tearing allowed),
+ * 3 = AutoNoVsync (portable uncapped preference).
  * With a non-vsync mode active, `setTargetFPS`'s sleep-based cap
  * becomes effective — under Fifo it is inert by design.
  */
 export function setPresentMode(mode: number): void {
   bloom_set_present_mode(mode);
+}
+
+/** Configured present-mode request, using the numeric values from setPresentMode(). */
+export function getPresentMode(): number {
+  return bloom_get_present_mode();
+}
+
+export type MaterialBindingTier = "A" | "B" | "C";
+
+export interface MaterialBindingCapabilityReport {
+  readonly version: number;
+  readonly detected_tier: MaterialBindingTier;
+  readonly selected_tier: MaterialBindingTier;
+  readonly override_tier: MaterialBindingTier | null;
+  readonly features: Readonly<{
+    texture_binding_array: boolean;
+    non_uniform_indexing: boolean;
+  }>;
+  readonly limits: Readonly<{
+    max_binding_array_elements: number;
+    max_binding_array_samplers: number;
+    max_texture_array_layers: number;
+    max_sampled_textures: number;
+    max_samplers: number;
+    max_material_records: number;
+  }>;
+  readonly capacities: Readonly<{
+    tier_a_textures: number;
+    tier_a_samplers: number;
+    tier_b_page_layers: number;
+  }>;
+  readonly diagnostic: string | null;
+  readonly residency: Readonly<{
+    materials: number;
+    textures: number;
+    samplers: number;
+    meshes: number;
+    buffer_views: number;
+    stale_fallbacks: number;
+    limit_fallbacks: number;
+  }>;
+  readonly dispatch: Readonly<{
+    tier_a_per_material_bind_group_switches: 0;
+    tier_b_last_page_count: number;
+    tier_b_last_page_switches: number;
+    tier_b_last_fallback_materials: number;
+  }>;
+}
+
+/** Adapter-derived material/texture tier and hard limits. This is read-only. */
+export function getMaterialBindingCapabilities(): MaterialBindingCapabilityReport {
+  return JSON.parse(
+    bloom_get_material_binding_capabilities(),
+  ) as MaterialBindingCapabilityReport;
+}
+
+export type ImportedRefractionMode =
+  | "disabled-legacy"
+  | "scene-snapshot"
+  | "environment-fallback";
+
+/** Capability-selected route used by imported glTF transmission materials. */
+export function getImportedRefractionMode(): ImportedRefractionMode {
+  const mode = bloom_get_imported_refraction_mode();
+  return mode === 1
+    ? "scene-snapshot"
+    : mode === 2
+      ? "environment-fallback"
+      : "disabled-legacy";
+}
+
+export type TransparencyCompositionMode = "sorted" | "auto" | "weighted";
+export type ActiveTransparencyCompositionMode = "sorted" | "weighted";
+
+/**
+ * Select conventional imported glTF transparency composition.
+ * "auto" preserves sorted alpha for ordinary scenes and enables weighted OIT
+ * only for high-count sets; "weighted" is useful for intersecting surfaces.
+ */
+export function setTransparencyCompositionMode(
+  mode: TransparencyCompositionMode,
+): void {
+  bloom_set_transparency_composition_mode(
+    mode === "sorted" ? 0 : mode === "weighted" ? 2 : 1,
+  );
+}
+
+/** Configured transparency policy. */
+export function getTransparencyCompositionMode(): TransparencyCompositionMode {
+  const mode = bloom_get_transparency_composition_mode();
+  return mode === 0 ? "sorted" : mode === 2 ? "weighted" : "auto";
+}
+
+/** Route selected for the most recently prepared frame. */
+export function getActiveTransparencyCompositionMode():
+  ActiveTransparencyCompositionMode {
+  return bloom_get_active_transparency_composition_mode() === 1
+    ? "weighted"
+    : "sorted";
+}
+
+/**
+ * Qualification-only lower-tier override. "auto" restores adapter selection.
+ * Returns false for an unsupported upward override or an invalid value.
+ */
+export function setMaterialBindingTierOverride(
+  tier: "auto" | MaterialBindingTier,
+): boolean {
+  const code = tier === "auto" ? 0 : tier === "C" ? 1 : tier === "B" ? 2 : 3;
+  return bloom_set_material_binding_tier_override(code) !== 0;
 }
 
 /** Screen-space sun shafts (god rays). strength 0 = off. */
@@ -362,7 +509,10 @@ export function setTaaEnabled(on: boolean): void {
  * Catmull-Rom is the default upscale filter (see `setUpscaleMode`).
  */
 export function setRenderScale(scale: number): void {
-  bloom_set_render_scale(Math.min(1.0, Math.max(0.5, scale)));
+  // SH-055 — floor lowered from 0.5 to 0.15 alongside the matching Rust-side
+  // clamp in renderer::render_extent()/set_render_scale(). A weak mobile GPU
+  // (Adreno 618) needs to go lower than 0.5 to hit a playable frame time.
+  bloom_set_render_scale(Math.min(1.0, Math.max(0.15, scale)));
 }
 
 /// OUTPUT scale — configure the swapchain at this fraction of the window's real
@@ -682,6 +832,27 @@ export function getProfilerFrameGpuUs(): number {
   return bloom_get_profiler_frame_gpu_us();
 }
 
+/** Write a native, allocation-safe snapshot for the deterministic quality harness. */
+export function writeQualityTelemetry(
+  path: string,
+  warmupFrames: number,
+  measuredFrames: number,
+  fixedTimestep: number,
+  qualityPreset: number,
+  renderScale: number,
+  measurementWallMs: number,
+): boolean {
+  return bloom_write_quality_telemetry(
+    path,
+    warmupFrames,
+    measuredFrames,
+    fixedTimestep,
+    qualityPreset,
+    renderScale,
+    measurementWallMs,
+  ) !== 0.0;
+}
+
 /** Print a per-phase CPU/GPU timing table to stdout. Useful for quick diagnostics. */
 export function printProfilerSummary(): void {
   bloom_print_profiler_summary();
@@ -733,14 +904,16 @@ export function setMaterialParams(handle: number, params: number[]): void {
 export function getProfilerOverlay(): { label: string, cpuUs: number, gpuUs: number }[] {
   // EN-020: per-row numeric FFI — do NOT reintroduce a packed-text +
   // split()/parseFloat() path here (Perry runtime overread, crashes).
-  const out: { label: string, cpuUs: number, gpuUs: number }[] = [];
   const n = bloom_profiler_row_count();
+  // Perry's native `.push()` lowering can leave array length/capacity out
+  // of sync for FFI-derived rows. Pre-size and assign by index.
+  const out: { label: string, cpuUs: number, gpuUs: number }[] = new Array(n);
   for (let i = 0; i < n; i++) {
-    out.push({
+    out[i] = {
       label: bloom_profiler_row_label(i),
       cpuUs: bloom_profiler_row_cpu_us(i),
       gpuUs: bloom_profiler_row_gpu_us(i),
-    });
+    };
   }
   return out;
 }
@@ -752,13 +925,13 @@ export function getProfilerOverlay(): { label: string, cpuUs: number, gpuUs: num
  */
 export function getProfilerFrameHistory(): { cpuUs: number, gpuUs: number }[] {
   // EN-020: numeric FFI — see getProfilerOverlay.
-  const out: { cpuUs: number, gpuUs: number }[] = [];
   const n = bloom_profiler_hist_count();
+  const out: { cpuUs: number, gpuUs: number }[] = new Array(n);
   for (let i = 0; i < n; i++) {
-    out.push({
+    out[i] = {
       cpuUs: bloom_profiler_hist_cpu_us(i),
       gpuUs: bloom_profiler_hist_gpu_us(i),
-    });
+    };
   }
   return out;
 }
@@ -1204,4 +1377,12 @@ export function launchProcess(cmd: string, args: string[], cwd: string): number 
     joined = joined + args[i];
   }
   return bloom_launch_process(cmd, joined, cwd);
+}
+
+/** Return the native process argv. Index 0 is the executable path. */
+export function getCommandLineArgs(): string[] {
+  const count = Math.max(0, Math.floor(bloom_command_line_arg_count()));
+  const args: string[] = new Array(count);
+  for (let i = 0; i < count; i++) args[i] = bloom_command_line_arg(i);
+  return args;
 }

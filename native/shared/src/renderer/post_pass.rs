@@ -173,7 +173,10 @@ pub fn compile_post_pass(
         cache: None,
     });
 
-    Ok(PostPassPipeline { pipeline, bind_group_layout })
+    Ok(PostPassPipeline {
+        pipeline,
+        bind_group_layout,
+    })
 }
 
 /// Allocate the LDR intermediate render target the composite pass
@@ -188,13 +191,16 @@ pub fn create_composite_ldr_rt(
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("composite_ldr_rt"),
-        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-             | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -216,15 +222,15 @@ mod tests {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: None,
             force_fallback_adapter: true,
-        })).ok()?;
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("post-pass-test-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                ..Default::default()
-            },
-        )).ok()?;
+        }))
+        .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("post-pass-test-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            ..Default::default()
+        }))
+        .ok()?;
         Some((device, queue))
     }
 
@@ -233,7 +239,9 @@ mod tests {
     /// where `try_create_device` returns None (CI without a GPU).
     #[test]
     fn underwater_tint_compiles() {
-        let Some((device, _queue)) = try_create_device() else { return; };
+        let Some((device, _queue)) = try_create_device() else {
+            return;
+        };
         let wgsl = r#"
             @fragment
             fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
@@ -241,9 +249,11 @@ mod tests {
                 return vec4<f32>(scene.rgb * vec3<f32>(0.4, 0.7, 0.9), 1.0);
             }
         "#;
-        let result = compile_post_pass(
-            &device, wgsl, wgpu::TextureFormat::Bgra8UnormSrgb,
+        let result = compile_post_pass(&device, wgsl, wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert!(
+            result.is_ok(),
+            "underwater tint should compile: {:?}",
+            result.err()
         );
-        assert!(result.is_ok(), "underwater tint should compile: {:?}", result.err());
     }
 }
