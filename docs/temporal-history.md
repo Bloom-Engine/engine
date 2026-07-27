@@ -70,8 +70,23 @@ SSGI now owns `probe_history_valid` independently of TAA:
 
 Telemetry exposes `temporal_history.ssgi_probe_valid` and `ssgi_probe_index`.
 
+## TAA/TSR implementation
+
+TAA/TSR now separates history validity from its Halton jitter counter:
+
+- invalid history keeps the established current-frame weight `1.0`;
+- valid history keeps the existing four-frame warmup and render-scale-aware
+  steady blend;
+- resize, render-scale changes, and TAA toggles invalidate and reset storage;
+- transitions between raster and path-traced scene color invalidate history,
+  including progressive PT changing ownership without a mode change;
+- the ping-pong advances only after the TAA pass wrote its current target.
+
+Telemetry exposes `temporal_history.taa_valid`, `taa_index`, and
+`taa_pt_owned`.
+
 ## Remaining #135 work
 
-The next slices should give TAA/TSR, PT, exposure, and any future temporal effect
-the same explicit lifetime rules, then add camera-cut/FOV-change resets,
-per-pixel rejection diagnostics, and the sequence-based motion corpus.
+The next slices should give PT, exposure, and any future temporal effect the
+same explicit lifetime rules, then add camera-cut/FOV-change resets, per-pixel
+rejection diagnostics, and the sequence-based motion corpus.

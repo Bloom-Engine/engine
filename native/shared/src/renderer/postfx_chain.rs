@@ -16,6 +16,16 @@ fn bloom_threshold(auto_exposure: bool, manual_exposure: f32) -> f32 {
 }
 
 #[inline]
+fn taa_current_weight(history_valid: bool, frame_index: u32, render_scale: f32) -> f32 {
+    if !history_valid || frame_index < 4 {
+        1.0
+    } else {
+        let s2 = render_scale * render_scale;
+        0.05 + 0.05 * s2
+    }
+}
+
+#[inline]
 fn bloom_mip_extent(width: u32, height: u32, mip_index: usize) -> (u32, u32) {
     (
         ((width / 2) >> mip_index).max(1),
@@ -251,7 +261,7 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{bloom_mip_extent, bloom_threshold};
+    use super::{bloom_mip_extent, bloom_threshold, taa_current_weight};
 
     #[test]
     fn bloom_mip_extent_matches_half_resolution_chain_and_never_reaches_zero() {
@@ -273,6 +283,14 @@ mod tests {
     fn bloom_threshold_stays_in_pre_exposed_units_for_auto_exposure() {
         assert_eq!(bloom_threshold(true, 0.0), 2.5);
         assert_eq!(bloom_threshold(true, 8.0), 2.5);
+    }
+
+    #[test]
+    fn invalid_taa_history_is_replaced_without_changing_steady_weights() {
+        assert_eq!(taa_current_weight(false, 99, 0.5), 1.0);
+        assert_eq!(taa_current_weight(true, 3, 1.0), 1.0);
+        assert_eq!(taa_current_weight(true, 4, 0.5), 0.0625);
+        assert_eq!(taa_current_weight(true, 4, 1.0), 0.1);
     }
 }
 
@@ -545,6 +563,16 @@ impl Renderer {
         // Skipped when TAA is off — composite reads composed_rt
         // directly and gets the same composed / fog / shafts output.
         // ============================================================
+        if self.taa_enabled {
+            let pt_owned = self.pt_owns_frame();
+            if self.taa_history_pt_owned != pt_owned {
+                // Progressive PT can begin or stop owning frames without a
+                // mode change. Never blend across the raster/PT radiance seam.
+                self.taa_history_pt_owned = pt_owned;
+                self.taa_history_valid = false;
+                self.taa_current_idx = 0;
+            }
+        }
         let taa_dst_idx = self.taa_current_idx;
         let taa_src_idx = 1 - self.taa_current_idx;
 
@@ -553,13 +581,11 @@ impl Renderer {
             // density (~render_scale²). At 0.5 → 0.0625 (~16-frame
             // window, close to the prior 0.05/20-frame); at 1.0 →
             // 0.10 (~10-frame), matching native TAA.
-            let s2 = self.render_scale * self.render_scale;
-            let steady = 0.05 + 0.05 * s2;
-            let alpha = if self.taa_frame_index < 4 {
-                1.0
-            } else {
-                steady
-            };
+            let alpha = taa_current_weight(
+                self.taa_history_valid,
+                self.taa_frame_index,
+                self.render_scale,
+            );
             // yz = the current jitter as a composed-UV offset. Content shifts by
             // -jitter_ndc through the GL-convention perspective divide (w = -z),
             // so the rendered position of a feature is uv + (-0.5*jx, +0.5*jy)
@@ -719,6 +745,9 @@ impl Renderer {
             }
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..3, 0..1);
+            drop(pass);
+            self.taa_history_valid = true;
+            self.taa_history_written = true;
         }
 
         // ============================================================

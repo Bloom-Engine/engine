@@ -688,6 +688,15 @@ pub struct Renderer {
     /// 1 = TAA on (default). When off the renderer behaves exactly
     /// as the pre-TAA pipeline did.
     pub taa_enabled: bool,
+    /// True only after TAA wrote a current history in the active radiance
+    /// domain. Separate from the jitter counter so ownership changes can
+    /// replace history without restarting the sample sequence.
+    pub taa_history_valid: bool,
+    /// Per-frame producer bit; prevents ping-pong advancement when the TAA
+    /// graph node is intentionally skipped.
+    taa_history_written: bool,
+    /// Whether the history's scene-color source was path traced.
+    taa_history_pt_owned: bool,
     /// Render-resolution multiplier in [0.5, 1.0]. The G-buffer,
     /// HDR, and composed RTs are sized to `surface * render_scale`;
     /// TAA (or the upscale pass) brings the output back up to the
@@ -7659,6 +7668,9 @@ impl Renderer {
             taa_reactive_layout: None,
             taa_frame_index: 0,
             taa_enabled: true,
+            taa_history_valid: false,
+            taa_history_written: false,
+            taa_history_pt_owned: false,
             render_scale: 0.5,
             // 1.0 = native output. Games that never touch it are unaffected.
             output_scale: 1.0,
@@ -8300,7 +8312,10 @@ impl Renderer {
             let (taa_t, taa_v) = create_taa_textures(&self.device, width, height);
             self.taa_textures = taa_t;
             self.taa_views = taa_v;
+            self.taa_current_idx = 0;
             self.taa_frame_index = 0; // reset jitter sequence on resize
+            self.taa_history_valid = false;
+            self.taa_history_written = false;
             let (sr_t, sr_v) = create_ssr_rt(&self.device, rw, rh);
             self.ssr_rt_texture = sr_t;
             self.ssr_rt_view = sr_v;
@@ -11723,6 +11738,7 @@ impl Renderer {
         self.iridescence_ssr_active = false;
         self.weighted_transparency_active = false;
         self.temporal_reactive_active = false;
+        self.taa_history_written = false;
         // PT-6 — normally consumed by rebuild_instance_data (mem::take);
         // this clear covers frames where the accel path is skipped
         // (PT and Lumen both off) so the registry can't grow unbounded.
@@ -12564,10 +12580,12 @@ impl Renderer {
         // offset and the just-written texture becomes the history.
         // Snapshot current VP into prev_vp so next frame's TAA pass
         // can reproject through it.
-        if self.taa_enabled {
+        if self.taa_enabled && self.taa_history_written {
             self.taa_current_idx = 1 - self.taa_current_idx;
             self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
             self.prev_vp_matrix = self.current_vp_matrix;
+        } else if self.taa_enabled {
+            self.taa_history_valid = false;
         }
         // EN-022 fix — velocity reference inputs roll over every frame
         // regardless of TAA state (velocity also feeds motion blur).

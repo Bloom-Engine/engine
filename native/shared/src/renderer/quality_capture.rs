@@ -528,6 +528,20 @@ impl Renderer {
         });
         out.push_str(",\"ssgi_probe_index\":");
         out.push_str(&self.probe_history_idx.to_string());
+        out.push_str(",\"taa_valid\":");
+        out.push_str(if self.taa_history_valid {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"taa_index\":");
+        out.push_str(&self.taa_current_idx.to_string());
+        out.push_str(",\"taa_pt_owned\":");
+        out.push_str(if self.taa_history_pt_owned {
+            "true"
+        } else {
+            "false"
+        });
         out.push('}');
         out.push_str(",\"transparent_gi\":{");
         out.push_str("\"enabled\":");
