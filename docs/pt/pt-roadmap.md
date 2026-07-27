@@ -132,5 +132,7 @@ ray query by default (`BLOOM_FORCE_SW_GI` disables it).
 | PT-1 | Progressive megakernel, accumulation, FFI mode plumbing, shooter toggle |
 | PT-2 | Geometry megabuffer, interpolated hit attributes, texture binding array, GGX+MIS, emissive hits |
 | PT-3 | Realtime mode: temporal reprojection + à-trous, half-res option, perf gate |
+| PT-3b | SVGF denoiser for realtime mode — landed 2026-07-14 (`PT-3b-svgf-denoiser.md`) |
 | PT-4 | ReSTIR DI (experimental flag) |
 | PT-5 | Settings/editor/gameplay integration, fallback matrix, reference-diff CI hook |
+| PT-6/7/8 | Skinned meshes in the TLAS, real skinned motion vectors, golden-image correctness oracle — landed 2026-07-14 (`PT-6-7-8-skinned-tlas-motion-oracle.md`) |

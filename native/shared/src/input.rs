@@ -285,6 +285,17 @@ impl InputState {
         if button < MAX_GAMEPAD_BUTTONS { self.gamepad_buttons_down[button] = false; }
     }
 
+    /// Clear polled gamepad axes + buttons at the top of a hardware poll.
+    /// A poller only ever SETS the currently-pressed buttons/axes, so without
+    /// this a released button would stay `down` forever (begin_frame does not
+    /// reset gamepad state — the edge detector reads down-vs-prev). Call this
+    /// once per poll, only when a real controller is present, so it never
+    /// clobbers the inject path on frames with no pad connected.
+    pub fn reset_gamepad(&mut self) {
+        self.gamepad_axes = [0.0; MAX_GAMEPAD_AXES];
+        self.gamepad_buttons_down = [false; MAX_GAMEPAD_BUTTONS];
+    }
+
     pub fn is_gamepad_available(&self) -> bool { self.gamepad_available }
     pub fn get_gamepad_axis(&self, axis: usize) -> f32 {
         if axis < MAX_GAMEPAD_AXES { self.gamepad_axes[axis] } else { 0.0 }

@@ -335,6 +335,15 @@ impl Reverb {
     }
 }
 
+/// Hard cap on simultaneously-playing voices. The render thread NEVER grows
+/// `voices` past this — a heap reallocation on the audio thread is a glitch
+/// (and a priority inversion against the malloc lock). At the cap, a new play
+/// steals the quietest voice instead. `voices` is preallocated to this size.
+const MAX_VOICES: usize = 64;
+/// Same discipline for music tracks. Practically 1-2 ever play at once; the
+/// cap only exists so the render thread can never reallocate.
+const MAX_MUSIC: usize = 4;
+
 pub struct AudioRenderer {
     rx: Consumer<Cmd>,
     voices: Vec<Voice>,
@@ -357,8 +366,8 @@ impl AudioRenderer {
     pub(super) fn new(rx: Consumer<Cmd>) -> Self {
         Self {
             rx,
-            voices: Vec::with_capacity(64),
-            music: Vec::with_capacity(4),
+            voices: Vec::with_capacity(MAX_VOICES),
+            music: Vec::with_capacity(MAX_MUSIC),
             master: 1.0,
             listener_pos: [0.0; 3],
             listener_forward: [0.0, 0.0, -1.0],
@@ -380,6 +389,21 @@ impl AudioRenderer {
                 sound_id, voice_id, data, volume, spatial, looping,
                 ref_dist, max_dist, rolloff, pitch, bus, send, lowpass,
             } => {
+                if self.voices.len() >= MAX_VOICES {
+                    // Voice steal: drop the quietest non-stopping voice (least
+                    // audible) so the push below can never reallocate. O(n) over
+                    // <= MAX_VOICES, no allocation. `swap_remove` is O(1) and
+                    // voice order does not affect the mix.
+                    let victim = self.voices.iter().enumerate()
+                        .filter(|(_, v)| !v.stopping)
+                        .min_by(|(_, a), (_, b)| {
+                            a.volume.partial_cmp(&b.volume)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.voices.swap_remove(victim);
+                }
                 self.voices.push(Voice {
                     sound_id, voice_id, data, frame_pos: 0.0, volume, spatial,
                     looping,
@@ -419,6 +443,13 @@ impl AudioRenderer {
                         ended: false,
                     },
                 };
+                if self.music.len() >= MAX_MUSIC {
+                    // Evict the oldest track so the push can't reallocate. The
+                    // evicted track's shared flag is cleared so its control-side
+                    // handle reports stopped.
+                    let old = self.music.remove(0);
+                    old.shared.playing.store(false, Ordering::Relaxed);
+                }
                 self.music.push(MusicVoice { music_id, samples, shared, volume, looping, consumed: 0 });
             }
             Cmd::StopMusic { music_id } => {
@@ -809,5 +840,53 @@ impl AudioRenderer {
             m.shared.position.store(m.consumed, Ordering::Relaxed);
             true
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::spsc;
+
+    fn dummy_sound() -> Arc<SoundData> {
+        Arc::new(SoundData { samples: vec![0.0; 16], sample_rate: 44_100, channels: 1 })
+    }
+
+    fn play(id: u64, volume: f32) -> Cmd {
+        Cmd::PlaySound {
+            sound_id: id, voice_id: id, data: dummy_sound(), volume,
+            spatial: None, looping: false,
+            ref_dist: 1.0, max_dist: 0.0, rolloff: 1.0, pitch: 1.0,
+            bus: bus::SFX, send: 0.0, lowpass: 0.0,
+        }
+    }
+
+    // RT-safety: the render thread must never grow `voices` past its
+    // preallocated capacity — a malloc on the audio thread is a glitch.
+    #[test]
+    fn voices_never_exceed_cap_or_reallocate() {
+        let (_tx, rx) = spsc::channel::<Cmd>(8);
+        let mut r = AudioRenderer::new(rx);
+        let cap0 = r.voices.capacity();
+        for i in 0..(MAX_VOICES as u64 * 4) {
+            r.apply(play(i, 0.5 + (i % 7) as f32 * 0.01));
+            assert!(r.voices.len() <= MAX_VOICES);
+        }
+        assert_eq!(r.voices.len(), MAX_VOICES);
+        assert_eq!(r.voices.capacity(), cap0, "voices reallocated on the audio thread");
+    }
+
+    // At the cap, a new play steals the QUIETEST voice, not an arbitrary one.
+    #[test]
+    fn voice_steal_drops_the_quietest() {
+        let (_tx, rx) = spsc::channel::<Cmd>(8);
+        let mut r = AudioRenderer::new(rx);
+        for i in 0..(MAX_VOICES as u64 - 1) { r.apply(play(i, 1.0)); }
+        r.apply(play(9999, 0.01)); // quiet marker, brings us to the cap
+        assert_eq!(r.voices.len(), MAX_VOICES);
+        r.apply(play(10_000, 1.0)); // must evict the quiet marker
+        assert!(!r.voices.iter().any(|v| v.sound_id == 9999),
+            "the quietest voice should have been stolen");
+        assert_eq!(r.voices.len(), MAX_VOICES);
     }
 }
