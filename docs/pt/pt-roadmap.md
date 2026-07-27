@@ -74,10 +74,12 @@ multi-bounce colour bleed.
   `bloom-reference/src/tracer.rs` so the two tracers stay comparable.
 - **Layered-material sidecar**: a 96-byte scalar record and group-2 pipeline
   are created only after PT encounters a qualified layered TLAS instance.
-  Scalar clearcoat direct lighting and bounce sampling match the CPU
-  reference's reciprocal fixed-IOR GGX contract. The base kernel, shared GI
-  record, bindings, and cost remain unchanged; reserved but unqualified lobes
-  continue to dispatch the exact base pipeline.
+  Scalar clearcoat and dielectric specular/IOR direct lighting and bounce
+  sampling match the CPU reference's reciprocal GGX, F0/F90, and diffuse
+  complement contracts, including their combined composition. The base kernel,
+  shared GI record, bindings, and cost remain unchanged; reserved but
+  unqualified or texture-bearing lobes continue to dispatch the exact base
+  pipeline until their complete transport path is qualified.
 - Emissive from material data (VFX/muzzle flashes become real light in PT).
 
 ### Tier 3 — PT-3/PT-4: gameplay

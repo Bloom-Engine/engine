@@ -190,14 +190,19 @@ mode produce bit-exact images, while the BRDF-energy and reprojection fault
 controls still fail their respective goldens. The realtime base shader already
 used the corrected Smith visibility.
 
-Scalar clearcoat path transport now lives in a lazy group-2 specialization. It
-identifies the primary TLAS instance without growing the G-buffer, applies the
-same reciprocal top-interface attenuation and fixed-IOR GGX evaluation as the
-CPU reference for direct light, and samples clearcoat at every bounce. A scene
-without a nonzero clearcoat record dispatches the original base pipeline
-exactly; other reserved lobes neither bind nor execute the specialization until
-their transport is qualified. Textured clearcoat and the specular/IOR, sheen,
-anisotropy, and iridescence lobes remain separate follow-up slices.
+Scalar clearcoat and dielectric specular/IOR path transport now live in a lazy
+group-2 specialization. It identifies the primary TLAS instance without growing
+the G-buffer, applies the CPU reference's reciprocal fixed-IOR clearcoat and
+KHR_materials_specular dielectric F0/F90 contracts for direct light, and samples
+the qualified lobes at every bounce. Clearcoat composes over the modified base
+with reciprocal attenuation, and pure metals remain independent of dielectric
+specular/IOR settings. A scene without either qualified record dispatches the
+original base pipeline exactly; other reserved lobes neither bind nor execute
+the specialization until their transport is qualified. The sidecar marks
+texture-bearing lobes separately and leaves each one on established base PT
+semantics rather than applying an incorrect scalar approximation. Textured
+factors, clearcoat normals, sheen, anisotropy, and iridescence remain separate
+follow-up slices.
 
 ## Runtime material-record ABI
 

@@ -12,7 +12,7 @@ pub(super) const PT_LAYERED_RECORD_VERSION: u32 = 1;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct PtLayeredMaterialCpu {
-    /// x = ABI version, y = MaterialLayeredPbr lobe mask.
+    /// x = ABI version, y = lobe mask, z = texture-bearing lobe mask.
     pub(super) header: [u32; 4],
     pub(super) clearcoat_ior: [f32; 4],
     pub(super) specular: [f32; 4],
@@ -54,8 +54,15 @@ impl PtLayeredMaterialCpu {
         }
 
         let mut mask = 0;
+        let mut texture_mask = 0;
         if material.has_clearcoat() {
             mask |= crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE;
+        }
+        if material.clearcoat_texture.is_some()
+            || material.clearcoat_roughness_texture.is_some()
+            || material.clearcoat_normal_texture.is_some()
+        {
+            texture_mask |= crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE;
         }
         if material.has_sheen() {
             mask |= crate::models::MaterialLayeredPbr::SHEEN_LOBE;
@@ -69,10 +76,13 @@ impl PtLayeredMaterialCpu {
         if material.has_specular_ior() {
             mask |= crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE;
         }
+        if material.specular_texture.is_some() || material.specular_color_texture.is_some() {
+            texture_mask |= crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE;
+        }
         let rotation = finite_or(material.anisotropy_rotation, 0.0);
         let (rotation_sine, rotation_cosine) = rotation.sin_cos();
         Self {
-            header: [PT_LAYERED_RECORD_VERSION, mask, 0, 0],
+            header: [PT_LAYERED_RECORD_VERSION, mask, texture_mask, 0],
             clearcoat_ior: [
                 unit(material.clearcoat_factor, 0.0),
                 unit(material.clearcoat_roughness_factor, 0.0),
@@ -112,7 +122,17 @@ impl PtLayeredMaterialCpu {
 
     fn has_clearcoat(self) -> bool {
         self.header[1] & crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE != 0
+            && self.header[2] & crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE == 0
             && self.clearcoat_ior[0] > 0.0
+    }
+
+    fn has_specular_ior(self) -> bool {
+        self.header[1] & crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE != 0
+            && self.header[2] & crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE == 0
+    }
+
+    fn has_qualified_transport(self) -> bool {
+        self.has_clearcoat() || self.has_specular_ior()
     }
 }
 
@@ -154,8 +174,9 @@ struct PtLayeredMaterial {
 var<storage, read> pt_layered_materials: array<PtLayeredMaterial>;
 "#;
 
-const PT_LAYERED_CLEARCOAT_WGSL: &str = r#"
+const PT_LAYERED_TRANSPORT_WGSL: &str = r#"
 const PT_LAYERED_CLEARCOAT_LOBE: u32 = 1u;
+const PT_LAYERED_SPECULAR_IOR_LOBE: u32 = 16u;
 
 fn pt_layered_default() -> PtLayeredMaterial {
     return PtLayeredMaterial(
@@ -171,7 +192,68 @@ fn pt_layered_default() -> PtLayeredMaterial {
 fn pt_layered_has_clearcoat(material: PtLayeredMaterial) -> bool {
     return material.header.x == 1u
         && (material.header.y & PT_LAYERED_CLEARCOAT_LOBE) != 0u
+        && (material.header.z & PT_LAYERED_CLEARCOAT_LOBE) == 0u
         && material.clearcoat_ior.x > 0.0;
+}
+
+fn pt_layered_has_specular_ior(material: PtLayeredMaterial) -> bool {
+    return material.header.x == 1u
+        && (material.header.y & PT_LAYERED_SPECULAR_IOR_LOBE) != 0u
+        && (material.header.z & PT_LAYERED_SPECULAR_IOR_LOBE) == 0u;
+}
+
+fn pt_layered_has_transport(material: PtLayeredMaterial) -> bool {
+    return pt_layered_has_clearcoat(material) || pt_layered_has_specular_ior(material);
+}
+
+fn pt_ior_f0(ior_value: f32) -> f32 {
+    if (ior_value == 0.0) {
+        return 1.0;
+    }
+    let ior = max(ior_value, 1.0);
+    let ratio = (ior - 1.0) / (ior + 1.0);
+    return ratio * ratio;
+}
+
+fn pt_dielectric_f0(material: PtLayeredMaterial) -> vec3<f32> {
+    return min(
+        max(material.specular.xyz, vec3<f32>(0.0)) * pt_ior_f0(material.clearcoat_ior.w),
+        vec3<f32>(1.0),
+    ) * clamp(material.specular.w, 0.0, 1.0);
+}
+
+fn pt_fresnel_f90(cos_theta: f32, f0: vec3<f32>, f90: vec3<f32>) -> vec3<f32> {
+    let m = 1.0 - clamp(cos_theta, 0.0, 1.0);
+    return f0 + (f90 - f0) * (m * m * m * m * m);
+}
+
+fn pt_layered_base_fresnel(
+    cos_theta: f32,
+    base_color: vec3<f32>,
+    metallic: f32,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    if (!pt_layered_has_specular_ior(material)) {
+        return fresnel_schlick3(
+            cos_theta, mix(vec3<f32>(0.04), base_color, metallic),
+        );
+    }
+    let dielectric = pt_fresnel_f90(
+        cos_theta,
+        pt_dielectric_f0(material),
+        vec3<f32>(clamp(material.specular.w, 0.0, 1.0)),
+    );
+    let conductor = fresnel_schlick3(cos_theta, base_color);
+    return mix(dielectric, conductor, metallic);
+}
+
+fn pt_dielectric_transmission(cos_theta: f32, material: PtLayeredMaterial) -> f32 {
+    let fresnel = pt_fresnel_f90(
+        cos_theta,
+        pt_dielectric_f0(material),
+        vec3<f32>(clamp(material.specular.w, 0.0, 1.0)),
+    );
+    return clamp(1.0 - max(fresnel.x, max(fresnel.y, fresnel.z)), 0.0, 1.0);
 }
 
 fn pt_clearcoat_fresnel(cos_theta: f32, material: PtLayeredMaterial) -> f32 {
@@ -215,6 +297,42 @@ fn pt_layered_primary_material(p: vec3<f32>) -> PtLayeredMaterial {
     return pt_layered_materials[hit.instance_custom_data];
 }
 
+fn pt_layered_base_nee(
+    n: vec3<f32>,
+    view: vec3<f32>,
+    ldir: vec3<f32>,
+    ndl: f32,
+    full_alb: vec3<f32>,
+    rough: f32,
+    metal: f32,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    if (!pt_layered_has_specular_ior(material)) {
+        return nee_diffuse(n, view, ldir, ndl, full_alb, rough, metal)
+            + nee_spec(n, view, ldir, ndl, full_alb, rough, metal);
+    }
+    let half_raw = view + ldir;
+    if (dot(half_raw, half_raw) <= 1e-8) {
+        return vec3<f32>(0.0);
+    }
+    let half = normalize(half_raw);
+    let ndv = max(dot(n, view), 1e-4);
+    let ndh = max(dot(n, half), 0.0);
+    let vdh = max(dot(view, half), 1e-4);
+    let alpha = max(rough * rough, 1e-3);
+    let a2 = alpha * alpha;
+    let denominator = ndh * ndh * (a2 - 1.0) + 1.0;
+    let distribution = a2 / (3.14159265 * denominator * denominator);
+    let specular = pt_layered_base_fresnel(vdh, full_alb, metal, material)
+        * distribution * v_smith(ndv, ndl, alpha) * ndl;
+    let diffuse_albedo = full_alb * (1.0 - metal)
+        * pt_dielectric_transmission(ndv, material)
+        * pt_dielectric_transmission(ndl, material);
+    let diffuse = diffuse_albedo
+        * burley_diffuse(ndl, ndv, max(dot(ldir, half), 0.0), rough) * ndl;
+    return diffuse + specular;
+}
+
 fn pt_layered_nee(
     n: vec3<f32>,
     view: vec3<f32>,
@@ -225,8 +343,9 @@ fn pt_layered_nee(
     metal: f32,
     material: PtLayeredMaterial,
 ) -> vec3<f32> {
-    let undercoat = nee_diffuse(n, view, ldir, ndl, full_alb, rough, metal)
-        + nee_spec(n, view, ldir, ndl, full_alb, rough, metal);
+    let undercoat = pt_layered_base_nee(
+        n, view, ldir, ndl, full_alb, rough, metal, material,
+    );
     let half_raw = view + ldir;
     if (!pt_layered_has_clearcoat(material) || dot(half_raw, half_raw) <= 1e-8) {
         return undercoat;
@@ -257,7 +376,7 @@ fn pt_layered_direct_light(
     with_points: bool,
     material: PtLayeredMaterial,
 ) -> vec3<f32> {
-    if (!pt_layered_has_clearcoat(material)) {
+    if (!pt_layered_has_transport(material)) {
         return direct_light(p, n, sun_r2, view, full_alb, rough, metal, with_points);
     }
     var result = vec3<f32>(0.0);
@@ -293,6 +412,89 @@ fn pt_layered_direct_light(
     return result;
 }
 
+fn pt_sample_layered_base(
+    n: vec3<f32>,
+    view: vec3<f32>,
+    base_color: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    material: PtLayeredMaterial,
+) -> BrdfSample {
+    if (!pt_layered_has_specular_ior(material)) {
+        return sample_brdf(n, view, base_color, roughness, metallic);
+    }
+    var out: BrdfSample;
+    out.valid = false;
+    let alpha = max(roughness * roughness, 1e-3);
+    let basis = onb(n);
+    let view_tangent = vec3<f32>(
+        dot(view, basis[0]), dot(view, basis[1]), dot(view, n),
+    );
+    if (view_tangent.z <= 0.0) {
+        return out;
+    }
+    let n_dot_v = max(view_tangent.z, 1e-4);
+    let fresnel_view = pt_layered_base_fresnel(
+        n_dot_v, base_color, metallic, material,
+    );
+    let specular_weight = (
+        fresnel_view.x + fresnel_view.y + fresnel_view.z
+    ) / 3.0;
+    let diffuse_weight = pt_dielectric_transmission(n_dot_v, material)
+        * (1.0 - metallic);
+    var specular_probability = specular_weight
+        / (specular_weight + diffuse_weight + 1e-6);
+    if (specular_weight > 0.0 && diffuse_weight > 0.0) {
+        specular_probability = clamp(specular_probability, 0.05, 0.95);
+    }
+    let sample = rand_2f();
+    if (rand_f() < specular_probability) {
+        let half_tangent = sample_ggx_vndf(view_tangent, alpha, sample);
+        let light_tangent = reflect(-view_tangent, half_tangent);
+        if (light_tangent.z <= 0.0) {
+            return out;
+        }
+        let n_dot_l = light_tangent.z;
+        let v_dot_h = max(dot(view_tangent, half_tangent), 1e-4);
+        let g2 = v_smith(n_dot_v, n_dot_l, alpha)
+            * 4.0 * n_dot_v * n_dot_l;
+        out.dir = basis * light_tangent;
+        out.weight = pt_layered_base_fresnel(
+            v_dot_h, base_color, metallic, material,
+        ) * g2 / max(smith_g1(n_dot_v, alpha) * specular_probability, 1e-6);
+        if (u.cfg.x >= 2.0) {
+            out.weight = min(out.weight, vec3<f32>(4.0));
+        }
+        out.valid = true;
+        return out;
+    }
+    let radius = sqrt(sample.x);
+    let phi = 6.2831853 * sample.y;
+    let light_tangent = vec3<f32>(
+        radius * cos(phi),
+        radius * sin(phi),
+        sqrt(max(0.0, 1.0 - sample.x)),
+    );
+    let n_dot_l = max(light_tangent.z, 1e-4);
+    let half_raw = view_tangent + light_tangent;
+    var l_dot_h = 0.0;
+    if (dot(half_raw, half_raw) > 1e-8) {
+        l_dot_h = max(dot(light_tangent, normalize(half_raw)), 0.0);
+    }
+    let diffuse_albedo = base_color * (1.0 - metallic)
+        * pt_dielectric_transmission(n_dot_v, material)
+        * pt_dielectric_transmission(n_dot_l, material);
+    out.dir = basis * light_tangent;
+    out.weight = diffuse_albedo
+        * burley_diffuse(n_dot_l, n_dot_v, l_dot_h, roughness)
+        * 3.14159265 / max(1.0 - specular_probability, 1e-6);
+    if (u.cfg.x >= 2.0) {
+        out.weight = min(out.weight, vec3<f32>(4.0));
+    }
+    out.valid = true;
+    return out;
+}
+
 fn pt_sample_layered_brdf(
     n: vec3<f32>,
     view: vec3<f32>,
@@ -301,8 +503,13 @@ fn pt_sample_layered_brdf(
     metallic: f32,
     material: PtLayeredMaterial,
 ) -> BrdfSample {
-    if (!pt_layered_has_clearcoat(material)) {
+    if (!pt_layered_has_transport(material)) {
         return sample_brdf(n, view, base_color, roughness, metallic);
+    }
+    if (!pt_layered_has_clearcoat(material)) {
+        return pt_sample_layered_base(
+            n, view, base_color, roughness, metallic, material,
+        );
     }
     var out: BrdfSample;
     out.valid = false;
@@ -310,10 +517,12 @@ fn pt_sample_layered_brdf(
     if (ndv <= 0.0) {
         return out;
     }
-    let base_f0 = mix(vec3<f32>(0.04), base_color, metallic);
-    let base_f = fresnel_schlick3(ndv, base_f0);
+    let base_f = pt_layered_base_fresnel(ndv, base_color, metallic, material);
     let base_specular_weight = (base_f.x + base_f.y + base_f.z) / 3.0;
-    let diffuse_weight = (1.0 - base_specular_weight) * (1.0 - metallic);
+    var diffuse_weight = (1.0 - base_specular_weight) * (1.0 - metallic);
+    if (pt_layered_has_specular_ior(material)) {
+        diffuse_weight = pt_dielectric_transmission(ndv, material) * (1.0 - metallic);
+    }
     let clearcoat_weight = pt_clearcoat_fresnel(ndv, material);
     let clearcoat_probability = clearcoat_weight
         / (base_specular_weight + diffuse_weight + clearcoat_weight + 1e-6);
@@ -347,7 +556,9 @@ fn pt_sample_layered_brdf(
         return out;
     }
 
-    out = sample_brdf(n, view, base_color, roughness, metallic);
+    out = pt_sample_layered_base(
+        n, view, base_color, roughness, metallic, material,
+    );
     if (!out.valid) {
         return out;
     }
@@ -371,7 +582,7 @@ fn replace_once(source: &mut String, needle: &str, replacement: &str) {
     *source = source.replacen(needle, replacement, 1);
 }
 
-fn clearcoat_kernel_variant(base: &str) -> String {
+fn layered_kernel_variant(base: &str) -> String {
     let mut source = base.to_owned();
     replace_once(
         &mut source,
@@ -382,7 +593,7 @@ fn clearcoat_kernel_variant(base: &str) -> String {
         &mut source,
         "    let use_restir = u.ext.w == 1u && u.cfg.x >= 2.0;",
         "    let use_restir = u.ext.w == 1u && u.cfg.x >= 2.0\n        \
-         && !pt_layered_has_clearcoat(layered_cur);",
+         && !pt_layered_has_transport(layered_cur);",
     );
     replace_once(
         &mut source,
@@ -442,7 +653,7 @@ impl Renderer {
         self.pt_layered_records
             .iter()
             .copied()
-            .any(PtLayeredMaterialCpu::has_clearcoat)
+            .any(PtLayeredMaterialCpu::has_qualified_transport)
     }
 
     pub(super) fn set_pt_layered_records(
@@ -493,7 +704,7 @@ impl Renderer {
                     .is_some_and(|view| (6..=19).contains(&view));
             let fault = std::env::var("BLOOM_PT_TEST_FAULT").ok();
             let base_kernel = pt_kernel_variant(query_diagnostics);
-            let layered_kernel = clearcoat_kernel_variant(base_kernel.as_ref());
+            let layered_kernel = layered_kernel_variant(base_kernel.as_ref());
             let source = format!(
                 "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
@@ -501,7 +712,7 @@ impl Renderer {
                 layered_kernel,
                 texture_variant(self.pt_texture_arrays_enabled),
                 PT_LAYERED_BINDINGS_WGSL,
-                PT_LAYERED_CLEARCOAT_WGSL,
+                PT_LAYERED_TRANSPORT_WGSL,
             );
             let shader = self
                 .device
@@ -655,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn only_nonzero_qualified_clearcoat_selects_layered_transport() {
+    fn only_qualified_lobes_select_layered_transport() {
         let sheen = crate::models::MaterialLayeredPbr::from_authoring_factors(
             crate::models::MaterialLayeredPbr::SHEEN_LOBE,
             0.0,
@@ -690,8 +901,51 @@ mod tests {
             100.0,
             400.0,
         );
-        assert!(!PtLayeredMaterialCpu::from_material(sheen).has_clearcoat());
-        assert!(PtLayeredMaterialCpu::from_material(clearcoat).has_clearcoat());
+        let specular = crate::models::MaterialLayeredPbr::from_authoring_factors(
+            crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE,
+            0.0,
+            0.0,
+            1.0,
+            0.7,
+            [0.8, 0.6, 0.4],
+            1.8,
+            [0.0; 3],
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.3,
+            100.0,
+            400.0,
+        );
+        let texture = crate::models::MaterialTextureBinding {
+            source_texture_index: 1,
+            source_image_index: 2,
+            runtime_texture_idx: Some(3),
+            transform: Default::default(),
+        };
+        let textured = crate::models::MaterialLayeredPbr {
+            clearcoat_authored: true,
+            clearcoat_factor: 0.8,
+            clearcoat_texture: Some(texture),
+            specular_authored: true,
+            specular_factor: 0.7,
+            specular_texture: Some(texture),
+            ..Default::default()
+        };
+        let sheen = PtLayeredMaterialCpu::from_material(sheen);
+        let clearcoat = PtLayeredMaterialCpu::from_material(clearcoat);
+        let specular = PtLayeredMaterialCpu::from_material(specular);
+        let textured = PtLayeredMaterialCpu::from_material(textured);
+        assert!(!sheen.has_qualified_transport());
+        assert!(clearcoat.has_clearcoat() && clearcoat.has_qualified_transport());
+        assert!(specular.has_specular_ior() && specular.has_qualified_transport());
+        assert!(textured.active() && !textured.has_qualified_transport());
+        assert_eq!(
+            textured.header[2],
+            crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
+                | crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE
+        );
     }
 
     #[test]
@@ -701,10 +955,10 @@ mod tests {
     }
 
     #[test]
-    fn clearcoat_specialization_rewrites_every_transport_vertex() {
+    fn layered_specialization_rewrites_every_transport_vertex() {
         for diagnostics in [false, true] {
             let base = pt_kernel_variant(diagnostics);
-            let specialized = clearcoat_kernel_variant(base.as_ref());
+            let specialized = layered_kernel_variant(base.as_ref());
             assert!(specialized.contains("var layered_cur = pt_layered_primary_material(p0);"));
             assert_eq!(specialized.matches("pt_sample_layered_brdf(").count(), 1);
             assert_eq!(

@@ -632,7 +632,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
 }
 
 #[test]
-fn layered_path_tracing_clearcoat_is_isolated_and_energy_bounded() {
+fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     fn render_variant(
         layered: Option<MaterialLayeredPbr>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
@@ -668,11 +668,43 @@ fn layered_path_tracing_clearcoat_is_isolated_and_energy_bounded() {
             / (rgba.len() / 4) as f64
     }
 
+    fn assert_transport_response(label: &str, base: &[u8], transported: &[u8]) {
+        let response = calculate_diff_metrics(base, transported, W, H);
+        let changed_pixels = base
+            .chunks_exact(4)
+            .zip(transported.chunks_exact(4))
+            .filter(|(base, transported)| {
+                (0..3)
+                    .map(|channel| base[channel].abs_diff(transported[channel]) as u32)
+                    .sum::<u32>()
+                    >= 3
+            })
+            .count();
+        let changed_fraction = changed_pixels as f64 / (W * H) as f64;
+        assert!(
+            response.mean_rgb >= 0.05 && changed_fraction >= 0.002,
+            "{label} did not produce a visible transport response: \
+             metrics={response:?}, changed_fraction={changed_fraction:.6}"
+        );
+
+        // A layered interface redistributes energy; it must not behave as a
+        // second unattenuated BRDF. This display-space guard complements the
+        // CPU white-furnace oracle and catches catastrophic GPU energy gain
+        // without over-constraining a legitimate sharp highlight.
+        let base_luminance = mean_display_luminance(base);
+        let transported_luminance = mean_display_luminance(transported);
+        assert!(
+            transported_luminance <= base_luminance * 1.10 + 0.25,
+            "{label} created unbounded display energy: \
+             base={base_luminance:.4}, transported={transported_luminance:.4}"
+        );
+    }
+
     let _guard = lock_rt_goldens();
     let Some((base, base_paths)) = render_variant(None).expect("base PT variant initializes")
     else {
         skip_rt_golden(
-            "layered_path_tracing_clearcoat_is_isolated_and_energy_bounded",
+            "layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded",
             "no-non-cpu-ray-query-adapter",
         );
         return;
@@ -693,6 +725,29 @@ fn layered_path_tracing_clearcoat_is_isolated_and_energy_bounded() {
     }))
     .expect("clearcoat PT variant initializes")
     .expect("same ray-query adapter remains available");
+    let (specular_ior, specular_ior_paths) = render_variant(Some(MaterialLayeredPbr {
+        specular_authored: true,
+        specular_factor: 0.8,
+        specular_color_factor: [1.2, 0.6, 0.3],
+        ior_authored: true,
+        ior: 2.0,
+        ..Default::default()
+    }))
+    .expect("specular/IOR PT variant initializes")
+    .expect("same ray-query adapter remains available");
+    let (combined, combined_paths) = render_variant(Some(MaterialLayeredPbr {
+        clearcoat_authored: true,
+        clearcoat_factor: 0.7,
+        clearcoat_roughness_factor: 0.16,
+        specular_authored: true,
+        specular_factor: 0.8,
+        specular_color_factor: [1.2, 0.6, 0.3],
+        ior_authored: true,
+        ior: 2.0,
+        ..Default::default()
+    }))
+    .expect("combined clearcoat/specular PT variant initializes")
+    .expect("same ray-query adapter remains available");
 
     assert!(
         base == neutral,
@@ -706,34 +761,12 @@ fn layered_path_tracing_clearcoat_is_isolated_and_energy_bounded() {
     assert!(neutral_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
     assert!(clearcoat_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(clearcoat_paths.contains("\"path_tracing_active_instance_count\":1"));
+    assert!(specular_ior_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(specular_ior_paths.contains("\"path_tracing_active_instance_count\":1"));
+    assert!(combined_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(combined_paths.contains("\"path_tracing_active_instance_count\":1"));
 
-    let response = calculate_diff_metrics(&base, &clearcoat, W, H);
-    let changed_pixels = base
-        .chunks_exact(4)
-        .zip(clearcoat.chunks_exact(4))
-        .filter(|(base, clearcoat)| {
-            (0..3)
-                .map(|channel| base[channel].abs_diff(clearcoat[channel]) as u32)
-                .sum::<u32>()
-                >= 3
-        })
-        .count();
-    let changed_fraction = changed_pixels as f64 / (W * H) as f64;
-    assert!(
-        response.mean_rgb >= 0.05 && changed_fraction >= 0.002,
-        "clearcoat did not produce a visible transport response: \
-         metrics={response:?}, changed_fraction={changed_fraction:.6}"
-    );
-
-    // The physical top interface redistributes energy; it must not behave as
-    // a second unattenuated BRDF. This display-space guard complements the
-    // CPU reference white-furnace oracle and catches catastrophic GPU energy
-    // gain without over-constraining a legitimate sharp highlight.
-    let base_luminance = mean_display_luminance(&base);
-    let clearcoat_luminance = mean_display_luminance(&clearcoat);
-    assert!(
-        clearcoat_luminance <= base_luminance * 1.10 + 0.25,
-        "clearcoat created unbounded display energy: \
-         base={base_luminance:.4}, clearcoat={clearcoat_luminance:.4}"
-    );
+    assert_transport_response("clearcoat", &base, &clearcoat);
+    assert_transport_response("specular/IOR", &base, &specular_ior);
+    assert_transport_response("combined clearcoat/specular", &base, &combined);
 }
