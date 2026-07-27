@@ -82,7 +82,7 @@ native/               Rust implementations (one crate per platform)
   ios/                Metal + UIKit + Core Audio
   tvos/               Metal + UIKit + GCController
   windows/            DirectX 12 + Win32 + WASAPI
-  linux/              Vulkan/OpenGL + X11 + PulseAudio
+  linux/              Vulkan/OpenGL + X11 + ALSA
   android/            Vulkan/OpenGL ES + NativeActivity + AAudio
   web/                WebGPU/WebGL + Canvas + Web Audio API (WASM via wasm-pack)
   visionos/           Metal + UIKit-style shell (wgpu; iOS/tvOS-family port)

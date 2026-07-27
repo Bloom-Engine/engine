@@ -17,6 +17,9 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_env_clear_from_hdr(_p0: i64) {
 }
+#[no_mangle] pub extern "C" fn bloom_is_key_repeated(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_get_mouse_x() -> f64 {
     0.0
 }
