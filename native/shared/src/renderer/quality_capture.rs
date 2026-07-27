@@ -550,6 +550,10 @@ impl Renderer {
         });
         out.push_str(",\"exposure_index\":");
         out.push_str(&self.exposure_current_idx.to_string());
+        out.push_str(",\"pt_samples\":");
+        out.push_str(&self.pt_accum_count.to_string());
+        out.push_str(",\"pt_index\":");
+        out.push_str(&self.pt_accum_idx.to_string());
         out.push('}');
         out.push_str(",\"transparent_gi\":{");
         out.push_str("\"enabled\":");

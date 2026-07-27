@@ -264,3 +264,31 @@ fn exposure_history_seeds_each_enable_epoch_without_advancing_while_off() {
         .quality_runtime_paths_json()
         .contains("\"exposure_valid\":true,\"exposure_index\":1"));
 }
+
+#[test]
+fn path_tracing_mode_transitions_reset_incompatible_history() {
+    let _rt_guard = lock_rt_goldens();
+    let (mut eng, _) = match try_engine_rt() {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            skip_rt_golden("pt_history_lifetime", "no-non-cpu-ray-query-adapter");
+            return;
+        }
+        Err(err) => panic!("{err}"),
+    };
+    build_pt_scene(&mut eng);
+
+    eng.renderer.set_path_tracing(2);
+    let _ = render(&mut eng, 1, draw_pt_static_frame);
+    assert!(eng.renderer.path_tracing_sample_count() > 0);
+
+    eng.renderer.set_path_tracing(1);
+    assert_eq!(eng.renderer.path_tracing_sample_count(), 0);
+    assert!(eng
+        .renderer
+        .quality_runtime_paths_json()
+        .contains("\"pt_samples\":0,\"pt_index\":0"));
+
+    eng.renderer.set_path_tracing(0);
+    assert_eq!(eng.renderer.path_tracing_sample_count(), 0);
+}

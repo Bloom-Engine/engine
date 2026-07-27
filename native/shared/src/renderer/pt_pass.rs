@@ -13,6 +13,7 @@ impl Renderer {
         let mode = mode.min(2);
         if self.pt_mode != mode {
             self.pt_mode = mode;
+            self.reset_path_tracing_history(0);
             self.ssr_history_idx = 0;
             self.ssr_history_valid = false;
             self.probe_history_idx = 0;

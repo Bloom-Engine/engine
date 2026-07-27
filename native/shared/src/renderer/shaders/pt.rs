@@ -1508,26 +1508,31 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             var seed_m2 = 0.0;
             var seed_n = 0.0;
             var seed_w = 0.0;
-            // 7x7: under TRANSLATION a whole COLUMN of texels streams in per
-            // frame (rotation only trickles a few px), so a 5x5 often found
-            // nothing but fellow newborns and the band stayed raw.
-            for (var by = -3; by <= 3; by = by + 1) {
-                for (var bx = -3; bx <= 3; bx = bx + 1) {
-                    if (bx == 0 && by == 0) { continue; }
-                    let q = vec2<i32>(i32(gid.x) + bx, i32(gid.y) + by);
-                    if (q.x < 0 || q.y < 0 || q.x >= i32(u.size.x) || q.y >= i32(u.size.y)) {
-                        continue;
+            // A global reset leaves old bytes allocated, but size.w = 0
+            // makes them invalid. Do not let neighbour seeding resurrect
+            // those moments after a mode toggle, camera cut, or seed change.
+            if (u.size.w > 0u) {
+                // 7x7: under TRANSLATION a whole COLUMN of texels streams in
+                // per frame (rotation only trickles a few px), so a 5x5 often
+                // found nothing but fellow newborns and the band stayed raw.
+                for (var by = -3; by <= 3; by = by + 1) {
+                    for (var bx = -3; bx <= 3; bx = bx + 1) {
+                        if (bx == 0 && by == 0) { continue; }
+                        let q = vec2<i32>(i32(gid.x) + bx, i32(gid.y) + by);
+                        if (q.x < 0 || q.y < 0 || q.x >= i32(u.size.x) || q.y >= i32(u.size.y)) {
+                            continue;
+                        }
+                        let qidx = u32(q.y) * u.size.x + u32(q.x);
+                        let m = moments[qidx];
+                        if (m.w >= 0.9999999 || m.z < 4.0) { continue; }
+                        if (abs(lin_depth(m.w) - zl_here) > btol) { continue; }
+                        let wt = m.z;
+                        seed_rgb += accum[qidx].rgb * wt;
+                        seed_m1 += m.x * wt;
+                        seed_m2 += m.y * wt;
+                        seed_n += m.z * wt;
+                        seed_w += wt;
                     }
-                    let qidx = u32(q.y) * u.size.x + u32(q.x);
-                    let m = moments[qidx];
-                    if (m.w >= 0.9999999 || m.z < 4.0) { continue; }
-                    if (abs(lin_depth(m.w) - zl_here) > btol) { continue; }
-                    let wt = m.z;
-                    seed_rgb += accum[qidx].rgb * wt;
-                    seed_m1 += m.x * wt;
-                    seed_m2 += m.y * wt;
-                    seed_n += m.z * wt;
-                    seed_w += wt;
                 }
             }
             if (seed_w > 0.0) {

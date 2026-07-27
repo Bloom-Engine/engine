@@ -99,8 +99,23 @@ enable epoch:
 
 Telemetry exposes `temporal_history.exposure_valid` and `exposure_index`.
 
+## Path-tracing implementation
+
+PT history validity remains the path tracer's own sample count, which the
+kernel already receives as `size.w`:
+
+- every off/progressive/realtime mode transition resets the sample count,
+  ping-pong index, deterministic sequence, and ownership;
+- a zero sample count suppresses reprojection and now also suppresses
+  disocclusion neighbor seeding, so retained buffer bytes cannot resurrect
+  history after a toggle, camera cut, seed change, or diagnostic reset;
+- buffers are retained when compatible and recreated only when trace-grid size
+  changes, preserving the established steady-state memory and pass cost.
+
+Telemetry exposes `temporal_history.pt_samples` and `pt_index`.
+
 ## Remaining #135 work
 
-The next slices should give PT and any future temporal effect the same explicit
-lifetime rules, then add camera-cut/FOV-change resets, per-pixel rejection
-diagnostics, and the sequence-based motion corpus.
+The next slice should add the common camera-cut/FOV-change reset API, then
+continue with per-pixel rejection diagnostics and the sequence-based motion
+corpus.

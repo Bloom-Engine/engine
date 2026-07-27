@@ -51,3 +51,18 @@ fn base_transport_uses_bounded_reciprocal_layered_contract() {
     assert!(production.contains("return diffuse + spec;"));
     assert!(!production.contains("return alb * lit + spec;"));
 }
+
+#[test]
+fn zero_sample_count_cannot_seed_from_retained_moments() {
+    let production = pt_kernel_variant(false);
+    let gate = production
+        .find("if (u.size.w > 0u) {")
+        .expect("neighbor seeding must have a global-history gate");
+    let neighbor_read = production[gate..]
+        .find("let m = moments[qidx];")
+        .expect("gate must enclose the disocclusion neighbor read");
+    let gate_end = production[gate..]
+        .find("if (seed_w > 0.0) {")
+        .expect("seed reduction follows the gated search");
+    assert!(neighbor_read < gate_end);
+}
