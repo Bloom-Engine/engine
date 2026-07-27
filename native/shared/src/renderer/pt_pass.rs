@@ -72,6 +72,7 @@ impl Renderer {
         // current renderer. Select the extra pipeline only for lobes whose
         // transport is qualified, preserving the exact base path otherwise.
         let layered_active = self.pt_layered_transport_active();
+        let layered_sheen = self.pt_layered_sheen_active();
         if layered_active {
             self.ensure_pt_layered_resources();
         }
@@ -526,7 +527,9 @@ impl Renderer {
                 timestamp_writes: ts,
             });
             pass.set_pipeline(if layered_active {
-                self.pt_layered_pipeline.as_ref().unwrap()
+                self.pt_layered_pipelines[layered_sheen as usize]
+                    .as_ref()
+                    .unwrap()
             } else {
                 self.pt_pipeline.as_ref().unwrap()
             });
@@ -535,7 +538,13 @@ impl Renderer {
                 pass.set_bind_group(1, self.pt_tex_bg.as_ref().unwrap(), &[]);
             }
             if layered_active {
-                pass.set_bind_group(2, self.pt_layered_bg.as_ref().unwrap(), &[]);
+                pass.set_bind_group(
+                    2,
+                    self.pt_layered_bgs[layered_sheen as usize]
+                        .as_ref()
+                        .unwrap(),
+                    &[],
+                );
             }
             pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
         }

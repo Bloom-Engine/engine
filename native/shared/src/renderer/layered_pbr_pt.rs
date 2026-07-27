@@ -67,6 +67,9 @@ impl PtLayeredMaterialCpu {
         if material.has_sheen() {
             mask |= crate::models::MaterialLayeredPbr::SHEEN_LOBE;
         }
+        if material.sheen_color_texture.is_some() || material.sheen_roughness_texture.is_some() {
+            texture_mask |= crate::models::MaterialLayeredPbr::SHEEN_LOBE;
+        }
         if material.has_anisotropy() {
             mask |= crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE;
         }
@@ -131,8 +134,14 @@ impl PtLayeredMaterialCpu {
             && self.header[2] & crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE == 0
     }
 
+    fn has_sheen(self) -> bool {
+        self.header[1] & crate::models::MaterialLayeredPbr::SHEEN_LOBE != 0
+            && self.header[2] & crate::models::MaterialLayeredPbr::SHEEN_LOBE == 0
+            && self.sheen[..3].iter().any(|value| *value > 0.0)
+    }
+
     fn has_qualified_transport(self) -> bool {
-        self.has_clearcoat() || self.has_specular_ior()
+        self.has_clearcoat() || self.has_specular_ior() || self.has_sheen()
     }
 }
 
@@ -203,7 +212,9 @@ fn pt_layered_has_specular_ior(material: PtLayeredMaterial) -> bool {
 }
 
 fn pt_layered_has_transport(material: PtLayeredMaterial) -> bool {
-    return pt_layered_has_clearcoat(material) || pt_layered_has_specular_ior(material);
+    return pt_layered_has_clearcoat(material)
+        || pt_layered_has_specular_ior(material)
+        || pt_layered_has_sheen(material);
 }
 
 fn pt_ior_f0(ior_value: f32) -> f32 {
@@ -343,7 +354,7 @@ fn pt_layered_nee(
     metal: f32,
     material: PtLayeredMaterial,
 ) -> vec3<f32> {
-    let undercoat = pt_layered_base_nee(
+    let undercoat = pt_layered_undercoat_nee(
         n, view, ldir, ndl, full_alb, rough, metal, material,
     );
     let half_raw = view + ldir;
@@ -507,7 +518,7 @@ fn pt_sample_layered_brdf(
         return sample_brdf(n, view, base_color, roughness, metallic);
     }
     if (!pt_layered_has_clearcoat(material)) {
-        return pt_sample_layered_base(
+        return pt_sample_layered_undercoat(
             n, view, base_color, roughness, metallic, material,
         );
     }
@@ -523,9 +534,13 @@ fn pt_sample_layered_brdf(
     if (pt_layered_has_specular_ior(material)) {
         diffuse_weight = pt_dielectric_transmission(ndv, material) * (1.0 - metallic);
     }
+    let sheen_weight = pt_layered_sheen_weight(material);
     let clearcoat_weight = pt_clearcoat_fresnel(ndv, material);
     let clearcoat_probability = clearcoat_weight
-        / (base_specular_weight + diffuse_weight + clearcoat_weight + 1e-6);
+        / (
+            base_specular_weight + diffuse_weight + sheen_weight
+                + clearcoat_weight + 1e-6
+        );
 
     if (rand_f() < clearcoat_probability) {
         let basis = onb(n);
@@ -556,7 +571,7 @@ fn pt_sample_layered_brdf(
         return out;
     }
 
-    out = pt_sample_layered_base(
+    out = pt_sample_layered_undercoat(
         n, view, base_color, roughness, metallic, material,
     );
     if (!out.valid) {
@@ -566,6 +581,252 @@ fn pt_sample_layered_brdf(
     let attenuation = pt_clearcoat_transmission(ndv, material)
         * pt_clearcoat_transmission(n_dot_l, material);
     out.weight *= attenuation / max(1.0 - clearcoat_probability, 1e-6);
+    if (u.cfg.x >= 2.0) {
+        out.weight = min(out.weight, vec3<f32>(4.0));
+    }
+    return out;
+}
+"#;
+
+const PT_LAYERED_SHEEN_DISABLED_WGSL: &str = r#"
+fn pt_layered_has_sheen(material: PtLayeredMaterial) -> bool {
+    return false;
+}
+
+fn pt_layered_sheen_weight(material: PtLayeredMaterial) -> f32 {
+    return 0.0;
+}
+
+fn pt_layered_undercoat_nee(
+    n: vec3<f32>,
+    view: vec3<f32>,
+    ldir: vec3<f32>,
+    ndl: f32,
+    full_alb: vec3<f32>,
+    rough: f32,
+    metal: f32,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    return pt_layered_base_nee(
+        n, view, ldir, ndl, full_alb, rough, metal, material,
+    );
+}
+
+fn pt_sample_layered_undercoat(
+    n: vec3<f32>,
+    view: vec3<f32>,
+    base_color: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    material: PtLayeredMaterial,
+) -> BrdfSample {
+    return pt_sample_layered_base(
+        n, view, base_color, roughness, metallic, material,
+    );
+}
+"#;
+
+const PT_LAYERED_SHEEN_WGSL: &str = r#"
+@group(2) @binding(1)
+var pt_sheen_albedo_tex: texture_2d<f32>;
+
+fn pt_layered_has_sheen(material: PtLayeredMaterial) -> bool {
+    return material.header.x == 1u
+        && (material.header.y & 2u) != 0u
+        && (material.header.z & 2u) == 0u
+        && max(material.sheen.x, max(material.sheen.y, material.sheen.z)) > 0.0;
+}
+
+fn pt_layered_sheen_weight(material: PtLayeredMaterial) -> f32 {
+    if (!pt_layered_has_sheen(material)) {
+        return 0.0;
+    }
+    return (material.sheen.x + material.sheen.y + material.sheen.z) / 3.0;
+}
+
+fn pt_sheen_roughness(material: PtLayeredMaterial) -> f32 {
+    return max(clamp(material.sheen.w, 0.0, 1.0), 1e-3);
+}
+
+fn pt_sheen_lambda_helper(x: f32, alpha_g: f32) -> f32 {
+    let one_minus_alpha_sq = (1.0 - alpha_g) * (1.0 - alpha_g);
+    let a = mix(21.5473, 25.3245, one_minus_alpha_sq);
+    let b = mix(3.82987, 3.32435, one_minus_alpha_sq);
+    let c = mix(0.19823, 0.16801, one_minus_alpha_sq);
+    let d = mix(-1.97760, -1.27393, one_minus_alpha_sq);
+    let e = mix(-4.32054, -4.85967, one_minus_alpha_sq);
+    return a / (1.0 + b * pow(max(x, 0.0), c)) + d * x + e;
+}
+
+fn pt_sheen_lambda(cos_theta: f32, alpha_g: f32) -> f32 {
+    let cosine = clamp(abs(cos_theta), 0.0, 1.0);
+    if (cosine < 0.5) {
+        return exp(pt_sheen_lambda_helper(cosine, alpha_g));
+    }
+    return exp(
+        2.0 * pt_sheen_lambda_helper(0.5, alpha_g)
+            - pt_sheen_lambda_helper(1.0 - cosine, alpha_g),
+    );
+}
+
+fn pt_sheen_distribution(n_dot_h: f32, roughness: f32) -> f32 {
+    let alpha_g = max(roughness * roughness, 1e-6);
+    let inverse_alpha = 1.0 / alpha_g;
+    let sin2_h = max(1.0 - n_dot_h * n_dot_h, 0.0);
+    return (2.0 + inverse_alpha) * pow(sin2_h, 0.5 * inverse_alpha)
+        / 6.2831853;
+}
+
+fn pt_sheen_visibility(n_dot_l: f32, n_dot_v: f32, roughness: f32) -> f32 {
+    let alpha_g = max(roughness * roughness, 1e-6);
+    let denominator = (
+        1.0 + pt_sheen_lambda(n_dot_v, alpha_g)
+            + pt_sheen_lambda(n_dot_l, alpha_g)
+    ) * (4.0 * n_dot_v * n_dot_l);
+    return 1.0 / max(denominator, 1e-6);
+}
+
+fn pt_sheen_directional_albedo(n_dot: f32, roughness: f32) -> f32 {
+    return textureSampleLevel(
+        pt_sheen_albedo_tex,
+        card_samp,
+        vec2<f32>(clamp(n_dot, 0.0, 1.0), clamp(roughness, 0.0, 1.0)),
+        0.0,
+    ).r;
+}
+
+fn pt_sheen_scale(
+    material: PtLayeredMaterial,
+    n_dot_v: f32,
+    n_dot_l: f32,
+) -> f32 {
+    let maximum_color = max(
+        material.sheen.x, max(material.sheen.y, material.sheen.z),
+    );
+    let view_albedo = pt_sheen_directional_albedo(
+        n_dot_v, pt_sheen_roughness(material),
+    );
+    let light_albedo = pt_sheen_directional_albedo(
+        n_dot_l, pt_sheen_roughness(material),
+    );
+    return clamp(
+        1.0 - maximum_color * max(view_albedo, light_albedo), 0.0, 1.0,
+    );
+}
+
+fn pt_layered_undercoat_nee(
+    n: vec3<f32>,
+    view: vec3<f32>,
+    ldir: vec3<f32>,
+    ndl: f32,
+    full_alb: vec3<f32>,
+    rough: f32,
+    metal: f32,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    let base = pt_layered_base_nee(
+        n, view, ldir, ndl, full_alb, rough, metal, material,
+    );
+    if (!pt_layered_has_sheen(material)) {
+        return base;
+    }
+    let half_raw = view + ldir;
+    if (dot(half_raw, half_raw) <= 1e-8) {
+        return base;
+    }
+    let half = normalize(half_raw);
+    let n_dot_v = max(dot(n, view), 1e-4);
+    let n_dot_h = max(dot(n, half), 0.0);
+    let roughness = pt_sheen_roughness(material);
+    let sheen = material.sheen.xyz
+        * pt_sheen_distribution(n_dot_h, roughness)
+        * pt_sheen_visibility(ndl, n_dot_v, roughness) * ndl;
+    return base * pt_sheen_scale(material, n_dot_v, ndl) + sheen;
+}
+
+fn pt_sample_charlie_half(
+    perceptual_roughness: f32,
+    sample: vec2<f32>,
+) -> vec3<f32> {
+    let alpha = max(perceptual_roughness, 1e-3);
+    let alpha_g = alpha * alpha;
+    let sin_theta = pow(sample.x, alpha_g / (2.0 * alpha_g + 1.0));
+    let cos_theta = sqrt(max(0.0, 1.0 - sin_theta * sin_theta));
+    let phi = 6.2831853 * sample.y;
+    return vec3<f32>(
+        sin_theta * cos(phi), sin_theta * sin(phi), cos_theta,
+    );
+}
+
+fn pt_sample_layered_undercoat(
+    n: vec3<f32>,
+    view: vec3<f32>,
+    base_color: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    material: PtLayeredMaterial,
+) -> BrdfSample {
+    if (!pt_layered_has_sheen(material)) {
+        return pt_sample_layered_base(
+            n, view, base_color, roughness, metallic, material,
+        );
+    }
+    var out: BrdfSample;
+    out.valid = false;
+    let n_dot_v = max(dot(n, view), 0.0);
+    if (n_dot_v <= 0.0) {
+        return out;
+    }
+    let base_f = pt_layered_base_fresnel(
+        n_dot_v, base_color, metallic, material,
+    );
+    let base_specular_weight = (base_f.x + base_f.y + base_f.z) / 3.0;
+    var diffuse_weight = (1.0 - base_specular_weight) * (1.0 - metallic);
+    if (pt_layered_has_specular_ior(material)) {
+        diffuse_weight = pt_dielectric_transmission(n_dot_v, material)
+            * (1.0 - metallic);
+    }
+    let sheen_weight = pt_layered_sheen_weight(material);
+    let sheen_probability = sheen_weight
+        / (base_specular_weight + diffuse_weight + sheen_weight + 1e-6);
+    if (rand_f() < sheen_probability) {
+        let basis = onb(n);
+        let view_tangent = vec3<f32>(
+            dot(view, basis[0]), dot(view, basis[1]), dot(view, n),
+        );
+        let half_tangent = pt_sample_charlie_half(
+            pt_sheen_roughness(material), rand_2f(),
+        );
+        let v_dot_h = max(dot(view_tangent, half_tangent), 0.0);
+        if (v_dot_h <= 0.0 || half_tangent.z <= 0.0) {
+            return out;
+        }
+        let light_tangent = reflect(-view_tangent, half_tangent);
+        if (light_tangent.z <= 0.0) {
+            return out;
+        }
+        let visibility = pt_sheen_visibility(
+            light_tangent.z, n_dot_v, pt_sheen_roughness(material),
+        );
+        out.dir = basis * light_tangent;
+        out.weight = material.sheen.xyz * visibility * light_tangent.z
+            * 4.0 * v_dot_h
+            / max(half_tangent.z * sheen_probability, 1e-6);
+        if (u.cfg.x >= 2.0) {
+            out.weight = min(out.weight, vec3<f32>(4.0));
+        }
+        out.valid = true;
+        return out;
+    }
+    out = pt_sample_layered_base(
+        n, view, base_color, roughness, metallic, material,
+    );
+    if (!out.valid) {
+        return out;
+    }
+    let n_dot_l = max(dot(n, out.dir), 0.0);
+    out.weight *= pt_sheen_scale(material, n_dot_v, n_dot_l)
+        / max(1.0 - sheen_probability, 1e-6);
     if (u.cfg.x >= 2.0) {
         out.weight = min(out.weight, vec3<f32>(4.0));
     }
@@ -656,6 +917,13 @@ impl Renderer {
             .any(PtLayeredMaterialCpu::has_qualified_transport)
     }
 
+    pub(super) fn pt_layered_sheen_active(&self) -> bool {
+        self.pt_layered_records
+            .iter()
+            .copied()
+            .any(PtLayeredMaterialCpu::has_sheen)
+    }
+
     pub(super) fn set_pt_layered_records(
         &mut self,
         records: Option<Vec<PtLayeredMaterialCpu>>,
@@ -677,24 +945,46 @@ impl Renderer {
         if self.pt_layered_records.is_empty() {
             return;
         }
-        if self.pt_layered_layout.is_none() {
-            self.pt_layered_layout = Some(self.device.create_bind_group_layout(
+        let sheen = self.pt_layered_sheen_active();
+        let variant = sheen as usize;
+        if sheen {
+            self.ensure_scene_sheen_albedo_lut();
+        }
+        if self.pt_layered_layouts[variant].is_none() {
+            let mut entries = vec![wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(PT_LAYERED_RECORD_BYTES),
+                },
+                count: None,
+            }];
+            if sheen {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                });
+            }
+            self.pt_layered_layouts[variant] = Some(self.device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
-                    label: Some("pt_layered_layout"),
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: std::num::NonZeroU64::new(PT_LAYERED_RECORD_BYTES),
-                        },
-                        count: None,
-                    }],
+                    label: Some(if sheen {
+                        "pt_layered_sheen_layout"
+                    } else {
+                        "pt_layered_layout"
+                    }),
+                    entries: &entries,
                 },
             ));
         }
-        if self.pt_layered_pipeline.is_none() {
+        if self.pt_layered_pipelines[variant].is_none() {
             let query_diagnostics = std::env::var("BLOOM_GOLDEN_DIAGNOSTICS")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
@@ -706,35 +996,52 @@ impl Renderer {
             let base_kernel = pt_kernel_variant(query_diagnostics);
             let layered_kernel = layered_kernel_variant(base_kernel.as_ref());
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
                 pt_fault_constants(fault.as_deref()),
                 layered_kernel,
                 texture_variant(self.pt_texture_arrays_enabled),
                 PT_LAYERED_BINDINGS_WGSL,
                 PT_LAYERED_TRANSPORT_WGSL,
+                if sheen {
+                    PT_LAYERED_SHEEN_WGSL
+                } else {
+                    PT_LAYERED_SHEEN_DISABLED_WGSL
+                },
             );
             let shader = self
                 .device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("pt_layered_shader"),
+                    label: Some(if sheen {
+                        "pt_layered_sheen_shader"
+                    } else {
+                        "pt_layered_shader"
+                    }),
                     source: wgpu::ShaderSource::Wgsl(source.into()),
                 });
             let groups = [
                 self.pt_layout.as_ref(),
                 self.pt_tex_layout.as_ref(),
-                self.pt_layered_layout.as_ref(),
+                self.pt_layered_layouts[variant].as_ref(),
             ];
             let pipeline_layout =
                 self.device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some("pt_layered_pipeline_layout"),
+                        label: Some(if sheen {
+                            "pt_layered_sheen_pipeline_layout"
+                        } else {
+                            "pt_layered_pipeline_layout"
+                        }),
                         bind_group_layouts: &groups,
                         immediate_size: 0,
                     });
-            self.pt_layered_pipeline = Some(self.device.create_compute_pipeline(
+            self.pt_layered_pipelines[variant] = Some(self.device.create_compute_pipeline(
                 &wgpu::ComputePipelineDescriptor {
-                    label: Some("pt_layered_pipeline"),
+                    label: Some(if sheen {
+                        "pt_layered_sheen_pipeline"
+                    } else {
+                        "pt_layered_pipeline"
+                    }),
                     layout: Some(&pipeline_layout),
                     module: &shader,
                     entry_point: Some("cs_main"),
@@ -758,7 +1065,7 @@ impl Renderer {
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }));
-            self.pt_layered_bg = None;
+            self.pt_layered_bgs = [None, None];
             self.pt_layered_dirty = true;
         }
         if self.pt_layered_dirty {
@@ -769,21 +1076,33 @@ impl Renderer {
             );
             self.pt_layered_dirty = false;
         }
-        if self.pt_layered_bg.is_none() {
-            self.pt_layered_bg = Some(
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("pt_layered_bg"),
-                    layout: self.pt_layered_layout.as_ref().unwrap(),
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self
-                            .pt_layered_instance_buffer
-                            .as_ref()
-                            .unwrap()
-                            .as_entire_binding(),
-                    }],
-                }),
-            );
+        if self.pt_layered_bgs[variant].is_none() {
+            let mut entries = vec![wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self
+                    .pt_layered_instance_buffer
+                    .as_ref()
+                    .unwrap()
+                    .as_entire_binding(),
+            }];
+            if sheen {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(
+                        &self.scene_sheen_albedo_lut.as_ref().unwrap().view,
+                    ),
+                });
+            }
+            self.pt_layered_bgs[variant] =
+                Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(if sheen {
+                        "pt_layered_sheen_bg"
+                    } else {
+                        "pt_layered_bg"
+                    }),
+                    layout: self.pt_layered_layouts[variant].as_ref().unwrap(),
+                    entries: &entries,
+                }));
         }
     }
 }
@@ -918,6 +1237,23 @@ mod tests {
             100.0,
             400.0,
         );
+        let anisotropy = crate::models::MaterialLayeredPbr::from_authoring_factors(
+            crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            [1.0; 3],
+            1.5,
+            [0.0; 3],
+            0.0,
+            0.6,
+            0.3,
+            0.0,
+            1.3,
+            100.0,
+            400.0,
+        );
         let texture = crate::models::MaterialTextureBinding {
             source_texture_index: 1,
             source_image_index: 2,
@@ -931,26 +1267,34 @@ mod tests {
             specular_authored: true,
             specular_factor: 0.7,
             specular_texture: Some(texture),
+            sheen_authored: true,
+            sheen_color_factor: [0.3, 0.1, 0.05],
+            sheen_color_texture: Some(texture),
             ..Default::default()
         };
         let sheen = PtLayeredMaterialCpu::from_material(sheen);
         let clearcoat = PtLayeredMaterialCpu::from_material(clearcoat);
         let specular = PtLayeredMaterialCpu::from_material(specular);
+        let anisotropy = PtLayeredMaterialCpu::from_material(anisotropy);
         let textured = PtLayeredMaterialCpu::from_material(textured);
-        assert!(!sheen.has_qualified_transport());
+        assert!(sheen.has_sheen() && sheen.has_qualified_transport());
         assert!(clearcoat.has_clearcoat() && clearcoat.has_qualified_transport());
         assert!(specular.has_specular_ior() && specular.has_qualified_transport());
+        assert!(!anisotropy.has_qualified_transport());
         assert!(textured.active() && !textured.has_qualified_transport());
         assert_eq!(
             textured.header[2],
             crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
                 | crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE
+                | crate::models::MaterialLayeredPbr::SHEEN_LOBE
         );
     }
 
     #[test]
     fn specialization_uses_separate_group_without_touching_base_kernel() {
         assert!(PT_LAYERED_BINDINGS_WGSL.contains("@group(2) @binding(0)"));
+        assert!(!PT_LAYERED_SHEEN_DISABLED_WGSL.contains("@binding(1)"));
+        assert!(PT_LAYERED_SHEEN_WGSL.contains("@group(2) @binding(1)"));
         assert!(!pt_kernel_variant(false).contains("pt_layered_materials"));
     }
 

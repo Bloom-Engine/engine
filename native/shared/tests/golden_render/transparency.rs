@@ -710,9 +710,9 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         return;
     };
     let (neutral, neutral_paths) = render_variant(Some(MaterialLayeredPbr {
-        sheen_authored: true,
-        sheen_color_factor: [0.3, 0.1, 0.05],
-        sheen_roughness_factor: 0.4,
+        anisotropy_authored: true,
+        anisotropy_strength: 0.6,
+        anisotropy_rotation: 0.3,
         ..Default::default()
     }))
     .expect("neutral layered PT variant initializes")
@@ -735,6 +735,14 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     }))
     .expect("specular/IOR PT variant initializes")
     .expect("same ray-query adapter remains available");
+    let (sheen, sheen_paths) = render_variant(Some(MaterialLayeredPbr {
+        sheen_authored: true,
+        sheen_color_factor: [0.45, 0.12, 0.04],
+        sheen_roughness_factor: 0.4,
+        ..Default::default()
+    }))
+    .expect("sheen PT variant initializes")
+    .expect("same ray-query adapter remains available");
     let (combined, combined_paths) = render_variant(Some(MaterialLayeredPbr {
         clearcoat_authored: true,
         clearcoat_factor: 0.7,
@@ -744,6 +752,9 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         specular_color_factor: [1.2, 0.6, 0.3],
         ior_authored: true,
         ior: 2.0,
+        sheen_authored: true,
+        sheen_color_factor: [0.35, 0.1, 0.04],
+        sheen_roughness_factor: 0.4,
         ..Default::default()
     }))
     .expect("combined clearcoat/specular PT variant initializes")
@@ -754,19 +765,30 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         "an unqualified layered lobe changed PT output before its transport landed"
     );
     assert!(base_paths.contains("\"path_tracing_specialization_initialized\":false"));
+    assert!(base_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
     assert!(base_paths.contains("\"path_tracing_active_instance_count\":0"));
     assert!(base_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
     assert!(neutral_paths.contains("\"path_tracing_specialization_initialized\":false"));
     assert!(neutral_paths.contains("\"path_tracing_active_instance_count\":1"));
     assert!(neutral_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
     assert!(clearcoat_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(clearcoat_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
+    assert!(clearcoat_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(clearcoat_paths.contains("\"path_tracing_active_instance_count\":1"));
     assert!(specular_ior_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(specular_ior_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
+    assert!(specular_ior_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(specular_ior_paths.contains("\"path_tracing_active_instance_count\":1"));
+    assert!(sheen_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(sheen_paths.contains("\"path_tracing_sheen_specialization_initialized\":true"));
+    assert!(sheen_paths.contains("\"sheen_lut_initialized\":true"));
+    assert!(sheen_paths.contains("\"path_tracing_active_instance_count\":1"));
     assert!(combined_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(combined_paths.contains("\"path_tracing_sheen_specialization_initialized\":true"));
     assert!(combined_paths.contains("\"path_tracing_active_instance_count\":1"));
 
     assert_transport_response("clearcoat", &base, &clearcoat);
     assert_transport_response("specular/IOR", &base, &specular_ior);
-    assert_transport_response("combined clearcoat/specular", &base, &combined);
+    assert_transport_response("sheen", &base, &sheen);
+    assert_transport_response("combined scalar lobes", &base, &combined);
 }

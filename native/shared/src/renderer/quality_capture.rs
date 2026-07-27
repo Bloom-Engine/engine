@@ -649,7 +649,13 @@ impl Renderer {
         out.push_str(&super::layered_pbr_scene::SHEEN_ALBEDO_LUT_BYTES.to_string());
         out.push_str(",\"layered_shared_sampler_count\":1");
         out.push_str(",\"path_tracing_specialization_initialized\":");
-        out.push_str(if self.pt_layered_pipeline.is_some() {
+        out.push_str(if self.pt_layered_pipelines.iter().any(Option::is_some) {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"path_tracing_sheen_specialization_initialized\":");
+        out.push_str(if self.pt_layered_pipelines[1].is_some() {
             "true"
         } else {
             "false"
