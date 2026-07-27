@@ -41,6 +41,13 @@ fn importance_sample_ggx(xi: vec2<f32>, n: vec3<f32>, roughness: f32) -> vec3<f3
     return normalize(t * h_local.x + b * h_local.y + n * h_local.z);
 }
 
+fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let denominator = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * denominator * denominator, 1e-7);
+}
+
 fn dir_to_uv(dir: vec3<f32>) -> vec2<f32> {
     let d = normalize(dir);
     let theta = acos(clamp(d.y, -1.0, 1.0));
@@ -82,7 +89,28 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         let l = normalize(2.0 * dot(v, h) * h - v);
         let n_dot_l = max(dot(n, l), 0.0);
         if (n_dot_l > 0.0) {
-            color += textureSampleLevel(src_tex, src_samp, dir_to_uv(l), 0.0).rgb * n_dot_l;
+            let n_dot_h = max(dot(n, h), 1e-5);
+            let h_dot_v = max(dot(h, v), 1e-5);
+            let pdf = max(distribution_ggx(n_dot_h, roughness) * n_dot_h / (4.0 * h_dot_v), 1e-6);
+            let sample_solid_angle = 1.0 / (f32(n_samples) * pdf);
+
+            // One equirectangular texel spans d_phi times the exact spherical
+            // area between its two latitude edges. Selecting the source mip
+            // whose footprint matches the importance sample integrates tiny
+            // HDR emitters instead of randomly hitting them as isolated
+            // fireflies. A one-level source view naturally clamps this to mip
+            // zero for procedural-sky bakes.
+            let sample_uv = dir_to_uv(l);
+            let source_size = vec2<f32>(textureDimensions(src_tex, 0));
+            let half_theta = 0.5 * PI / source_size.y;
+            let theta = sample_uv.y * PI;
+            let theta0 = max(theta - half_theta, 0.0);
+            let theta1 = min(theta + half_theta, PI);
+            let texel_solid_angle =
+                (2.0 * PI / source_size.x) * max(cos(theta0) - cos(theta1), 1e-8);
+            let source_lod =
+                0.5 * log2(max(sample_solid_angle / texel_solid_angle, 1.0));
+            color += textureSampleLevel(src_tex, src_samp, sample_uv, source_lod).rgb * n_dot_l;
             weight += n_dot_l;
         }
     }
@@ -140,6 +168,20 @@ fn fs_diffuse(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> 
     return vec4<f32>(color / f32(n_samples), 1.0);
 }
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environment_prefilter_shader_parses_with_pdf_lod_selection() {
+        wgpu::naga::front::wgsl::parse_str(PREFILTER_SHADER_WGSL)
+            .expect("environment prefilter WGSL must parse");
+        assert!(PREFILTER_SHADER_WGSL.contains("sample_solid_angle"));
+        assert!(PREFILTER_SHADER_WGSL.contains("texel_solid_angle"));
+        assert!(PREFILTER_SHADER_WGSL.contains("source_lod"));
+    }
+}
 
 pub(in crate::renderer) const SKY_SHADER_WGSL: &str = "
 struct SkyUniforms {

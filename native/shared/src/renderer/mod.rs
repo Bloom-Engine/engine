@@ -18,6 +18,7 @@ fn default_flat_normal_carries_no_filtered_variance() {
 
 mod alpha_coverage;
 mod draw2d;
+mod env_prefilter;
 mod final_pass;
 mod frame_graph_runtime;
 mod froxel;
@@ -10219,22 +10220,18 @@ impl Renderer {
     /// at any roughness without per-frame importance sampling.
     /// Mip 0 is the original radiance (used by the sky pass).
     pub fn load_env_from_hdr(&mut self, width: u32, height: u32, rgb_f32: &[f32]) {
+        let source_mips = env_prefilter::build_radiance_mip_chain(width, height, rgb_f32);
+        if source_mips.is_empty() {
+            return;
+        }
         let max_dim = width.max(height);
         let mip_count = ((max_dim as f32).log2().floor() as u32 + 1).min(7);
 
-        // Pack f32 RGB → packed f16 RGBA for the GPU.
-        let texel_count = (width as usize) * (height as usize);
-        let mut packed: Vec<u16> = Vec::with_capacity(texel_count * 4);
-        for px in 0..texel_count {
-            packed.push(half::f16::from_f32(rgb_f32[px * 3]).to_bits());
-            packed.push(half::f16::from_f32(rgb_f32[px * 3 + 1]).to_bits());
-            packed.push(half::f16::from_f32(rgb_f32[px * 3 + 2]).to_bits());
-            packed.push(half::f16::from_f32(1.0).to_bits());
-        }
-
-        // Source texture — single mip, holds the original radiance.
-        // We sample from this when prefiltering each output mip so a
-        // single texture isn't both read and written in the same pass.
+        // Source texture — ordinary solid-angle-weighted radiance mips. The
+        // GGX convolution selects among these according to each importance
+        // sample's PDF, which preserves tiny HDR emitters without fireflies.
+        // It remains separate because a texture cannot be sampled while one of
+        // its mip levels is also a render attachment.
         let src_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sky_env_src"),
             size: wgpu::Extent3d {
@@ -10242,7 +10239,7 @@ impl Renderer {
                 height,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count: source_mips.len() as u32,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
@@ -10251,25 +10248,27 @@ impl Renderer {
                 | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &src_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&packed),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 8),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+        for (level, mip) in source_mips.iter().enumerate() {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &src_texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&mip.rgba16),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(mip.width * 8),
+                    rows_per_image: Some(mip.height),
+                },
+                wgpu::Extent3d {
+                    width: mip.width,
+                    height: mip.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
         // Destination texture — full mip chain, RENDER_ATTACHMENT for
         // the prefilter passes plus TEXTURE_BINDING for sampling at

@@ -438,20 +438,6 @@ fn layered_secondary_uv(in: VertexOutputScene) -> vec2<f32> {
     );
     source = replace_once(
         source,
-        "    let prefiltered_env = env_sample_lod(r, roughness * max_spec_mip);",
-        r#"    // Thin-film tint makes isolated mip-0 HDR texels far more visible
-    // than ordinary dark-metal Fresnel. A one-mip floor at full factor is
-    // the minimum footprint integral needed to keep those texels from
-    // becoming colored point artifacts; fractional factors blend the bias in.
-    let layered_env_lod = max(
-        roughness * max_spec_mip,
-        layered_surface.iridescence_factor,
-    );
-    let prefiltered_env = env_sample_lod(r, layered_env_lod);"#,
-        "iridescence environment footprint",
-    );
-    source = replace_once(
-        source,
         "    let single_spec = prefiltered_env * (f0 * brdf.x + vec3<f32>(brdf.y));",
         "    let single_spec = prefiltered_env * (f0 * brdf.x + f90 * brdf.y);",
         "IBL single scatter F90",
