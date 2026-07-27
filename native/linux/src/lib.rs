@@ -92,6 +92,13 @@ mod x11_impl {
     static mut WARP_CENTER_X: i32 = 0;
     static mut WARP_CENTER_Y: i32 = 0;
     static mut RELATIVE_MODE: bool = false;
+    /// WM_PROTOCOLS / WM_DELETE_WINDOW, interned once in `create_window`.
+    /// Cached because `poll_events` compares against them every event.
+    static mut WM_PROTOCOLS: x11::xlib::Atom = 0;
+    static mut WM_DELETE_WINDOW: x11::xlib::Atom = 0;
+
+    pub fn wm_protocols_atom() -> x11::xlib::Atom { unsafe { WM_PROTOCOLS } }
+    pub fn wm_delete_window_atom() -> x11::xlib::Atom { unsafe { WM_DELETE_WINDOW } }
 
     pub fn set_fullscreen(fullscreen: bool) {
         unsafe {
@@ -183,6 +190,20 @@ mod x11_impl {
                 x11::xlib::ExposureMask | x11::xlib::KeyPressMask | x11::xlib::KeyReleaseMask |
                 x11::xlib::ButtonPressMask | x11::xlib::ButtonReleaseMask |
                 x11::xlib::PointerMotionMask | x11::xlib::StructureNotifyMask);
+
+            // Opt into the WM close protocol before mapping, so the titlebar
+            // ✕ / Alt-F4 arrives as a ClientMessage we can turn into
+            // `windowShouldClose()` instead of the WM dropping our X
+            // connection and Xlib exit(1)-ing the game mid-frame.
+            WM_PROTOCOLS = x11::xlib::XInternAtom(
+                DISPLAY, b"WM_PROTOCOLS\0".as_ptr() as *const _, 0);
+            WM_DELETE_WINDOW = x11::xlib::XInternAtom(
+                DISPLAY, b"WM_DELETE_WINDOW\0".as_ptr() as *const _, 0);
+            if WM_DELETE_WINDOW != 0 {
+                let mut protocols = [WM_DELETE_WINDOW];
+                x11::xlib::XSetWMProtocols(
+                    DISPLAY, X11_WINDOW, protocols.as_mut_ptr(), 1);
+            }
 
             if !headless {
                 x11::xlib::XMapWindow(DISPLAY, X11_WINDOW);
@@ -487,6 +508,23 @@ mod x11_impl {
                                 let log_h = ((phys_h as f64) / scale).round() as u32;
                                 eng.renderer.resize(phys_w, phys_h, log_w, log_h);
                             }
+                        }
+                    }
+                    x11::xlib::ClientMessage => {
+                        // The WM asking us to close (titlebar ✕, Alt-F4, or a
+                        // session logout). Without WM_DELETE_WINDOW in our
+                        // WM_PROTOCOLS the WM instead destroys the connection,
+                        // and Xlib's default IO-error handler calls exit(1)
+                        // from under the game — `windowShouldClose()` never
+                        // goes true, so `closeWindow()` and every shutdown
+                        // path after it (audio teardown, save-on-exit) are
+                        // skipped. Observed as:
+                        //   XIO: fatal IO error 62 (Timer expired)
+                        if event.client_message.message_type == wm_protocols_atom()
+                            && event.client_message.data.get_long(0)
+                                == wm_delete_window_atom() as i64
+                        {
+                            engine().should_close = true;
                         }
                     }
                     x11::xlib::DestroyNotify => {
