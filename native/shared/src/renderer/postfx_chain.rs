@@ -26,6 +26,15 @@ fn taa_current_weight(history_valid: bool, frame_index: u32, render_scale: f32) 
 }
 
 #[inline]
+fn exposure_update_rate(history_valid: bool, authored_rate: f32) -> f32 {
+    if history_valid {
+        authored_rate
+    } else {
+        -1.0
+    }
+}
+
+#[inline]
 fn bloom_mip_extent(width: u32, height: u32, mip_index: usize) -> (u32, u32) {
     (
         ((width / 2) >> mip_index).max(1),
@@ -261,7 +270,7 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{bloom_mip_extent, bloom_threshold, taa_current_weight};
+    use super::{bloom_mip_extent, bloom_threshold, exposure_update_rate, taa_current_weight};
 
     #[test]
     fn bloom_mip_extent_matches_half_resolution_chain_and_never_reaches_zero() {
@@ -291,6 +300,13 @@ mod tests {
         assert_eq!(taa_current_weight(true, 3, 1.0), 1.0);
         assert_eq!(taa_current_weight(true, 4, 0.5), 0.0625);
         assert_eq!(taa_current_weight(true, 4, 1.0), 0.1);
+    }
+
+    #[test]
+    fn invalid_exposure_history_seeds_once_then_keeps_authored_adaptation() {
+        assert_eq!(exposure_update_rate(false, 0.0), -1.0);
+        assert_eq!(exposure_update_rate(false, 0.05), -1.0);
+        assert_eq!(exposure_update_rate(true, 0.05), 0.05);
     }
 }
 
@@ -1063,6 +1079,28 @@ impl Renderer {
 }
 
 impl Renderer {
+    /// Toggle auto-exposure. The first enabled frame measures and seeds the
+    /// current scene instead of adapting from a value frozen while disabled.
+    pub fn set_auto_exposure(&mut self, enabled: bool) {
+        if self.auto_exposure != enabled {
+            self.auto_exposure = enabled;
+            self.exposure_current_idx = 0;
+            self.exposure_history_valid = false;
+            self.exposure_history_written = false;
+        }
+    }
+
+    /// Auto-exposure target scene key (average luminance to drive toward).
+    pub fn set_auto_exposure_key(&mut self, key: f32) {
+        self.auto_exposure_key = key.clamp(0.01, 1.0);
+    }
+
+    /// Auto-exposure smoothing rate per frame. Invalid history always seeds
+    /// once; this authored rate applies to all subsequent adaptation.
+    pub fn set_auto_exposure_rate(&mut self, rate: f32) {
+        self.auto_exposure_rate = rate.clamp(0.0, 1.0);
+    }
+
     /// Auto-exposure measure + adapt pass into the dst slot of the
     /// ping-pong exposure texture. No-op when auto_exposure is off (the
     /// composite keeps reading the stale texture, which manual_exposure
@@ -1080,7 +1118,7 @@ impl Renderer {
             let ep = ExposureParams {
                 params: [
                     self.auto_exposure_key,
-                    self.auto_exposure_rate,
+                    exposure_update_rate(self.exposure_history_valid, self.auto_exposure_rate),
                     // Wide clamp — without SSGI, Sponza's shadowed
                     // corridors have ~7× less average luma than its
                     // sunlit courtyard, so exposure needs to span
@@ -1140,6 +1178,9 @@ impl Renderer {
             pass.set_pipeline(&self.exposure_pipeline);
             pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..3, 0..1);
+            drop(pass);
+            self.exposure_history_valid = true;
+            self.exposure_history_written = true;
         }
     }
 }

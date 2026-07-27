@@ -551,6 +551,10 @@ pub struct Renderer {
     pub exposure_textures: [wgpu::Texture; 2],
     pub exposure_views: [wgpu::TextureView; 2],
     pub exposure_current_idx: usize,
+    /// True after auto-exposure wrote a value in the current enable epoch.
+    pub exposure_history_valid: bool,
+    /// Per-frame producer bit; only written exposure may advance ping-pong.
+    exposure_history_written: bool,
     pub exposure_pipeline: wgpu::RenderPipeline,
     pub exposure_layout: wgpu::BindGroupLayout,
     pub exposure_uniform_buffer: wgpu::Buffer,
@@ -7595,6 +7599,8 @@ impl Renderer {
             exposure_textures,
             exposure_views,
             exposure_current_idx: 0,
+            exposure_history_valid: false,
+            exposure_history_written: false,
             exposure_pipeline,
             exposure_layout,
             exposure_uniform_buffer,
@@ -9909,36 +9915,11 @@ impl Renderer {
         self.tonemap_kind = kind;
     }
 
-    /// Toggle auto-exposure. Off (default) = manual exposure
-    /// multiplier. On = per-frame average scene luminance drives
-    /// exposure toward `auto_exposure_key` (0.18 photography
-    /// standard). Instant adapt — no inter-frame smoothing yet,
-    /// so scene cuts pop. Fine for static or slow-motion cameras.
-    pub fn set_auto_exposure(&mut self, on: bool) {
-        self.auto_exposure = on;
-    }
-
     /// Manual exposure multiplier. Applied when auto_exposure
     /// is off. 1.0 = no change. 2.0 = twice as bright. Clamp is
     /// [0, +∞) — negative silently becomes 0.
     pub fn set_manual_exposure(&mut self, value: f32) {
         self.manual_exposure = value.max(0.0);
-    }
-
-    /// Auto-exposure target scene key (average luminance to drive
-    /// toward). Lower = darker overall, higher = brighter. 0.18
-    /// is the 18%-gray photography standard; 0.14 gives a slightly
-    /// moodier look, 0.25 a brighter one.
-    pub fn set_auto_exposure_key(&mut self, key: f32) {
-        self.auto_exposure_key = key.clamp(0.01, 1.0);
-    }
-
-    /// Auto-exposure smoothing rate per frame. 0 = no adapt (stuck
-    /// at whatever the current texture holds), 0.05 ≈ 20-frame
-    /// half-life at 60 fps (default — feels natural for camera
-    /// moves), 1 = instant (pops on scene cuts).
-    pub fn set_auto_exposure_rate(&mut self, rate: f32) {
-        self.auto_exposure_rate = rate.clamp(0.0, 1.0);
     }
 
     /// Fog color that distant geometry fades to (rgb, 0-1).
@@ -11739,6 +11720,7 @@ impl Renderer {
         self.weighted_transparency_active = false;
         self.temporal_reactive_active = false;
         self.taa_history_written = false;
+        self.exposure_history_written = false;
         // PT-6 — normally consumed by rebuild_instance_data (mem::take);
         // this clear covers frames where the accel path is skipped
         // (PT and Lumen both off) so the registry can't grow unbounded.
@@ -12492,8 +12474,13 @@ impl Renderer {
                 c.r.record_auto_exposure(c.encoder, src, dst);
             });
             bind_pass!("final_composite", |c: &mut FrameCtx2| {
-                let (_, exposure_dst) = c.exposure_idx;
-                c.r.record_final_composite_pass(c.encoder, c.profiler, c.output_view, exposure_dst);
+                let (exposure_src, exposure_dst) = c.exposure_idx;
+                let exposure_idx = if c.r.exposure_history_written {
+                    exposure_dst
+                } else {
+                    exposure_src
+                };
+                c.r.record_final_composite_pass(c.encoder, c.profiler, c.output_view, exposure_idx);
             });
             bind_pass!("overlay_2d", |c: &mut FrameCtx2| {
                 c.r.record_overlay_2d_pass(c.encoder, c.profiler, c.output_view);
@@ -12603,7 +12590,7 @@ impl Renderer {
         }
         // Swap exposure ping-pong so next frame's exposure pass
         // reads what we just wrote.
-        if self.auto_exposure {
+        if self.auto_exposure && self.exposure_history_written {
             self.exposure_current_idx = 1 - self.exposure_current_idx;
         }
     }

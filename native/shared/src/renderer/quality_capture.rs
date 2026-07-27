@@ -542,6 +542,14 @@ impl Renderer {
         } else {
             "false"
         });
+        out.push_str(",\"exposure_valid\":");
+        out.push_str(if self.exposure_history_valid {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"exposure_index\":");
+        out.push_str(&self.exposure_current_idx.to_string());
         out.push('}');
         out.push_str(",\"transparent_gi\":{");
         out.push_str("\"enabled\":");

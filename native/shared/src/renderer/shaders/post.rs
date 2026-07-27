@@ -945,7 +945,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 pub(in crate::renderer) const EXPOSURE_SHADER_WGSL: &str = "
 struct ExposureParams {
     /// x = target key value (0.18 = photography 18%-gray).
-    /// y = smoothing rate (0 = no adapt, 1 = instant).
+    /// y = smoothing rate (0 = no adapt, 1 = instant, negative = seed).
     /// z = min exposure clamp (prevents pitch-black scenes from
     ///     exploding to max brightness).
     /// w = max exposure clamp (prevents sun scenes from crushing
@@ -1029,7 +1029,8 @@ fn fs_main() -> @location(0) vec4<f32> {
     let median_luma = exp2(median_log);
 
     let key = u.params.x;
-    let rate = u.params.y;
+    let force_refresh = u.params.y < 0.0;
+    let rate = abs(u.params.y);
     let min_e = u.params.z;
     let max_e = u.params.w;
 
@@ -1042,7 +1043,9 @@ fn fs_main() -> @location(0) vec4<f32> {
     // byte-stable exposure while real lighting changes re-anchor at
     // once and adapt at the normal rate.
     var anchor = prev.g;
-    if (anchor < min_e * 0.5 || abs(raw_target - anchor) > anchor * 0.02) {
+    if (force_refresh) {
+        anchor = raw_target;
+    } else if (anchor < min_e * 0.5 || abs(raw_target - anchor) > anchor * 0.02) {
         anchor = raw_target;
     }
     // Proportional adaptation speed (flicker fix): the measurement is
@@ -1056,7 +1059,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     let rate_scale = smoothstep(0.0, 0.25, gap);
     // First frame: prev is 0; snap to target instead of crawling up.
     var smoothed = mix(prev.r, anchor, rate * rate_scale);
-    if (prev.r < min_e * 0.5) {
+    if (force_refresh || prev.r < min_e * 0.5) {
         smoothed = anchor;
     }
     return vec4<f32>(smoothed, anchor, 0.0, 1.0);

@@ -18,7 +18,11 @@ impl Renderer {
         let params = CompositeParams {
             params: [
                 self.tonemap_kind as f32,
-                if self.auto_exposure { 1.0 } else { 0.0 },
+                if self.auto_exposure && self.exposure_history_valid {
+                    1.0
+                } else {
+                    0.0
+                },
                 self.manual_exposure,
                 self.auto_exposure_key,
             ],

@@ -217,3 +217,50 @@ fn taa_history_lifetime_is_explicit_across_toggles_and_resize() {
         .quality_runtime_paths_json()
         .contains("\"taa_valid\":true"));
 }
+
+#[test]
+fn exposure_history_seeds_each_enable_epoch_without_advancing_while_off() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let draw_frame = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(13.0, 18.0, 26.0, 255.0);
+        r.begin_mode_3d(4.0, 3.0, 6.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+        r.draw_plane(0.0, 0.0, 0.0, 10.0, 10.0, 120.0, 120.0, 125.0, 255.0);
+    };
+    let advance = |eng: &mut EngineState, frames: u32| {
+        for _ in 0..frames {
+            eng.begin_frame();
+            draw_frame(eng);
+            eng.end_frame();
+        }
+    };
+
+    eng.renderer.set_auto_exposure(true);
+    assert!(eng
+        .renderer
+        .quality_runtime_paths_json()
+        .contains("\"exposure_valid\":false,\"exposure_index\":0"));
+    advance(&mut eng, 1);
+    assert!(eng
+        .renderer
+        .quality_runtime_paths_json()
+        .contains("\"exposure_valid\":true,\"exposure_index\":1"));
+
+    eng.renderer.set_auto_exposure(false);
+    advance(&mut eng, 2);
+    assert!(eng
+        .renderer
+        .quality_runtime_paths_json()
+        .contains("\"exposure_valid\":false,\"exposure_index\":0"));
+
+    eng.renderer.set_auto_exposure_rate(0.0);
+    eng.renderer.set_auto_exposure(true);
+    advance(&mut eng, 1);
+    assert!(eng
+        .renderer
+        .quality_runtime_paths_json()
+        .contains("\"exposure_valid\":true,\"exposure_index\":1"));
+}

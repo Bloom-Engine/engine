@@ -85,8 +85,22 @@ TAA/TSR now separates history validity from its Halton jitter counter:
 Telemetry exposes `temporal_history.taa_valid`, `taa_index`, and
 `taa_pt_owned`.
 
+## Auto-exposure implementation
+
+Auto-exposure now tracks whether its 1×1 history was written in the current
+enable epoch:
+
+- the first valid frame uses the reserved negative-rate seed signal, replacing
+  history from the current histogram instead of a stale disabled-era value;
+- later frames keep the authored adaptation rate exactly;
+- either toggle invalidates and resets the ping-pong;
+- the ping-pong advances only after the exposure pass writes, and a skipped
+  producer falls back to the last valid slot (or manual exposure if none).
+
+Telemetry exposes `temporal_history.exposure_valid` and `exposure_index`.
+
 ## Remaining #135 work
 
-The next slices should give PT, exposure, and any future temporal effect the
-same explicit lifetime rules, then add camera-cut/FOV-change resets, per-pixel
-rejection diagnostics, and the sequence-based motion corpus.
+The next slices should give PT and any future temporal effect the same explicit
+lifetime rules, then add camera-cut/FOV-change resets, per-pixel rejection
+diagnostics, and the sequence-based motion corpus.
