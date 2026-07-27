@@ -10,9 +10,9 @@ const PT_LAYERED_FACTOR_UV1: u32 = 1 << 16;
 const PT_LAYERED_COLOR_UV1: u32 = 1 << 17;
 
 pub(in crate::renderer) struct PtLayeredRuntimeState {
-    pub(in crate::renderer) pipelines: [Option<wgpu::ComputePipeline>; 128],
-    pub(in crate::renderer) layouts: [Option<wgpu::BindGroupLayout>; 32],
-    pub(in crate::renderer) bind_groups: [Option<wgpu::BindGroup>; 32],
+    pub(in crate::renderer) pipelines: [Option<wgpu::ComputePipeline>; 256],
+    pub(in crate::renderer) layouts: [Option<wgpu::BindGroupLayout>; 64],
+    pub(in crate::renderer) bind_groups: [Option<wgpu::BindGroup>; 64],
     pub(in crate::renderer) instance_buffer: Option<wgpu::Buffer>,
     pub(in crate::renderer) records: Vec<PtLayeredMaterialCpu>,
     pub(in crate::renderer) texture_buffer: Option<wgpu::Buffer>,
@@ -22,18 +22,21 @@ pub(in crate::renderer) struct PtLayeredRuntimeState {
     pub(in crate::renderer) clearcoat_texture_records: Vec<PtClearcoatTextureCpu>,
     pub(in crate::renderer) sheen_texture_buffer: Option<wgpu::Buffer>,
     pub(in crate::renderer) sheen_texture_records: Vec<PtSheenTextureCpu>,
+    pub(in crate::renderer) iridescence_texture_buffer: Option<wgpu::Buffer>,
+    pub(in crate::renderer) iridescence_texture_records: Vec<PtIridescenceTextureCpu>,
     pub(in crate::renderer) dirty: bool,
     pub(in crate::renderer) texture_dirty: bool,
     pub(in crate::renderer) clearcoat_texture_dirty: bool,
     pub(in crate::renderer) sheen_texture_dirty: bool,
+    pub(in crate::renderer) iridescence_texture_dirty: bool,
 }
 
 impl Default for PtLayeredRuntimeState {
     fn default() -> Self {
         Self {
             pipelines: std::array::from_fn(|_| None),
-            layouts: Default::default(),
-            bind_groups: Default::default(),
+            layouts: std::array::from_fn(|_| None),
+            bind_groups: std::array::from_fn(|_| None),
             instance_buffer: None,
             records: Vec::new(),
             texture_buffer: None,
@@ -43,10 +46,13 @@ impl Default for PtLayeredRuntimeState {
             clearcoat_texture_records: Vec::new(),
             sheen_texture_buffer: None,
             sheen_texture_records: Vec::new(),
+            iridescence_texture_buffer: None,
+            iridescence_texture_records: Vec::new(),
             dirty: false,
             texture_dirty: false,
             clearcoat_texture_dirty: false,
             sheen_texture_dirty: false,
+            iridescence_texture_dirty: false,
         }
     }
 }
@@ -178,6 +184,7 @@ pub(in crate::renderer) fn append_record(
     texture_records: &mut Option<Vec<PtLayeredTextureCpu>>,
     clearcoat_texture_records: &mut Option<Vec<PtClearcoatTextureCpu>>,
     sheen_texture_records: &mut Option<Vec<PtSheenTextureCpu>>,
+    iridescence_texture_records: &mut Option<Vec<PtIridescenceTextureCpu>>,
     instance_index: usize,
     material: crate::models::MaterialLayeredPbr,
     runtime_texture_count: usize,
@@ -230,6 +237,18 @@ pub(in crate::renderer) fn append_record(
     if let Some(sheen_texture_records) = sheen_texture_records {
         debug_assert_eq!(sheen_texture_records.len(), instance_index);
         sheen_texture_records.push(sheen_texture_record);
+    }
+
+    let iridescence_texture_record =
+        PtIridescenceTextureCpu::from_material(material, runtime_texture_count, has_secondary_uv);
+    let uses_uv1 = uses_uv1 || iridescence_texture_record.has_uv1();
+    if iridescence_texture_records.is_none() && iridescence_texture_record.active() {
+        *iridescence_texture_records =
+            Some(vec![PtIridescenceTextureCpu::default(); instance_index]);
+    }
+    if let Some(iridescence_texture_records) = iridescence_texture_records {
+        debug_assert_eq!(iridescence_texture_records.len(), instance_index);
+        iridescence_texture_records.push(iridescence_texture_record);
     }
     uses_uv1
 }
@@ -390,11 +409,13 @@ mod tests {
         let mut texture_records = None;
         let mut clearcoat_texture_records = None;
         let mut sheen_texture_records = None;
+        let mut iridescence_texture_records = None;
         append_record(
             &mut records,
             &mut texture_records,
             &mut clearcoat_texture_records,
             &mut sheen_texture_records,
+            &mut iridescence_texture_records,
             0,
             Default::default(),
             1,
@@ -405,6 +426,7 @@ mod tests {
             &mut texture_records,
             &mut clearcoat_texture_records,
             &mut sheen_texture_records,
+            &mut iridescence_texture_records,
             1,
             Default::default(),
             1,
@@ -414,6 +436,7 @@ mod tests {
         assert!(texture_records.is_none());
         assert!(clearcoat_texture_records.is_none());
         assert!(sheen_texture_records.is_none());
+        assert!(iridescence_texture_records.is_none());
 
         let layered = crate::models::MaterialLayeredPbr::from_authoring_factors(
             crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE,
@@ -437,6 +460,7 @@ mod tests {
             &mut texture_records,
             &mut clearcoat_texture_records,
             &mut sheen_texture_records,
+            &mut iridescence_texture_records,
             2,
             layered,
             1,
@@ -453,6 +477,7 @@ mod tests {
         assert!(texture_records.is_none());
         assert!(clearcoat_texture_records.is_none());
         assert!(sheen_texture_records.is_none());
+        assert!(iridescence_texture_records.is_none());
     }
 
     #[test]
@@ -509,22 +534,26 @@ mod tests {
 
     #[test]
     fn scalar_uv0_and_uv1_specializations_parse() {
-        for (textures, clearcoat_textures, sheen_textures, uv1) in [
-            (false, false, false, false),
-            (true, false, false, false),
-            (true, false, false, true),
-            (false, true, false, false),
-            (false, true, false, true),
-            (false, false, true, false),
-            (false, false, true, true),
-            (true, true, true, true),
+        for (textures, clearcoat_textures, sheen_textures, iridescence_textures, uv1) in [
+            (false, false, false, false, false),
+            (true, false, false, false, false),
+            (true, false, false, false, true),
+            (false, true, false, false, false),
+            (false, true, false, false, true),
+            (false, false, true, false, false),
+            (false, false, true, false, true),
+            (false, false, false, true, false),
+            (false, false, false, true, true),
+            (true, true, true, true, true),
         ] {
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 "const BLOOM_RAY_QUERY_NEEDS_PROCEED: bool = false;",
                 pt_fault_constants(None),
                 layered_kernel_variant(pt_kernel_variant(false).as_ref()),
-                texture_variant(textures || clearcoat_textures || sheen_textures),
+                texture_variant(
+                    textures || clearcoat_textures || sheen_textures || iridescence_textures
+                ),
                 PT_LAYERED_BINDINGS_WGSL,
                 if textures {
                     PT_LAYERED_TEXTURE_BINDINGS_WGSL
@@ -541,6 +570,11 @@ mod tests {
                 } else {
                     super::super::PT_SHEEN_TEXTURE_DISABLED_WGSL
                 },
+                if iridescence_textures {
+                    super::super::PT_IRIDESCENCE_TEXTURE_BINDINGS_WGSL
+                } else {
+                    super::super::PT_IRIDESCENCE_TEXTURE_DISABLED_WGSL
+                },
                 if uv1 {
                     PT_LAYERED_UV1_BINDINGS_WGSL
                 } else {
@@ -548,7 +582,11 @@ mod tests {
                 },
                 "const PT_HAS_SCALAR_ANISOTROPY: bool = false;",
                 PT_LAYERED_TRANSPORT_WGSL,
-                PT_LAYERED_IRIDESCENCE_DISABLED_WGSL,
+                if iridescence_textures {
+                    PT_LAYERED_IRIDESCENCE_WGSL
+                } else {
+                    PT_LAYERED_IRIDESCENCE_DISABLED_WGSL
+                },
                 if sheen_textures {
                     PT_LAYERED_SHEEN_WGSL
                 } else {
@@ -558,7 +596,8 @@ mod tests {
             wgpu::naga::front::wgsl::parse_str(&source).unwrap_or_else(|error| {
                 panic!(
                     "layered PT WGSL (specular={textures}, clearcoat={clearcoat_textures}, \
-                     sheen={sheen_textures}, uv1={uv1}) failed: {error}"
+                     sheen={sheen_textures}, iridescence={iridescence_textures}, \
+                     uv1={uv1}) failed: {error}"
                 )
             });
         }

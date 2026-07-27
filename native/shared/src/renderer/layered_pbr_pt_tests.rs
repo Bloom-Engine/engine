@@ -141,6 +141,7 @@ fn only_qualified_lobes_select_layered_transport() {
     let textured_meta = PtLayeredTextureCpu::from_material(textured_material, 4, false);
     let clearcoat_meta = PtClearcoatTextureCpu::from_material(textured_material, 4, false);
     let sheen_meta = PtSheenTextureCpu::from_material(textured_material, 4, false);
+    let iridescence_meta = PtIridescenceTextureCpu::from_material(textured_material, 4, false);
     assert!(sheen.has_sheen() && sheen.has_qualified_transport());
     assert!(clearcoat.has_clearcoat() && clearcoat.has_qualified_transport());
     assert!(specular.has_specular_ior() && specular.has_qualified_transport());
@@ -149,6 +150,7 @@ fn only_qualified_lobes_select_layered_transport() {
     assert!(textured_meta.has_specular_ior());
     assert!(clearcoat_meta.active());
     assert!(sheen_meta.active());
+    assert!(iridescence_meta.active());
     assert_eq!(
         textured.header[2],
         crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE
@@ -165,6 +167,7 @@ fn specialization_uses_separate_group_without_touching_base_kernel() {
     assert!(PT_LAYERED_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(2)"));
     assert!(PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(4)"));
     assert!(PT_SHEEN_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(5)"));
+    assert!(PT_IRIDESCENCE_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(6)"));
     assert!(!PT_LAYERED_SHEEN_DISABLED_WGSL.contains("@binding(1)"));
     assert!(PT_LAYERED_SHEEN_WGSL.contains("@group(2) @binding(1)"));
     assert!(PT_LAYERED_TRANSPORT_WGSL.contains("PT_HAS_SCALAR_ANISOTROPY"));

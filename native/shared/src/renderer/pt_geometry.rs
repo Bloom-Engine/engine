@@ -101,7 +101,7 @@ impl Renderer {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
-            self.pt_layered.bind_groups = Default::default();
+            self.pt_layered.bind_groups = std::array::from_fn(|_| None);
         }
         self.queue.write_buffer(
             self.pt_layered.uv1_buffer.as_ref().unwrap(),

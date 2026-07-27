@@ -653,6 +653,12 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
             MaterialTextureTransform,
         )>,
+        iridescence_textures: Option<(
+            &[u8],
+            &[u8],
+            MaterialTextureTransform,
+            MaterialTextureTransform,
+        )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
         let Some((mut eng, _adapter)) = try_engine_rt()? else {
             return Ok(None);
@@ -711,6 +717,24 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
                 transform: roughness_transform,
             });
         }
+        if let (Some(material), Some((factor, thickness, factor_transform, thickness_transform))) =
+            (layered.as_mut(), iridescence_textures)
+        {
+            let factor_index = eng.renderer.register_texture_kind(2, 2, factor, false);
+            let thickness_index = eng.renderer.register_texture_kind(2, 2, thickness, false);
+            material.iridescence_texture = Some(MaterialTextureBinding {
+                source_texture_index: 0,
+                source_image_index: 0,
+                runtime_texture_idx: Some(factor_index),
+                transform: factor_transform,
+            });
+            material.iridescence_thickness_texture = Some(MaterialTextureBinding {
+                source_texture_index: 1,
+                source_image_index: 1,
+                runtime_texture_idx: Some(thickness_index),
+                transform: thickness_transform,
+            });
+        }
         build_pt_scene(&mut eng);
         // Replace the material target with the same cube carrying an explicit
         // per-face tangent. The base PT shader ignores this attribute, while
@@ -750,6 +774,12 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
                 || material
                     .sheen_roughness_texture
                     .is_some_and(|binding| binding.transform.tex_coord == 1)
+                || material
+                    .iridescence_texture
+                    .is_some_and(|binding| binding.transform.tex_coord == 1)
+                || material
+                    .iridescence_thickness_texture
+                    .is_some_and(|binding| binding.transform.tex_coord == 1)
         });
         let secondary_uvs = uses_uv1.then(|| {
             vertices
@@ -778,7 +808,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, specular_textures, None, None)
+        render_variant_with_layered_textures(layered, specular_textures, None, None, None)
     }
 
     fn render_variant_with_clearcoat_textures(
@@ -790,7 +820,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, clearcoat_textures, None)
+        render_variant_with_layered_textures(layered, None, clearcoat_textures, None, None)
     }
 
     fn render_variant_with_sheen_textures(
@@ -802,13 +832,25 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None, sheen_textures)
+        render_variant_with_layered_textures(layered, None, None, sheen_textures, None)
+    }
+
+    fn render_variant_with_iridescence_textures(
+        layered: Option<MaterialLayeredPbr>,
+        iridescence_textures: Option<(
+            &[u8],
+            &[u8],
+            MaterialTextureTransform,
+            MaterialTextureTransform,
+        )>,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
+        render_variant_with_layered_textures(layered, None, None, None, iridescence_textures)
     }
 
     fn render_variant(
         layered: Option<MaterialLayeredPbr>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None, None)
+        render_variant_with_layered_textures(layered, None, None, None, None)
     }
 
     fn mean_display_luminance(rgba: &[u8]) -> f64 {
@@ -1126,6 +1168,74 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     }))
     .expect("iridescence PT variant initializes")
     .expect("same ray-query adapter remains available");
+    let directional_iridescence_channels = [
+        24, 255, 255, 255, 255, 24, 255, 255, 24, 255, 255, 255, 255, 24, 255, 255,
+    ];
+    let textured_iridescence_material = MaterialLayeredPbr {
+        iridescence_authored: true,
+        iridescence_factor: 1.0,
+        iridescence_ior: 1.3,
+        iridescence_thickness_minimum: 100.0,
+        iridescence_thickness_maximum: 180.0,
+        ..Default::default()
+    };
+    let (textured_iridescence_white, textured_iridescence_white_paths) =
+        render_variant_with_iridescence_textures(
+            Some(textured_iridescence_material),
+            Some((
+                &white_specular_texels,
+                &white_specular_texels,
+                Default::default(),
+                Default::default(),
+            )),
+        )
+        .expect("neutral textured iridescence PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (textured_iridescence, textured_iridescence_paths) =
+        render_variant_with_iridescence_textures(
+            Some(textured_iridescence_material),
+            Some((
+                &directional_iridescence_channels,
+                &directional_iridescence_channels,
+                Default::default(),
+                Default::default(),
+            )),
+        )
+        .expect("textured iridescence PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (textured_iridescence_rotated, textured_iridescence_rotated_paths) =
+        render_variant_with_iridescence_textures(
+            Some(textured_iridescence_material),
+            Some((
+                &directional_iridescence_channels,
+                &directional_iridescence_channels,
+                MaterialTextureTransform {
+                    rotation: std::f32::consts::FRAC_PI_2,
+                    ..Default::default()
+                },
+                Default::default(),
+            )),
+        )
+        .expect("rotated textured iridescence PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (textured_iridescence_uv1, textured_iridescence_uv1_paths) =
+        render_variant_with_iridescence_textures(
+            Some(textured_iridescence_material),
+            Some((
+                &directional_iridescence_channels,
+                &directional_iridescence_channels,
+                MaterialTextureTransform {
+                    tex_coord: 1,
+                    ..Default::default()
+                },
+                MaterialTextureTransform {
+                    tex_coord: 1,
+                    ..Default::default()
+                },
+            )),
+        )
+        .expect("UV1 textured iridescence PT variant initializes")
+        .expect("same ray-query adapter remains available");
     let (iridescence_thick, iridescence_thick_paths) = render_variant(Some(MaterialLayeredPbr {
         iridescence_authored: true,
         iridescence_factor: 1.0,
@@ -1176,6 +1286,9 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     assert!(base_paths.contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
     assert!(base_paths.contains("\"path_tracing_sheen_texture_specialization_initialized\":false"));
     assert!(base_paths.contains("\"path_tracing_sheen_texture_sidecar_allocated_bytes\":0"));
+    assert!(base_paths
+        .contains("\"path_tracing_iridescence_texture_specialization_initialized\":false"));
+    assert!(base_paths.contains("\"path_tracing_iridescence_texture_sidecar_allocated_bytes\":0"));
     assert!(neutral_paths.contains("\"path_tracing_specialization_initialized\":false"));
     assert!(neutral_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false"));
     assert!(neutral_paths.contains("\"path_tracing_active_instance_count\":1"));
@@ -1366,6 +1479,47 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     assert!(iridescence_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(iridescence_thick_paths
         .contains("\"path_tracing_iridescence_specialization_initialized\":true"));
+    let textured_iridescence_supported = textured_iridescence_white_paths
+        .contains("\"path_tracing_iridescence_texture_specialization_initialized\":true");
+    if textured_iridescence_supported {
+        assert_eq!(
+            iridescence, textured_iridescence_white,
+            "neutral UV0 iridescence textures changed scalar path-traced transport"
+        );
+        assert!(textured_iridescence_paths
+            .contains("\"path_tracing_iridescence_texture_specialization_initialized\":true"));
+        assert!(textured_iridescence_paths
+            .contains("\"path_tracing_iridescence_specialization_initialized\":true"));
+        assert!(textured_iridescence_rotated_paths
+            .contains("\"path_tracing_iridescence_texture_specialization_initialized\":true"));
+        assert!(textured_iridescence_paths
+            .contains("\"path_tracing_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_iridescence_paths
+            .contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_iridescence_paths
+            .contains("\"path_tracing_sheen_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_iridescence_paths
+            .contains("\"path_tracing_iridescence_texture_sidecar_record_bytes\":64"));
+        assert!(!textured_iridescence_paths
+            .contains("\"path_tracing_iridescence_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_iridescence_uv1_paths
+            .contains("\"path_tracing_uv1_specialization_initialized\":true"));
+        assert!(!textured_iridescence_uv1_paths
+            .contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0"));
+    } else {
+        assert_eq!(
+            base, textured_iridescence_white,
+            "an adapter without PT texture arrays must preserve iridescence fallback"
+        );
+        assert_eq!(
+            base, textured_iridescence_uv1,
+            "an adapter without PT texture arrays must not partially enable iridescence UV1"
+        );
+        assert!(textured_iridescence_white_paths
+            .contains("\"path_tracing_iridescence_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_iridescence_uv1_paths
+            .contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0"));
+    }
     assert!(combined_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(combined_paths.contains("\"path_tracing_sheen_specialization_initialized\":true"));
     assert!(combined_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":true"));
@@ -1444,6 +1598,26 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         "anisotropy rotation did not turn the path-traced highlight: {rotation_response:?}"
     );
     assert_transport_response("iridescence", &base, &iridescence);
+    if textured_iridescence_supported {
+        assert_transport_response(
+            "UV0 textured iridescence",
+            &textured_iridescence_white,
+            &textured_iridescence,
+        );
+        let transform_response =
+            calculate_diff_metrics(&textured_iridescence, &textured_iridescence_rotated, W, H);
+        assert!(
+            transform_response.mean_rgb >= 0.02,
+            "iridescence texture UV rotation did not turn the path-traced response: \
+             {transform_response:?}"
+        );
+        let uv_set_response =
+            calculate_diff_metrics(&textured_iridescence, &textured_iridescence_uv1, W, H);
+        assert!(
+            uv_set_response.mean_rgb >= 0.02,
+            "iridescence UV1 did not select retained secondary coordinates: {uv_set_response:?}"
+        );
+    }
     assert_transport_response("thick iridescence", &base, &iridescence_thick);
     let thickness_response = calculate_diff_metrics(&iridescence, &iridescence_thick, W, H);
     assert!(

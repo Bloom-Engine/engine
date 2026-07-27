@@ -9177,6 +9177,7 @@ impl Renderer {
         let mut pt_layered_texture_records = None;
         let mut pt_clearcoat_texture_records = None;
         let mut pt_sheen_texture_records = None;
+        let mut pt_iridescence_texture_records = None;
         // Array-incapable adapters cannot bind any PT material texture.
         // Passing an empty runtime table preserves their exact fallback and
         // avoids building otherwise unreachable CPU texture sidecars.
@@ -9227,6 +9228,7 @@ impl Renderer {
                 &mut pt_layered_texture_records,
                 &mut pt_clearcoat_texture_records,
                 &mut pt_sheen_texture_records,
+                &mut pt_iridescence_texture_records,
                 instance_data.len(),
                 n.material.layered_pbr,
                 runtime_texture_count,
@@ -9318,6 +9320,7 @@ impl Renderer {
                 &mut pt_layered_texture_records,
                 &mut pt_clearcoat_texture_records,
                 &mut pt_sheen_texture_records,
+                &mut pt_iridescence_texture_records,
                 instance_data.len(),
                 mesh.layered_pbr,
                 runtime_texture_count,
@@ -9368,6 +9371,7 @@ impl Renderer {
             pt_layered_texture_records,
             pt_clearcoat_texture_records,
             pt_sheen_texture_records,
+            pt_iridescence_texture_records,
             instance_data.len(),
         );
         self.upload_pt_geometry(&geo_vertices, &geo_indices, geo_secondary_uvs.as_deref());

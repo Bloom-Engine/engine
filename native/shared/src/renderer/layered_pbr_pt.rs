@@ -9,6 +9,8 @@ use super::*;
 
 #[path = "layered_pbr_pt_clearcoat_texture.rs"]
 mod clearcoat_texture;
+#[path = "layered_pbr_pt_iridescence_texture.rs"]
+mod iridescence_texture;
 #[path = "layered_pbr_pt_runtime.rs"]
 mod runtime;
 #[path = "layered_pbr_pt_sheen_texture.rs"]
@@ -19,6 +21,11 @@ pub(super) use clearcoat_texture::PtClearcoatTextureCpu;
 use clearcoat_texture::{
     PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL, PT_CLEARCOAT_TEXTURE_DISABLED_WGSL,
     PT_CLEARCOAT_TEXTURE_RECORD_BYTES,
+};
+pub(super) use iridescence_texture::PtIridescenceTextureCpu;
+use iridescence_texture::{
+    PT_IRIDESCENCE_TEXTURE_BINDINGS_WGSL, PT_IRIDESCENCE_TEXTURE_DISABLED_WGSL,
+    PT_IRIDESCENCE_TEXTURE_RECORD_BYTES,
 };
 pub(super) use sheen_texture::PtSheenTextureCpu;
 use sheen_texture::{
@@ -543,6 +550,9 @@ fn pt_layered_primary_surface(
             material, hit.instance_custom_data, attributes.uv, secondary_uv,
         );
         material = pt_layered_apply_sheen_textures(
+            material, hit.instance_custom_data, attributes.uv, secondary_uv,
+        );
+        material = pt_layered_apply_iridescence_textures(
             material, hit.instance_custom_data, attributes.uv, secondary_uv,
         );
     }
@@ -1429,6 +1439,10 @@ fn layered_kernel_variant(base: &str) -> String {
          \x20               layered_hit, hit.instance_custom_data,\n\
          \x20               layered_attributes.uv, layered_secondary_uv,\n\
          \x20           );\n\
+         \x20           layered_hit = pt_layered_apply_iridescence_textures(\n\
+         \x20               layered_hit, hit.instance_custom_data,\n\
+         \x20               layered_attributes.uv, layered_secondary_uv,\n\
+         \x20           );\n\
          \x20       }\n\
          \x20       var layered_tangent_hit = vec4<f32>(0.0);\n\
          \x20       if (pt_layered_has_anisotropy(layered_hit)) {\n\
@@ -1468,20 +1482,24 @@ impl Renderer {
             self.pt_texture_arrays_enabled && self.pt_layered_clearcoat_texture_active();
         let sheen_textures =
             self.pt_texture_arrays_enabled && self.pt_layered_sheen_texture_active();
-        let any_textures = textures || clearcoat_textures || sheen_textures;
+        let iridescence_textures =
+            self.pt_texture_arrays_enabled && self.pt_layered_iridescence_texture_active();
+        let any_textures = textures || clearcoat_textures || sheen_textures || iridescence_textures;
         let uv1 = any_textures && self.pt_layered_uv1_active();
         let resource_variant = sheen as usize
             | ((textures as usize) << 1)
             | ((uv1 as usize) << 2)
             | ((clearcoat_textures as usize) << 3)
-            | ((sheen_textures as usize) << 4);
+            | ((sheen_textures as usize) << 4)
+            | ((iridescence_textures as usize) << 5);
         let pipeline_variant = sheen as usize
             | ((anisotropy as usize) << 1)
             | ((iridescence as usize) << 2)
             | ((textures as usize) << 3)
             | ((uv1 as usize) << 4)
             | ((clearcoat_textures as usize) << 5)
-            | ((sheen_textures as usize) << 6);
+            | ((sheen_textures as usize) << 6)
+            | ((iridescence_textures as usize) << 7);
         if sheen {
             self.ensure_scene_sheen_albedo_lut();
         }
@@ -1560,6 +1578,20 @@ impl Renderer {
                     count: None,
                 });
             }
+            if iridescence_textures {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(
+                            PT_IRIDESCENCE_TEXTURE_RECORD_BYTES,
+                        ),
+                    },
+                    count: None,
+                });
+            }
             self.pt_layered.layouts[resource_variant] = Some(self.device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
                     label: Some(if any_textures {
@@ -1585,7 +1617,7 @@ impl Renderer {
             let base_kernel = pt_kernel_variant(query_diagnostics);
             let layered_kernel = layered_kernel_variant(base_kernel.as_ref());
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
                 pt_fault_constants(fault.as_deref()),
                 layered_kernel,
@@ -1605,6 +1637,11 @@ impl Renderer {
                     PT_SHEEN_TEXTURE_BINDINGS_WGSL
                 } else {
                     PT_SHEEN_TEXTURE_DISABLED_WGSL
+                },
+                if iridescence_textures {
+                    PT_IRIDESCENCE_TEXTURE_BINDINGS_WGSL
+                } else {
+                    PT_IRIDESCENCE_TEXTURE_DISABLED_WGSL
                 },
                 if uv1 {
                     PT_LAYERED_UV1_BINDINGS_WGSL
@@ -1700,7 +1737,7 @@ impl Renderer {
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }));
-            self.pt_layered.bind_groups = Default::default();
+            self.pt_layered.bind_groups = std::array::from_fn(|_| None);
             self.pt_layered.dirty = true;
         }
         if self.pt_layered.dirty {
@@ -1728,7 +1765,7 @@ impl Renderer {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }));
-                self.pt_layered.bind_groups = Default::default();
+                self.pt_layered.bind_groups = std::array::from_fn(|_| None);
                 self.pt_layered.texture_dirty = true;
             }
             if self.pt_layered.texture_dirty {
@@ -1761,7 +1798,7 @@ impl Renderer {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }));
-                self.pt_layered.bind_groups = Default::default();
+                self.pt_layered.bind_groups = std::array::from_fn(|_| None);
                 self.pt_layered.clearcoat_texture_dirty = true;
             }
             if self.pt_layered.clearcoat_texture_dirty {
@@ -1794,7 +1831,7 @@ impl Renderer {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }));
-                self.pt_layered.bind_groups = Default::default();
+                self.pt_layered.bind_groups = std::array::from_fn(|_| None);
                 self.pt_layered.sheen_texture_dirty = true;
             }
             if self.pt_layered.sheen_texture_dirty {
@@ -1804,6 +1841,39 @@ impl Renderer {
                     bytemuck::cast_slice(&self.pt_layered.sheen_texture_records),
                 );
                 self.pt_layered.sheen_texture_dirty = false;
+            }
+        }
+        if iridescence_textures {
+            let needed = PT_IRIDESCENCE_TEXTURE_RECORD_BYTES
+                * self.pt_layered.iridescence_texture_records.len() as u64;
+            let recreate = self
+                .pt_layered
+                .iridescence_texture_buffer
+                .as_ref()
+                .is_none_or(|buffer| buffer.size() < needed);
+            if recreate {
+                let capacity = self
+                    .pt_layered
+                    .iridescence_texture_records
+                    .len()
+                    .next_power_of_two() as u64;
+                self.pt_layered.iridescence_texture_buffer =
+                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("pt_iridescence_texture_instances"),
+                        size: PT_IRIDESCENCE_TEXTURE_RECORD_BYTES * capacity,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                self.pt_layered.bind_groups = std::array::from_fn(|_| None);
+                self.pt_layered.iridescence_texture_dirty = true;
+            }
+            if self.pt_layered.iridescence_texture_dirty {
+                self.queue.write_buffer(
+                    self.pt_layered.iridescence_texture_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(&self.pt_layered.iridescence_texture_records),
+                );
+                self.pt_layered.iridescence_texture_dirty = false;
             }
         }
         if self.pt_layered.bind_groups[resource_variant].is_none() {
@@ -1863,6 +1933,17 @@ impl Renderer {
                     resource: self
                         .pt_layered
                         .sheen_texture_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                });
+            }
+            if iridescence_textures {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self
+                        .pt_layered
+                        .iridescence_texture_buffer
                         .as_ref()
                         .unwrap()
                         .as_entire_binding(),

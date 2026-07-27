@@ -12,7 +12,8 @@ impl Renderer {
             || (self.pt_texture_arrays_enabled
                 && (self.pt_layered_texture_active()
                     || self.pt_layered_clearcoat_texture_active()
-                    || self.pt_layered_sheen_texture_active()))
+                    || self.pt_layered_sheen_texture_active()
+                    || self.pt_layered_iridescence_texture_active()))
     }
 
     pub(in crate::renderer) fn pt_layered_sheen_active(&self) -> bool {
@@ -38,6 +39,7 @@ impl Renderer {
             .iter()
             .copied()
             .any(PtLayeredMaterialCpu::has_iridescence)
+            || (self.pt_texture_arrays_enabled && self.pt_layered_iridescence_texture_active())
     }
 
     pub(in crate::renderer) fn pt_layered_texture_active(&self) -> bool {
@@ -64,6 +66,14 @@ impl Renderer {
             .any(PtSheenTextureCpu::active)
     }
 
+    pub(in crate::renderer) fn pt_layered_iridescence_texture_active(&self) -> bool {
+        self.pt_layered
+            .iridescence_texture_records
+            .iter()
+            .copied()
+            .any(PtIridescenceTextureCpu::active)
+    }
+
     pub(in crate::renderer) fn pt_layered_uv1_active(&self) -> bool {
         self.pt_layered
             .texture_records
@@ -82,6 +92,12 @@ impl Renderer {
                 .iter()
                 .copied()
                 .any(PtSheenTextureCpu::has_uv1)
+            || self
+                .pt_layered
+                .iridescence_texture_records
+                .iter()
+                .copied()
+                .any(PtIridescenceTextureCpu::has_uv1)
     }
 
     pub(in crate::renderer) fn set_pt_layered_records(
@@ -90,12 +106,14 @@ impl Renderer {
         texture_records: Option<Vec<PtLayeredTextureCpu>>,
         clearcoat_texture_records: Option<Vec<PtClearcoatTextureCpu>>,
         sheen_texture_records: Option<Vec<PtSheenTextureCpu>>,
+        iridescence_texture_records: Option<Vec<PtIridescenceTextureCpu>>,
         instance_count: usize,
     ) {
         let records = records.unwrap_or_default();
         let texture_records = texture_records.unwrap_or_default();
         let clearcoat_texture_records = clearcoat_texture_records.unwrap_or_default();
         let sheen_texture_records = sheen_texture_records.unwrap_or_default();
+        let iridescence_texture_records = iridescence_texture_records.unwrap_or_default();
         debug_assert!(records.is_empty() || records.len() == instance_count);
         debug_assert!(texture_records.is_empty() || texture_records.len() == instance_count);
         debug_assert!(
@@ -104,6 +122,10 @@ impl Renderer {
         );
         debug_assert!(
             sheen_texture_records.is_empty() || sheen_texture_records.len() == instance_count
+        );
+        debug_assert!(
+            iridescence_texture_records.is_empty()
+                || iridescence_texture_records.len() == instance_count
         );
         if self.pt_layered.records != records {
             self.pt_layered.records = records;
@@ -121,6 +143,13 @@ impl Renderer {
         if self.pt_layered.sheen_texture_records != sheen_texture_records {
             self.pt_layered.sheen_texture_records = sheen_texture_records;
             self.pt_layered.sheen_texture_dirty = !self.pt_layered.sheen_texture_records.is_empty();
+            self.pt_accum_count = 0;
+            self.pt_wrote_frame = false;
+        }
+        if self.pt_layered.iridescence_texture_records != iridescence_texture_records {
+            self.pt_layered.iridescence_texture_records = iridescence_texture_records;
+            self.pt_layered.iridescence_texture_dirty =
+                !self.pt_layered.iridescence_texture_records.is_empty();
             self.pt_accum_count = 0;
             self.pt_wrote_frame = false;
         }
