@@ -86,6 +86,97 @@ fn hdr_rgb(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) -> V
     rgb
 }
 
+fn hdr_luminance_at(data: &[u8], x: u32, y: u32, padded_bytes_per_row: u32) -> Option<f32> {
+    let base = (y * padded_bytes_per_row + x * 8) as usize;
+    let channel = |index: usize| {
+        let offset = base + index * 2;
+        half::f16::from_bits(u16::from_le_bytes([data[offset], data[offset + 1]])).to_f32()
+    };
+    let luma = 0.2126 * channel(0) + 0.7152 * channel(1) + 0.0722 * channel(2);
+    luma.is_finite().then_some(luma.max(0.0))
+}
+
+fn hdr_metrics_json(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) -> String {
+    let mut luminances = Vec::with_capacity((width * height) as usize);
+    let mut non_finite = 0usize;
+    let mut non_finite_alpha = 0usize;
+    let mut max_alpha = 0.0f32;
+    let mut hit_alpha_pixels = 0usize;
+    for y in 0..height {
+        for x in 0..width {
+            match hdr_luminance_at(data, x, y, padded_bytes_per_row) {
+                Some(luma) => luminances.push(luma),
+                None => non_finite += 1,
+            }
+            let alpha_offset = (y * padded_bytes_per_row + x * 8 + 6) as usize;
+            let alpha = half::f16::from_bits(u16::from_le_bytes([
+                data[alpha_offset],
+                data[alpha_offset + 1],
+            ]))
+            .to_f32();
+            if alpha.is_finite() {
+                max_alpha = max_alpha.max(alpha);
+                hit_alpha_pixels += usize::from(alpha > 0.1);
+            } else {
+                non_finite_alpha += 1;
+            }
+        }
+    }
+    luminances.sort_by(f32::total_cmp);
+    let percentile = |fraction: f32| {
+        let index = ((luminances.len().saturating_sub(1)) as f32 * fraction).round() as usize;
+        luminances.get(index).copied().unwrap_or(0.0)
+    };
+    let mean = luminances
+        .iter()
+        .map(|value| f64::from(*value))
+        .sum::<f64>()
+        / luminances.len().max(1) as f64;
+    let mut isolated_local_outliers = 0usize;
+    for y in 1..height.saturating_sub(1) {
+        for x in 1..width.saturating_sub(1) {
+            let Some(center) = hdr_luminance_at(data, x, y, padded_bytes_per_row) else {
+                continue;
+            };
+            if center <= 4.0 {
+                continue;
+            }
+            let mut neighbor_max = 0.0f32;
+            for oy in -1..=1 {
+                for ox in -1..=1 {
+                    if ox == 0 && oy == 0 {
+                        continue;
+                    }
+                    neighbor_max = neighbor_max.max(
+                        hdr_luminance_at(
+                            data,
+                            x.wrapping_add_signed(ox),
+                            y.wrapping_add_signed(oy),
+                            padded_bytes_per_row,
+                        )
+                        .unwrap_or(0.0),
+                    );
+                }
+            }
+            isolated_local_outliers += usize::from(center > neighbor_max.max(1.0) * 4.0);
+        }
+    }
+    format!(
+        "{{\n  \"width\": {width},\n  \"height\": {height},\n  \"finite_pixels\": {},\n  \
+         \"non_finite_pixels\": {non_finite},\n  \
+         \"non_finite_alpha\": {non_finite_alpha},\n  \"mean_luminance\": {mean:.9},\n  \
+         \"max_luminance\": {:.9},\n  \"p99_luminance\": {:.9},\n  \
+         \"p999_luminance\": {:.9},\n  \"max_alpha\": {max_alpha:.9},\n  \
+         \"hit_alpha_pixels\": {hit_alpha_pixels},\n  \
+         \"isolated_local_outliers\": {isolated_local_outliers},\n  \
+         \"outlier_rule\": \"luma > 4 and > 4x every 3x3 neighbor\"\n}}\n",
+        luminances.len(),
+        luminances.last().copied().unwrap_or(0.0),
+        percentile(0.99),
+        percentile(0.999),
+    )
+}
+
 fn depth_rgb(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) -> Vec<u8> {
     let mut min_proximity = f32::INFINITY;
     let mut max_proximity = 0.0f32;
@@ -223,6 +314,14 @@ impl Renderer {
                     wgpu::TextureAspect::DepthOnly,
                     4,
                 ),
+                "ssr" => self.record_quality_texture(
+                    encoder,
+                    &self.ssr_history_textures[self.ssr_history_idx],
+                    name,
+                    ReadbackKind::Hdr,
+                    wgpu::TextureAspect::All,
+                    8,
+                ),
                 "shadow-cascade-0" | "shadow-cascade-1" | "shadow-cascade-2" => {
                     let cascade = name
                         .as_bytes()
@@ -302,6 +401,16 @@ impl Renderer {
             Vec::new()
         };
         if quality_capture_dir.is_some() {
+            // The graph's `ssr` name resolves to filtered history. Keep the
+            // noisy march as an explicitly physical companion diagnostic.
+            quality_readbacks.push(self.record_quality_texture(
+                encoder,
+                &self.ssr_rt_texture,
+                "ssr-raw",
+                ReadbackKind::Hdr,
+                wgpu::TextureAspect::All,
+                8,
+            ));
             if let Some(textures) = self.taa_diagnostic_textures() {
                 for (&name, texture) in super::temporal_diagnostics::TAA_DIAGNOSTIC_NAMES
                     .iter()
@@ -421,6 +530,18 @@ impl Renderer {
                 continue;
             }
             let data = readback.buffer.slice(..).get_mapped_range();
+            if matches!(readback.kind, ReadbackKind::Hdr) {
+                let metrics = hdr_metrics_json(
+                    &data,
+                    readback.width,
+                    readback.height,
+                    readback.padded_bytes_per_row,
+                );
+                let metrics_path = directory.join(format!("{}.metrics.json", readback.name));
+                if let Err(error) = std::fs::write(&metrics_path, metrics) {
+                    eprintln!("bloom: HDR metrics write '{metrics_path:?}' failed: {error}");
+                }
+            }
             let rgb = match readback.kind {
                 ReadbackKind::Hdr => hdr_rgb(
                     &data,
@@ -634,6 +755,13 @@ impl Renderer {
         } else {
             "false"
         });
+        let ssr_size = self.ssr_rt_texture.size();
+        let ssr_row_bytes = u64::from((ssr_size.width * 8 + 255) & !255);
+        let ssr_capture_bytes = ssr_row_bytes * u64::from(ssr_size.height) * 2;
+        out.push_str(",\"ssr_diagnostic_persistent_bytes\":0");
+        out.push_str(",\"ssr_diagnostic_capture_readback_bytes\":");
+        out.push_str(&ssr_capture_bytes.to_string());
+        out.push_str(",\"ssr_diagnostic_capture_passes\":0");
         out.push('}');
         out.push_str(",\"transparent_gi\":{");
         out.push_str("\"enabled\":");
@@ -1146,5 +1274,34 @@ impl Renderer {
         out.push_str(&self.material_binding_report_json());
         out.push('}');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hdr_metrics_json;
+
+    #[test]
+    fn hdr_metrics_detect_a_single_local_firefly() {
+        let width = 3;
+        let height = 3;
+        let row_bytes = width * 8;
+        let mut data = vec![0u8; (row_bytes * height) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let value = if (x, y) == (1, 1) { 10.0 } else { 1.0 };
+                let bits = half::f16::from_f32(value).to_bits().to_le_bytes();
+                let base = (y * row_bytes + x * 8) as usize;
+                for channel in 0..3 {
+                    data[base + channel * 2..base + channel * 2 + 2].copy_from_slice(&bits);
+                }
+                data[base + 6..base + 8]
+                    .copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
+            }
+        }
+        let metrics = hdr_metrics_json(&data, width, height, row_bytes);
+        assert!(metrics.contains("\"non_finite_pixels\": 0"));
+        assert!(metrics.contains("\"max_luminance\": 10.000000000"));
+        assert!(metrics.contains("\"isolated_local_outliers\": 1"));
     }
 }

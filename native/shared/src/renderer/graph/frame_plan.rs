@@ -15,9 +15,10 @@ use super::{
 /// Qualification resources accepted by the internal debug-capture path.
 /// These are graph names rather than renderer field names so requests remain
 /// stable when a physical texture is replaced or aliased.
-pub const QUALITY_CAPTURE_RESOURCE_NAMES: [&str; 5] = [
+pub const QUALITY_CAPTURE_RESOURCE_NAMES: [&str; 6] = [
     "hdr-scene",
     "scene-depth",
+    "ssr",
     "shadow-cascade-0",
     "shadow-cascade-1",
     "shadow-cascade-2",
@@ -628,6 +629,7 @@ pub fn build_renderer_frame_plan(
         if key.feature_mask & FRAME_FEATURE_CAPTURE_QUALITY != 0 {
             graph.read_texture(capture, hdr, TextureUsage::COPY_SRC);
             graph.read_texture(capture, depth, TextureUsage::COPY_SRC);
+            graph.read_texture(capture, ssr, TextureUsage::COPY_SRC);
             for cascade in shadows {
                 graph.read_texture(capture, cascade, TextureUsage::COPY_SRC);
             }
@@ -757,6 +759,7 @@ mod tests {
             "output",
             "hdr-scene",
             "scene-depth",
+            "ssr",
             "shadow-cascade-0",
             "shadow-cascade-1",
             "shadow-cascade-2",

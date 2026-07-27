@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "ssr_quality.rs"]
+mod ssr_quality;
+
 fn severe_pixel_fraction(reference: &[u8], candidate: &[u8]) -> f64 {
     let severe = reference
         .chunks_exact(4)

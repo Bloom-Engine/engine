@@ -47,6 +47,12 @@ SSR now owns `ssr_history_valid` independently of TAA:
 
 - invalid history uses temporal alpha `1.0`, replacing stale or zero storage;
 - valid history uses alpha `0.1`;
+- the established roughness fade keeps wide-lobe surfaces on prefiltered IBL
+  while preserving SSR ownership for valid smooth reflections;
+- march thickness is evaluated against the same explicit-LOD-0 depth sample
+  used to declare the hit, avoiding a coarse-Hi-Z footprint mismatch;
+- accepted hit radiance is unchanged through 8 linear luminance units and
+  bounded there before it can poison temporal history;
 - resize, SSR toggles, SSR-strength changes, and PT-mode transitions invalidate
   it;
 - frames owned by PT neither write nor advance SSR history;
@@ -55,6 +61,12 @@ SSR now owns `ssr_history_valid` independently of TAA:
 
 Telemetry exposes `temporal_history.ssr_valid` and `ssr_index`. Unit and
 headless-GPU tests pin initialization and every transition above.
+
+The hit bound adds no texture fetch, allocation, pass, draw, or bind group.
+It is a luminance dot/select/scale only on accepted hits. A more aggressive
+rough-dielectric cutoff was qualification-tested and rejected because it
+changed an existing transparent-GI receiver's material response; the
+established IBL/SSR ownership curve remains matched on both sides.
 
 ## SSGI implementation
 
@@ -173,6 +185,16 @@ four 256-byte-row-aligned RGBA8 buffers. Both are released after PNG encoding,
 so persistent diagnostic memory is zero. These values and the one-pass count
 are reported under `temporal_history.diagnostic_*`.
 
+Native quality captures also include `ssr-raw.png` and `ssr.png` for the
+quarter-resolution stochastic march and filtered history. Their accompanying
+`*.metrics.json` files retain raw HDR evidence: finite/non-finite counts,
+mean/max/p99/p99.9 luminance, alpha hit coverage, and isolated local outliers.
+An isolated outlier is over 4 linear luminance and over four times every 3x3
+neighbor. These diagnostics reuse the two production SSR targets and add no
+normal-frame resource or pass; capture-only readback bytes, zero persistent
+diagnostic bytes, and zero diagnostic passes are reported under
+`temporal_history.ssr_diagnostic_*`.
+
 ## Temporal sequence gates
 
 The headless GPU corpus now evaluates a sequence rather than only a final
@@ -186,6 +208,8 @@ still. It isolates TAA/TSR from unrelated temporal effects and covers:
 - cached skinned locomotion plus joint-palette deformation;
 - cached alpha-tested card translation and rotation;
 - emissive geometry plus a local light switching both on and off;
+- a dark interior with an extreme bright opening and a smooth-reflection
+  negative control;
 - a `1.0 -> 0.5` render-scale step;
 - a `320x192 -> 256x256` target resize.
 
@@ -210,6 +234,10 @@ depth rejection from hiding a broken motion-vector path. The emissive sequence
 checks both dark-to-bright and bright-to-dark radiance convergence on
 stationary geometry.
 
+The dark-interior SSR gate requires finite raw march/history values, no
+isolated HDR fireflies under the documented local rule, a populated reflection
+buffer, and a visible SSR-on/off delta from the smooth-reflection control.
+
 Render-scale changes must produce a first frame byte-identical to a freshly
 seeded history at the new scale. Resize changes must have no `>32/255`
 outliers against a fresh target-size seed, with mean RGB error at most 0.5 and
@@ -226,5 +254,4 @@ silently passing.
 ## Remaining #135 work
 
 Extend shared reason/confidence semantics to SSR/GI/PT where their
-representations match, then add interior-to-bright-exterior and refractive
-motion sequences.
+representations match, then add the refractive motion sequence.

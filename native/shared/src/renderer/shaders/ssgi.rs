@@ -1728,7 +1728,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let raw = textureSampleLevel(hdr_tex, hdr_samp, hit_uv, 0.0).rgb;
     let reflected = select(vec3<f32>(0.0), raw, raw == raw);
     let out = reflected * fresnel * roughness_fade * u.params.x * fade;
-    let out_safe = select(vec3<f32>(0.0), out, out == out);
+    // EN-061: bound a rare bright hit before it can poison the temporal
+    // history and become a quarter-resolution block after TSR. Eight linear
+    // luminance units remain far above display white and preserve bloom from
+    // valid polished-metal reflections; ordinary hits are byte-for-byte
+    // unchanged.
+    let out_luma = dot(out, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let firefly_cap = 8.0;
+    let firefly_scale = select(
+        1.0,
+        firefly_cap / max(out_luma, 0.0001),
+        out_luma > firefly_cap,
+    );
+    let out_bounded = out * firefly_scale;
+    let out_safe = select(vec3<f32>(0.0), out_bounded, out_bounded == out_bounded);
     return vec4<f32>(out_safe, fade);
 }
 ";
