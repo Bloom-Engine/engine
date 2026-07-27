@@ -136,7 +136,8 @@ export {
   setSceneNodeGiOnly,
   setSceneNodeParent, setSceneNodeTransform,
   updateSceneNodeGeometry,
-  setSceneNodeColor, setSceneNodePbr, setSceneNodeTexture, setSceneNodeWaterMaterial, pickSceneAll,
+  setSceneNodeColor, setSceneNodePbr, setSceneNodeMaterial, setSceneNodeTexture,
+  setSceneNodeWaterMaterial, pickSceneAll,
   getSceneNodeTransform, getSceneNodeBounds,
   setSceneNodeUserData, getSceneNodeUserData,
   getSceneNodeCount,
@@ -152,7 +153,11 @@ export {
   projectToScreen,
 } from './scene/index';
 
-export type { SceneNodeHandle, PbrMaterial, PickHit } from './scene/index';
+export type {
+  SceneNodeHandle, PbrMaterial, LayeredPbrMaterial,
+  ClearcoatMaterial, SpecularMaterial, SheenMaterial,
+  AnisotropyMaterial, IridescenceMaterial, PickHit,
+} from './scene/index';
 
 export {
   createPhysicsWorld, setGravity, setPhysicsTimestep,

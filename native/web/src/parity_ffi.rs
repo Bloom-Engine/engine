@@ -235,6 +235,67 @@ pub fn bloom_scene_set_gi_only(handle: f64, gi_only: f64) {
     engine().scene.set_gi_only(handle, gi_only != 0.0);
 }
 
+#[wasm_bindgen]
+pub fn bloom_scene_set_material_emissive(handle: f64, r: f64, g: f64, b: f64) {
+    let finite_non_negative = |value: f64| {
+        if value.is_finite() {
+            (value as f32).max(0.0)
+        } else {
+            0.0
+        }
+    };
+    engine().scene.set_material_emissive_factor(
+        handle,
+        finite_non_negative(r),
+        finite_non_negative(g),
+        finite_non_negative(b),
+    );
+}
+
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_scene_set_material_layered_pbr(
+    handle: f64,
+    lobe_mask: f64,
+    clearcoat_factor: f64,
+    clearcoat_roughness: f64,
+    clearcoat_normal_scale: f64,
+    specular_factor: f64,
+    specular_r: f64,
+    specular_g: f64,
+    specular_b: f64,
+    ior: f64,
+    sheen_r: f64,
+    sheen_g: f64,
+    sheen_b: f64,
+    sheen_roughness: f64,
+    anisotropy_strength: f64,
+    anisotropy_rotation: f64,
+    iridescence_factor: f64,
+    iridescence_ior: f64,
+    iridescence_thickness_minimum: f64,
+    iridescence_thickness_maximum: f64,
+) {
+    let layered = bloom_shared::models::MaterialLayeredPbr::from_authoring_factors(
+        lobe_mask as u32,
+        clearcoat_factor as f32,
+        clearcoat_roughness as f32,
+        clearcoat_normal_scale as f32,
+        specular_factor as f32,
+        [specular_r as f32, specular_g as f32, specular_b as f32],
+        ior as f32,
+        [sheen_r as f32, sheen_g as f32, sheen_b as f32],
+        sheen_roughness as f32,
+        anisotropy_strength as f32,
+        anisotropy_rotation as f32,
+        iridescence_factor as f32,
+        iridescence_ior as f32,
+        iridescence_thickness_minimum as f32,
+        iridescence_thickness_maximum as f32,
+    );
+    engine().scene.set_material_layered_pbr(handle, layered);
+}
+
 // ============================================================
 // Profiler text (mirrors ffi_core/game_loop.rs; GPU column is 0 on
 // web — no TIMESTAMP_QUERY in the WebGPU spec at wgpu 29)

@@ -55,7 +55,7 @@ import {
 import {
   createSceneNode, setSceneNodeTransform,
   updateSceneNodeGeometry,
-  setSceneNodeColor, setSceneNodePbr,
+  setSceneNodeColor, setSceneNodePbr, setSceneNodeMaterial,
   setSceneNodeCastShadow, setSceneNodeReceiveShadow,
   enableShadows, dumpShadowMap,
   addDirectionalLight, addPointLight,
@@ -242,8 +242,11 @@ function placeSphere(
   roughness: number, metalness: number,
 ): number {
   const node = placeNode(sphereHandle, 0, px, py, pz, scale, scale, scale);
-  setSceneNodeColor(node, cr * 255, cg * 255, cb * 255);
-  setSceneNodePbr(node, roughness, metalness);
+  setSceneNodeMaterial(node, {
+    color: [cr * 255, cg * 255, cb * 255],
+    roughness,
+    metalness,
+  });
   return node;
 }
 
@@ -254,8 +257,11 @@ function placeCube(
   roughness: number, metalness: number,
 ): number {
   const node = placeNode(cubeHandle, 0, px, py, pz, sx, sy, sz);
-  setSceneNodeColor(node, cr * 255, cg * 255, cb * 255);
-  setSceneNodePbr(node, roughness, metalness);
+  setSceneNodeMaterial(node, {
+    color: [cr * 255, cg * 255, cb * 255],
+    roughness,
+    metalness,
+  });
   // Thin horizontal slabs (floors) should receive but not cast
   // shadows — otherwise they fill the shadow map with their own
   // depth and everything reads as "in shadow of the ground".

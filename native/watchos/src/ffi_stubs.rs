@@ -500,6 +500,10 @@
 }
 #[no_mangle] pub extern "C" fn bloom_scene_attach_model_lod(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64) {
 }
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_emissive(_p0: f64, _p1: f64, _p2: f64, _p3: f64) {
+}
+#[no_mangle] pub extern "C" fn bloom_scene_set_material_layered_pbr(_p0: f64, _p1: f64, _p2: f64, _p3: f64, _p4: f64, _p5: f64, _p6: f64, _p7: f64, _p8: f64, _p9: f64, _p10: f64, _p11: f64, _p12: f64, _p13: f64, _p14: f64, _p15: f64, _p16: f64, _p17: f64, _p18: f64, _p19: f64) {
+}
 #[no_mangle] pub extern "C" fn bloom_scene_node_vertex_count(_p0: f64) -> f64 {
     0.0
 }

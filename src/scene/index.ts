@@ -56,6 +56,29 @@ declare function bloom_scene_update_geometry(
 ): void;
 declare function bloom_scene_set_material_color(handle: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_scene_set_material_pbr(handle: number, roughness: number, metalness: number): void;
+declare function bloom_scene_set_material_emissive(handle: number, r: number, g: number, b: number): void;
+declare function bloom_scene_set_material_layered_pbr(
+  handle: number,
+  lobeMask: number,
+  clearcoatFactor: number,
+  clearcoatRoughness: number,
+  clearcoatNormalScale: number,
+  specularFactor: number,
+  specularR: number,
+  specularG: number,
+  specularB: number,
+  ior: number,
+  sheenR: number,
+  sheenG: number,
+  sheenB: number,
+  sheenRoughness: number,
+  anisotropyStrength: number,
+  anisotropyRotation: number,
+  iridescenceFactor: number,
+  iridescenceIor: number,
+  iridescenceThicknessMinimum: number,
+  iridescenceThicknessMaximum: number,
+): void;
 declare function bloom_scene_set_material_texture(handle: number, textureIdx: number): void;
 declare function bloom_scene_node_count(): number;
 
@@ -146,12 +169,64 @@ declare function bloom_scene_subtract_box(
 
 export type SceneNodeHandle = number;
 
-export interface PbrMaterial {
+export interface ClearcoatMaterial {
+  factor?: number;
+  roughness?: number;
+  normalScale?: number;
+}
+
+export interface SpecularMaterial {
+  factor?: number;
+  color?: [number, number, number];
+  ior?: number;
+}
+
+export interface SheenMaterial {
   color?: [number, number, number];
   roughness?: number;
+}
+
+export interface AnisotropyMaterial {
+  strength?: number;
+  rotation?: number;
+}
+
+export interface IridescenceMaterial {
+  factor?: number;
+  ior?: number;
+  thicknessMinimum?: number;
+  thicknessMaximum?: number;
+}
+
+export interface LayeredPbrMaterial {
+  clearcoat?: ClearcoatMaterial;
+  specular?: SpecularMaterial;
+  sheen?: SheenMaterial;
+  anisotropy?: AnisotropyMaterial;
+  iridescence?: IridescenceMaterial;
+}
+
+export interface PbrMaterial {
+  /** Base color in the engine-wide 0-255 color scale. */
+  color?: [number, number, number];
+  /** Perceptual roughness in [0, 1]. */
+  roughness?: number;
+  /** Metallic weight in [0, 1]. */
   metalness?: number;
+  /** Surface opacity in [0, 1]. */
   opacity?: number;
+  /** Linear emissive radiance; values above 1 are valid. */
+  emissive?: [number, number, number];
   textureIdx?: number;
+  layered?: LayeredPbrMaterial;
+}
+
+function finiteOr(value: number, fallback: number): number {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function unitMaterialValue(value: number, fallback: number): number {
+  return Math.min(1, Math.max(0, finiteOr(value, fallback)));
 }
 
 // ============================================================
@@ -332,6 +407,83 @@ export function attachModelLodToNode(
 
 export function setSceneNodePbr(handle: SceneNodeHandle, roughness: number, metalness: number): void {
   bloom_scene_set_material_pbr(handle, roughness, metalness);
+}
+
+/**
+ * Replace a node's complete PBR material from one descriptor.
+ *
+ * Every property is optional and falls back to the engine/glTF default.
+ * Omitted layered lobes are disabled and retain the unchanged base-material
+ * fast path. Layered colors use linear 0-1 values; base `color` uses Bloom's
+ * engine-wide 0-255 color scale. Iridescence thickness is in nanometres and
+ * anisotropy rotation is in radians.
+ *
+ * Layer textures and texture transforms remain asset-authored in this first
+ * API version; imported glTF materials preserve and render them losslessly.
+ */
+export function setSceneNodeMaterial(
+  handle: SceneNodeHandle,
+  material: PbrMaterial = {},
+): void {
+  const color = material.color ?? [255, 255, 255];
+  const emissive = material.emissive ?? [0, 0, 0];
+  bloom_scene_set_material_color(
+    handle,
+    Math.min(255, Math.max(0, finiteOr(color[0], 255))) / 255,
+    Math.min(255, Math.max(0, finiteOr(color[1], 255))) / 255,
+    Math.min(255, Math.max(0, finiteOr(color[2], 255))) / 255,
+    unitMaterialValue(material.opacity ?? 1, 1),
+  );
+  bloom_scene_set_material_pbr(
+    handle,
+    unitMaterialValue(material.roughness ?? 0.8, 0.8),
+    unitMaterialValue(material.metalness ?? 0, 0),
+  );
+  bloom_scene_set_material_emissive(
+    handle,
+    Math.max(0, finiteOr(emissive[0], 0)),
+    Math.max(0, finiteOr(emissive[1], 0)),
+    Math.max(0, finiteOr(emissive[2], 0)),
+  );
+  bloom_scene_set_material_texture(
+    handle,
+    Math.floor(Math.max(0, finiteOr(material.textureIdx ?? 0, 0))),
+  );
+
+  const clearcoat = material.layered?.clearcoat;
+  const specular = material.layered?.specular;
+  const sheen = material.layered?.sheen;
+  const anisotropy = material.layered?.anisotropy;
+  const iridescence = material.layered?.iridescence;
+  const lobeMask = (clearcoat === undefined ? 0 : 1 << 0)
+    | (sheen === undefined ? 0 : 1 << 1)
+    | (anisotropy === undefined ? 0 : 1 << 2)
+    | (iridescence === undefined ? 0 : 1 << 3)
+    | (specular === undefined ? 0 : 1 << 4);
+  const specularColor = specular?.color ?? [1, 1, 1];
+  const sheenColor = sheen?.color ?? [0, 0, 0];
+  bloom_scene_set_material_layered_pbr(
+    handle,
+    lobeMask,
+    clearcoat?.factor ?? 0,
+    clearcoat?.roughness ?? 0,
+    clearcoat?.normalScale ?? 1,
+    specular?.factor ?? 1,
+    specularColor[0],
+    specularColor[1],
+    specularColor[2],
+    specular?.ior ?? 1.5,
+    sheenColor[0],
+    sheenColor[1],
+    sheenColor[2],
+    sheen?.roughness ?? 0,
+    anisotropy?.strength ?? 0,
+    anisotropy?.rotation ?? 0,
+    iridescence?.factor ?? 0,
+    iridescence?.ior ?? 1.3,
+    iridescence?.thicknessMinimum ?? 100,
+    iridescence?.thicknessMaximum ?? 400,
+  );
 }
 
 /**

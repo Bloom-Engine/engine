@@ -251,3 +251,35 @@ layered ABI and do not allocate the LUT.
 The CPU scene tracer and GPU path tracer still require an explicit reviewed
 migration to these named equations. Iridescence is the next lobe package;
 public authoring/debug surfaces and transport parity follow it.
+
+## Public authoring API
+
+`setSceneNodeMaterial(node, descriptor)` is the single public authoring entry
+point for base, emissive, clearcoat, specular/IOR, sheen, anisotropy, and
+iridescence factors. Every field is optional. An empty descriptor restores the
+same base defaults as a new scene node, while an omitted layered lobe is absent
+from the native lobe mask and keeps the allocation-free base-material path.
+
+```ts
+setSceneNodeMaterial(node, {
+  color: [210, 68, 32],
+  roughness: 0.22,
+  metalness: 0,
+  layered: {
+    clearcoat: { factor: 0.8, roughness: 0.1 },
+    iridescence: {
+      factor: 0.65,
+      ior: 1.3,
+      thicknessMinimum: 120,
+      thicknessMaximum: 380,
+    },
+  },
+});
+```
+
+Base color follows Bloom's engine-wide 0–255 convention. Layered colors are
+linear factors, anisotropy rotation is in radians, and iridescence thickness is
+in nanometres. Unsafe scalar input is bounded before it reaches a shader, and
+reapplying an unchanged descriptor does not rebuild the material. Layer
+textures and texture transforms remain glTF-authored in this first API version;
+the importer continues to preserve and render their full UV contract.

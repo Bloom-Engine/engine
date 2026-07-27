@@ -132,6 +132,93 @@ impl Default for MaterialLayeredPbr {
 }
 
 impl MaterialLayeredPbr {
+    pub const CLEARCOAT_LOBE: u32 = 1 << 0;
+    pub const SHEEN_LOBE: u32 = 1 << 1;
+    pub const ANISOTROPY_LOBE: u32 = 1 << 2;
+    pub const IRIDESCENCE_LOBE: u32 = 1 << 3;
+    pub const SPECULAR_IOR_LOBE: u32 = 1 << 4;
+
+    /// Build the texture-free layered material used by the public authoring
+    /// API. The lobe mask is authoritative: values belonging to an absent
+    /// lobe are ignored so an omitted descriptor always restores glTF
+    /// defaults and the allocation-free base-material path.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_authoring_factors(
+        lobe_mask: u32,
+        clearcoat_factor: f32,
+        clearcoat_roughness: f32,
+        clearcoat_normal_scale: f32,
+        specular_factor: f32,
+        specular_color: [f32; 3],
+        ior: f32,
+        sheen_color: [f32; 3],
+        sheen_roughness: f32,
+        anisotropy_strength: f32,
+        anisotropy_rotation: f32,
+        iridescence_factor: f32,
+        iridescence_ior: f32,
+        iridescence_thickness_minimum: f32,
+        iridescence_thickness_maximum: f32,
+    ) -> Self {
+        fn finite_or(value: f32, fallback: f32) -> f32 {
+            if value.is_finite() {
+                value
+            } else {
+                fallback
+            }
+        }
+        fn unit(value: f32, fallback: f32) -> f32 {
+            finite_or(value, fallback).clamp(0.0, 1.0)
+        }
+        fn non_negative(value: f32, fallback: f32) -> f32 {
+            finite_or(value, fallback).max(0.0)
+        }
+        fn material_ior(value: f32) -> f32 {
+            let value = finite_or(value, 1.5);
+            if value == 0.0 {
+                0.0
+            } else {
+                value.max(1.0)
+            }
+        }
+
+        let mut material = Self::default();
+        if lobe_mask & Self::CLEARCOAT_LOBE != 0 {
+            material.clearcoat_authored = true;
+            material.clearcoat_factor = unit(clearcoat_factor, 0.0);
+            material.clearcoat_roughness_factor = unit(clearcoat_roughness, 0.0);
+            material.clearcoat_normal_scale = finite_or(clearcoat_normal_scale, 1.0);
+        }
+        if lobe_mask & Self::SPECULAR_IOR_LOBE != 0 {
+            material.specular_authored = true;
+            material.specular_factor = unit(specular_factor, 1.0);
+            material.specular_color_factor = specular_color.map(|value| non_negative(value, 1.0));
+            material.ior_authored = true;
+            material.ior = material_ior(ior);
+        }
+        if lobe_mask & Self::SHEEN_LOBE != 0 {
+            material.sheen_authored = true;
+            material.sheen_color_factor = sheen_color.map(|value| unit(value, 0.0));
+            material.sheen_roughness_factor = unit(sheen_roughness, 0.0);
+        }
+        if lobe_mask & Self::ANISOTROPY_LOBE != 0 {
+            material.anisotropy_authored = true;
+            material.anisotropy_strength = unit(anisotropy_strength, 0.0);
+            material.anisotropy_rotation = finite_or(anisotropy_rotation, 0.0);
+        }
+        if lobe_mask & Self::IRIDESCENCE_LOBE != 0 {
+            material.iridescence_authored = true;
+            material.iridescence_factor = unit(iridescence_factor, 0.0);
+            material.iridescence_ior = finite_or(iridescence_ior, 1.3).max(1.0);
+            material.iridescence_thickness_minimum =
+                non_negative(iridescence_thickness_minimum, 100.0);
+            material.iridescence_thickness_maximum =
+                non_negative(iridescence_thickness_maximum, 400.0);
+        }
+        material
+    }
+
     pub(crate) fn is_active(self) -> bool {
         self.has_clearcoat()
             || self.has_specular_ior()
@@ -238,6 +325,75 @@ impl MaterialLayeredPbr {
                 binding.transform.tex_coord == tex_coord
                     && binding.runtime_texture_idx.is_some_and(|index| index != 0)
             })
+    }
+}
+
+#[cfg(test)]
+mod layered_pbr_authoring_tests {
+    use super::MaterialLayeredPbr;
+
+    #[test]
+    fn omitted_lobes_restore_exact_defaults() {
+        let material = MaterialLayeredPbr::from_authoring_factors(
+            0,
+            1.0,
+            1.0,
+            2.0,
+            0.0,
+            [3.0, 2.0, 1.0],
+            1.1,
+            [1.0; 3],
+            1.0,
+            1.0,
+            2.0,
+            1.0,
+            1.8,
+            20.0,
+            80.0,
+        );
+        assert_eq!(material, MaterialLayeredPbr::default());
+        assert!(!material.is_active());
+    }
+
+    #[test]
+    fn authoring_factors_are_finite_and_range_safe() {
+        let mask = MaterialLayeredPbr::CLEARCOAT_LOBE
+            | MaterialLayeredPbr::SPECULAR_IOR_LOBE
+            | MaterialLayeredPbr::SHEEN_LOBE
+            | MaterialLayeredPbr::ANISOTROPY_LOBE
+            | MaterialLayeredPbr::IRIDESCENCE_LOBE;
+        let material = MaterialLayeredPbr::from_authoring_factors(
+            mask,
+            2.0,
+            -1.0,
+            f32::NAN,
+            -2.0,
+            [-1.0, 2.0, f32::INFINITY],
+            0.5,
+            [-1.0, 0.5, 2.0],
+            f32::NAN,
+            4.0,
+            f32::INFINITY,
+            3.0,
+            0.2,
+            -10.0,
+            f32::NAN,
+        );
+        assert_eq!(material.clearcoat_factor, 1.0);
+        assert_eq!(material.clearcoat_roughness_factor, 0.0);
+        assert_eq!(material.clearcoat_normal_scale, 1.0);
+        assert_eq!(material.specular_factor, 0.0);
+        assert_eq!(material.specular_color_factor, [0.0, 2.0, 1.0]);
+        assert_eq!(material.ior, 1.0);
+        assert_eq!(material.sheen_color_factor, [0.0, 0.5, 1.0]);
+        assert_eq!(material.sheen_roughness_factor, 0.0);
+        assert_eq!(material.anisotropy_strength, 1.0);
+        assert_eq!(material.anisotropy_rotation, 0.0);
+        assert_eq!(material.iridescence_factor, 1.0);
+        assert_eq!(material.iridescence_ior, 1.0);
+        assert_eq!(material.iridescence_thickness_minimum, 0.0);
+        assert_eq!(material.iridescence_thickness_maximum, 400.0);
+        assert!(material.is_active());
     }
 }
 

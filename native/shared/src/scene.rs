@@ -1037,6 +1037,9 @@ impl SceneGraph {
 
     pub fn set_material_texture(&mut self, handle: f64, texture_idx: u32) {
         if let Some(node) = self.nodes.get_mut(handle) {
+            if node.material.texture_idx == texture_idx {
+                return;
+            }
             node.material.texture_idx = texture_idx;
             node.mat_dirty = true;
         }
@@ -1065,7 +1068,11 @@ impl SceneGraph {
 
     pub fn set_material_emissive_factor(&mut self, handle: f64, r: f32, g: f32, b: f32) {
         if let Some(node) = self.nodes.get_mut(handle) {
-            node.material.emissive = [r, g, b];
+            let emissive = [r, g, b];
+            if node.material.emissive == emissive {
+                return;
+            }
+            node.material.emissive = emissive;
             node.mat_dirty = true;
         }
     }
@@ -2834,6 +2841,12 @@ mod gpu_driven_cache_tests {
         assert!(
             !scene.nodes.get(node).unwrap().mat_dirty,
             "identical PBR factors must remain allocation-free"
+        );
+        scene.set_material_emissive_factor(node, 0.0, 0.0, 0.0);
+        scene.set_material_texture(node, 0);
+        assert!(
+            !scene.nodes.get(node).unwrap().mat_dirty,
+            "default descriptor fields must not rebuild an unchanged material"
         );
     }
 
