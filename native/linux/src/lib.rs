@@ -92,6 +92,13 @@ mod x11_impl {
     static mut WARP_CENTER_X: i32 = 0;
     static mut WARP_CENTER_Y: i32 = 0;
     static mut RELATIVE_MODE: bool = false;
+    /// WM_PROTOCOLS / WM_DELETE_WINDOW, interned once in `create_window`.
+    /// Cached because `poll_events` compares against them every event.
+    static mut WM_PROTOCOLS: x11::xlib::Atom = 0;
+    static mut WM_DELETE_WINDOW: x11::xlib::Atom = 0;
+
+    pub fn wm_protocols_atom() -> x11::xlib::Atom { unsafe { WM_PROTOCOLS } }
+    pub fn wm_delete_window_atom() -> x11::xlib::Atom { unsafe { WM_DELETE_WINDOW } }
 
     pub fn set_fullscreen(fullscreen: bool) {
         unsafe {
@@ -183,6 +190,20 @@ mod x11_impl {
                 x11::xlib::ExposureMask | x11::xlib::KeyPressMask | x11::xlib::KeyReleaseMask |
                 x11::xlib::ButtonPressMask | x11::xlib::ButtonReleaseMask |
                 x11::xlib::PointerMotionMask | x11::xlib::StructureNotifyMask);
+
+            // Opt into the WM close protocol before mapping, so the titlebar
+            // ✕ / Alt-F4 arrives as a ClientMessage we can turn into
+            // `windowShouldClose()` instead of the WM dropping our X
+            // connection and Xlib exit(1)-ing the game mid-frame.
+            WM_PROTOCOLS = x11::xlib::XInternAtom(
+                DISPLAY, b"WM_PROTOCOLS\0".as_ptr() as *const _, 0);
+            WM_DELETE_WINDOW = x11::xlib::XInternAtom(
+                DISPLAY, b"WM_DELETE_WINDOW\0".as_ptr() as *const _, 0);
+            if WM_DELETE_WINDOW != 0 {
+                let mut protocols = [WM_DELETE_WINDOW];
+                x11::xlib::XSetWMProtocols(
+                    DISPLAY, X11_WINDOW, protocols.as_mut_ptr(), 1);
+            }
 
             if !headless {
                 x11::xlib::XMapWindow(DISPLAY, X11_WINDOW);
@@ -489,6 +510,23 @@ mod x11_impl {
                             }
                         }
                     }
+                    x11::xlib::ClientMessage => {
+                        // The WM asking us to close (titlebar ✕, Alt-F4, or a
+                        // session logout). Without WM_DELETE_WINDOW in our
+                        // WM_PROTOCOLS the WM instead destroys the connection,
+                        // and Xlib's default IO-error handler calls exit(1)
+                        // from under the game — `windowShouldClose()` never
+                        // goes true, so `closeWindow()` and every shutdown
+                        // path after it (audio teardown, save-on-exit) are
+                        // skipped. Observed as:
+                        //   XIO: fatal IO error 62 (Timer expired)
+                        if event.client_message.message_type == wm_protocols_atom()
+                            && event.client_message.data.get_long(0)
+                                == wm_delete_window_atom() as i64
+                        {
+                            engine().should_close = true;
+                        }
+                    }
                     x11::xlib::DestroyNotify => {
                         engine().should_close = true;
                     }
@@ -572,6 +610,14 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         if !force_sw_gi && supported.contains(rt_mask) {
             required_features |= rt_mask;
         }
+        // PT-2: texture binding array + non-uniform indexing for textured
+        // path-trace hit shading. Both or neither (the kernel indexes the
+        // array with a per-thread material id).
+        let pt_tex_mask = wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+        if supported.contains(pt_tex_mask) {
+            required_features |= pt_tex_mask;
+        }
         let experimental_features = if required_features.intersects(rt_mask) {
             unsafe { wgpu::ExperimentalFeatures::enabled() }
         } else {
@@ -582,6 +628,34 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         // PerMaterial, PerDraw, SceneInputs). wgpu's default limit is
         // 4. Vulkan supports at least 7 here, so 5 is universally safe.
         required_limits.max_bind_groups = 5;
+        // The refractive/translucent material profile binds up to 19
+        // sampled textures in the fragment stage (5 material maps + env/
+        // BRDF/3 shadow cascades/env-diffuse + planar reflection + 3 texture
+        // arrays + the group-4 scene_color/scene_depth/impulse/motion inputs).
+        // wgpu's default is 16. Raise to whatever the adapter actually
+        // supports — every real Vulkan/GL GPU exposes ≥128 — so opaque/
+        // transparent materials are unaffected and refractive ones link.
+        let adapter_limits = adapter.limits();
+        required_limits.max_sampled_textures_per_shader_stage = required_limits
+            .max_sampled_textures_per_shader_stage
+            .max(adapter_limits.max_sampled_textures_per_shader_stage);
+        required_limits.max_samplers_per_shader_stage = required_limits
+            .max_samplers_per_shader_stage
+            .max(adapter_limits.max_samplers_per_shader_stage);
+        // PT-2: binding arrays have their own element budget, default 0.
+        // Take whatever the adapter offers; the renderer checks the
+        // granted value against its fixed array size before compiling
+        // the textured kernel variant.
+        if required_features.contains(pt_tex_mask) {
+            required_limits.max_binding_array_elements_per_shader_stage =
+                adapter_limits.max_binding_array_elements_per_shader_stage;
+        }
+        // PT-4: the path-trace kernel binds 9 storage buffers (accum +
+        // moments + reservoir ping-pongs on top of instance/geo data);
+        // the wgpu default limit is 8.
+        required_limits.max_storage_buffers_per_shader_stage = required_limits
+            .max_storage_buffers_per_shader_stage
+            .max(adapter_limits.max_storage_buffers_per_shader_stage.min(16));
         if required_features.intersects(rt_mask) {
             required_limits = required_limits
                 .using_minimum_supported_acceleration_structure_values();
@@ -603,7 +677,11 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         // logical size separately so screenWidth() etc. stay
         // DPI-independent.
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // COPY_SRC: bloom_take_screenshot reads the swapchain back;
+            // without it the readback copy is a validation error that
+            // aborts the process the first time a game calls it.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
             format,
             width: phys_w,
             height: phys_h,

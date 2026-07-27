@@ -233,10 +233,6 @@ export function drawModelTransform(model: Model, m16: number[], tint: Color): vo
   );
 }
 
-export function unloadModel(model: Model): void {
-  bloom_unload_model(model.handle);
-}
-
 /**
  * Return the axis-aligned bounding box of a loaded model in its local
  * coordinate space. Computed once at load time from mesh vertex positions.
@@ -356,15 +352,6 @@ export function compileMaterial(wgslSource: string): number {
 export const PROFILE_OPAQUE = 0;
 export const PROFILE_TRANSLUCENT = 1;
 
-/// Material bucket — matches `Bucket` in the engine. Decides which
-/// pass the draw lands in and what sort order applies. Refractive
-/// also triggers a scene-colour snapshot before the pass runs.
-export const BUCKET_OPAQUE = 0;
-export const BUCKET_TRANSPARENT = 1;
-export const BUCKET_REFRACTIVE = 2;
-export const BUCKET_ADDITIVE = 3;
-export const BUCKET_CUTOUT = 4;
-
 /// Phase 4b — full-control material compile. Pass PROFILE_* and
 /// BUCKET_* constants. `readsScene` enables the group-4 SceneInputs
 /// binding; required for refraction / shoreline / depth-fade effects.
@@ -421,6 +408,17 @@ export function compileMaterialInstanced(wgslSource: string): number {
 
 declare function bloom_compile_material_instanced_bucket(src: number, bucket: number, readsScene: number): number;
 
+/// Material bucket — the wire values `bloom_compile_material_instanced_bucket`
+/// decodes (see `Renderer::compile_material_instanced_bucket`). These are the
+/// FFI's own numbering, NOT the discriminants of the Rust `Bucket` enum, and
+/// they only cover the buckets the instanced compile can reach: Refractive has
+/// no wire value here — use `compileRefractiveMaterial` for that.
+///
+/// A second, conflicting BUCKET_* block used to sit further up this file with
+/// Phase 4b's numbering (TRANSPARENT=1, REFRACTIVE=2, ADDITIVE=3, CUTOUT=4).
+/// Two `export const`s of the same name made Perry emit duplicate LLVM
+/// definitions, so clang rejected this whole module and every game importing
+/// `bloom/models` failed to link against empty `_perry_init_*` stubs.
 export const BUCKET_OPAQUE = 0;
 export const BUCKET_CUTOUT = 1;
 export const BUCKET_ADDITIVE = 2;
