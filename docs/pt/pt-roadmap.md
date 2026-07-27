@@ -72,6 +72,10 @@ multi-bounce colour bleed.
   albedo where absent. DX12 with DXC and Vulkan both qualify.
 - **GGX specular lobe** with lobe selection + MIS, mirroring
   `bloom-reference/src/tracer.rs` so the two tracers stay comparable.
+- **Layered-material sidecar**: a 96-byte scalar record and group-2 pipeline
+  are created only after PT encounters a contributing layered TLAS instance.
+  The base kernel, shared GI record, bindings, and cost remain unchanged.
+  The sidecar foundation is pixel-neutral until each lobe is qualified.
 - Emissive from material data (VFX/muzzle flashes become real light in PT).
 
 ### Tier 3 — PT-3/PT-4: gameplay

@@ -630,3 +630,60 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         &sorted_custom_near[center..center + 4],
     );
 }
+
+#[test]
+fn layered_path_tracing_sidecar_is_lazy_and_pixel_neutral() {
+    fn render_variant(layered: bool) -> Result<Option<(Vec<u8>, String)>, String> {
+        let Some((mut eng, _adapter)) = try_engine_rt()? else {
+            return Ok(None);
+        };
+        build_pt_scene(&mut eng);
+        if layered {
+            let node = eng
+                .scene
+                .nodes
+                .iter()
+                .nth(1)
+                .map(|(handle, _)| handle)
+                .expect("PT scene has a test object");
+            eng.scene.set_material_layered_pbr(
+                node,
+                MaterialLayeredPbr {
+                    clearcoat_authored: true,
+                    clearcoat_factor: 0.85,
+                    clearcoat_roughness_factor: 0.2,
+                    ..Default::default()
+                },
+            );
+        }
+        eng.renderer.set_path_tracing(1);
+        eng.renderer.set_path_tracing_seed(0);
+        eng.renderer.reset_path_tracing_history(0);
+        let (_, _, rgba) = render(&mut eng, 12, draw_pt_static_frame);
+        Ok(Some((rgba, eng.renderer.quality_runtime_paths_json())))
+    }
+
+    let _guard = lock_rt_goldens();
+    let Some((base, base_paths)) = render_variant(false).expect("base PT variant initializes")
+    else {
+        skip_rt_golden(
+            "layered_path_tracing_sidecar_is_lazy_and_pixel_neutral",
+            "no-non-cpu-ray-query-adapter",
+        );
+        return;
+    };
+    let (layered, layered_paths) = render_variant(true)
+        .expect("layered PT variant initializes")
+        .expect("same ray-query adapter remains available");
+
+    assert_eq!(
+        base, layered,
+        "binding the behavior-neutral layered sidecar changed PT output"
+    );
+    assert!(base_paths.contains("\"path_tracing_specialization_initialized\":false"));
+    assert!(base_paths.contains("\"path_tracing_active_instance_count\":0"));
+    assert!(base_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
+    assert!(layered_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(layered_paths.contains("\"path_tracing_active_instance_count\":1"));
+    assert!(!layered_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
+}

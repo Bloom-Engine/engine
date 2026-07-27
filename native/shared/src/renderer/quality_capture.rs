@@ -648,6 +648,33 @@ impl Renderer {
         out.push_str(",\"sheen_lut_bytes_when_initialized\":");
         out.push_str(&super::layered_pbr_scene::SHEEN_ALBEDO_LUT_BYTES.to_string());
         out.push_str(",\"layered_shared_sampler_count\":1");
+        out.push_str(",\"path_tracing_specialization_initialized\":");
+        out.push_str(if self.pt_layered_pipeline.is_some() {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"path_tracing_active_instance_count\":");
+        out.push_str(
+            &self
+                .pt_layered_records
+                .iter()
+                .filter(|record| record.active())
+                .count()
+                .to_string(),
+        );
+        out.push_str(",\"path_tracing_sidecar_record_bytes\":");
+        out.push_str(
+            &std::mem::size_of::<super::layered_pbr_pt::PtLayeredMaterialCpu>().to_string(),
+        );
+        out.push_str(",\"path_tracing_sidecar_allocated_bytes\":");
+        out.push_str(
+            &self
+                .pt_layered_instance_buffer
+                .as_ref()
+                .map_or(0, wgpu::Buffer::size)
+                .to_string(),
+        );
         out.push_str(",\"additional_base_material_bytes\":0");
         out.push_str(",\"additional_base_material_bindings\":0");
         out.push_str(",\"additional_base_material_branches\":0");

@@ -255,10 +255,20 @@ GPU-driven record, and pipeline selection; they do not load or branch on the
 layered ABI and do not allocate the LUT.
 
 The CPU scene tracer and GPU path tracer now share the version-1 base equations.
-Their full layered-lobe transport still requires an explicit, reviewed lazy
-specialization so base-only materials retain the established buffer, pipeline,
-and cost. The public descriptor already exposes every current scalar lobe;
-texture authoring and transport parity remain follow-up work.
+GPU PT also has the isolated transport foundation for the remaining lobes:
+`InstanceGiData` is unchanged, while the first contributing layered TLAS
+instance lazily backfills a parallel 96-byte-per-instance scalar record.
+Only a frame that both enables PT and contains one of those records compiles
+the group-2 pipeline and allocates/binds its storage buffer. Base-only scenes
+retain the established shader source, pipeline, bindings, instance record, and
+GPU cost.
+
+The foundation specialization is intentionally behavior-neutral. A Metal
+ray-query test renders the same seeded scene through the base and sidecar
+pipelines, requires byte-identical output, and verifies telemetry reports zero
+base allocation versus one active layered instance. Clearcoat, specular/IOR,
+sheen, anisotropy, and iridescence sampling/evaluation are the next reviewed
+transport slice; texture authoring and texture-sampled PT parity follow that.
 
 ## Public authoring API
 

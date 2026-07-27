@@ -26,6 +26,7 @@ mod gi_bake;
 pub mod gpu_driven;
 mod hiz;
 mod layered_pbr;
+mod layered_pbr_pt;
 mod layered_pbr_refraction;
 pub(crate) mod layered_pbr_scene;
 pub(crate) mod layered_pbr_ssr;
@@ -900,42 +901,34 @@ pub struct Renderer {
     probe_trace_hw_bg_cache: [Option<wgpu::BindGroup>; 2],
 
     // --- Path tracing (PT-1, docs/pt/pt-roadmap.md) ---
-    /// Megakernel pipeline; None when the adapter lacks ray query
-    /// (same gate as the HW probe trace — there is no SW fallback).
+    /// Base megakernel; None when the adapter lacks ray query.
     pub pt_pipeline: Option<wgpu::ComputePipeline>,
     pub pt_layout: Option<wgpu::BindGroupLayout>,
-    /// Rebuilt lazily; nulled on resize and on instance-data rebuild.
-    /// Two variants for the accumulation ping-pong: bg[i] reads
-    /// accum_buffers[i] (binding 8) and writes accum_buffers[1-i]
-    /// (binding 13).
+    /// Lazy group-2 specialization. Base-only PT never creates or binds it.
+    pt_layered_pipeline: Option<wgpu::ComputePipeline>,
+    pt_layered_layout: Option<wgpu::BindGroupLayout>,
+    pt_layered_bg: Option<wgpu::BindGroup>,
+    pt_layered_instance_buffer: Option<wgpu::Buffer>,
+    pt_layered_records: Vec<layered_pbr_pt::PtLayeredMaterialCpu>,
+    pt_layered_dirty: bool,
+    /// Accumulation ping-pong bind groups, invalidated with their resources.
     pt_bg: [Option<wgpu::BindGroup>; 2],
     pt_uniform_buffer: wgpu::Buffer,
-    /// rgba32float-equivalent accumulation (vec4 per pixel) as storage
-    /// buffers — rgba32float storage *textures* lack read_write in core
-    /// WGSL. Ping-pong pair (PT-3 reprojection reads other pixels from
-    /// the previous frame). Lazily (re)created at render extent.
+    /// Vec4 storage-buffer accumulation ping-pong, recreated at trace extent.
     pt_accum_buffers: [Option<wgpu::Buffer>; 2],
-    /// PT-3b SVGF — luminance moments + geometry side-channel, ping-pong
-    /// with the accum pair: (mu1, mu2, history length, raw depth) per
-    /// trace texel. The kernel validates reprojection taps and derives
-    /// the temporal variance from it; the à-trous passes read it for
-    /// depth edge-stopping and sky markers.
+    /// SVGF (mu1, mu2, history length, raw depth) ping-pong.
     pt_moments_buffers: [Option<wgpu::Buffer>; 2],
-    /// Index of the buffer holding the PREVIOUS frame's result (the
-    /// read side of this frame's dispatch). Flipped after dispatch.
+    /// Previous-frame/read-side accumulation index.
     pt_accum_idx: usize,
     /// Samples accumulated at the current view; 0 = history invalid.
     pt_accum_count: u32,
-    /// VP matrix of the last accumulated frame; movement beyond epsilon
-    /// resets accumulation (mode 1) — mode 2 relies on EMA instead.
+    /// Last accumulated VP; motion resets progressive accumulation.
     pt_prev_vp: [[f32; 4]; 4],
     /// TLAS version last traced; a rebuild invalidates accumulation.
     pt_last_tlas_version: u64,
     /// BLOOM_PT_DEBUG view selector, forwarded to the kernel via cfg.w.
     pt_debug: f32,
-    /// PT's own rolling frame counter (kernel RNG seed). Deliberately
-    /// NOT taa_frame_index: that freezes when TAA is off, which froze
-    /// the sample sequence and stopped accumulation from converging.
+    /// Independent RNG frame counter; TAA's counter can freeze.
     pt_frame_index: u32,
     /// Global scramble for the deterministic per-pixel PT sample stream.
     /// Zero preserves the historical sequence used by checked-in goldens.
@@ -944,38 +937,27 @@ pub struct Renderer {
     pt_restir: bool,
     /// PT-4 — ReSTIR reservoir ping-pong, sized with the accum pair.
     pt_resv_buffers: [Option<wgpu::Buffer>; 2],
-    /// PT-6 — skinned meshes drawn this frame (dynamic TLAS instances).
-    /// Pushed by draw_model_cached_skinned, consumed by
-    /// rebuild_instance_data, cleared with the per-frame draw lists.
+    /// Skinned draws awaiting dynamic TLAS instance construction.
     pt_dynamic_draws: Vec<PtDynamicDraw>,
-    /// PT-6 — per-slot megabuffer windows for this frame's dynamic
-    /// instances. Feeds the compute pre-skin dispatches and the
-    /// per-frame BLAS builds.
+    /// Per-slot geometry windows for compute pre-skin and BLAS build.
     pt_dyn_windows: Vec<PtDynWindow>,
-    /// PT-6 — dynamic BLAS pool, one slot per dynamic instance.
-    /// Recreated when a slot's (vertex_count, index_count) changes.
+    /// Dynamic BLAS pool, recreated when a slot's geometry size changes.
     pt_dyn_blas: Vec<(wgpu::Blas, u32, u32)>,
-    /// PT-6 — compute pre-skin pipeline (posed world-space vertices
-    /// written into the PT megabuffer window before the BLAS build).
+    /// Writes posed world-space vertices before dynamic BLAS builds.
     pt_skin_pipeline: Option<wgpu::ComputePipeline>,
     pt_skin_layout: Option<wgpu::BindGroupLayout>,
     /// Per-slot uniform buffers for the pre-skin params (grow-only).
     pt_skin_params: Vec<wgpu::Buffer>,
-    /// PT-2 — concatenated Vertex3D words (f32) / indices (u32) for
-    /// interpolated hit shading. Grow-only, rebuilt alongside the
-    /// instance-data buffer.
+    /// Grow-only concatenated geometry for interpolated hit shading.
     pt_geo_vertex_buffer: Option<wgpu::Buffer>,
     pt_geo_index_buffer: Option<wgpu::Buffer>,
-    /// PT-2 — adapter grants binding-array features; when false the
-    /// kernel compiles without the texture array and hit shading stays
-    /// on card albedo.
+    /// Whether bounce hit shading can bind the texture array.
     pt_texture_arrays_enabled: bool,
     /// PT-2 — the texture binding array lives in its own group (wgpu
     /// forbids binding arrays next to uniform buffers).
     pt_tex_layout: Option<wgpu::BindGroupLayout>,
     pt_tex_bg: Option<wgpu::BindGroup>,
-    /// Texture-store length baked into the current pt_tex_bg; growth
-    /// forces a rebuild so new textures become visible to PT.
+    /// Texture-store length baked into the current bind group.
     pt_bg_texture_count: usize,
     /// Debug-16 numeric readback (see pt_pass.rs).
     pt_readback_buffer: Option<wgpu::Buffer>,
@@ -7758,6 +7740,12 @@ impl Renderer {
             probe_trace_hw_bg_cache: [None, None],
             pt_pipeline,
             pt_layout,
+            pt_layered_pipeline: None,
+            pt_layered_layout: None,
+            pt_layered_bg: None,
+            pt_layered_instance_buffer: None,
+            pt_layered_records: Vec::new(),
+            pt_layered_dirty: false,
             pt_bg: [None, None],
             pt_uniform_buffer,
             pt_accum_buffers: [None, None],
@@ -9192,6 +9180,7 @@ impl Renderer {
         // vertices); arena-scale worlds measure a few tens of MB.
         let mut geo_vertices: Vec<f32> = Vec::new();
         let mut geo_indices: Vec<u32> = Vec::new();
+        let mut pt_layered_records = None;
         for &h in instance_handles {
             let n = scene.nodes.get(h).unwrap();
             let e = n.material.emissive;
@@ -9229,6 +9218,11 @@ impl Renderer {
                 albedo_sum[2] += n.flat_albedo[2];
                 opaque_albedo_count = opaque_albedo_count.saturating_add(1);
             }
+            layered_pbr_pt::append_record(
+                &mut pt_layered_records,
+                instance_data.len(),
+                n.material.layered_pbr,
+            );
             instance_data.push(InstanceGiDataCpu {
                 albedo: n.flat_albedo,
                 emissive_luma: (e[0] + e[1] + e[2]) * (1.0 / 3.0),
@@ -9293,6 +9287,11 @@ impl Renderer {
             let ib = geo_indices.len() as u32;
             geo_vertices.extend_from_slice(bytemuck::cast_slice(cv));
             geo_indices.extend_from_slice(ci);
+            layered_pbr_pt::append_record(
+                &mut pt_layered_records,
+                instance_data.len(),
+                mesh.layered_pbr,
+            );
             instance_data.push(InstanceGiDataCpu {
                 albedo: [1.0, 1.0, 1.0],
                 emissive_luma: 0.0,
@@ -9326,6 +9325,7 @@ impl Renderer {
                 mesh_idx: d.mesh_idx,
             });
         }
+        self.set_pt_layered_records(pt_layered_records, instance_data.len());
         // PT-2 — upload the megabuffers (grow-only; a minimum size keeps
         // bind-group creation valid before any geometry is committed).
         {

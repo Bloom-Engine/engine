@@ -68,6 +68,10 @@ impl Renderer {
             self.pt_wrote_frame = false;
             return;
         }
+        let layered_active = !self.pt_layered_records.is_empty();
+        if layered_active {
+            self.ensure_pt_layered_resources();
+        }
         // PT-2 — a grown texture store means the baked view array is
         // stale; rebuild so new textures become visible to hit shading.
         if self.pt_texture_arrays_enabled && self.pt_bg_texture_count != self.textures.len() {
@@ -518,10 +522,17 @@ impl Renderer {
                 label: Some("pt_pass"),
                 timestamp_writes: ts,
             });
-            pass.set_pipeline(self.pt_pipeline.as_ref().unwrap());
+            pass.set_pipeline(if layered_active {
+                self.pt_layered_pipeline.as_ref().unwrap()
+            } else {
+                self.pt_pipeline.as_ref().unwrap()
+            });
             pass.set_bind_group(0, self.pt_bg[self.pt_accum_idx].as_ref().unwrap(), &[]);
             if self.pt_texture_arrays_enabled {
                 pass.set_bind_group(1, self.pt_tex_bg.as_ref().unwrap(), &[]);
+            }
+            if layered_active {
+                pass.set_bind_group(2, self.pt_layered_bg.as_ref().unwrap(), &[]);
             }
             pass.dispatch_workgroups((trace_w + 7) / 8, (trace_h + 7) / 8, 1);
         }
