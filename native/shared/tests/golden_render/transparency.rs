@@ -683,7 +683,22 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             .nth(1)
             .map(|(handle, _)| handle)
             .expect("PT scene has a test object");
-        eng.scene.update_geometry(node, vertices, indices);
+        let uses_uv1 = layered.is_some_and(|material| {
+            material
+                .specular_texture
+                .is_some_and(|binding| binding.transform.tex_coord == 1)
+                || material
+                    .specular_color_texture
+                    .is_some_and(|binding| binding.transform.tex_coord == 1)
+        });
+        let secondary_uvs = uses_uv1.then(|| {
+            vertices
+                .iter()
+                .map(|vertex| [1.0 - vertex.uv[1], vertex.uv[0]])
+                .collect()
+        });
+        eng.scene
+            .update_geometry_with_secondary_uv(node, vertices, secondary_uvs, indices);
         if let Some(material) = layered {
             eng.scene.set_material_layered_pbr(node, material);
         }
@@ -979,15 +994,25 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         assert!(textured_specular_white_paths
             .contains("\"path_tracing_texture_sidecar_allocated_bytes\":0"));
     }
-    assert_eq!(
-        base, textured_specular_uv1,
-        "unqualified UV1 specular textures changed established PT transport"
-    );
-    assert!(textured_specular_uv1_paths
-        .contains("\"path_tracing_texture_specialization_initialized\":false"));
-    assert!(
-        textured_specular_uv1_paths.contains("\"path_tracing_texture_sidecar_allocated_bytes\":0")
-    );
+    if textured_specular_supported {
+        assert!(textured_specular_uv1_paths
+            .contains("\"path_tracing_texture_specialization_initialized\":true"));
+        assert!(textured_specular_uv1_paths
+            .contains("\"path_tracing_uv1_specialization_initialized\":true"));
+        assert!(
+            !textured_specular_uv1_paths.contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0")
+        );
+    } else {
+        assert_eq!(
+            base, textured_specular_uv1,
+            "an adapter without PT texture arrays must not partially enable UV1"
+        );
+        assert!(textured_specular_uv1_paths
+            .contains("\"path_tracing_uv1_specialization_initialized\":false"));
+        assert!(
+            textured_specular_uv1_paths.contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0")
+        );
+    }
     assert!(sheen_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_sheen_specialization_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":false"));
@@ -1044,6 +1069,13 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             "UV0 rotated textured specular/IOR",
             &base,
             &textured_specular_rotated,
+        );
+        assert_transport_response("UV1 textured specular/IOR", &base, &textured_specular_uv1);
+        let uv_set_response =
+            calculate_diff_metrics(&textured_specular, &textured_specular_uv1, W, H);
+        assert!(
+            uv_set_response.mean_rgb >= 0.02,
+            "UV1 did not select the retained secondary coordinates: {uv_set_response:?}"
         );
     }
     assert_transport_response("sheen", &base, &sheen);

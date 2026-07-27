@@ -39,6 +39,7 @@ mod occlusion;
 mod opaque_material_pass;
 mod planar_pass;
 mod postfx_chain;
+mod pt_geometry;
 mod pt_pass;
 #[cfg(not(target_arch = "wasm32"))]
 mod quality_capture;
@@ -207,6 +208,7 @@ struct GpuMesh {
     /// meshes (they enter the TLAS as scene nodes or not at all).
     cpu_vertices: Option<Vec<Vertex3D>>,
     cpu_indices: Option<Vec<u32>>,
+    cpu_secondary_uvs: Option<Vec<[f32; 2]>>,
     /// PT-6 — hit-shading inputs for the dynamic TLAS instance.
     base_color_idx: u32,
     metallic_factor: f32,
@@ -9170,6 +9172,7 @@ impl Renderer {
         // vertices); arena-scale worlds measure a few tens of MB.
         let mut geo_vertices: Vec<f32> = Vec::new();
         let mut geo_indices: Vec<u32> = Vec::new();
+        let mut geo_secondary_uvs = None;
         let mut pt_layered_records = None;
         let mut pt_layered_texture_records = None;
         let runtime_texture_count = self.textures.len();
@@ -9210,12 +9213,30 @@ impl Renderer {
                 albedo_sum[2] += n.flat_albedo[2];
                 opaque_albedo_count = opaque_albedo_count.saturating_add(1);
             }
-            layered_pbr_pt::append_record(
+            let uses_uv1 = layered_pbr_pt::append_record(
                 &mut pt_layered_records,
                 &mut pt_layered_texture_records,
                 instance_data.len(),
                 n.material.layered_pbr,
                 runtime_texture_count,
+                self.pt_texture_arrays_enabled
+                    && index_count != 0
+                    && n.secondary_tex_coords.is_some(),
+            );
+            pt_geometry::append_pt_secondary_uvs(
+                &mut geo_secondary_uvs,
+                vertex_base as usize,
+                if index_count != 0 {
+                    n.vertices.len()
+                } else {
+                    0
+                },
+                if index_count != 0 {
+                    n.secondary_tex_coords.as_deref()
+                } else {
+                    None
+                },
+                uses_uv1,
             );
             instance_data.push(InstanceGiDataCpu {
                 albedo: n.flat_albedo,
@@ -9281,12 +9302,20 @@ impl Renderer {
             let ib = geo_indices.len() as u32;
             geo_vertices.extend_from_slice(bytemuck::cast_slice(cv));
             geo_indices.extend_from_slice(ci);
-            layered_pbr_pt::append_record(
+            let uses_uv1 = layered_pbr_pt::append_record(
                 &mut pt_layered_records,
                 &mut pt_layered_texture_records,
                 instance_data.len(),
                 mesh.layered_pbr,
                 runtime_texture_count,
+                self.pt_texture_arrays_enabled && mesh.cpu_secondary_uvs.is_some(),
+            );
+            pt_geometry::append_pt_secondary_uvs(
+                &mut geo_secondary_uvs,
+                vb as usize,
+                cv.len(),
+                mesh.cpu_secondary_uvs.as_deref(),
+                uses_uv1,
             );
             instance_data.push(InstanceGiDataCpu {
                 albedo: [1.0, 1.0, 1.0],
@@ -9326,65 +9355,7 @@ impl Renderer {
             pt_layered_texture_records,
             instance_data.len(),
         );
-        // PT-2 — upload the megabuffers (grow-only; a minimum size keeps
-        // bind-group creation valid before any geometry is committed).
-        {
-            let v_bytes = (geo_vertices.len() * 4).max(16) as u64;
-            let i_bytes = (geo_indices.len() * 4).max(16) as u64;
-            let v_recreate = self
-                .pt_geo_vertex_buffer
-                .as_ref()
-                .map_or(true, |b| b.size() < v_bytes);
-            let i_recreate = self
-                .pt_geo_index_buffer
-                .as_ref()
-                .map_or(true, |b| b.size() < i_bytes);
-            // PT-6 — on RT adapters the megabuffers double as BLAS
-            // geometry inputs for the dynamic skinned instances (the
-            // BLAS reads a window via first_vertex/first_index).
-            let mega_usage = if self.hw_rt_enabled {
-                wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::BLAS_INPUT
-            } else {
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
-            };
-            if v_recreate {
-                self.pt_geo_vertex_buffer =
-                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("pt_geo_vertices"),
-                        size: v_bytes.next_power_of_two(),
-                        usage: mega_usage,
-                        mapped_at_creation: false,
-                    }));
-            }
-            if i_recreate {
-                self.pt_geo_index_buffer =
-                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("pt_geo_indices"),
-                        size: i_bytes.next_power_of_two(),
-                        usage: mega_usage,
-                        mapped_at_creation: false,
-                    }));
-            }
-            if v_recreate || i_recreate {
-                self.pt_bg = [None, None];
-            }
-            if !geo_vertices.is_empty() {
-                self.queue.write_buffer(
-                    self.pt_geo_vertex_buffer.as_ref().unwrap(),
-                    0,
-                    bytemuck::cast_slice(&geo_vertices),
-                );
-            }
-            if !geo_indices.is_empty() {
-                self.queue.write_buffer(
-                    self.pt_geo_index_buffer.as_ref().unwrap(),
-                    0,
-                    bytemuck::cast_slice(&geo_indices),
-                );
-            }
-        }
+        self.upload_pt_geometry(&geo_vertices, &geo_indices, geo_secondary_uvs.as_deref());
         if opaque_albedo_count > 0 {
             let inv = 1.0 / opaque_albedo_count as f32;
             self.gi_scene_avg_albedo = [
@@ -13624,6 +13595,11 @@ impl Renderer {
                     },
                     cpu_indices: if is_skinned {
                         Some(mesh.indices.clone())
+                    } else {
+                        None
+                    },
+                    cpu_secondary_uvs: if is_skinned {
+                        valid_secondary_tex_coords.cloned()
                     } else {
                         None
                     },

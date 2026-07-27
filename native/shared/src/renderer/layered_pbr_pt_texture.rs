@@ -6,14 +6,17 @@
 use super::*;
 
 const PT_LAYERED_TEXTURE_RECORD_VERSION: u32 = 1;
+const PT_LAYERED_FACTOR_UV1: u32 = 1 << 16;
+const PT_LAYERED_COLOR_UV1: u32 = 1 << 17;
 
 pub(in crate::renderer) struct PtLayeredRuntimeState {
-    pub(in crate::renderer) pipelines: [Option<wgpu::ComputePipeline>; 16],
-    pub(in crate::renderer) layouts: [Option<wgpu::BindGroupLayout>; 4],
-    pub(in crate::renderer) bind_groups: [Option<wgpu::BindGroup>; 4],
+    pub(in crate::renderer) pipelines: [Option<wgpu::ComputePipeline>; 32],
+    pub(in crate::renderer) layouts: [Option<wgpu::BindGroupLayout>; 8],
+    pub(in crate::renderer) bind_groups: [Option<wgpu::BindGroup>; 8],
     pub(in crate::renderer) instance_buffer: Option<wgpu::Buffer>,
     pub(in crate::renderer) records: Vec<PtLayeredMaterialCpu>,
     pub(in crate::renderer) texture_buffer: Option<wgpu::Buffer>,
+    pub(in crate::renderer) uv1_buffer: Option<wgpu::Buffer>,
     pub(in crate::renderer) texture_records: Vec<PtLayeredTextureCpu>,
     pub(in crate::renderer) dirty: bool,
     pub(in crate::renderer) texture_dirty: bool,
@@ -28,6 +31,7 @@ impl Default for PtLayeredRuntimeState {
             instance_buffer: None,
             records: Vec::new(),
             texture_buffer: None,
+            uv1_buffer: None,
             texture_records: Vec::new(),
             dirty: false,
             texture_dirty: false,
@@ -66,17 +70,19 @@ impl PtLayeredTextureCpu {
     pub(super) fn from_material(
         material: crate::models::MaterialLayeredPbr,
         runtime_texture_count: usize,
+        has_secondary_uv: bool,
     ) -> Self {
         fn usable(
             binding: crate::models::MaterialTextureBinding,
             runtime_texture_count: usize,
+            has_secondary_uv: bool,
         ) -> bool {
             let transform = binding.transform;
             binding.runtime_texture_idx.is_some_and(|index| {
                 index != 0
                     && (index as usize) < PT_MAX_TEXTURES
                     && (index as usize) < runtime_texture_count
-            }) && transform.tex_coord == 0
+            }) && (transform.tex_coord == 0 || (transform.tex_coord == 1 && has_secondary_uv))
                 && transform.offset.iter().all(|value| value.is_finite())
                 && transform.scale.iter().all(|value| value.is_finite())
                 && transform.rotation.is_finite()
@@ -101,8 +107,9 @@ impl PtLayeredTextureCpu {
         let factor = material.specular_texture;
         let color = material.specular_color_texture;
         let has_texture = factor.is_some() || color.is_some();
-        let all_usable = factor.is_none_or(|binding| usable(binding, runtime_texture_count))
-            && color.is_none_or(|binding| usable(binding, runtime_texture_count));
+        let all_usable = factor
+            .is_none_or(|binding| usable(binding, runtime_texture_count, has_secondary_uv))
+            && color.is_none_or(|binding| usable(binding, runtime_texture_count, has_secondary_uv));
         if !material.has_specular_ior() || !has_texture || !all_usable {
             return Self::default();
         }
@@ -112,7 +119,17 @@ impl PtLayeredTextureCpu {
         Self {
             header: [
                 PT_LAYERED_TEXTURE_RECORD_VERSION,
-                crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE,
+                crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE
+                    | if factor.is_some_and(|binding| binding.transform.tex_coord == 1) {
+                        PT_LAYERED_FACTOR_UV1
+                    } else {
+                        0
+                    }
+                    | if color.is_some_and(|binding| binding.transform.tex_coord == 1) {
+                        PT_LAYERED_COLOR_UV1
+                    } else {
+                        0
+                    },
                 factor
                     .and_then(|binding| binding.runtime_texture_idx)
                     .unwrap_or(0),
@@ -135,6 +152,11 @@ impl PtLayeredTextureCpu {
         self.header[0] == PT_LAYERED_TEXTURE_RECORD_VERSION
             && self.header[1] & crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE != 0
     }
+
+    pub(super) fn has_uv1(self) -> bool {
+        self.has_specular_ior()
+            && self.header[1] & (PT_LAYERED_FACTOR_UV1 | PT_LAYERED_COLOR_UV1) != 0
+    }
 }
 
 /// Append scalar and texture records parallel to the next TLAS instance.
@@ -145,10 +167,11 @@ pub(in crate::renderer) fn append_record(
     instance_index: usize,
     material: crate::models::MaterialLayeredPbr,
     runtime_texture_count: usize,
-) {
+    has_secondary_uv: bool,
+) -> bool {
     let active = material.is_active();
     if records.is_none() && !active {
-        return;
+        return false;
     }
     if records.is_none() {
         *records = Some(vec![PtLayeredMaterialCpu::default(); instance_index]);
@@ -162,7 +185,9 @@ pub(in crate::renderer) fn append_record(
         });
     }
 
-    let texture_record = PtLayeredTextureCpu::from_material(material, runtime_texture_count);
+    let texture_record =
+        PtLayeredTextureCpu::from_material(material, runtime_texture_count, has_secondary_uv);
+    let uses_uv1 = texture_record.has_uv1();
     if texture_records.is_none() && texture_record.has_specular_ior() {
         *texture_records = Some(vec![PtLayeredTextureCpu::default(); instance_index]);
     }
@@ -170,6 +195,7 @@ pub(in crate::renderer) fn append_record(
         debug_assert_eq!(texture_records.len(), instance_index);
         texture_records.push(texture_record);
     }
+    uses_uv1
 }
 
 pub(super) fn texture_variant(enabled: bool) -> &'static str {
@@ -191,6 +217,8 @@ pub(super) fn texture_variant(enabled: bool) -> &'static str {
 
 pub(super) const PT_LAYERED_TEXTURE_BINDINGS_WGSL: &str = r#"
 const PT_HAS_LAYERED_TEXTURES: bool = true;
+const PT_LAYERED_FACTOR_UV1: u32 = 65536u;
+const PT_LAYERED_COLOR_UV1: u32 = 131072u;
 
 struct PtLayeredTexture {
     header: vec4<u32>,
@@ -221,7 +249,8 @@ fn pt_layered_srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
 fn pt_layered_apply_textures(
     material_in: PtLayeredMaterial,
     instance_index: u32,
-    uv: vec2<f32>,
+    uv0: vec2<f32>,
+    uv1: vec2<f32>,
 ) -> PtLayeredMaterial {
     var material = material_in;
     let texture_meta = pt_layered_textures[instance_index];
@@ -235,7 +264,7 @@ fn pt_layered_apply_textures(
     var specular_factor = material.specular.w;
     if (texture_meta.header.z != 0u) {
         let factor_uv = pt_layered_transform_uv(
-            uv,
+            select(uv0, uv1, (texture_meta.header.y & PT_LAYERED_FACTOR_UV1) != 0u),
             texture_meta.specular_factor_matrix,
             texture_meta.specular_offsets.xy,
         );
@@ -245,7 +274,7 @@ fn pt_layered_apply_textures(
     }
     if (texture_meta.header.w != 0u) {
         let color_uv = pt_layered_transform_uv(
-            uv,
+            select(uv0, uv1, (texture_meta.header.y & PT_LAYERED_COLOR_UV1) != 0u),
             texture_meta.specular_color_matrix,
             texture_meta.specular_offsets.zw,
         );
@@ -272,9 +301,40 @@ const PT_HAS_LAYERED_TEXTURES: bool = false;
 fn pt_layered_apply_textures(
     material: PtLayeredMaterial,
     instance_index: u32,
-    uv: vec2<f32>,
+    uv0: vec2<f32>,
+    uv1: vec2<f32>,
 ) -> PtLayeredMaterial {
     return material;
+}
+"#;
+
+pub(super) const PT_LAYERED_UV1_BINDINGS_WGSL: &str = r#"
+@group(2) @binding(3)
+var<storage, read> pt_layered_uv1_vertices: array<vec2<f32>>;
+
+fn pt_layered_hit_uv1(
+    geo: vec4<u32>,
+    primitive: u32,
+    barycentrics: vec2<f32>,
+) -> vec2<f32> {
+    let base = geo.y + primitive * 3u;
+    let slot0 = geo.x + geo_i[base];
+    let slot1 = geo.x + geo_i[base + 1u];
+    let slot2 = geo.x + geo_i[base + 2u];
+    let weight0 = 1.0 - barycentrics.x - barycentrics.y;
+    return weight0 * pt_layered_uv1_vertices[slot0]
+        + barycentrics.x * pt_layered_uv1_vertices[slot1]
+        + barycentrics.y * pt_layered_uv1_vertices[slot2];
+}
+"#;
+
+pub(super) const PT_LAYERED_UV1_DISABLED_WGSL: &str = r#"
+fn pt_layered_hit_uv1(
+    geo: vec4<u32>,
+    primitive: u32,
+    barycentrics: vec2<f32>,
+) -> vec2<f32> {
+    return vec2<f32>(0.0);
 }
 "#;
 
@@ -292,8 +352,22 @@ mod tests {
     fn first_active_record_backfills_base_instances_lazily() {
         let mut records = None;
         let mut texture_records = None;
-        append_record(&mut records, &mut texture_records, 0, Default::default(), 1);
-        append_record(&mut records, &mut texture_records, 1, Default::default(), 1);
+        append_record(
+            &mut records,
+            &mut texture_records,
+            0,
+            Default::default(),
+            1,
+            false,
+        );
+        append_record(
+            &mut records,
+            &mut texture_records,
+            1,
+            Default::default(),
+            1,
+            false,
+        );
         assert!(records.is_none());
         assert!(texture_records.is_none());
 
@@ -314,7 +388,7 @@ mod tests {
             100.0,
             400.0,
         );
-        append_record(&mut records, &mut texture_records, 2, layered, 1);
+        append_record(&mut records, &mut texture_records, 2, layered, 1, false);
         let records = records.unwrap();
         assert_eq!(records.len(), 3);
         assert!(!records[0].active());
@@ -327,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn qualifies_only_resolved_uv0_specular_bindings() {
+    fn qualifies_only_resolved_specular_bindings_with_available_coordinates() {
         let binding = crate::models::MaterialTextureBinding {
             source_texture_index: 4,
             source_image_index: 5,
@@ -345,7 +419,7 @@ mod tests {
             specular_texture: Some(binding),
             ..Default::default()
         };
-        let record = PtLayeredTextureCpu::from_material(material, 4);
+        let record = PtLayeredTextureCpu::from_material(material, 4, false);
         assert!(record.has_specular_ior());
         assert_eq!(record.header[2..], [3, 0]);
         assert!(record.specular_factor_matrix[0].abs() < 1e-6);
@@ -361,7 +435,7 @@ mod tests {
             }),
             ..material
         };
-        assert!(!PtLayeredTextureCpu::from_material(unresolved, 4).has_specular_ior());
+        assert!(!PtLayeredTextureCpu::from_material(unresolved, 4, false).has_specular_ior());
 
         let uv1 = crate::models::MaterialLayeredPbr {
             specular_texture: Some(crate::models::MaterialTextureBinding {
@@ -373,6 +447,39 @@ mod tests {
             }),
             ..material
         };
-        assert!(!PtLayeredTextureCpu::from_material(uv1, 4).has_specular_ior());
+        assert!(!PtLayeredTextureCpu::from_material(uv1, 4, false).has_specular_ior());
+        let uv1_record = PtLayeredTextureCpu::from_material(uv1, 4, true);
+        assert!(uv1_record.has_specular_ior() && uv1_record.has_uv1());
+    }
+
+    #[test]
+    fn scalar_uv0_and_uv1_specializations_parse() {
+        for (textures, uv1) in [(false, false), (true, false), (true, true)] {
+            let source = format!(
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "const BLOOM_RAY_QUERY_NEEDS_PROCEED: bool = false;",
+                pt_fault_constants(None),
+                layered_kernel_variant(pt_kernel_variant(false).as_ref()),
+                texture_variant(textures),
+                PT_LAYERED_BINDINGS_WGSL,
+                if textures {
+                    PT_LAYERED_TEXTURE_BINDINGS_WGSL
+                } else {
+                    PT_LAYERED_TEXTURE_DISABLED_WGSL
+                },
+                if uv1 {
+                    PT_LAYERED_UV1_BINDINGS_WGSL
+                } else {
+                    PT_LAYERED_UV1_DISABLED_WGSL
+                },
+                "const PT_HAS_SCALAR_ANISOTROPY: bool = false;",
+                PT_LAYERED_TRANSPORT_WGSL,
+                PT_LAYERED_IRIDESCENCE_DISABLED_WGSL,
+                PT_LAYERED_SHEEN_DISABLED_WGSL,
+            );
+            wgpu::naga::front::wgsl::parse_str(&source).unwrap_or_else(|error| {
+                panic!("layered PT WGSL (textures={textures}, uv1={uv1}) failed: {error}")
+            });
+        }
     }
 }

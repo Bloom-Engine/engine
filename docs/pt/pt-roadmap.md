@@ -83,10 +83,11 @@ multi-bounce colour bleed.
   the 32 KiB LUT. The base kernel, shared GI record, bindings, and cost remain
   unchanged. Resolved UV0 specular-factor/color textures use the existing
   texture array plus a separately lazy 64-byte transform record, with
-  transformed UV reconstruction at primary and bounce hits. White textures
-  are byte-identical to the scalar path. Unresolved, UV1, and other
-  texture-bearing lobes continue to use exact established PT semantics until
-  their complete transport is qualified.
+  transformed UV0/UV1 reconstruction at primary and bounce hits. UV1 is an
+  aligned 8-byte-per-vertex sidecar retained for static and skinned geometry
+  only when selected. White textures are byte-identical to the scalar path.
+  Missing UV1 streams and other texture-bearing lobes continue to use exact
+  established PT semantics until their complete transport is qualified.
 - Emissive from material data (VFX/muzzle flashes become real light in PT).
 
 ### Tier 3 — PT-3/PT-4: gameplay
