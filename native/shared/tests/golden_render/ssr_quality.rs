@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "refractive_quality.rs"]
+mod refractive_quality;
+
 fn transformed_box(
     eng: &mut EngineState,
     position: [f32; 3],

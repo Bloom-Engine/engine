@@ -208,6 +208,7 @@ still. It isolates TAA/TSR from unrelated temporal effects and covers:
 - cached skinned locomotion plus joint-palette deformation;
 - cached alpha-tested card translation and rotation;
 - emissive geometry plus a local light switching both on and off;
+- retained opaque physical-transmission translation and rotation;
 - a dark interior with an extreme bright opening and a smooth-reflection
   negative control;
 - a `1.0 -> 0.5` render-scale step;
@@ -234,6 +235,15 @@ depth rejection from hiding a broken motion-vector path. The emissive sequence
 checks both dark-to-bright and bright-to-dark radiance convergence on
 stationary geometry.
 
+The physical-refraction sequence requires at least 250 pixels of both captured
+nonzero velocity and reactive rejection coverage. Because fully reactive
+transmission deliberately consumes the current refracted sample rather than
+accumulating it, recovery is compared against the same Halton phase one
+16-sample cycle later. Severe residue must remain below 0.5% within four frames,
+coherent outliers may cover at most 2% after four frames, and the settled cycle
+must still vary by no more than 2 RGB levels. This distinguishes real history
+lag from the intended subpixel sample pattern.
+
 The dark-interior SSR gate requires finite raw march/history values, no
 isolated HDR fireflies under the documented local rule, a populated reflection
 buffer, and a visible SSR-on/off delta from the smooth-reflection control.
@@ -254,4 +264,4 @@ silently passing.
 ## Remaining #135 work
 
 Extend shared reason/confidence semantics to SSR/GI/PT where their
-representations match, then add the refractive motion sequence.
+representations match.
