@@ -185,6 +185,7 @@ still. It isolates TAA/TSR from unrelated temporal effects and covers:
 - retained transparent motion through reactive TAA coverage;
 - cached skinned locomotion plus joint-palette deformation;
 - cached alpha-tested card translation and rotation;
+- emissive geometry plus a local light switching both on and off;
 - a `1.0 -> 0.5` render-scale step;
 - a `320x192 -> 256x256` target resize.
 
@@ -196,16 +197,18 @@ camera. Fast-rotation recovery is compared with the mean of a settled
 cycle's mean variation is bounded to 2 RGB levels. Slow-pan pairwise variation
 is bounded to 4 RGB levels with at most 3% coherent outliers.
 
-The rigid, reactive, skinned, and alpha-tested content sequences use the same
-recovery gate and include a negative control requiring a visibly different
-final pose. A motion trail may cover at most 2% of pixels after four frames,
-severe `>64/255` residue must settle below 0.5% within four frames, and the
-settled jitter cycle must vary by no more than 2 RGB levels. The skinned
-sequence uses the production cached-model draw, keyed previous palette, world
-locomotion, and two-joint deformation paths. The foliage card uses the
-production cached alpha-mask/coverage-mip route and additionally requires at
-least 250 pixels of captured nonzero object velocity, preventing depth
-rejection from hiding a broken motion-vector path.
+The rigid, reactive, skinned, alpha-tested, and emissive content sequences use
+the same recovery gate and include a negative control requiring visibly
+different stable states. A motion trail may cover at most 2% of pixels after
+four frames, severe `>64/255` residue must settle below 0.5% within four
+frames, and the settled jitter cycle must vary by no more than 2 RGB levels.
+The skinned sequence uses the production cached-model draw, keyed previous
+palette, world locomotion, and two-joint deformation paths. The foliage card
+uses the production cached alpha-mask/coverage-mip route and additionally
+requires at least 250 pixels of captured nonzero object velocity, preventing
+depth rejection from hiding a broken motion-vector path. The emissive sequence
+checks both dark-to-bright and bright-to-dark radiance convergence on
+stationary geometry.
 
 Render-scale changes must produce a first frame byte-identical to a freshly
 seeded history at the new scale. Resize changes must have no `>32/255`
@@ -223,5 +226,5 @@ silently passing.
 ## Remaining #135 work
 
 Extend shared reason/confidence semantics to SSR/GI/PT where their
-representations match, then add emissive, interior-to-bright-exterior, and
-refractive motion sequences.
+representations match, then add interior-to-bright-exterior and refractive
+motion sequences.

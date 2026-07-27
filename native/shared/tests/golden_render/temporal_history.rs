@@ -1052,6 +1052,76 @@ fn cached_alpha_tested_card_motion_writes_velocity_and_bounds_trails() {
 }
 
 #[test]
+fn emissive_light_switches_converge_without_radiance_trails() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(true);
+    r.set_render_scale(1.0);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+
+    let (vertices, indices) = cube_verts(0.65, [0.18, 0.035, 0.01, 1.0]);
+    let node = eng.scene.create_node();
+    eng.scene.update_geometry(node, vertices, indices);
+    eng.scene.set_transform(
+        node,
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 1.0],
+        ],
+    );
+    eng.scene.set_material_pbr(node, 0.24, 0.0);
+
+    let draw_state = |eng: &mut EngineState, enabled: bool| {
+        eng.scene.set_material_emissive_factor(
+            node,
+            if enabled { 7.0 } else { 0.0 },
+            if enabled { 0.8 } else { 0.0 },
+            if enabled { 0.08 } else { 0.0 },
+        );
+        let r = &mut eng.renderer;
+        r.set_clear_color(5.0, 7.0, 14.0, 255.0);
+        r.begin_mode_3d(4.2, 2.8, 6.2, 0.0, 0.8, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.add_directional_light(-0.4, -1.0, -0.25, 0.55, 0.65, 0.9, 0.55);
+        if enabled {
+            r.add_point_light(0.0, 1.25, 0.2, 4.5, 1.0, 0.11, 0.02, 8.0);
+        }
+        r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 30.0, 38.0, 52.0, 255.0);
+        r.draw_cube(-1.4, 0.65, 0.0, 0.8, 1.3, 0.8, 105.0, 115.0, 135.0, 255.0);
+        r.draw_cube(1.4, 0.65, 0.0, 0.8, 1.3, 0.8, 105.0, 115.0, 135.0, 255.0);
+    };
+    let capture_state =
+        |eng: &mut EngineState, enabled| render(eng, 1, |eng| draw_state(eng, enabled)).2;
+    let run_switch = |eng: &mut EngineState, from: bool, to: bool| {
+        eng.renderer.reset_temporal_history();
+        for _ in 0..8 {
+            capture_state(eng, from);
+        }
+        let old_state = capture_state(eng, from);
+        let mut frames = Vec::new();
+        for _ in 0..24 {
+            frames.push(capture_state(eng, to));
+        }
+        (old_state, frames)
+    };
+
+    let (off_state, on_frames) = run_switch(&mut eng, false, true);
+    evaluate_motion_recovery("emissive-on", &off_state, &on_frames);
+    let (on_state, off_frames) = run_switch(&mut eng, true, false);
+    evaluate_motion_recovery("emissive-off", &on_state, &off_frames);
+}
+
+#[test]
 fn render_scale_and_resize_steps_seed_without_prior_frame_residue() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
