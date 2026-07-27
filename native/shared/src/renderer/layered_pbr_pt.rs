@@ -79,6 +79,11 @@ impl PtLayeredMaterialCpu {
         if material.has_iridescence() {
             mask |= crate::models::MaterialLayeredPbr::IRIDESCENCE_LOBE;
         }
+        if material.iridescence_texture.is_some()
+            || material.iridescence_thickness_texture.is_some()
+        {
+            texture_mask |= crate::models::MaterialLayeredPbr::IRIDESCENCE_LOBE;
+        }
         if material.has_specular_ior() {
             mask |= crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE;
         }
@@ -149,8 +154,19 @@ impl PtLayeredMaterialCpu {
             && self.anisotropy[0] > 0.0
     }
 
+    fn has_iridescence(self) -> bool {
+        self.header[1] & crate::models::MaterialLayeredPbr::IRIDESCENCE_LOBE != 0
+            && self.header[2] & crate::models::MaterialLayeredPbr::IRIDESCENCE_LOBE == 0
+            && self.iridescence[0] > 0.0
+            && self.iridescence[3] > 0.0
+    }
+
     fn has_qualified_transport(self) -> bool {
-        self.has_clearcoat() || self.has_specular_ior() || self.has_sheen() || self.has_anisotropy()
+        self.has_clearcoat()
+            || self.has_specular_ior()
+            || self.has_sheen()
+            || self.has_anisotropy()
+            || self.has_iridescence()
     }
 }
 
@@ -238,7 +254,8 @@ fn pt_layered_has_transport(material: PtLayeredMaterial) -> bool {
     return pt_layered_has_clearcoat(material)
         || pt_layered_has_specular_ior(material)
         || pt_layered_has_sheen(material)
-        || pt_layered_has_anisotropy(material);
+        || pt_layered_has_anisotropy(material)
+        || pt_layered_has_iridescence(material);
 }
 
 fn pt_ior_f0(ior_value: f32) -> f32 {
@@ -268,25 +285,33 @@ fn pt_layered_base_fresnel(
     metallic: f32,
     material: PtLayeredMaterial,
 ) -> vec3<f32> {
-    if (!pt_layered_has_specular_ior(material)) {
-        return fresnel_schlick3(
+    var base: vec3<f32>;
+    if (pt_layered_has_specular_ior(material)) {
+        let dielectric = pt_fresnel_f90(
+            cos_theta,
+            pt_dielectric_f0(material),
+            vec3<f32>(clamp(material.specular.w, 0.0, 1.0)),
+        );
+        let conductor = fresnel_schlick3(cos_theta, base_color);
+        base = mix(dielectric, conductor, metallic);
+    } else {
+        base = fresnel_schlick3(
             cos_theta, mix(vec3<f32>(0.04), base_color, metallic),
         );
     }
-    let dielectric = pt_fresnel_f90(
+    return pt_apply_iridescence_base_fresnel(
+        base, cos_theta, base_color, metallic, material,
+    );
+}
+
+fn pt_dielectric_transmission(cos_theta: f32, material: PtLayeredMaterial) -> f32 {
+    let base = pt_fresnel_f90(
         cos_theta,
         pt_dielectric_f0(material),
         vec3<f32>(clamp(material.specular.w, 0.0, 1.0)),
     );
-    let conductor = fresnel_schlick3(cos_theta, base_color);
-    return mix(dielectric, conductor, metallic);
-}
-
-fn pt_dielectric_transmission(cos_theta: f32, material: PtLayeredMaterial) -> f32 {
-    let fresnel = pt_fresnel_f90(
-        cos_theta,
-        pt_dielectric_f0(material),
-        vec3<f32>(clamp(material.specular.w, 0.0, 1.0)),
+    let fresnel = pt_apply_iridescence_dielectric_fresnel(
+        base, cos_theta, material,
     );
     return clamp(1.0 - max(fresnel.x, max(fresnel.y, fresnel.z)), 0.0, 1.0);
 }
@@ -533,6 +558,7 @@ fn pt_layered_base_nee(
     if (
         !pt_layered_has_specular_ior(material)
             && !pt_layered_has_anisotropy(material)
+            && !pt_layered_has_iridescence(material)
     ) {
         return nee_diffuse(n, view, ldir, ndl, full_alb, rough, metal)
             + nee_spec(n, view, ldir, ndl, full_alb, rough, metal);
@@ -677,6 +703,7 @@ fn pt_sample_layered_base(
     if (
         !pt_layered_has_specular_ior(material)
             && !pt_layered_has_anisotropy(material)
+            && !pt_layered_has_iridescence(material)
     ) {
         return sample_brdf(n, view, base_color, roughness, metallic);
     }
@@ -810,7 +837,11 @@ fn pt_sample_layered_brdf(
     let base_f = pt_layered_base_fresnel(ndv, base_color, metallic, material);
     let base_specular_weight = (base_f.x + base_f.y + base_f.z) / 3.0;
     var diffuse_weight = (1.0 - base_specular_weight) * (1.0 - metallic);
-    if (pt_layered_has_specular_ior(material)) {
+    if (
+        pt_layered_has_specular_ior(material)
+            || pt_layered_has_anisotropy(material)
+            || pt_layered_has_iridescence(material)
+    ) {
         diffuse_weight = pt_dielectric_transmission(ndv, material) * (1.0 - metallic);
     }
     let sheen_weight = pt_layered_sheen_weight(material);
@@ -864,6 +895,198 @@ fn pt_sample_layered_brdf(
         out.weight = min(out.weight, vec3<f32>(4.0));
     }
     return out;
+}
+"#;
+
+const PT_LAYERED_IRIDESCENCE_DISABLED_WGSL: &str = r#"
+fn pt_layered_has_iridescence(material: PtLayeredMaterial) -> bool {
+    return false;
+}
+
+fn pt_apply_iridescence_base_fresnel(
+    base: vec3<f32>,
+    cos_theta: f32,
+    base_color: vec3<f32>,
+    metallic: f32,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    return base;
+}
+
+fn pt_apply_iridescence_dielectric_fresnel(
+    base: vec3<f32>,
+    cos_theta: f32,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    return base;
+}
+"#;
+
+const PT_LAYERED_IRIDESCENCE_WGSL: &str = r#"
+const PT_LAYERED_IRIDESCENCE_LOBE: u32 = 8u;
+const PT_IRIDESCENCE_PI: f32 = 3.14159265;
+
+fn pt_layered_has_iridescence(material: PtLayeredMaterial) -> bool {
+    return material.header.x == 1u
+        && (material.header.y & PT_LAYERED_IRIDESCENCE_LOBE) != 0u
+        && (material.header.z & PT_LAYERED_IRIDESCENCE_LOBE) == 0u
+        && material.iridescence.x > 0.0
+        && material.iridescence.w > 0.0;
+}
+
+fn pt_fresnel0_to_ior(f0: vec3<f32>) -> vec3<f32> {
+    let root = sqrt(clamp(f0, vec3<f32>(0.0), vec3<f32>(0.9999)));
+    return (vec3<f32>(1.0) + root) / (vec3<f32>(1.0) - root);
+}
+
+fn pt_ior_to_fresnel0(
+    transmitted_ior: vec3<f32>,
+    incident_ior: f32,
+) -> vec3<f32> {
+    let incident = vec3<f32>(incident_ior);
+    let ratio = (transmitted_ior - incident) / (transmitted_ior + incident);
+    return ratio * ratio;
+}
+
+fn pt_iridescence_sensitivity(
+    optical_path_difference_nm: f32,
+    shift: vec3<f32>,
+) -> vec3<f32> {
+    let phase = 2.0 * PT_IRIDESCENCE_PI
+        * optical_path_difference_nm * 1e-9;
+    let phase_squared = phase * phase;
+    let value = vec3<f32>(5.4856e-13, 4.4201e-13, 5.2481e-13);
+    let position = vec3<f32>(1.6810e6, 1.7953e6, 2.2084e6);
+    let variance = vec3<f32>(4.3278e9, 9.3046e9, 6.6121e9);
+    var xyz = value
+        * sqrt(vec3<f32>(2.0 * PT_IRIDESCENCE_PI) * variance)
+        * cos(position * phase + shift)
+        * exp(-vec3<f32>(phase_squared) * variance);
+    xyz.x += 9.7470e-14
+        * sqrt(2.0 * PT_IRIDESCENCE_PI * 4.5282e9)
+        * cos(2.2399e6 * phase + shift.x)
+        * exp(-4.5282e9 * phase_squared);
+    xyz /= 1.0685e-7;
+    return vec3<f32>(
+        3.2404542 * xyz.x - 0.9692660 * xyz.y + 0.0556434 * xyz.z,
+        -1.5371385 * xyz.x + 1.8760108 * xyz.y - 0.2040259 * xyz.z,
+        -0.4985314 * xyz.x + 0.0415560 * xyz.y + 1.0572252 * xyz.z,
+    );
+}
+
+fn pt_eval_iridescence(
+    outside_ior: f32,
+    authored_film_ior: f32,
+    cos_theta_1: f32,
+    authored_thickness_nm: f32,
+    base_f0: vec3<f32>,
+) -> vec3<f32> {
+    let safe_outside_ior = max(outside_ior, 1e-4);
+    let thickness_nm = max(authored_thickness_nm, 0.0);
+    let film_ior = mix(
+        safe_outside_ior,
+        max(authored_film_ior, 1.0),
+        smoothstep(0.0, 0.03, thickness_nm),
+    );
+    let cosine_1 = clamp(cos_theta_1, 0.0, 1.0);
+    let sin_theta_2_squared = pow(
+        safe_outside_ior / film_ior, 2.0,
+    ) * (1.0 - cosine_1 * cosine_1);
+    let cos_theta_2_squared = 1.0 - sin_theta_2_squared;
+    if (cos_theta_2_squared < 0.0) {
+        return vec3<f32>(1.0);
+    }
+    let cosine_2 = sqrt(cos_theta_2_squared);
+
+    let r0 = pt_ior_f0(film_ior / safe_outside_ior);
+    let r12 = pt_fresnel_f90(
+        cosine_1, vec3<f32>(r0), vec3<f32>(1.0),
+    ).x;
+    let t121 = 1.0 - r12;
+    let phi12 = select(
+        0.0, PT_IRIDESCENCE_PI, film_ior < safe_outside_ior,
+    );
+    let phi21 = PT_IRIDESCENCE_PI - phi12;
+
+    let base_ior = pt_fresnel0_to_ior(base_f0);
+    let r1 = pt_ior_to_fresnel0(base_ior, film_ior);
+    let r23 = pt_fresnel_f90(cosine_2, r1, vec3<f32>(1.0));
+    let phi23 = vec3<f32>(
+        select(0.0, PT_IRIDESCENCE_PI, base_ior.x < film_ior),
+        select(0.0, PT_IRIDESCENCE_PI, base_ior.y < film_ior),
+        select(0.0, PT_IRIDESCENCE_PI, base_ior.z < film_ior),
+    );
+    let optical_path_difference =
+        2.0 * film_ior * thickness_nm * cosine_2;
+    let phase_shift = vec3<f32>(phi21) + phi23;
+    let r123 = clamp(
+        vec3<f32>(r12) * r23,
+        vec3<f32>(1e-5),
+        vec3<f32>(0.9999),
+    );
+    let reflected_series = vec3<f32>(t121 * t121)
+        * r23 / (vec3<f32>(1.0) - r123);
+    var result = vec3<f32>(r12) + reflected_series;
+    var coefficient = reflected_series - vec3<f32>(t121);
+    let amplitude = sqrt(r123);
+    for (var order = 1u; order <= 2u; order += 1u) {
+        coefficient *= amplitude;
+        result += coefficient * 2.0 * pt_iridescence_sensitivity(
+            f32(order) * optical_path_difference,
+            f32(order) * phase_shift,
+        );
+    }
+    return clamp(result, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn pt_apply_iridescence_base_fresnel(
+    base: vec3<f32>,
+    cos_theta: f32,
+    base_color: vec3<f32>,
+    metallic: f32,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    if (!pt_layered_has_iridescence(material)) {
+        return base;
+    }
+    let dielectric = pt_eval_iridescence(
+        1.0,
+        material.iridescence.y,
+        cos_theta,
+        material.iridescence.w,
+        pt_dielectric_f0(material),
+    );
+    let conductor = pt_eval_iridescence(
+        1.0,
+        material.iridescence.y,
+        cos_theta,
+        material.iridescence.w,
+        base_color,
+    );
+    let thin_film = mix(dielectric, conductor, metallic);
+    return mix(
+        base, thin_film, clamp(material.iridescence.x, 0.0, 1.0),
+    );
+}
+
+fn pt_apply_iridescence_dielectric_fresnel(
+    base: vec3<f32>,
+    cos_theta: f32,
+    material: PtLayeredMaterial,
+) -> vec3<f32> {
+    if (!pt_layered_has_iridescence(material)) {
+        return base;
+    }
+    let thin_film = pt_eval_iridescence(
+        1.0,
+        material.iridescence.y,
+        cos_theta,
+        material.iridescence.w,
+        pt_dielectric_f0(material),
+    );
+    return mix(
+        base, thin_film, clamp(material.iridescence.x, 0.0, 1.0),
+    );
 }
 "#;
 
@@ -1065,7 +1288,11 @@ fn pt_sample_layered_undercoat(
     );
     let base_specular_weight = (base_f.x + base_f.y + base_f.z) / 3.0;
     var diffuse_weight = (1.0 - base_specular_weight) * (1.0 - metallic);
-    if (pt_layered_has_specular_ior(material)) {
+    if (
+        pt_layered_has_specular_ior(material)
+            || pt_layered_has_anisotropy(material)
+            || pt_layered_has_iridescence(material)
+    ) {
         diffuse_weight = pt_dielectric_transmission(n_dot_v, material)
             * (1.0 - metallic);
     }
@@ -1226,6 +1453,13 @@ impl Renderer {
             .any(PtLayeredMaterialCpu::has_anisotropy)
     }
 
+    pub(super) fn pt_layered_iridescence_active(&self) -> bool {
+        self.pt_layered_records
+            .iter()
+            .copied()
+            .any(PtLayeredMaterialCpu::has_iridescence)
+    }
+
     pub(super) fn set_pt_layered_records(
         &mut self,
         records: Option<Vec<PtLayeredMaterialCpu>>,
@@ -1249,8 +1483,10 @@ impl Renderer {
         }
         let sheen = self.pt_layered_sheen_active();
         let anisotropy = self.pt_layered_anisotropy_active();
+        let iridescence = self.pt_layered_iridescence_active();
         let resource_variant = sheen as usize;
-        let pipeline_variant = resource_variant | ((anisotropy as usize) << 1);
+        let pipeline_variant =
+            resource_variant | ((anisotropy as usize) << 1) | ((iridescence as usize) << 2);
         if sheen {
             self.ensure_scene_sheen_albedo_lut();
         }
@@ -1300,7 +1536,7 @@ impl Renderer {
             let base_kernel = pt_kernel_variant(query_diagnostics);
             let layered_kernel = layered_kernel_variant(base_kernel.as_ref());
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
                 pt_fault_constants(fault.as_deref()),
                 layered_kernel,
@@ -1312,6 +1548,11 @@ impl Renderer {
                     "const PT_HAS_SCALAR_ANISOTROPY: bool = false;"
                 },
                 PT_LAYERED_TRANSPORT_WGSL,
+                if iridescence {
+                    PT_LAYERED_IRIDESCENCE_WGSL
+                } else {
+                    PT_LAYERED_IRIDESCENCE_DISABLED_WGSL
+                },
                 if sheen {
                     PT_LAYERED_SHEEN_WGSL
                 } else {
@@ -1347,7 +1588,9 @@ impl Renderer {
             self.pt_layered_pipelines[pipeline_variant] = Some(
                 self.device
                     .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some(if anisotropy {
+                        label: Some(if iridescence {
+                            "pt_layered_iridescence_pipeline"
+                        } else if anisotropy {
                             "pt_layered_anisotropy_pipeline"
                         } else if sheen {
                             "pt_layered_sheen_pipeline"
@@ -1494,6 +1737,7 @@ mod tests {
         assert_eq!(record.header[1], mask);
         assert_eq!(record.clearcoat_ior, [0.8, 0.2, 1.0, 1.45]);
         assert_eq!(record.iridescence, [0.75, 1.3, 120.0, 360.0]);
+        assert!(record.has_iridescence() && record.has_qualified_transport());
     }
 
     #[test]
@@ -1585,6 +1829,9 @@ mod tests {
             anisotropy_authored: true,
             anisotropy_strength: 0.6,
             anisotropy_texture: Some(texture),
+            iridescence_authored: true,
+            iridescence_factor: 0.75,
+            iridescence_texture: Some(texture),
             ..Default::default()
         };
         let sheen = PtLayeredMaterialCpu::from_material(sheen);
@@ -1603,6 +1850,7 @@ mod tests {
                 | crate::models::MaterialLayeredPbr::SPECULAR_IOR_LOBE
                 | crate::models::MaterialLayeredPbr::SHEEN_LOBE
                 | crate::models::MaterialLayeredPbr::ANISOTROPY_LOBE
+                | crate::models::MaterialLayeredPbr::IRIDESCENCE_LOBE
         );
     }
 
@@ -1614,6 +1862,8 @@ mod tests {
         assert!(PT_LAYERED_TRANSPORT_WGSL.contains("PT_HAS_SCALAR_ANISOTROPY"));
         assert!(PT_LAYERED_TRANSPORT_WGSL.contains("slot * PT_VSTRIDE + 20u"));
         assert!(PT_LAYERED_TRANSPORT_WGSL.contains("hit.object_to_world"));
+        assert!(PT_LAYERED_IRIDESCENCE_WGSL.contains("pt_eval_iridescence"));
+        assert!(!PT_LAYERED_IRIDESCENCE_DISABLED_WGSL.contains("exp("));
         assert!(!pt_kernel_variant(false).contains("pt_layered_materials"));
     }
 

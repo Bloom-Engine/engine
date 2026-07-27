@@ -727,6 +727,12 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         iridescence_factor: 0.65,
         iridescence_thickness_minimum: 120.0,
         iridescence_thickness_maximum: 360.0,
+        iridescence_texture: Some(MaterialTextureBinding {
+            source_texture_index: 0,
+            source_image_index: 0,
+            runtime_texture_idx: None,
+            transform: Default::default(),
+        }),
         ..Default::default()
     }))
     .expect("neutral layered PT variant initializes")
@@ -773,6 +779,26 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     }))
     .expect("rotated anisotropy PT variant initializes")
     .expect("same ray-query adapter remains available");
+    let (iridescence, iridescence_paths) = render_variant(Some(MaterialLayeredPbr {
+        iridescence_authored: true,
+        iridescence_factor: 1.0,
+        iridescence_ior: 1.3,
+        iridescence_thickness_minimum: 100.0,
+        iridescence_thickness_maximum: 180.0,
+        ..Default::default()
+    }))
+    .expect("iridescence PT variant initializes")
+    .expect("same ray-query adapter remains available");
+    let (iridescence_thick, iridescence_thick_paths) = render_variant(Some(MaterialLayeredPbr {
+        iridescence_authored: true,
+        iridescence_factor: 1.0,
+        iridescence_ior: 1.3,
+        iridescence_thickness_minimum: 100.0,
+        iridescence_thickness_maximum: 520.0,
+        ..Default::default()
+    }))
+    .expect("thick iridescence PT variant initializes")
+    .expect("same ray-query adapter remains available");
     let (combined, combined_paths) = render_variant(Some(MaterialLayeredPbr {
         clearcoat_authored: true,
         clearcoat_factor: 0.7,
@@ -788,6 +814,11 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         anisotropy_authored: true,
         anisotropy_strength: 0.6,
         anisotropy_rotation: 0.3,
+        iridescence_authored: true,
+        iridescence_factor: 0.8,
+        iridescence_ior: 1.3,
+        iridescence_thickness_minimum: 100.0,
+        iridescence_thickness_maximum: 360.0,
         ..Default::default()
     }))
     .expect("combined clearcoat/specular PT variant initializes")
@@ -799,15 +830,20 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     );
     assert!(base_paths.contains("\"path_tracing_specialization_initialized\":false"));
     assert!(base_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
+    assert!(base_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false"));
     assert!(base_paths.contains("\"path_tracing_active_instance_count\":0"));
     assert!(base_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
     assert!(neutral_paths.contains("\"path_tracing_specialization_initialized\":false"));
+    assert!(neutral_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false"));
     assert!(neutral_paths.contains("\"path_tracing_active_instance_count\":1"));
     assert!(neutral_paths.contains("\"path_tracing_sidecar_allocated_bytes\":0"));
     assert!(clearcoat_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(clearcoat_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
     assert!(
         clearcoat_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":false")
+    );
+    assert!(
+        clearcoat_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false")
     );
     assert!(clearcoat_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(clearcoat_paths.contains("\"path_tracing_active_instance_count\":1"));
@@ -816,11 +852,14 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     assert!(
         specular_ior_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":false")
     );
+    assert!(specular_ior_paths
+        .contains("\"path_tracing_iridescence_specialization_initialized\":false"));
     assert!(specular_ior_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(specular_ior_paths.contains("\"path_tracing_active_instance_count\":1"));
     assert!(sheen_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_sheen_specialization_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":false"));
+    assert!(sheen_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false"));
     assert!(sheen_paths.contains("\"sheen_lut_initialized\":true"));
     assert!(sheen_paths.contains("\"path_tracing_active_instance_count\":1"));
     assert!(anisotropy_paths.contains("\"path_tracing_specialization_initialized\":true"));
@@ -828,15 +867,30 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     assert!(
         anisotropy_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":true")
     );
+    assert!(
+        anisotropy_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false")
+    );
     assert!(anisotropy_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(anisotropy_paths.contains("\"path_tracing_active_instance_count\":1"));
     assert!(anisotropy_rotated_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(anisotropy_rotated_paths
         .contains("\"path_tracing_anisotropy_specialization_initialized\":true"));
     assert!(anisotropy_rotated_paths.contains("\"sheen_lut_initialized\":false"));
+    assert!(iridescence_paths.contains("\"path_tracing_specialization_initialized\":true"));
+    assert!(iridescence_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
+    assert!(
+        iridescence_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":false")
+    );
+    assert!(
+        iridescence_paths.contains("\"path_tracing_iridescence_specialization_initialized\":true")
+    );
+    assert!(iridescence_paths.contains("\"sheen_lut_initialized\":false"));
+    assert!(iridescence_thick_paths
+        .contains("\"path_tracing_iridescence_specialization_initialized\":true"));
     assert!(combined_paths.contains("\"path_tracing_specialization_initialized\":true"));
     assert!(combined_paths.contains("\"path_tracing_sheen_specialization_initialized\":true"));
     assert!(combined_paths.contains("\"path_tracing_anisotropy_specialization_initialized\":true"));
+    assert!(combined_paths.contains("\"path_tracing_iridescence_specialization_initialized\":true"));
     assert!(combined_paths.contains("\"path_tracing_active_instance_count\":1"));
 
     assert_transport_response("clearcoat", &base, &clearcoat);
@@ -848,6 +902,13 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     assert!(
         rotation_response.mean_rgb >= 0.02,
         "anisotropy rotation did not turn the path-traced highlight: {rotation_response:?}"
+    );
+    assert_transport_response("iridescence", &base, &iridescence);
+    assert_transport_response("thick iridescence", &base, &iridescence_thick);
+    let thickness_response = calculate_diff_metrics(&iridescence, &iridescence_thick, W, H);
+    assert!(
+        thickness_response.mean_rgb >= 0.02,
+        "thin-film thickness did not shift the path-traced spectrum: {thickness_response:?}"
     );
     assert_transport_response("combined scalar lobes", &base, &combined);
 }

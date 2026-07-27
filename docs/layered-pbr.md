@@ -190,25 +190,28 @@ mode produce bit-exact images, while the BRDF-energy and reprojection fault
 controls still fail their respective goldens. The realtime base shader already
 used the corrected Smith visibility.
 
-Scalar clearcoat, dielectric specular/IOR, sheen, and anisotropic-GGX path
-transport now live in lazy group-2 specializations. They identify the primary
-TLAS instance without growing the G-buffer, apply the CPU reference's
-reciprocal fixed-IOR clearcoat, KHR_materials_specular F0/F90,
-energy-compensated Charlie sheen, and Burley anisotropy contracts for direct
-light, and sample every qualified lobe at each bounce. Anisotropy reconstructs
-the retained vertex tangent and mirrored handedness from the existing geometry
-megabuffer and committed object-to-world transform. Clearcoat composes over the
-modified base and sheen with reciprocal attenuation, and pure metals remain
-independent of dielectric specular/IOR settings.
+Scalar clearcoat, dielectric specular/IOR, sheen, anisotropic-GGX, and
+iridescent path transport now live in lazy group-2 specializations. They
+identify the primary TLAS instance without growing the G-buffer, apply the CPU
+reference's reciprocal fixed-IOR clearcoat, KHR_materials_specular F0/F90,
+energy-compensated Charlie sheen, Burley anisotropy, and bounded
+Belcour/Barla thin-film contracts for direct light, and sample every qualified
+lobe at each bounce. Anisotropy reconstructs the retained vertex tangent and
+mirrored handedness from the existing geometry megabuffer and committed
+object-to-world transform. Texture-free iridescence uses glTF's authored
+maximum thickness and spectrally modifies dielectric or conductor Fresnel
+without creating a second lobe. Clearcoat composes over the modified base and
+sheen with reciprocal attenuation, and pure metals remain independent of
+dielectric specular/IOR settings.
 
 A scene without a qualified record dispatches the original base pipeline
 exactly. Clearcoat/specular-only scenes bind one sidecar buffer; scalar
-anisotropy selects a separately constant-folded code variant without adding a
-resource, and only a scene with scalar sheen creates the 32 KiB
-directional-albedo LUT. The sidecar marks texture-bearing lobes separately and
-leaves each one on established base PT semantics rather than applying an
-incorrect scalar approximation. Textured factors, clearcoat normals, and
-iridescence remain separate follow-up slices.
+anisotropy and iridescence select separately constant-folded code variants
+without adding a resource, and only a scene with scalar sheen creates the
+32 KiB directional-albedo LUT. The sidecar marks texture-bearing lobes
+separately and leaves each one on established base PT semantics rather than
+applying an incorrect scalar approximation. Textured factors and clearcoat
+normals remain separate follow-up slices.
 
 ## Runtime material-record ABI
 
@@ -283,13 +286,13 @@ retain the established shader source, pipeline, bindings, instance record, and
 GPU cost.
 
 Metal ray-query qualification renders the same seeded scene through base,
-clearcoat, specular/IOR, sheen, anisotropy, and combined scalar pipelines. It
-requires byte-identical output for an unqualified lobe, visible bounded-energy
-responses for every qualified lobe, and a distinct highlight after a 90-degree
-anisotropy rotation on explicit vertex tangents. Telemetry verifies that sheen
-and anisotropy code variants remain independently lazy. Iridescence is the next
-reviewed scalar transport slice; texture authoring and texture-sampled PT
-parity follow that.
+clearcoat, specular/IOR, sheen, anisotropy, iridescence, and combined scalar
+pipelines. It requires byte-identical output for an unqualified textured lobe,
+visible bounded-energy responses for every qualified lobe, a distinct highlight
+after a 90-degree anisotropy rotation on explicit vertex tangents, and a
+spectral image change between 180 nm and 520 nm films. Telemetry verifies that
+sheen, anisotropy, and iridescence code variants remain independently lazy.
+Texture authoring and texture-sampled PT parity are the next reviewed slices.
 
 ## Public authoring API
 

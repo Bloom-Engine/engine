@@ -74,15 +74,15 @@ multi-bounce colour bleed.
   `bloom-reference/src/tracer.rs` so the two tracers stay comparable.
 - **Layered-material sidecar**: a 96-byte scalar record and group-2 pipeline
   are created only after PT encounters a qualified layered TLAS instance.
-  Scalar clearcoat, dielectric specular/IOR, Charlie sheen, and anisotropic
-  GGX direct lighting and bounce sampling match the CPU reference's reciprocal
-  GGX, F0/F90, diffuse-complement, directional-albedo, authored-tangent, and
-  visible-normal sampling contracts, including their combined composition.
-  Sheen and anisotropy select independently lazy, constant-folded code
-  variants; only sheen adds the 32 KiB LUT. The base kernel, shared GI record,
-  bindings, and cost remain unchanged; unqualified or texture-bearing lobes
-  continue to dispatch the exact base pipeline until complete transport is
-  qualified.
+  Scalar clearcoat, dielectric specular/IOR, Charlie sheen, anisotropic GGX,
+  and iridescence direct lighting and bounce sampling match the CPU reference's
+  reciprocal GGX, F0/F90, diffuse-complement, directional-albedo,
+  authored-tangent, visible-normal, and bounded spectral thin-film contracts,
+  including their combined composition. Sheen, anisotropy, and iridescence
+  select independently lazy, constant-folded code variants; only sheen adds
+  the 32 KiB LUT. The base kernel, shared GI record, bindings, and cost remain
+  unchanged; unqualified or texture-bearing lobes continue to dispatch the
+  exact base pipeline until complete transport is qualified.
 - Emissive from material data (VFX/muzzle flashes become real light in PT).
 
 ### Tier 3 — PT-3/PT-4: gameplay

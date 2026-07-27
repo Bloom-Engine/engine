@@ -656,7 +656,12 @@ impl Renderer {
         });
         out.push_str(",\"path_tracing_sheen_specialization_initialized\":");
         out.push_str(
-            if self.pt_layered_pipelines[1].is_some() || self.pt_layered_pipelines[3].is_some() {
+            if self
+                .pt_layered_pipelines
+                .iter()
+                .enumerate()
+                .any(|(index, pipeline)| index & 1 != 0 && pipeline.is_some())
+            {
                 "true"
             } else {
                 "false"
@@ -664,7 +669,25 @@ impl Renderer {
         );
         out.push_str(",\"path_tracing_anisotropy_specialization_initialized\":");
         out.push_str(
-            if self.pt_layered_pipelines[2].is_some() || self.pt_layered_pipelines[3].is_some() {
+            if self
+                .pt_layered_pipelines
+                .iter()
+                .enumerate()
+                .any(|(index, pipeline)| index & 2 != 0 && pipeline.is_some())
+            {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        out.push_str(",\"path_tracing_iridescence_specialization_initialized\":");
+        out.push_str(
+            if self
+                .pt_layered_pipelines
+                .iter()
+                .enumerate()
+                .any(|(index, pipeline)| index & 4 != 0 && pipeline.is_some())
+            {
                 "true"
             } else {
                 "false"

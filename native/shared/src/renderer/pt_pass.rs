@@ -74,8 +74,10 @@ impl Renderer {
         let layered_active = self.pt_layered_transport_active();
         let layered_sheen = self.pt_layered_sheen_active();
         let layered_anisotropy = layered_active && self.pt_layered_anisotropy_active();
-        let layered_pipeline_variant =
-            layered_sheen as usize | ((layered_anisotropy as usize) << 1);
+        let layered_iridescence = layered_active && self.pt_layered_iridescence_active();
+        let layered_pipeline_variant = layered_sheen as usize
+            | ((layered_anisotropy as usize) << 1)
+            | ((layered_iridescence as usize) << 2);
         if layered_active {
             self.ensure_pt_layered_resources();
         }
