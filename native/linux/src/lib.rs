@@ -572,6 +572,14 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         if !force_sw_gi && supported.contains(rt_mask) {
             required_features |= rt_mask;
         }
+        // PT-2: texture binding array + non-uniform indexing for textured
+        // path-trace hit shading. Both or neither (the kernel indexes the
+        // array with a per-thread material id).
+        let pt_tex_mask = wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+        if supported.contains(pt_tex_mask) {
+            required_features |= pt_tex_mask;
+        }
         let experimental_features = if required_features.intersects(rt_mask) {
             unsafe { wgpu::ExperimentalFeatures::enabled() }
         } else {
@@ -582,6 +590,34 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         // PerMaterial, PerDraw, SceneInputs). wgpu's default limit is
         // 4. Vulkan supports at least 7 here, so 5 is universally safe.
         required_limits.max_bind_groups = 5;
+        // The refractive/translucent material profile binds up to 19
+        // sampled textures in the fragment stage (5 material maps + env/
+        // BRDF/3 shadow cascades/env-diffuse + planar reflection + 3 texture
+        // arrays + the group-4 scene_color/scene_depth/impulse/motion inputs).
+        // wgpu's default is 16. Raise to whatever the adapter actually
+        // supports — every real Vulkan/GL GPU exposes ≥128 — so opaque/
+        // transparent materials are unaffected and refractive ones link.
+        let adapter_limits = adapter.limits();
+        required_limits.max_sampled_textures_per_shader_stage = required_limits
+            .max_sampled_textures_per_shader_stage
+            .max(adapter_limits.max_sampled_textures_per_shader_stage);
+        required_limits.max_samplers_per_shader_stage = required_limits
+            .max_samplers_per_shader_stage
+            .max(adapter_limits.max_samplers_per_shader_stage);
+        // PT-2: binding arrays have their own element budget, default 0.
+        // Take whatever the adapter offers; the renderer checks the
+        // granted value against its fixed array size before compiling
+        // the textured kernel variant.
+        if required_features.contains(pt_tex_mask) {
+            required_limits.max_binding_array_elements_per_shader_stage =
+                adapter_limits.max_binding_array_elements_per_shader_stage;
+        }
+        // PT-4: the path-trace kernel binds 9 storage buffers (accum +
+        // moments + reservoir ping-pongs on top of instance/geo data);
+        // the wgpu default limit is 8.
+        required_limits.max_storage_buffers_per_shader_stage = required_limits
+            .max_storage_buffers_per_shader_stage
+            .max(adapter_limits.max_storage_buffers_per_shader_stage.min(16));
         if required_features.intersects(rt_mask) {
             required_limits = required_limits
                 .using_minimum_supported_acceleration_structure_values();
@@ -603,7 +639,11 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         // logical size separately so screenWidth() etc. stay
         // DPI-independent.
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // COPY_SRC: bloom_take_screenshot reads the swapchain back;
+            // without it the readback copy is a validation error that
+            // aborts the process the first time a game calls it.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
             format,
             width: phys_w,
             height: phys_h,
