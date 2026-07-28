@@ -663,6 +663,8 @@ pub extern "C" fn bloom_init_window(
                 &adapter,
                 bloom_shared::renderer::device_negotiation::DeviceRequestOptions {
                     allow_ray_query: !force_sw_gi,
+                    profile:
+                        bloom_shared::renderer::device_negotiation::DeviceRequestProfile::NativeFull,
                 },
             ),
         )

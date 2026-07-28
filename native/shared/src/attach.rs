@@ -101,6 +101,11 @@ fn request_device(
             &adapter,
             crate::renderer::device_negotiation::DeviceRequestOptions {
                 allow_ray_query: !force_sw_gi,
+                profile: if cfg!(target_os = "android") {
+                    crate::renderer::device_negotiation::DeviceRequestProfile::FoldedMobile
+                } else {
+                    crate::renderer::device_negotiation::DeviceRequestProfile::NativeFull
+                },
             },
         ),
     )?;

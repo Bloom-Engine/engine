@@ -1,10 +1,10 @@
+use bloom_shared::audio::{parse_mp3, parse_ogg, parse_wav};
 use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
-use bloom_shared::string_header::{str_from_header, alloc_perry_string};
-use bloom_shared::audio::{parse_wav, parse_ogg, parse_mp3};
+use bloom_shared::string_header::{alloc_perry_string, str_from_header};
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
 static mut NATIVE_WINDOW: *mut libc::c_void = std::ptr::null_mut();
@@ -23,7 +23,6 @@ fn bloom_resolve_asset_path(path: &str) -> std::borrow::Cow<'_, str> {
 // The full shared (non-physics) FFI surface. See bloom_shared::ffi_core
 // docs for the contract; tools/validate-ffi.js checks parity in CI.
 bloom_shared::define_core_ffi!();
-
 
 /// Resolve relative asset paths to the app's base asset directory.
 /// On Android, relative paths like "assets/models/tree.glb" won't resolve
@@ -75,11 +74,13 @@ pub extern "C" fn bloom_android_set_native_window(window: *mut libc::c_void) {
 }
 
 fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
-    use std::task::{Context, Poll, Wake, Waker};
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
     struct NoopWaker;
-    impl Wake for NoopWaker { fn wake(self: Arc<Self>) {} }
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
     let waker = Waker::from(Arc::new(NoopWaker));
     let mut cx = Context::from_waker(&waker);
     let mut future = unsafe { Pin::new_unchecked(Box::new(future)) };
@@ -109,7 +110,9 @@ fn sysprop(name: &str) -> String {
     if n <= 0 {
         return String::new();
     }
-    String::from_utf8_lossy(&buf[..n as usize]).trim().to_string()
+    String::from_utf8_lossy(&buf[..n as usize])
+        .trim()
+        .to_string()
 }
 
 /// SH-055 diag — wgpu backend selection for the A/B experiment. Default keeps
@@ -123,7 +126,12 @@ fn backend_choice() -> wgpu::Backends {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8, _fullscreen: f64) {
+pub extern "C" fn bloom_init_window(
+    width: f64,
+    height: f64,
+    title_ptr: *const u8,
+    _fullscreen: f64,
+) {
     let _title = str_from_header(title_ptr);
 
     // Re-install after perry-runtime's own hook (set during main() init) so the
@@ -131,11 +139,18 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     install_panic_logger();
 
     unsafe {
-        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: starting\0".as_ptr());
+        __android_log_print(
+            3,
+            b"BloomEngine\0".as_ptr(),
+            b"bloom_init_window: starting\0".as_ptr(),
+        );
         let window = NATIVE_WINDOW;
         // If no native window was set, use requested dimensions with a headless surface
         let (pixel_w, pixel_h) = if !window.is_null() {
-            (ANativeWindow_getWidth(window) as u32, ANativeWindow_getHeight(window) as u32)
+            (
+                ANativeWindow_getWidth(window) as u32,
+                ANativeWindow_getHeight(window) as u32,
+            )
         } else {
             (width as u32, height as u32)
         };
@@ -151,7 +166,8 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         {
             let msg = std::ffi::CString::new(format!(
                 "bloom_init_window: requested backends={backends:?}"
-            )).unwrap();
+            ))
+            .unwrap();
             __android_log_print(3, b"BloomEngine\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
         }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -167,17 +183,22 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             return;
         }
 
-        let handle = raw_window_handle::AndroidNdkWindowHandle::new(
-            std::ptr::NonNull::new(window).unwrap()
-        );
+        let handle =
+            raw_window_handle::AndroidNdkWindowHandle::new(std::ptr::NonNull::new(window).unwrap());
         let raw = raw_window_handle::RawWindowHandle::AndroidNdk(handle);
-        let surface = instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Android(
-                raw_window_handle::AndroidDisplayHandle::new()
-            )),
-            raw_window_handle: raw,
-        }).expect("Failed to create surface");
-        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: surface created\0".as_ptr());
+        let surface = instance
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Android(
+                    raw_window_handle::AndroidDisplayHandle::new(),
+                )),
+                raw_window_handle: raw,
+            })
+            .expect("Failed to create surface");
+        __android_log_print(
+            3,
+            b"BloomEngine\0".as_ptr(),
+            b"bloom_init_window: surface created\0".as_ptr(),
+        );
 
         let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
@@ -197,95 +218,47 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
                 }
             }
         };
-        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: adapter found\0".as_ptr());
+        __android_log_print(
+            3,
+            b"BloomEngine\0".as_ptr(),
+            b"bloom_init_window: adapter found\0".as_ptr(),
+        );
         {
             let info = adapter.get_info();
             let msg = std::ffi::CString::new(format!(
                 "adapter: name='{}' backend={:?} device_type={:?} driver='{}' driver_info='{}'",
                 info.name, info.backend, info.device_type, info.driver, info.driver_info
-            )).unwrap();
+            ))
+            .unwrap();
             __android_log_print(3, b"BloomEngine\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
         }
 
-        // Ticket 007b: most Android GPUs lack RT, but recent Adreno /
-        // Mali-Immortalis devices do — request the feature if advertised.
-        // Limits merge: start from downlevel (required for older Android
-        // adapters), then layer acceleration-structure minimums on top
-        // when RT was granted.
-        let supported = adapter.features();
         let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-        let mut required_features = wgpu::Features::empty();
-        // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
-        // can record GPU timings. Optional — profiler falls back to CPU-only
-        // when the adapter doesn't grant it (many Android GPUs won't).
-        if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-            required_features |= wgpu::Features::TIMESTAMP_QUERY;
-        }
-        // Cooked BC7 textures (bloom-cook) upload compressed when the
-        // adapter has BC support; without it they CPU-decode at load.
-        if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-            required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-        }
-        if !force_sw_gi && supported.contains(rt_mask) {
-            required_features |= rt_mask;
-        }
-        let experimental_features = if required_features.intersects(rt_mask) {
-            unsafe { wgpu::ExperimentalFeatures::enabled() }
-        } else {
-            wgpu::ExperimentalFeatures::disabled()
-        };
-        let adapter_limits = adapter.limits();
-        let mut required_limits = wgpu::Limits::downlevel_defaults()
-            .using_resolution(adapter_limits.clone());
-        // The renderer's `joint_bg` binds a 64KB uniform buffer, but
-        // downlevel_defaults caps uniform-buffer bindings at 16KB, so
-        // create_bind_group panics on mobile GPUs (e.g. Adreno) with
-        // "range 65536 exceeds max_*_buffer_binding_size limit 16384". Raise the
-        // buffer-binding sizes (and bind-group count) to the adapter's maximum;
-        // these are guaranteed-supported and match the desktop limits.
-        required_limits.max_uniform_buffer_binding_size =
-            adapter_limits.max_uniform_buffer_binding_size;
-        required_limits.max_storage_buffer_binding_size =
-            adapter_limits.max_storage_buffer_binding_size;
-        required_limits.max_bind_groups =
-            required_limits.max_bind_groups.max(5).min(adapter_limits.max_bind_groups);
-        // SH-055 — `downlevel_defaults` caps per-stage sampled-textures and
-        // samplers at 16, but the material fragment stage uses 19 (more so once
-        // the group-4 SceneInputs fold moves the scene colour/depth/impulse/
-        // motion textures + samplers into group 0 on Android). Adreno actually
-        // supports ~128 per stage — request the adapter's real maximum, same as
-        // the buffer/bind-group raises above.
-        required_limits.max_sampled_textures_per_shader_stage =
-            adapter_limits.max_sampled_textures_per_shader_stage;
-        required_limits.max_samplers_per_shader_stage =
-            adapter_limits.max_samplers_per_shader_stage;
-        bloom_shared::renderer::material_indirection::request_tier_a_if_supported(
-            supported,
-            &adapter_limits,
-            &mut required_features,
-            &mut required_limits,
+        let negotiated = pollster_block_on(
+            bloom_shared::renderer::device_negotiation::request_device_with_fallback(
+                &adapter,
+                bloom_shared::renderer::device_negotiation::DeviceRequestOptions {
+                    allow_ray_query: !force_sw_gi,
+                    profile: bloom_shared::renderer::device_negotiation::DeviceRequestProfile::FoldedMobile,
+                },
+            ),
+        )
+        .unwrap_or_else(|error| panic!("Failed to create renderer device: {error}"));
+        let negotiation_report = negotiated.report.report_json();
+        let msg = std::ffi::CString::new(format!(
+            "renderer device negotiation = {negotiation_report}"
+        ))
+        .unwrap();
+        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
+        let device = negotiated.device;
+        let queue = negotiated.queue;
+        __android_log_print(
+            3,
+            b"BloomEngine\0".as_ptr(),
+            b"bloom_init_window: device created\0".as_ptr(),
         );
-        bloom_shared::renderer::gpu_driven::request_features_if_supported(
-            supported,
-            &mut required_features,
-        );
-        if required_features.intersects(rt_mask) {
-            required_limits = required_limits
-                .using_minimum_supported_acceleration_structure_values();
-        }
-        let (device, queue) = pollster_block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("bloom_device"),
-                required_features,
-                required_limits,
-                experimental_features,
-                ..Default::default()
-            },
-        )).expect("Failed to create device");
-        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: device created\0".as_ptr());
 
         // SH-055 diag — capture wgpu validation/device errors with their full
         // detail instead of wgpu's default "handle as fatal" panic (which the
@@ -300,8 +273,11 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         if surface_caps.formats.is_empty() {
             panic!("Surface reports no supported formats (emulator Vulkan limitation)");
         }
-        let format = surface_caps.formats.iter()
-            .find(|f| f.is_srgb()).copied()
+        let format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
             .unwrap_or(surface_caps.formats[0]);
 
         let alpha_mode = if surface_caps.alpha_modes.is_empty() {
@@ -322,10 +298,20 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
         };
         surface.configure(&device, &surface_config);
 
-        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: surface configured\0".as_ptr());
-        let renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
+        __android_log_print(
+            3,
+            b"BloomEngine\0".as_ptr(),
+            b"bloom_init_window: surface configured\0".as_ptr(),
+        );
+        let mut renderer =
+            Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
+        renderer.set_device_negotiation_report(negotiation_report);
         let _ = ENGINE.set(EngineState::new(renderer));
-        __android_log_print(3, b"BloomEngine\0".as_ptr(), b"bloom_init_window: engine initialized\0".as_ptr());
+        __android_log_print(
+            3,
+            b"BloomEngine\0".as_ptr(),
+            b"bloom_init_window: engine initialized\0".as_ptr(),
+        );
     }
 }
 
@@ -390,7 +376,8 @@ pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f
 #[no_mangle]
 pub extern "C" fn bloom_resize(phys_w: f64, phys_h: f64, log_w: f64, log_h: f64) {
     if let Some(eng) = unsafe { ENGINE.get_mut() } {
-        eng.renderer.resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
+        eng.renderer
+            .resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
     }
 }
 
@@ -411,7 +398,11 @@ pub extern "C" fn bloom_close_window() {
 
 #[no_mangle]
 pub extern "C" fn bloom_window_should_close() -> f64 {
-    if engine().should_close { 1.0 } else { 0.0 }
+    if engine().should_close {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 // ============================================================
@@ -427,7 +418,11 @@ pub extern "C" fn bloom_android_on_touch(action: i32, x: f64, y: f64, pointer_in
             let sh = eng.screen_height();
             let lx = x * 0.5;
             let ly = y * 0.5;
-            let msg = std::ffi::CString::new(format!("touch a={} raw=({},{}) scaled=({},{}) sw={} sh={}", action, x, y, lx, ly, sw, sh)).unwrap();
+            let msg = std::ffi::CString::new(format!(
+                "touch a={} raw=({},{}) scaled=({},{}) sw={} sh={}",
+                action, x, y, lx, ly, sw, sh
+            ))
+            .unwrap();
             __android_log_print(3, b"BloomTouch\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr());
             eng.input.set_mouse_position(lx, ly);
             if action == 1 || action == 3 {
@@ -436,9 +431,9 @@ pub extern "C" fn bloom_android_on_touch(action: i32, x: f64, y: f64, pointer_in
                 eng.input.set_touch(pointer_index as usize, lx, ly, true); // DOWN / MOVE
             }
             match action {
-                0 => eng.input.set_mouse_button_down(0),  // ACTION_DOWN
-                1 => eng.input.set_mouse_button_up(0),    // ACTION_UP
-                2 => {}                                      // ACTION_MOVE
+                0 => eng.input.set_mouse_button_down(0), // ACTION_DOWN
+                1 => eng.input.set_mouse_button_up(0),   // ACTION_UP
+                2 => {}                                  // ACTION_MOVE
                 _ => {}
             }
         }
@@ -510,12 +505,18 @@ fn android_audio_thread(renderer: Option<bloom_shared::audio::AudioRenderer>) {
     impl AudioOutputCallback for BloomAudioCallback {
         type FrameType = (f32, Stereo);
 
-        fn on_audio_ready(&mut self, _stream: &mut dyn AudioOutputStreamSafe, frames: &mut [(f32, f32)]) -> DataCallbackResult {
+        fn on_audio_ready(
+            &mut self,
+            _stream: &mut dyn AudioOutputStreamSafe,
+            frames: &mut [(f32, f32)],
+        ) -> DataCallbackResult {
             // Convert frame tuples to interleaved slice
             let len = frames.len() * 2;
             let ptr = frames.as_mut_ptr() as *mut f32;
             let interleaved = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-            for s in interleaved.iter_mut() { *s = 0.0; }
+            for s in interleaved.iter_mut() {
+                *s = 0.0;
+            }
             if let Some(r) = self.renderer.as_mut() {
                 r.mix(interleaved);
             }
@@ -574,9 +575,13 @@ fn android_audio_thread(renderer: Option<bloom_shared::audio::AudioRenderer>) {
 #[no_mangle]
 pub extern "C" fn bloom_toggle_fullscreen() {}
 #[no_mangle]
-pub extern "C" fn bloom_set_window_title(title_ptr: *const u8) { let _ = str_from_header(title_ptr); }
+pub extern "C" fn bloom_set_window_title(title_ptr: *const u8) {
+    let _ = str_from_header(title_ptr);
+}
 #[no_mangle]
-pub extern "C" fn bloom_set_window_icon(path_ptr: *const u8) { let _ = str_from_header(path_ptr); }
+pub extern "C" fn bloom_set_window_icon(path_ptr: *const u8) {
+    let _ = str_from_header(path_ptr);
+}
 
 #[no_mangle]
 pub extern "C" fn bloom_disable_cursor() {
@@ -592,15 +597,29 @@ pub extern "C" fn bloom_enable_cursor() {
 #[no_mangle]
 pub extern "C" fn bloom_set_clipboard_text(_text_ptr: *const u8) {}
 #[no_mangle]
-pub extern "C" fn bloom_get_clipboard_text() -> *const u8 { std::ptr::null() }
+pub extern "C" fn bloom_get_clipboard_text() -> *const u8 {
+    std::ptr::null()
+}
 
 // E5b: File dialogs (stub on this platform)
 #[no_mangle]
-pub extern "C" fn bloom_open_file_dialog(_filter_ptr: *const u8, _title_ptr: *const u8) -> *const u8 { std::ptr::null() }
+pub extern "C" fn bloom_open_file_dialog(
+    _filter_ptr: *const u8,
+    _title_ptr: *const u8,
+) -> *const u8 {
+    std::ptr::null()
+}
 #[no_mangle]
-pub extern "C" fn bloom_save_file_dialog(_default_name_ptr: *const u8, _title_ptr: *const u8) -> *const u8 { std::ptr::null() }
+pub extern "C" fn bloom_save_file_dialog(
+    _default_name_ptr: *const u8,
+    _title_ptr: *const u8,
+) -> *const u8 {
+    std::ptr::null()
+}
 #[no_mangle]
-pub extern "C" fn bloom_get_platform() -> f64 { 5.0 }
+pub extern "C" fn bloom_get_platform() -> f64 {
+    5.0
+}
 
 /// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag), read
 /// from the device locale system property via the NDK (no JNI). Tries the
@@ -608,7 +627,9 @@ pub extern "C" fn bloom_get_platform() -> f64 { 5.0 }
 #[no_mangle]
 pub extern "C" fn bloom_get_language() -> f64 {
     fn parse(buf: &[u8], n: i32) -> Option<f64> {
-        if n < 2 { return None; }
+        if n < 2 {
+            return None;
+        }
         let lc = |b: u8| if b.is_ascii_uppercase() { b + 32 } else { b };
         let (c0, c1) = (lc(buf[0]), lc(buf[1]));
         if c0.is_ascii_alphabetic() && c1.is_ascii_alphabetic() {
@@ -630,7 +651,9 @@ pub extern "C" fn bloom_get_language() -> f64 {
                 buf.as_mut_ptr() as *mut libc::c_char,
             )
         };
-        if let Some(v) = parse(&buf, n) { return v; }
+        if let Some(v) = parse(&buf, n) {
+            return v;
+        }
     }
     25966.0
 }
@@ -644,7 +667,10 @@ pub extern "C" fn bloom_get_language() -> f64 {
 // com.bloomengine.game.BloomGameBridge Kotlin class.
 
 extern "C" {
-    fn ANativeWindow_fromSurface(env: *mut libc::c_void, surface: *mut libc::c_void) -> *mut libc::c_void;
+    fn ANativeWindow_fromSurface(
+        env: *mut libc::c_void,
+        surface: *mut libc::c_void,
+    ) -> *mut libc::c_void;
     fn mallopt(param: i32, value: i32) -> i32;
     fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
     fn main() -> i32;
@@ -702,7 +728,8 @@ pub extern "C" fn JNI_OnLoad(_vm: *mut libc::c_void, _reserved: *mut libc::c_voi
         mallopt(-204, 0);
 
         __android_log_print(
-            3, b"BloomEngine\0".as_ptr(),
+            3,
+            b"BloomEngine\0".as_ptr(),
             b"JNI_OnLoad: MTE disabled\0".as_ptr(),
         );
     }
@@ -724,15 +751,15 @@ pub extern "C" fn JNI_OnLoad(_vm: *mut libc::c_void, _reserved: *mut libc::c_voi
     // pathological draw): adb shell setprop debug.bloom.maxmodels N
     let max_models = sysprop("debug.bloom.maxmodels");
     if !max_models.is_empty() {
-        std::env::set_var("BLOOM_MAX_MODELS", max_models
-        );
+        std::env::set_var("BLOOM_MAX_MODELS", max_models);
     }
 
     // Read asset base path from environment (set by Activity before loadLibrary)
     if let Ok(path) = std::env::var("BLOOM_ASSET_PATH") {
         unsafe {
             __android_log_print(
-                3, b"BloomEngine\0".as_ptr(),
+                3,
+                b"BloomEngine\0".as_ptr(),
                 b"JNI_OnLoad: asset path set\0".as_ptr(),
             );
             ASSET_BASE_PATH = Some(path);
@@ -752,7 +779,8 @@ pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeSetSurf
 ) {
     let window = ANativeWindow_fromSurface(env, surface);
     __android_log_print(
-        3, b"BloomEngine\0".as_ptr(),
+        3,
+        b"BloomEngine\0".as_ptr(),
         b"nativeSetSurface: ANativeWindow acquired\0".as_ptr(),
     );
     bloom_android_set_native_window(window);
@@ -766,12 +794,14 @@ pub unsafe extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeMain(
     _class: *mut libc::c_void,
 ) {
     __android_log_print(
-        3, b"BloomEngine\0".as_ptr(),
+        3,
+        b"BloomEngine\0".as_ptr(),
         b"nativeMain: calling main()\0".as_ptr(),
     );
     main();
     __android_log_print(
-        3, b"BloomEngine\0".as_ptr(),
+        3,
+        b"BloomEngine\0".as_ptr(),
         b"nativeMain: main() returned\0".as_ptr(),
     );
 }
@@ -807,8 +837,6 @@ pub extern "C" fn Java_com_bloomengine_game_BloomGameBridge_nativeOnDestroy(
 // ============================================================
 // Thread-safe staging (for async asset loading via Perry threads)
 // ============================================================
-
-
 
 // Q6: Multi-hit picking
 // ============================================================

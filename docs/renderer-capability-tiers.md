@@ -21,15 +21,22 @@ because an unrelated optional feature is absent.
 This table describes the cross-system path contract after device creation.
 Platform profiles still own their minimum surface and shader-layout limits.
 
-## Native device negotiation
+## Platform device negotiation
 
-The shared native and Linux startup paths request the renderer's actual active
-profile instead of `wgpu::Limits::default()`: 5 bind groups, 4 color
-attachments, 19 sampled textures, 16 samplers, 8 storage buffers, and a 64 KiB
-uniform-buffer binding. Path tracing raises the storage-buffer requirement to
-9. Tier A requests only Bloom's bounded 4,096-texture/64-sampler working set,
-including fallback entries, rather than the adapter's maximum descriptor
-budget.
+Every native startup path selects one of these profiles and requests its actual
+active shader-layout contract instead of `wgpu::Limits::default()` or the
+adapter's entire advertised budget:
+
+| Profile | Platforms/layout | Bind groups | Color attachments | Sampled textures/stage | Samplers/stage | Storage buffers/stage | Uniform binding |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `native-full` | macOS, Linux, Windows; separate SceneInputs group | 5 | 4 | 19 | 16 | 8 | 64 KiB |
+| `folded-mobile` | Android; SceneInputs folded into group 0 | 4 | 4 | 19 | 16 | 4 | 64 KiB |
+
+Android's lean main pass uses two color attachments, but its platform contract
+remains four because other compiled pipelines may use up to four. Path tracing
+raises the storage-buffer requirement to 9. Tier A requests only Bloom's
+bounded 4,096-texture/64-sampler working set, including fallback entries,
+rather than the adapter's maximum descriptor budget.
 
 Startup first requests supported optional features for the selected tier. If
 the backend rejects that request, Bloom retries the same active shader-layout
