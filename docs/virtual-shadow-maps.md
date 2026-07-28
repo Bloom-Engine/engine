@@ -37,10 +37,17 @@ used consistently for receiver demand, physical-page rendering, and VSM
 sampling. CSM retains its own fitted matrices. A receiver outside a clipmap or
 on any missing page samples that original CSM projection.
 
-Crossing a snapped origin currently invalidates the affected level. This is
-safe and bounded because its pages become missing before upload and use CSM
-until rebuilt. A later rolling/toroidal page-table milestone can preserve the
-overlapping cache region across that rebase.
+Crossing a snapped planar origin now shifts the affected level's virtual
+owners while preserving their physical layers, depth, age, and content
+signatures. Only pages shifted outside the 32 by 32 address space are freed.
+Any prior dynamic-overlay pages are made missing before the shift because
+their depth is frame-specific.
+
+Preservation is deliberately strict. The old and new projections must have
+identical light basis, scale, and depth fields; only their planar page origins
+may differ. A light, depth range, content signature, or unexpected matrix
+change invalidates the affected level before upload. Missing and invalidated
+pages continue to sample CSM.
 
 ## Dynamic and skinned casters
 
@@ -76,6 +83,7 @@ Quality telemetry reports the VSM state under
 - receiver demand source and count;
 - resident, dirty, hit, miss, eviction, denial, invalidation, and render
   counts;
+- clipmap level rebases and pages preserved or dropped by those rebases;
 - per-level resident and dirty counts;
 - dynamic overlay footprint, rendered pages, draws, deferred pages, and both
   hard budgets.
@@ -116,11 +124,16 @@ Qualification evidence for the current dynamic overlay milestone is in
 Qualification evidence for the independent page-snapped directional clipmap
 milestone is in `docs/evidence/issue-132-directional-clipmap-v1.md`.
 
+Add `--vsm-scroll` beside `--vsm-dynamic` to alternate the camera across an
+exact light-plane page boundary every 30 frames. This opt-in transition oracle
+does not alter the ordinary fixture. Qualification evidence for rolling page
+preservation during that camera motion is in
+`docs/evidence/issue-132-clipmap-scroll-v1.md`.
+
 ## Work that remains on issue #132
 
-- Preserve overlapping physical pages across clipmap origin changes with a
-  rolling/toroidal page-table mapping, then qualify moving-camera and
-  moving-light transitions without pops.
+- Qualify moving-light transitions, including the conservative full-level
+  invalidation path, without pops.
 - Move receiver marking, request compaction, caster culling, and submission to
   bounded GPU-driven paths where the capability tier supports them.
 - Add explicit, default-off spot and point shadow requests, their virtual
