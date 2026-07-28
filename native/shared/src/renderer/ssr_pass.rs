@@ -264,6 +264,9 @@ impl Renderer {
                 bytemuck::bytes_of(&tp),
             );
 
+            self.frame_resource_stats.created_bind_group(
+                super::frame_resource_stats::BindGroupCreationSite::SsrTemporal,
+            );
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ssr_temporal_bg"),
                 layout: &self.ssr_temporal_layout,

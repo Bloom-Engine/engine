@@ -414,6 +414,8 @@ impl Renderer {
             bytemuck::bytes_of(&cp),
         );
         {
+            self.frame_resource_stats
+                .created_bind_group(frame_resource_stats::BindGroupCreationSite::SceneCompose);
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("scene_compose_bg"),
                 layout: &self.scene_compose_layout,
@@ -535,6 +537,8 @@ impl Renderer {
             };
             self.queue
                 .write_buffer(&self.upscale_uniform_buffer, 0, bytemuck::bytes_of(&up));
+            self.frame_resource_stats
+                .created_bind_group(frame_resource_stats::BindGroupCreationSite::Upscale);
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("upscale_bg"),
                 layout: &self.upscale_layout,
@@ -636,6 +640,8 @@ impl Renderer {
                     .transient_pool
                     .compiled_view(plan.plan_id, reactive)
                     .expect("reactive coverage is materialized before post-FX");
+                self.frame_resource_stats
+                    .created_bind_group(frame_resource_stats::BindGroupCreationSite::TaaReactive);
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("taa_reactive_bg"),
                     layout: self
@@ -688,6 +694,8 @@ impl Renderer {
                     ],
                 })
             } else {
+                self.frame_resource_stats
+                    .created_bind_group(frame_resource_stats::BindGroupCreationSite::Taa);
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("taa_bg"),
                     layout: &self.taa_layout,
@@ -796,6 +804,8 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.dof_uniform_buffer, 0, bytemuck::bytes_of(&dp));
 
+            self.frame_resource_stats
+                .created_bind_group(frame_resource_stats::BindGroupCreationSite::DepthOfField);
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("dof_bg"),
                 layout: &self.dof_layout,
@@ -872,6 +882,8 @@ impl Renderer {
                 bytemuck::bytes_of(&mbp),
             );
 
+            self.frame_resource_stats
+                .created_bind_group(frame_resource_stats::BindGroupCreationSite::MotionBlur);
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("motion_blur_bg"),
                 layout: &self.motion_blur_layout,
@@ -944,6 +956,9 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.sss_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
+            self.frame_resource_stats.created_bind_group(
+                frame_resource_stats::BindGroupCreationSite::SubsurfaceScattering,
+            );
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("sss_bg"),
                 layout: &self.sss_layout,
@@ -1019,6 +1034,9 @@ impl Renderer {
             };
             self.queue
                 .write_buffer(&self.cas_uniform_buffer, 0, bytemuck::bytes_of(&cp));
+            self.frame_resource_stats.created_bind_group(
+                frame_resource_stats::BindGroupCreationSite::ContrastAdaptiveSharpen,
+            );
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("cas_bg"),
                 layout: &self.cas_layout,
@@ -1122,8 +1140,10 @@ impl Renderer {
         exposure_dst_idx: usize,
     ) {
         // The luminance source is whatever the composite will read.
-        let composite_src_view = self.composite_source_view();
         if self.auto_exposure {
+            self.frame_resource_stats
+                .created_bind_group(frame_resource_stats::BindGroupCreationSite::AutoExposure);
+            let composite_src_view = self.composite_source_view();
             let ep = ExposureParams {
                 params: [
                     self.auto_exposure_key,

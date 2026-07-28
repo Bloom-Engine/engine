@@ -147,6 +147,12 @@ directional fields, point lights, and view/shadow/frame data). This makes the
 former repeated full-buffer upload observable without adding a readback or GPU
 pass.
 
+`renderer_paths.steady_state_resources.bind_group_creations` reports the last
+frame's total bind-group creations and a fixed, named count for every recurring
+core-frame site. The counter storage is a twelve-element integer array: it
+performs no allocation and lets qualification distinguish true steady-state
+churn from initialization, resize, or resource-generation rebuilds.
+
 `examples/quality-transparency/main.ts` accepts `--sorted-interleaving` as an
 unversioned focused ordering oracle. It forces conventional sorted composition
 and pairs the 96 imported BLEND layers with 96 custom-material layers at

@@ -1273,7 +1273,24 @@ impl Renderer {
         out.push_str(&lighting_uploads.byte_count.to_string());
         out.push_str(",\"full_buffer_bytes\":");
         out.push_str(&std::mem::size_of::<super::types::LightingUniforms>().to_string());
-        out.push_str("}}");
+        out.push_str("}},\"steady_state_resources\":{\"bind_group_creations\":{");
+        out.push_str("\"total\":");
+        out.push_str(
+            &self
+                .frame_resource_stats
+                .total_bind_group_creations()
+                .to_string(),
+        );
+        out.push_str(",\"sites\":{");
+        for (index, (site, count)) in self.frame_resource_stats.bind_group_creations().enumerate() {
+            if index != 0 {
+                out.push(',');
+            }
+            json_string(&mut out, site.name());
+            out.push(':');
+            out.push_str(&count.to_string());
+        }
+        out.push_str("}}}");
         let graph_stats = self.render_graph_cache_stats();
         out.push_str(",\"render_graph\":{");
         out.push_str("\"compile_count\":");

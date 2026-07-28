@@ -14,6 +14,8 @@ impl Renderer {
         exposure_dst_idx: usize,
     ) {
         profiler.begin("post_fx");
+        self.frame_resource_stats
+            .created_bind_group(super::frame_resource_stats::BindGroupCreationSite::FinalComposite);
         let composite_src_view = self.composite_source_view();
         let params = CompositeParams {
             params: [
@@ -120,6 +122,9 @@ impl Renderer {
                 self.composite_ldr_rt_a_view.as_ref().unwrap_or(output_view)
             };
             let post_pass = &self.post_passes[index];
+            self.frame_resource_stats.created_bind_group(
+                super::frame_resource_stats::BindGroupCreationSite::CustomPostPass,
+            );
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("post_pass_bg"),
                 layout: &post_pass.bind_group_layout,

@@ -312,6 +312,30 @@ class ReproducibilityTests(unittest.TestCase):
         self.assertTrue(any("does not match selected renderer tier" in item for item in failures))
         self.assertTrue(any("device_negotiation snapshot" in item for item in failures))
 
+    def test_steady_state_renderer_contract_accepts_named_bounded_counts(self) -> None:
+        sites = {key: 0 for key in quality.STEADY_STATE_BIND_GROUP_SITES}
+        sites["scene_compose"] = 1
+        sites["final_composite"] = 1
+        renderer_paths = {
+            "steady_state_uploads": {
+                "lighting": {
+                    "write_count": 2,
+                    "byte_count": 128,
+                    "full_buffer_bytes": 8768,
+                }
+            },
+            "steady_state_resources": {
+                "bind_group_creations": {"total": 2, "sites": sites}
+            },
+        }
+        self.assertEqual(quality.steady_state_renderer_failures(renderer_paths), [])
+
+        renderer_paths["steady_state_resources"]["bind_group_creations"]["total"] = 3
+        failures = quality.steady_state_renderer_failures(renderer_paths)
+        self.assertIn(
+            "steady-state bind-group total does not match named sites", failures
+        )
+
     def test_telemetry_contract_rejects_vsync_and_wrong_frame_count(self) -> None:
         case = {
             "fixed_timestep": 1 / 60,

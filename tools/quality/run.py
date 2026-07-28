@@ -126,6 +126,20 @@ DEVICE_NEGOTIATION_LIMIT_KEYS = {
     "max_binding_array_elements_per_shader_stage",
     "max_binding_array_sampler_elements_per_shader_stage",
 }
+STEADY_STATE_BIND_GROUP_SITES = {
+    "scene_compose",
+    "ssr_temporal",
+    "upscale",
+    "taa",
+    "taa_reactive",
+    "depth_of_field",
+    "motion_blur",
+    "subsurface_scattering",
+    "contrast_adaptive_sharpen",
+    "auto_exposure",
+    "final_composite",
+    "custom_post_pass",
+}
 
 
 class QualityError(RuntimeError):
@@ -688,6 +702,68 @@ def png_dimensions(path: Path) -> tuple[int, int]:
     )
 
 
+def steady_state_renderer_failures(renderer_paths: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    uploads = renderer_paths.get("steady_state_uploads")
+    lighting = uploads.get("lighting") if isinstance(uploads, dict) else None
+    if not isinstance(lighting, dict):
+        failures.append("renderer paths did not report steady-state lighting uploads")
+    else:
+        write_count = lighting.get("write_count")
+        byte_count = lighting.get("byte_count")
+        full_bytes = lighting.get("full_buffer_bytes")
+        if (
+            not isinstance(write_count, int)
+            or isinstance(write_count, bool)
+            or not 0 <= write_count <= 3
+        ):
+            failures.append("steady-state lighting write_count is not an integer in [0, 3]")
+        if (
+            not isinstance(full_bytes, int)
+            or isinstance(full_bytes, bool)
+            or full_bytes <= 0
+        ):
+            failures.append("steady-state lighting full_buffer_bytes is not positive")
+        if (
+            not isinstance(byte_count, int)
+            or isinstance(byte_count, bool)
+            or byte_count < 0
+            or (
+                isinstance(full_bytes, int)
+                and not isinstance(full_bytes, bool)
+                and byte_count > full_bytes
+            )
+        ):
+            failures.append("steady-state lighting byte_count is invalid")
+
+    resources = renderer_paths.get("steady_state_resources")
+    bind_groups = (
+        resources.get("bind_group_creations") if isinstance(resources, dict) else None
+    )
+    if not isinstance(bind_groups, dict):
+        failures.append("renderer paths did not report steady-state bind-group creations")
+        return failures
+    total = bind_groups.get("total")
+    sites = bind_groups.get("sites")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        failures.append("steady-state bind-group total is not a non-negative integer")
+    if not isinstance(sites, dict):
+        failures.append("steady-state bind-group sites are unavailable")
+        return failures
+    if set(sites) != STEADY_STATE_BIND_GROUP_SITES:
+        failures.append("steady-state bind-group site set is incomplete or unknown")
+        return failures
+    counts = list(sites.values())
+    if any(
+        not isinstance(count, int) or isinstance(count, bool) or count < 0
+        for count in counts
+    ):
+        failures.append("steady-state bind-group site counts must be non-negative integers")
+    elif isinstance(total, int) and not isinstance(total, bool) and sum(counts) != total:
+        failures.append("steady-state bind-group total does not match named sites")
+    return failures
+
+
 def telemetry_contract_failures(
     case: Mapping[str, Any], telemetry: Mapping[str, Any] | None
 ) -> list[str]:
@@ -734,8 +810,11 @@ def telemetry_contract_failures(
         failures.append("telemetry did not report the native adapter")
     else:
         failures.extend(capability_snapshot_failures(adapter))
-    if not isinstance(telemetry.get("renderer_paths"), dict):
+    renderer_paths = telemetry.get("renderer_paths")
+    if not isinstance(renderer_paths, dict):
         failures.append("telemetry did not report active renderer paths")
+    else:
+        failures.extend(steady_state_renderer_failures(renderer_paths))
     for key in ("cpu_frame_mean_ms", "cpu_frame_p95_ms", "measurement_wall_ms"):
         value = telemetry.get(key)
         if not isinstance(value, (int, float)) or value < 0:

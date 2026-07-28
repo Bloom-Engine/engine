@@ -22,6 +22,7 @@ mod draw2d;
 mod env_prefilter;
 mod final_pass;
 mod frame_graph_runtime;
+mod frame_resource_stats;
 mod froxel;
 mod gi_bake;
 pub mod gpu_driven;
@@ -461,6 +462,7 @@ pub struct Renderer {
     // Lighting uniforms
     lighting_uniforms: LightingUniforms,
     lighting_upload_tracker: lighting_upload::LightingUploadTracker,
+    frame_resource_stats: frame_resource_stats::FrameResourceStats,
     lighting_buffer: wgpu::Buffer,
     lighting_bind_group: wgpu::BindGroup,
 
@@ -7546,6 +7548,7 @@ impl Renderer {
             uniform_bind_group_3d,
             lighting_uniforms,
             lighting_upload_tracker: lighting_upload::LightingUploadTracker::new(lighting_uniforms),
+            frame_resource_stats: frame_resource_stats::FrameResourceStats::default(),
             lighting_buffer,
             lighting_bind_group,
             joint_buffer,
@@ -11685,6 +11688,7 @@ impl Renderer {
 
     pub fn begin_frame(&mut self) {
         self.lighting_upload_tracker.begin_frame();
+        self.frame_resource_stats.begin_frame();
         self.vertices_2d.clear();
         self.indices_2d.clear();
         self.draw_calls_2d.clear();

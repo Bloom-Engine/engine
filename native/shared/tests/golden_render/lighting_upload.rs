@@ -43,4 +43,20 @@ fn golden_many_point_lights() {
         writes <= 3 && bytes <= 512 && bytes < full_bytes,
         "steady point-light frame uploaded too much lighting data: {uploads}"
     );
+
+    let bind_groups = &paths["steady_state_resources"]["bind_group_creations"];
+    let total = bind_groups["total"].as_u64().expect("bind-group total");
+    let sites = bind_groups["sites"]
+        .as_object()
+        .expect("named bind-group creation sites");
+    let named_total: u64 = sites
+        .values()
+        .map(|count| count.as_u64().expect("site count"))
+        .sum();
+    assert_eq!(
+        total, named_total,
+        "bind-group total must match named sites"
+    );
+    assert_eq!(sites["scene_compose"].as_u64(), Some(1));
+    assert_eq!(sites["final_composite"].as_u64(), Some(1));
 }

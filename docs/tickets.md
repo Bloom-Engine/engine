@@ -1934,10 +1934,16 @@ budget for at 4K.
 - **Graph planning fixed in #129:** immutable topology is compiled and cached;
   per-frame execution only binds closures to the cached pass slots. Composite
   and post-pass bind-group creation remain part of this ticket's audit.
+- **Recurring bind-group creation is now measured:** a fixed twelve-counter
+  array names scene compose, SSR temporal, the post-FX chain, final composite,
+  and custom post-pass creation in
+  `renderer_paths.steady_state_resources.bind_group_creations`. Measurement
+  adds no heap allocation and leaves GPU resources, descriptors, and pass order
+  untouched.
 
-Remaining: cache bloom/composite bind groups only with complete
-resource-generation keys, then instrument and eliminate the other
-steady-state upload/allocation sites under #139.
+Remaining: eliminate the measured bind-group hotspots only with complete
+resource-generation keys, then instrument and eliminate the other steady-state
+upload/allocation sites under #139.
 
 ## EN-057 — Hi-Z occlusion runs every frame for zero consumers ✅ *(shipped same day)*
 
