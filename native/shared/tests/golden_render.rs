@@ -1758,11 +1758,12 @@ fn golden_lit_primitives_taa() {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    // Same scene as lit_primitives_3d but with TAA ON: pins the TAA
-    // branch of the post-FX cascade (reprojection, neighborhood clamp,
-    // Catmull-Rom upscale path) that the TAA-off goldens never touch.
+    // Same scene as lit_primitives_3d but with half-scale TAA reconstruction:
+    // pins the TAA branch of the post-FX cascade (reprojection, neighborhood
+    // clamp, Catmull-Rom upscale path) that the TAA-off goldens never touch.
     // The Halton jitter sequence is indexed by frame number, so a fixed
     // frame count renders deterministically.
+    eng.renderer.set_render_scale(0.5);
     eng.renderer.set_taa_enabled(true);
     let (w, h, rgba) = render(&mut eng, 10, |eng| {
         let r = &mut eng.renderer;
@@ -1906,6 +1907,7 @@ fn try_engine_rt() -> Result<Option<(EngineState, AdapterMetadata)>, String> {
                 Renderer::new_headless(context.device.clone(), context.queue.clone(), W, H);
             let mut eng = EngineState::new(renderer);
             eng.renderer.set_taa_enabled(false);
+            eng.renderer.set_render_scale(1.0);
             // Auto-exposure adapts over the accumulation window; a fixed
             // exposure keeps the golden a pure function of the transport.
             eng.renderer.set_manual_exposure(1.0);
