@@ -12,6 +12,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use super::capabilities::{forced_renderer_tier, RendererCapabilities, RendererCapabilityTier};
 use super::layered_pbr::{
     global_material_lobe_mask, global_material_version, pack_global_material_metadata,
     MaterialLobeMask,
@@ -386,26 +387,13 @@ pub struct MaterialBindingCapabilities {
 
 impl MaterialBindingCapabilities {
     pub fn detect(features: wgpu::Features, limits: &wgpu::Limits) -> Self {
-        let texture_binding_array = features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY);
-        let non_uniform_indexing = features.contains(
-            wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
-        );
-        let descriptor_features = texture_binding_array && non_uniform_indexing;
-        let descriptor_limits = limits.max_binding_array_elements_per_shader_stage >= 2
-            && limits.max_binding_array_sampler_elements_per_shader_stage >= 2;
-        let detected_tier = if descriptor_features && descriptor_limits {
-            MaterialBindingTier::A
-        } else if limits.max_texture_array_layers >= 16
-            && limits.max_sampled_textures_per_shader_stage >= 8
-        {
-            MaterialBindingTier::B
-        } else {
-            MaterialBindingTier::C
-        };
-        let env_override = std::env::var("BLOOM_MATERIAL_TIER")
+        let detected_tier = detected_material_tier(features, limits);
+        let material_override = std::env::var("BLOOM_MATERIAL_TIER")
             .ok()
             .and_then(|value| MaterialBindingTier::from_override(&value));
-        Self::with_override(features, limits, detected_tier, env_override)
+        let requested_override =
+            lower_material_override(material_override, forced_renderer_material_tier());
+        Self::with_override(features, limits, detected_tier, requested_override)
     }
 
     pub fn detect_with_override(
@@ -413,8 +401,10 @@ impl MaterialBindingCapabilities {
         limits: &wgpu::Limits,
         override_tier: Option<MaterialBindingTier>,
     ) -> Self {
-        let base = Self::detect(features, limits);
-        Self::with_override(features, limits, base.detected_tier, override_tier)
+        let detected_tier = detected_material_tier(features, limits);
+        let requested_override =
+            lower_material_override(override_tier, forced_renderer_material_tier());
+        Self::with_override(features, limits, detected_tier, requested_override)
     }
 
     fn with_override(
@@ -521,6 +511,32 @@ impl MaterialBindingCapabilities {
         }
         out.push('}');
         out
+    }
+}
+
+fn detected_material_tier(features: wgpu::Features, limits: &wgpu::Limits) -> MaterialBindingTier {
+    match RendererCapabilities::detect_with_override(features, limits, None).detected_tier {
+        RendererCapabilityTier::Baseline => MaterialBindingTier::C,
+        RendererCapabilityTier::Modern => MaterialBindingTier::B,
+        RendererCapabilityTier::HighEnd => MaterialBindingTier::A,
+    }
+}
+
+fn forced_renderer_material_tier() -> Option<MaterialBindingTier> {
+    forced_renderer_tier().map(|tier| match tier {
+        RendererCapabilityTier::Baseline => MaterialBindingTier::C,
+        RendererCapabilityTier::Modern => MaterialBindingTier::B,
+        RendererCapabilityTier::HighEnd => MaterialBindingTier::A,
+    })
+}
+
+fn lower_material_override(
+    material: Option<MaterialBindingTier>,
+    renderer: Option<MaterialBindingTier>,
+) -> Option<MaterialBindingTier> {
+    match (material, renderer) {
+        (Some(material), Some(renderer)) => Some(material.min(renderer)),
+        (material, renderer) => material.or(renderer),
     }
 }
 

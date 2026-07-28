@@ -836,14 +836,18 @@ impl Renderer {
 fn gpu_driven_forced_off() -> bool {
     static OFF: OnceLock<bool> = OnceLock::new();
     *OFF.get_or_init(|| {
-        std::env::var("BLOOM_GPU_DRIVEN")
+        let explicitly_disabled = std::env::var("BLOOM_GPU_DRIVEN")
             .map(|value| {
                 matches!(
                     value.trim().to_ascii_lowercase().as_str(),
                     "0" | "off" | "false" | "disabled"
                 )
             })
-            .unwrap_or(false)
+            .unwrap_or(false);
+        explicitly_disabled
+            || !super::capabilities::RendererCapabilities::forced_path_allowed(
+                super::capabilities::RendererCapabilityTier::HighEnd,
+            )
     })
 }
 

@@ -10,14 +10,14 @@
 //!
 //! - Runs on a non-CPU GPU adapter and skips gracefully without one.
 //! - Most scenes disable TAA; fixed warm-up counts settle temporal passes.
-//! - Tolerances absorb GPU-family rasterization differences; goldens are
-//!   regenerated with BLOOM_UPDATE_GOLDEN=1 `cargo test golden`.
+//! - Tolerances absorb GPU-family rasterization differences.
 
 use bloom_shared::engine::EngineState;
 use bloom_shared::models::{
     MaterialAlphaMode, MaterialLayeredPbr, MaterialTextureBinding, MaterialTextureTransform,
     MaterialThicknessSource, MaterialTransmission, MeshData,
 };
+use bloom_shared::renderer::capabilities::{RendererCapabilities, RendererCapabilityTier};
 use bloom_shared::renderer::{Renderer, Vertex3D};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -1920,12 +1920,12 @@ fn create_rt_device_context() -> Result<Option<RtDeviceContext>, String> {
 }
 
 fn try_engine_rt() -> Result<Option<(EngineState, AdapterMetadata)>, String> {
+    if !RendererCapabilities::forced_path_allowed(RendererCapabilityTier::HighEnd) {
+        return Ok(None);
+    }
     match RT_DEVICE.get_or_init(create_rt_device_context) {
         Ok(Some(context)) => {
-            // Each golden receives fresh renderer/history/resource state, but
-            // the underlying device stays alive for the test process. This
-            // avoids Metal's repeated headless-device teardown leak while
-            // preserving complete test isolation above the wgpu device.
+            // Reuse one device while giving each golden fresh renderer/history state.
             let renderer =
                 Renderer::new_headless(context.device.clone(), context.queue.clone(), W, H);
             let mut eng = EngineState::new(renderer);

@@ -6,6 +6,7 @@
 
 use std::sync::mpsc;
 
+use super::capabilities::RendererCapabilities;
 use super::util::encode_png_simple;
 use super::weighted_transparency::WEIGHTED_TRANSPARENCY_AUTO_DRAW_THRESHOLD;
 use super::Renderer;
@@ -648,6 +649,7 @@ impl Renderer {
     pub fn quality_adapter_json(&self) -> String {
         let info = self.device.adapter_info();
         let features = self.device.features();
+        let renderer_capabilities = RendererCapabilities::detect(features, &self.device.limits());
         let mut semantic_features = Vec::new();
         for (feature, enabled) in [
             (
@@ -677,15 +679,6 @@ impl Renderer {
                 semantic_features.push(feature);
             }
         }
-        let tier = if self.hw_rt_enabled && self.pt_texture_arrays_enabled {
-            "high-end-rt-bindless"
-        } else if self.hw_rt_enabled {
-            "high-end-rt"
-        } else if features.contains(wgpu::Features::TIMESTAMP_QUERY) {
-            "raster-timestamp"
-        } else {
-            "baseline"
-        };
         let mut out = String::from("{\"availability\":\"reported\",\"name\":");
         json_string(&mut out, &info.name);
         out.push_str(",\"vendor_id\":");
@@ -701,7 +694,9 @@ impl Renderer {
         out.push_str(",\"backend\":");
         json_string(&mut out, &enum_name(info.backend));
         out.push_str(",\"capability_tier\":");
-        json_string(&mut out, tier);
+        json_string(&mut out, renderer_capabilities.selected_tier.name());
+        out.push_str(",\"renderer_capabilities\":");
+        out.push_str(&renderer_capabilities.report_json());
         out.push_str(",\"features\":[");
         for (index, feature) in semantic_features.iter().enumerate() {
             if index > 0 {

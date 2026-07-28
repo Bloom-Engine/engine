@@ -97,6 +97,7 @@ pub use util::{
 mod brdf_lut;
 use brdf_lut::build_brdf_lut;
 mod atmosphere_lut;
+pub mod capabilities;
 use atmosphere_lut::{
     build_multi_scattering_lut, build_transmittance_lut, AERIAL_D, AERIAL_H, AERIAL_MAX_DIST_KM,
     AERIAL_W, MULTI_SCATTERING_SIZE, SKY_VIEW_H, SKY_VIEW_W, TRANSMITTANCE_H, TRANSMITTANCE_W,
@@ -1838,9 +1839,7 @@ impl Renderer {
         // query, set by whichever platform crate constructed this
         // device. Renderer internals branch on this flag when picking
         // the probe-trace pipeline.
-        let hw_rt_enabled = device
-            .features()
-            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        let hw_rt_enabled = capabilities::hardware_ray_query_enabled(device.features());
         // PT-2 — textured hit shading wants a bindless-ish texture
         // array. Both feature bits AND the element budget (a separate
         // limit that defaults to 0 and must be granted at device
