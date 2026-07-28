@@ -254,6 +254,11 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      - name: Install virtual display for WebGPU presentation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
