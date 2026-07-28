@@ -6,6 +6,27 @@
 use super::*;
 use wgpu::util::DeviceExt;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(super) enum CompositeSource {
+    Hdr,
+    Upscale,
+    Taa0,
+    Taa1,
+    DepthOfField,
+    MotionBlur,
+    SubsurfaceScattering,
+    ContrastAdaptiveSharpen,
+}
+
+impl CompositeSource {
+    pub(super) const COUNT: usize = 8;
+
+    pub(super) const fn bind_group_cache_index(self, exposure_idx: usize) -> usize {
+        self as usize * 2 + exposure_idx
+    }
+}
+
 #[inline]
 fn bloom_threshold(auto_exposure: bool, manual_exposure: f32) -> f32 {
     if auto_exposure {
@@ -270,7 +291,10 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{bloom_mip_extent, bloom_threshold, exposure_update_rate, taa_current_weight};
+    use super::{
+        bloom_mip_extent, bloom_threshold, exposure_update_rate, taa_current_weight,
+        CompositeSource,
+    };
 
     #[test]
     fn bloom_mip_extent_matches_half_resolution_chain_and_never_reaches_zero() {
@@ -292,6 +316,30 @@ mod tests {
     fn bloom_threshold_stays_in_pre_exposed_units_for_auto_exposure() {
         assert_eq!(bloom_threshold(true, 0.0), 2.5);
         assert_eq!(bloom_threshold(true, 8.0), 2.5);
+    }
+
+    #[test]
+    fn composite_cache_key_covers_every_source_and_exposure_slot() {
+        let sources = [
+            CompositeSource::Hdr,
+            CompositeSource::Upscale,
+            CompositeSource::Taa0,
+            CompositeSource::Taa1,
+            CompositeSource::DepthOfField,
+            CompositeSource::MotionBlur,
+            CompositeSource::SubsurfaceScattering,
+            CompositeSource::ContrastAdaptiveSharpen,
+        ];
+        let mut keys = Vec::new();
+        for source in sources {
+            for exposure_idx in 0..2 {
+                keys.push(source.bind_group_cache_index(exposure_idx));
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+
+        assert_eq!(keys, (0..CompositeSource::COUNT * 2).collect::<Vec<_>>());
     }
 
     #[test]
@@ -1081,22 +1129,43 @@ impl Renderer {
     /// stage in chain order CAS > SSS > motion blur > DoF > TAA >
     /// upscale > raw HDR. Must mirror the `pre_*_view` cascade in
     /// record_postfx_tail.
-    pub(super) fn composite_source_view(&self) -> &wgpu::TextureView {
+    pub(super) fn composite_source(&self) -> CompositeSource {
         if self.cas_strength > 0.0 {
-            &self.cas_rt_view
+            CompositeSource::ContrastAdaptiveSharpen
         } else if self.sss_enabled && self.sss_strength > 0.0 {
-            &self.sss_rt_view
+            CompositeSource::SubsurfaceScattering
         } else if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
-            &self.motion_blur_rt_view
+            CompositeSource::MotionBlur
         } else if self.dof_enabled && self.dof_aperture > 0.0 {
-            &self.dof_rt_view
+            CompositeSource::DepthOfField
         } else if self.taa_enabled {
-            &self.taa_views[self.taa_current_idx]
+            if self.taa_current_idx == 0 {
+                CompositeSource::Taa0
+            } else {
+                CompositeSource::Taa1
+            }
         } else if self.render_scale < 0.999 {
-            &self.upscale_rt_view
+            CompositeSource::Upscale
         } else {
-            &self.hdr_rt_view
+            CompositeSource::Hdr
         }
+    }
+
+    pub(super) fn composite_source_view_for(&self, source: CompositeSource) -> &wgpu::TextureView {
+        match source {
+            CompositeSource::Hdr => &self.hdr_rt_view,
+            CompositeSource::Upscale => &self.upscale_rt_view,
+            CompositeSource::Taa0 => &self.taa_views[0],
+            CompositeSource::Taa1 => &self.taa_views[1],
+            CompositeSource::DepthOfField => &self.dof_rt_view,
+            CompositeSource::MotionBlur => &self.motion_blur_rt_view,
+            CompositeSource::SubsurfaceScattering => &self.sss_rt_view,
+            CompositeSource::ContrastAdaptiveSharpen => &self.cas_rt_view,
+        }
+    }
+
+    pub(super) fn composite_source_view(&self) -> &wgpu::TextureView {
+        self.composite_source_view_for(self.composite_source())
     }
 }
 

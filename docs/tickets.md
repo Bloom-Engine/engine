@@ -1940,6 +1940,11 @@ budget for at 4K.
   `renderer_paths.steady_state_resources.bind_group_creations`. Measurement
   adds no heap allocation and leaves GPU resources, descriptors, and pass order
   untouched.
+- **Final composite fixed in #139:** its bind groups are cached for every exact
+  source/exposure combination (eight source views × two exposure slots).
+  Resize clears all sixteen entries before recreating their referenced views;
+  after warmup the real-GPU many-light golden hard-gates
+  `final_composite: 0`.
 
 Remaining: eliminate the measured bind-group hotspots only with complete
 resource-generation keys, then instrument and eliminate the other steady-state

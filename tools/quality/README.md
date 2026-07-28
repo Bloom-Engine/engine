@@ -152,6 +152,10 @@ frame's total bind-group creations and a fixed, named count for every recurring
 core-frame site. The counter storage is a twelve-element integer array: it
 performs no allocation and lets qualification distinguish true steady-state
 churn from initialization, resize, or resource-generation rebuilds.
+Final-composite bindings are cached across the exact Cartesian product of
+eight possible source views and two exposure-history slots. Resize invalidates
+all sixteen entries before replacing any referenced render-target view, so a
+warmed stable path reports `final_composite: 0` without stale-view reuse.
 
 `examples/quality-transparency/main.ts` accepts `--sorted-interleaving` as an
 unversioned focused ordering oracle. It forces conventional sorted composition

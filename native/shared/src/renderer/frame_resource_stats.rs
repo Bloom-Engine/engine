@@ -24,6 +24,7 @@ pub(super) enum BindGroupCreationSite {
 
 impl BindGroupCreationSite {
     const COUNT: usize = 12;
+    #[cfg(not(target_arch = "wasm32"))]
     const ALL: [Self; Self::COUNT] = [
         Self::SceneCompose,
         Self::SsrTemporal,
@@ -39,6 +40,7 @@ impl BindGroupCreationSite {
         Self::CustomPostPass,
     ];
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) const fn name(self) -> &'static str {
         match self {
             Self::SceneCompose => "scene_compose",
@@ -72,6 +74,7 @@ impl FrameResourceStats {
         *count = count.saturating_add(1);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn total_bind_group_creations(&self) -> u32 {
         self.bind_group_creations
             .iter()
@@ -79,6 +82,7 @@ impl FrameResourceStats {
             .fold(0, u32::saturating_add)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn bind_group_creations(
         &self,
     ) -> impl Iterator<Item = (BindGroupCreationSite, u32)> + '_ {

@@ -534,6 +534,10 @@ pub struct Renderer {
     pub composite_pipeline: wgpu::RenderPipeline,
     pub composite_layout: wgpu::BindGroupLayout,
     pub composite_sampler: wgpu::Sampler,
+    /// One final-composite bind group for every exact HDR source and
+    /// exposure-history slot. All referenced views are persistent until
+    /// resize, which invalidates every slot before replacing those views.
+    composite_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::CompositeSource::COUNT * 2],
     /// 0 = ACES (default, matches bloom-reference), 1 = AgX.
     pub tonemap_kind: u32,
     /// Auto-exposure on/off. Default off so validation against
@@ -7582,6 +7586,7 @@ impl Renderer {
             composite_pipeline,
             composite_layout,
             composite_sampler,
+            composite_bind_group_cache: std::array::from_fn(|_| None),
             // 1 = AgX (Troy Sobotka 2022). Matches Blender 4.0+ and
             // UE5 "PBR Neutral" look — softer highlight rolloff and
             // better hue preservation than the Narkowicz ACES fit,
@@ -8396,6 +8401,7 @@ impl Renderer {
 
             // Invalidate bind-group caches that reference any of the
             // RT views we just recreated.
+            self.composite_bind_group_cache = std::array::from_fn(|_| None);
             self.ssao_bg_cache = [None, None];
             self.ssao_blur_bg_cache = None;
             self.ssr_bg_cache = None;

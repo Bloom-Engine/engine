@@ -14,9 +14,8 @@ impl Renderer {
         exposure_dst_idx: usize,
     ) {
         profiler.begin("post_fx");
-        self.frame_resource_stats
-            .created_bind_group(super::frame_resource_stats::BindGroupCreationSite::FinalComposite);
-        let composite_src_view = self.composite_source_view();
+        let composite_source = self.composite_source();
+        let composite_cache_index = composite_source.bind_group_cache_index(exposure_dst_idx);
         let params = CompositeParams {
             params: [
                 self.tonemap_kind as f32,
@@ -42,42 +41,49 @@ impl Renderer {
             bytemuck::bytes_of(&params),
         );
 
-        let composite_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("composite_bg"),
-            layout: &self.composite_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(composite_src_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.composite_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(
-                        &self.exposure_views[exposure_dst_idx],
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&self.ssao_blur_rt_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                },
-            ],
-        });
+        if self.composite_bind_group_cache[composite_cache_index].is_none() {
+            self.frame_resource_stats.created_bind_group(
+                super::frame_resource_stats::BindGroupCreationSite::FinalComposite,
+            );
+            let composite_src_view = self.composite_source_view_for(composite_source);
+            let composite_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("composite_bg"),
+                layout: &self.composite_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(composite_src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.composite_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.exposure_views[exposure_dst_idx],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&self.ssao_blur_rt_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    },
+                ],
+            });
+            self.composite_bind_group_cache[composite_cache_index] = Some(composite_bg);
+        }
         let composite_target_view = if self.post_passes.is_empty() {
             output_view
         } else {
@@ -102,7 +108,13 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.composite_pipeline);
-            pass.set_bind_group(0, &composite_bg, &[]);
+            pass.set_bind_group(
+                0,
+                self.composite_bind_group_cache[composite_cache_index]
+                    .as_ref()
+                    .expect("final composite bind group was initialized"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
         }
 
