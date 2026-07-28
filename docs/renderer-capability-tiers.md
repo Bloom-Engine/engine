@@ -29,7 +29,7 @@ adapter's entire advertised budget:
 
 | Profile | Platforms/layout | Bind groups | Color attachments | Sampled textures/stage | Samplers/stage | Storage buffers/stage | Uniform binding |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `native-full` | macOS, iOS/tvOS, Linux, Windows; separate SceneInputs group | 5 | 4 | 19 | 16 | 8 | 64 KiB |
+| `native-full` | macOS, iOS/tvOS/visionOS, Linux, Windows; separate SceneInputs group | 5 | 4 | 19 | 16 | 8 | 64 KiB |
 | `folded-mobile` | Android; SceneInputs folded into group 0 | 4 | 4 | 19 | 16 | 4 | 64 KiB |
 
 Android's lean main pass uses two color attachments, but its platform contract

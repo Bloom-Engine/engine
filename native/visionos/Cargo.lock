@@ -103,6 +103,7 @@ dependencies = [
  "log",
  "minimp3",
  "raw-window-handle",
+ "serde_json",
  "web-sys",
  "wgpu",
 ]
