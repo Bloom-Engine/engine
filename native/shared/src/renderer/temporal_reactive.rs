@@ -353,6 +353,7 @@ impl Renderer {
             });
         self.taa_reactive_layout = Some(layout);
         self.taa_reactive_pipeline = Some(pipeline);
+        self.created_pipelines(1);
     }
 
     pub(super) fn ensure_scene_transparent_reactive_resources(&mut self) {
@@ -438,6 +439,7 @@ impl Renderer {
             "scene_transparent_reactive_double_sided_pipeline",
             None,
         ));
+        self.created_pipelines(2);
     }
 
     pub(super) fn ensure_scene_refraction_reactive_resources(&mut self) {
@@ -556,6 +558,7 @@ impl Renderer {
             "scene_refractive_reactive_double_sided_pipeline",
             None,
         ));
+        self.created_pipelines(2);
         if self.scene_refractive_uv1_pipeline.is_some() {
             self.ensure_scene_refraction_reactive_uv1_resources();
         }
@@ -682,6 +685,7 @@ impl Renderer {
             "scene_refractive_reactive_uv1_double_sided_pipeline",
             None,
         ));
+        self.created_pipelines(2);
     }
 
     pub(super) fn ensure_weighted_transparency_reactive_resources(&mut self) {
@@ -746,6 +750,7 @@ impl Renderer {
                     cache: None,
                 }),
         );
+        self.created_pipelines(1);
     }
 }
 

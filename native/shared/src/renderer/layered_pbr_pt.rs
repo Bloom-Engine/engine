@@ -1675,6 +1675,7 @@ impl Renderer {
                         cache: None,
                     }),
             );
+            self.created_pipelines(1);
         }
 
         let needed = PT_LAYERED_RECORD_BYTES * self.pt_layered.records.len() as u64;

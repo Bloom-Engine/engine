@@ -325,6 +325,7 @@ class ReproducibilityTests(unittest.TestCase):
             "steady_state_resources": {
                 "bind_group_creations": {"total": 0, "sites": sites},
                 "graph_compiles": 0,
+                "pipeline_creations": {"first_use": 0},
                 "command_encoder_creations": {
                     "total": 1,
                     "sites": {"frame_submission": 1},
@@ -338,6 +339,7 @@ class ReproducibilityTests(unittest.TestCase):
         sites["final_composite"] = 1
         resources["bind_group_creations"]["total"] = 1
         resources["graph_compiles"] = 1
+        resources["pipeline_creations"]["first_use"] = 1
         resources["command_encoder_creations"]["total"] = 2
         resources["transient_physical_creations"]["textures"] = 1
         failures = quality.steady_state_renderer_failures(renderer_paths)
@@ -345,6 +347,7 @@ class ReproducibilityTests(unittest.TestCase):
             "steady-state bind-group creation remained after warm-up", failures
         )
         self.assertIn("render graph recompiled after warm-up", failures)
+        self.assertIn("pipeline creation remained after warm-up", failures)
         self.assertIn(
             "command-encoder total does not match the frame-submission site", failures
         )

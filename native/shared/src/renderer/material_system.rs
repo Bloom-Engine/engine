@@ -243,6 +243,7 @@ pub fn map_texture_array_format(code: u32) -> wgpu::TextureFormat {
 
 pub struct MaterialSystem {
     pub layouts: MaterialAbiLayouts,
+    pub(super) pipeline_creation_count: u64,
 
     // Compiled pipelines, indexed by MaterialHandle (1-based; 0 = invalid).
     pub pipelines: Vec<Option<MaterialPipeline>>,
@@ -841,6 +842,7 @@ impl MaterialSystem {
 
         Self {
             layouts,
+            pipeline_creation_count: 0,
             pipelines: Vec::new(),
             material_ids: Vec::new(),
             indirection,
@@ -927,6 +929,8 @@ impl MaterialSystem {
             wants_instancing,
         };
         let pipeline = compile_material(device, &self.layouts, &desc)?;
+        let created = 1 + u64::from(pipeline.reflection_pipeline.is_some());
+        self.pipeline_creation_count = self.pipeline_creation_count.saturating_add(created);
         self.pipelines.push(Some(pipeline));
         let material_id = self
             .indirection

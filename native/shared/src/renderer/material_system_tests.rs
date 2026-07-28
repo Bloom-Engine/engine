@@ -452,6 +452,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             0,
             "ordinary material compilation must not eagerly create the sibling"
         );
+        assert_eq!(sys.pipeline_creation_count, 1);
 
         let pf = PerFrameUniforms {
             time: 0.0,
@@ -478,6 +479,12 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         sys.ensure_translucent_reactive_pipelines(&device);
         assert_eq!(sys.reactive_translucent_pipeline_count(), 1);
+        assert_eq!(sys.pipeline_creation_count, 2);
+        sys.ensure_translucent_reactive_pipelines(&device);
+        assert_eq!(
+            sys.pipeline_creation_count, 2,
+            "cached reactive material pipeline must not count twice"
+        );
 
         let extent = wgpu::Extent3d {
             width: 8,

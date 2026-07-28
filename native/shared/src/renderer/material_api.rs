@@ -192,6 +192,7 @@ impl Renderer {
         wgsl_source: &str,
     ) -> Result<u32, post_pass::PostPassCompileError> {
         let pipeline = post_pass::compile_post_pass(&self.device, wgsl_source, self.output_format)?;
+        self.created_pipelines(1);
 
         if self.composite_ldr_rt_a.is_none() {
             let (texture, view) = post_pass::create_composite_ldr_rt(

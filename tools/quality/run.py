@@ -774,6 +774,19 @@ def steady_state_renderer_failures(renderer_paths: Mapping[str, Any]) -> list[st
     elif graph_compiles != 0:
         failures.append("render graph recompiled after warm-up")
 
+    pipelines = resources.get("pipeline_creations")
+    pipeline_first_use = (
+        pipelines.get("first_use") if isinstance(pipelines, dict) else None
+    )
+    if (
+        not isinstance(pipeline_first_use, int)
+        or isinstance(pipeline_first_use, bool)
+        or pipeline_first_use < 0
+    ):
+        failures.append("steady-state pipeline first-use count is invalid")
+    elif pipeline_first_use != 0:
+        failures.append("pipeline creation remained after warm-up")
+
     encoders = resources.get("command_encoder_creations")
     if not isinstance(encoders, dict):
         failures.append("renderer paths did not report command-encoder creations")

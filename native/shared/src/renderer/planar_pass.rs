@@ -227,6 +227,7 @@ impl Renderer {
             self.reflect_model_bg = Some(model_bg);
             self.reflect_light_buf = Some(light_buf);
             self.reflect_light_bg = Some(light_bg);
+            self.created_pipelines(1);
         }
         // Sun/ambient + shadow data for the reflection shading (same values
         // as the main pass, so the mirrored scene is lit AND shadowed like

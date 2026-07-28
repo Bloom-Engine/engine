@@ -464,6 +464,7 @@ pub struct Renderer {
     lighting_upload_tracker: lighting_upload::LightingUploadTracker,
     frame_resource_stats: frame_resource_stats::FrameResourceStats,
     steady_state_frame_resource_stats: frame_resource_stats::FrameResourceStats,
+    pipeline_creation_count: u64,
     lighting_buffer: wgpu::Buffer,
     lighting_bind_group: wgpu::BindGroup,
 
@@ -7558,6 +7559,7 @@ impl Renderer {
             lighting_upload_tracker: lighting_upload::LightingUploadTracker::new(lighting_uniforms),
             frame_resource_stats: frame_resource_stats::FrameResourceStats::default(),
             steady_state_frame_resource_stats: Default::default(),
+            pipeline_creation_count: 0,
             lighting_buffer,
             lighting_bind_group,
             joint_buffer,
@@ -9720,7 +9722,6 @@ impl Renderer {
         if dyn_count == 0 {
             return;
         }
-        // Lazy pipeline: first dynamic draw on an RT adapter.
         if self.pt_skin_pipeline.is_none() {
             let shader = self
                 .device
@@ -9793,8 +9794,8 @@ impl Renderer {
                 },
             ));
             self.pt_skin_layout = Some(layout);
+            self.created_pipelines(1);
         }
-        // Params pool (mat4 model + vec4<u32> = 80 bytes per slot).
         while self.pt_skin_params.len() < dyn_count {
             self.pt_skin_params
                 .push(self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -11205,6 +11206,7 @@ impl Renderer {
             "scene_refractive_double_sided_pipeline",
             None,
         ));
+        self.created_pipelines(2);
         self.scene_refractive_material_layout = Some(material_layout);
 
         log::info!(
@@ -11341,6 +11343,7 @@ impl Renderer {
             "scene_refractive_uv1_double_sided_pipeline",
             None,
         ));
+        self.created_pipelines(2);
         log::info!(
             "bloom materials: lazy physical TEXCOORD_1 stream enabled \
              (8 bytes/vertex on UV1 refractors only)"
@@ -11727,7 +11730,8 @@ impl Renderer {
 
     pub fn begin_frame(&mut self) {
         self.lighting_upload_tracker.begin_frame();
-        self.frame_resource_stats.begin_frame();
+        self.frame_resource_stats
+            .begin_frame(self.total_pipeline_creation_count());
         self.vertices_2d.clear();
         self.indices_2d.clear();
         self.draw_calls_2d.clear();
@@ -14764,6 +14768,7 @@ impl Renderer {
             });
 
         self.custom_pipelines.push(pipeline);
+        self.created_pipelines(1);
         self.custom_pipelines.len() // 1-based index
     }
 }

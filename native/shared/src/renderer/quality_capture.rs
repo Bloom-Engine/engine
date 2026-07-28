@@ -1301,6 +1301,14 @@ impl Renderer {
                 .graph_compiles()
                 .to_string(),
         );
+        out.push_str(",\"pipeline_creations\":{\"first_use\":");
+        out.push_str(
+            &self
+                .steady_state_frame_resource_stats
+                .pipeline_creations()
+                .to_string(),
+        );
+        out.push('}');
         out.push_str(",\"command_encoder_creations\":{\"total\":");
         out.push_str(
             &self

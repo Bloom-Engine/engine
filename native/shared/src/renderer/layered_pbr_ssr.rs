@@ -354,6 +354,7 @@ impl Renderer {
             ssr_layout,
             ssr_pipeline,
         });
+        self.created_pipelines(3);
         self.ssr_layered_bg_cache = None;
         log::info!(
             "bloom materials: lazy iridescence SSR transport enabled \

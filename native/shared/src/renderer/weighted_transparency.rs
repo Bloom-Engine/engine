@@ -356,6 +356,7 @@ impl Renderer {
         self.scene_weighted_transparent_double_sided_pipeline = Some(double_sided);
         self.weighted_transparency_resolve_pipeline = Some(resolve_pipeline);
         self.weighted_transparency_resolve_layout = Some(resolve_layout);
+        self.created_pipelines(3);
         log::info!(
             "bloom materials: weighted transparency initialized \
              (auto_threshold={}, accumulation=rgba16float, revealage=r16float)",

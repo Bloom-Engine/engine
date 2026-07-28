@@ -62,6 +62,8 @@ impl BindGroupCreationSite {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct FrameResourceStats {
     bind_group_creations: [u32; BindGroupCreationSite::COUNT],
+    pipeline_creation_count_at_begin: u64,
+    pipeline_creations: u32,
     graph_compiles: u32,
     command_encoder_creations: u32,
     physical_texture_creations: u32,
@@ -69,8 +71,10 @@ pub(super) struct FrameResourceStats {
 }
 
 impl FrameResourceStats {
-    pub(super) fn begin_frame(&mut self) {
+    pub(super) fn begin_frame(&mut self, pipeline_creation_count: u64) {
         self.bind_group_creations.fill(0);
+        self.pipeline_creation_count_at_begin = pipeline_creation_count;
+        self.pipeline_creations = 0;
         self.graph_compiles = 0;
         self.command_encoder_creations = 0;
         self.physical_texture_creations = 0;
@@ -88,6 +92,12 @@ impl FrameResourceStats {
             .saturating_add(count.min(u32::MAX as u64) as u32);
     }
 
+    pub(super) fn finish_pipeline_creations(&mut self, pipeline_creation_count: u64) {
+        let creations =
+            pipeline_creation_count.saturating_sub(self.pipeline_creation_count_at_begin);
+        self.pipeline_creations = creations.min(u32::MAX as u64) as u32;
+    }
+
     pub(super) fn created_command_encoder(&mut self) {
         self.command_encoder_creations = self.command_encoder_creations.saturating_add(1);
     }
@@ -103,6 +113,11 @@ impl FrameResourceStats {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) const fn graph_compiles(&self) -> u32 {
         self.graph_compiles
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn pipeline_creations(&self) -> u32 {
+        self.pipeline_creations
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -139,7 +154,18 @@ impl FrameResourceStats {
 }
 
 impl super::Renderer {
+    pub(super) fn created_pipelines(&mut self, count: u64) {
+        self.pipeline_creation_count = self.pipeline_creation_count.saturating_add(count);
+    }
+
+    pub(super) fn total_pipeline_creation_count(&self) -> u64 {
+        self.pipeline_creation_count
+            .saturating_add(self.material_system.pipeline_creation_count)
+    }
+
     pub(super) fn finish_frame_resource_stats(&mut self) {
+        self.frame_resource_stats
+            .finish_pipeline_creations(self.total_pipeline_creation_count());
         if cfg!(not(target_arch = "wasm32"))
             && (self.screenshot_requested || self.pending_quality_capture_dir.is_some())
         {
@@ -156,6 +182,7 @@ mod tests {
     #[test]
     fn counters_are_named_bounded_and_reset_per_frame() {
         let mut stats = FrameResourceStats::default();
+        stats.begin_frame(20);
         stats.created_bind_group(BindGroupCreationSite::Taa);
         stats.created_bind_group(BindGroupCreationSite::CustomPostPass);
         stats.created_bind_group(BindGroupCreationSite::CustomPostPass);
@@ -163,8 +190,10 @@ mod tests {
         stats.created_command_encoder();
         stats.created_physical_textures(2);
         stats.created_physical_buffers(3);
+        stats.finish_pipeline_creations(22);
 
         assert_eq!(stats.total_bind_group_creations(), 3);
+        assert_eq!(stats.pipeline_creations(), 2);
         assert_eq!(stats.graph_compiles(), 1);
         assert_eq!(stats.command_encoder_creations(), 1);
         assert_eq!(stats.physical_texture_creations(), 2);
@@ -176,12 +205,14 @@ mod tests {
         assert_eq!(custom.0.name(), "custom_post_pass");
         assert_eq!(custom.1, 2);
 
-        stats.begin_frame();
+        stats.begin_frame(22);
+        stats.finish_pipeline_creations(22);
         assert_eq!(stats.total_bind_group_creations(), 0);
         assert!(stats.bind_group_creations().all(|(_, count)| count == 0));
         assert_eq!(stats.graph_compiles(), 0);
         assert_eq!(stats.command_encoder_creations(), 0);
         assert_eq!(stats.physical_texture_creations(), 0);
         assert_eq!(stats.physical_buffer_creations(), 0);
+        assert_eq!(stats.pipeline_creations(), 0);
     }
 }

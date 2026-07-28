@@ -509,12 +509,12 @@ impl MaterialPipeline {
     /// write mask, so custom materials cannot fabricate reactive coverage.
     /// They retain their exact location-0 blend behavior while imported draws
     /// in the same render pass union real coverage into the R8 target.
-    pub(crate) fn ensure_reactive_pipeline(&mut self, device: &wgpu::Device) {
+    pub(crate) fn ensure_reactive_pipeline(&mut self, device: &wgpu::Device) -> bool {
         if self.reactive_pipeline.is_some() {
-            return;
+            return false;
         }
         let Some(recipe) = self.reactive_recipe.take() else {
-            return;
+            return false;
         };
         let source = match recipe.source {
             TranslucentReactiveSource::Expanded(source) => source,
@@ -595,6 +595,7 @@ impl MaterialPipeline {
                 cache: None,
             },
         ));
+        true
     }
 }
 

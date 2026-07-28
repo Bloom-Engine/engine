@@ -62,7 +62,9 @@ impl material_system::MaterialSystem {
                 continue;
             };
             if let Some(Some(pipeline)) = self.pipelines.get_mut(index) {
-                pipeline.ensure_reactive_pipeline(device);
+                if pipeline.ensure_reactive_pipeline(device) {
+                    self.pipeline_creation_count = self.pipeline_creation_count.saturating_add(1);
+                }
             }
         }
     }

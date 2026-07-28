@@ -164,6 +164,7 @@ impl Renderer {
                     cache: None,
                 },
             ));
+            self.created_pipelines(1);
         }
 
         if self.hw_rt_enabled && self.probe_trace_hw_transparent_pipeline.is_none() {
@@ -200,6 +201,7 @@ impl Renderer {
                     cache: None,
                 },
             ));
+            self.created_pipelines(1);
         }
 
         if self.hw_rt_enabled && self.wsrc_bake_hw_transparent_pipeline.is_none() {
@@ -236,6 +238,7 @@ impl Renderer {
                     cache: None,
                 },
             ));
+            self.created_pipelines(1);
         }
 
         log::info!(

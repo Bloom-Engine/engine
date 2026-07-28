@@ -1156,6 +1156,7 @@ impl Renderer {
             weighted_uv1: None,
             weighted_uv1_double_sided: None,
         });
+        self.created_pipelines(8);
         log::info!(
             "bloom materials: lazy layered-PBR v4 scene specialization enabled \
              (base-only scene pipelines remain unchanged)"
@@ -1521,6 +1522,7 @@ impl Renderer {
         resources.reactive_double_sided = Some(reactive_double_sided);
         resources.reactive_uv1 = Some(reactive_uv1);
         resources.reactive_uv1_double_sided = Some(reactive_uv1_double_sided);
+        self.created_pipelines(4);
     }
 
     pub(super) fn ensure_scene_layered_pbr_weighted_resources(&mut self) {
@@ -1635,6 +1637,7 @@ impl Renderer {
         resources.weighted_double_sided = Some(weighted_double_sided);
         resources.weighted_uv1 = Some(weighted_uv1);
         resources.weighted_uv1_double_sided = Some(weighted_uv1_double_sided);
+        self.created_pipelines(4);
     }
 }
 

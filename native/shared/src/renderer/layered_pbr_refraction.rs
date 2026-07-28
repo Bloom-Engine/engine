@@ -409,6 +409,7 @@ impl Renderer {
             reactive_uv1: None,
             reactive_uv1_double_sided: None,
         });
+        self.created_pipelines(2);
     }
 
     fn ensure_scene_layered_refraction_uv1_resources(&mut self) {
@@ -461,6 +462,7 @@ impl Renderer {
             .expect("layered refractive resources initialize first");
         resources.uv1 = Some(uv1);
         resources.uv1_double_sided = Some(uv1_double_sided);
+        self.created_pipelines(2);
     }
 
     pub(super) fn ensure_scene_layered_refraction_reactive_resources(&mut self) {
@@ -507,7 +509,9 @@ impl Renderer {
             .expect("layered refractive resources initialize first");
         resources.reactive = Some(reactive);
         resources.reactive_double_sided = Some(reactive_double_sided);
-        if resources.uv1.is_some() {
+        let has_uv1 = resources.uv1.is_some();
+        self.created_pipelines(2);
+        if has_uv1 {
             self.ensure_scene_layered_refraction_reactive_uv1_resources();
         }
     }
@@ -560,6 +564,7 @@ impl Renderer {
             .expect("layered refractive resources initialize first");
         resources.reactive_uv1 = Some(reactive_uv1);
         resources.reactive_uv1_double_sided = Some(reactive_uv1_double_sided);
+        self.created_pipelines(2);
     }
 
     #[allow(clippy::too_many_arguments)]

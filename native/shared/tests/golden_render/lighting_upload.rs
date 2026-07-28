@@ -84,6 +84,11 @@ fn golden_many_point_lights() {
         "stable topology must not compile after warm-up"
     );
     assert_eq!(
+        resources["pipeline_creations"]["first_use"].as_u64(),
+        Some(0),
+        "warmed frame must not create a first-use pipeline"
+    );
+    assert_eq!(
         resources["command_encoder_creations"]["total"].as_u64(),
         Some(1),
         "steady rendering must use one submission encoder"
@@ -217,18 +222,29 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    eng.renderer
-        .add_post_pass(COPY_PASS)
-        .expect("first copy post pass compiles");
-    eng.renderer
-        .add_post_pass(COPY_PASS)
-        .expect("second copy post pass compiles");
     let draw = |eng: &mut EngineState| {
         let r = &mut eng.renderer;
         r.set_clear_color(8.0, 12.0, 20.0, 255.0);
         r.begin_mode_3d(3.0, 2.5, 5.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
         r.draw_cube(0.0, 0.75, 0.0, 1.5, 1.5, 1.5, 220.0, 90.0, 35.0, 255.0);
     };
+    eng.begin_frame();
+    eng.renderer
+        .add_post_pass(COPY_PASS)
+        .expect("first copy post pass compiles");
+    eng.renderer
+        .add_post_pass(COPY_PASS)
+        .expect("second copy post pass compiles");
+    draw(&mut eng);
+    eng.end_frame();
+    let first_use: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+            .expect("first-use pipeline telemetry is valid JSON");
+    assert_eq!(
+        first_use["steady_state_resources"]["pipeline_creations"]["first_use"].as_u64(),
+        Some(2),
+        "two post-pass pipeline compilations must be measured in their creation frame"
+    );
     let (_, _, rgba) = render(&mut eng, 4, draw);
     assert!(
         rgba.chunks_exact(4)
@@ -243,6 +259,11 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         Some(0),
         "warmed custom post-pass stack must reuse parity-specific bind groups"
     );
+    assert_eq!(
+        paths["steady_state_resources"]["pipeline_creations"]["first_use"].as_u64(),
+        Some(0),
+        "warmed custom post-pass stack must not recreate pipelines"
+    );
 
     eng.renderer.resize(320, 192, 320, 192);
     let _ = render(&mut eng, 3, draw);
@@ -255,5 +276,10 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             .as_u64(),
         Some(0),
         "post-pass bindings must rebuild after resize then return to zero churn"
+    );
+    assert_eq!(
+        resized_paths["steady_state_resources"]["pipeline_creations"]["first_use"].as_u64(),
+        Some(0),
+        "resize must retain custom pipelines"
     );
 }

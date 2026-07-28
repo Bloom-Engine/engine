@@ -877,14 +877,16 @@ impl TransmittedShadowResources {
         self.resolve_bind_group = None;
     }
 
-    fn ensure_uv1_pipeline(&mut self, device: &wgpu::Device) {
+    fn ensure_uv1_pipeline(&mut self, device: &wgpu::Device) -> bool {
         if self.caster_uv1_pipeline.is_none() {
             self.caster_uv1_pipeline = Some(create_transmitted_shadow_caster_pipeline(
                 device,
                 &self.caster_pipeline_layout,
                 true,
             ));
+            return true;
         }
+        false
     }
 }
 
@@ -986,6 +988,7 @@ impl Renderer {
             material_layout,
             &self.joint_layout,
         ));
+        self.created_pipelines(2);
         log::info!(
             "bloom materials: transmitted directional shadows enabled \
              (nearest-layer, {}x{}, rgba8+depth16, lazy)",
@@ -999,8 +1002,12 @@ impl Renderer {
             return;
         }
         self.ensure_transmitted_shadow_resources();
-        if let Some(resources) = self.transmitted_shadow_resources.as_mut() {
-            resources.ensure_uv1_pipeline(&self.device);
+        let created = self
+            .transmitted_shadow_resources
+            .as_mut()
+            .is_some_and(|resources| resources.ensure_uv1_pipeline(&self.device));
+        if created {
+            self.created_pipelines(1);
         }
     }
 
