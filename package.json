@@ -1676,7 +1676,7 @@
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_get_present_mode",
@@ -1824,7 +1824,7 @@
           "params": [
             "f64"
           ],
-          "returns": "void"
+          "returns": "f64"
         },
         {
           "name": "bloom_reset_temporal_history",

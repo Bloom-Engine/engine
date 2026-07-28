@@ -395,10 +395,22 @@ pub fn bloom_profiler_hist_gpu_us(i: f64) -> f64 {
 /// The browser owns presentation (rAF + compositor); Fifo-equivalent
 /// behaviour is all a canvas surface can do, so the mode is fixed.
 #[wasm_bindgen]
-pub fn bloom_set_present_mode(_mode: f64) {}
+pub fn bloom_set_present_mode(mode: f64) -> f64 {
+    if mode == 0.0 { 1.0 } else { 0.0 }
+}
 
 #[wasm_bindgen]
 pub fn bloom_get_present_mode() -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_path_tracing(mode: f64) -> f64 {
+    if mode == 0.0 { 1.0 } else { 0.0 }
+}
+
+#[wasm_bindgen]
+pub fn bloom_path_tracing_supported() -> f64 {
     0.0
 }
 

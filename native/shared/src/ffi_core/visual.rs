@@ -285,9 +285,13 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_present_mode  [round-2 audit F6]
         #[no_mangle]
-        pub extern "C" fn bloom_set_present_mode(mode: f64) {
+        pub extern "C" fn bloom_set_present_mode(mode: f64) -> f64 {
             $crate::ffi::guard("bloom_set_present_mode", move || {
-                engine().renderer.set_present_mode(mode as u32);
+                if engine().renderer.set_present_mode(mode as u32) {
+                    1.0
+                } else {
+                    0.0
+                }
             })
         }
 
@@ -465,12 +469,18 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_path_tracing — 0 off / 1 progressive / 2 realtime
         // (docs/pt/pt-roadmap.md). Needs hardware ray query; without it
-        // the request is stored but nothing engages — check
-        // bloom_path_tracing_supported to know which world you are in.
+        // the request is rejected with a false status.
         #[no_mangle]
-        pub extern "C" fn bloom_set_path_tracing(mode: f64) {
+        pub extern "C" fn bloom_set_path_tracing(mode: f64) -> f64 {
             $crate::ffi::guard("bloom_set_path_tracing", move || {
-                engine().renderer.set_path_tracing(mode as u32);
+                let renderer = &mut engine().renderer;
+                let mode = mode as u32;
+                if mode == 0 || renderer.pt_supported() {
+                    renderer.set_path_tracing(mode);
+                    1.0
+                } else {
+                    0.0
+                }
             })
         }
 

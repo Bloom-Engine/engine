@@ -296,7 +296,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_sharpen_strength(_p0: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_set_present_mode(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_present_mode(_p0: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_get_present_mode() -> f64 {
     0.0
@@ -340,7 +341,8 @@
 }
 #[no_mangle] pub extern "C" fn bloom_set_ssgi_enabled(_p0: f64) {
 }
-#[no_mangle] pub extern "C" fn bloom_set_path_tracing(_p0: f64) {
+#[no_mangle] pub extern "C" fn bloom_set_path_tracing(_p0: f64) -> f64 {
+    0.0
 }
 #[no_mangle] pub extern "C" fn bloom_reset_temporal_history() {
 }

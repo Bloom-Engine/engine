@@ -34,6 +34,45 @@ impl Renderer {
         self.device_negotiation_report = Some(report);
     }
 
+    /// Present mode: 0 = Fifo (vsync), 1 = Mailbox (uncapped, no tearing),
+    /// 2 = Immediate (uncapped, tearing allowed), 3 = AutoNoVsync (portable
+    /// uncapped preference with backend fallback). Returns false for invalid
+    /// requests and headless renderers, which have no presentation surface.
+    pub fn set_present_mode(&mut self, mode: u32) -> bool {
+        if mode > 3 || self.surface.is_none() {
+            return false;
+        }
+        let requested = match mode {
+            1 => wgpu::PresentMode::Mailbox,
+            2 => wgpu::PresentMode::Immediate,
+            3 => wgpu::PresentMode::AutoNoVsync,
+            _ => wgpu::PresentMode::Fifo,
+        };
+        if self.surface_config.present_mode == requested {
+            return true;
+        }
+        self.surface_config.present_mode = requested;
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.surface_config);
+        }
+        eprintln!("bloom: present mode = {:?}", requested);
+        true
+    }
+
+    /// Stable numeric form of the configured present-mode request. Quality
+    /// qualification records this alongside wall/GPU timings so a vsync cap
+    /// cannot masquerade as unchanged performance.
+    pub fn present_mode_code(&self) -> u32 {
+        match self.surface_config.present_mode {
+            wgpu::PresentMode::Fifo => 0,
+            wgpu::PresentMode::Mailbox => 1,
+            wgpu::PresentMode::Immediate => 2,
+            wgpu::PresentMode::AutoNoVsync => 3,
+            wgpu::PresentMode::FifoRelaxed => 4,
+            wgpu::PresentMode::AutoVsync => 5,
+        }
+    }
+
     pub fn quality_adapter_json(&self) -> String {
         let info = self.device.adapter_info();
         let features = self.device.features();

@@ -36,7 +36,7 @@ declare function bloom_set_chromatic_aberration(strength: number): void;
 declare function bloom_set_vignette(strength: number, softness: number): void;
 declare function bloom_set_film_grain(strength: number): void;
 declare function bloom_set_sharpen_strength(strength: number): void;
-declare function bloom_set_present_mode(mode: number): void;
+declare function bloom_set_present_mode(mode: number): number;
 declare function bloom_get_present_mode(): number;
 declare function bloom_get_material_binding_capabilities(): string;
 declare function bloom_get_renderer_capabilities(): string;
@@ -64,7 +64,7 @@ declare function bloom_set_auto_resolution(targetHz: number, enabled: number): v
 declare function bloom_set_manual_exposure(value: number): void;
 declare function bloom_set_env_intensity(intensity: number): void;
 declare function bloom_set_ssgi_enabled(on: number): void;
-declare function bloom_set_path_tracing(mode: number): void;
+declare function bloom_set_path_tracing(mode: number): number;
 declare function bloom_reset_temporal_history(): void;
 declare function bloom_path_tracing_supported(): number;
 declare function bloom_set_ssgi_intensity(intensity: number): void;
@@ -360,8 +360,8 @@ export function setSharpenStrength(strength: number): void {
  * With a non-vsync mode active, `setTargetFPS`'s sleep-based cap
  * becomes effective — under Fifo it is inert by design.
  */
-export function setPresentMode(mode: number): void {
-  bloom_set_present_mode(mode);
+export function setPresentMode(mode: number): boolean {
+  return bloom_set_present_mode(mode) !== 0;
 }
 
 /** Configured present-mode request, using the numeric values from setPresentMode(). */
@@ -692,11 +692,11 @@ export function setSsgiEnabled(on: boolean): void {
  *       resets on movement. Converges to ground truth — the "final quality"
  *       view for the editor and for stills.
  *   2 — realtime: denoised 1-sample path tracing for gameplay.
- * Requires hardware ray query (see isPathTracingSupported); on devices
- * without it the request is a no-op and the engine stays on Lumen.
+ * Returns false when the requested mode needs unavailable hardware ray query;
+ * the engine stays on Lumen and no renderer state is changed.
  */
-export function setPathTracing(mode: number): void {
-  bloom_set_path_tracing(mode);
+export function setPathTracing(mode: number): boolean {
+  return bloom_set_path_tracing(mode) !== 0;
 }
 
 /**
