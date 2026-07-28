@@ -1285,7 +1285,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     .expect("same ray-query adapter remains available");
     let (anisotropy, anisotropy_paths) = render_variant(Some(MaterialLayeredPbr {
         anisotropy_authored: true,
-        anisotropy_strength: 0.75,
+        anisotropy_strength: 1.0,
         anisotropy_rotation: 0.3,
         ..Default::default()
     }))
@@ -1293,7 +1293,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     .expect("same ray-query adapter remains available");
     let (anisotropy_rotated, anisotropy_rotated_paths) = render_variant(Some(MaterialLayeredPbr {
         anisotropy_authored: true,
-        anisotropy_strength: 0.75,
+        anisotropy_strength: 1.0,
         anisotropy_rotation: 0.3 + std::f32::consts::FRAC_PI_2,
         ..Default::default()
     }))
@@ -1303,11 +1303,11 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         255, 128, 255, 255, 255, 128, 255, 255, 255, 128, 255, 255, 255, 128, 255, 255,
     ];
     let directional_anisotropy_channels = [
-        255, 128, 255, 255, 128, 255, 48, 255, 128, 255, 48, 255, 255, 128, 255, 255,
+        255, 128, 255, 255, 128, 255, 255, 255, 128, 255, 255, 255, 128, 255, 255, 255,
     ];
     let textured_anisotropy_material = MaterialLayeredPbr {
         anisotropy_authored: true,
-        anisotropy_strength: 0.75,
+        anisotropy_strength: 1.0,
         anisotropy_rotation: 0.3,
         ..Default::default()
     };
@@ -1844,6 +1844,8 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         );
     }
     if clearcoat_normal_supported {
+        let normal_response =
+            calculate_diff_metrics(&flat_clearcoat_normal, &textured_clearcoat_normal, W, H);
         assert_transport_response(
             "textured clearcoat normal",
             &flat_clearcoat_normal,
@@ -1858,6 +1860,13 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         );
         let uv_set_response =
             calculate_diff_metrics(&textured_clearcoat_normal, &uv1_clearcoat_normal, W, H);
+        eprintln!(
+            "clearcoat-normal PT qualification: normal={normal_response:?}, \
+             rotation={transform_response:?}, uv1={uv_set_response:?}, \
+             flat_luma={:.6}, mapped_luma={:.6}",
+            mean_display_luminance(&flat_clearcoat_normal),
+            mean_display_luminance(&textured_clearcoat_normal),
+        );
         assert!(
             uv_set_response.mean_rgb >= 0.02,
             "clearcoat normal UV1 did not select retained secondary coordinates: \

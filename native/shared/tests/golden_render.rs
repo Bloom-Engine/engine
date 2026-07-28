@@ -1630,16 +1630,17 @@ fn cube_verts(half: f32, color: [f32; 4]) -> (Vec<Vertex3D>, Vec<u32>) {
             [[-h, -h, h], [h, -h, h], [h, -h, -h], [-h, -h, -h]],
         ),
     ];
+    let face_uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
     let mut verts = Vec::new();
     let mut idx = Vec::new();
     for (normal, vs) in faces {
         let base = verts.len() as u32;
-        for p in vs {
+        for (p, uv) in vs.into_iter().zip(face_uvs) {
             verts.push(Vertex3D {
                 position: p,
                 normal,
                 color,
-                uv: [0.0, 0.0],
+                uv,
                 joints: [0.0; 4],
                 weights: [0.0; 4],
                 tangent: [0.0; 4],
@@ -1863,13 +1864,23 @@ fn create_rt_device_context() -> Result<Option<RtDeviceContext>, String> {
         return Ok(None);
     };
     let info = adapter.get_info();
+    let texture_array_features = wgpu::Features::TEXTURE_BINDING_ARRAY
+        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+    let enabled_texture_array_features = if adapter.features().contains(texture_array_features) {
+        texture_array_features
+    } else {
+        wgpu::Features::empty()
+    };
     eprintln!(
-        "PT golden adapter: {}({:?}, {:?})",
-        info.name, info.backend, info.device_type
+        "PT golden adapter: {}({:?}, {:?}), texture_arrays={}",
+        info.name,
+        info.backend,
+        info.device_type,
+        !enabled_texture_array_features.is_empty(),
     );
     let supported_features = format!("{:?}", adapter.features());
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: rt_mask,
+        required_features: rt_mask | enabled_texture_array_features,
         required_limits: adapter.limits(),
         experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
         ..Default::default()
