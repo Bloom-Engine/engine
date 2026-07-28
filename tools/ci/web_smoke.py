@@ -364,17 +364,14 @@ def main() -> int:
         "--ignore-gpu-blocklist",
     ]
     if sys.platform.startswith("linux"):
-        # Hosted Linux runners have no display GPU. Keep WebGPU and Chrome's
-        # compositor on a single explicit SwiftShader/Vulkan path so a canvas
-        # swap-chain image can be presented and captured deterministically.
+        # Hosted Linux runners have no display GPU. These are Chromium's own
+        # WebGPU SwiftShader test switches: explicitly select the software
+        # adapter and initialize ANGLE for canvas/compositor interop.
         command.extend(
             [
-                "--use-angle=vulkan",
-                "--enable-features=Vulkan",
-                "--disable-vulkan-surface",
-                "--enable-unsafe-swiftshader",
                 "--use-webgpu-adapter=swiftshader",
                 "--use-gpu-in-tests",
+                "--enable-accelerated-2d-canvas",
             ]
         )
     command.extend(
@@ -421,6 +418,24 @@ def main() -> int:
                 if marker in ("pass", "fail"):
                     break
                 time.sleep(0.1)
+            raw_adapter_info = evaluated_value(
+                devtools,
+                """(() => {
+                  const adapter = globalThis.__bloomSmokeAdapter;
+                  if (!adapter) return null;
+                  const info = adapter.info ?? {};
+                  return {
+                    vendor: info.vendor ?? "",
+                    architecture: info.architecture ?? "",
+                    device: info.device ?? "",
+                    description: info.description ?? "",
+                    backend: info.backend ?? "",
+                    type: info.type ?? "",
+                  };
+                })()""",
+            )
+            if isinstance(raw_adapter_info, dict):
+                adapter_info = raw_adapter_info
             if marker == "fail":
                 browser_error = str(
                     evaluated_value(
@@ -432,24 +447,6 @@ def main() -> int:
             elif marker != "pass":
                 failures.append("browser timed out before completing a Bloom frame")
             else:
-                raw_adapter_info = evaluated_value(
-                    devtools,
-                    """(() => {
-                      const adapter = globalThis.__bloomSmokeAdapter;
-                      if (!adapter) return null;
-                      const info = adapter.info ?? {};
-                      return {
-                        vendor: info.vendor ?? "",
-                        architecture: info.architecture ?? "",
-                        device: info.device ?? "",
-                        description: info.description ?? "",
-                        backend: info.backend ?? "",
-                        type: info.type ?? "",
-                      };
-                    })()""",
-                )
-                if isinstance(raw_adapter_info, dict):
-                    adapter_info = raw_adapter_info
                 raw_frame_signature = evaluated_value(
                     devtools,
                     "document.documentElement.dataset.bloomFrame || null",
@@ -458,11 +455,11 @@ def main() -> int:
                     frame_signature = raw_frame_signature
                 if frame_signature != "direct-2d-clear-rgba-32-112-224-255":
                     failures.append("browser did not report the submitted known frame")
-                capture = devtools.call(
-                    "Page.captureScreenshot",
-                    {"format": "png", "fromSurface": True},
-                )
-                screenshot.write_bytes(base64.b64decode(capture["data"]))
+            capture = devtools.call(
+                "Page.captureScreenshot",
+                {"format": "png", "fromSurface": True},
+            )
+            screenshot.write_bytes(base64.b64decode(capture["data"]))
     except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
         failures.append(f"browser automation failed: {exc}")
     finally:
