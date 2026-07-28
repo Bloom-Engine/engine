@@ -9,6 +9,8 @@ use std::sync::OnceLock;
 mod clipmap;
 #[path = "virtual_shadow_page_priority.rs"]
 mod page_priority;
+#[path = "virtual_shadow_receiver_demand.rs"]
+mod receiver_demand;
 #[path = "virtual_shadow_report.rs"]
 mod report;
 
@@ -26,6 +28,7 @@ const VSM_DIRECTIONAL_LEVEL_PAGE_CAPS: [usize; VSM_CLIP_LEVELS as usize] = [144,
 pub(crate) use clipmap::{
     projection as directional_clipmap_projection, DirectionalClipmapCacheKey,
 };
+pub use receiver_demand::directional_receiver_demand;
 
 #[repr(C, align(16))]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1365,85 +1368,6 @@ pub fn directional_dynamic_fallback_pages(
         })
         .collect();
     page_priority::center_first(pages, &priority)
-}
-
-/// Mark directional virtual pages touched by camera-visible receiver bounds.
-///
-/// Bounds are projected into each fitted cascade. A one-page guard band keeps
-/// PCF taps, temporal jitter, and small camera motion inside resident pages.
-/// Coverage count wins over center distance so large shared surfaces (ground,
-/// walls) are filled before isolated geometry. Per-level caps keep CPU work,
-/// residency, and upload size bounded even when one receiver covers the full
-/// clipmap; any omitted page continues to sample the conventional CSM.
-pub fn directional_receiver_demand(
-    level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
-    receiver_bounds: &[([f32; 3], [f32; 3])],
-    light: u16,
-) -> Vec<VirtualShadowPage> {
-    let center = i32::from(VSM_VIRTUAL_PAGES_PER_AXIS);
-    let per_level: [Vec<VirtualShadowPage>; VSM_CLIP_LEVELS as usize] =
-        std::array::from_fn(|level| {
-            let planes = crate::scene::extract_frustum_planes(&level_vps[level]);
-            let mut coverage: HashMap<VirtualShadowPage, u32> = HashMap::new();
-            for &(bmin, bmax) in receiver_bounds {
-                let Some((page_min_x, page_min_y, page_max_x, page_max_y)) =
-                    projected_directional_page_rect(&level_vps[level], &planes, bmin, bmax, 1)
-                else {
-                    continue;
-                };
-                for y in page_min_y..=page_max_y {
-                    for x in page_min_x..=page_max_x {
-                        let page = VirtualShadowPage {
-                            light,
-                            level: level as u8,
-                            x,
-                            y,
-                        };
-                        coverage
-                            .entry(page)
-                            .and_modify(|count| *count = count.saturating_add(1))
-                            .or_insert(1);
-                    }
-                }
-            }
-
-            let mut ranked: Vec<(VirtualShadowPage, u32)> = coverage.into_iter().collect();
-            ranked.sort_unstable_by_key(|(page, count)| {
-                let dx = (i32::from(page.x) * 2 + 1 - center).unsigned_abs();
-                let dy = (i32::from(page.y) * 2 + 1 - center).unsigned_abs();
-                (
-                    std::cmp::Reverse(*count),
-                    dx.max(dy),
-                    dx + dy,
-                    page.y,
-                    page.x,
-                )
-            });
-            ranked
-                .into_iter()
-                .take(VSM_DIRECTIONAL_LEVEL_PAGE_CAPS[level])
-                .map(|(page, _)| page)
-                .collect()
-        });
-
-    // Interleave clip levels so an invalidated near level cannot consume the
-    // full render budget before mid/far receiver coverage gets a page.
-    let mut pages = Vec::with_capacity(per_level.iter().map(Vec::len).sum());
-    let mut next = [0usize; VSM_CLIP_LEVELS as usize];
-    loop {
-        let mut appended = false;
-        for level in 0..VSM_CLIP_LEVELS as usize {
-            if next[level] < per_level[level].len() {
-                pages.push(per_level[level][next[level]]);
-                next[level] += 1;
-                appended = true;
-            }
-        }
-        if !appended {
-            break;
-        }
-    }
-    pages
 }
 
 /// Deterministic center-first demand used by the directional prototype.
