@@ -186,5 +186,6 @@ Those roots occupy the first eight pages and require exactly 469,360 resident
 payload bytes, only 790 bytes of packing overhead beyond their raw cluster
 payload. This is structural hierarchy/page qualification, not yet a measured
 runtime residency budget.
-The full record is
-`docs/evidence/issue-131-atomic-hierarchy-v1.{md,json}`.
+The hierarchy and page-placement records are
+`docs/evidence/issue-131-atomic-hierarchy-v1.{md,json}` and
+`docs/evidence/issue-131-coarse-page-prefix-v1.{md,json}`.
