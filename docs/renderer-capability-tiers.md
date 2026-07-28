@@ -20,5 +20,24 @@ because an unrelated optional feature is absent.
 
 This table describes the cross-system path contract after device creation.
 Platform profiles still own their minimum surface and shader-layout limits.
-Those startup contracts and lower-tier device-request retries are tracked as the
-next capability-tier migration step.
+
+## Native device negotiation
+
+The shared native and Linux startup paths request the renderer's actual active
+profile instead of `wgpu::Limits::default()`: 5 bind groups, 4 color
+attachments, 19 sampled textures, 16 samplers, 8 storage buffers, and a 64 KiB
+uniform-buffer binding. Path tracing raises the storage-buffer requirement to
+9. Tier A requests only Bloom's bounded 4,096-texture/64-sampler working set,
+including fallback entries, rather than the adapter's maximum descriptor
+budget.
+
+Startup first requests supported optional features for the selected tier. If
+the backend rejects that request, Bloom retries the same active shader-layout
+contract without optional features, selecting the resulting modern/baseline
+resource tier. Both success and fallback emit a structured report; the chosen
+request and the preferred-request failure cause are also embedded in quality
+artifacts under `adapter.device_negotiation`.
+
+An adapter below the active shader-layout contract receives an explicit error
+naming every insufficient limit. It is not reported as a successful lower tier
+until Bloom has an implementation of that lower shader layout.

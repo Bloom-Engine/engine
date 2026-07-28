@@ -239,6 +239,10 @@ fn rgba8_rgb(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) ->
 }
 
 impl Renderer {
+    pub fn set_device_negotiation_report(&mut self, report: String) {
+        self.device_negotiation_report = Some(report);
+    }
+
     fn record_quality_texture(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -697,6 +701,8 @@ impl Renderer {
         json_string(&mut out, renderer_capabilities.selected_tier.name());
         out.push_str(",\"renderer_capabilities\":");
         out.push_str(&renderer_capabilities.report_json());
+        out.push_str(",\"device_negotiation\":");
+        out.push_str(self.device_negotiation_report.as_deref().unwrap_or("null"));
         out.push_str(",\"features\":[");
         for (index, feature) in semantic_features.iter().enumerate() {
             if index > 0 {

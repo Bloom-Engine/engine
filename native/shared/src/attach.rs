@@ -77,7 +77,15 @@ pub struct AttachParams {
 fn request_device(
     instance: &wgpu::Instance,
     compatible_surface: Option<&wgpu::Surface<'_>>,
-) -> Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue), String> {
+) -> Result<
+    (
+        wgpu::Adapter,
+        wgpu::Device,
+        wgpu::Queue,
+        crate::renderer::device_negotiation::DeviceNegotiationReport,
+    ),
+    String,
+> {
     let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         compatible_surface,
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -85,85 +93,27 @@ fn request_device(
     }))
     .map_err(|e| format!("no compatible adapter: {e}"))?;
 
-    // Optional device features, requested only when the adapter offers
-    // them: GPU timestamps, BC compression, and HW ray query.
-    let supported = adapter.features();
-    let mut required_features = wgpu::Features::empty();
-    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-        required_features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-    }
     let force_sw_gi = std::env::var("BLOOM_FORCE_SW_GI")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-    if !force_sw_gi && supported.contains(rt_mask) {
-        required_features |= rt_mask;
-    }
-    let pt_tex_mask = crate::renderer::material_indirection::TIER_A_FEATURES;
-    if supported.contains(pt_tex_mask) {
-        required_features |= pt_tex_mask;
-    }
-    crate::renderer::gpu_driven::request_features_if_supported(supported, &mut required_features);
-    let experimental_features = if required_features.intersects(rt_mask) {
-        // Apple-Silicon Metal ray query has been stable since wgpu v25.
-        unsafe { wgpu::ExperimentalFeatures::enabled() }
-    } else {
-        wgpu::ExperimentalFeatures::disabled()
-    };
-
-    // The material ABI declares 5 bind groups and 19+ sampled textures.
-    let adapter_limits = adapter.limits();
-    let mut required_limits = wgpu::Limits::default();
-    required_limits.max_bind_groups = 5;
-    required_limits.max_sampled_textures_per_shader_stage = required_limits
-        .max_sampled_textures_per_shader_stage
-        .max(adapter_limits.max_sampled_textures_per_shader_stage);
-    required_limits.max_samplers_per_shader_stage = required_limits
-        .max_samplers_per_shader_stage
-        .max(adapter_limits.max_samplers_per_shader_stage);
-    if required_features.contains(pt_tex_mask) {
-        required_limits.max_binding_array_elements_per_shader_stage =
-            adapter_limits.max_binding_array_elements_per_shader_stage;
-        required_limits.max_binding_array_sampler_elements_per_shader_stage =
-            adapter_limits.max_binding_array_sampler_elements_per_shader_stage;
-    }
-    required_limits.max_storage_buffers_per_shader_stage = required_limits
-        .max_storage_buffers_per_shader_stage
-        .max(adapter_limits.max_storage_buffers_per_shader_stage.min(16));
-
-    if required_features.intersects(rt_mask) {
-        required_limits = required_limits.using_minimum_supported_acceleration_structure_values();
-    }
-
-    let device_desc = wgpu::DeviceDescriptor {
-        label: Some("bloom_device"),
-        required_features,
-        required_limits: required_limits.clone(),
-        experimental_features,
-        ..Default::default()
-    };
-    let (device, queue) = match block_on(adapter.request_device(&device_desc)) {
-        Ok(pair) => pair,
-        Err(first) => {
-            let fallback = wgpu::DeviceDescriptor {
-                label: Some("bloom_device_fallback"),
-                required_features: wgpu::Features::empty(),
-                required_limits: {
-                    let mut limits = adapter.limits();
-                    limits.max_bind_groups = limits.max_bind_groups.max(5);
-                    limits
-                },
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                ..Default::default()
-            };
-            block_on(adapter.request_device(&fallback))
-                .map_err(|second| format!("request_device failed: {first}; fallback: {second}"))?
-        }
-    };
-    Ok((adapter, device, queue))
+    let negotiated = block_on(
+        crate::renderer::device_negotiation::request_device_with_fallback(
+            &adapter,
+            crate::renderer::device_negotiation::DeviceRequestOptions {
+                allow_ray_query: !force_sw_gi,
+            },
+        ),
+    )?;
+    eprintln!(
+        "bloom: renderer device negotiation = {}",
+        negotiated.report.report_json()
+    );
+    Ok((
+        adapter,
+        negotiated.device,
+        negotiated.queue,
+        negotiated.report,
+    ))
 }
 
 /// Build the same production renderer without a presentation surface.
@@ -178,13 +128,10 @@ pub fn attach_headless_engine(
         backends,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let (_adapter, device, queue) = request_device(&instance, None)?;
-    Ok(EngineState::new(Renderer::new_headless(
-        device,
-        queue,
-        width.max(1),
-        height.max(1),
-    )))
+    let (_adapter, device, queue, negotiation) = request_device(&instance, None)?;
+    let mut renderer = Renderer::new_headless(device, queue, width.max(1), height.max(1));
+    renderer.set_device_negotiation_report(negotiation.report_json());
+    Ok(EngineState::new(renderer))
 }
 
 /// Build a fully-configured [`EngineState`] that renders into a
@@ -213,7 +160,7 @@ pub unsafe fn attach_engine(
         .create_surface_unsafe(target)
         .map_err(|e| format!("create_surface failed: {e}"))?;
 
-    let (adapter, device, queue) = request_device(&instance, Some(&surface))?;
+    let (adapter, device, queue, negotiation) = request_device(&instance, Some(&surface))?;
 
     let surface_caps = surface.get_capabilities(&adapter);
     if surface_caps.formats.is_empty() {
@@ -249,7 +196,7 @@ pub unsafe fn attach_engine(
     };
     surface.configure(&device, &surface_config);
 
-    let renderer = Renderer::new(
+    let mut renderer = Renderer::new(
         device,
         queue,
         surface,
@@ -257,5 +204,6 @@ pub unsafe fn attach_engine(
         params.logical_w.max(1),
         params.logical_h.max(1),
     );
+    renderer.set_device_negotiation_report(negotiation.report_json());
     Ok(EngineState::new(renderer))
 }

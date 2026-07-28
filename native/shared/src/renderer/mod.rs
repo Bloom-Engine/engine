@@ -98,6 +98,7 @@ mod brdf_lut;
 use brdf_lut::build_brdf_lut;
 mod atmosphere_lut;
 pub mod capabilities;
+pub mod device_negotiation;
 use atmosphere_lut::{
     build_multi_scattering_lut, build_transmittance_lut, AERIAL_D, AERIAL_H, AERIAL_MAX_DIST_KM,
     AERIAL_W, MULTI_SCATTERING_SIZE, SKY_VIEW_H, SKY_VIEW_W, TRANSMITTANCE_H, TRANSMITTANCE_W,
@@ -418,9 +419,10 @@ pub(crate) fn srgb_u8_to_linear(c: f64) -> f32 {
 
 pub struct Renderer {
     pub device: wgpu::Device,
+    #[cfg(not(target_arch = "wasm32"))]
+    device_negotiation_report: Option<String>,
     pub queue: wgpu::Queue,
-    /// None in headless mode (golden tests, server rendering): frames
-    /// render into `headless_target` instead of a swapchain.
+    /// None in headless mode; frames render into `headless_target`.
     pub surface: Option<wgpu::Surface<'static>>,
     headless_target: Option<wgpu::Texture>,
     /// Surface acquisition naturally limits how far the CPU can submit
@@ -431,11 +433,9 @@ pub struct Renderer {
     pub surface_config: wgpu::SurfaceConfiguration,
     /// EN-063 — the format frames are rendered in: equals
     /// `surface_config.format` on native (already sRGB), or its sRGB view
-    /// variant on hosts whose surfaces are non-sRGB (WebGPU canvases). Every
-    /// pipeline that targets the swapchain, and the per-frame surface view,
-    /// use THIS; `surface_config.format` is only for `surface.configure`.
+    /// variant on hosts whose surfaces are non-sRGB (WebGPU canvases).
+    /// Pipelines use this; `surface_config.format` is only for configuration.
     pub output_format: wgpu::TextureFormat,
-
     // Logical (points / CSS px) size — what user code addresses via
     // `screenWidth`/HUD coords. Physical render target size is stored
     // in `surface_config` and is `logical * scale_factor`. On non-HiDPI
@@ -443,7 +443,6 @@ pub struct Renderer {
     pub logical_width: u32,
     pub logical_height: u32,
 
-    // Pipelines
     pipeline_2d: wgpu::RenderPipeline,
     pipeline_3d: wgpu::RenderPipeline,
     custom_pipelines: Vec<wgpu::RenderPipeline>,
@@ -7528,6 +7527,8 @@ impl Renderer {
             },
             headless_in_flight: std::collections::VecDeque::with_capacity(4),
             device,
+            #[cfg(not(target_arch = "wasm32"))]
+            device_negotiation_report: None,
             queue,
             surface,
             surface_config,

@@ -24,12 +24,14 @@ const ID_GENERATION_MASK: u32 = (1 << (32 - ID_SLOT_BITS)) - 1;
 const DEFAULT_RESOURCE_CAPACITY: usize = 8_192;
 const TIER_A_TARGET_TEXTURES: u32 = 4_096;
 const TIER_A_TARGET_SAMPLERS: u32 = 64;
+const TIER_A_TARGET_BINDING_ARRAY_ELEMENTS: u32 =
+    TIER_A_TARGET_TEXTURES + TIER_A_TARGET_SAMPLERS + 2;
 const INITIAL_MATERIAL_CAPACITY: usize = 64;
 
 pub const TIER_A_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
     .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
 
-/// Add Tier A's optional features and exact adapter limits to a device request.
+/// Add Tier A's optional features and bounded working-set limits to a request.
 ///
 /// Platform bring-up paths call this after choosing their mandatory limits.
 /// Unsupported adapters are unchanged and naturally select Tier B/C later.
@@ -43,10 +45,12 @@ pub fn request_tier_a_if_supported(
         return;
     }
     *required_features |= TIER_A_FEATURES;
-    required_limits.max_binding_array_elements_per_shader_stage =
-        adapter_limits.max_binding_array_elements_per_shader_stage;
-    required_limits.max_binding_array_sampler_elements_per_shader_stage =
-        adapter_limits.max_binding_array_sampler_elements_per_shader_stage;
+    required_limits.max_binding_array_elements_per_shader_stage = adapter_limits
+        .max_binding_array_elements_per_shader_stage
+        .min(TIER_A_TARGET_BINDING_ARRAY_ELEMENTS);
+    required_limits.max_binding_array_sampler_elements_per_shader_stage = adapter_limits
+        .max_binding_array_sampler_elements_per_shader_stage
+        .min(TIER_A_TARGET_SAMPLERS + 1);
 }
 
 /// Common behavior for the typed 32-bit IDs stored in scene and GPU records.
