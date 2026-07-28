@@ -5,6 +5,7 @@ struct TemporalParams {
 struct ProbeHeader {
     world_pos: vec4<f32>,
     normal: vec4<f32>,
+    diffuse: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TemporalParams;
@@ -29,7 +30,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         i32(octel.y * 8u + octel.x),
     );
     let curr = textureLoad(radiance_in, coord, 0).rgb;
-    let hist = textureLoad(history_in, coord, 0).rgb;
+    var hist = textureLoad(history_in, coord, 0).rgb;
+    // Production reserves octel zero for the probe's cosine-convolved
+    // diffuse result and seeds that lane's directional history from current.
+    if (octel.x == 0u && octel.y == 0u) {
+        hist = curr;
+    }
     let curr_finite = all(abs(curr) <= vec3<f32>(65504.0));
     let hist_finite = all(abs(hist) <= vec3<f32>(65504.0));
     let finite = curr_finite && hist_finite;

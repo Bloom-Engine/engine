@@ -481,7 +481,6 @@ fn capture_realtime_diagnostics(eng: &mut EngineState, final_rgba: &[u8]) {
     }
     eng.renderer.set_path_tracing_debug_view(0);
 }
-
 fn try_engine() -> Option<EngineState> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -498,7 +497,9 @@ fn try_engine() -> Option<EngineState> {
     if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
         return None;
     }
+    let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features,
         required_limits: adapter.limits(),
         ..Default::default()
     }))

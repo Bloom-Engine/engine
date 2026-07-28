@@ -6076,6 +6076,7 @@ impl Renderer {
                         },
                         count: None,
                     },
+                    PROBE_HEADER_RW_LAYOUT_ENTRY,
                 ],
             });
         let probe_temporal_pl_layout =
@@ -6099,7 +6100,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
         // --- Probe resolve (fragment → half-res ssgi_rt) ---
         let probe_resolve_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

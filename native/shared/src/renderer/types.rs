@@ -813,13 +813,27 @@ pub(super) struct ProbeResolveParams {
 }
 
 /// On-GPU `ProbeHeader` layout (must match PROBE_HELPERS_WGSL's struct).
-/// 32 bytes per probe.
+/// 48 bytes per probe; diffuse stores the cosine-convolved result so resolve
+/// needs no separate probe-history texture lookup.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeHeaderCpu {
     pub(super) world_pos: [f32; 4],
     pub(super) normal: [f32; 4],
+    pub(super) diffuse: [f32; 4],
 }
+
+pub(super) const PROBE_HEADER_RW_LAYOUT_ENTRY: wgpu::BindGroupLayoutEntry =
+    wgpu::BindGroupLayoutEntry {
+        binding: 4,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
 
 /// Ticket 013 V3 — CardCaptureParams. ortho_vp + base_color + emissive.
 /// 96 bytes; we allocate 128 for uniform-alignment headroom.
@@ -1147,6 +1161,11 @@ mod physical_uv_tests {
         assert_eq!(layout.array_stride, 8);
         assert_eq!(layout.attributes.len(), 1);
         assert_eq!(layout.attributes[0].shader_location, 7);
+    }
+
+    #[test]
+    fn probe_header_matches_shader_storage_abi() {
+        assert_eq!(std::mem::size_of::<ProbeHeaderCpu>(), 48);
     }
 
     #[test]

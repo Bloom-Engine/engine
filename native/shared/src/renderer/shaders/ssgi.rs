@@ -26,6 +26,8 @@ struct ProbeHeader {
     world_pos: vec4<f32>,
     // xyz = world-space normal at the probe surface; w = linear |view-z|
     normal: vec4<f32>,
+    // xyz = cosine-convolved diffuse radiance, w = reserved.
+    diffuse: vec4<f32>,
 };
 
 fn oct_wrap(v: vec2<f32>) -> vec2<f32> {
@@ -355,10 +357,12 @@ fn cs_main(
         // lets coarse steps accept wider thickness, which matches the
         // existing SSGI behaviour closely enough for V1.
         if (ray_abs_z >= scene_z && scene_z < HIZ_SKY_Z * 0.5) {
-            // Refine against mip 0 to reject far-off misses.
+            // Refine against mip 0 to reject coarse-footprint false
+            // positives. Exponential stepping can cross a real surface by
+            // much more than the old thickness window, so a confirmed
+            // front-depth crossing is the hit instead of being dropped.
             let refined_z = hiz_sample(ray_uv, 0);
-            let thickness = abs(ray_abs_z - refined_z);
-            if (thickness < step_size * 2.0 + 0.1) {
+            if (ray_abs_z >= refined_z && refined_z < HIZ_SKY_Z * 0.5) {
                 let tn = t / max_t;
                 let falloff = 1.0 - tn * tn;
                 var raw = bounded_probe_history(
@@ -369,8 +373,8 @@ fn cs_main(
                 let cap = u.params.w;
                 if (luma > cap) { raw = raw * (cap / luma); }
                 hit_color = raw;
+                break;
             }
-            break;
         }
 
         prev_t = t;
@@ -1259,6 +1263,13 @@ struct TemporalParams {
 @group(0) @binding(1) var radiance_in: texture_3d<f32>;
 @group(0) @binding(2) var history_in: texture_3d<f32>;
 @group(0) @binding(3) var history_out: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(4) var<storage, read_write> probes: array<ProbeHeader>;
+
+// The trace stores cosine-weighted incident radiance in 64 directional
+// octels. Reserve octel zero in the filtered history for the diffuse
+// convolution that resolve actually needs. Keeping the reduction in this
+// existing workgroup avoids another texture, pass, or per-pixel 64-tap loop.
+var<workgroup> diffuse_radiance: array<vec3<f32>, 64>;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(
@@ -1271,7 +1282,13 @@ fn cs_main(
 
     let coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
     let curr = bounded_probe_history(textureLoad(radiance_in, coord, 0).rgb);
-    let hist = bounded_probe_history(textureLoad(history_in, coord, 0).rgb);
+    var hist = bounded_probe_history(textureLoad(history_in, coord, 0).rgb);
+    let lane = lid.y * PROBE_OCT_SIZE + lid.x;
+    // Octel zero held the previous frame's integrated irradiance rather than
+    // directional history. Seed that one directional sample from current.
+    if (lane == 0u) {
+        hist = curr;
+    }
 
     var alpha = u.params.x;
     let force_refresh = u.params.y > 0.5;
@@ -1300,6 +1317,36 @@ fn cs_main(
         // `mix(undefined, current, 1)` may still evaluate undefined * zero.
         // Direct assignment guarantees invalid history is never observed.
         blended = curr;
+    }
+
+    diffuse_radiance[lane] = blended;
+    workgroupBarrier();
+    if (lane < 32u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 32u];
+    }
+    workgroupBarrier();
+    if (lane < 16u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 16u];
+    }
+    workgroupBarrier();
+    if (lane < 8u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 8u];
+    }
+    workgroupBarrier();
+    if (lane < 4u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 4u];
+    }
+    workgroupBarrier();
+    if (lane < 2u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 2u];
+    }
+    workgroupBarrier();
+    if (lane == 0u) {
+        diffuse_radiance[0] = diffuse_radiance[0] + diffuse_radiance[1];
+        // Uniform sphere samples need 4x their mean cosine-weighted
+        // radiance to reproduce constant diffuse incident radiance.
+        blended = bounded_probe_history(diffuse_radiance[0] * (4.0 / 64.0));
+        probes[wg.y * grid_w + wg.x].diffuse = vec4<f32>(blended, 1.0);
     }
 
     textureStore(history_out, coord, vec4<f32>(blended, 1.0));
@@ -1348,20 +1395,11 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
-// Sample a probe's octahedral atlas in a given world-space direction.
-// Uses trilinear sampling on the 3D texture so neighbouring octels
-// softly blend — some visible smear on the 8×8 atlas, at the cost of
-// a cheap reconstruction.
-fn sample_probe(probe_xy: vec2<i32>, dir_ws: vec3<f32>) -> vec3<f32> {
-    let oct_uv = oct_encode(dir_ws);
-    let u_tex = (f32(probe_xy.x) + 0.5) / f32(u.size.z);
-    let v_tex = (f32(probe_xy.y) + 0.5) / f32(u.size.w);
-    // z coordinate: octahedral texel index in [0, 64) normalized to [0, 1)
-    let oct_x = clamp(oct_uv.x * f32(PROBE_OCT_SIZE), 0.0, f32(PROBE_OCT_SIZE) - 1.0);
-    let oct_y = clamp(oct_uv.y * f32(PROBE_OCT_SIZE), 0.0, f32(PROBE_OCT_SIZE) - 1.0);
-    let z_idx = floor(oct_y) * f32(PROBE_OCT_SIZE) + floor(oct_x);
-    let z = (z_idx + 0.5) / f32(PROBE_OCT_TEXELS);
-    return textureSampleLevel(radiance_tex, radiance_samp, vec3<f32>(u_tex, v_tex, z), 0.0).rgb;
+// Temporal stores the cosine-convolved diffuse result alongside the probe
+// header. Resolve already loads that header for its bilateral weights, so
+// this adds no texture lookup.
+fn sample_probe(probe: ProbeHeader) -> vec3<f32> {
+    return probe.diffuse.rgb;
 }
 
 @fragment
@@ -1434,7 +1472,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let w = w_corner * w_depth * w_normal;
             if (w <= 0.0001) { continue; }
 
-            let radiance = sample_probe(vec2<i32>(gx, gy), N_ws);
+            let radiance = sample_probe(probe);
             accum = accum + radiance * w;
             wsum = wsum + w;
         }

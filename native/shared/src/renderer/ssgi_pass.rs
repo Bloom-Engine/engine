@@ -589,6 +589,10 @@ impl Renderer {
                                     &self.probe_history_views[write_idx],
                                 ),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: self.probe_header_buffer.as_entire_binding(),
+                            },
                         ],
                     }));
             }

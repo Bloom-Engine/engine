@@ -80,6 +80,11 @@ SSGI now owns `probe_history_valid` independently of TAA:
   component-wise with zero; ordinary finite radiance is unchanged;
 - degenerate depth-derived normals use finite fallback directions during probe
   placement and resolve, preventing NaN normals from rejecting every probe;
+- the Hi-Z tracer treats only a mip-zero-confirmed front-depth crossing as a
+  hit and continues marching after a coarse-footprint false positive;
+- the existing temporal workgroup cosine-convolves all 64 directional samples
+  once per probe, and resolve reads that diffuse result from the probe header
+  instead of treating one normal-indexed octel as irradiance;
 - resize, SSGI toggles, intensity/radius changes, transparent-GI route changes,
   and PT ownership invalidate it;
 - suppressed frames neither preserve validity nor advance the probe ping-pong;
@@ -87,6 +92,10 @@ SSGI now owns `probe_history_valid` independently of TAA:
   filter remain unchanged.
 
 Telemetry exposes `temporal_history.ssgi_probe_valid` and `ssgi_probe_index`.
+The cached diffuse result grows each probe header from 32 to 48 bytes
+(16 bytes per probe, 32,640 bytes at a 1920x1080 render size). It adds no
+texture, bind group, dispatch, draw, or graph pass, and removes the probe
+history texture lookup from each resolve sample.
 
 ## TAA/TSR implementation
 
@@ -304,10 +313,15 @@ The dark-interior SSR gate requires finite raw march/history values, no
 isolated HDR fireflies under the documented local rule, a populated reflection
 buffer, and a visible SSR-on/off delta from the smooth-reflection control.
 
-The SSGI gate warms a retained emissive receiver scene through the production
-Hi-Z-to-SDF backend transition, then requires a finite, nonzero resolved HDR
-target and real retained probe history. It also verifies the probe-domain
-reason/confidence dimensions and the zero-persistent-memory capture contract.
+The SSGI gates cover both production software tracing tiers. A retained
+emissive receiver scene warms through the Hi-Z-to-SDF backend transition, then
+requires a finite, nonzero resolved HDR target and real retained probe history.
+An immediate-only room stays on `hiz-screen` and independently requires
+nonzero current trace samples, retained history, finite resolved radiance, and
+a nonblack diffuse result. Its optional 1280x720 profile window records all
+four probe-pass timestamps for frozen-binary A/B qualification. The tests also
+verify the probe-domain reason/confidence dimensions and the
+zero-persistent-memory capture contract.
 
 The realtime PT gate orbits the deterministic retained ray-query scene for 24
 frames, then requires finite nonzero HDR output, accepted history, valid
