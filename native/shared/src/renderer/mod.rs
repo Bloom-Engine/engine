@@ -12541,6 +12541,7 @@ impl Renderer {
         // Map the occlusion-grid readback recorded this frame (no-op if
         // none was recorded).
         self.occlusion.after_submit();
+        self.shadow_map.virtual_map.after_submit_gpu_receiver();
 
         // Ticket 022 — drain freshly-baked SDFs to the on-disk cache.
         // No-op on cache-hit frames (queue is empty); on cold-launch

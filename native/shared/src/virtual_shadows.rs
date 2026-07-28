@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 #[path = "directional_shadow_clipmap.rs"]
 mod clipmap;
+#[path = "virtual_shadow_gpu_receiver.rs"]
+mod gpu_receiver;
 #[path = "virtual_shadow_page_priority.rs"]
 mod page_priority;
 #[path = "virtual_shadow_receiver_demand.rs"]
@@ -506,6 +508,8 @@ pub struct DirectionalVirtualShadowMap {
     receiver_demand: Vec<VirtualShadowPage>,
     receiver_bounds_signature: u64,
     receiver_demand_level_vps: Option<[[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize]>,
+    receiver_bounds_count: usize,
+    receiver_marking_backend: &'static str,
     last_demand_count: usize,
     receiver_demand_active: bool,
     pending: Vec<PageRequest>,
@@ -570,6 +574,8 @@ impl DirectionalVirtualShadowMap {
             receiver_demand: Vec::new(),
             receiver_bounds_signature: 0,
             receiver_demand_level_vps: None,
+            receiver_bounds_count: 0,
+            receiver_marking_backend: "disabled",
             last_demand_count: 0,
             receiver_demand_active: false,
             pending: Vec::with_capacity(render_budget),
@@ -583,7 +589,9 @@ impl DirectionalVirtualShadowMap {
 
     pub fn prepare(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
         level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
         clipmap_keys: Option<[DirectionalClipmapCacheKey; VSM_CLIP_LEVELS as usize]>,
         content_signatures: [u64; VSM_CLIP_LEVELS as usize],
@@ -656,22 +664,87 @@ impl DirectionalVirtualShadowMap {
         self.previous_clipmap_keys = clipmap_keys;
         self.previous_content_signatures = Some(content_signatures);
 
+        let completed_gpu_demand = self
+            .gpu
+            .as_mut()
+            .and_then(|gpu| gpu.receiver_demand.poll(device));
         let receiver_bounds_signature = receiver_bounds
             .filter(|bounds| !bounds.is_empty())
             .map(receiver_bounds_signature);
+        self.receiver_bounds_count = receiver_bounds.map_or(0, <[_]>::len);
         if let Some(signature) = receiver_bounds_signature {
-            if self.receiver_bounds_signature != signature
-                || self.receiver_demand_level_vps != Some(level_vps)
-            {
-                self.receiver_demand =
-                    directional_receiver_demand(level_vps, receiver_bounds.unwrap(), 0);
-                self.receiver_bounds_signature = signature;
-                self.receiver_demand_level_vps = Some(level_vps);
+            let bounds = receiver_bounds.expect("non-empty receiver bounds have a signature");
+            let gpu_wanted = self
+                .gpu
+                .as_ref()
+                .is_some_and(|gpu| gpu.receiver_demand.wants_gpu(bounds.len()));
+            let gpu_validated = self
+                .gpu
+                .as_ref()
+                .is_some_and(|gpu| gpu.receiver_demand.validated());
+            let current_demand_exact = self.receiver_bounds_signature == signature
+                && self.receiver_demand_level_vps == Some(level_vps);
+            if !gpu_wanted {
+                if !current_demand_exact {
+                    self.receiver_demand = directional_receiver_demand(level_vps, bounds, 0);
+                    self.receiver_bounds_signature = signature;
+                    self.receiver_demand_level_vps = Some(level_vps);
+                }
+                self.receiver_marking_backend = "fixed-cpu";
+            } else {
+                let projection_changed = self.receiver_demand_level_vps != Some(level_vps);
+                if !gpu_validated || self.receiver_demand.is_empty() || projection_changed {
+                    if !current_demand_exact {
+                        self.receiver_demand = directional_receiver_demand(level_vps, bounds, 0);
+                        self.receiver_bounds_signature = signature;
+                        self.receiver_demand_level_vps = Some(level_vps);
+                    }
+                    self.receiver_marking_backend = if gpu_validated {
+                        "fixed-cpu-transition"
+                    } else {
+                        "fixed-cpu-validation"
+                    };
+                } else if let Some(completed) =
+                    completed_gpu_demand.filter(|completed| completed.level_vps == level_vps)
+                {
+                    let completed_is_current = completed.bounds_signature == signature;
+                    self.receiver_demand = completed.demand;
+                    self.receiver_bounds_signature = completed.bounds_signature;
+                    self.receiver_demand_level_vps = Some(level_vps);
+                    self.receiver_marking_backend = if completed_is_current {
+                        "gpu-async"
+                    } else {
+                        "gpu-async-lagged"
+                    };
+                } else if current_demand_exact {
+                    self.receiver_marking_backend = "gpu-validated-cache";
+                } else {
+                    // Retain the previous exact result while the next marker
+                    // runs. Pages newly touched by receiver motion are absent
+                    // and therefore sample current CSM until readback lands.
+                    self.receiver_marking_backend = "gpu-async-pending";
+                }
+
+                let demand_is_current = self.receiver_bounds_signature == signature
+                    && self.receiver_demand_level_vps == Some(level_vps);
+                if !gpu_validated || !demand_is_current {
+                    let expected = (!gpu_validated).then(|| self.receiver_demand.clone());
+                    if let Some(gpu) = self.gpu.as_mut() {
+                        gpu.receiver_demand.record(
+                            device, queue, encoder, level_vps, bounds, signature, expected,
+                        );
+                    }
+                }
             }
         } else {
             self.receiver_demand.clear();
             self.receiver_bounds_signature = 0;
             self.receiver_demand_level_vps = None;
+            self.receiver_marking_backend = if self.requested {
+                "center-fallback"
+            } else {
+                "disabled"
+            };
         }
         let receiver_demand_active = !self.receiver_demand.is_empty();
         let demand_len = if receiver_demand_active {
@@ -846,6 +919,15 @@ impl DirectionalVirtualShadowMap {
         self.gpu.as_ref().map(|gpu| &gpu.sampling_params_buffer)
     }
 
+    /// Start mapping receiver-demand readback only after the encoder that
+    /// produced it has been submitted. The callback is collected by the next
+    /// non-blocking `prepare` poll.
+    pub fn after_submit_gpu_receiver(&mut self) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.receiver_demand.after_submit();
+        }
+    }
+
     fn upload_page_table_if_changed(&mut self, queue: &wgpu::Queue) {
         if !self.sampling_active {
             return;
@@ -911,6 +993,7 @@ struct GpuVirtualShadowResources {
     render_uniform_buffer: wgpu::Buffer,
     render_uniform_bind_group: wgpu::BindGroup,
     sampling_params_buffer: wgpu::Buffer,
+    receiver_demand: gpu_receiver::GpuReceiverDemand,
 }
 
 impl GpuVirtualShadowResources {
@@ -1009,6 +1092,7 @@ impl GpuVirtualShadowResources {
             render_uniform_buffer,
             render_uniform_bind_group,
             sampling_params_buffer,
+            receiver_demand: gpu_receiver::GpuReceiverDemand::new(device),
         }
     }
 

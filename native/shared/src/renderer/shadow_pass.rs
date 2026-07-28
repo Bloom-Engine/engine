@@ -703,7 +703,9 @@ impl Renderer {
                 Vec::new()
             };
             self.shadow_map.virtual_map.prepare(
+                &self.device,
                 &self.queue,
+                encoder,
                 vsm_level_vps,
                 vsm_projection.map(|projection| projection.cache_keys),
                 cascade_sigs,

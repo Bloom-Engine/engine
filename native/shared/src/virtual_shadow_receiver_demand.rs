@@ -1,7 +1,8 @@
 use super::*;
 
-const PAGES_PER_LEVEL: usize =
+pub(super) const PAGES_PER_LEVEL: usize =
     VSM_VIRTUAL_PAGES_PER_AXIS as usize * VSM_VIRTUAL_PAGES_PER_AXIS as usize;
+pub(super) const COVERAGE_ENTRIES: usize = PAGES_PER_LEVEL * VSM_CLIP_LEVELS as usize;
 
 /// Mark directional virtual pages touched by camera-visible receiver bounds.
 ///
@@ -44,38 +45,73 @@ pub fn directional_receiver_demand(
                 }
             }
 
-            let mut ranked = Vec::with_capacity(touched.len());
-            for index in touched {
-                let index = usize::from(index);
-                ranked.push((
-                    VirtualShadowPage {
-                        light,
-                        level: level as u8,
-                        x: (index % axis) as u16,
-                        y: (index / axis) as u16,
-                    },
-                    coverage[index],
-                ));
-            }
-            ranked.sort_unstable_by_key(|(page, count)| {
-                let dx = (i32::from(page.x) * 2 + 1 - center).unsigned_abs();
-                let dy = (i32::from(page.y) * 2 + 1 - center).unsigned_abs();
-                (
-                    std::cmp::Reverse(*count),
-                    dx.max(dy),
-                    dx + dy,
-                    page.y,
-                    page.x,
-                )
-            });
-            ranked
-                .into_iter()
-                .take(VSM_DIRECTIONAL_LEVEL_PAGE_CAPS[level])
-                .map(|(page, _)| page)
-                .collect()
+            rank_level(
+                &coverage,
+                touched.into_iter().map(usize::from),
+                light,
+                level,
+                axis,
+                center,
+            )
         });
 
     interleave_levels(per_level)
+}
+
+pub(super) fn compact_directional_coverage(coverage: &[u32], light: u16) -> Vec<VirtualShadowPage> {
+    if coverage.len() != COVERAGE_ENTRIES {
+        return Vec::new();
+    }
+    let axis = VSM_VIRTUAL_PAGES_PER_AXIS as usize;
+    let center = i32::from(VSM_VIRTUAL_PAGES_PER_AXIS);
+    let per_level = std::array::from_fn(|level| {
+        let offset = level * PAGES_PER_LEVEL;
+        let counts = &coverage[offset..offset + PAGES_PER_LEVEL];
+        rank_level(counts, 0..PAGES_PER_LEVEL, light, level, axis, center)
+    });
+    interleave_levels(per_level)
+}
+
+fn rank_level(
+    coverage: &[u32],
+    indices: impl IntoIterator<Item = usize>,
+    light: u16,
+    level: usize,
+    axis: usize,
+    center: i32,
+) -> Vec<VirtualShadowPage> {
+    let mut ranked = Vec::new();
+    for index in indices {
+        let count = coverage[index];
+        if count == 0 {
+            continue;
+        }
+        ranked.push((
+            VirtualShadowPage {
+                light,
+                level: level as u8,
+                x: (index % axis) as u16,
+                y: (index / axis) as u16,
+            },
+            count,
+        ));
+    }
+    ranked.sort_unstable_by_key(|(page, count)| {
+        let dx = (i32::from(page.x) * 2 + 1 - center).unsigned_abs();
+        let dy = (i32::from(page.y) * 2 + 1 - center).unsigned_abs();
+        (
+            std::cmp::Reverse(*count),
+            dx.max(dy),
+            dx + dy,
+            page.y,
+            page.x,
+        )
+    });
+    ranked
+        .into_iter()
+        .take(VSM_DIRECTIONAL_LEVEL_PAGE_CAPS[level])
+        .map(|(page, _)| page)
+        .collect()
 }
 
 fn interleave_levels(
@@ -167,10 +203,29 @@ mod tests {
         bounds.push(([2.0, 2.0, 2.0], [3.0, 3.0, 3.0]));
         bounds.push(([1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]));
         let vps = [crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize];
-        assert_eq!(
-            directional_receiver_demand(vps, &bounds, 7),
-            hash_oracle(vps, &bounds, 7),
-        );
+        let expected = hash_oracle(vps, &bounds, 7);
+        assert_eq!(directional_receiver_demand(vps, &bounds, 7), expected);
+
+        let axis = VSM_VIRTUAL_PAGES_PER_AXIS as usize;
+        let mut dense = vec![0u32; COVERAGE_ENTRIES];
+        for level in 0..VSM_CLIP_LEVELS as usize {
+            let planes = crate::scene::extract_frustum_planes(&vps[level]);
+            for &(bmin, bmax) in &bounds {
+                let Some((min_x, min_y, max_x, max_y)) =
+                    projected_directional_page_rect(&vps[level], &planes, bmin, bmax, 1)
+                else {
+                    continue;
+                };
+                for y in min_y..=max_y {
+                    for x in min_x..=max_x {
+                        let index =
+                            level * PAGES_PER_LEVEL + usize::from(y) * axis + usize::from(x);
+                        dense[index] = dense[index].saturating_add(1);
+                    }
+                }
+            }
+        }
+        assert_eq!(compact_directional_coverage(&dense, 7), expected);
     }
 
     #[test]

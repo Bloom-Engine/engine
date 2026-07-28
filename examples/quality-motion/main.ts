@@ -24,10 +24,12 @@ const config = parseQualityRun(argv);
 let vsmDynamicFixture = false;
 let vsmScrollFixture = false;
 let vsmLightMotionFixture = false;
+let vsmGpuReceiverFixture = false;
 for (let i = 0; i < argv.length; i = i + 1) {
   if (argv[i] === "--vsm-dynamic") vsmDynamicFixture = true;
   if (argv[i] === "--vsm-scroll") vsmScrollFixture = true;
   if (argv[i] === "--vsm-light-motion") vsmLightMotionFixture = true;
+  if (argv[i] === "--vsm-gpu-receivers") vsmGpuReceiverFixture = true;
 }
 
 initWindow(800, 450, "Bloom Quality: Skinned + Alpha Motion", 0);
@@ -88,6 +90,23 @@ if (vsmDynamicFixture) {
   setSceneNodeReceiveShadow(ground, true);
 }
 
+// Opt-in receiver-compaction stress oracle. These small receive-only nodes
+// remain fully below the large ground, so they cannot alter the capture, but
+// their camera-visible bounds exercise the >=1,024 receiver path. Continuous
+// sub-page motion requires asynchronous results to make forward progress
+// without a same-frame CPU readback.
+const gpuReceiverNodes: number[] = [];
+if (vsmGpuReceiverFixture) {
+  const receiverModel = genMeshCube(0.12, 0.02, 0.12);
+  for (let index = 0; index < 18 * 64; index = index + 1) {
+    const receiver = createSceneNode();
+    attachModelToNode(receiver, receiverModel.handle, 0);
+    setSceneNodeCastShadow(receiver, false);
+    setSceneNodeReceiveShadow(receiver, true);
+    gpuReceiverNodes.push(receiver);
+  }
+}
+
 let simulationTime = 0.0;
 let fixtureFrame = 0;
 while (!windowShouldClose()) {
@@ -95,6 +114,24 @@ while (!windowShouldClose()) {
   const dt = quality !== null ? quality.deltaTime() : 1 / 60;
   simulationTime = simulationTime + dt;
   fixtureFrame = fixtureFrame + 1;
+
+  if (vsmGpuReceiverFixture) {
+    const receiverMotion = Math.sin(simulationTime * 2.0) * 0.02;
+    for (let index = 0; index < gpuReceiverNodes.length; index = index + 1) {
+      const column = index % 18;
+      const row = Math.floor(index / 18);
+      let transform = mat4Identity();
+      transform = mat4Translate(
+        transform,
+        {
+          x: 4.86 + (column - 8.5) * 0.38 + receiverMotion,
+          y: 0.0,
+          z: -1.2 - row * 0.08,
+        },
+      );
+      setSceneNodeTransform(gpuReceiverNodes[index], transform);
+    }
+  }
 
   // Fox clip 1 ("Walk") has continuous limb motion and a stable loop.
   updateModelAnimation(foxAnimation, 1, simulationTime, 0.02, 4.86, 0.15, -1.25, 0.0);

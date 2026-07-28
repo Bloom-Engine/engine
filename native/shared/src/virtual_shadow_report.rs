@@ -10,7 +10,29 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
     let render_staging_bytes = crate::shadows::SHADOW_UNIFORM_STRIDE as u64
         * crate::shadows::SHADOW_MAX_NODES as u64
         * vsm.render_budget as u64;
-    let gpu_overhead_bytes = page_table_bytes + render_staging_bytes + VSM_SAMPLING_PARAMS_BYTES;
+    let gpu_receiver_bytes = vsm
+        .gpu
+        .as_ref()
+        .map_or(0, |gpu| gpu.receiver_demand.memory_bytes());
+    let gpu_receiver_stats = vsm
+        .gpu
+        .as_ref()
+        .map(|gpu| gpu.receiver_demand.stats)
+        .unwrap_or_default();
+    let gpu_receiver_validated = vsm
+        .gpu
+        .as_ref()
+        .is_some_and(|gpu| gpu.receiver_demand.validated());
+    let gpu_receiver_enabled = vsm
+        .gpu
+        .as_ref()
+        .is_some_and(|gpu| gpu.receiver_demand.enabled());
+    let gpu_receiver_in_flight = vsm
+        .gpu
+        .as_ref()
+        .map_or(0, |gpu| gpu.receiver_demand.in_flight());
+    let gpu_overhead_bytes =
+        page_table_bytes + render_staging_bytes + VSM_SAMPLING_PARAMS_BYTES + gpu_receiver_bytes;
     let (physical_capacity, physical_bytes, gpu_overhead_bytes, render_budget) = if vsm.requested {
         (
             stats.capacity,
@@ -39,6 +61,12 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
             "\"clipmap_pages_dropped\":{},",
             "\"pending_render\":{},\"render_budget\":{},",
             "\"demand_source\":\"{}\",\"demand_count\":{},",
+            "\"receiver_bounds_count\":{},\"receiver_marking_backend\":\"{}\",",
+            "\"gpu_receiver_min_bounds\":{},\"gpu_receiver_max_bounds\":{},",
+            "\"gpu_receiver_enabled\":{},\"gpu_receiver_validated\":{},",
+            "\"gpu_receiver_in_flight\":{},",
+            "\"gpu_receiver_dispatches\":{},\"gpu_receiver_completions\":{},",
+            "\"gpu_receiver_validation_failures\":{},\"gpu_receiver_bytes\":{},",
             "\"levels\":[",
             "{{\"level\":0,\"resident\":{},\"dirty\":{}}},",
             "{{\"level\":1,\"resident\":{},\"dirty\":{}}},",
@@ -89,6 +117,17 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
             "bounded-center-fallback"
         },
         vsm.last_demand_count,
+        vsm.receiver_bounds_count,
+        vsm.receiver_marking_backend,
+        gpu_receiver::GPU_RECEIVER_MIN_BOUNDS,
+        gpu_receiver::GPU_RECEIVER_MAX_BOUNDS,
+        gpu_receiver_enabled,
+        gpu_receiver_validated,
+        gpu_receiver_in_flight,
+        gpu_receiver_stats.dispatches,
+        gpu_receiver_stats.completions,
+        gpu_receiver_stats.validation_failures,
+        gpu_receiver_bytes,
         levels[0].0,
         levels[0].1,
         levels[1].0,
