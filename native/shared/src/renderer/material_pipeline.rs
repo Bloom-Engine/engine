@@ -674,69 +674,118 @@ fn expand_material_source(
     Ok(expanded)
 }
 
+fn wgsl_tokens(source: &str) -> Vec<&str> {
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+        } else if bytes[index..].starts_with(b"//") {
+            index += bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .unwrap_or(bytes.len() - index);
+        } else if bytes[index..].starts_with(b"/*") {
+            let mut depth = 1usize;
+            index += 2;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth += 1;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+        } else if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            tokens.push(&source[start..index]);
+        } else if bytes[index..].starts_with(b"->") {
+            tokens.push(&source[index..index + 2]);
+            index += 2;
+        } else if !bytes[index].is_ascii() {
+            index += source[index..]
+                .chars()
+                .next()
+                .expect("index is inside source")
+                .len_utf8();
+        } else {
+            tokens.push(&source[index..index + 1]);
+            index += 1;
+        }
+    }
+    tokens
+}
+
 fn declares_reactive_fragment(source: &str) -> Result<bool, MaterialCompileError> {
     if !source.contains("fs_reactive") {
         return Ok(false);
     }
-    let module = wgpu::naga::front::wgsl::parse_str(source)
-        .map_err(|error| MaterialCompileError::Naga(error.emit_to_string(source)))?;
-    let Some(entry) = module.entry_points.iter().find(|entry| {
-        entry.stage == wgpu::naga::ShaderStage::Fragment && entry.name == "fs_reactive"
-    }) else {
-        return Ok(false);
-    };
-    let Some(result) = entry.function.result.as_ref() else {
-        return Err(MaterialCompileError::Naga(
-            "fs_reactive must return ReactiveTranslucentOut".to_owned(),
-        ));
-    };
-    let wgpu::naga::TypeInner::Struct { members, .. } = &module.types[result.ty].inner else {
-        return Err(MaterialCompileError::Naga(
-            "fs_reactive must return a struct with @location(0) vec4<f32> HDR and \
-             @location(1) f32 reactive coverage"
-                .to_owned(),
-        ));
-    };
-    let member_at = |location| {
-        members.iter().find(|member| {
-            matches!(
-                member.binding,
-                Some(wgpu::naga::Binding::Location {
-                    location: member_location,
-                    ..
-                }) if member_location == location
-            )
-        })
-    };
-    let hdr_valid = member_at(0).is_some_and(|member| {
-        matches!(
-            &module.types[member.ty].inner,
-            wgpu::naga::TypeInner::Vector {
-                size: wgpu::naga::VectorSize::Quad,
-                scalar: wgpu::naga::Scalar {
-                    kind: wgpu::naga::ScalarKind::Float,
-                    width: 4,
-                },
-            }
-        )
-    });
-    let coverage_valid = member_at(1).is_some_and(|member| {
-        matches!(
-            &module.types[member.ty].inner,
-            wgpu::naga::TypeInner::Scalar(wgpu::naga::Scalar {
-                kind: wgpu::naga::ScalarKind::Float,
-                width: 4,
-            })
-        )
-    });
-    if members.len() != 2 || !hdr_valid || !coverage_valid {
-        return Err(MaterialCompileError::Naga(
-            "fs_reactive must return exactly @location(0) vec4<f32> HDR and \
-             @location(1) f32 reactive coverage"
-                .to_owned(),
-        ));
+    let tokens = wgsl_tokens(source);
+    for function in tokens
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| (pair == ["fn", "fs_reactive"]).then_some(index))
+    {
+        let declaration_start = tokens[..function]
+            .iter()
+            .rposition(|token| matches!(*token, "}" | ";"))
+            .map_or(0, |index| index + 1);
+        let is_fragment = tokens[declaration_start..function]
+            .windows(2)
+            .any(|pair| pair == ["@", "fragment"]);
+        if !is_fragment {
+            continue;
+        }
+        let Some(open) = tokens[function + 2..]
+            .iter()
+            .position(|token| *token == "(")
+            .map(|index| function + 2 + index)
+        else {
+            return Err(MaterialCompileError::Naga(
+                "fs_reactive has no parameter list".to_owned(),
+            ));
+        };
+        let mut depth = 0usize;
+        let close = tokens[open..]
+            .iter()
+            .enumerate()
+            .find_map(|(offset, token)| {
+                match *token {
+                    "(" => depth += 1,
+                    ")" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(open + offset);
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            });
+        let valid_result = close.is_some_and(|close| {
+            tokens.get(close + 1) == Some(&"->")
+                && tokens.get(close + 2) == Some(&"ReactiveTranslucentOut")
+        });
+        if !valid_result {
+            return Err(MaterialCompileError::Naga(
+                "fs_reactive must return ReactiveTranslucentOut with @location(0) HDR and \
+                 @location(1) f32 reactive coverage"
+                    .to_owned(),
+            ));
+        }
+        return Ok(true);
     }
-    Ok(true)
+    Ok(false)
 }
 
 /// Compile a material pipeline. This is the happy-path you call at
@@ -1131,6 +1180,7 @@ mod tests {
         assert!(!declares_reactive_fragment(ordinary).unwrap());
 
         let helper_only = "
+            // @fragment fn fs_reactive() -> ReactiveTranslucentOut {}
             fn fs_reactive() -> f32 {
                 return 1.0;
             }
@@ -1142,7 +1192,7 @@ mod tests {
         assert!(!declares_reactive_fragment(helper_only).unwrap());
 
         let responsive = "
-            struct Out {
+            struct ReactiveTranslucentOut {
                 @location(0) hdr: vec4<f32>,
                 @location(1) reactive: f32,
             };
@@ -1151,8 +1201,8 @@ mod tests {
                 return vec4<f32>(1.0);
             }
             @fragment
-            fn fs_reactive() -> Out {
-                return Out(vec4<f32>(1.0), 1.0);
+            fn fs_reactive() -> ReactiveTranslucentOut {
+                return ReactiveTranslucentOut(vec4<f32>(1.0), 1.0);
             }
         ";
         assert!(declares_reactive_fragment(responsive).unwrap());
@@ -1170,7 +1220,7 @@ mod tests {
         assert!(matches!(
             declares_reactive_fragment(malformed),
             Err(MaterialCompileError::Naga(message))
-                if message.contains("@location(1) f32 reactive coverage")
+                if message.contains("must return ReactiveTranslucentOut")
         ));
     }
 }
