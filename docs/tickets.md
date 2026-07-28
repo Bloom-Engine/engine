@@ -1919,21 +1919,25 @@ adjacent but does not remove the duplication.
 ## EN-056 — Per-frame upload/allocation tail in the renderer 🟡 *(2026-07-16 audit)*
 
 Individually small, collectively the class of waste the frame no longer has
-budget for at 4K. All VERIFIED still present:
+budget for at 4K.
 
-- Lighting UBO (~8.7 KB, 256 point-light slots) uploaded whole **8-9x/frame**
-  with no dirty flag (`mod.rs:10245,11526,11919-11955`; `shadow_pass.rs:73`
-  is explicitly unconditional).
-- Bloom chain creates **9 uniform buffers + 9 bind groups per frame**
-  (`postfx_chain.rs:66-141` — the per-pass UBOs are argued for in comments;
-  the bind-group re-creation is not).
-- The render graph is rebuilt from scratch **twice per frame** — 17 boxed
-  closures, fresh HashMap + HashSets, O(n^3) topo sort (`graph.rs:103-224`,
-  `mod.rs:10650,10824,11067`); composite/post bind groups rebuilt per frame
-  (`mod.rs:10862,10946`).
+- **Lighting UBO fixed in #139:** setters now update one CPU snapshot and the
+  renderer submits at most three aligned dirty ranges after the frame has
+  finalized camera and cascade data. Unchanged ranges submit nothing; exact
+  per-frame write/byte counts live in
+  `renderer_paths.steady_state_uploads.lighting`. The shader layout and bind
+  group are unchanged, and the many-light golden hard-gates a steady frame to
+  at most 512 bytes instead of the former 8-9 full ~8.7 KiB uploads.
+- **Bloom pass resources fixed:** per-mip buffers and bind groups are rebuilt
+  only with the mip chain (initialization/resize); steady frames update only
+  the first threshold uniform when exposure policy changes.
+- **Graph planning fixed in #129:** immutable topology is compiled and cached;
+  per-frame execution only binds closures to the cached pass slots. Composite
+  and post-pass bind-group creation remain part of this ticket's audit.
 
-Fix: dirty-flag the lighting UBO, cache bloom + composite bind groups keyed
-on the views they wrap, build the graph once and rebuild on topology change.
+Remaining: cache bloom/composite bind groups only with complete
+resource-generation keys, then instrument and eliminate the other
+steady-state upload/allocation sites under #139.
 
 ## EN-057 — Hi-Z occlusion runs every frame for zero consumers ✅ *(shipped same day)*
 

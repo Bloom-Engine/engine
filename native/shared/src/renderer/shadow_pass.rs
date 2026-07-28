@@ -75,11 +75,6 @@ impl Renderer {
                 },
             ];
             self.lighting_uniforms.shadow_view_matrix = self.current_view_matrix;
-            self.queue.write_buffer(
-                &self.lighting_buffer,
-                0,
-                bytemuck::bytes_of(&self.lighting_uniforms),
-            );
             // Shadow-flicker fix: the material system's PerView buffer was
             // uploaded before this fit ran and still carries LAST frame's
             // cascade VPs. Patch its shadow fields so material-path

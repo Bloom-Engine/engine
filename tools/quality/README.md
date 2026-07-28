@@ -139,6 +139,14 @@ and the invariant zero additional draws/graph passes. Weighted OIT remains an
 imported aggregate resolved before custom commands.
 `BLOOM_SORTED_INTERLEAVING=0` restores the prior list boundary for exact A/B.
 
+`renderer_paths.steady_state_uploads.lighting` reports the last frame's
+lighting-buffer `write_count`, actual `byte_count`, and `full_buffer_bytes`.
+Lighting setters update one CPU snapshot; the renderer compares that snapshot
+once before submission and emits at most three aligned dirty ranges (fixed and
+directional fields, point lights, and view/shadow/frame data). This makes the
+former repeated full-buffer upload observable without adding a readback or GPU
+pass.
+
 `examples/quality-transparency/main.ts` accepts `--sorted-interleaving` as an
 unversioned focused ordering oracle. It forces conventional sorted composition
 and pairs the 96 imported BLEND layers with 96 custom-material layers at

@@ -1265,6 +1265,15 @@ impl Renderer {
         out.push_str(",\"sample_count\":1");
         out.push_str(",\"alpha_to_coverage_supported\":false");
         out.push_str(",\"single_sample_fallback\":\"coverage-mips-bayer-4x4\"}");
+        let lighting_uploads = self.lighting_upload_tracker.frame_stats();
+        out.push_str(",\"steady_state_uploads\":{\"lighting\":{");
+        out.push_str("\"write_count\":");
+        out.push_str(&lighting_uploads.write_count.to_string());
+        out.push_str(",\"byte_count\":");
+        out.push_str(&lighting_uploads.byte_count.to_string());
+        out.push_str(",\"full_buffer_bytes\":");
+        out.push_str(&std::mem::size_of::<super::types::LightingUniforms>().to_string());
+        out.push_str("}}");
         let graph_stats = self.render_graph_cache_stats();
         out.push_str(",\"render_graph\":{");
         out.push_str("\"compile_count\":");

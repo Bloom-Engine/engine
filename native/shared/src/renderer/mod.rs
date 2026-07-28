@@ -32,6 +32,7 @@ mod layered_pbr_refraction;
 pub(crate) mod layered_pbr_scene;
 pub(crate) mod layered_pbr_ssr;
 mod lighting;
+mod lighting_upload;
 mod material_api;
 pub mod material_indirection;
 mod material_instancing;
@@ -459,6 +460,7 @@ pub struct Renderer {
 
     // Lighting uniforms
     lighting_uniforms: LightingUniforms,
+    lighting_upload_tracker: lighting_upload::LightingUploadTracker,
     lighting_buffer: wgpu::Buffer,
     lighting_bind_group: wgpu::BindGroup,
 
@@ -7543,6 +7545,7 @@ impl Renderer {
             uniform_buffer_3d,
             uniform_bind_group_3d,
             lighting_uniforms,
+            lighting_upload_tracker: lighting_upload::LightingUploadTracker::new(lighting_uniforms),
             lighting_buffer,
             lighting_bind_group,
             joint_buffer,
@@ -10005,11 +10008,6 @@ impl Renderer {
 
     pub fn set_env_intensity(&mut self, intensity: f32) {
         self.lighting_uniforms.camera_pos[3] = intensity;
-        self.queue.write_buffer(
-            &self.lighting_buffer,
-            0,
-            bytemuck::bytes_of(&self.lighting_uniforms),
-        );
     }
 
     // ============================================================
@@ -11673,7 +11671,20 @@ impl Renderer {
         Some((physical_uniform, bind_group, uses_uv1))
     }
 
+    fn flush_lighting_uniforms(&mut self) {
+        let batch = self.lighting_upload_tracker.plan(self.lighting_uniforms);
+        let bytes = bytemuck::bytes_of(&self.lighting_uniforms);
+        for range in batch.ranges() {
+            self.queue.write_buffer(
+                &self.lighting_buffer,
+                range.start as u64,
+                &bytes[range.clone()],
+            );
+        }
+    }
+
     pub fn begin_frame(&mut self) {
+        self.lighting_upload_tracker.begin_frame();
         self.vertices_2d.clear();
         self.indices_2d.clear();
         self.draw_calls_2d.clear();
@@ -11728,11 +11739,6 @@ impl Renderer {
         let preserved_env_intensity = self.lighting_uniforms.camera_pos[3];
         self.lighting_uniforms = LightingUniforms::defaults();
         self.lighting_uniforms.camera_pos[3] = preserved_env_intensity;
-        self.queue.write_buffer(
-            &self.lighting_buffer,
-            0,
-            bytemuck::bytes_of(&self.lighting_uniforms),
-        );
         self.clear_additional_lights();
 
         // DEBUG: joint animation disabled for iOS port
@@ -12106,6 +12112,7 @@ impl Renderer {
             }
         }
 
+        self.flush_lighting_uniforms();
         self.submit_frame_commands(encoder.finish());
         if let Some(out) = surface_output {
             self.present_frame(out);
@@ -12490,6 +12497,11 @@ impl Renderer {
             }
         }
 
+        // Queue writes are ordered before the command buffer submitted below.
+        // Flush once after every pass has finalized the CPU lighting snapshot
+        // (notably the shadow cascade fit), so all encoded consumers see one
+        // coherent set of dirty ranges.
+        self.flush_lighting_uniforms();
         profiler.resolve(&mut encoder);
 
         // Capture copies were encoded by the terminal graph node. Mapping must
@@ -13056,11 +13068,6 @@ impl Renderer {
             0.0,
         ];
         self.lighting_uniforms.shadow_view_matrix = self.current_view_matrix;
-        self.queue.write_buffer(
-            &self.lighting_buffer,
-            0,
-            bytemuck::bytes_of(&self.lighting_uniforms),
-        );
 
         self.queue.write_buffer(
             &self.uniform_buffer_3d,
@@ -13732,11 +13739,6 @@ impl Renderer {
             (b / 255.0) as f32,
             intensity as f32,
         ];
-        self.queue.write_buffer(
-            &self.lighting_buffer,
-            0,
-            bytemuck::bytes_of(&self.lighting_uniforms),
-        );
     }
 
     pub fn set_directional_light(
@@ -13760,11 +13762,6 @@ impl Renderer {
             (b / 255.0) as f32,
             0.0,
         ];
-        self.queue.write_buffer(
-            &self.lighting_buffer,
-            0,
-            bytemuck::bytes_of(&self.lighting_uniforms),
-        );
     }
 
     /// Add an additional directional light (up to MAX_DIR_LIGHTS).
@@ -13788,11 +13785,6 @@ impl Renderer {
             color: [r, g, b, 0.0],
         };
         self.lighting_uniforms.dir_light_count[0] = (idx + 1) as f32;
-        self.queue.write_buffer(
-            &self.lighting_buffer,
-            0,
-            bytemuck::bytes_of(&self.lighting_uniforms),
-        );
     }
 
     /// Add a point light (up to MAX_POINT_LIGHTS).
@@ -13817,11 +13809,6 @@ impl Renderer {
             color: [r, g, b, intensity],
         };
         self.lighting_uniforms.point_light_count[0] = (idx + 1) as f32;
-        self.queue.write_buffer(
-            &self.lighting_buffer,
-            0,
-            bytemuck::bytes_of(&self.lighting_uniforms),
-        );
     }
 
     /// Clear all additional lights (called at begin_frame).
