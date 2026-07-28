@@ -22,8 +22,10 @@ import { mat4Identity, mat4Translate, mat4Scale } from "bloom/math";
 const argv: string[] = getCommandLineArgs();
 const config = parseQualityRun(argv);
 let vsmDynamicFixture = false;
+let vsmScrollFixture = false;
 for (let i = 0; i < argv.length; i = i + 1) {
   if (argv[i] === "--vsm-dynamic") vsmDynamicFixture = true;
+  if (argv[i] === "--vsm-scroll") vsmScrollFixture = true;
 }
 
 initWindow(800, 450, "Bloom Quality: Skinned + Alpha Motion", 0);
@@ -85,10 +87,12 @@ if (vsmDynamicFixture) {
 }
 
 let simulationTime = 0.0;
+let fixtureFrame = 0;
 while (!windowShouldClose()) {
   const capture = quality !== null ? quality.beginFrame() : false;
   const dt = quality !== null ? quality.deltaTime() : 1 / 60;
   simulationTime = simulationTime + dt;
+  fixtureFrame = fixtureFrame + 1;
 
   // Fox clip 1 ("Walk") has continuous limb motion and a stable loop.
   updateModelAnimation(foxAnimation, 1, simulationTime, 0.02, 4.86, 0.15, -1.25, 0.0);
@@ -100,9 +104,19 @@ while (!windowShouldClose()) {
     { r: 255, g: 244, b: 226, a: 255 },
     1.8,
   );
+  // Opt-in snapped-origin transition oracle. The 30-frame hold lets new
+  // boundary pages settle, while frame 240 deliberately lands one frame after
+  // a rebase so the capture and telemetry expose its safe fallback behavior.
+  const cameraScroll = vsmScrollFixture
+    ? (Math.floor(fixtureFrame / 30) % 2) * 2.5
+    : 0.0;
+  // Exact unnormalized right vector for the qualification sun, so this move
+  // crosses planar page origins without also changing the depth projection.
+  const cameraScrollX = cameraScroll * 0.25;
+  const cameraScrollZ = cameraScroll * -0.45;
   beginMode3D({
-    position: { x: 4.86, y: 1.45, z: 2.2 },
-    target: { x: 4.86, y: 1.2, z: -1.6 },
+    position: { x: 4.86 + cameraScrollX, y: 1.45, z: 2.2 + cameraScrollZ },
+    target: { x: 4.86 + cameraScrollX, y: 1.2, z: -1.6 + cameraScrollZ },
     up: { x: 0, y: 1, z: 0 },
     fovy: 48,
     projection: "perspective",

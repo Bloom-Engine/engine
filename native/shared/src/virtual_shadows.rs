@@ -9,6 +9,8 @@ use std::sync::OnceLock;
 mod clipmap;
 #[path = "virtual_shadow_page_priority.rs"]
 mod page_priority;
+#[path = "virtual_shadow_report.rs"]
+mod report;
 
 pub const VSM_CLIP_LEVELS: u8 = 3;
 pub const VSM_VIRTUAL_PAGES_PER_AXIS: u16 = 32;
@@ -21,7 +23,9 @@ pub const VSM_DYNAMIC_OVERLAY_PAGE_BUDGET: usize = 4;
 pub const VSM_DYNAMIC_OVERLAY_DRAW_BUDGET: usize = 64;
 const VSM_DIRECTIONAL_LEVEL_PAGE_CAPS: [usize; VSM_CLIP_LEVELS as usize] = [144, 64, 16];
 
-pub(crate) use clipmap::level_vps as directional_clipmap_vps;
+pub(crate) use clipmap::{
+    projection as directional_clipmap_projection, DirectionalClipmapCacheKey,
+};
 
 #[repr(C, align(16))]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -83,6 +87,9 @@ pub struct VirtualShadowCacheStats {
     pub dirty: u16,
     pub rendered: u32,
     pub invalidated: u32,
+    pub clipmap_level_rebases: u32,
+    pub clipmap_pages_preserved: u32,
+    pub clipmap_pages_dropped: u32,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -142,6 +149,9 @@ impl VirtualShadowPageCache {
         self.stats.denied = 0;
         self.stats.rendered = 0;
         self.stats.invalidated = 0;
+        self.stats.clipmap_level_rebases = 0;
+        self.stats.clipmap_pages_preserved = 0;
+        self.stats.clipmap_pages_dropped = 0;
     }
 
     pub fn request(
@@ -256,6 +266,51 @@ impl VirtualShadowPageCache {
                 self.stats.invalidated = self.stats.invalidated.saturating_add(1);
             }
         }
+        self.refresh_counts();
+    }
+
+    pub fn scroll_level(&mut self, light: u16, level: u8, delta: [i32; 2]) {
+        if delta == [0, 0] {
+            return;
+        }
+        let axis = i32::from(VSM_VIRTUAL_PAGES_PER_AXIS);
+        let mut preserved = 0u32;
+        let mut dropped = 0u32;
+        for slot in &mut self.physical {
+            let Some(owner) = slot.owner else {
+                continue;
+            };
+            if owner.light != light || owner.level != level {
+                continue;
+            }
+            let x = i32::from(owner.x).saturating_add(delta[0]);
+            let y = i32::from(owner.y).saturating_add(delta[1]);
+            if (0..axis).contains(&x) && (0..axis).contains(&y) {
+                slot.owner = Some(VirtualShadowPage {
+                    x: x as u16,
+                    y: y as u16,
+                    ..owner
+                });
+                preserved = preserved.saturating_add(1);
+            } else {
+                *slot = PhysicalPage::default();
+                dropped = dropped.saturating_add(1);
+            }
+        }
+        self.mapping.clear();
+        for (physical_page, slot) in self.physical.iter().enumerate() {
+            if let Some(owner) = slot.owner {
+                let previous = self.mapping.insert(owner, physical_page as u16);
+                debug_assert!(
+                    previous.is_none(),
+                    "clipmap scroll produced duplicate pages"
+                );
+            }
+        }
+        self.stats.clipmap_level_rebases = self.stats.clipmap_level_rebases.saturating_add(1);
+        self.stats.clipmap_pages_preserved =
+            self.stats.clipmap_pages_preserved.saturating_add(preserved);
+        self.stats.clipmap_pages_dropped = self.stats.clipmap_pages_dropped.saturating_add(dropped);
         self.refresh_counts();
     }
 
@@ -441,6 +496,7 @@ pub struct DirectionalVirtualShadowMap {
     gpu: Option<GpuVirtualShadowResources>,
     frame: u64,
     previous_level_vps: Option<[[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize]>,
+    previous_clipmap_keys: Option<[DirectionalClipmapCacheKey; VSM_CLIP_LEVELS as usize]>,
     previous_content_signatures: Option<[u64; VSM_CLIP_LEVELS as usize]>,
     previous_demand_signature: u64,
     fallback_demand: Vec<VirtualShadowPage>,
@@ -504,6 +560,7 @@ impl DirectionalVirtualShadowMap {
             gpu,
             frame: 0,
             previous_level_vps: None,
+            previous_clipmap_keys: None,
             previous_content_signatures: None,
             previous_demand_signature: 0,
             fallback_demand,
@@ -525,6 +582,7 @@ impl DirectionalVirtualShadowMap {
         &mut self,
         queue: &wgpu::Queue,
         level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
+        clipmap_keys: Option<[DirectionalClipmapCacheKey; VSM_CLIP_LEVELS as usize]>,
         content_signatures: [u64; VSM_CLIP_LEVELS as usize],
         receiver_bounds: Option<&[([f32; 3], [f32; 3])]>,
         dynamic_bounds: &[([f32; 3], [f32; 3])],
@@ -538,6 +596,60 @@ impl DirectionalVirtualShadowMap {
         self.dynamic_overlay_rendered_pages = 0;
         self.dynamic_overlay_draws = 0;
         self.dynamic_overlay_deferred_pages = 0;
+        let level_vps_unchanged = self.previous_level_vps == Some(level_vps);
+        let content_unchanged = self.previous_content_signatures == Some(content_signatures);
+        if let (Some(previous_keys), Some(current_keys)) =
+            (self.previous_clipmap_keys, clipmap_keys)
+        {
+            let scrolls = std::array::from_fn::<_, { VSM_CLIP_LEVELS as usize }, _>(|level| {
+                current_keys[level].scroll_from(previous_keys[level])
+            });
+            if scrolls.iter().flatten().any(|delta| *delta != [0, 0]) {
+                // Dynamic depth is frame-specific. Dirty its old address before
+                // the physical owner is moved to the new virtual coordinate.
+                self.cache.invalidate_pages(&self.dynamic_overlay_pages);
+            }
+            for level in 0..VSM_CLIP_LEVELS as usize {
+                match scrolls[level] {
+                    Some(delta) if delta != [0, 0] => {
+                        self.cache.scroll_level(0, level as u8, delta);
+                    }
+                    Some(_)
+                        if self
+                            .previous_level_vps
+                            .is_some_and(|vps| vps[level] != level_vps[level]) =>
+                    {
+                        // Same origin and stable matrix fields should produce
+                        // the exact same VP. Treat any discrepancy as unsafe.
+                        self.cache.invalidate_level(0, level as u8);
+                    }
+                    Some(_) => {}
+                    None => self.cache.invalidate_level(0, level as u8),
+                }
+                if self
+                    .previous_content_signatures
+                    .is_some_and(|signatures| signatures[level] != content_signatures[level])
+                {
+                    self.cache.invalidate_level(0, level as u8);
+                }
+            }
+        } else if let Some(previous) = self.previous_level_vps {
+            for level in 0..VSM_CLIP_LEVELS as usize {
+                if previous[level] != level_vps[level]
+                    || self
+                        .previous_content_signatures
+                        .is_some_and(|signatures| signatures[level] != content_signatures[level])
+                {
+                    self.cache.invalidate_level(0, level as u8);
+                }
+            }
+        } else {
+            self.cache.invalidate_light(0);
+        }
+        self.previous_level_vps = Some(level_vps);
+        self.previous_clipmap_keys = clipmap_keys;
+        self.previous_content_signatures = Some(content_signatures);
+
         let receiver_bounds_signature = receiver_bounds
             .filter(|bounds| !bounds.is_empty())
             .map(receiver_bounds_signature);
@@ -574,8 +686,8 @@ impl DirectionalVirtualShadowMap {
             self.cache.finish_requests();
             return;
         }
-        let demand_unchanged = self.previous_level_vps == Some(level_vps)
-            && self.previous_content_signatures == Some(content_signatures)
+        let demand_unchanged = level_vps_unchanged
+            && content_unchanged
             && self.previous_demand_signature == demand_signature;
         if demand_unchanged && self.cache.stats().dirty == 0 {
             self.cache.record_stable_requests(demand.len());
@@ -584,17 +696,6 @@ impl DirectionalVirtualShadowMap {
             }
             return;
         }
-        if let Some(previous) = self.previous_level_vps {
-            for level in 0..VSM_CLIP_LEVELS as usize {
-                if previous[level] != level_vps[level] {
-                    self.cache.invalidate_level(0, level as u8);
-                }
-            }
-        } else {
-            self.cache.invalidate_light(0);
-        }
-        self.previous_level_vps = Some(level_vps);
-        self.previous_content_signatures = Some(content_signatures);
         self.previous_demand_signature = demand_signature;
 
         for &page in &self.dynamic_overlay_pages {
@@ -757,6 +858,7 @@ impl DirectionalVirtualShadowMap {
     pub fn invalidate(&mut self) {
         self.cache.invalidate_all();
         self.previous_level_vps = None;
+        self.previous_clipmap_keys = None;
         self.previous_content_signatures = None;
         self.previous_demand_signature = 0;
         self.dynamic_global_fallback = false;
@@ -790,98 +892,7 @@ impl DirectionalVirtualShadowMap {
     }
 
     pub fn report_json(&self) -> String {
-        let stats = self.cache.stats();
-        let levels = self.cache.level_counts(0);
-        let page_table_bytes = VSM_VIRTUAL_PAGES_PER_AXIS as u64
-            * VSM_VIRTUAL_PAGES_PER_AXIS as u64
-            * VSM_CLIP_LEVELS as u64
-            * std::mem::size_of::<u32>() as u64;
-        let render_staging_bytes = crate::shadows::SHADOW_UNIFORM_STRIDE as u64
-            * crate::shadows::SHADOW_MAX_NODES as u64
-            * self.render_budget as u64;
-        let gpu_overhead_bytes =
-            page_table_bytes + render_staging_bytes + VSM_SAMPLING_PARAMS_BYTES;
-        let (physical_capacity, physical_bytes, gpu_overhead_bytes, render_budget) =
-            if self.requested {
-                (
-                    stats.capacity,
-                    self.cache.memory_bytes(),
-                    gpu_overhead_bytes,
-                    self.render_budget,
-                )
-            } else {
-                (0, 0, 0, 0)
-            };
-        format!(
-            concat!(
-                "{{\"requested\":{},\"active\":{},",
-                "\"projection\":\"camera-centered-page-snapped-clipmap\",",
-                "\"fallback\":\"csm\",\"dynamic_fallback\":{},",
-                "\"dynamic_fallback_mode\":\"{}\",\"dynamic_fallback_pages\":{},",
-                "\"dynamic_overlay_pages\":{},\"dynamic_overlay_rendered_pages\":{},",
-                "\"dynamic_overlay_draws\":{},\"dynamic_overlay_deferred_pages\":{},",
-                "\"dynamic_overlay_page_budget\":{},\"dynamic_overlay_draw_budget\":{},",
-                "\"physical_capacity\":{},\"physical_bytes\":{},",
-                "\"gpu_overhead_bytes\":{},\"gpu_total_bytes\":{},",
-                "\"resident\":{},\"dirty\":{},\"requested_pages\":{},",
-                "\"cache_hits\":{},\"cache_misses\":{},\"evictions\":{},",
-                "\"denied\":{},\"invalidated\":{},\"rendered\":{},",
-                "\"pending_render\":{},\"render_budget\":{},",
-                "\"demand_source\":\"{}\",\"demand_count\":{},",
-                "\"levels\":[",
-                "{{\"level\":0,\"resident\":{},\"dirty\":{}}},",
-                "{{\"level\":1,\"resident\":{},\"dirty\":{}}},",
-                "{{\"level\":2,\"resident\":{},\"dirty\":{}}}]}}"
-            ),
-            self.requested,
-            self.sampling_active,
-            self.dynamic_global_fallback || self.dynamic_overlay_deferred_pages > 0,
-            if self.dynamic_global_fallback {
-                "whole-frame-csm"
-            } else if self.dynamic_overlay_pages.is_empty() {
-                "none"
-            } else if self.dynamic_overlay_deferred_pages > 0 {
-                "bounded-page-overlay-with-csm"
-            } else {
-                "page-overlay"
-            },
-            self.dynamic_overlay_deferred_pages,
-            self.dynamic_overlay_pages.len(),
-            self.dynamic_overlay_rendered_pages,
-            self.dynamic_overlay_draws,
-            self.dynamic_overlay_deferred_pages,
-            VSM_DYNAMIC_OVERLAY_PAGE_BUDGET,
-            VSM_DYNAMIC_OVERLAY_DRAW_BUDGET,
-            physical_capacity,
-            physical_bytes,
-            gpu_overhead_bytes,
-            physical_bytes + gpu_overhead_bytes,
-            stats.resident,
-            stats.dirty,
-            stats.requested,
-            stats.hits,
-            stats.misses,
-            stats.evictions,
-            stats.denied,
-            stats.invalidated,
-            stats.rendered,
-            self.pending.len(),
-            render_budget,
-            if !self.requested {
-                "disabled"
-            } else if self.receiver_demand_active {
-                "receiver-bounds"
-            } else {
-                "bounded-center-fallback"
-            },
-            self.last_demand_count,
-            levels[0].0,
-            levels[0].1,
-            levels[1].0,
-            levels[1].1,
-            levels[2].0,
-            levels[2].1,
-        )
+        report::json(self)
     }
 }
 
@@ -1576,6 +1587,36 @@ mod tests {
         let request = cache.request(page(2), 1).unwrap();
         assert_eq!(request.evicted, Some(page(0)));
         assert_eq!(request.physical_page, 0);
+    }
+
+    #[test]
+    fn clipmap_scroll_preserves_overlap_and_drops_only_the_boundary() {
+        let mut cache = VirtualShadowPageCache::new(3);
+        cache.begin_frame(1);
+        for x in [0, 1, VSM_VIRTUAL_PAGES_PER_AXIS - 1] {
+            let page = page(x);
+            cache.request(page, 7).unwrap();
+            cache.mark_rendered(page, 7);
+        }
+        cache.finish_requests();
+
+        cache.begin_frame(2);
+        cache.scroll_level(0, 0, [-1, 0]);
+        let table = cache.page_table(0);
+        assert_ne!(table[page(0).table_index()], VSM_PAGE_TABLE_MISSING);
+        assert_ne!(
+            table[page(VSM_VIRTUAL_PAGES_PER_AXIS - 2).table_index()],
+            VSM_PAGE_TABLE_MISSING,
+        );
+        assert_eq!(
+            table[page(VSM_VIRTUAL_PAGES_PER_AXIS - 1).table_index()],
+            VSM_PAGE_TABLE_MISSING,
+        );
+        assert_eq!(cache.stats().resident, 2);
+        assert_eq!(cache.stats().dirty, 0);
+        assert_eq!(cache.stats().clipmap_level_rebases, 1);
+        assert_eq!(cache.stats().clipmap_pages_preserved, 2);
+        assert_eq!(cache.stats().clipmap_pages_dropped, 1);
     }
 
     #[test]

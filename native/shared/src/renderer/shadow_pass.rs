@@ -116,16 +116,19 @@ impl Renderer {
             // default CSM path keeps an empty Option, so it performs neither
             // heap allocation nor receiver transforms/frustum tests.
             let vsm_requested = self.shadow_map.virtual_map.requested();
-            let vsm_level_vps = if vsm_requested {
-                crate::virtual_shadows::directional_clipmap_vps(
+            let vsm_projection = if vsm_requested {
+                Some(crate::virtual_shadows::directional_clipmap_projection(
                     light_dir,
                     self.current_camera_pos,
                     self.shadow_map.cascade_splits,
                     scene_bounds,
-                )
+                ))
             } else {
-                self.shadow_map.light_vps
+                None
             };
+            let vsm_level_vps = vsm_projection
+                .map(|projection| projection.level_vps)
+                .unwrap_or(self.shadow_map.light_vps);
             let camera_planes = vsm_requested.then(|| {
                 crate::scene::extract_frustum_planes(&mat4_multiply(
                     self.current_proj_matrix_unjittered,
@@ -702,6 +705,7 @@ impl Renderer {
             self.shadow_map.virtual_map.prepare(
                 &self.queue,
                 vsm_level_vps,
+                vsm_projection.map(|projection| projection.cache_keys),
                 cascade_sigs,
                 vsm_receiver_bounds.as_deref(),
                 &dynamic_bounds,
