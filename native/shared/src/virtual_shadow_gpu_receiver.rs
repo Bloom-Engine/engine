@@ -76,7 +76,7 @@ impl GpuReceiverDemand {
         let max_bounds_bytes =
             GPU_RECEIVER_MAX_BOUNDS as u64 * std::mem::size_of::<ReceiverBounds>() as u64;
         let enabled = cfg!(not(target_arch = "wasm32"))
-            && gpu_receiver_requested()
+            && (cfg!(test) || gpu_receiver_requested())
             && limits.max_storage_buffers_per_shader_stage >= 2
             && limits.max_storage_buffer_binding_size >= max_bounds_bytes
             && limits.max_uniform_buffer_binding_size
@@ -421,14 +421,12 @@ impl GpuReceiverDemand {
 }
 
 fn gpu_receiver_requested() -> bool {
-    std::env::var("BLOOM_VSM_GPU_RECEIVER")
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "off" | "false" | "disabled"
-            )
-        })
-        .unwrap_or(true)
+    std::env::var("BLOOM_VSM_GPU_RECEIVER").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "on" | "true" | "enabled"
+        )
+    })
 }
 
 fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
