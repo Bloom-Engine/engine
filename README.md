@@ -156,11 +156,10 @@ Install Node.js, Python 3.11 or newer, the stable Rust toolchain with
 `rustfmt`, `clippy`, and the `wasm32-unknown-unknown` target. The full and web
 lanes also require
 [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Chrome or
-Chromium for the real-browser WebGPU smoke. On headless Linux, install Xvfb so
-Chrome can present its WebGPU canvas through a virtual display. Native builds
-need the platform dependencies listed in `.github/workflows/test.yml` (CMake
-and a C++ compiler everywhere, X11/audio development packages on Linux, and
-the MSVC developer environment on Windows).
+Chromium for the real-browser WebGPU smoke. Native builds need the platform
+dependencies listed in `.github/workflows/test.yml` (CMake and a C++ compiler
+everywhere, X11/audio development packages on Linux, and the MSVC developer
+environment on Windows).
 
 Run the platform-independent PR gates while iterating:
 

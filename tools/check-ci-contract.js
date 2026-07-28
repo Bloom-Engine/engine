@@ -50,7 +50,9 @@ const workflowCommands = [
   "./scripts/ci-check.sh --quick --component contracts",
   "./scripts/ci-check.sh --quick --component lint",
   "./scripts/ci-check.sh --full --component host-build",
-  "./scripts/ci-check.sh --web",
+  "./scripts/ci-check.sh --web --component wasm-check",
+  "./scripts/ci-check.sh --web --component wasm-build",
+  "./scripts/ci-check.sh --web --component browser-smoke",
   "./scripts/ci-check.sh --quick --component quality-contract",
   "./scripts/ci-check.sh --hardware --component example-compile",
   "./scripts/ci-check.sh --hardware --component quality-check",
@@ -88,7 +90,7 @@ for (const evidencePath of [
     failures += 1;
   }
 }
-if ((testWorkflow.match(/uses: \.\/\.github\/actions\/upload-ci-failure/g) || []).length !== 7) {
+if ((testWorkflow.match(/uses: \.\/\.github\/actions\/upload-ci-failure/g) || []).length !== 8) {
   console.error("FAIL  every Tests job must upload failure evidence");
   failures += 1;
 }

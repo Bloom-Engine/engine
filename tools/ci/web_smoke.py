@@ -354,20 +354,7 @@ def main() -> int:
     screenshot.unlink(missing_ok=True)
     profile = tempfile.mkdtemp(prefix="bloom-web-smoke-")
     debug_port = free_local_port()
-    xvfb = shutil.which("xvfb-run") if sys.platform.startswith("linux") else None
-    if xvfb is not None:
-        # A virtual X11 display gives Chrome's Linux compositor the shared
-        # image backing needed to present a WebGPU canvas. Chrome's headless
-        # compositor can expose SwiftShader while still rejecting swap-chain
-        # image allocation on GPU-less hosts.
-        command = [
-            xvfb,
-            "-a",
-            "--server-args=-screen 0 640x480x24",
-            browser,
-        ]
-    else:
-        command = [browser, "--headless=new"]
+    command = [browser, "--headless=new"]
     command.extend(
         [
             "--no-sandbox",
@@ -511,7 +498,6 @@ def main() -> int:
         "status": "fail" if failures else "pass",
         "duration_ms": round((time.perf_counter() - started) * 1000, 3),
         "browser": browser,
-        "virtual_display": xvfb is not None,
         "command": command,
         "url": url,
         "dom_marker": marker,
