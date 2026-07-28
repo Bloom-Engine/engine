@@ -25,6 +25,8 @@ use std::time::Instant;
 
 #[path = "golden_render/lighting_upload.rs"]
 mod lighting_upload;
+#[path = "golden_render/motion_producer_audit.rs"]
+mod motion_producer_audit;
 #[path = "golden_render/temporal_history.rs"]
 mod temporal_history;
 #[path = "golden_render/transparency.rs"]

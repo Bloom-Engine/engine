@@ -26,7 +26,7 @@ fn average_rgba(frames: &[Vec<u8>]) -> Vec<u8> {
         .collect()
 }
 
-fn evaluate_motion_recovery(label: &str, old_pose: &[u8], frames: &[Vec<u8>]) {
+pub(super) fn evaluate_motion_recovery(label: &str, old_pose: &[u8], frames: &[Vec<u8>]) {
     let stable = average_rgba(&frames[8..]);
     let movement = calculate_diff_metrics(old_pose, &stable, W, H);
     let recovery = frames[..8]
@@ -75,7 +75,7 @@ fn evaluate_motion_recovery(label: &str, old_pose: &[u8], frames: &[Vec<u8>]) {
     );
 }
 
-fn configure_taa_motion_corpus(renderer: &mut Renderer) {
+pub(super) fn configure_taa_motion_corpus(renderer: &mut Renderer) {
     renderer.set_taa_enabled(true);
     renderer.set_render_scale(1.0);
     renderer.set_ssao_enabled(false);
