@@ -1,0 +1,76 @@
+{
+  "schema": "bloom-cooked-geometry-evidence-v1",
+  "issue": 131,
+  "qualified_revision": "59c8df794b7c119cca00c03bb299179f3331c486",
+  "format": {
+    "magic": "BLMGEO1\\0",
+    "version": 1,
+    "byte_order": "little-endian",
+    "header_bytes": 160,
+    "cluster_record_bytes": 128,
+    "page_record_bytes": 64,
+    "compatibility_record_bytes": 16,
+    "vertex_bytes": 72,
+    "default_max_vertices": 64,
+    "default_max_triangles": 124,
+    "default_page_budget_bytes": 65536,
+    "hash": "SHA-256",
+    "leaf_hierarchy_only": true
+  },
+  "deterministic_static_asset": {
+    "path": "examples/renderer-test/assets/DamagedHelmet.glb",
+    "source_sha256": "3de5114323cba08aaef85757a90ed9685f1597b5ea0e7d7913f9fa45eeacaae7",
+    "eligible_triangles": 15452,
+    "meshlets": 258,
+    "pages": 20,
+    "payload_bytes": 1230128,
+    "file_bytes": 1264592,
+    "maximum_page_bytes": 63216,
+    "page_budget_bytes": 65536,
+    "payload_sha256": "67b0352a54d3d669d76d688f94899bcb8a665c561587123ea85d5d6a2b1061b0",
+    "artifact_sha256": "df089b23324fe8a8e00842a80b44894fd27b276c9124b8ff81dd77f8cf7b2cd2",
+    "independent_cooks_byte_identical": true
+  },
+  "compatibility_asset": {
+    "path": "examples/test-gltf-watch/assets/Fox.glb",
+    "source_sha256": "310e02a618f906534aef8651359257bd6c6bfd99d3f140c56108677626acda12",
+    "meshlets": 0,
+    "pages": 0,
+    "payload_bytes": 0,
+    "file_bytes": 176,
+    "reason": "skinned",
+    "mesh_index": 0,
+    "primitive_index": 0,
+    "artifact_sha256": "5e4125b6ba31649f5ebbd694d79242e19fdb0c561073beee08f490c12be063e2"
+  },
+  "qualification": {
+    "release_tests_passed": 13,
+    "strict_clippy": "pass",
+    "format": "pass",
+    "file_size_ratchet": "pass",
+    "git_diff_check": "pass",
+    "ci_component": "quick/quality-contract",
+    "ci_component_status": "pass",
+    "ci_component_duration_seconds": 1
+  },
+  "shipping_runtime_delta": {
+    "passes": 0,
+    "draws": 0,
+    "buffers": 0,
+    "images": 0,
+    "allocations": 0,
+    "bindings": 0,
+    "shader_branches": 0,
+    "engine_dependencies": 0,
+    "pixels_changed": false
+  },
+  "remaining": [
+    "hierarchical LOD and geometric error",
+    "coarse always-resident fallback",
+    "runtime asset database integration",
+    "residency and streaming budgets",
+    "GPU traversal, Hi-Z culling, and indirect selection",
+    "runtime quality and performance qualification"
+  ],
+  "issue_acceptance_boxes_checked": 0
+}
