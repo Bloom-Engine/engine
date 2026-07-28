@@ -770,8 +770,6 @@ unsafe fn init_engine_for_hwnd(
         );
     }
 
-    // Ticket 007b: HW ray-query via DXR 1.1 / VK_KHR_ray_query.
-    let supported = adapter.features();
     // 2026-07-16: HW ray query is OPT-IN now, not granted-by-default.
     // Measured on the shooter (760M, PT off): merely granting the
     // feature flips SSGI/WSRC to the HW trace and registers every
@@ -791,84 +789,23 @@ unsafe fn init_engine_for_hwnd(
         || std::env::var("BLOOM_FORCE_SW_GI")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-    let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
     eprintln!("bloom: hw-gi opt-in: want_hw={want_hw} force_sw_gi={force_sw_gi}");
-    let mut required_features = wgpu::Features::empty();
-    // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
-    // can record GPU timings. Optional — profiler falls back to CPU-only
-    // when the adapter doesn't grant it.
-    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-        required_features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-    // Cooked BC7 textures (bloom-cook) upload compressed when the
-    // adapter has BC support; without it they CPU-decode at load.
-    if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-        required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-    }
-    if !force_sw_gi && supported.contains(rt_mask) {
-        required_features |= rt_mask;
-    }
-    // PT-2: texture binding array + non-uniform indexing for textured
-    // path-trace hit shading. Both or neither (the kernel indexes the
-    // array with a per-thread material id).
-    let pt_tex_mask = wgpu::Features::TEXTURE_BINDING_ARRAY
-        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
-    if supported.contains(pt_tex_mask) {
-        required_features |= pt_tex_mask;
-    }
-    bloom_shared::renderer::gpu_driven::request_features_if_supported(
-        supported,
-        &mut required_features,
+    let negotiated = pollster_block_on(
+        bloom_shared::renderer::device_negotiation::request_device_with_fallback(
+            &adapter,
+            bloom_shared::renderer::device_negotiation::DeviceRequestOptions {
+                allow_ray_query: !force_sw_gi,
+            },
+        ),
+    )
+    .unwrap_or_else(|error| panic!("Failed to create renderer device: {error}"));
+    eprintln!(
+        "bloom: renderer device negotiation = {}",
+        negotiated.report.report_json()
     );
-    let experimental_features = if required_features.intersects(rt_mask) {
-        unsafe { wgpu::ExperimentalFeatures::enabled() }
-    } else {
-        wgpu::ExperimentalFeatures::disabled()
-    };
-    let mut required_limits = wgpu::Limits::default();
-    // Phase 1c: the material ABI declares 5 bind groups (PerFrame,
-    // PerView, PerMaterial, PerDraw, SceneInputs). wgpu's default
-    // limit is 4. Metal / Vulkan / D3D12 support at least 7, so 5 is
-    // safely within every real backend's capabilities.
-    required_limits.max_bind_groups = 5;
-    // The refractive/translucent material profile binds up to 19
-    // sampled textures in the fragment stage (5 material maps + env/
-    // BRDF/3 shadow cascades/env-diffuse + planar reflection + 3 texture
-    // arrays + the group-4 scene_color/scene_depth/impulse/motion inputs).
-    // wgpu's default is 16. Raise to whatever the adapter actually
-    // supports — every real D3D12/Vulkan/Metal GPU exposes ≥128 — so
-    // opaque/transparent materials are unaffected and refractive ones link.
-    let adapter_limits = adapter.limits();
-    required_limits.max_sampled_textures_per_shader_stage =
-        adapter_limits.max_sampled_textures_per_shader_stage;
-    required_limits.max_samplers_per_shader_stage = adapter_limits.max_samplers_per_shader_stage;
-    // PT-2: binding arrays have their own element budget, default 0.
-    // Take whatever the adapter offers; the renderer checks the
-    // granted value against its fixed array size before compiling
-    // the textured kernel variant.
-    if required_features.contains(pt_tex_mask) {
-        required_limits.max_binding_array_elements_per_shader_stage =
-            adapter_limits.max_binding_array_elements_per_shader_stage;
-        required_limits.max_binding_array_sampler_elements_per_shader_stage =
-            adapter_limits.max_binding_array_sampler_elements_per_shader_stage;
-    }
-    // PT-4: the path-trace kernel binds 9 storage buffers (accum +
-    // moments + reservoir ping-pongs on top of instance/geo data);
-    // the wgpu default limit is 8.
-    required_limits.max_storage_buffers_per_shader_stage = required_limits
-        .max_storage_buffers_per_shader_stage
-        .max(adapter_limits.max_storage_buffers_per_shader_stage.min(16));
-    if required_features.intersects(rt_mask) {
-        required_limits = required_limits.using_minimum_supported_acceleration_structure_values();
-    }
-    let (device, queue) = pollster_block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("bloom_device"),
-        required_features,
-        required_limits,
-        experimental_features,
-        ..Default::default()
-    }))
-    .expect("Failed to create device");
+    let negotiation_report = negotiated.report.report_json();
+    let device = negotiated.device;
+    let queue = negotiated.queue;
 
     let surface_caps = surface.get_capabilities(&adapter);
     let format = surface_caps.formats[0];
@@ -895,7 +832,8 @@ unsafe fn init_engine_for_hwnd(
     // itself, so the construction-time targets already honour
     // render_scale — no explicit resize needed here (it used to live
     // here, which left every non-Windows host with the bug).
-    let renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
+    let mut renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
+    renderer.set_device_negotiation_report(negotiation_report);
     let _ = ENGINE.set(EngineState::new(renderer));
 }
 
