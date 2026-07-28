@@ -44,6 +44,12 @@ jobs:
       - name: quick / quality-contract
         run: ./scripts/ci-check.sh --quick --component quality-contract
 
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: quality-contract
+
   metal:
     name: Full quality — Apple M1 Max / Metal
     if: >-

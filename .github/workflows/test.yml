@@ -70,6 +70,12 @@ jobs:
       - name: quick / shared-tests
         run: ./scripts/ci-check.sh --quick --component shared-tests
 
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: shared-tests-${{ runner.os }}
+
   # ---------------------------------------------------------------------------
   # FFI parity: every function in package.json's perry.nativeLibrary manifest
   # must be exported with matching arity by every platform crate (hand-written
@@ -86,6 +92,12 @@ jobs:
         run: ./scripts/ci-check.sh --quick --component contracts
       - name: quick / example-inventory
         run: ./scripts/ci-check.sh --quick --component example-inventory
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: ffi-contracts
 
   # ---------------------------------------------------------------------------
   # Lint: rustfmt plus a strict clippy correctness/performance ratchet.
@@ -106,6 +118,12 @@ jobs:
 
       - name: quick / lint
         run: ./scripts/ci-check.sh --quick --component lint
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: lint
 
   # ---------------------------------------------------------------------------
   # Per-platform builds: each native crate is a separate Cargo workspace root
@@ -139,6 +157,12 @@ jobs:
       - name: full / host-build
         run: ./scripts/ci-check.sh --full --component host-build
 
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: build-macos
+
   build-linux:
     runs-on: ubuntu-22.04
     steps:
@@ -170,6 +194,12 @@ jobs:
       - name: full / host-build
         run: ./scripts/ci-check.sh --full --component host-build
 
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: build-linux
+
   build-windows:
     runs-on: windows-latest
     steps:
@@ -199,6 +229,12 @@ jobs:
 
       - name: full / host-build
         run: ./scripts/ci-check.sh --full --component host-build
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: build-windows
 
   # ---------------------------------------------------------------------------
   # Web / WASM. No submodule needed: bloom-shared's build.rs early-exits on
@@ -231,3 +267,9 @@ jobs:
 
       - name: web lane
         run: ./scripts/ci-check.sh --web
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: build-web

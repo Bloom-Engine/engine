@@ -43,6 +43,7 @@ for (const [lane, expected] of expectedLanes) {
 
 const testWorkflow = read(".github/workflows/test.yml");
 const qualityWorkflow = read(".github/workflows/quality.yml");
+const failureAction = read(".github/actions/upload-ci-failure/action.yml");
 const workflowCommands = [
   "./scripts/ci-check.sh --quick --component shared-tests",
   "./scripts/ci-check.sh --quick --component contracts",
@@ -74,6 +75,25 @@ for (const [name, workflow] of [
     console.error(`FAIL  ${name} contains an advisory required step`);
     failures += 1;
   }
+}
+
+for (const evidencePath of [
+  "target/ci",
+  "native/shared/tests/golden/**/*.actual.png",
+  "tools/quality/out",
+]) {
+  if (!failureAction.includes(evidencePath)) {
+    console.error(`FAIL  failure evidence action omits: ${evidencePath}`);
+    failures += 1;
+  }
+}
+if ((testWorkflow.match(/uses: \.\/\.github\/actions\/upload-ci-failure/g) || []).length !== 7) {
+  console.error("FAIL  every Tests job must upload failure evidence");
+  failures += 1;
+}
+if (!qualityWorkflow.includes("uses: ./.github/actions/upload-ci-failure")) {
+  console.error("FAIL  quality contract job must upload failure evidence");
+  failures += 1;
 }
 
 const duplicatedTestCommands = [
