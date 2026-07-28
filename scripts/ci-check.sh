@@ -5,6 +5,7 @@
 #   ./scripts/ci-check.sh --quick
 #   ./scripts/ci-check.sh --full
 #   ./scripts/ci-check.sh --web
+#   ./scripts/ci-check.sh --hardware
 #   ./scripts/ci-check.sh --quick --component lint
 #   ./scripts/ci-check.sh --list
 #
@@ -26,7 +27,7 @@ usage() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --quick|--full|--web)
+    --quick|--full|--web|--hardware)
       if [ -n "$LANE" ]; then
         echo "choose exactly one lane" >&2
         exit 2
@@ -75,9 +76,10 @@ done
 
 lane_components() {
   case "$1" in
-    quick) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract" ;;
-    full) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract host-build wasm-build" ;;
-    web) printf '%s\n' "wasm-check wasm-build" ;;
+    quick) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory" ;;
+    full) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory host-build wasm-build" ;;
+    web) printf '%s\n' "wasm-check wasm-build browser-smoke" ;;
+    hardware) printf '%s\n' "example-compile quality-check quality-faults quality-run" ;;
     *)
       echo "unknown lane: $1" >&2
       return 2
@@ -89,6 +91,7 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   printf 'quick\t%s\n' "$(lane_components quick)"
   printf 'full\t%s\n' "$(lane_components full)"
   printf 'web\t%s\n' "$(lane_components web)"
+  printf 'hardware\t%s\n' "$(lane_components hardware)"
   exit 0
 fi
 
@@ -246,6 +249,10 @@ run_component() {
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
       ;;
+    example-inventory)
+      hr "canonical TypeScript example inventory"
+      python3 tools/ci/compile_examples.py --check
+      ;;
     host-build)
       if [ -z "$host_crate" ]; then
         echo "unsupported host for native build: $host_os" >&2
@@ -261,6 +268,45 @@ run_component() {
       fi
       hr "bloom-web: wasm-pack build --release --target web"
       ( cd native/web && wasm-pack build --release --target web )
+      ;;
+    browser-smoke)
+      hr "Bloom WebGPU real-browser known-frame smoke"
+      python3 tools/ci/web_smoke.py
+      ;;
+    example-compile)
+      hr "compile every canonical TypeScript example"
+      python3 tools/ci/compile_examples.py
+      ;;
+    quality-check)
+      hr "validate quality manifest, assets, and approved baselines"
+      python3 tools/quality/run.py check
+      ;;
+    quality-faults)
+      hr "prove seeded quality regressions are detected"
+      python3 tools/quality/run.py faults \
+        --out "${BLOOM_QUALITY_FAULTS_OUT:-tools/quality/out/ci-faults}" \
+        --timeout "${BLOOM_QUALITY_TIMEOUT:-900}"
+      ;;
+    quality-run)
+      if [ -z "${BLOOM_QUALITY_MACHINE_CLASS:-}" ]; then
+        echo "BLOOM_QUALITY_MACHINE_CLASS is required for hardware quality runs" >&2
+        return 2
+      fi
+      quality_suite="${BLOOM_QUALITY_SUITE:-full}"
+      quality_out="${BLOOM_QUALITY_OUT:-tools/quality/out/ci-hardware}"
+      hr "run '$quality_suite' quality suite on $BLOOM_QUALITY_MACHINE_CLASS"
+      if [ -n "${BLOOM_QUALITY_CASE:-}" ]; then
+        python3 tools/quality/run.py run "$quality_suite" \
+          --case "$BLOOM_QUALITY_CASE" \
+          --machine-class "$BLOOM_QUALITY_MACHINE_CLASS" \
+          --out "$quality_out" \
+          --timeout "${BLOOM_QUALITY_TIMEOUT:-1800}"
+      else
+        python3 tools/quality/run.py run "$quality_suite" \
+          --machine-class "$BLOOM_QUALITY_MACHINE_CLASS" \
+          --out "$quality_out" \
+          --timeout "${BLOOM_QUALITY_TIMEOUT:-1800}"
+      fi
       ;;
     *)
       echo "unknown component: $CURRENT_COMPONENT" >&2

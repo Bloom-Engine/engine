@@ -84,6 +84,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: quick / contracts
         run: ./scripts/ci-check.sh --quick --component contracts
+      - name: quick / example-inventory
+        run: ./scripts/ci-check.sh --quick --component example-inventory
 
   # ---------------------------------------------------------------------------
   # Lint: rustfmt plus a strict clippy correctness/performance ratchet.

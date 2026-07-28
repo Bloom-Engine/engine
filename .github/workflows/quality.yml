@@ -65,34 +65,36 @@ jobs:
           cargo --version
           command -v perry
 
+      - name: Compile every canonical TypeScript example
+        run: ./scripts/ci-check.sh --hardware --component example-compile
+
       - name: Validate manifest, assets, and approved baselines
-        run: python3 tools/quality/run.py check
+        run: ./scripts/ci-check.sh --hardware --component quality-check
 
       - name: Prove seeded regressions are detected
-        run: >-
-          python3 tools/quality/run.py faults
-          --out tools/quality/out/ci-faults
-          --timeout 900
+        env:
+          BLOOM_QUALITY_FAULTS_OUT: tools/quality/out/ci-faults
+          BLOOM_QUALITY_TIMEOUT: "900"
+        run: ./scripts/ci-check.sh --hardware --component quality-faults
 
       - name: Run selected high-end suite
         if: always()
         env:
-          REQUESTED_SUITE: ${{ inputs.suite }}
-        run: |
-          suite="${REQUESTED_SUITE:-full}"
-          python3 tools/quality/run.py run "$suite" \
-            --machine-class apple-m1-max-metal \
-            --out tools/quality/out/ci-metal \
-            --timeout 1800
+          BLOOM_QUALITY_SUITE: ${{ inputs.suite || 'full' }}
+          BLOOM_QUALITY_MACHINE_CLASS: apple-m1-max-metal
+          BLOOM_QUALITY_OUT: tools/quality/out/ci-metal
+          BLOOM_QUALITY_TIMEOUT: "1800"
+        run: ./scripts/ci-check.sh --hardware --component quality-run
 
       - name: Hard-gate the constrained tier
         if: always()
-        run: |
-          python3 tools/quality/run.py run full \
-            --case pbr-spheres-constrained \
-            --machine-class apple-m1-metal-constrained \
-            --out tools/quality/out/ci-metal-constrained \
-            --timeout 1800
+        env:
+          BLOOM_QUALITY_SUITE: full
+          BLOOM_QUALITY_CASE: pbr-spheres-constrained
+          BLOOM_QUALITY_MACHINE_CLASS: apple-m1-metal-constrained
+          BLOOM_QUALITY_OUT: tools/quality/out/ci-metal-constrained
+          BLOOM_QUALITY_TIMEOUT: "1800"
+        run: ./scripts/ci-check.sh --hardware --component quality-run
 
       - name: Publish compact job summary
         if: always()
@@ -110,6 +112,7 @@ jobs:
         with:
           name: quality-apple-m1-max-metal-${{ github.run_attempt }}
           path: |
+            target/ci/examples
             tools/quality/out/ci-metal
             tools/quality/out/ci-metal-constrained
             tools/quality/out/ci-faults
@@ -139,24 +142,22 @@ jobs:
           nvidia-smi
 
       - name: Validate manifest, assets, and approved baselines
-        run: python3 tools/quality/run.py check
+        run: ./scripts/ci-check.sh --hardware --component quality-check
 
       - name: Prove seeded regressions are detected
-        run: >-
-          python3 tools/quality/run.py faults
-          --out tools/quality/out/ci-faults
-          --timeout 900
+        env:
+          BLOOM_QUALITY_FAULTS_OUT: tools/quality/out/ci-faults
+          BLOOM_QUALITY_TIMEOUT: "900"
+        run: ./scripts/ci-check.sh --hardware --component quality-faults
 
       - name: Run selected high-end suite
         if: always()
         env:
-          REQUESTED_SUITE: ${{ inputs.suite }}
-        run: |
-          suite="${REQUESTED_SUITE:-full}"
-          python3 tools/quality/run.py run "$suite" \
-            --machine-class nvidia-rtx4080-vulkan \
-            --out tools/quality/out/ci-vulkan \
-            --timeout 1800
+          BLOOM_QUALITY_SUITE: ${{ inputs.suite || 'full' }}
+          BLOOM_QUALITY_MACHINE_CLASS: nvidia-rtx4080-vulkan
+          BLOOM_QUALITY_OUT: tools/quality/out/ci-vulkan
+          BLOOM_QUALITY_TIMEOUT: "1800"
+        run: ./scripts/ci-check.sh --hardware --component quality-run
 
       - name: Publish compact job summary
         if: always()

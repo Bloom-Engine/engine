@@ -10,9 +10,10 @@ const read = (relative) =>
   fs.readFileSync(path.join(root, relative), "utf8").replace(/\r\n/g, "\n");
 
 const expectedLanes = new Map([
-  ["quick", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract"]],
-  ["full", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "host-build", "wasm-build"]],
-  ["web", ["wasm-check", "wasm-build"]],
+  ["quick", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "example-inventory"]],
+  ["full", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "example-inventory", "host-build", "wasm-build"]],
+  ["web", ["wasm-check", "wasm-build", "browser-smoke"]],
+  ["hardware", ["example-compile", "quality-check", "quality-faults", "quality-run"]],
 ]);
 
 const listing = spawnSync("bash", ["scripts/ci-check.sh", "--list"], {
@@ -49,10 +50,16 @@ const workflowCommands = [
   "./scripts/ci-check.sh --full --component host-build",
   "./scripts/ci-check.sh --web",
   "./scripts/ci-check.sh --quick --component quality-contract",
+  "./scripts/ci-check.sh --hardware --component example-compile",
+  "./scripts/ci-check.sh --hardware --component quality-check",
+  "./scripts/ci-check.sh --hardware --component quality-faults",
+  "./scripts/ci-check.sh --hardware --component quality-run",
 ];
 
 for (const command of workflowCommands) {
-  const workflow = command.includes("quality-contract") ? qualityWorkflow : testWorkflow;
+  const workflow = command.includes("quality-") || command.includes("example-compile")
+    ? qualityWorkflow
+    : testWorkflow;
   if (!workflow.includes(command)) {
     console.error(`FAIL  workflow does not delegate through: ${command}`);
     failures += 1;
