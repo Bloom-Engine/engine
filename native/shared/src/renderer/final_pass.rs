@@ -133,32 +133,36 @@ impl Renderer {
             } else {
                 self.composite_ldr_rt_a_view.as_ref().unwrap_or(output_view)
             };
+            let input_slot = index % 2;
+            if self.post_passes[index].bind_group_cache[input_slot].is_none() {
+                self.frame_resource_stats.created_bind_group(
+                    super::frame_resource_stats::BindGroupCreationSite::CustomPostPass,
+                );
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("post_pass_bg"),
+                    layout: &self.post_passes[index].bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(input_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&self.post_pass_depth_sampler),
+                        },
+                    ],
+                });
+                self.post_passes[index].bind_group_cache[input_slot] = Some(bind_group);
+            }
             let post_pass = &self.post_passes[index];
-            self.frame_resource_stats.created_bind_group(
-                super::frame_resource_stats::BindGroupCreationSite::CustomPostPass,
-            );
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("post_pass_bg"),
-                layout: &post_pass.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(input_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&self.depth_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.post_pass_depth_sampler),
-                    },
-                ],
-            });
             let timestamp_writes = profiler.pass_timestamp_writes("post_pass");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom_post_pass"),
@@ -177,7 +181,13 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&post_pass.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(
+                0,
+                post_pass.bind_group_cache[input_slot]
+                    .as_ref()
+                    .expect("custom post-pass bind group was initialized"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
         }
         profiler.end("post_fx");

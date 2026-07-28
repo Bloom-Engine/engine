@@ -761,6 +761,8 @@ def steady_state_renderer_failures(renderer_paths: Mapping[str, Any]) -> list[st
         failures.append("steady-state bind-group site counts must be non-negative integers")
     elif isinstance(total, int) and not isinstance(total, bool) and sum(counts) != total:
         failures.append("steady-state bind-group total does not match named sites")
+    elif total != 0:
+        failures.append("steady-state bind-group creation remained after warm-up")
     return failures
 
 

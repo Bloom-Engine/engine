@@ -178,6 +178,15 @@ upstream color target selected by the post-FX chain (including both TAA
 history slots). Resize clears every array before replacing those views. A
 forced full-chain GPU test renders geometry and hard-gates all four named
 creation counters to zero after warmup.
+Auto exposure uses sixteen lazy entries for the same eight composite-source
+identities crossed with both previous-exposure slots. The forced full-chain
+test enables exposure adaptation and also hard-gates `auto_exposure: 0` after
+both ping-pong bindings are warm.
+Each user post-pass owns two lazy bindings for the LDR A/B input parity and
+drops them before resize replaces color/depth views. A two-pass copy stack
+proves geometry preservation and `custom_post_pass: 0` both before and after a
+resize cycle. With every named core site covered, official post-warmup quality
+artifacts now fail the contract unless total bind-group creation is zero.
 
 `examples/quality-transparency/main.ts` accepts `--sorted-interleaving` as an
 unversioned focused ordering oracle. It forces conventional sorted composition

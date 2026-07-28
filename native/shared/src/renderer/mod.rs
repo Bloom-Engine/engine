@@ -526,8 +526,6 @@ pub struct Renderer {
     pub scene_compose_pipeline: wgpu::RenderPipeline,
     pub scene_compose_layout: wgpu::BindGroupLayout,
     pub scene_compose_uniform_buffer: wgpu::Buffer,
-    /// One scene-compose bind group for the cleared SSR fallback and both
-    /// temporal-history views. All other entries are stable until resize.
     scene_compose_bind_group_cache:
         [Option<wgpu::BindGroup>; postfx_chain::SsrCompositeSource::COUNT],
     /// Composite-tonemap pipeline + bind group layout. Single full-
@@ -538,9 +536,6 @@ pub struct Renderer {
     pub composite_pipeline: wgpu::RenderPipeline,
     pub composite_layout: wgpu::BindGroupLayout,
     pub composite_sampler: wgpu::Sampler,
-    /// One final-composite bind group for every exact HDR source and
-    /// exposure-history slot. All referenced views are persistent until
-    /// resize, which invalidates every slot before replacing those views.
     composite_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::CompositeSource::COUNT * 2],
     /// 0 = ACES (default, matches bloom-reference), 1 = AgX.
     pub tonemap_kind: u32,
@@ -581,6 +576,7 @@ pub struct Renderer {
     pub exposure_pipeline: wgpu::RenderPipeline,
     pub exposure_layout: wgpu::BindGroupLayout,
     pub exposure_uniform_buffer: wgpu::Buffer,
+    exposure_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::CompositeSource::COUNT * 2],
     /// Bloom mip-chain texture. Single texture with BLOOM_MIP_COUNT
     /// mips starting at surface/2 size — each mip is half the
     /// previous. Downsample chain (with HDR threshold on first tap)
@@ -703,7 +699,6 @@ pub struct Renderer {
     pub taa_pipeline: wgpu::RenderPipeline,
     pub taa_layout: wgpu::BindGroupLayout,
     pub taa_uniform_buffer: wgpu::Buffer,
-    /// Ordinary TAA binding for each alternating previous-history input.
     taa_bind_group_cache: [Option<wgpu::BindGroup>; 2],
     #[cfg(not(target_arch = "wasm32"))]
     temporal_diagnostics: Option<temporal_diagnostics::TaaDiagnosticResources>,
@@ -711,8 +706,6 @@ pub struct Renderer {
     /// Opaque and TAA-disabled frames never compile or bind it.
     taa_reactive_pipeline: Option<wgpu::RenderPipeline>,
     taa_reactive_layout: Option<wgpu::BindGroupLayout>,
-    /// Reactive TAA history bindings, additionally keyed by compiled plan ID
-    /// and transient-pool rebuild epoch for the coverage texture view.
     taa_reactive_bind_group_cache: [Option<wgpu::BindGroup>; 2],
     taa_reactive_bind_group_cache_keys: [Option<(u64, u64)>; 2],
     /// Frame counter used to pick a different Halton offset every
@@ -838,7 +831,6 @@ pub struct Renderer {
     pub ssr_temporal_pipeline: wgpu::RenderPipeline,
     pub ssr_temporal_layout: wgpu::BindGroupLayout,
     pub ssr_temporal_uniform_buffer: wgpu::Buffer,
-    /// Two exact bindings for the alternating previous-history input.
     ssr_temporal_bind_group_cache: [Option<wgpu::BindGroup>; 2],
     #[cfg(not(target_arch = "wasm32"))]
     ssr_temporal_diagnostics: Option<ssr_temporal_diagnostics::SsrTemporalDiagnosticResources>,
@@ -7636,6 +7628,7 @@ impl Renderer {
             exposure_pipeline,
             exposure_layout,
             exposure_uniform_buffer,
+            exposure_bind_group_cache: std::array::from_fn(|_| None),
             composite_uniform_buffer,
             bloom_chain_textures,
             bloom_mip_views,
@@ -8328,6 +8321,7 @@ impl Renderer {
             // Drop every cache that owns a render-target view before replacing
             // those views. Source/history indices select distinct cache slots.
             self.composite_bind_group_cache = std::array::from_fn(|_| None);
+            self.exposure_bind_group_cache = std::array::from_fn(|_| None);
             self.scene_compose_bind_group_cache = std::array::from_fn(|_| None);
             self.ssr_temporal_bind_group_cache = [None, None];
             self.taa_bind_group_cache = [None, None];
@@ -8338,6 +8332,9 @@ impl Renderer {
             self.motion_blur_bind_group_cache = std::array::from_fn(|_| None);
             self.sss_bind_group_cache = std::array::from_fn(|_| None);
             self.cas_bind_group_cache = std::array::from_fn(|_| None);
+            for post_pass in self.post_passes.iter_mut() {
+                post_pass.bind_group_cache = [None, None];
+            }
 
             let (dt, dv) = create_depth_texture(&self.device, rw, rh);
             self.depth_texture = dt;

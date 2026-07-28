@@ -153,6 +153,7 @@ fn steady_optional_postfx_chain_reuses_every_source_specific_bind_group() {
     r.set_sss_enabled(true);
     r.set_sss_strength(0.4);
     r.set_cas_strength(0.35);
+    r.set_auto_exposure(true);
 
     let (_, _, rgba) = render(&mut eng, 5, |eng| {
         let r = &mut eng.renderer;
@@ -173,6 +174,7 @@ fn steady_optional_postfx_chain_reuses_every_source_specific_bind_group() {
         "motion_blur",
         "subsurface_scattering",
         "contrast_adaptive_sharpen",
+        "auto_exposure",
     ] {
         assert_eq!(
             sites[site].as_u64(),
@@ -180,4 +182,57 @@ fn steady_optional_postfx_chain_reuses_every_source_specific_bind_group() {
             "warmed optional post-FX site {site} must reuse its source-specific bind group"
         );
     }
+}
+
+#[test]
+fn steady_custom_post_pass_stack_reuses_parity_specific_bind_groups() {
+    const COPY_PASS: &str = r#"
+@fragment
+fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    return textureSample(scene_color_tex, scene_color_samp, uv);
+}
+"#;
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    eng.renderer
+        .add_post_pass(COPY_PASS)
+        .expect("first copy post pass compiles");
+    eng.renderer
+        .add_post_pass(COPY_PASS)
+        .expect("second copy post pass compiles");
+    let draw = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(8.0, 12.0, 20.0, 255.0);
+        r.begin_mode_3d(3.0, 2.5, 5.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.draw_cube(0.0, 0.75, 0.0, 1.5, 1.5, 1.5, 220.0, 90.0, 35.0, 255.0);
+    };
+    let (_, _, rgba) = render(&mut eng, 4, draw);
+    assert!(
+        rgba.chunks_exact(4)
+            .any(|pixel| pixel[0] != 8 || pixel[1] != 12 || pixel[2] != 20),
+        "custom post-pass stack did not preserve scene geometry"
+    );
+    let paths: serde_json::Value = serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+        .expect("custom post-pass telemetry is valid JSON");
+    assert_eq!(
+        paths["steady_state_resources"]["bind_group_creations"]["sites"]["custom_post_pass"]
+            .as_u64(),
+        Some(0),
+        "warmed custom post-pass stack must reuse parity-specific bind groups"
+    );
+
+    eng.renderer.resize(320, 192, 320, 192);
+    let _ = render(&mut eng, 3, draw);
+    let resized_paths: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+            .expect("resized custom post-pass telemetry is valid JSON");
+    assert_eq!(
+        resized_paths["steady_state_resources"]["bind_group_creations"]["sites"]
+            ["custom_post_pass"]
+            .as_u64(),
+        Some(0),
+        "post-pass bindings must rebuild after resize then return to zero churn"
+    );
 }

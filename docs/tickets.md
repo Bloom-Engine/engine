@@ -1969,6 +1969,15 @@ budget for at 4K.
   Resize invalidates all source arrays before replacing views. A forced
   full-chain GPU test renders geometry and hard-gates all four counters to
   zero after warmup.
+- **Auto exposure fixed in #139:** its cache covers all eight composite sources
+  crossed with both previous-exposure slots. The same full-chain test enables
+  adaptation, exercises the ping-pong, and hard-gates `auto_exposure: 0`.
+- **Custom post-pass stack fixed in #139:** each pass lazily caches both A/B
+  input parities and invalidates them before resize replaces LDR/depth views. A
+  two-pass GPU copy stack preserves geometry and reaches zero churn before and
+  after resize.
+- **Bind-group acceptance is now hard-gated:** official post-warmup quality
+  telemetry fails unless the sum across all twelve named core sites is zero.
 
 Remaining: eliminate the measured bind-group hotspots only with complete
 resource-generation keys, then instrument and eliminate the other steady-state

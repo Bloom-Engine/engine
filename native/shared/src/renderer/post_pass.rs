@@ -21,6 +21,10 @@ use wgpu;
 pub struct PostPassPipeline {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
+    /// Both possible LDR ping-pong inputs. A pass normally uses only its
+    /// index parity, but retaining both identities keeps the cache complete
+    /// if stack editing grows beyond append/clear.
+    pub bind_group_cache: [Option<wgpu::BindGroup>; 2],
 }
 
 #[derive(Debug)]
@@ -176,6 +180,7 @@ pub fn compile_post_pass(
     Ok(PostPassPipeline {
         pipeline,
         bind_group_layout,
+        bind_group_cache: [None, None],
     })
 }
 

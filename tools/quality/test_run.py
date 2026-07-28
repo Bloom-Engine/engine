@@ -314,8 +314,6 @@ class ReproducibilityTests(unittest.TestCase):
 
     def test_steady_state_renderer_contract_accepts_named_bounded_counts(self) -> None:
         sites = {key: 0 for key in quality.STEADY_STATE_BIND_GROUP_SITES}
-        sites["scene_compose"] = 1
-        sites["final_composite"] = 1
         renderer_paths = {
             "steady_state_uploads": {
                 "lighting": {
@@ -325,15 +323,16 @@ class ReproducibilityTests(unittest.TestCase):
                 }
             },
             "steady_state_resources": {
-                "bind_group_creations": {"total": 2, "sites": sites}
+                "bind_group_creations": {"total": 0, "sites": sites}
             },
         }
         self.assertEqual(quality.steady_state_renderer_failures(renderer_paths), [])
 
-        renderer_paths["steady_state_resources"]["bind_group_creations"]["total"] = 3
+        sites["final_composite"] = 1
+        renderer_paths["steady_state_resources"]["bind_group_creations"]["total"] = 1
         failures = quality.steady_state_renderer_failures(renderer_paths)
         self.assertIn(
-            "steady-state bind-group total does not match named sites", failures
+            "steady-state bind-group creation remained after warm-up", failures
         )
 
     def test_telemetry_contract_rejects_vsync_and_wrong_frame_count(self) -> None:
