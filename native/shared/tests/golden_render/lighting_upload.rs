@@ -1,5 +1,156 @@
 use super::*;
 
+#[derive(Debug, Eq, PartialEq)]
+struct LiveGpuObjects {
+    buffers: isize,
+    textures: isize,
+    texture_views: isize,
+    bind_groups: isize,
+    bind_group_layouts: isize,
+    render_pipelines: isize,
+    compute_pipelines: isize,
+    pipeline_layouts: isize,
+    samplers: isize,
+    command_encoders: isize,
+    shader_modules: isize,
+    query_sets: isize,
+    fences: isize,
+    buffer_memory: isize,
+    texture_memory: isize,
+    acceleration_structure_memory: isize,
+    memory_allocations: isize,
+}
+
+fn live_gpu_objects(device: &wgpu::Device) -> LiveGpuObjects {
+    let counters = device.get_internal_counters();
+    let hal = counters.hal;
+    LiveGpuObjects {
+        buffers: hal.buffers.read(),
+        textures: hal.textures.read(),
+        texture_views: hal.texture_views.read(),
+        bind_groups: hal.bind_groups.read(),
+        bind_group_layouts: hal.bind_group_layouts.read(),
+        render_pipelines: hal.render_pipelines.read(),
+        compute_pipelines: hal.compute_pipelines.read(),
+        pipeline_layouts: hal.pipeline_layouts.read(),
+        samplers: hal.samplers.read(),
+        command_encoders: hal.command_encoders.read(),
+        shader_modules: hal.shader_modules.read(),
+        query_sets: hal.query_sets.read(),
+        fences: hal.fences.read(),
+        buffer_memory: hal.buffer_memory.read(),
+        texture_memory: hal.texture_memory.read(),
+        acceleration_structure_memory: hal.acceleration_structure_memory.read(),
+        memory_allocations: hal.memory_allocations.read(),
+    }
+}
+
+fn wait_for_gpu(device: &wgpu::Device) {
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+}
+
+#[test]
+fn static_ultra_scene_has_stable_renderer_owned_memory_for_1000_frames() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    eng.renderer.apply_quality_preset(4);
+
+    let draw = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(2.0, 2.0, 4.0, 255.0);
+        r.begin_mode_3d(
+            0.0, 8.0, 7.0, // eye
+            0.0, 0.0, 0.0, // target
+            0.0, 1.0, 0.0, 55.0, 0.0,
+        );
+        r.draw_plane(0.0, 0.0, 0.0, 14.0, 14.0, 110.0, 110.0, 110.0, 255.0);
+        r.draw_cube(0.0, 0.8, 0.0, 1.6, 1.6, 1.6, 210.0, 105.0, 35.0, 255.0);
+        for i in 0..40u32 {
+            let t = i as f32 / 40.0 * std::f32::consts::TAU;
+            r.add_point_light(
+                t.cos() * 4.0,
+                1.2,
+                t.sin() * 4.0,
+                3.5,
+                0.5 + 0.5 * t.cos(),
+                0.5 + 0.5 * (t + 2.094).cos(),
+                0.5 + 0.5 * (t + 4.189).cos(),
+                1.6,
+            );
+        }
+    };
+    let run_frames = |eng: &mut EngineState, count: u32| {
+        for _ in 0..count {
+            eng.begin_frame();
+            draw(eng);
+            eng.end_frame();
+        }
+    };
+
+    // Settle temporal histories, rotating bind-group caches, queue-owned
+    // staging allocations, and the three-frame headless submission window.
+    run_frames(&mut eng, 16);
+    wait_for_gpu(&eng.renderer.device);
+    let before = live_gpu_objects(&eng.renderer.device);
+    assert!(
+        before.buffers > 0 && before.textures > 0,
+        "wgpu test counters are disabled; this would be a vacuous memory gate: {before:?}"
+    );
+    let paths_before: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+            .expect("pre-run runtime paths are valid JSON");
+    let cpu_capacity_before = eng.renderer.quality_frame_cpu_capacity_bytes();
+
+    run_frames(&mut eng, 1_000);
+    wait_for_gpu(&eng.renderer.device);
+    let after = live_gpu_objects(&eng.renderer.device);
+    let paths_after: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+            .expect("post-run runtime paths are valid JSON");
+    let cpu_capacity_after = eng.renderer.quality_frame_cpu_capacity_bytes();
+
+    assert_eq!(
+        after, before,
+        "renderer-owned live GPU objects or backend-reported bytes grew over 1,000 static frames"
+    );
+    assert_eq!(
+        cpu_capacity_after, cpu_capacity_before,
+        "renderer-owned growable frame-container capacity changed over 1,000 static frames"
+    );
+    assert_eq!(
+        paths_after["render_graph"]["cached_plan_count"],
+        paths_before["render_graph"]["cached_plan_count"],
+        "render-graph plan cache grew after warm-up"
+    );
+    assert_eq!(
+        paths_after["render_graph"]["physical_transient_slots"],
+        paths_before["render_graph"]["physical_transient_slots"],
+        "compiled transient pool grew after warm-up"
+    );
+    let steady = &paths_after["steady_state_resources"];
+    assert_eq!(steady["graph_compiles"].as_u64(), Some(0));
+    assert_eq!(steady["pipeline_creations"]["first_use"].as_u64(), Some(0));
+    assert_eq!(
+        steady["transient_physical_creations"]["textures"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        steady["transient_physical_creations"]["buffers"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(steady["bind_group_creations"]["total"].as_u64(), Some(0));
+    eprintln!(
+        "1,000-frame renderer memory stable: {before:?}; frame_cpu_capacity_bytes={cpu_capacity_before}; graph_plans={}; transient_slots={}",
+        paths_before["render_graph"]["cached_plan_count"],
+        paths_before["render_graph"]["physical_transient_slots"],
+    );
+}
+
 #[test]
 fn golden_many_point_lights() {
     let Some(mut eng) = try_engine() else {

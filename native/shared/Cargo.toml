@@ -70,3 +70,6 @@ web-sys = { version = "0.3", features = ["console"] }
 
 [dev-dependencies]
 pollster = "0.4"
+# Live GPU-object counters are enabled only while compiling tests. Production
+# builds keep wgpu's counter atomics disabled.
+wgpu = { version = "29", features = ["counters"] }

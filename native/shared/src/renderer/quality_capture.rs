@@ -641,6 +641,57 @@ impl Renderer {
         }
     }
 
+    /// Capacity owned by renderer containers whose contents are rebuilt or
+    /// extended while recording frames. This intentionally excludes immutable
+    /// startup resources and user-created registries: the qualification gate
+    /// compares it after warm-up to detect steady-state CPU growth.
+    pub fn quality_frame_cpu_capacity_bytes(&self) -> usize {
+        fn bytes<T>(values: &Vec<T>) -> usize {
+            values.capacity().saturating_mul(std::mem::size_of::<T>())
+        }
+
+        let mut total = 0usize;
+        for value in [
+            self.headless_in_flight
+                .capacity()
+                .saturating_mul(std::mem::size_of::<wgpu::SubmissionIndex>()),
+            bytes(&self.vertices_2d),
+            bytes(&self.indices_2d),
+            bytes(&self.draw_calls_2d),
+            bytes(&self.vertices_3d),
+            bytes(&self.indices_3d),
+            bytes(&self.draw_calls_3d),
+            bytes(&self.model_draw_commands),
+            bytes(&self.model_uniform_scratch),
+            bytes(&self.model_uniform_bind_groups),
+            bytes(&self.pending_skin_groups),
+            bytes(&self.frame_joint_data),
+            bytes(&self.pending_skin_groups_prev),
+            bytes(&self.frame_joint_data_prev),
+            bytes(&self.pt_dynamic_draws),
+            bytes(&self.pt_dyn_windows),
+            bytes(&self.pt_dyn_blas),
+            bytes(&self.pt_skin_params),
+            bytes(&self.sdf_cache_writes),
+            bytes(&self.material_system.commands),
+            bytes(&self.material_system.translucent_commands),
+            bytes(&self.material_system.per_draw_buffers),
+            bytes(&self.material_system.per_draw_bgs),
+        ] {
+            total = total.saturating_add(value);
+        }
+        for palettes in [&self.pending_skin_groups, &self.pending_skin_groups_prev] {
+            for palette in palettes {
+                total = total.saturating_add(bytes(palette));
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let (_, cached_motion_bytes) = self.cached_model_motion_stats();
+        #[cfg(target_arch = "wasm32")]
+        let cached_motion_bytes = 0;
+        total.saturating_add(cached_motion_bytes)
+    }
+
     pub fn quality_runtime_paths_json(&self) -> String {
         let ssgi = self.ssgi_backend_logged.unwrap_or(if self.hw_rt_enabled {
             "hw-ray-query-pending"
@@ -1374,6 +1425,14 @@ impl Renderer {
             out.push_str(",\"physical_transient_slots\":");
             out.push_str(&self.transient_pool.compiled_slot_count().to_string());
         }
+        out.push('}');
+        out.push_str(",\"renderer_owned_memory\":{");
+        out.push_str("\"tracked_frame_cpu_capacity_bytes\":");
+        out.push_str(&self.quality_frame_cpu_capacity_bytes().to_string());
+        out.push_str(",\"cached_graph_plans\":");
+        out.push_str(&graph_stats.plan_count.to_string());
+        out.push_str(",\"physical_transient_slots\":");
+        out.push_str(&self.transient_pool.compiled_slot_count().to_string());
         out.push('}');
         out.push_str(",\"gpu_driven\":");
         out.push_str(&self.gpu_driven.report_json());
