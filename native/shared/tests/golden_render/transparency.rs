@@ -764,7 +764,9 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         // scalar anisotropy must recover it from the geometry megabuffer at
         // both the primary and bounce intersections.
         let (mut vertices, indices) = cube_verts(0.5, [0.85, 0.2, 0.15, 1.0]);
-        for vertex in &mut vertices {
+        let face_uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        for (index, vertex) in vertices.iter_mut().enumerate() {
+            vertex.uv = face_uvs[index % face_uvs.len()];
             vertex.tangent = if vertex.normal[0].abs() > 0.5 {
                 [0.0, 0.0, 1.0, 1.0]
             } else {

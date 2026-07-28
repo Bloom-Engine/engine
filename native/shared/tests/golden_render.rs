@@ -1630,17 +1630,16 @@ fn cube_verts(half: f32, color: [f32; 4]) -> (Vec<Vertex3D>, Vec<u32>) {
             [[-h, -h, h], [h, -h, h], [h, -h, -h], [-h, -h, -h]],
         ),
     ];
-    let face_uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
     let mut verts = Vec::new();
     let mut idx = Vec::new();
     for (normal, vs) in faces {
         let base = verts.len() as u32;
-        for (p, uv) in vs.into_iter().zip(face_uvs) {
+        for p in vs {
             verts.push(Vertex3D {
                 position: p,
                 normal,
                 color,
-                uv,
+                uv: [0.0, 0.0],
                 joints: [0.0; 4],
                 weights: [0.0; 4],
                 tangent: [0.0; 4],
