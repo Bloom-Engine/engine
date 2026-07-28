@@ -652,26 +652,31 @@ impl Renderer {
             };
             self.queue
                 .write_buffer(&self.upscale_uniform_buffer, 0, bytemuck::bytes_of(&up));
-            self.frame_resource_stats
-                .created_bind_group(frame_resource_stats::BindGroupCreationSite::Upscale);
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("upscale_bg"),
-                layout: &self.upscale_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.upscale_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.composed_rt_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                ],
-            });
+            if self.upscale_bind_group_cache.is_none() {
+                self.frame_resource_stats
+                    .created_bind_group(frame_resource_stats::BindGroupCreationSite::Upscale);
+                self.upscale_bind_group_cache =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("upscale_bg"),
+                        layout: &self.upscale_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.upscale_uniform_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.composed_rt_view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                        ],
+                    }));
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("upscale_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -689,7 +694,13 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.upscale_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(
+                0,
+                self.upscale_bind_group_cache
+                    .as_ref()
+                    .expect("upscale bind group was initialized"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
         }
 

@@ -1960,6 +1960,10 @@ budget for at 4K.
   the compiled plan ID and transient-pool rebuild epoch that own the reactive
   coverage view. The retained transparent-motion corpus hard-gates
   `taa_reactive: 0` before and after a resize/rebuild cycle.
+- **Non-TAA upscale fixed in #139:** its single persistent composed-input
+  binding is invalidated before resize. A dedicated half-resolution real-GPU
+  test proves rendered geometry survives and hard-gates `upscale: 0` after
+  warmup.
 
 Remaining: eliminate the measured bind-group hotspots only with complete
 resource-generation keys, then instrument and eliminate the other steady-state

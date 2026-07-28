@@ -169,6 +169,10 @@ after warmup. Reactive TAA remains a separately named counter and uses two
 history slots keyed by both compiled plan ID and transient-pool rebuild epoch,
 because its coverage view belongs to that compiled transient generation. It
 also reports `taa_reactive: 0` after warmup and after a resize rebuild settles.
+The non-TAA half-resolution upscale binding is a single persistent slot,
+invalidated before resize replaces its composed input. A dedicated real-GPU
+half-resolution test proves scene pixels are produced and `upscale: 0` is
+restored after warmup.
 
 `examples/quality-transparency/main.ts` accepts `--sorted-interleaving` as an
 unversioned focused ordering oracle. It forces conventional sorted composition

@@ -78,3 +78,31 @@ fn golden_many_point_lights() {
         "steady ordinary TAA must reuse its previous-history-specific bind group"
     );
 }
+
+#[test]
+fn steady_half_resolution_upscale_reuses_its_bind_group() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    eng.renderer.set_render_scale(0.5);
+    eng.renderer.set_taa_enabled(false);
+    let (_, _, rgba) = render(&mut eng, 4, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(8.0, 12.0, 20.0, 255.0);
+        r.begin_mode_3d(3.0, 2.5, 5.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.draw_cube(0.0, 0.75, 0.0, 1.5, 1.5, 1.5, 220.0, 90.0, 35.0, 255.0);
+    });
+    assert!(
+        rgba.chunks_exact(4)
+            .any(|pixel| pixel[0] != 8 || pixel[1] != 12 || pixel[2] != 20),
+        "half-resolution upscale frame did not render scene geometry"
+    );
+    let paths: serde_json::Value = serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+        .expect("upscale telemetry is valid JSON");
+    assert_eq!(
+        paths["steady_state_resources"]["bind_group_creations"]["sites"]["upscale"].as_u64(),
+        Some(0),
+        "warmed upscale path must reuse its persistent bind group"
+    );
+}

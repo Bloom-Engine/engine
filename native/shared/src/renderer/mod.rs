@@ -1237,6 +1237,7 @@ pub struct Renderer {
     pub upscale_pipeline: wgpu::RenderPipeline,
     pub upscale_layout: wgpu::BindGroupLayout,
     pub upscale_uniform_buffer: wgpu::Buffer,
+    upscale_bind_group_cache: Option<wgpu::BindGroup>,
     /// 0 = bilinear (cheap), 1 = Catmull-Rom 5-tap (sharper edges).
     /// Default 1.
     pub upscale_mode: u32,
@@ -7941,6 +7942,7 @@ impl Renderer {
             upscale_pipeline,
             upscale_layout,
             upscale_uniform_buffer,
+            upscale_bind_group_cache: None,
             upscale_mode: 1, // Catmull-Rom by default
             cas_rt_texture,
             cas_rt_view,
@@ -8323,6 +8325,7 @@ impl Renderer {
             self.taa_bind_group_cache = [None, None];
             self.taa_reactive_bind_group_cache = [None, None];
             self.taa_reactive_bind_group_cache_keys = [None, None];
+            self.upscale_bind_group_cache = None;
 
             let (dt, dv) = create_depth_texture(&self.device, rw, rh);
             self.depth_texture = dt;
