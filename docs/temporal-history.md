@@ -175,6 +175,25 @@ matrix per live cached instance; its allocated capacity is reported as
 `cached_model_motion_cpu_capacity_bytes`. The current entry count, zero GPU
 bytes, and zero added passes are reported alongside it.
 
+## Immediate-primitive motion
+
+Raylib-style `drawCube`, `drawSphere`, `drawCylinder`, `drawPlane`, wire,
+grid, and ray submissions rebuild world-space vertices each frame. Their
+stable submission slot now owns the previous vertex positions, so moving,
+scaling, or deforming an immediate primitive writes the same true
+current-minus-previous velocity as retained geometry. Call order is the
+identity contract, matching the cached-model submission-slot API. A new slot,
+a different primitive kind in that slot, a changed vertex count, an empty
+intervening frame, or an explicit temporal reset seeds previous=current; none
+can inherit unrelated motion.
+
+Previous positions use xyz of the immediate pipeline's otherwise-unused
+tangent lane with a marker in w. `Vertex3D` stride and the existing upload are
+unchanged, and there is no GPU allocation, bind group, draw, or pass. CPU
+history is two grow-on-demand position streams plus compact slot ranges.
+Telemetry reports `immediate_motion_entries`,
+`immediate_motion_cpu_capacity_bytes`, zero GPU bytes, and zero added passes.
+
 ## Per-pixel TAA/TSR diagnostics
 
 `captureDebugIntermediates(directory)` now adds four surface-resolution PNGs

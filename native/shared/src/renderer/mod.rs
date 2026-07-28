@@ -27,6 +27,7 @@ mod froxel;
 mod gi_bake;
 pub mod gpu_driven;
 mod hiz;
+mod immediate_motion;
 mod layered_pbr;
 mod layered_pbr_pt;
 mod layered_pbr_refraction;
@@ -1262,6 +1263,7 @@ pub struct Renderer {
     pub vertices_3d: Vec<Vertex3D>,
     pub indices_3d: Vec<u32>,
     draw_calls_3d: Vec<DrawCall3D>,
+    immediate_motion: immediate_motion::History,
     current_texture_3d: u32,
 
     // Persistent GPU buffers (reused across frames, grown as needed)
@@ -7955,6 +7957,7 @@ impl Renderer {
             vertices_3d: Vec::with_capacity(16384),
             indices_3d: Vec::with_capacity(32768),
             draw_calls_3d: Vec::new(),
+            immediate_motion: Default::default(),
             current_texture_3d: 0,
             persistent_vb_2d,
             persistent_ib_2d,
@@ -8200,9 +8203,7 @@ impl Renderer {
         self.rt_height = 0;
     }
 
-    // ============================================================
     // Lifecycle
-    // ============================================================
 
     /// Resize the swapchain and all post-process render targets.
     // Debug accessors for diagnosing draw call issues
@@ -10053,11 +10054,9 @@ impl Renderer {
         self.lighting_uniforms.camera_pos[3] = intensity;
     }
 
-    // ============================================================
     // Render quality toggles — control individual post-FX / lighting
     // features at runtime. Games call these directly for fine-tuning
     // or use `apply_quality_preset()` for batch configuration.
-    // ============================================================
 
     pub fn set_shadows_enabled(&mut self, on: bool) {
         if on {
@@ -10532,9 +10531,7 @@ impl Renderer {
         pass.draw(0..3, 0..1);
     }
 
-    // ========================================================================
     // EN-005 Phase 2 — procedural sky public surface
-    // ========================================================================
 
     /// Toggle the procedural-atmosphere sky. When enabled, the HDR
     /// pass renders a Hillaire 2020 atmosphere driven by `set_sun_direction`
@@ -11738,6 +11735,7 @@ impl Renderer {
         self.vertices_3d.clear();
         self.indices_3d.clear();
         self.draw_calls_3d.clear();
+        self.immediate_motion.begin_frame();
         self.begin_cached_model_frame();
         self.has_blend_model_draws = false;
         self.has_layered_blend_model_draws = false;
@@ -12642,9 +12640,7 @@ impl Renderer {
             .unwrap_or(0)
     }
 
-    // ============================================================
     // 2D drawing internals
-    // ============================================================
 
     fn ensure_draw_state(&mut self, texture_idx: u32) {
         let needs_new = self.draw_calls_2d.is_empty() || {
@@ -12763,9 +12759,7 @@ impl Renderer {
         }
     }
 
-    // ============================================================
     // Textured 2D drawing (for text atlas, sprites, etc.)
-    // ============================================================
 
     pub fn draw_textured_quad(
         &mut self,
@@ -12942,9 +12936,7 @@ impl Renderer {
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
-    // ============================================================
     // Camera 2D
-    // ============================================================
 
     pub fn begin_mode_2d(
         &mut self,
@@ -12997,9 +12989,7 @@ impl Renderer {
         self.render_mode = RenderMode::ScreenSpace;
     }
 
-    // ============================================================
     // Camera 3D
-    // ============================================================
 
     pub fn begin_mode_3d(
         &mut self,
@@ -13138,9 +13128,7 @@ impl Renderer {
         self.render_mode = RenderMode::ScreenSpace;
     }
 
-    // ============================================================
     // Joint matrices (GPU skinning)
-    // ============================================================
 
     /// Set a single joint matrix for testing (joint_index 0-63, angle in radians around X axis)
     pub fn set_joint_test(&mut self, joint_index: usize, angle: f32) {
@@ -13273,9 +13261,7 @@ impl Renderer {
         }
     }
 
-    // ============================================================
     // Cached model GPU buffers
-    // ============================================================
 
     /// Check if a model's GPU buffers are cached (or marked uncacheable).
     pub fn is_model_in_cache(&self, handle_bits: u64) -> bool {
@@ -13694,9 +13680,7 @@ impl Renderer {
         self.pending_skin_groups_prev.clear();
     }
 
-    // ============================================================
     // 3D texture tracking
-    // ============================================================
 
     fn ensure_draw_state_3d(&mut self, texture_idx: u32) {
         let needs_new = self.draw_calls_3d.is_empty()
@@ -13964,6 +13948,7 @@ impl Renderer {
         b: f64,
         a: f64,
     ) {
+        let motion_start = self.vertices_3d.len();
         self.ensure_draw_state_3d(self.current_texture_3d);
         let color = Self::color_to_f32(r, g, b, a);
         let (x, y, z) = (x as f32, y as f32, z as f32);
@@ -14052,6 +14037,7 @@ impl Renderer {
                 base + 2,
             ]);
         }
+        self.record_immediate_motion(immediate_motion::PrimitiveKind::Cube, motion_start);
     }
 
     pub fn draw_cube_wires(
@@ -14067,6 +14053,7 @@ impl Renderer {
         b: f64,
         a: f64,
     ) {
+        let motion_start = self.vertices_3d.len();
         let color = Self::color_to_f32(r, g, b, a);
         let (x, y, z) = (x as f32, y as f32, z as f32);
         let (hw, hh, hd) = (w as f32 * 0.5, h as f32 * 0.5, d as f32 * 0.5);
@@ -14099,6 +14086,7 @@ impl Renderer {
         for (a_idx, b_idx) in &edges {
             self.add_line_3d(corners[*a_idx], corners[*b_idx], color, t);
         }
+        self.record_immediate_motion(immediate_motion::PrimitiveKind::CubeWires, motion_start);
     }
 
     pub fn draw_sphere(
@@ -14112,6 +14100,7 @@ impl Renderer {
         b: f64,
         a: f64,
     ) {
+        let motion_start = self.vertices_3d.len();
         self.ensure_draw_state_3d(self.current_texture_3d);
         let color = Self::color_to_f32(r, g, b, a);
         let (cx, cy, cz, radius) = (cx as f32, cy as f32, cz as f32, radius as f32);
@@ -14187,6 +14176,7 @@ impl Renderer {
                 ]);
             }
         }
+        self.record_immediate_motion(immediate_motion::PrimitiveKind::Sphere, motion_start);
     }
 
     pub fn draw_sphere_wires(
@@ -14200,6 +14190,7 @@ impl Renderer {
         b: f64,
         a: f64,
     ) {
+        let motion_start = self.vertices_3d.len();
         let color = Self::color_to_f32(r, g, b, a);
         let (cx, cy, cz, radius) = (cx as f32, cy as f32, cz as f32, radius as f32);
         let segments = 16u32;
@@ -14229,6 +14220,7 @@ impl Renderer {
                 0.02,
             );
         }
+        self.record_immediate_motion(immediate_motion::PrimitiveKind::SphereWires, motion_start);
     }
 
     pub fn draw_cylinder(
@@ -14244,6 +14236,7 @@ impl Renderer {
         b: f64,
         a: f64,
     ) {
+        let motion_start = self.vertices_3d.len();
         self.ensure_draw_state_3d(self.current_texture_3d);
         let color = Self::color_to_f32(r, g, b, a);
         let (x, y, z) = (x as f32, y as f32, z as f32);
@@ -14367,6 +14360,7 @@ impl Renderer {
             self.indices_3d
                 .extend_from_slice(&[base, base + 1, base + 2]);
         }
+        self.record_immediate_motion(immediate_motion::PrimitiveKind::Cylinder, motion_start);
     }
 
     pub fn draw_plane(
@@ -14381,6 +14375,7 @@ impl Renderer {
         b: f64,
         a: f64,
     ) {
+        let motion_start = self.vertices_3d.len();
         self.ensure_draw_state_3d(self.current_texture_3d);
         let color = Self::color_to_f32(r, g, b, a);
         let (cx, cy, cz) = (cx as f32, cy as f32, cz as f32);
@@ -14429,9 +14424,11 @@ impl Renderer {
         // every camera above it (only visible from underneath).
         self.indices_3d
             .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        self.record_immediate_motion(immediate_motion::PrimitiveKind::Plane, motion_start);
     }
 
     pub fn draw_grid(&mut self, slices: i32, spacing: f64) {
+        let motion_start = self.vertices_3d.len();
         let color = [0.5f32, 0.5, 0.5, 1.0];
         let spacing = spacing as f32;
         let half = slices as f32 * spacing / 2.0;
@@ -14441,6 +14438,7 @@ impl Renderer {
             self.add_line_3d([-half, 0.0, pos], [half, 0.0, pos], color, 0.01);
             self.add_line_3d([pos, 0.0, -half], [pos, 0.0, half], color, 0.01);
         }
+        self.record_immediate_motion(immediate_motion::PrimitiveKind::Grid, motion_start);
     }
 
     pub fn draw_ray(
@@ -14456,6 +14454,7 @@ impl Renderer {
         b: f64,
         a: f64,
     ) {
+        let motion_start = self.vertices_3d.len();
         let color = Self::color_to_f32(r, g, b, a);
         let start = [origin_x as f32, origin_y as f32, origin_z as f32];
         let end = [
@@ -14464,6 +14463,7 @@ impl Renderer {
             (origin_z + dir_z) as f32,
         ];
         self.add_line_3d(start, end, color, 0.02);
+        self.record_immediate_motion(immediate_motion::PrimitiveKind::Ray, motion_start);
     }
 
     // ============================================================

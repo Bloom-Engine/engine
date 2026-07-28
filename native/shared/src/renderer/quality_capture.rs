@@ -782,6 +782,13 @@ impl Renderer {
         out.push_str(&cached_motion_cpu_bytes.to_string());
         out.push_str(",\"cached_model_motion_gpu_bytes\":0");
         out.push_str(",\"cached_model_motion_passes\":0");
+        let (immediate_motion_entries, immediate_motion_cpu_bytes) = self.immediate_motion.stats();
+        out.push_str(",\"immediate_motion_entries\":");
+        out.push_str(&immediate_motion_entries.to_string());
+        out.push_str(",\"immediate_motion_cpu_capacity_bytes\":");
+        out.push_str(&immediate_motion_cpu_bytes.to_string());
+        out.push_str(",\"immediate_motion_gpu_bytes\":0");
+        out.push_str(",\"immediate_motion_passes\":0");
         out.push_str(",\"diagnostic_persistent_bytes\":0");
         let diagnostic_texture_bytes = u64::from(self.surface_config.width)
             * u64::from(self.surface_config.height)

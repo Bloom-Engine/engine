@@ -87,6 +87,9 @@ struct VertexInput3D {
     @location(3) uv: vec2<f32>,
     @location(4) joints: vec4<f32>,
     @location(5) weights: vec4<f32>,
+    // Immediate primitives use their otherwise-unused tangent lane for
+    // previous world position. w=2 distinguishes it from model tangents.
+    @location(6) previous_position: vec4<f32>,
 };
 
 struct VertexOutput3D {
@@ -128,7 +131,8 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
     let curr = u.mvp * pos;
     out.clip_position = curr;
     out.curr_clip = curr;
-    out.prev_clip = u.prev_mvp * pos;
+    let prev_pos = select(pos, vec4<f32>(in.previous_position.xyz, 1.0), in.previous_position.w > 1.5);
+    out.prev_clip = u.prev_mvp * prev_pos;
     out.normal = normalize((u.model * norm).xyz);
     out.world_pos = (u.model * pos).xyz;
     out.color = in.color * u.model_tint;

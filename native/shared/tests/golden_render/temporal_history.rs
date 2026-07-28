@@ -1242,6 +1242,90 @@ fn retained_rigid_and_reactive_motion_sequences_bound_trails() {
 }
 
 #[test]
+fn immediate_primitive_motion_writes_velocity_and_bounds_trails() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(true);
+    r.set_render_scale(1.0);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+
+    let draw_pose = |eng: &mut EngineState, moving_x: f64| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(7.0, 10.0, 20.0, 255.0);
+        r.begin_mode_3d(0.0, 2.2, 6.5, 0.0, 0.8, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.add_directional_light(-0.4, -1.0, -0.25, 1.0, 0.95, 0.88, 2.2);
+        r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 30.0, 38.0, 52.0, 255.0);
+        r.draw_cube(0.0, 1.1, -1.8, 5.0, 3.2, 0.35, 30.0, 170.0, 235.0, 255.0);
+        r.draw_cube(
+            moving_x, 0.9, 0.35, 1.35, 1.8, 1.35, 245.0, 45.0, 25.0, 255.0,
+        );
+    };
+    let capture_pose = |eng: &mut EngineState, x| render(eng, 1, |eng| draw_pose(eng, x)).2;
+
+    eng.renderer.reset_temporal_history();
+    for _ in 0..8 {
+        capture_pose(&mut eng, -1.6);
+    }
+    let old_pose = capture_pose(&mut eng, -1.6);
+    let directory =
+        std::env::temp_dir().join(format!("bloom-immediate-motion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    let mut frames = Vec::new();
+    for _ in 0..24 {
+        frames.push(capture_pose(&mut eng, 1.6));
+    }
+
+    let motion = image::open(directory.join("taa-motion.png"))
+        .expect("immediate primitive motion did not emit the TAA velocity map")
+        .to_rgb8();
+    let moving_pixels = motion.pixels().filter(|pixel| pixel[2] > 8).count();
+    eprintln!("temporal-corpus immediate moving_pixels={moving_pixels}");
+    assert!(
+        moving_pixels >= 300,
+        "moving immediate cube wrote no meaningful velocity"
+    );
+    evaluate_motion_recovery("immediate-cube", &old_pose, &frames);
+
+    let paths: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json()).unwrap();
+    assert_eq!(
+        paths["temporal_history"]["immediate_motion_entries"].as_u64(),
+        Some(3)
+    );
+    assert_eq!(
+        paths["temporal_history"]["immediate_motion_gpu_bytes"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        paths["temporal_history"]["immediate_motion_passes"].as_u64(),
+        Some(0)
+    );
+    let cpu_capacity = paths["temporal_history"]["immediate_motion_cpu_capacity_bytes"]
+        .as_u64()
+        .unwrap();
+    eprintln!("temporal-corpus immediate history_cpu_capacity={cpu_capacity} bytes");
+    assert!(
+        cpu_capacity <= 4096,
+        "three immediate primitives retained excessive history: {cpu_capacity} bytes"
+    );
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept immediate motion diagnostics at {directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 fn cached_skinned_motion_sequence_bounds_animation_trails() {
     const HANDLE: u64 = 0x7AA5_0001;
     const PALETTE_KEY: u64 = 0x7AA5_1001;

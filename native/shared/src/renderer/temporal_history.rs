@@ -34,6 +34,7 @@ impl Renderer {
         self.exposure_history_valid = false;
         self.exposure_history_written = false;
         self.reset_path_tracing_history(0);
+        self.immediate_motion.reset();
         self.temporal_camera_cut_pending = true;
     }
 }
