@@ -73,12 +73,18 @@ established IBL/SSR ownership curve remains matched on both sides.
 SSGI now owns `probe_history_valid` independently of TAA:
 
 - invalid history uses the existing force-refresh route (`alpha = 1.0`);
+- force refresh assigns current radiance directly, avoiding the undefined
+  `invalid_history * 0` side of a nominal `mix(..., alpha = 1)`;
 - valid history keeps the existing variance-adaptive four-frame EMA;
+- non-finite half-float history, trace input, and trace output are replaced
+  component-wise with zero; ordinary finite radiance is unchanged;
+- degenerate depth-derived normals use finite fallback directions during probe
+  placement and resolve, preventing NaN normals from rejecting every probe;
 - resize, SSGI toggles, intensity/radius changes, transparent-GI route changes,
   and PT ownership invalidate it;
 - suppressed frames neither preserve validity nor advance the probe ping-pong;
-- the existing two 3D history images, shader, pass count, and steady-state
-  filter are unchanged.
+- the existing two 3D history images, production pass count, and steady-state
+  filter remain unchanged.
 
 Telemetry exposes `temporal_history.ssgi_probe_valid` and `ssgi_probe_index`.
 
@@ -204,6 +210,29 @@ released after readback; normal frames and production SSR output are
 unchanged. Telemetry includes their exact capture texture/readback byte counts,
 one diagnostic pass, and zero persistent bytes for the complete SSR capture.
 
+When SSGI is active, a capture also emits `ssgi-rejection-reason.png` and
+`ssgi-temporal-confidence.png`. SSGI history lives in a 3D
+probe-X/probe-Y/octahedral-texel domain, so the capture-only compute pass
+flattens each probe's 8x8 octahedral slab into a 2D atlas. Gray marks invalid
+or freshly seeded probes, magenta marks invalid or adaptively refreshed
+radiance, and green marks retained history. Confidence RGB contains local
+radiance variation, current-radiance strength, and retained-history
+contribution. Screen-space categories such as off-screen reprojection and
+motion weighting are intentionally absent because they do not exist in this
+representation.
+
+The two RGBA8 atlases and their readback buffers exist only for the native
+capture and are released after encoding. Normal frames add no diagnostic pass,
+texture, bind group, or persistent allocation. Telemetry reports
+`ssgi_diagnostic_persistent_bytes = 0`, exact capture texture/readback bytes,
+one capture-only pass, and whether the temporary resources are live.
+
+Native captures now include the resolved half-resolution `ssgi.png` plus
+`ssgi.metrics.json`. The raw HDR metrics gate finite output and nonzero
+indirect radiance after the SDF/card backend has warmed up, independently of
+the display tonemap. Marking the existing SSGI target as `COPY_SRC` adds no
+normal-frame pass or allocation.
+
 ## Temporal sequence gates
 
 The headless GPU corpus now evaluates a sequence rather than only a final
@@ -257,6 +286,11 @@ The dark-interior SSR gate requires finite raw march/history values, no
 isolated HDR fireflies under the documented local rule, a populated reflection
 buffer, and a visible SSR-on/off delta from the smooth-reflection control.
 
+The SSGI gate warms a retained emissive receiver scene through the production
+Hi-Z-to-SDF backend transition, then requires a finite, nonzero resolved HDR
+target and real retained probe history. It also verifies the probe-domain
+reason/confidence dimensions and the zero-persistent-memory capture contract.
+
 Render-scale changes must produce a first frame byte-identical to a freshly
 seeded history at the new scale. Resize changes must have no `>32/255`
 outliers against a fresh target-size seed, with mean RGB error at most 0.5 and
@@ -272,5 +306,5 @@ silently passing.
 
 ## Remaining #135 work
 
-Extend shared reason/confidence semantics to SSR/GI/PT where their
-representations match.
+Extend the shared reason/confidence semantics to the path-tracing denoiser
+where its representation matches the raster temporal contract.

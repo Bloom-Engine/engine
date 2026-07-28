@@ -101,6 +101,25 @@ fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32,
 fn ign(p: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
+
+fn bounded_probe_history(value: vec3<f32>) -> vec3<f32> {
+    // Rgba16Float can retain undefined Inf/NaN bytes across allocation reuse.
+    // Componentwise comparison rejects both without changing finite radiance.
+    return select(
+        vec3<f32>(0.0),
+        value,
+        abs(value) <= vec3<f32>(65504.0),
+    );
+}
+
+fn safe_probe_direction(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let clean = bounded_probe_history(value);
+    let len2 = dot(clean, clean);
+    if (len2 <= 0.000001) {
+        return fallback;
+    }
+    return clean * inverseSqrt(len2);
+}
 ";
 
 /// Probe placement. One workgroup invocation per probe tile writes a
@@ -173,10 +192,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let zu = textureSampleLevel(hiz0, hiz_samp, uv_u, 0.0).r;
     let P_r = view_pos_from_linear(uv_r, zr, p00, p11, p20, p21);
     let P_u = view_pos_from_linear(uv_u, zu, p00, p11, p20, p21);
-    let N_vs = normalize(cross(P_r - P, P_u - P));
+    let N_vs = safe_probe_direction(
+        cross(P_r - P, P_u - P),
+        vec3<f32>(0.0, 0.0, 1.0),
+    );
 
     let P_world = (u.inv_view * vec4<f32>(P, 1.0)).xyz;
-    let N_world = normalize((u.inv_view * vec4<f32>(N_vs, 0.0)).xyz);
+    let N_world = safe_probe_direction(
+        (u.inv_view * vec4<f32>(N_vs, 0.0)).xyz,
+        vec3<f32>(0.0, 1.0, 0.0),
+    );
 
     probes[probe_idx].world_pos = vec4<f32>(P_world, 1.0);
     probes[probe_idx].normal = vec4<f32>(N_world, linear_z);
@@ -267,7 +292,9 @@ fn cs_main(
     // light). Luma is read from the prev-frame temporal-filtered
     // history texture; `dst_coord` indexes the probe × octel slab
     // identically between trace output and history.
-    let prev_slice = textureLoad(prev_history, dst_coord, 0).rgb;
+    let prev_slice = bounded_probe_history(
+        textureLoad(prev_history, dst_coord, 0).rgb,
+    );
     let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
     let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
     let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
@@ -334,7 +361,9 @@ fn cs_main(
             if (thickness < step_size * 2.0 + 0.1) {
                 let tn = t / max_t;
                 let falloff = 1.0 - tn * tn;
-                var raw = textureSampleLevel(hdr_tex, hdr_samp, ray_uv, 0.0).rgb * max(falloff, 0.0);
+                var raw = bounded_probe_history(
+                    textureSampleLevel(hdr_tex, hdr_samp, ray_uv, 0.0).rgb,
+                ) * max(falloff, 0.0);
                 // Firefly clamp (cap per-sample luma).
                 let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
                 let cap = u.params.w;
@@ -349,7 +378,8 @@ fn cs_main(
     }
 
     let intensity = u.params.y;
-    textureStore(radiance_out, dst_coord, vec4<f32>(hit_color * intensity * ndotd, 1.0));
+    let output = bounded_probe_history(hit_color * intensity * ndotd);
+    textureStore(radiance_out, dst_coord, vec4<f32>(output, 1.0));
 }
 ";
 
@@ -628,7 +658,9 @@ fn cs_main(
     // light). Luma is read from the prev-frame temporal-filtered
     // history texture; `dst_coord` indexes the probe × octel slab
     // identically between trace output and history.
-    let prev_slice = textureLoad(prev_history, dst_coord, 0).rgb;
+    let prev_slice = bounded_probe_history(
+        textureLoad(prev_history, dst_coord, 0).rgb,
+    );
     let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
     let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
     let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
@@ -719,7 +751,8 @@ fn cs_main(
     }
 
     let intensity = u.params.y;
-    textureStore(radiance_out, dst_coord, vec4<f32>(radiance * intensity * ndotd, 1.0));
+    let output = bounded_probe_history(radiance * intensity * ndotd);
+    textureStore(radiance_out, dst_coord, vec4<f32>(output, 1.0));
 }
 ";
 
@@ -963,7 +996,9 @@ fn cs_main(
     // light). Luma is read from the prev-frame temporal-filtered
     // history texture; `dst_coord` indexes the probe × octel slab
     // identically between trace output and history.
-    let prev_slice = textureLoad(prev_history, dst_coord, 0).rgb;
+    let prev_slice = bounded_probe_history(
+        textureLoad(prev_history, dst_coord, 0).rgb,
+    );
     let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
     let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
     let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
@@ -1199,7 +1234,8 @@ fn cs_main(
     }
 
     let intensity = u.params.y;
-    textureStore(radiance_out, dst_coord, vec4<f32>(radiance * intensity * ndotd, 1.0));
+    let output = bounded_probe_history(radiance * intensity * ndotd);
+    textureStore(radiance_out, dst_coord, vec4<f32>(output, 1.0));
 }
 ";
 
@@ -1234,11 +1270,12 @@ fn cs_main(
     if (wg.x >= grid_w || wg.y >= grid_h) { return; }
 
     let coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
-    let curr = textureLoad(radiance_in, coord, 0).rgb;
-    let hist = textureLoad(history_in, coord, 0).rgb;
+    let curr = bounded_probe_history(textureLoad(radiance_in, coord, 0).rgb);
+    let hist = bounded_probe_history(textureLoad(history_in, coord, 0).rgb);
 
     var alpha = u.params.x;
-    if (u.params.y > 0.5) {
+    let force_refresh = u.params.y > 0.5;
+    if (force_refresh) {
         alpha = 1.0;
     } else {
         // Ticket 016 V4 — variance-adaptive alpha. Scale the base
@@ -1258,7 +1295,12 @@ fn cs_main(
         let delta = abs(curr_luma - hist_luma);
         alpha = min(1.0, alpha + delta * 0.6);
     }
-    let blended = mix(hist, curr, alpha);
+    var blended = mix(hist, curr, alpha);
+    if (force_refresh) {
+        // `mix(undefined, current, 1)` may still evaluate undefined * zero.
+        // Direct assignment guarantees invalid history is never observed.
+        blended = curr;
+    }
 
     textureStore(history_out, coord, vec4<f32>(blended, 1.0));
 }
@@ -1347,8 +1389,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let zu = textureSampleLevel(hiz0, hiz_samp, in.uv + vec2<f32>(0.0, -texel.y), 0.0).r;
     let Pr = view_pos_from_linear(in.uv + vec2<f32>(texel.x, 0.0), zr, p00, p11, p20, p21);
     let Pu = view_pos_from_linear(in.uv + vec2<f32>(0.0, -texel.y), zu, p00, p11, p20, p21);
-    let N_vs = normalize(cross(Pr - P_vs, Pu - P_vs));
-    let N_ws = normalize((u.inv_view * vec4<f32>(N_vs, 0.0)).xyz);
+    let N_vs = safe_probe_direction(
+        cross(Pr - P_vs, Pu - P_vs),
+        vec3<f32>(0.0, 0.0, 1.0),
+    );
+    let N_ws = safe_probe_direction(
+        (u.inv_view * vec4<f32>(N_vs, 0.0)).xyz,
+        vec3<f32>(0.0, 1.0, 0.0),
+    );
 
     // Pixel's grid-space fractional position (which probes surround it?).
     let px_x = in.uv.x * half_w;

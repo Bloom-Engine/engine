@@ -49,6 +49,8 @@ mod shaders;
 mod shadow_pass;
 mod sorted_transparency;
 mod ssgi_pass;
+#[cfg(not(target_arch = "wasm32"))]
+mod ssgi_temporal_diagnostics;
 mod ssr_pass;
 #[cfg(not(target_arch = "wasm32"))]
 mod ssr_temporal_diagnostics;
@@ -99,6 +101,8 @@ use atmosphere_lut::{
 };
 
 mod formats;
+#[cfg(not(target_arch = "wasm32"))]
+use formats::PROBE_OCT_SIZE;
 use formats::{
     create_albedo_rt, create_bloom_chain, create_composed_rt, create_depth_texture, create_dof_rt,
     create_exposure_textures, create_hdr_rt, create_linear_depth_hiz_chain, create_material_rt,
@@ -854,25 +858,21 @@ pub struct Renderer {
     /// Current probe grid dimensions. Recomputed on resize.
     pub probe_grid_w: u32,
     pub probe_grid_h: u32,
-    /// Per-probe header buffer (`ProbeHeader`, 32 B each). `STORAGE |
-    /// COPY_DST`. Written by probe-place, read by trace + resolve.
+    /// Per-probe headers (32 B, storage/copy-dst), placed then read by trace/resolve.
     pub probe_header_buffer: wgpu::Buffer,
-    /// Per-frame trace output — the compute trace pass writes
-    /// `textureStore` into this. The temporal pass reads it as the
-    /// "current" input.
+    /// Per-frame compute trace output; temporal reads it as current input.
     pub probe_trace_tex: wgpu::Texture,
     pub probe_trace_view: wgpu::TextureView,
-    /// Ping-pong 3D history textures (Rgba16Float, gw × gh × 64).
-    /// Temporal reads `[prev_idx]` + trace, writes to `[write_idx]`.
-    /// Resolve samples `[write_idx]`.
+    /// Rgba16Float 3D history ping-pong (gw × gh × 64): temporal reads prior
+    /// plus trace, writes current, and resolve samples current.
     pub probe_history_textures: [wgpu::Texture; 2],
     pub probe_history_views: [wgpu::TextureView; 2],
     pub probe_history_idx: usize,
-    /// True only after the probe temporal pass wrote a current history.
-    /// `probe_history_idx` points at the next write target after present.
-    /// Kept independent from TAA because SSGI can be disabled or temporarily
-    /// replaced by path tracing.
+    /// True after temporal writes; the index becomes next write after present.
+    /// Independent from TAA because SSGI may be disabled or replaced by PT.
     pub probe_history_valid: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    ssgi_temporal_diagnostics: Option<ssgi_temporal_diagnostics::SsgiTemporalDiagnosticResources>,
 
     /// Ticket 007b — true when the adapter granted
     /// `Features::EXPERIMENTAL_RAY_QUERY` at device creation. Flips the
@@ -7756,6 +7756,8 @@ impl Renderer {
             probe_history_views,
             probe_history_idx: 0,
             probe_history_valid: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            ssgi_temporal_diagnostics: None,
             hw_rt_enabled,
             tlas: None,
             tlas_max_instances: 1024,

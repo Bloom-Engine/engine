@@ -159,6 +159,8 @@ The one debug-capture API snapshots existing render-graph products:
 
 - `hdr-scene`: RGBA16F scene output, converted for review with the same
   ACES-style display curve used by the capture helper;
+- `ssgi`: RGBA16F resolved indirect diffuse output, accompanied by raw HDR
+  finite/luminance metrics;
 - `scene-depth`: Depth32F normalized to the finite range of that capture for
   diagnostic visibility (not a metric-preserving linear-depth encoding);
 - `shadow-cascade-0`, `shadow-cascade-1`, `shadow-cascade-2`: Depth32F shadow

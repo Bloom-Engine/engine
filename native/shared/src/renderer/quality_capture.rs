@@ -322,6 +322,14 @@ impl Renderer {
                     wgpu::TextureAspect::All,
                     8,
                 ),
+                "ssgi" => self.record_quality_texture(
+                    encoder,
+                    &self.ssgi_rt_texture,
+                    name,
+                    ReadbackKind::Hdr,
+                    wgpu::TextureAspect::All,
+                    8,
+                ),
                 "shadow-cascade-0" | "shadow-cascade-1" | "shadow-cascade-2" => {
                     let cascade = name
                         .as_bytes()
@@ -442,6 +450,22 @@ impl Renderer {
                     ));
                 }
             }
+            if let Some(textures) = self.ssgi_temporal_diagnostic_textures() {
+                for (&name, texture) in
+                    super::ssgi_temporal_diagnostics::SSGI_TEMPORAL_DIAGNOSTIC_NAMES
+                        .iter()
+                        .zip(textures)
+                {
+                    quality_readbacks.push(self.record_quality_texture(
+                        encoder,
+                        texture,
+                        name,
+                        ReadbackKind::Rgba8,
+                        wgpu::TextureAspect::All,
+                        4,
+                    ));
+                }
+            }
         }
         FrameReadback {
             staging,
@@ -509,6 +533,7 @@ impl Renderer {
         self.pending_quality_capture_dir.take();
         self.release_temporal_diagnostics();
         self.release_ssr_temporal_diagnostics();
+        self.release_ssgi_temporal_diagnostics();
         self.screenshot_requested = false;
     }
 
@@ -791,6 +816,29 @@ impl Renderer {
         out.push_str(",\"ssr_diagnostic_capture_passes\":1");
         out.push_str(",\"ssr_diagnostic_resources_live\":");
         out.push_str(if self.ssr_temporal_diagnostic_textures().is_some() {
+            "true"
+        } else {
+            "false"
+        });
+        let ssgi_diagnostic_width = self.probe_grid_w * super::PROBE_OCT_SIZE;
+        let ssgi_diagnostic_height = self.probe_grid_h * super::PROBE_OCT_SIZE;
+        let ssgi_diagnostic_count =
+            super::ssgi_temporal_diagnostics::SSGI_TEMPORAL_DIAGNOSTIC_NAMES.len() as u64;
+        let ssgi_diagnostic_texture_bytes = u64::from(ssgi_diagnostic_width)
+            * u64::from(ssgi_diagnostic_height)
+            * ssgi_diagnostic_count
+            * 4;
+        let ssgi_diagnostic_row_bytes = u64::from((ssgi_diagnostic_width * 4 + 255) & !255);
+        let ssgi_diagnostic_readback_bytes =
+            ssgi_diagnostic_row_bytes * u64::from(ssgi_diagnostic_height) * ssgi_diagnostic_count;
+        out.push_str(",\"ssgi_diagnostic_persistent_bytes\":0");
+        out.push_str(",\"ssgi_diagnostic_capture_texture_bytes\":");
+        out.push_str(&ssgi_diagnostic_texture_bytes.to_string());
+        out.push_str(",\"ssgi_diagnostic_capture_readback_bytes\":");
+        out.push_str(&ssgi_diagnostic_readback_bytes.to_string());
+        out.push_str(",\"ssgi_diagnostic_capture_passes\":1");
+        out.push_str(",\"ssgi_diagnostic_resources_live\":");
+        out.push_str(if self.ssgi_temporal_diagnostic_textures().is_some() {
             "true"
         } else {
             "false"

@@ -606,6 +606,10 @@ impl Renderer {
                 );
                 pass.dispatch_workgroups(gw, gh, 1);
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.pending_quality_capture_dir.is_some() {
+                self.record_ssgi_temporal_diagnostics(encoder, prev_idx, gw, gh);
+            }
             self.probe_history_valid = true;
 
             // ---- resolve ----

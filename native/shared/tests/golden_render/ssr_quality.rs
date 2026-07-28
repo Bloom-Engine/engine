@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "refractive_quality.rs"]
 mod refractive_quality;
+#[path = "ssgi_quality.rs"]
+mod ssgi_quality;
 
 fn transformed_box(
     eng: &mut EngineState,
