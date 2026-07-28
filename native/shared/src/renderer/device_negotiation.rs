@@ -53,12 +53,13 @@ pub struct DeviceRequestPlan {
 }
 
 impl DeviceRequestPlan {
-    fn descriptor(&self) -> wgpu::DeviceDescriptor<'static> {
+    fn descriptor(&self, trace: wgpu::Trace) -> wgpu::DeviceDescriptor<'static> {
         wgpu::DeviceDescriptor {
             label: Some(self.label),
             required_features: self.required_features,
             required_limits: self.required_limits.clone(),
             experimental_features: self.experimental_features,
+            trace,
             ..Default::default()
         }
     }
@@ -125,9 +126,26 @@ pub async fn request_device_with_fallback(
     adapter: &wgpu::Adapter,
     options: DeviceRequestOptions,
 ) -> Result<NegotiatedDevice, String> {
+    request_device_with_fallback_and_trace(adapter, options, wgpu::Trace::Off).await
+}
+
+/// Production device negotiation with an optional wgpu API trace.
+///
+/// Normal engine startup always calls [`request_device_with_fallback`] and
+/// keeps tracing disabled. Qualification tools use this entry point so their
+/// traced device has the exact same bounded feature/limit request and fallback
+/// report as the engine being measured.
+pub async fn request_device_with_fallback_and_trace(
+    adapter: &wgpu::Adapter,
+    options: DeviceRequestOptions,
+    trace: wgpu::Trace,
+) -> Result<NegotiatedDevice, String> {
     let plans = build_device_request_plans(adapter.features(), &adapter.limits(), options)?;
     let preferred = &plans[0];
-    match adapter.request_device(&preferred.descriptor()).await {
+    match adapter
+        .request_device(&preferred.descriptor(trace.clone()))
+        .await
+    {
         Ok((device, queue)) => Ok(NegotiatedDevice {
             device,
             queue,
@@ -140,7 +158,7 @@ pub async fn request_device_with_fallback(
                     preferred.label
                 ));
             };
-            match adapter.request_device(&fallback.descriptor()).await {
+            match adapter.request_device(&fallback.descriptor(trace)).await {
                 Ok((device, queue)) => Ok(NegotiatedDevice {
                     device,
                     queue,

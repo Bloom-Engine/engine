@@ -288,6 +288,36 @@ class ReproducibilityTests(unittest.TestCase):
         }
         self.assertEqual(quality.capability_snapshot_failures(adapter), [])
 
+    def test_named_capability_artifact_preserves_result_context(self) -> None:
+        adapter = {
+            "availability": "reported",
+            "name": "Test GPU",
+            "renderer_capabilities": {"selected": "modern"},
+            "device_negotiation": {"selected_request": "preferred"},
+        }
+        artifact = quality.capability_snapshot_artifact(
+            {
+                "git_commit": "abc123",
+                "adapter": adapter,
+            },
+            "test-machine",
+        )
+        self.assertEqual(artifact["schema"], quality.CAPABILITY_SNAPSHOT_SCHEMA)
+        self.assertEqual(artifact["git_commit"], "abc123")
+        self.assertEqual(artifact["machine_class"], "test-machine")
+        self.assertEqual(artifact["adapter"], adapter)
+        with tempfile.TemporaryDirectory() as directory:
+            name = quality.write_capability_snapshot_artifact(
+                Path(directory),
+                {"git_commit": "abc123", "adapter": adapter},
+                "test-machine",
+            )
+            self.assertEqual(name, "capabilities.json")
+            self.assertEqual(
+                json.loads((Path(directory) / name).read_text(encoding="utf-8")),
+                artifact,
+            )
+
     def test_capability_snapshot_contract_rejects_missing_or_inconsistent_data(
         self,
     ) -> None:

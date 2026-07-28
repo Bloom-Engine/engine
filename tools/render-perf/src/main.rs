@@ -1,4 +1,7 @@
 use bloom_shared::engine::EngineState;
+use bloom_shared::renderer::device_negotiation::{
+    request_device_with_fallback_and_trace, DeviceRequestOptions, DeviceRequestProfile,
+};
 use bloom_shared::renderer::Renderer;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -148,7 +151,7 @@ fn render_frame(engine: &mut EngineState) -> FrameTiming {
     }
 }
 
-fn create_engine(config: &Config) -> Result<(EngineState, wgpu::AdapterInfo), String> {
+fn create_engine(config: &Config) -> Result<(EngineState, String), String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -171,28 +174,34 @@ fn create_engine(config: &Config) -> Result<(EngineState, wgpu::AdapterInfo), St
         std::fs::create_dir_all(directory)
             .map_err(|error| format!("create trace directory: {error}"))?;
     }
-    let supported = adapter.features();
-    let requested = supported
-        & (wgpu::Features::TIMESTAMP_QUERY
-            | wgpu::Features::INDIRECT_FIRST_INSTANCE
-            | wgpu::Features::TEXTURE_BINDING_ARRAY
-            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
-    let descriptor = wgpu::DeviceDescriptor {
-        label: Some("bloom_render_perf"),
-        required_features: requested,
-        required_limits: adapter.limits(),
-        trace: config.trace_dir.as_ref().map_or(wgpu::Trace::Off, |path| {
-            wgpu::Trace::Directory(path.clone())
-        }),
-        ..Default::default()
-    };
-    let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
-        .map_err(|error| format!("request_device failed: {error}"))?;
-    let mut renderer = Renderer::new_headless(device, queue, config.width, config.height);
+    let trace = config.trace_dir.as_ref().map_or(wgpu::Trace::Off, |path| {
+        wgpu::Trace::Directory(path.clone())
+    });
+    let negotiated = pollster::block_on(request_device_with_fallback_and_trace(
+        &adapter,
+        DeviceRequestOptions {
+            // This workload measures the raster steady-state path. Requesting
+            // ray query can itself change backend scheduling even while PT is
+            // off, so keep the unused feature out of this comparison.
+            allow_ray_query: false,
+            profile: DeviceRequestProfile::NativeFull,
+        },
+        trace,
+    ))
+    .map_err(|error| format!("request_device failed: {error}"))?;
+    let negotiation_report = negotiated.report.report_json();
+    let mut renderer = Renderer::new_headless(
+        negotiated.device,
+        negotiated.queue,
+        config.width,
+        config.height,
+    );
+    renderer.set_device_negotiation_report(negotiation_report);
     renderer.apply_quality_preset(4);
+    let adapter_snapshot = renderer.quality_adapter_json();
     let mut engine = EngineState::new(renderer);
     engine.target_fps = 0.0;
-    Ok((engine, info))
+    Ok((engine, adapter_snapshot))
 }
 
 fn data_file(line: &str) -> Option<&str> {
@@ -275,7 +284,7 @@ fn json_escape(value: &str) -> String {
 
 fn write_report(
     config: &Config,
-    info: &wgpu::AdapterInfo,
+    adapter_snapshot: &str,
     render_submit: Percentiles,
     prepare: Percentiles,
     end_frame: Percentiles,
@@ -319,7 +328,7 @@ fn write_report(
         concat!(
             "{{\n  \"schema\":\"bloom-render-perf-v1\",\n",
             "  \"revision\":\"{}\",\n",
-            "  \"adapter\":{{\"name\":\"{}\",\"backend\":\"{:?}\",\"device_type\":\"{:?}\"}},\n",
+            "  \"adapter\":{},\n",
             "  \"resolution\":[{},{}],\n",
             "  \"quality_preset\":4,\n",
             "  \"headless_uncapped\":true,\n",
@@ -335,9 +344,7 @@ fn write_report(
             "  \"uploads\":{}\n}}\n"
         ),
         json_escape(&revision),
-        json_escape(&info.name),
-        info.backend,
-        info.device_type,
+        adapter_snapshot,
         config.width,
         config.height,
         config.warmup_frames,
@@ -370,7 +377,7 @@ fn write_report(
 
 fn run() -> Result<(), String> {
     let config = config()?;
-    let (mut engine, info) = create_engine(&config)?;
+    let (mut engine, adapter_snapshot) = create_engine(&config)?;
     for _ in 0..config.warmup_frames {
         let _ = render_frame(&mut engine);
     }
@@ -391,7 +398,14 @@ fn run() -> Result<(), String> {
         .as_deref()
         .map(|directory| trace_uploads(directory, config.measured_frames))
         .transpose()?;
-    write_report(&config, &info, render_submit, prepare, end_frame, uploads)?;
+    write_report(
+        &config,
+        &adapter_snapshot,
+        render_submit,
+        prepare,
+        end_frame,
+        uploads,
+    )?;
     println!(
         "bloom-render-perf {}x{} CPU p50={:.3} p95={:.3} p99={:.3} ms{}",
         config.width,

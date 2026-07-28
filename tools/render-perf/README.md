@@ -10,6 +10,12 @@ tool disables Bloom's unrelated default audio/physics/model-loading features
 so comparison worktrees do not depend on optional submodules and both
 revisions compile the same renderer-only workload.
 
+Device creation uses the engine's production bounded negotiation and fallback
+path. Every report embeds the complete adapter, renderer-tier/path, granted
+feature/limit, selected device request, and fallback-cause snapshot under
+`adapter`; a performance number without that capability evidence is not a
+qualified result.
+
 The optional `--trace-dir` mode enables wgpu's API trace only in this tool and
 sums every traced buffer/texture upload between the final measured submits.
 Never use trace-mode timings as performance evidence: the report marks them as

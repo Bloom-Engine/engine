@@ -31,6 +31,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_MANIFEST = SCRIPT_DIR / "scenes.toml"
 RESULT_SCHEMA = "bloom-quality-result-v1"
+CAPABILITY_SNAPSHOT_SCHEMA = "bloom-renderer-capability-snapshot-v1"
 REVIEW_SCHEMA = "bloom-quality-baseline-review-v1"
 INSTALL_SCHEMA = "bloom-quality-baseline-install-v1"
 REPRO_SCHEMA = "bloom-quality-reproducibility-v1"
@@ -300,6 +301,36 @@ def stable_environment(adapter: Mapping[str, Any] | None) -> dict[str, Any]:
         "python": platform.python_version(),
         "adapter": dict(adapter or {"availability": "not-reported"}),
     }
+
+
+def capability_snapshot_artifact(
+    environment: Mapping[str, Any], machine_class: str | None
+) -> dict[str, Any]:
+    adapter = environment.get("adapter")
+    return {
+        "schema": CAPABILITY_SNAPSHOT_SCHEMA,
+        "git_commit": environment.get("git_commit"),
+        "machine_class": machine_class,
+        "adapter": dict(adapter) if isinstance(adapter, Mapping) else {
+            "availability": "not-reported"
+        },
+    }
+
+
+def write_capability_snapshot_artifact(
+    out_dir: Path, environment: Mapping[str, Any], machine_class: str | None
+) -> str:
+    name = "capabilities.json"
+    (out_dir / name).write_text(
+        json.dumps(
+            capability_snapshot_artifact(environment, machine_class),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return name
 
 
 def load_adapter(path: Path | None) -> dict[str, Any] | None:
@@ -1737,15 +1768,21 @@ def execute_suite(args: argparse.Namespace) -> int:
             None,
         )
     observed_features = effective_features(observed_adapter)
+    environment = stable_environment(observed_adapter)
+    machine_class = machine.get("id") if machine else None
+    capability_snapshot_path = write_capability_snapshot_artifact(
+        out_dir, environment, machine_class
+    )
     result = {
         "schema": RESULT_SCHEMA,
         "manifest_path": os.path.relpath(manifest_path, REPO_ROOT),
         "manifest_sha256": manifest_hash,
         "suite": args.suite,
-        "machine_class": machine.get("id") if machine else None,
+        "machine_class": machine_class,
         "report_only": bool(args.report_only),
-        "environment": stable_environment(observed_adapter),
+        "environment": environment,
         "features": sorted(observed_features or features),
+        "artifacts": {"capability_snapshot": capability_snapshot_path},
         "build": command_record(build_result) if build_result else None,
         "cases": cases,
         "status": "fail" if hard_fail else "pass",

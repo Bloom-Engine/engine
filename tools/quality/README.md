@@ -213,7 +213,10 @@ The quality runner validates tier identity, granted features/limits, selected
 system paths, active platform profile, chosen request, fallback cause, and
 requested device limits before comparing images or timings. Missing or
 inconsistent capability evidence fails the case rather than producing an
-unqualified performance result.
+unqualified performance result. Each run also writes the same evidence as the
+named top-level `capabilities.json` artifact referenced by `result.json`; the
+hardware workflows upload the entire result directory on both success and
+failure.
 
 The one debug-capture API snapshots existing render-graph products:
 
