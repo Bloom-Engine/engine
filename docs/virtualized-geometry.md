@@ -170,3 +170,10 @@ currently produces 15,452 triangles in 258 meshlets and 20 pages, with a
 maximum page of 63,216 bytes under the 65,536-byte budget. Two independent
 cooks are byte-identical. The canonical compatibility control is
 `examples/test-gltf-watch/assets/Fox.glb`.
+
+With `--hierarchy-levels 8`, the same static asset produces 247 leaf clusters,
+385 parent clusters, and 100 level-3 coarse roots. The roots reduce the
+triangle set by 70.8% and raw payload by 60.2%; two cooks are byte-identical.
+This is structural hierarchy qualification, not yet a final residency budget.
+The full record is
+`docs/evidence/issue-131-atomic-hierarchy-v1.{md,json}`.
