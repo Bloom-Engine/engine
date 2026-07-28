@@ -237,6 +237,68 @@ jobs:
           name: build-windows
 
   # ---------------------------------------------------------------------------
+  # Mobile/Apple cross-compiles. Renderer platform glue is checked on every PR;
+  # Jolt is disabled here because release.yml independently builds every mobile
+  # Jolt archive from source. Together the two workflows cover both halves
+  # without rebuilding the large C++ dependency for every Rust target on every
+  # pull request.
+  # ---------------------------------------------------------------------------
+  mobile-targets:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { crate: android, target: aarch64-linux-android, runner: ubuntu-22.04, features: "models3d,image-extras" }
+          - { crate: android, target: armv7-linux-androideabi, runner: ubuntu-22.04, features: "models3d,image-extras" }
+          - { crate: android, target: x86_64-linux-android, runner: ubuntu-22.04, features: "models3d,image-extras" }
+          - { crate: ios, target: aarch64-apple-ios, runner: macos-14, features: "models3d,image-extras" }
+          - { crate: ios, target: aarch64-apple-ios-sim, runner: macos-14, features: "models3d,image-extras" }
+          - { crate: ios, target: x86_64-apple-ios, runner: macos-14, features: "models3d,image-extras" }
+          - { crate: tvos, target: aarch64-apple-tvos, runner: macos-14, features: "models3d,image-extras" }
+          - { crate: tvos, target: aarch64-apple-tvos-sim, runner: macos-14, features: "models3d,image-extras" }
+          - { crate: visionos, target: aarch64-apple-visionos, runner: macos-14, features: "models3d,image-extras" }
+          - { crate: visionos, target: aarch64-apple-visionos-sim, runner: macos-14, features: "models3d,image-extras" }
+          - { crate: watchos, target: aarch64-apple-watchos, runner: macos-14, features: "" }
+          - { crate: watchos, target: aarch64-apple-watchos-sim, runner: macos-14, features: "" }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Android native build tools
+        if: matrix.crate == 'android'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build build-essential
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/${{ matrix.crate }}/target
+          key: ${{ runner.os }}-${{ matrix.crate }}-${{ matrix.target }}-${{ hashFiles(format('native/{0}/Cargo.lock', matrix.crate)) }}
+          restore-keys: ${{ runner.os }}-${{ matrix.crate }}-${{ matrix.target }}-
+
+      - name: cross / target-check
+        env:
+          BLOOM_CROSS_CRATE: ${{ matrix.crate }}
+          BLOOM_CROSS_TARGET: ${{ matrix.target }}
+          BLOOM_CROSS_FEATURES: ${{ matrix.features }}
+        run: ./scripts/ci-check.sh --cross --component target-check
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: mobile-${{ matrix.crate }}-${{ matrix.target }}
+
+  # ---------------------------------------------------------------------------
   # Web / WASM. No submodule needed: bloom-shared's build.rs early-exits on
   # target_arch=wasm32, and web physics is bridged to JoltPhysics.js at
   # runtime rather than a native Jolt static lib.

@@ -5,6 +5,7 @@
 #   ./scripts/ci-check.sh --quick
 #   ./scripts/ci-check.sh --full
 #   ./scripts/ci-check.sh --web
+#   ./scripts/ci-check.sh --cross
 #   ./scripts/ci-check.sh --hardware
 #   ./scripts/ci-check.sh --quick --component lint
 #   ./scripts/ci-check.sh --list
@@ -27,7 +28,7 @@ usage() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --quick|--full|--web|--hardware)
+    --quick|--full|--web|--cross|--hardware)
       if [ -n "$LANE" ]; then
         echo "choose exactly one lane" >&2
         exit 2
@@ -79,6 +80,7 @@ lane_components() {
     quick) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory" ;;
     full) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract example-inventory host-build wasm-build" ;;
     web) printf '%s\n' "wasm-check wasm-build browser-smoke" ;;
+    cross) printf '%s\n' "target-check" ;;
     hardware) printf '%s\n' "example-compile quality-check quality-faults quality-run" ;;
     *)
       echo "unknown lane: $1" >&2
@@ -91,6 +93,7 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   printf 'quick\t%s\n' "$(lane_components quick)"
   printf 'full\t%s\n' "$(lane_components full)"
   printf 'web\t%s\n' "$(lane_components web)"
+  printf 'cross\t%s\n' "$(lane_components cross)"
   printf 'hardware\t%s\n' "$(lane_components hardware)"
   exit 0
 fi
@@ -272,6 +275,68 @@ run_component() {
     browser-smoke)
       hr "Bloom WebGPU real-browser known-frame smoke"
       python3 tools/ci/web_smoke.py
+      ;;
+    target-check)
+      cross_crate="${BLOOM_CROSS_CRATE:-}"
+      cross_target="${BLOOM_CROSS_TARGET:-}"
+      cross_features="${BLOOM_CROSS_FEATURES:-}"
+      if [ -z "$cross_crate" ] || [ -z "$cross_target" ]; then
+        echo "BLOOM_CROSS_CRATE and BLOOM_CROSS_TARGET are required for target-check" >&2
+        return 2
+      fi
+      case "$cross_crate" in
+        android|ios|tvos|visionos|watchos) ;;
+        *)
+          echo "unsupported cross-target crate: $cross_crate" >&2
+          return 2
+          ;;
+      esac
+      case "$cross_target" in
+        *-linux-android*)
+          android_ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
+          if [ -z "$android_ndk" ]; then
+            echo "ANDROID_NDK_HOME or ANDROID_NDK_LATEST_HOME is required for Android checks" >&2
+            return 2
+          fi
+          case "$host_os" in
+            Linux) android_host="linux-x86_64" ;;
+            Darwin) android_host="darwin-x86_64" ;;
+            *)
+              echo "unsupported Android NDK host: $host_os" >&2
+              return 2
+              ;;
+          esac
+          android_api="${BLOOM_ANDROID_API:-24}"
+          case "$cross_target" in
+            aarch64-linux-android) android_clang="aarch64-linux-android${android_api}-clang" ;;
+            armv7-linux-androideabi) android_clang="armv7a-linux-androideabi${android_api}-clang" ;;
+            x86_64-linux-android) android_clang="x86_64-linux-android${android_api}-clang" ;;
+            *)
+              echo "unsupported Android Rust target: $cross_target" >&2
+              return 2
+              ;;
+          esac
+          android_bin="$android_ndk/toolchains/llvm/prebuilt/$android_host/bin"
+          android_cc="$android_bin/$android_clang"
+          if [ ! -x "$android_cc" ]; then
+            echo "Android compiler not found: $android_cc" >&2
+            return 2
+          fi
+          target_env="$(printf '%s' "$cross_target" | tr '-' '_')"
+          target_env_upper="$(printf '%s' "$target_env" | tr '[:lower:]' '[:upper:]')"
+          export "CC_${target_env}=$android_cc"
+          export "CXX_${target_env}=${android_cc}++"
+          export "AR_${target_env}=$android_bin/llvm-ar"
+          export "CARGO_TARGET_${target_env_upper}_LINKER=$android_cc"
+          export ANDROID_PLATFORM="android-$android_api"
+          ;;
+      esac
+      hr "bloom-$cross_crate: cargo check ($cross_target)"
+      cargo_args=(check --locked --target "$cross_target" --no-default-features)
+      if [ -n "$cross_features" ]; then
+        cargo_args+=(--features "$cross_features")
+      fi
+      ( cd "native/$cross_crate" && cargo "${cargo_args[@]}" )
       ;;
     example-compile)
       hr "compile every canonical TypeScript example"

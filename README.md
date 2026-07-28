@@ -174,6 +174,18 @@ including its native crate and the packaged WebAssembly build:
 ./scripts/ci-check.sh --full
 ```
 
+Mobile jobs use the same entry point through the `cross` lane. Select one
+declared crate/target with `BLOOM_CROSS_CRATE`, `BLOOM_CROSS_TARGET`, and
+optionally `BLOOM_CROSS_FEATURES`; Android additionally requires
+`ANDROID_NDK_HOME` or `ANDROID_NDK_LATEST_HOME`. For example:
+
+```bash
+BLOOM_CROSS_CRATE=ios \
+BLOOM_CROSS_TARGET=aarch64-apple-ios-sim \
+BLOOM_CROSS_FEATURES=models3d,image-extras \
+./scripts/ci-check.sh --cross --component target-check
+```
+
 Every invocation writes a machine-readable `bloom-ci-summary-v1` result under
 `target/ci/`. GitHub Actions selects components of these same lanes so its
 command inventory cannot silently differ from local development.

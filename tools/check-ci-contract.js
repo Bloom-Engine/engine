@@ -13,6 +13,7 @@ const expectedLanes = new Map([
   ["quick", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "example-inventory"]],
   ["full", ["contracts", "lint", "shared-tests", "wasm-check", "quality-contract", "example-inventory", "host-build", "wasm-build"]],
   ["web", ["wasm-check", "wasm-build", "browser-smoke"]],
+  ["cross", ["target-check"]],
   ["hardware", ["example-compile", "quality-check", "quality-faults", "quality-run"]],
 ]);
 
@@ -53,6 +54,7 @@ const workflowCommands = [
   "./scripts/ci-check.sh --web --component wasm-check",
   "./scripts/ci-check.sh --web --component wasm-build",
   "./scripts/ci-check.sh --web --component browser-smoke",
+  "./scripts/ci-check.sh --cross --component target-check",
   "./scripts/ci-check.sh --quick --component quality-contract",
   "./scripts/ci-check.sh --hardware --component example-compile",
   "./scripts/ci-check.sh --hardware --component quality-check",
@@ -90,7 +92,7 @@ for (const evidencePath of [
     failures += 1;
   }
 }
-if ((testWorkflow.match(/uses: \.\/\.github\/actions\/upload-ci-failure/g) || []).length !== 8) {
+if ((testWorkflow.match(/uses: \.\/\.github\/actions\/upload-ci-failure/g) || []).length !== 9) {
   console.error("FAIL  every Tests job must upload failure evidence");
   failures += 1;
 }
