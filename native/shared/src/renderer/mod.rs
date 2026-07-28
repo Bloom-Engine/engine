@@ -463,6 +463,7 @@ pub struct Renderer {
     lighting_uniforms: LightingUniforms,
     lighting_upload_tracker: lighting_upload::LightingUploadTracker,
     frame_resource_stats: frame_resource_stats::FrameResourceStats,
+    steady_state_frame_resource_stats: frame_resource_stats::FrameResourceStats,
     lighting_buffer: wgpu::Buffer,
     lighting_bind_group: wgpu::BindGroup,
 
@@ -1583,19 +1584,13 @@ pub struct Renderer {
     _default_normal_texture: wgpu::Texture,
     pub default_normal_view: wgpu::TextureView,
 
-    /// Phase 1c — the new shader-ABI material draw path. Opt-in via
-    /// `compile_material` + `submit_material_draw`; existing draws are
-    /// untouched.
+    /// Opt-in shader-ABI material draw path.
     pub material_system: material_system::MaterialSystem,
 
-    /// Phase 3 — short-lived texture pool. Feeds scene-colour
-    /// snapshots (Phase 4b), depth-as-sampled linearisations (Phase 4b),
-    /// and future graph-managed intermediates.
+    /// Short-lived graph-managed textures and buffers.
     pub transient_pool: transient::TransientPool,
 
-    /// #129 — immutable frame topologies keyed only by configuration values
-    /// that change pass/resource contracts. Per-frame uniforms never enter
-    /// this cache key.
+    /// Immutable frame topologies keyed only by pass/resource configuration.
     frame_plan_cache: graph::PlanCache<graph::FramePlanKey>,
     /// Most recently selected plan, retained for diagnostics/capture tools.
     last_frame_plan: Option<std::sync::Arc<graph::CompiledGraph>>,
@@ -7562,6 +7557,7 @@ impl Renderer {
             lighting_uniforms,
             lighting_upload_tracker: lighting_upload::LightingUploadTracker::new(lighting_uniforms),
             frame_resource_stats: frame_resource_stats::FrameResourceStats::default(),
+            steady_state_frame_resource_stats: Default::default(),
             lighting_buffer,
             lighting_bind_group,
             joint_buffer,
@@ -11986,6 +11982,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("bloom_encoder"),
             });
+        self.frame_resource_stats.created_command_encoder();
 
         // Upload 2D data to persistent GPU buffers
         let has_2d = !self.vertices_2d.is_empty();
@@ -12164,6 +12161,7 @@ impl Renderer {
         if let Some(out) = surface_output {
             self.present_frame(out);
         }
+        self.finish_frame_resource_stats();
     }
 
     /// Like end_frame, but also renders retained scene graph nodes.
@@ -12250,6 +12248,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("bloom_encoder"),
             });
+        self.frame_resource_stats.created_command_encoder();
 
         // Upload immediate-mode 2D data
         profiler.begin("upload_geometry");
@@ -12550,6 +12549,7 @@ impl Renderer {
         // coherent set of dirty ranges.
         self.flush_lighting_uniforms();
         profiler.resolve(&mut encoder);
+        self.finish_frame_resource_stats();
 
         // Capture copies were encoded by the terminal graph node. Mapping must
         // happen after submission; synchronous GPU readback remains unavailable

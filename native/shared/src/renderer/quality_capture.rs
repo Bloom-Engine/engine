@@ -1277,12 +1277,16 @@ impl Renderer {
         out.push_str("\"total\":");
         out.push_str(
             &self
-                .frame_resource_stats
+                .steady_state_frame_resource_stats
                 .total_bind_group_creations()
                 .to_string(),
         );
         out.push_str(",\"sites\":{");
-        for (index, (site, count)) in self.frame_resource_stats.bind_group_creations().enumerate() {
+        for (index, (site, count)) in self
+            .steady_state_frame_resource_stats
+            .bind_group_creations()
+            .enumerate()
+        {
             if index != 0 {
                 out.push(',');
             }
@@ -1290,7 +1294,42 @@ impl Renderer {
             out.push(':');
             out.push_str(&count.to_string());
         }
-        out.push_str("}}}");
+        out.push_str("}},\"graph_compiles\":");
+        out.push_str(
+            &self
+                .steady_state_frame_resource_stats
+                .graph_compiles()
+                .to_string(),
+        );
+        out.push_str(",\"command_encoder_creations\":{\"total\":");
+        out.push_str(
+            &self
+                .steady_state_frame_resource_stats
+                .command_encoder_creations()
+                .to_string(),
+        );
+        out.push_str(",\"sites\":{\"frame_submission\":");
+        out.push_str(
+            &self
+                .steady_state_frame_resource_stats
+                .command_encoder_creations()
+                .to_string(),
+        );
+        out.push_str("}},\"transient_physical_creations\":{\"textures\":");
+        out.push_str(
+            &self
+                .steady_state_frame_resource_stats
+                .physical_texture_creations()
+                .to_string(),
+        );
+        out.push_str(",\"buffers\":");
+        out.push_str(
+            &self
+                .steady_state_frame_resource_stats
+                .physical_buffer_creations()
+                .to_string(),
+        );
+        out.push_str("}}");
         let graph_stats = self.render_graph_cache_stats();
         out.push_str(",\"render_graph\":{");
         out.push_str("\"compile_count\":");

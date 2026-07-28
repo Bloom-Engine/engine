@@ -139,6 +139,7 @@ impl Renderer {
     ) -> Result<Arc<graph::CompiledGraph>, graph::CompileError> {
         let key = self.frame_plan_key(render_target_output);
         let output_format = self.output_format;
+        let compile_count_before = self.frame_plan_cache.stats().compile_count;
         let plan = self.frame_plan_cache.get_or_compile(
             key,
             // The allocator is conservative: exact descriptor/alias-class
@@ -147,6 +148,9 @@ impl Renderer {
             graph::CompileOptions::CONSERVATIVE_ALIASING,
             || graph::build_renderer_frame_plan(key, output_format),
         )?;
+        let compile_count_after = self.frame_plan_cache.stats().compile_count;
+        self.frame_resource_stats
+            .created_graph_compiles(compile_count_after.saturating_sub(compile_count_before));
         self.maybe_dump_frame_plan(&plan);
         self.last_frame_plan = Some(Arc::clone(&plan));
         Ok(plan)

@@ -62,16 +62,62 @@ impl BindGroupCreationSite {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct FrameResourceStats {
     bind_group_creations: [u32; BindGroupCreationSite::COUNT],
+    graph_compiles: u32,
+    command_encoder_creations: u32,
+    physical_texture_creations: u32,
+    physical_buffer_creations: u32,
 }
 
 impl FrameResourceStats {
     pub(super) fn begin_frame(&mut self) {
         self.bind_group_creations.fill(0);
+        self.graph_compiles = 0;
+        self.command_encoder_creations = 0;
+        self.physical_texture_creations = 0;
+        self.physical_buffer_creations = 0;
     }
 
     pub(super) fn created_bind_group(&mut self, site: BindGroupCreationSite) {
         let count = &mut self.bind_group_creations[site as usize];
         *count = count.saturating_add(1);
+    }
+
+    pub(super) fn created_graph_compiles(&mut self, count: u64) {
+        self.graph_compiles = self
+            .graph_compiles
+            .saturating_add(count.min(u32::MAX as u64) as u32);
+    }
+
+    pub(super) fn created_command_encoder(&mut self) {
+        self.command_encoder_creations = self.command_encoder_creations.saturating_add(1);
+    }
+
+    pub(super) fn created_physical_textures(&mut self, count: u32) {
+        self.physical_texture_creations = self.physical_texture_creations.saturating_add(count);
+    }
+
+    pub(super) fn created_physical_buffers(&mut self, count: u32) {
+        self.physical_buffer_creations = self.physical_buffer_creations.saturating_add(count);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn graph_compiles(&self) -> u32 {
+        self.graph_compiles
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn command_encoder_creations(&self) -> u32 {
+        self.command_encoder_creations
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn physical_texture_creations(&self) -> u32 {
+        self.physical_texture_creations
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn physical_buffer_creations(&self) -> u32 {
+        self.physical_buffer_creations
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -92,6 +138,17 @@ impl FrameResourceStats {
     }
 }
 
+impl super::Renderer {
+    pub(super) fn finish_frame_resource_stats(&mut self) {
+        if cfg!(not(target_arch = "wasm32"))
+            && (self.screenshot_requested || self.pending_quality_capture_dir.is_some())
+        {
+            return;
+        }
+        self.steady_state_frame_resource_stats = self.frame_resource_stats;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BindGroupCreationSite, FrameResourceStats};
@@ -102,8 +159,16 @@ mod tests {
         stats.created_bind_group(BindGroupCreationSite::Taa);
         stats.created_bind_group(BindGroupCreationSite::CustomPostPass);
         stats.created_bind_group(BindGroupCreationSite::CustomPostPass);
+        stats.created_graph_compiles(1);
+        stats.created_command_encoder();
+        stats.created_physical_textures(2);
+        stats.created_physical_buffers(3);
 
         assert_eq!(stats.total_bind_group_creations(), 3);
+        assert_eq!(stats.graph_compiles(), 1);
+        assert_eq!(stats.command_encoder_creations(), 1);
+        assert_eq!(stats.physical_texture_creations(), 2);
+        assert_eq!(stats.physical_buffer_creations(), 3);
         let custom = stats
             .bind_group_creations()
             .find(|(site, _)| *site == BindGroupCreationSite::CustomPostPass)
@@ -114,5 +179,9 @@ mod tests {
         stats.begin_frame();
         assert_eq!(stats.total_bind_group_creations(), 0);
         assert!(stats.bind_group_creations().all(|(_, count)| count == 0));
+        assert_eq!(stats.graph_compiles(), 0);
+        assert_eq!(stats.command_encoder_creations(), 0);
+        assert_eq!(stats.physical_texture_creations(), 0);
+        assert_eq!(stats.physical_buffer_creations(), 0);
     }
 }

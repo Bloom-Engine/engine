@@ -122,6 +122,12 @@ struct CompiledPlan {
     resource_to_slot: HashMap<graph::ResourceId, usize>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PhysicalCreationStats {
+    pub textures: u32,
+    pub buffers: u32,
+}
+
 /// Per-frame transient manager. Usage pattern:
 ///
 /// ```ignore
@@ -210,7 +216,7 @@ impl TransientPool {
         plan: &graph::CompiledGraph,
         render_extent: (u32, u32),
         output_extent: (u32, u32),
-    ) -> Result<(), String> {
+    ) -> Result<PhysicalCreationStats, String> {
         let extent_key = (render_extent, output_extent);
         if self.compiled_extent != extent_key {
             if self.compiled_extent != ((0, 0), (0, 0)) && !self.compiled_plans.is_empty() {
@@ -220,11 +226,12 @@ impl TransientPool {
             self.compiled_extent = extent_key;
         }
         if self.compiled_plans.contains_key(&plan.plan_id) {
-            return Ok(());
+            return Ok(PhysicalCreationStats::default());
         }
 
         let mut slots = Vec::with_capacity(plan.allocations.len());
         let mut physical_to_slot = HashMap::with_capacity(plan.allocations.len());
+        let mut creations = PhysicalCreationStats::default();
         for allocation in &plan.allocations {
             let label = format!(
                 "bloom_graph_{:016x}_physical_{}",
@@ -254,16 +261,19 @@ impl TransientPool {
                         usage,
                         view_formats: &[],
                     });
+                    creations.textures = creations.textures.saturating_add(1);
                     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                     CompiledSlot::Texture { texture, view }
                 }
                 graph::ResourceDesc::Buffer(desc) => {
-                    CompiledSlot::Buffer(device.create_buffer(&wgpu::BufferDescriptor {
+                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&label),
                         size: desc.size.max(1),
                         usage: compiled_buffer_usage(desc.allowed_usage),
                         mapped_at_creation: false,
-                    }))
+                    });
+                    creations.buffers = creations.buffers.saturating_add(1);
+                    CompiledSlot::Buffer(buffer)
                 }
             };
             let slot_index = slots.len();
@@ -289,7 +299,7 @@ impl TransientPool {
                 resource_to_slot,
             },
         );
-        Ok(())
+        Ok(creations)
     }
 
     pub fn compiled_texture(
@@ -890,23 +900,35 @@ mod tests {
         let depth = plan.resource("translucent-scene-depth").unwrap().id;
         let mut pool = TransientPool::new();
 
-        pool.prepare_compiled_plan(&device, &plan, (960, 540), (1920, 1080))
+        let first = pool
+            .prepare_compiled_plan(&device, &plan, (960, 540), (1920, 1080))
             .unwrap();
+        assert_eq!(
+            first,
+            PhysicalCreationStats {
+                textures: 2,
+                buffers: 0
+            }
+        );
         assert_eq!(pool.compiled_slot_count(), 2);
         assert!(pool.compiled_texture(plan.plan_id, color).is_some());
         assert!(pool.compiled_view(plan.plan_id, depth).is_some());
         let epoch = pool.rebuild_epoch;
 
         // Stable plan/extent is a pure cache hit.
-        pool.prepare_compiled_plan(&device, &plan, (960, 540), (1920, 1080))
+        let stable = pool
+            .prepare_compiled_plan(&device, &plan, (960, 540), (1920, 1080))
             .unwrap();
+        assert_eq!(stable, PhysicalCreationStats::default());
         assert_eq!(pool.compiled_slot_count(), 2);
         assert_eq!(pool.rebuild_epoch, epoch);
 
         // Internal resolution changes establish a new allocation generation
         // even when the output surface itself did not resize.
-        pool.prepare_compiled_plan(&device, &plan, (1280, 720), (1920, 1080))
+        let resized = pool
+            .prepare_compiled_plan(&device, &plan, (1280, 720), (1920, 1080))
             .unwrap();
+        assert_eq!(resized, first);
         assert_eq!(pool.compiled_slot_count(), 2);
         assert_eq!(pool.rebuild_epoch, epoch + 1);
     }
@@ -942,8 +964,16 @@ mod tests {
         assert_eq!(plan.allocations.len(), 1);
 
         let mut pool = TransientPool::new();
-        pool.prepare_compiled_plan(&device, &plan, (1, 1), (1, 1))
+        let creations = pool
+            .prepare_compiled_plan(&device, &plan, (1, 1), (1, 1))
             .unwrap();
+        assert_eq!(
+            creations,
+            PhysicalCreationStats {
+                textures: 0,
+                buffers: 1
+            }
+        );
         assert_eq!(pool.compiled_slot_count(), 1);
         assert!(pool
             .compiled_buffer(plan.plan_id, plan.resource("a").unwrap().id)

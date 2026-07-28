@@ -77,6 +77,27 @@ fn golden_many_point_lights() {
         Some(0),
         "steady ordinary TAA must reuse its previous-history-specific bind group"
     );
+    let resources = &paths["steady_state_resources"];
+    assert_eq!(
+        resources["graph_compiles"].as_u64(),
+        Some(0),
+        "stable topology must not compile after warm-up"
+    );
+    assert_eq!(
+        resources["command_encoder_creations"]["total"].as_u64(),
+        Some(1),
+        "steady rendering must use one submission encoder"
+    );
+    assert_eq!(
+        resources["transient_physical_creations"]["textures"].as_u64(),
+        Some(0),
+        "stable graph must not allocate physical textures after warm-up"
+    );
+    assert_eq!(
+        resources["transient_physical_creations"]["buffers"].as_u64(),
+        Some(0),
+        "stable graph must not allocate physical buffers after warm-up"
+    );
 }
 
 #[test]

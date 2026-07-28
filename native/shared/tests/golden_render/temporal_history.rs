@@ -1204,6 +1204,16 @@ fn retained_rigid_and_reactive_motion_sequences_bound_trails() {
         Some(0),
         "warmed reactive TAA must reuse its plan/generation/history-specific bind group"
     );
+    assert_eq!(
+        paths["steady_state_resources"]["graph_compiles"].as_u64(),
+        Some(0),
+        "reactive topology must not recompile after warm-up"
+    );
+    assert_eq!(
+        paths["steady_state_resources"]["transient_physical_creations"]["textures"].as_u64(),
+        Some(0),
+        "reactive graph textures must be reused after warm-up"
+    );
 
     eng.renderer.resize(320, 192, 320, 192);
     advance(&mut eng, 3);
@@ -1217,6 +1227,17 @@ fn retained_rigid_and_reactive_motion_sequences_bound_trails() {
             .as_u64(),
         Some(0),
         "reactive TAA must rebuild for resize generation then return to zero churn"
+    );
+    assert_eq!(
+        resized_paths["steady_state_resources"]["graph_compiles"].as_u64(),
+        Some(0),
+        "settled resize generation must return to cached topology"
+    );
+    assert_eq!(
+        resized_paths["steady_state_resources"]["transient_physical_creations"]["textures"]
+            .as_u64(),
+        Some(0),
+        "settled resize generation must reuse graph textures"
     );
 }
 

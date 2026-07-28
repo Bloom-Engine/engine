@@ -323,16 +323,34 @@ class ReproducibilityTests(unittest.TestCase):
                 }
             },
             "steady_state_resources": {
-                "bind_group_creations": {"total": 0, "sites": sites}
+                "bind_group_creations": {"total": 0, "sites": sites},
+                "graph_compiles": 0,
+                "command_encoder_creations": {
+                    "total": 1,
+                    "sites": {"frame_submission": 1},
+                },
+                "transient_physical_creations": {"textures": 0, "buffers": 0},
             },
         }
         self.assertEqual(quality.steady_state_renderer_failures(renderer_paths), [])
 
+        resources = renderer_paths["steady_state_resources"]
         sites["final_composite"] = 1
-        renderer_paths["steady_state_resources"]["bind_group_creations"]["total"] = 1
+        resources["bind_group_creations"]["total"] = 1
+        resources["graph_compiles"] = 1
+        resources["command_encoder_creations"]["total"] = 2
+        resources["transient_physical_creations"]["textures"] = 1
         failures = quality.steady_state_renderer_failures(renderer_paths)
         self.assertIn(
             "steady-state bind-group creation remained after warm-up", failures
+        )
+        self.assertIn("render graph recompiled after warm-up", failures)
+        self.assertIn(
+            "command-encoder total does not match the frame-submission site", failures
+        )
+        self.assertIn("steady frame must create exactly one submission encoder", failures)
+        self.assertIn(
+            "transient physical textures were created after warm-up", failures
         )
 
     def test_telemetry_contract_rejects_vsync_and_wrong_frame_count(self) -> None:

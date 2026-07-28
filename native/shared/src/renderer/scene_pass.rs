@@ -883,7 +883,8 @@ impl Renderer {
                     .last_frame_plan
                     .as_ref()
                     .expect("active frame plan is installed before translucent execution");
-                self.transient_pool
+                let creations = self
+                    .transient_pool
                     .prepare_compiled_plan(
                         &self.device,
                         plan,
@@ -893,6 +894,10 @@ impl Renderer {
                     .unwrap_or_else(|error| {
                         panic!("compiled transient allocation failed: {error}")
                     });
+                self.frame_resource_stats
+                    .created_physical_textures(creations.textures);
+                self.frame_resource_stats
+                    .created_physical_buffers(creations.buffers);
             }
             let compiled_snapshots = needs_scene.then(|| {
                 let plan = self

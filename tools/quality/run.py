@@ -763,6 +763,42 @@ def steady_state_renderer_failures(renderer_paths: Mapping[str, Any]) -> list[st
         failures.append("steady-state bind-group total does not match named sites")
     elif total != 0:
         failures.append("steady-state bind-group creation remained after warm-up")
+
+    graph_compiles = resources.get("graph_compiles")
+    if (
+        not isinstance(graph_compiles, int)
+        or isinstance(graph_compiles, bool)
+        or graph_compiles < 0
+    ):
+        failures.append("steady-state graph compile count is not a non-negative integer")
+    elif graph_compiles != 0:
+        failures.append("render graph recompiled after warm-up")
+
+    encoders = resources.get("command_encoder_creations")
+    if not isinstance(encoders, dict):
+        failures.append("renderer paths did not report command-encoder creations")
+    else:
+        encoder_total = encoders.get("total")
+        encoder_sites = encoders.get("sites")
+        if encoder_sites != {"frame_submission": encoder_total}:
+            failures.append("command-encoder total does not match the frame-submission site")
+        if encoder_total != 1:
+            failures.append("steady frame must create exactly one submission encoder")
+
+    physical = resources.get("transient_physical_creations")
+    if not isinstance(physical, dict):
+        failures.append("renderer paths did not report transient physical creations")
+    else:
+        for kind in ("textures", "buffers"):
+            count = physical.get(kind)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                failures.append(
+                    f"steady-state transient physical {kind} count is invalid"
+                )
+            elif count != 0:
+                failures.append(
+                    f"transient physical {kind} were created after warm-up"
+                )
     return failures
 
 
