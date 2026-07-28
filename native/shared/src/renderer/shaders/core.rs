@@ -106,13 +106,13 @@ struct VertexOutput3D {
 @group(1) @binding(0) var<uniform> lighting: Lighting;
 @group(2) @binding(0) var tex3d: texture_2d<f32>;
 @group(2) @binding(1) var tex3d_sampler: sampler;
-@group(3) @binding(0) var<uniform> joints: JointMatrices;
+@group(3) @binding(0) var<uniform> joints: JointMatrices; @group(3) @binding(1) var<uniform> joints_prev: JointMatrices;
 
 @vertex
 fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
     var out: VertexOutput3D;
     let total_weight = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
-    var pos = vec4<f32>(in.position, 1.0);
+    var pos = vec4<f32>(in.position, 1.0); var prev_pos = pos;
     var norm = vec4<f32>(in.normal, 0.0);
     if (total_weight > 0.01) {
         let j0 = u32(in.joints.x); let j1 = u32(in.joints.y);
@@ -125,13 +125,13 @@ fn vs_main_3d(in: VertexInput3D) -> VertexOutput3D {
                          + joints.matrices[j1] * norm * in.weights.y
                          + joints.matrices[j2] * norm * in.weights.z
                          + joints.matrices[j3] * norm * in.weights.w;
+        prev_pos = joints_prev.matrices[j0] * pos * in.weights.x + joints_prev.matrices[j1] * pos * in.weights.y + joints_prev.matrices[j2] * pos * in.weights.z + joints_prev.matrices[j3] * pos * in.weights.w;
         pos = skinned_pos;
         norm = skinned_norm;
-    }
+    } else if (in.previous_position.w > 1.5) { prev_pos = vec4<f32>(in.previous_position.xyz, 1.0); } // immediate primitive history
     let curr = u.mvp * pos;
     out.clip_position = curr;
     out.curr_clip = curr;
-    let prev_pos = select(pos, vec4<f32>(in.previous_position.xyz, 1.0), in.previous_position.w > 1.5);
     out.prev_clip = u.prev_mvp * prev_pos;
     out.normal = normalize((u.model * norm).xyz);
     out.world_pos = (u.model * pos).xyz;

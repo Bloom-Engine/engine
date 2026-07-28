@@ -75,6 +75,18 @@ fn evaluate_motion_recovery(label: &str, old_pose: &[u8], frames: &[Vec<u8>]) {
     );
 }
 
+fn configure_taa_motion_corpus(renderer: &mut Renderer) {
+    renderer.set_taa_enabled(true);
+    renderer.set_render_scale(1.0);
+    renderer.set_ssao_enabled(false);
+    renderer.set_ssr_enabled(false);
+    renderer.set_ssgi_enabled(false);
+    renderer.set_bloom_enabled(false);
+    renderer.set_auto_exposure(false);
+    renderer.set_motion_blur_enabled(false);
+    renderer.set_shadows_enabled(false);
+}
+
 #[test]
 fn ssr_history_lifetime_is_independent_from_the_taa_frame_counter() {
     let Some(mut eng) = try_engine() else {
@@ -966,16 +978,7 @@ fn camera_motion_sequence_bounds_ghosting_flicker_and_cut_residue() {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    let r = &mut eng.renderer;
-    r.set_taa_enabled(true);
-    r.set_render_scale(1.0);
-    r.set_ssao_enabled(false);
-    r.set_ssr_enabled(false);
-    r.set_ssgi_enabled(false);
-    r.set_bloom_enabled(false);
-    r.set_auto_exposure(false);
-    r.set_motion_blur_enabled(false);
-    r.set_shadows_enabled(false);
+    configure_taa_motion_corpus(&mut eng.renderer);
 
     let draw_pose = |eng: &mut EngineState, angle: f32, fov: f32| {
         let radius = 7.2;
@@ -1136,17 +1139,8 @@ fn retained_rigid_and_reactive_motion_sequences_bound_trails() {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    let r = &mut eng.renderer;
-    r.set_taa_enabled(true);
-    r.set_render_scale(1.0);
-    r.set_ssao_enabled(false);
-    r.set_ssr_enabled(false);
-    r.set_ssgi_enabled(false);
-    r.set_bloom_enabled(false);
-    r.set_auto_exposure(false);
-    r.set_motion_blur_enabled(false);
-    r.set_shadows_enabled(false);
-    r.set_transparency_composition_mode(0);
+    configure_taa_motion_corpus(&mut eng.renderer);
+    eng.renderer.set_transparency_composition_mode(0);
 
     let (vertices, indices) = cube_verts(0.9, [0.95, 0.08, 0.04, 1.0]);
     let node = eng.scene.create_node();
@@ -1247,16 +1241,7 @@ fn immediate_primitive_motion_writes_velocity_and_bounds_trails() {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    let r = &mut eng.renderer;
-    r.set_taa_enabled(true);
-    r.set_render_scale(1.0);
-    r.set_ssao_enabled(false);
-    r.set_ssr_enabled(false);
-    r.set_ssgi_enabled(false);
-    r.set_bloom_enabled(false);
-    r.set_auto_exposure(false);
-    r.set_motion_blur_enabled(false);
-    r.set_shadows_enabled(false);
+    configure_taa_motion_corpus(&mut eng.renderer);
 
     let draw_pose = |eng: &mut EngineState, moving_x: f64| {
         let r = &mut eng.renderer;
@@ -1385,17 +1370,8 @@ fn fs_reactive(in: VsOut) -> ReactiveTranslucentOut {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    let r = &mut eng.renderer;
-    r.set_taa_enabled(true);
-    r.set_render_scale(1.0);
-    r.set_ssao_enabled(false);
-    r.set_ssr_enabled(false);
-    r.set_ssgi_enabled(false);
-    r.set_bloom_enabled(false);
-    r.set_auto_exposure(false);
-    r.set_motion_blur_enabled(false);
-    r.set_shadows_enabled(false);
-    r.set_transparency_composition_mode(0);
+    configure_taa_motion_corpus(&mut eng.renderer);
+    eng.renderer.set_transparency_composition_mode(0);
 
     let vertex = |position| Vertex3D {
         position,
@@ -1522,6 +1498,104 @@ fn fs_reactive(in: VsOut) -> ReactiveTranslucentOut {
 }
 
 #[test]
+fn legacy_skinned_motion_uses_staged_previous_palette_and_bounds_trails() {
+    const PALETTE_KEY: u64 = 0x7AA5_2001;
+    const IDENTITY: [[f32; 4]; 4] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    fn palette(bend: f32) -> [[[f32; 4]; 4]; 2] {
+        let (sin, cos) = bend.sin_cos();
+        [
+            IDENTITY,
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, cos, sin, 0.0],
+                [0.0, -sin, cos, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        ]
+    }
+
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    configure_taa_motion_corpus(&mut eng.renderer);
+
+    let (mut vertices, indices) = cube_verts(0.9, [0.95, 0.12, 0.035, 1.0]);
+    for vertex in &mut vertices {
+        let upper = vertex.position[1] > 0.0;
+        vertex.joints = if upper {
+            [1.0, 0.0, 0.0, 0.0]
+        } else {
+            [0.0; 4]
+        };
+        vertex.weights = [1.0, 0.0, 0.0, 0.0];
+    }
+
+    let draw_scene = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(7.0, 10.0, 20.0, 255.0);
+        r.begin_mode_3d(0.0, 2.2, 6.5, 0.0, 0.8, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.add_directional_light(-0.4, -1.0, -0.25, 1.0, 0.95, 0.88, 2.2);
+        r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 30.0, 38.0, 52.0, 255.0);
+        r.draw_cube(0.0, 1.1, -1.8, 5.0, 3.2, 0.35, 30.0, 170.0, 235.0, 255.0);
+    };
+    let capture_pose = |eng: &mut EngineState, x: f32, bend: f32, facing: f32| {
+        render(eng, 1, |eng| {
+            draw_scene(eng);
+            let (rot_sin, rot_cos) = facing.sin_cos();
+            eng.renderer.set_joint_matrices_scaled(
+                PALETTE_KEY,
+                &palette(bend),
+                1.0,
+                [x, 1.0, 0.0],
+                rot_sin,
+                rot_cos,
+            );
+            eng.renderer
+                .draw_model_mesh(&vertices, &indices, [0.0; 3], 1.0);
+        })
+        .2
+    };
+
+    eng.renderer.reset_temporal_history();
+    for _ in 0..8 {
+        capture_pose(&mut eng, -1.5, -0.55, -0.45);
+    }
+    let old_pose = capture_pose(&mut eng, -1.5, -0.55, -0.45);
+    let directory =
+        std::env::temp_dir().join(format!("bloom-legacy-skin-motion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    let mut frames = Vec::new();
+    for _ in 0..24 {
+        frames.push(capture_pose(&mut eng, 1.5, 0.75, 0.6));
+    }
+
+    let motion = image::open(directory.join("taa-motion.png"))
+        .expect("legacy skinned capture did not emit the TAA velocity map")
+        .to_rgb8();
+    let moving_pixels = motion.pixels().filter(|pixel| pixel[2] > 8).count();
+    eprintln!("temporal-corpus legacy-skinned moving_pixels={moving_pixels}");
+    assert!(
+        moving_pixels >= 250,
+        "legacy skinned pose wrote no meaningful velocity"
+    );
+    evaluate_motion_recovery("legacy-skinned", &old_pose, &frames);
+
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept legacy-skinned diagnostics at {directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 fn cached_skinned_motion_sequence_bounds_animation_trails() {
     const HANDLE: u64 = 0x7AA5_0001;
     const PALETTE_KEY: u64 = 0x7AA5_1001;
@@ -1549,16 +1623,7 @@ fn cached_skinned_motion_sequence_bounds_animation_trails() {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    let r = &mut eng.renderer;
-    r.set_taa_enabled(true);
-    r.set_render_scale(1.0);
-    r.set_ssao_enabled(false);
-    r.set_ssr_enabled(false);
-    r.set_ssgi_enabled(false);
-    r.set_bloom_enabled(false);
-    r.set_auto_exposure(false);
-    r.set_motion_blur_enabled(false);
-    r.set_shadows_enabled(false);
+    configure_taa_motion_corpus(&mut eng.renderer);
 
     let (mut vertices, indices) = cube_verts(0.9, [0.95, 0.12, 0.035, 1.0]);
     for vertex in &mut vertices {
@@ -1644,16 +1709,7 @@ fn cached_alpha_tested_card_motion_writes_velocity_and_bounds_trails() {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    let r = &mut eng.renderer;
-    r.set_taa_enabled(true);
-    r.set_render_scale(1.0);
-    r.set_ssao_enabled(false);
-    r.set_ssr_enabled(false);
-    r.set_ssgi_enabled(false);
-    r.set_bloom_enabled(false);
-    r.set_auto_exposure(false);
-    r.set_motion_blur_enabled(false);
-    r.set_shadows_enabled(false);
+    configure_taa_motion_corpus(&mut eng.renderer);
 
     let mut pixels = Vec::with_capacity((TEX_SIZE * TEX_SIZE * 4) as usize);
     for y in 0..TEX_SIZE {
@@ -1783,16 +1839,7 @@ fn emissive_light_switches_converge_without_radiance_trails() {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    let r = &mut eng.renderer;
-    r.set_taa_enabled(true);
-    r.set_render_scale(1.0);
-    r.set_ssao_enabled(false);
-    r.set_ssr_enabled(false);
-    r.set_ssgi_enabled(false);
-    r.set_bloom_enabled(false);
-    r.set_auto_exposure(false);
-    r.set_motion_blur_enabled(false);
-    r.set_shadows_enabled(false);
+    configure_taa_motion_corpus(&mut eng.renderer);
 
     let (vertices, indices) = cube_verts(0.65, [0.18, 0.035, 0.01, 1.0]);
     let node = eng.scene.create_node();
@@ -1853,15 +1900,7 @@ fn render_scale_and_resize_steps_seed_without_prior_frame_residue() {
         eprintln!("skip: no GPU adapter");
         return;
     };
-    let r = &mut eng.renderer;
-    r.set_taa_enabled(true);
-    r.set_ssao_enabled(false);
-    r.set_ssr_enabled(false);
-    r.set_ssgi_enabled(false);
-    r.set_bloom_enabled(false);
-    r.set_auto_exposure(false);
-    r.set_motion_blur_enabled(false);
-    r.set_shadows_enabled(false);
+    configure_taa_motion_corpus(&mut eng.renderer);
 
     let draw_scene = |eng: &mut EngineState| {
         let r = &mut eng.renderer;
