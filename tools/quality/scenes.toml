@@ -75,9 +75,20 @@ quality_tier = "high"
 required_intermediates = [
   "hdr-scene",
   "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
   "shadow-cascade-0",
   "shadow-cascade-1",
   "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
 ]
 
 [case.camera]
@@ -157,7 +168,7 @@ animation = "still"
 
 [case.settings]
 quality_preset = 1
-taa = true
+taa = false
 auto_exposure = false
 present_mode = "auto-no-vsync"
 
@@ -211,9 +222,20 @@ quality_tier = "high"
 required_intermediates = [
   "hdr-scene",
   "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
   "shadow-cascade-0",
   "shadow-cascade-1",
   "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
 ]
 
 [case.camera]
@@ -286,9 +308,20 @@ required_features = ["ray-query"]
 required_intermediates = [
   "hdr-scene",
   "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
   "shadow-cascade-0",
   "shadow-cascade-1",
   "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
 ]
 
 [case.fallback]
@@ -363,9 +396,20 @@ required_features = ["ray-query"]
 required_intermediates = [
   "hdr-scene",
   "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
   "shadow-cascade-0",
   "shadow-cascade-1",
   "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
 ]
 
 [case.fallback]
@@ -454,9 +498,20 @@ quality_tier = "high"
 required_intermediates = [
   "hdr-scene",
   "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
   "shadow-cascade-0",
   "shadow-cascade-1",
   "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
 ]
 
 [case.camera]
@@ -530,9 +585,20 @@ quality_tier = "stress"
 required_intermediates = [
   "hdr-scene",
   "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
   "shadow-cascade-0",
   "shadow-cascade-1",
   "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
 ]
 
 [case.camera]
@@ -595,9 +661,20 @@ quality_tier = "high"
 required_intermediates = [
   "hdr-scene",
   "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
   "shadow-cascade-0",
   "shadow-cascade-1",
   "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
 ]
 
 [case.camera]
@@ -665,9 +742,20 @@ quality_tier = "high"
 required_intermediates = [
   "hdr-scene",
   "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
   "shadow-cascade-0",
   "shadow-cascade-1",
   "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
 ]
 
 [case.camera]

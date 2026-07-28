@@ -174,6 +174,31 @@ class ReproducibilityTests(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], 1)
         self.assertEqual(len(manifest["case"]), 9)
         self.assertEqual(len(digest), 64)
+        temporal_evidence = {
+            "ssr",
+            "ssr-raw",
+            "ssr-rejection-reason",
+            "ssr-temporal-confidence",
+            "ssgi",
+            "ssgi-rejection-reason",
+            "ssgi-temporal-confidence",
+            "taa-rejection-reason",
+            "taa-motion",
+            "taa-reprojected-uv",
+            "taa-temporal-confidence",
+        }
+        for case in manifest["case"]:
+            required = set(case["required_intermediates"])
+            if case["settings"]["quality_preset"] >= 3:
+                self.assertTrue(
+                    temporal_evidence <= required,
+                    f"{case['id']} must retain capture-only temporal evidence",
+                )
+            else:
+                self.assertTrue(
+                    temporal_evidence.isdisjoint(required),
+                    f"{case['id']} cannot require disabled temporal systems",
+                )
 
     def test_stable_metadata_ignores_commands_and_duration(self) -> None:
         common = {

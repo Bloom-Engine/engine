@@ -175,6 +175,13 @@ reprojected UV, and variance/history confidence in one temporary compute pass.
 The normal renderer creates none of those resources; runtime telemetry reports
 their exact temporary byte/pass contract and release state.
 
+The manifest makes the complete TAA, SSR, and SSGI capture set mandatory for
+every High-preset corpus case. A missing diagnostic therefore fails
+qualification instead of silently producing an incomplete evidence bundle.
+Lower presets require only the graph products that remain valid for their
+disabled feature set. Realtime PT uses the same named-artifact contract when a
+PT corpus case is enabled.
+
 The API is dormant during ordinary rendering and throughout the measured
 window. It reuses textures already marked `COPY_SRC` and records copies in a
 keyed terminal render-graph pass during the post-measurement screenshot

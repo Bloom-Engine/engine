@@ -36,6 +36,28 @@ INSTALL_SCHEMA = "bloom-quality-baseline-install-v1"
 REPRO_SCHEMA = "bloom-quality-reproducibility-v1"
 ALLOWED_SUITES = {"quick", "full"}
 ALLOWED_STATUSES = {"pass", "fail", "skip", "error"}
+KNOWN_INTERMEDIATE_NAMES = {
+    "hdr-scene",
+    "scene-depth",
+    "shadow-cascade-0",
+    "shadow-cascade-1",
+    "shadow-cascade-2",
+    "ssgi",
+    "ssgi-rejection-reason",
+    "ssgi-temporal-confidence",
+    "ssr",
+    "ssr-raw",
+    "ssr-rejection-reason",
+    "ssr-temporal-confidence",
+    "taa-motion",
+    "taa-rejection-reason",
+    "taa-reprojected-uv",
+    "taa-temporal-confidence",
+    "pt-motion",
+    "pt-rejection-reason",
+    "pt-reprojected-uv",
+    "pt-temporal-confidence",
+}
 STABLE_CASE_METADATA_KEYS = (
     "id",
     "description",
@@ -218,13 +240,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
             case.get("required_intermediates"),
             f"{case_id}.required_intermediates",
         )
-        unknown_intermediates = set(required_intermediates) - {
-            "hdr-scene",
-            "scene-depth",
-            "shadow-cascade-0",
-            "shadow-cascade-1",
-            "shadow-cascade-2",
-        }
+        unknown_intermediates = set(required_intermediates) - KNOWN_INTERMEDIATE_NAMES
         if unknown_intermediates:
             raise QualityError(
                 f"{case_id}.required_intermediates contains unknown names: "
