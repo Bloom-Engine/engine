@@ -31,6 +31,13 @@ struct UploadStats {
     per_frame: Percentiles,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct FrameTiming {
+    render_submit_ms: f64,
+    prepare_ms: f64,
+    end_frame_ms: f64,
+}
+
 fn parse_u32(value: Option<String>, flag: &str) -> Result<u32, String> {
     value
         .ok_or_else(|| format!("missing value for {flag}"))?
@@ -127,12 +134,18 @@ fn draw_static_ultra_scene(engine: &mut EngineState) {
     }
 }
 
-fn render_frame(engine: &mut EngineState) -> f64 {
+fn render_frame(engine: &mut EngineState) -> FrameTiming {
+    let frame_start = Instant::now();
     engine.begin_frame();
     draw_static_ultra_scene(engine);
-    let start = Instant::now();
+    let prepare_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+    let end_start = Instant::now();
     engine.end_frame();
-    start.elapsed().as_secs_f64() * 1000.0
+    FrameTiming {
+        render_submit_ms: frame_start.elapsed().as_secs_f64() * 1000.0,
+        prepare_ms,
+        end_frame_ms: end_start.elapsed().as_secs_f64() * 1000.0,
+    }
 }
 
 fn create_engine(config: &Config) -> Result<(EngineState, wgpu::AdapterInfo), String> {
@@ -263,7 +276,9 @@ fn json_escape(value: &str) -> String {
 fn write_report(
     config: &Config,
     info: &wgpu::AdapterInfo,
-    cpu: Percentiles,
+    render_submit: Percentiles,
+    prepare: Percentiles,
+    end_frame: Percentiles,
     uploads: Option<UploadStats>,
 ) -> Result<(), String> {
     let revision = std::env::var("BLOOM_RENDER_PERF_ENGINE_REVISION").unwrap_or_else(|_| {
@@ -313,6 +328,10 @@ fn write_report(
             "  \"timing_includes_trace_io\":{},\n",
             "  \"cpu_render_submit_ms\":{{\"mean\":{:.6},\"p50\":{:.6},",
             "\"p95\":{:.6},\"p99\":{:.6},\"max\":{:.6}}},\n",
+            "  \"cpu_prepare_ms\":{{\"mean\":{:.6},\"p50\":{:.6},",
+            "\"p95\":{:.6},\"p99\":{:.6},\"max\":{:.6}}},\n",
+            "  \"cpu_end_frame_ms\":{{\"mean\":{:.6},\"p50\":{:.6},",
+            "\"p95\":{:.6},\"p99\":{:.6},\"max\":{:.6}}},\n",
             "  \"uploads\":{}\n}}\n"
         ),
         json_escape(&revision),
@@ -324,11 +343,21 @@ fn write_report(
         config.warmup_frames,
         config.measured_frames,
         config.trace_dir.is_some(),
-        cpu.mean,
-        cpu.p50,
-        cpu.p95,
-        cpu.p99,
-        cpu.max,
+        render_submit.mean,
+        render_submit.p50,
+        render_submit.p95,
+        render_submit.p99,
+        render_submit.max,
+        prepare.mean,
+        prepare.p50,
+        prepare.p95,
+        prepare.p99,
+        prepare.max,
+        end_frame.mean,
+        end_frame.p50,
+        end_frame.p95,
+        end_frame.p99,
+        end_frame.max,
         upload_json,
     );
     if let Some(parent) = config.output.parent() {
@@ -345,29 +374,31 @@ fn run() -> Result<(), String> {
     for _ in 0..config.warmup_frames {
         let _ = render_frame(&mut engine);
     }
-    let mut cpu_samples = Vec::with_capacity(config.measured_frames as usize);
+    let mut timing_samples = Vec::with_capacity(config.measured_frames as usize);
     for _ in 0..config.measured_frames {
-        cpu_samples.push(render_frame(&mut engine));
+        timing_samples.push(render_frame(&mut engine));
     }
     let _ = engine.renderer.device.poll(wgpu::PollType::Wait {
         submission_index: None,
         timeout: None,
     });
-    let cpu = percentiles(cpu_samples);
+    let render_submit = percentiles(timing_samples.iter().map(|sample| sample.render_submit_ms));
+    let prepare = percentiles(timing_samples.iter().map(|sample| sample.prepare_ms));
+    let end_frame = percentiles(timing_samples.iter().map(|sample| sample.end_frame_ms));
     drop(engine);
     let uploads = config
         .trace_dir
         .as_deref()
         .map(|directory| trace_uploads(directory, config.measured_frames))
         .transpose()?;
-    write_report(&config, &info, cpu, uploads)?;
+    write_report(&config, &info, render_submit, prepare, end_frame, uploads)?;
     println!(
         "bloom-render-perf {}x{} CPU p50={:.3} p95={:.3} p99={:.3} ms{}",
         config.width,
         config.height,
-        cpu.p50,
-        cpu.p95,
-        cpu.p99,
+        render_submit.p50,
+        render_submit.p95,
+        render_submit.p99,
         uploads.map_or(String::new(), |value| format!(
             " upload/frame={:.0} bytes",
             value.per_frame.mean
