@@ -247,6 +247,71 @@ class ReproducibilityTests(unittest.TestCase):
         self.assertTrue(relative["passed"])
         self.assertFalse(rejected["passed"])
 
+    def test_capability_snapshot_contract_accepts_complete_native_evidence(self) -> None:
+        tier = "modern"
+        adapter = {
+            "availability": "reported",
+            "capability_tier": tier,
+            "renderer_capabilities": {
+                "detected": tier,
+                "selected": tier,
+                "requested": None,
+                "forced": None,
+                "diagnostic": None,
+                "available": {
+                    "features": {
+                        key: False
+                        for key in quality.RENDERER_CAPABILITY_FEATURE_KEYS
+                    },
+                    "limits": {
+                        key: 16
+                        for key in quality.RENDERER_CAPABILITY_LIMIT_KEYS
+                    },
+                },
+                "paths": {
+                    key: f"test-{key}"
+                    for key in quality.RENDERER_CAPABILITY_PATH_KEYS
+                },
+            },
+            "device_negotiation": {
+                "preferred_tier": tier,
+                "selected_tier": tier,
+                "profile": "native-full",
+                "selected_request": "bloom_device_preferred",
+                "fallback_cause": None,
+                "required_features": "Features(0x0)",
+                "required_limits": {
+                    key: 16
+                    for key in quality.DEVICE_NEGOTIATION_LIMIT_KEYS
+                },
+            },
+        }
+        self.assertEqual(quality.capability_snapshot_failures(adapter), [])
+
+    def test_capability_snapshot_contract_rejects_missing_or_inconsistent_data(
+        self,
+    ) -> None:
+        self.assertIn(
+            "adapter did not include renderer_capabilities snapshot",
+            quality.capability_snapshot_failures({"availability": "reported"}),
+        )
+        adapter = {
+            "capability_tier": "high-end",
+            "renderer_capabilities": {
+                "detected": "modern",
+                "selected": "modern",
+                "requested": None,
+                "forced": None,
+                "diagnostic": None,
+                "available": {"features": {}, "limits": {}},
+                "paths": {},
+            },
+            "device_negotiation": None,
+        }
+        failures = quality.capability_snapshot_failures(adapter)
+        self.assertTrue(any("does not match selected renderer tier" in item for item in failures))
+        self.assertTrue(any("device_negotiation snapshot" in item for item in failures))
+
     def test_telemetry_contract_rejects_vsync_and_wrong_frame_count(self) -> None:
         case = {
             "fixed_timestep": 1 / 60,

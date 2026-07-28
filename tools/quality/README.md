@@ -158,6 +158,14 @@ recorded rather than invented. Runtime evidence also reports
 the shared acceleration/card prefix observable without conflating it with
 SSGI-only baking.
 
+Every accepted native telemetry artifact must also contain the complete
+`adapter.renderer_capabilities` and `adapter.device_negotiation` snapshots.
+The quality runner validates tier identity, granted features/limits, selected
+system paths, active platform profile, chosen request, fallback cause, and
+requested device limits before comparing images or timings. Missing or
+inconsistent capability evidence fails the case rather than producing an
+unqualified performance result.
+
 The one debug-capture API snapshots existing render-graph products:
 
 - `hdr-scene`: RGBA16F scene output, converted for review with the same

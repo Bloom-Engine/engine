@@ -90,6 +90,42 @@ STABLE_TELEMETRY_METADATA_KEYS = (
     "adapter",
     "renderer_paths",
 )
+RENDERER_CAPABILITY_TIERS = {"baseline", "modern", "high-end"}
+RENDERER_CAPABILITY_PATH_KEYS = {
+    "materials",
+    "geometry",
+    "shadows",
+    "gi",
+    "reflections",
+    "anti_aliasing",
+    "textures",
+    "path_tracing",
+}
+RENDERER_CAPABILITY_FEATURE_KEYS = {
+    "texture_binding_array",
+    "non_uniform_indexing",
+    "indirect_first_instance",
+    "ray_query",
+}
+RENDERER_CAPABILITY_LIMIT_KEYS = {
+    "max_binding_array_elements_per_shader_stage",
+    "max_binding_array_sampler_elements_per_shader_stage",
+    "max_texture_array_layers",
+    "max_sampled_textures_per_shader_stage",
+    "max_samplers_per_shader_stage",
+    "max_bind_groups",
+    "max_color_attachments",
+}
+DEVICE_NEGOTIATION_LIMIT_KEYS = {
+    "max_bind_groups",
+    "max_color_attachments",
+    "max_sampled_textures_per_shader_stage",
+    "max_samplers_per_shader_stage",
+    "max_storage_buffers_per_shader_stage",
+    "max_uniform_buffer_binding_size",
+    "max_binding_array_elements_per_shader_stage",
+    "max_binding_array_sampler_elements_per_shader_stage",
+}
 
 
 class QualityError(RuntimeError):
@@ -117,6 +153,95 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def capability_snapshot_failures(adapter: Mapping[str, Any]) -> list[str]:
+    """Validate the capability evidence embedded in every native quality run."""
+    failures: list[str] = []
+    capability = adapter.get("renderer_capabilities")
+    if not isinstance(capability, dict):
+        return ["adapter did not include renderer_capabilities snapshot"]
+
+    for key in ("detected", "selected"):
+        if capability.get(key) not in RENDERER_CAPABILITY_TIERS:
+            failures.append(f"renderer_capabilities.{key} is not a known tier")
+    for key in ("requested", "forced"):
+        value = capability.get(key)
+        if value is not None and value not in RENDERER_CAPABILITY_TIERS:
+            failures.append(f"renderer_capabilities.{key} is not null or a known tier")
+    if adapter.get("capability_tier") != capability.get("selected"):
+        failures.append("adapter capability_tier does not match selected renderer tier")
+    forced = capability.get("forced")
+    if forced is not None and forced != capability.get("selected"):
+        failures.append("forced renderer tier does not match selected renderer tier")
+    if capability.get("diagnostic") is not None and not isinstance(
+        capability.get("diagnostic"), str
+    ):
+        failures.append("renderer_capabilities.diagnostic is not null or text")
+
+    available = capability.get("available")
+    if not isinstance(available, dict):
+        failures.append("renderer_capabilities.available is missing")
+    else:
+        features = available.get("features")
+        if not isinstance(features, dict):
+            failures.append("renderer_capabilities.available.features is missing")
+        else:
+            for key in RENDERER_CAPABILITY_FEATURE_KEYS:
+                if not isinstance(features.get(key), bool):
+                    failures.append(
+                        f"renderer_capabilities.available.features.{key} is not boolean"
+                    )
+        limits = available.get("limits")
+        if not isinstance(limits, dict):
+            failures.append("renderer_capabilities.available.limits is missing")
+        else:
+            for key in RENDERER_CAPABILITY_LIMIT_KEYS:
+                value = limits.get(key)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                    failures.append(
+                        f"renderer_capabilities.available.limits.{key} is invalid"
+                    )
+
+    paths = capability.get("paths")
+    if not isinstance(paths, dict):
+        failures.append("renderer_capabilities.paths is missing")
+    else:
+        for key in RENDERER_CAPABILITY_PATH_KEYS:
+            value = paths.get(key)
+            if not isinstance(value, str) or not value:
+                failures.append(f"renderer_capabilities.paths.{key} is missing")
+
+    negotiation = adapter.get("device_negotiation")
+    if not isinstance(negotiation, dict):
+        failures.append("adapter did not include device_negotiation snapshot")
+        return failures
+    for key in ("preferred_tier", "selected_tier"):
+        if negotiation.get(key) not in RENDERER_CAPABILITY_TIERS:
+            failures.append(f"device_negotiation.{key} is not a known tier")
+    if negotiation.get("selected_tier") != capability.get("selected"):
+        failures.append("device negotiation tier does not match selected renderer tier")
+    if negotiation.get("profile") not in {"native-full", "folded-mobile"}:
+        failures.append("device_negotiation.profile is invalid")
+    if not isinstance(negotiation.get("selected_request"), str) or not negotiation.get(
+        "selected_request"
+    ):
+        failures.append("device_negotiation.selected_request is missing")
+    if negotiation.get("fallback_cause") is not None and not isinstance(
+        negotiation.get("fallback_cause"), str
+    ):
+        failures.append("device_negotiation.fallback_cause is not null or text")
+    if not isinstance(negotiation.get("required_features"), str):
+        failures.append("device_negotiation.required_features is missing")
+    limits = negotiation.get("required_limits")
+    if not isinstance(limits, dict):
+        failures.append("device_negotiation.required_limits is missing")
+    else:
+        for key in DEVICE_NEGOTIATION_LIMIT_KEYS:
+            value = limits.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                failures.append(f"device_negotiation.required_limits.{key} is invalid")
+    return failures
 
 
 def repo_path(raw: str, *, must_exist: bool = False) -> Path:
@@ -607,6 +732,8 @@ def telemetry_contract_failures(
     adapter = telemetry.get("adapter")
     if not isinstance(adapter, dict) or adapter.get("availability") != "reported":
         failures.append("telemetry did not report the native adapter")
+    else:
+        failures.extend(capability_snapshot_failures(adapter))
     if not isinstance(telemetry.get("renderer_paths"), dict):
         failures.append("telemetry did not report active renderer paths")
     for key in ("cpu_frame_mean_ms", "cpu_frame_p95_ms", "measurement_wall_ms"):
