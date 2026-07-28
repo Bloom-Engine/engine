@@ -1,66 +1,278 @@
 #!/usr/bin/env bash
-# Local parity for .github/workflows/test.yml.
-#
-# Runs the subset of CI checks that make sense on a dev machine:
-#   - bloom-shared unit tests (includes Jolt C++ shim + jolt_sys tests)
-#   - the *current host's* platform crate build (macOS / Linux / Windows)
-#   - cargo check for shared on wasm32 (skips the full wasm-pack build)
+# Bloom's versioned local/CI qualification entry point.
 #
 # Usage:
-#   ./scripts/ci-check.sh              # run the full local suite
-#   ./scripts/ci-check.sh --fast       # skip the host platform crate build
-#   ./scripts/ci-check.sh --wasm       # also run wasm-pack build (slow, needs wasm-pack)
+#   ./scripts/ci-check.sh --quick
+#   ./scripts/ci-check.sh --full
+#   ./scripts/ci-check.sh --web
+#   ./scripts/ci-check.sh --quick --component lint
+#   ./scripts/ci-check.sh --list
+#
+# With no lane argument, the historical full-local-suite behavior is retained.
+# Every invocation writes a JSON summary under target/ci unless --summary is
+# supplied. CI selects components so independent jobs can run in parallel; a
+# lane without --component runs all of its components in order.
 
 set -euo pipefail
 
-FAST=0
-INCLUDE_WASM=0
-for arg in "$@"; do
-  case "$arg" in
-    --fast) FAST=1 ;;
-    --wasm) INCLUDE_WASM=1 ;;
+LANE=""
+COMPONENT=""
+SUMMARY_PATH=""
+LIST_ONLY=0
+
+usage() {
+  sed -n '2,14p' "$0"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --quick|--full|--web)
+      if [ -n "$LANE" ]; then
+        echo "choose exactly one lane" >&2
+        exit 2
+      fi
+      LANE="${1#--}"
+      ;;
+    --component=*) COMPONENT="${1#*=}" ;;
+    --summary=*) SUMMARY_PATH="${1#*=}" ;;
+    --component)
+      if [ "$#" -lt 2 ]; then
+        echo "--component requires a value" >&2
+        exit 2
+      fi
+      COMPONENT="$2"
+      shift
+      ;;
+    --summary)
+      if [ "$#" -lt 2 ]; then
+        echo "--summary requires a value" >&2
+        exit 2
+      fi
+      SUMMARY_PATH="$2"
+      shift
+      ;;
+    --list) LIST_ONLY=1 ;;
+    --fast)
+      echo "warning: --fast is deprecated; use --quick" >&2
+      LANE="quick"
+      ;;
+    --wasm)
+      echo "warning: --wasm is deprecated; use --full or --web" >&2
+      LANE="full"
+      ;;
     -h|--help)
-      sed -n '2,14p' "$0"
+      usage
       exit 0
       ;;
     *)
-      echo "unknown arg: $arg" >&2
+      echo "unknown arg: $1" >&2
+      usage >&2
       exit 2
       ;;
   esac
+  shift
 done
+
+lane_components() {
+  case "$1" in
+    quick) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract" ;;
+    full) printf '%s\n' "contracts lint shared-tests wasm-check quality-contract host-build wasm-build" ;;
+    web) printf '%s\n' "wasm-check wasm-build" ;;
+    *)
+      echo "unknown lane: $1" >&2
+      return 2
+      ;;
+  esac
+}
+
+if [ "$LIST_ONLY" -eq 1 ]; then
+  printf 'quick\t%s\n' "$(lane_components quick)"
+  printf 'full\t%s\n' "$(lane_components full)"
+  printf 'web\t%s\n' "$(lane_components web)"
+  exit 0
+fi
+
+if [ -z "$LANE" ]; then
+  LANE="full"
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 host_os="$(uname -s)"
 case "$host_os" in
-  Darwin)  host_crate="macos" ;;
-  Linux)   host_crate="linux" ;;
+  Darwin) host_crate="macos" ;;
+  Linux) host_crate="linux" ;;
   MINGW*|MSYS*|CYGWIN*) host_crate="windows" ;;
   *) host_crate="" ;;
 esac
 
-hr() { printf '\n==> %s\n' "$*"; }
-
-hr "bloom-shared: cargo test --release"
-( cd native/shared && cargo test --release )
-
-hr "bloom-shared: cargo check (wasm32, web feature)"
-( cd native/shared && cargo check --target wasm32-unknown-unknown --no-default-features --features web )
-
-if [ "$FAST" -eq 0 ] && [ -n "$host_crate" ]; then
-  hr "bloom-$host_crate: cargo build --release"
-  ( cd "native/$host_crate" && cargo build --release )
+ALLOWED_COMPONENTS="$(lane_components "$LANE")"
+if [ -n "$COMPONENT" ]; then
+  case " $ALLOWED_COMPONENTS " in
+    *" $COMPONENT "*) COMPONENTS="$COMPONENT" ;;
+    *)
+      echo "component '$COMPONENT' does not belong to the '$LANE' lane" >&2
+      exit 2
+      ;;
+  esac
+else
+  COMPONENTS="$ALLOWED_COMPONENTS"
 fi
 
-if [ "$INCLUDE_WASM" -eq 1 ]; then
-  if ! command -v wasm-pack >/dev/null 2>&1; then
-    echo "wasm-pack not installed — skipping wasm-pack build" >&2
+if [ -z "$SUMMARY_PATH" ]; then
+  summary_component="${COMPONENT:-all}"
+  SUMMARY_PATH="$ROOT/target/ci/${LANE}-${summary_component}.json"
+elif [ "${SUMMARY_PATH#/}" = "$SUMMARY_PATH" ]; then
+  SUMMARY_PATH="$ROOT/$SUMMARY_PATH"
+fi
+
+STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+START_SECONDS="$(date '+%s')"
+CURRENT_COMPONENT=""
+COMPLETED_COMPONENTS=""
+
+hr() {
+  printf '\n==> %s\n' "$*"
+}
+
+append_completed() {
+  if [ -n "$COMPLETED_COMPONENTS" ]; then
+    COMPLETED_COMPONENTS="$COMPLETED_COMPONENTS,$1"
   else
-    hr "bloom-web: wasm-pack build --release --target web"
-    ( cd native/web && wasm-pack build --release --target web )
+    COMPLETED_COMPONENTS="$1"
   fi
-fi
+}
 
-hr "OK — all local checks passed"
+write_summary() {
+  status="$1"
+  exit_code="$2"
+  finished_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  duration_seconds="$(( $(date '+%s') - START_SECONDS ))"
+  mkdir -p "$(dirname "$SUMMARY_PATH")"
+  BLOOM_CI_LANE="$LANE" \
+  BLOOM_CI_REQUESTED_COMPONENT="${COMPONENT:-all}" \
+  BLOOM_CI_CURRENT_COMPONENT="$CURRENT_COMPONENT" \
+  BLOOM_CI_COMPLETED_COMPONENTS="$COMPLETED_COMPONENTS" \
+  BLOOM_CI_STATUS="$status" \
+  BLOOM_CI_EXIT_CODE="$exit_code" \
+  BLOOM_CI_HOST_OS="$host_os" \
+  BLOOM_CI_STARTED_AT="$STARTED_AT" \
+  BLOOM_CI_FINISHED_AT="$finished_at" \
+  BLOOM_CI_DURATION_SECONDS="$duration_seconds" \
+  BLOOM_CI_SUMMARY_PATH="$SUMMARY_PATH" \
+  node -e '
+    const fs = require("fs");
+    const env = process.env;
+    const split = (value) => value ? value.split(",") : [];
+    const summary = {
+      schema: "bloom-ci-summary-v1",
+      lane: env.BLOOM_CI_LANE,
+      requested_component: env.BLOOM_CI_REQUESTED_COMPONENT,
+      current_component: env.BLOOM_CI_CURRENT_COMPONENT || null,
+      completed_components: split(env.BLOOM_CI_COMPLETED_COMPONENTS),
+      status: env.BLOOM_CI_STATUS,
+      exit_code: Number(env.BLOOM_CI_EXIT_CODE),
+      host_os: env.BLOOM_CI_HOST_OS,
+      started_at: env.BLOOM_CI_STARTED_AT,
+      finished_at: env.BLOOM_CI_FINISHED_AT,
+      duration_seconds: Number(env.BLOOM_CI_DURATION_SECONDS)
+    };
+    fs.writeFileSync(env.BLOOM_CI_SUMMARY_PATH, JSON.stringify(summary, null, 2) + "\n");
+  '
+}
+
+on_exit() {
+  exit_code=$?
+  trap - EXIT
+  if [ "$exit_code" -eq 0 ]; then
+    write_summary "pass" "$exit_code"
+  else
+    write_summary "fail" "$exit_code" || true
+  fi
+  exit "$exit_code"
+}
+trap on_exit EXIT
+
+run_component() {
+  CURRENT_COMPONENT="$1"
+  case "$CURRENT_COMPONENT" in
+    contracts)
+      hr "CI command inventory"
+      node tools/check-ci-contract.js
+      hr "FFI/schema parity"
+      node tools/validate-ffi.js
+      hr "file-size ratchet"
+      node tools/check-file-lines.js
+      ;;
+    lint)
+      hr "bloom-shared: cargo fmt --check"
+      ( cd native/shared && cargo fmt --check )
+      hr "bloom-shared: strict clippy correctness/performance policy"
+      (
+        cd native/shared
+        cargo clippy --release --no-deps -- \
+          -A warnings \
+          -D clippy::correctness \
+          -D clippy::suspicious \
+          -D clippy::perf \
+          -A clippy::empty-line-after-doc-comments \
+          -A clippy::manual-memcpy \
+          -A clippy::not-unsafe-ptr-arg-deref \
+          -A clippy::cloned-ref-to-slice-refs
+      )
+      ;;
+    shared-tests)
+      hr "bloom-shared: cargo test --release"
+      ( cd native/shared && cargo test --release )
+      ;;
+    wasm-check)
+      hr "bloom-shared: cargo check (wasm32, web feature)"
+      (
+        cd native/shared
+        cargo check \
+          --target wasm32-unknown-unknown \
+          --no-default-features \
+          --features web
+      )
+      ;;
+    quality-contract)
+      hr "quality orchestration syntax and governance tests"
+      python3 -m py_compile \
+        tools/quality/run.py \
+        tools/quality/build_example.py \
+        tools/quality/prepare_bistro.py
+      python3 -m unittest tools/quality/test_run.py -v
+      hr "visual metric and fault-engine tests"
+      cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
+      ;;
+    host-build)
+      if [ -z "$host_crate" ]; then
+        echo "unsupported host for native build: $host_os" >&2
+        return 2
+      fi
+      hr "bloom-$host_crate: cargo build --release"
+      ( cd "native/$host_crate" && cargo build --release )
+      ;;
+    wasm-build)
+      if ! command -v wasm-pack >/dev/null 2>&1; then
+        echo "wasm-pack is required for the '$LANE' lane" >&2
+        return 2
+      fi
+      hr "bloom-web: wasm-pack build --release --target web"
+      ( cd native/web && wasm-pack build --release --target web )
+      ;;
+    *)
+      echo "unknown component: $CURRENT_COMPONENT" >&2
+      return 2
+      ;;
+  esac
+  append_completed "$CURRENT_COMPONENT"
+}
+
+for component in $COMPONENTS; do
+  run_component "$component"
+done
+
+CURRENT_COMPONENT=""
+hr "OK — '$LANE' lane passed"

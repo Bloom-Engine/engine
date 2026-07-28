@@ -67,9 +67,8 @@ jobs:
           key: ${{ runner.os }}-shared-${{ hashFiles('native/shared/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-shared-
 
-      - name: cargo test (bloom-shared + jolt)
-        working-directory: native/shared
-        run: cargo test --release
+      - name: quick / shared-tests
+        run: ./scripts/ci-check.sh --quick --component shared-tests
 
   # ---------------------------------------------------------------------------
   # FFI parity: every function in package.json's perry.nativeLibrary manifest
@@ -83,14 +82,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: validate-ffi
-        run: node tools/validate-ffi.js
-      - name: file line limit (2000, ratcheting baseline)
-        run: node tools/check-file-lines.js
+      - name: quick / contracts
+        run: ./scripts/ci-check.sh --quick --component contracts
 
   # ---------------------------------------------------------------------------
-  # Lint: rustfmt + clippy. Advisory while the codebase is still in flux.
-  # Flip `continue-on-error: false` once the lint baseline is clean.
+  # Lint: rustfmt plus a strict clippy correctness/performance ratchet.
+  # Legacy style debt is documented in scripts/ci-check.sh rather than making
+  # findings advisory or silently accepting new correctness regressions.
   # ---------------------------------------------------------------------------
   lint:
     runs-on: macos-14
@@ -104,15 +102,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: rustfmt --check (shared)
-        working-directory: native/shared
-        continue-on-error: true
-        run: cargo fmt --check
-
-      - name: clippy (shared, advisory)
-        working-directory: native/shared
-        continue-on-error: true
-        run: cargo clippy --release --no-deps -- -D warnings
+      - name: quick / lint
+        run: ./scripts/ci-check.sh --quick --component lint
 
   # ---------------------------------------------------------------------------
   # Per-platform builds: each native crate is a separate Cargo workspace root
@@ -143,9 +134,8 @@ jobs:
           key: ${{ runner.os }}-macos-crate-${{ hashFiles('native/macos/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-macos-crate-
 
-      - name: cargo build --release (bloom-macos)
-        working-directory: native/macos
-        run: cargo build --release
+      - name: full / host-build
+        run: ./scripts/ci-check.sh --full --component host-build
 
   build-linux:
     runs-on: ubuntu-22.04
@@ -175,9 +165,8 @@ jobs:
           key: ${{ runner.os }}-linux-crate-${{ hashFiles('native/linux/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-linux-crate-
 
-      - name: cargo build --release (bloom-linux)
-        working-directory: native/linux
-        run: cargo build --release
+      - name: full / host-build
+        run: ./scripts/ci-check.sh --full --component host-build
 
   build-windows:
     runs-on: windows-latest
@@ -206,9 +195,8 @@ jobs:
           key: ${{ runner.os }}-windows-crate-${{ hashFiles('native/windows/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-windows-crate-
 
-      - name: cargo build --release (bloom-windows)
-        working-directory: native/windows
-        run: cargo build --release
+      - name: full / host-build
+        run: ./scripts/ci-check.sh --full --component host-build
 
   # ---------------------------------------------------------------------------
   # Web / WASM. No submodule needed: bloom-shared's build.rs early-exits on
@@ -239,10 +227,5 @@ jobs:
           key: ${{ runner.os }}-web-${{ hashFiles('native/web/Cargo.lock', 'native/shared/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-web-
 
-      - name: cargo check (shared, wasm32, web feature)
-        working-directory: native/shared
-        run: cargo check --target wasm32-unknown-unknown --no-default-features --features web
-
-      - name: wasm-pack build (bloom-web)
-        working-directory: native/web
-        run: wasm-pack build --release --target web
+      - name: web lane
+        run: ./scripts/ci-check.sh --web

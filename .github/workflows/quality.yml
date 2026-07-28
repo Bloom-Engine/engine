@@ -41,16 +41,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Python orchestration and governance tests
-        run: |
-          python3 -m py_compile \
-            tools/quality/run.py \
-            tools/quality/build_example.py \
-            tools/quality/prepare_bistro.py
-          python3 -m unittest tools/quality/test_run.py -v
-
-      - name: Visual metric and fault-engine tests
-        run: cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
+      - name: quick / quality-contract
+        run: ./scripts/ci-check.sh --quick --component quality-contract
 
   metal:
     name: Full quality — Apple M1 Max / Metal

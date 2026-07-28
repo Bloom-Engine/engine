@@ -150,6 +150,33 @@ examples/
   pong/               Complete working example (~170 lines)
 ```
 
+## Contributing checks
+
+Install Node.js, Python 3.11 or newer, the stable Rust toolchain with
+`rustfmt`, `clippy`, and the `wasm32-unknown-unknown` target. The full and web
+lanes also require
+[wasm-pack](https://rustwasm.github.io/wasm-pack/installer/). Native builds need
+the platform dependencies listed in `.github/workflows/test.yml` (CMake and a
+C++ compiler everywhere, X11/audio development packages on Linux, and the
+MSVC developer environment on Windows).
+
+Run the platform-independent PR gates while iterating:
+
+```bash
+./scripts/ci-check.sh --quick
+```
+
+Before handing off a change, run the complete suite for the current host,
+including its native crate and the packaged WebAssembly build:
+
+```bash
+./scripts/ci-check.sh --full
+```
+
+Every invocation writes a machine-readable `bloom-ci-summary-v1` result under
+`target/ci/`. GitHub Actions selects components of these same lanes so its
+command inventory cannot silently differ from local development.
+
 ## Types
 
 Plain interfaces, no classes:
