@@ -1281,7 +1281,7 @@ impl Renderer {
         });
         out.push_str(",\"format\":\"r8unorm\"");
         out.push_str(",\"bytes_per_render_pixel\":1");
-        out.push_str(",\"sources\":\"imported-blend-and-transmission\"}");
+        out.push_str(",\"sources\":\"imported-blend-transmission-and-authored-custom-coverage\"}");
         out.push_str(",\"transmitted_shadows\":{");
         out.push_str("\"enabled\":");
         out.push_str(

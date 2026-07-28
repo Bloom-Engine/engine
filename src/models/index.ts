@@ -434,6 +434,22 @@ export const BUCKET_TRANSPARENT = 3;
 /// absent from the pipeline layout and the shader fails validation when the
 /// pipeline is created (not when it is written), which is a confusing way to
 /// find out.
+///
+/// Fast-changing particles should also provide an optional second fragment
+/// entry named `fs_reactive`. It returns the same HDR color as `fs_main` plus
+/// authored 0..1 TAA rejection coverage:
+///
+///   @fragment
+///   fn fs_reactive(in: VsOut) -> ReactiveTranslucentOut {
+///     var out: ReactiveTranslucentOut;
+///     out.hdr = particleColor(in);
+///     out.reactive = in.alpha;
+///     return out;
+///   }
+///
+/// Only a submitted material with that entry activates the lazy R8 coverage
+/// target. Existing shaders and frames containing only ordinary custom
+/// translucency keep the original attachment topology and pipeline.
 export function compileMaterialInstancedBucket(
   wgslSource: string, bucket: number, readsScene: boolean = false,
 ): number {

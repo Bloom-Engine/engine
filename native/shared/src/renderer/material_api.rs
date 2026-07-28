@@ -119,6 +119,12 @@ impl Renderer {
     /// straight seam otherwise, which is the single biggest tell that a "puff"
     /// is a flat card — and without this flag the group is absent from the
     /// pipeline layout and the shader fails validation at create time.
+    ///
+    /// TAA-sensitive additive/transparent materials such as particles can
+    /// additionally author `@fragment fn fs_reactive(...) ->
+    /// ReactiveTranslucentOut`. It must produce the same HDR result as
+    /// `fs_main` plus 0..1 reactive coverage. The extra R8 target and sibling
+    /// pipeline stay lazy unless a submitted material declares that entry.
     pub fn compile_material_instanced_bucket(
         &mut self,
         wgsl_source: &str,

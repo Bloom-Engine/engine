@@ -53,6 +53,17 @@ fn compare_sorted_transparency(
 }
 
 impl material_system::MaterialSystem {
+    pub(crate) fn has_temporal_reactive_commands(&self) -> bool {
+        self.translucent_commands.iter().any(|command| {
+            command
+                .material
+                .checked_sub(1)
+                .and_then(|index| self.pipelines.get(index as usize))
+                .and_then(|pipeline| pipeline.as_ref())
+                .is_some_and(|pipeline| pipeline.writes_reactive)
+        })
+    }
+
     /// Compile attachment-compatible siblings only for custom materials that
     /// actually enter a mixed imported/custom TAA-reactive sorted frame.
     pub(crate) fn ensure_translucent_reactive_pipelines(&mut self, device: &wgpu::Device) {
@@ -122,6 +133,25 @@ impl material_system::MaterialSystem {
             pass.draw_indexed(mesh.index_range(), mesh.base_vertex, instance_range);
         }
         true
+    }
+
+    pub(crate) fn dispatch_translucent_reactive<'pass, F>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        mut mesh_fetch: F,
+    ) where
+        F: FnMut(u64, usize) -> Option<MeshDrawRef<'pass>>,
+    {
+        let mut last_material = 0;
+        for command in &self.translucent_commands {
+            if let Some(mesh) = mesh_fetch(command.mesh_handle, command.mesh_idx) {
+                let bind_material_state = command.material != last_material;
+                if self.dispatch_translucent_command(pass, command, mesh, true, bind_material_state)
+                {
+                    last_material = command.material;
+                }
+            }
+        }
     }
 }
 

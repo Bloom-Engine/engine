@@ -305,8 +305,21 @@ struct TranslucentOut {
 };
 ```
 
-The material descriptor (§3) specifies which profile the shader uses. The
-graph routes translucent draws to passes with single-target attachments.
+Fast-changing translucent materials may also provide an optional
+`fs_reactive` fragment entry returning:
+
+```wgsl
+struct ReactiveTranslucentOut {
+  @location(0) hdr:      vec4<f32>,
+  @location(1) reactive: f32, // authored 0..1 TAA rejection coverage
+};
+```
+
+`fs_main` remains mandatory and must produce the same HDR result. The material
+descriptor (§3) specifies which profile the shader uses. Ordinary translucent
+draws keep their single-target attachment. A submitted `fs_reactive` material
+lazily selects the two-target sibling, which unions coverage into an R8 target;
+no shader-source inference from color or alpha is performed.
 
 ### 1.9 Shared header
 

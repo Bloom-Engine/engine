@@ -301,6 +301,17 @@ struct TranslucentOut {
   @location(0) hdr: vec4<f32>,
 };
 
+// Optional responsive-translucency profile. A custom translucent material may
+// expose a second `@fragment fn fs_reactive(...) -> ReactiveTranslucentOut`
+// entry alongside its ordinary `fs_main`. The engine selects that entry only
+// while TAA has allocated the lazy R8 reactive attachment. `reactive` is
+// current-frame coverage in [0,1]: use opacity for smoke/glass and 1 for
+// rapidly changing additive sparks that must consume current color.
+struct ReactiveTranslucentOut {
+  @location(0) hdr:      vec4<f32>,
+  @location(1) reactive: f32,
+};
+
 // =====================================================================
 // Standard helpers
 // =====================================================================

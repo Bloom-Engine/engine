@@ -169,6 +169,7 @@ impl Renderer {
         let reactive = temporal_reactive::temporal_reactive_selected(
             self.taa_enabled,
             transparent_draw_count,
+            || self.material_system.has_temporal_reactive_commands(),
             || self.imported_refractive_draw_count(scene),
         );
         (weighted, reactive)

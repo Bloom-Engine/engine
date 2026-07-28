@@ -98,6 +98,40 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
 }
 "#;
 
+    const REACTIVE_TRANSLUCENT_WGSL: &str = r#"
+#include "material_abi.wgsl"
+
+struct VsOut {
+  @builtin(position) clip_position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VsOut {
+  var out: VsOut;
+  out.clip_position = draw.mvp * vec4<f32>(in.position, 1.0);
+  return out;
+}
+
+fn shade() -> vec4<f32> {
+  return vec4<f32>(1.0, 0.0, 0.0, 0.5);
+}
+
+@fragment
+fn fs_main(_in: VsOut) -> TranslucentOut {
+  var out: TranslucentOut;
+  out.hdr = shade();
+  return out;
+}
+
+@fragment
+fn fs_reactive(_in: VsOut) -> ReactiveTranslucentOut {
+  var out: ReactiveTranslucentOut;
+  out.hdr = shade();
+  out.reactive = 0.5;
+  return out;
+}
+"#;
+
     /// Create a tiny joint buffer so MaterialSystem::new is happy. The
     /// per_draw layout binds it at @binding(1); the test material
     /// doesn't read it but the bind group still has to validate.
@@ -426,7 +460,7 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
     }
 
     #[test]
-    fn reactive_custom_sibling_is_lazy_compatible_and_does_not_write_coverage() {
+    fn reactive_custom_siblings_are_lazy_and_only_opt_in_writes_coverage() {
         let Some((device, queue)) = try_create_device() else {
             return;
         };
@@ -447,12 +481,27 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
                 formats::DEPTH_FORMAT,
             )
             .expect("translucent material compiles");
+        let reactive_handle = sys
+            .compile(
+                &device,
+                REACTIVE_TRANSLUCENT_WGSL,
+                FragmentProfile::Translucent,
+                Bucket::Transparent,
+                false,
+                false,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rg8Unorm,
+                wgpu::TextureFormat::Rg16Float,
+                wgpu::TextureFormat::Rgba8Unorm,
+                formats::DEPTH_FORMAT,
+            )
+            .expect("reactive translucent material compiles");
         assert_eq!(
             sys.reactive_translucent_pipeline_count(),
             0,
             "ordinary material compilation must not eagerly create the sibling"
         );
-        assert_eq!(sys.pipeline_creation_count, 1);
+        assert_eq!(sys.pipeline_creation_count, 2);
 
         let pf = PerFrameUniforms {
             time: 0.0,
@@ -475,14 +524,28 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
             &device, &queue, &joint_buf, handle, 1, 0, identity, identity, identity, [1.0; 4],
             [0; 4],
         );
+        sys.submit_draw(
+            &device,
+            &queue,
+            &joint_buf,
+            reactive_handle,
+            1,
+            0,
+            identity,
+            identity,
+            identity,
+            [1.0; 4],
+            [0; 4],
+        );
+        assert!(sys.has_temporal_reactive_commands());
 
         let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         sys.ensure_translucent_reactive_pipelines(&device);
-        assert_eq!(sys.reactive_translucent_pipeline_count(), 1);
-        assert_eq!(sys.pipeline_creation_count, 2);
+        assert_eq!(sys.reactive_translucent_pipeline_count(), 2);
+        assert_eq!(sys.pipeline_creation_count, 4);
         sys.ensure_translucent_reactive_pipelines(&device);
         assert_eq!(
-            sys.pipeline_creation_count, 2,
+            sys.pipeline_creation_count, 4,
             "cached reactive material pipeline must not count twice"
         );
 
@@ -565,20 +628,21 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            let command = &sys.translucent_commands[0];
-            assert!(sys.dispatch_translucent_command(
-                &mut pass,
-                command,
-                crate::renderer::MeshDrawRef {
-                    vertex: &vertex,
-                    index: &index,
-                    first_index: 0,
-                    index_count,
-                    base_vertex: 0,
-                },
-                true,
-                true,
-            ));
+            for command in &sys.translucent_commands {
+                assert!(sys.dispatch_translucent_command(
+                    &mut pass,
+                    command,
+                    crate::renderer::MeshDrawRef {
+                        vertex: &vertex,
+                        index: &index,
+                        first_index: 0,
+                        index_count,
+                        base_vertex: 0,
+                    },
+                    true,
+                    true,
+                ));
+            }
         }
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("reactive_custom_coverage_readback"),
@@ -625,8 +689,9 @@ fn fs_main(_in: VsOut) -> TranslucentOut {
         drop(bytes);
         readback.unmap();
         assert!(
-            (63..=65).contains(&coverage_byte),
-            "custom sibling wrote imported reactive coverage: {coverage_byte}"
+            (158..=160).contains(&coverage_byte),
+            "ordinary coverage must stay untouched and opt-in 0.5 coverage must union over 0.25: \
+             {coverage_byte}"
         );
     }
 

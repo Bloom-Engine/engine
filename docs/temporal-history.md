@@ -194,6 +194,29 @@ history is two grow-on-demand position streams plus compact slot ranges.
 Telemetry reports `immediate_motion_entries`,
 `immediate_motion_cpu_capacity_bytes`, zero GPU bytes, and zero added passes.
 
+## Custom translucency and particles
+
+Custom translucent materials keep `fs_main -> TranslucentOut` as their
+baseline contract. Fast-changing particles, force fields, and similar effects
+can additionally author `fs_reactive -> ReactiveTranslucentOut`. That entry
+must return the same HDR value plus explicit 0..1 coverage; the engine unions
+the coverage into TAA's R8 reactive target. Coverage should follow the
+effect's visible contribution, normally its final opacity.
+
+The engine detects the named fragment entry after include expansion. A
+submitted opt-in draw activates the reactive frame topology and lazily creates
+an attachment-compatible sibling pipeline. Ordinary custom translucency uses
+the established single-attachment path when no opt-in draw is visible, so it
+adds no image, pass, draw, upload, or per-frame GPU allocation. When active,
+coverage costs one R8 render pixel and a second attachment on the existing
+translucent pass; it does not add a pass or draw.
+
+Opting out is explicit. Static and slowly changing custom translucency relies
+on the existing depth, color-neighborhood, and history-clamp rejection. The
+sequence corpus qualifies that route independently. Rapid particles should
+opt in rather than depend on alpha/color guesses, which are ambiguous for
+additive and premultiplied materials.
+
 ## Per-pixel TAA/TSR diagnostics
 
 `captureDebugIntermediates(directory)` now adds four surface-resolution PNGs
@@ -289,6 +312,8 @@ still. It isolates TAA/TSR from unrelated temporal effects and covers:
 - an eight-frame subpixel pan;
 - retained opaque rigid motion;
 - retained transparent motion through reactive TAA coverage;
+- instanced particle teleport with authored reactive coverage, plus an
+  ordinary custom-translucency negative control;
 - cached skinned locomotion plus joint-palette deformation;
 - cached alpha-tested card translation and rotation;
 - emissive geometry plus a local light switching both on and off;
@@ -306,11 +331,15 @@ camera. Fast-rotation recovery is compared with the mean of a settled
 cycle's mean variation is bounded to 2 RGB levels. Slow-pan pairwise variation
 is bounded to 4 RGB levels with at most 3% coherent outliers.
 
-The rigid, reactive, skinned, alpha-tested, and emissive content sequences use
-the same recovery gate and include a negative control requiring visibly
-different stable states. A motion trail may cover at most 2% of pixels after
-four frames, severe `>64/255` residue must settle below 0.5% within four
+The rigid, reactive, particle, skinned, alpha-tested, and emissive content
+sequences use the same recovery gate and include a negative control requiring
+visibly different stable states. A motion trail may cover at most 2% of pixels
+after four frames, severe `>64/255` residue must settle below 0.5% within four
 frames, and the settled jitter cycle must vary by no more than 2 RGB levels.
+The particle sequence uses the production instanced additive route, requires
+at least 100 pixels classified as reactive rejection, and then repeats with
+the ordinary material contract to prove both its bounded recovery and inactive
+reactive topology.
 The skinned sequence uses the production cached-model draw, keyed previous
 palette, world locomotion, and two-joint deformation paths. The foliage card
 uses the production cached alpha-mask/coverage-mip route and additionally

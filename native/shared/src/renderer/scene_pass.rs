@@ -845,7 +845,9 @@ impl Renderer {
             // The mixed dispatcher merge-walks this list with the independently
             // sorted imported list, avoiding a second combined allocation.
             self.material_system.sort_translucent();
-            if self.temporal_reactive_active && globally_interleave_sorted {
+            if self.temporal_reactive_active
+                && !self.material_system.translucent_commands.is_empty()
+            {
                 self.material_system
                     .ensure_translucent_reactive_pipelines(&self.device);
             }
@@ -1399,18 +1401,36 @@ impl Renderer {
                     if !globally_interleave_sorted
                         && !self.material_system.translucent_commands.is_empty()
                     {
+                        let reactive_view =
+                            reactive_view.expect("active reactive topology has a view");
+                        let reactive_load = if reactive_initialized {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        };
                         let t_ts = profiler.pass_timestamp_writes("translucent_pass");
                         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("bloom_custom_translucent_pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &self.hdr_rt_view,
-                                resolve_target: None,
-                                depth_slice: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
+                            label: Some("bloom_custom_translucent_reactive_pass"),
+                            color_attachments: &[
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: &self.hdr_rt_view,
+                                    resolve_target: None,
+                                    depth_slice: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                }),
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: reactive_view,
+                                    resolve_target: None,
+                                    depth_slice: None,
+                                    ops: wgpu::Operations {
+                                        load: reactive_load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                }),
+                            ],
                             depth_stencil_attachment: Some(
                                 wgpu::RenderPassDepthStencilAttachment {
                                     view: &self.depth_view,
@@ -1427,8 +1447,9 @@ impl Renderer {
                         });
                         let cache = &self.model_gpu_cache;
                         let gpu_driven = &self.gpu_driven;
-                        self.material_system
-                            .dispatch_translucent(&mut pass, |handle, idx| {
+                        self.material_system.dispatch_translucent_reactive(
+                            &mut pass,
+                            |handle, idx| {
                                 if let Some(Some(meshes)) = cache.get(&handle) {
                                     if idx < meshes.len() {
                                         let mesh = &meshes[idx];
@@ -1438,7 +1459,9 @@ impl Renderer {
                                     }
                                 }
                                 None
-                            });
+                            },
+                        );
+                        reactive_initialized = true;
                     }
                 } else {
                     let t_ts = profiler.pass_timestamp_writes("translucent_pass");

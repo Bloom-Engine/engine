@@ -1,4 +1,5 @@
-//! Lazy temporal-reactive coverage for imported transparency and transmission.
+//! Lazy temporal-reactive coverage for imported transparency, transmission,
+//! and custom translucent materials that author an `fs_reactive` entry point.
 //!
 //! The established TAA, sorted-alpha, refraction, and weighted-OIT pipelines
 //! remain untouched. These variants are compiled only after a TAA frame has a
@@ -26,12 +27,14 @@ pub(super) fn temporal_reactive_enabled() -> bool {
 pub(super) fn temporal_reactive_selected(
     taa_enabled: bool,
     imported_transparency_draw_count: usize,
+    custom_reactive_draw: impl FnOnce() -> bool,
     imported_refraction_draw_count: impl FnOnce() -> usize,
 ) -> bool {
     temporal_reactive_selected_for(
         temporal_reactive_enabled(),
         taa_enabled,
         imported_transparency_draw_count,
+        custom_reactive_draw,
         imported_refraction_draw_count,
     )
 }
@@ -40,11 +43,14 @@ fn temporal_reactive_selected_for(
     feature_enabled: bool,
     taa_enabled: bool,
     imported_transparency_draw_count: usize,
+    custom_reactive_draw: impl FnOnce() -> bool,
     imported_refraction_draw_count: impl FnOnce() -> usize,
 ) -> bool {
     feature_enabled
         && taa_enabled
-        && (imported_transparency_draw_count > 0 || imported_refraction_draw_count() > 0)
+        && (imported_transparency_draw_count > 0
+            || custom_reactive_draw()
+            || imported_refraction_draw_count() > 0)
 }
 
 pub(super) fn reactive_union_blend() -> wgpu::BlendState {
@@ -784,17 +790,48 @@ mod tests {
     }
 
     #[test]
-    fn selection_requires_taa_and_a_visible_imported_contributor() {
-        assert!(!temporal_reactive_selected_for(false, true, 1, || {
-            panic!("disabled feature must not scan refraction")
-        }));
-        assert!(!temporal_reactive_selected_for(true, false, 1, || {
-            panic!("TAA-off path must not scan refraction")
-        }));
-        assert!(!temporal_reactive_selected_for(true, true, 0, || 0));
-        assert!(temporal_reactive_selected_for(true, true, 1, || {
-            panic!("visible BLEND must short-circuit the refraction scan")
-        }));
-        assert!(temporal_reactive_selected_for(true, true, 0, || 1));
+    fn selection_requires_taa_and_a_visible_reactive_contributor() {
+        assert!(!temporal_reactive_selected_for(
+            false,
+            true,
+            1,
+            || panic!("disabled feature must not scan custom materials"),
+            || { panic!("disabled feature must not scan refraction") }
+        ));
+        assert!(!temporal_reactive_selected_for(
+            true,
+            false,
+            1,
+            || panic!("TAA-off path must not scan custom materials"),
+            || { panic!("TAA-off path must not scan refraction") }
+        ));
+        assert!(!temporal_reactive_selected_for(
+            true,
+            true,
+            0,
+            || false,
+            || 0
+        ));
+        assert!(temporal_reactive_selected_for(
+            true,
+            true,
+            1,
+            || { panic!("visible BLEND must short-circuit the custom-material scan") },
+            || { panic!("visible BLEND must short-circuit the refraction scan") }
+        ));
+        assert!(temporal_reactive_selected_for(
+            true,
+            true,
+            0,
+            || true,
+            || { panic!("custom reactive draw must short-circuit the refraction scan") }
+        ));
+        assert!(temporal_reactive_selected_for(
+            true,
+            true,
+            0,
+            || false,
+            || 1
+        ));
     }
 }

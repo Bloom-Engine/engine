@@ -457,6 +457,7 @@ struct TranslucentReactiveRecipe {
     depth_format: wgpu::TextureFormat,
     bucket: Bucket,
     label: String,
+    writes_reactive: bool,
 }
 
 enum TranslucentReactiveSource {
@@ -484,6 +485,9 @@ pub struct MaterialPipeline {
     /// what bind groups get bound, only which `set_vertex_buffer(1, …)`
     /// path runs for a given draw command.
     pub wants_instancing: bool,
+    /// The authored source exposes `fs_reactive`, so submitted translucent
+    /// draws can activate and write the lazy temporal-reactive attachment.
+    pub(crate) writes_reactive: bool,
     /// Label carried through for debug output.
     pub label: String,
     /// EN-011 V2 — sibling pipeline with front-face culling for use in
@@ -505,10 +509,9 @@ impl MaterialPipeline {
     /// Lazily create the attachment-compatible sibling used only when this
     /// custom material is globally interleaved with imported reactive BLEND.
     ///
-    /// The shader has no location-1 output and the second target has an empty
-    /// write mask, so custom materials cannot fabricate reactive coverage.
-    /// They retain their exact location-0 blend behavior while imported draws
-    /// in the same render pass union real coverage into the R8 target.
+    /// Ordinary custom shaders use `fs_main` with an empty location-1 write
+    /// mask. Opt-in responsive shaders use their authored `fs_reactive` entry
+    /// and union its coverage into the R8 attachment.
     pub(crate) fn ensure_reactive_pipeline(&mut self, device: &wgpu::Device) -> bool {
         if self.reactive_pipeline.is_some() {
             return false;
@@ -549,17 +552,26 @@ impl MaterialPipeline {
         } else {
             wgpu::BlendState::ALPHA_BLENDING
         };
+        let reactive_target = if recipe.writes_reactive {
+            wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::R8Unorm,
+                blend: Some(super::temporal_reactive::reactive_union_blend()),
+                write_mask: wgpu::ColorWrites::RED,
+            }
+        } else {
+            wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::R8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::empty(),
+            }
+        };
         let targets = [
             Some(wgpu::ColorTargetState {
                 format: recipe.hdr_format,
                 blend: Some(color_blend),
                 write_mask: wgpu::ColorWrites::ALL,
             }),
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::R8Unorm,
-                blend: None,
-                write_mask: wgpu::ColorWrites::empty(),
-            }),
+            Some(reactive_target),
         ];
         self.reactive_pipeline = Some(device.create_render_pipeline(
             &wgpu::RenderPipelineDescriptor {
@@ -573,7 +585,11 @@ impl MaterialPipeline {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(if recipe.writes_reactive {
+                        "fs_reactive"
+                    } else {
+                        "fs_main"
+                    }),
                     targets: &targets,
                     compilation_options: Default::default(),
                 }),
@@ -656,6 +672,71 @@ fn expand_material_source(
     #[cfg(fold_scene_inputs)]
     let expanded = rewrite_scene_inputs_for_wasm(expanded);
     Ok(expanded)
+}
+
+fn declares_reactive_fragment(source: &str) -> Result<bool, MaterialCompileError> {
+    if !source.contains("fs_reactive") {
+        return Ok(false);
+    }
+    let module = wgpu::naga::front::wgsl::parse_str(source)
+        .map_err(|error| MaterialCompileError::Naga(error.emit_to_string(source)))?;
+    let Some(entry) = module.entry_points.iter().find(|entry| {
+        entry.stage == wgpu::naga::ShaderStage::Fragment && entry.name == "fs_reactive"
+    }) else {
+        return Ok(false);
+    };
+    let Some(result) = entry.function.result.as_ref() else {
+        return Err(MaterialCompileError::Naga(
+            "fs_reactive must return ReactiveTranslucentOut".to_owned(),
+        ));
+    };
+    let wgpu::naga::TypeInner::Struct { members, .. } = &module.types[result.ty].inner else {
+        return Err(MaterialCompileError::Naga(
+            "fs_reactive must return a struct with @location(0) vec4<f32> HDR and \
+             @location(1) f32 reactive coverage"
+                .to_owned(),
+        ));
+    };
+    let member_at = |location| {
+        members.iter().find(|member| {
+            matches!(
+                member.binding,
+                Some(wgpu::naga::Binding::Location {
+                    location: member_location,
+                    ..
+                }) if member_location == location
+            )
+        })
+    };
+    let hdr_valid = member_at(0).is_some_and(|member| {
+        matches!(
+            &module.types[member.ty].inner,
+            wgpu::naga::TypeInner::Vector {
+                size: wgpu::naga::VectorSize::Quad,
+                scalar: wgpu::naga::Scalar {
+                    kind: wgpu::naga::ScalarKind::Float,
+                    width: 4,
+                },
+            }
+        )
+    });
+    let coverage_valid = member_at(1).is_some_and(|member| {
+        matches!(
+            &module.types[member.ty].inner,
+            wgpu::naga::TypeInner::Scalar(wgpu::naga::Scalar {
+                kind: wgpu::naga::ScalarKind::Float,
+                width: 4,
+            })
+        )
+    });
+    if members.len() != 2 || !hdr_valid || !coverage_valid {
+        return Err(MaterialCompileError::Naga(
+            "fs_reactive must return exactly @location(0) vec4<f32> HDR and \
+             @location(1) f32 reactive coverage"
+                .to_owned(),
+        ));
+    }
+    Ok(true)
 }
 
 /// Compile a material pipeline. This is the happy-path you call at
@@ -792,6 +873,8 @@ pub fn compile_material(
     //    InstanceData3D layout so the pipeline expects a second VB at
     //    slot 1 (step_mode = Instance). The owned Vec only lives long
     //    enough to be referenced by the RenderPipelineDescriptor.
+    let writes_reactive = matches!(desc.profile, FragmentProfile::Translucent)
+        && declares_reactive_fragment(&expanded)?;
     let vertex_buffers_owned: Vec<wgpu::VertexBufferLayout<'_>>;
     let vertex_buffers: &[wgpu::VertexBufferLayout<'_>] = if desc.wants_instancing {
         vertex_buffers_owned = desc
@@ -892,6 +975,7 @@ pub fn compile_material(
             depth_format: desc.depth_format,
             bucket: desc.bucket,
             label: desc.label.to_string(),
+            writes_reactive,
         }
     });
 
@@ -903,6 +987,7 @@ pub fn compile_material(
         bucket: desc.bucket,
         reads_scene: desc.reads_scene,
         wants_instancing: desc.wants_instancing,
+        writes_reactive,
         label: desc.label.to_string(),
         reflection_pipeline,
     })
@@ -1033,5 +1118,59 @@ mod tests {
             result.is_ok(),
             "test_minimal.wgsl should parse via naga after include expansion"
         );
+    }
+
+    #[test]
+    fn reactive_fragment_detection_requires_the_named_fragment_entry() {
+        let ordinary = "
+            @fragment
+            fn fs_main() -> @location(0) vec4<f32> {
+                return vec4<f32>(1.0);
+            }
+        ";
+        assert!(!declares_reactive_fragment(ordinary).unwrap());
+
+        let helper_only = "
+            fn fs_reactive() -> f32 {
+                return 1.0;
+            }
+            @fragment
+            fn fs_main() -> @location(0) vec4<f32> {
+                return vec4<f32>(1.0);
+            }
+        ";
+        assert!(!declares_reactive_fragment(helper_only).unwrap());
+
+        let responsive = "
+            struct Out {
+                @location(0) hdr: vec4<f32>,
+                @location(1) reactive: f32,
+            };
+            @fragment
+            fn fs_main() -> @location(0) vec4<f32> {
+                return vec4<f32>(1.0);
+            }
+            @fragment
+            fn fs_reactive() -> Out {
+                return Out(vec4<f32>(1.0), 1.0);
+            }
+        ";
+        assert!(declares_reactive_fragment(responsive).unwrap());
+
+        let malformed = "
+            struct Out {
+                @location(0) hdr: vec4<f32>,
+                @location(1) reactive: vec4<f32>,
+            };
+            @fragment
+            fn fs_reactive() -> Out {
+                return Out(vec4<f32>(1.0), vec4<f32>(1.0));
+            }
+        ";
+        assert!(matches!(
+            declares_reactive_fragment(malformed),
+            Err(MaterialCompileError::Naga(message))
+                if message.contains("@location(1) f32 reactive coverage")
+        ));
     }
 }

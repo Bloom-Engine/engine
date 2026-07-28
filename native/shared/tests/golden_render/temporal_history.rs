@@ -1326,6 +1326,202 @@ fn immediate_primitive_motion_writes_velocity_and_bounds_trails() {
 }
 
 #[test]
+fn instanced_particle_reactive_opt_in_bounds_trails_without_taxing_opt_out() {
+    const HANDLE: u64 = 0x7AA5_C011;
+    const PARTICLE_SHADER_PREFIX: &str = r#"
+#include "material_abi.wgsl"
+
+struct ParticleInput {
+  @location(0) position: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) color: vec4<f32>,
+  @location(3) uv: vec2<f32>,
+  @location(4) joints: vec4<f32>,
+  @location(5) weights: vec4<f32>,
+  @location(6) tangent: vec4<f32>,
+  @location(7) instance_pos: vec3<f32>,
+  @location(8) instance_rot_y: f32,
+  @location(9) instance_scale: f32,
+  @location(10) instance_tint: vec4<f32>,
+};
+
+struct VsOut {
+  @builtin(position) clip_position: vec4<f32>,
+  @location(0) tint: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: ParticleInput) -> VsOut {
+  var out: VsOut;
+  let world = in.position * in.instance_scale + in.instance_pos;
+  out.clip_position = view.view_proj * vec4<f32>(world, 1.0);
+  out.tint = in.color * in.instance_tint;
+  return out;
+}
+
+fn particle_color(in: VsOut) -> vec4<f32> {
+  return vec4<f32>(in.tint.rgb * 3.0, in.tint.a);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> TranslucentOut {
+  var out: TranslucentOut;
+  out.hdr = particle_color(in);
+  return out;
+}
+"#;
+    const PARTICLE_REACTIVE_SUFFIX: &str = r#"
+
+@fragment
+fn fs_reactive(in: VsOut) -> ReactiveTranslucentOut {
+  var out: ReactiveTranslucentOut;
+  out.hdr = particle_color(in);
+  out.reactive = in.tint.a;
+  return out;
+}
+"#;
+
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(true);
+    r.set_render_scale(1.0);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+    r.set_transparency_composition_mode(0);
+
+    let vertex = |position| Vertex3D {
+        position,
+        normal: [0.0, 0.0, 1.0],
+        color: [1.0, 0.13, 0.025, 1.0],
+        uv: [0.0; 2],
+        joints: [0.0; 4],
+        weights: [0.0; 4],
+        tangent: [1.0, 0.0, 0.0, 1.0],
+    };
+    assert!(eng.renderer.cache_model_if_static(
+        HANDLE,
+        &[MeshData {
+            vertices: vec![
+                vertex([-0.55, -0.55, 0.0]),
+                vertex([0.55, -0.55, 0.0]),
+                vertex([0.55, 0.55, 0.0]),
+                vertex([-0.55, 0.55, 0.0]),
+            ],
+            secondary_tex_coords: None,
+            indices: vec![0, 1, 2, 0, 2, 3],
+            texture_idx: None,
+            normal_texture_idx: None,
+            metallic_roughness_texture_idx: None,
+            emissive_texture_idx: None,
+            occlusion_texture_idx: None,
+            metallic_factor: 0.0,
+            roughness_factor: 1.0,
+            emissive_factor: [0.0; 3],
+            alpha_mode: MaterialAlphaMode::Blend,
+            alpha_cutoff: 0.0,
+            alpha_coverage_mips: false,
+            double_sided: true,
+            transmission: Default::default(),
+            layered_pbr: Default::default(),
+        }]
+    ));
+
+    let ordinary_material = eng
+        .renderer
+        .compile_material_instanced_bucket(PARTICLE_SHADER_PREFIX, 2, false)
+        .expect("ordinary instanced particle material compiles");
+    let reactive_source = format!("{PARTICLE_SHADER_PREFIX}{PARTICLE_REACTIVE_SUFFIX}");
+    let reactive_material = eng
+        .renderer
+        .compile_material_instanced_bucket(&reactive_source, 2, false)
+        .expect("reactive instanced particle material compiles");
+    let old_buffer = eng
+        .renderer
+        .create_instance_buffer(&[-1.35, 1.15, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0], 1);
+    let new_buffer = eng
+        .renderer
+        .create_instance_buffer(&[1.35, 1.15, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0], 1);
+
+    let draw_scene = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(7.0, 10.0, 20.0, 255.0);
+        r.begin_mode_3d(0.0, 2.0, 6.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 30.0, 38.0, 52.0, 255.0);
+        r.draw_cube(0.0, 1.2, -1.7, 5.0, 3.2, 0.3, 30.0, 150.0, 220.0, 255.0);
+    };
+    let capture_particle = |eng: &mut EngineState, material, instance_buffer| -> Vec<u8> {
+        render(eng, 1, |eng| {
+            draw_scene(eng);
+            eng.renderer
+                .submit_material_draw_instanced(material, HANDLE, 0, instance_buffer, 1);
+        })
+        .2
+    };
+    let mut run_sequence = |material, label: &str, capture_reactive: bool| {
+        eng.renderer.reset_temporal_history();
+        for _ in 0..8 {
+            capture_particle(&mut eng, material, old_buffer);
+        }
+        let old_pose = capture_particle(&mut eng, material, old_buffer);
+        let directory = std::env::temp_dir().join(format!("bloom-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        if capture_reactive {
+            eng.renderer.pending_quality_capture_dir =
+                Some(directory.to_string_lossy().into_owned());
+        }
+        let mut frames = Vec::new();
+        for _ in 0..24 {
+            frames.push(capture_particle(&mut eng, material, new_buffer));
+        }
+        evaluate_motion_recovery(label, &old_pose, &frames);
+        let paths: serde_json::Value =
+            serde_json::from_str(&eng.renderer.quality_runtime_paths_json()).unwrap();
+        assert_eq!(
+            paths["temporal_reactive"]["active"].as_bool(),
+            Some(capture_reactive),
+            "{label} selected the wrong temporal-reactive topology"
+        );
+        if capture_reactive {
+            let reasons = image::open(directory.join("taa-rejection-reason.png"))
+                .expect("reactive particle capture did not emit rejection reasons")
+                .to_rgb8();
+            let reactive_pixels = reasons
+                .pixels()
+                .filter(|pixel| {
+                    i32::from(pixel[0]).pow(2)
+                        + (i32::from(pixel[1]) - 230).pow(2)
+                        + (i32::from(pixel[2]) - 255).pow(2)
+                        < 80_i32.pow(2)
+                })
+                .count();
+            eprintln!("temporal-corpus {label} reactive_pixels={reactive_pixels}");
+            assert!(
+                reactive_pixels >= 100,
+                "authored particle coverage did not reach TAA rejection"
+            );
+        }
+        if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+            eprintln!("kept {label} diagnostics at {directory:?}");
+        } else {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    };
+
+    run_sequence(reactive_material, "reactive-particle", true);
+    run_sequence(ordinary_material, "ordinary-particle-control", false);
+    eng.renderer.destroy_instance_buffer(old_buffer);
+    eng.renderer.destroy_instance_buffer(new_buffer);
+}
+
+#[test]
 fn cached_skinned_motion_sequence_bounds_animation_trails() {
     const HANDLE: u64 = 0x7AA5_0001;
     const PALETTE_KEY: u64 = 0x7AA5_1001;
