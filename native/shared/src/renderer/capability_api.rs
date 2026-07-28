@@ -36,10 +36,11 @@ impl Renderer {
 
     /// Present mode: 0 = Fifo (vsync), 1 = Mailbox (uncapped, no tearing),
     /// 2 = Immediate (uncapped, tearing allowed), 3 = AutoNoVsync (portable
-    /// uncapped preference with backend fallback). Returns false for invalid
-    /// requests and headless renderers, which have no presentation surface.
+    /// uncapped preference with backend fallback). Headless renderers retain
+    /// the requested mode as qualification metadata without configuring a
+    /// surface. Returns false only for invalid requests.
     pub fn set_present_mode(&mut self, mode: u32) -> bool {
-        if mode > 3 || self.surface.is_none() {
+        if mode > 3 {
             return false;
         }
         let requested = match mode {

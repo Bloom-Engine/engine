@@ -4,7 +4,7 @@
 #[test]
 fn negotiated_headless_device_constructs_the_complete_renderer() {
     let engine = bloom_shared::attach::attach_headless_engine(wgpu::Backends::PRIMARY, 64, 64);
-    let engine = match engine {
+    let mut engine = match engine {
         Ok(engine) => engine,
         Err(error) if error.contains("no compatible adapter") => {
             eprintln!("skip: no native GPU adapter ({error})");
@@ -34,4 +34,12 @@ fn negotiated_headless_device_constructs_the_complete_renderer() {
     assert!(public["material_binding"]["selected_tier"].is_string());
     assert!(public["runtime_support"]["path_tracing"].is_boolean());
     assert!(public["runtime_support"]["gpu_driven"]["enabled"].is_boolean());
+
+    // Headless qualification has no swapchain to configure, but it is still
+    // uncapped and must retain the requested mode for truthful telemetry.
+    assert!(engine.renderer.set_present_mode(3));
+    assert_eq!(engine.renderer.present_mode_code(), 3);
+    assert!(!engine.renderer.vsync_active());
+    assert!(!engine.renderer.set_present_mode(4));
+    assert_eq!(engine.renderer.present_mode_code(), 3);
 }
