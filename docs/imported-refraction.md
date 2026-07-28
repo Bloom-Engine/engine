@@ -37,11 +37,14 @@ The shader applies:
    using the bounded planar/screen-space/environment hierarchy on native
    targets and the prefiltered environment on folded targets.
 
-Model scale promotes authored thickness into world units. The pass writes
-per-object motion vectors, depth-tests against opaque geometry, and does not
-write opaque depth. With TAA active, it also writes transmitted contribution
-to the lazy `r8unorm` reactive target so background-dependent radiance cannot
-leave stale temporal trails. See
+Static glTF node scale is retained when node transforms are baked into
+vertices, then the later `drawModel`/scene-instance scale promotes that
+effective thickness into world units. The authored `thicknessFactor` remains
+separate and unchanged in material metadata. The pass writes per-object motion
+vectors, depth-tests against opaque geometry, and does not write opaque depth.
+With TAA active, it also writes transmitted contribution to the lazy
+`r8unorm` reactive target so background-dependent radiance cannot leave stale
+temporal trails. See
 [Temporal reactive coverage](temporal-reactive-coverage.md).
 The reflection source and its exact fallback/allocation contract are described
 in [Refractive reflection sources](refractive-reflections.md).

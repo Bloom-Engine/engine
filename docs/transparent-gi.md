@@ -68,7 +68,9 @@ The existing 144-byte `InstanceGiDataCpu` record carries:
 | `mat_params.w` | dielectric Fresnel pass fraction |
 
 Absorption uses authored attenuation color and distance, with thickness scaled
-by average world model scale. The bounded composition is:
+by the baked static glTF node transform and the later average world instance
+scale. The authored material factor remains unchanged. The bounded composition
+is:
 
 ```text
 front_radiance * coverage * (1 - transmission_weight)

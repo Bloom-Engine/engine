@@ -420,6 +420,11 @@ pub struct MaterialTransmission {
     pub attenuation_distance: f32,
     pub attenuation_color: [f32; 3],
     pub thickness_source: MaterialThicknessSource,
+    /// Import-only conversion from authored mesh-space thickness to the
+    /// baked static geometry's space. glTF node transforms are folded into
+    /// static vertices before rendering, so their scale cannot be recovered
+    /// from the later draw-model matrix.
+    pub baked_thickness_scale: f32,
 }
 
 impl Default for MaterialTransmission {
@@ -438,6 +443,7 @@ impl Default for MaterialTransmission {
             attenuation_distance: f32::INFINITY,
             attenuation_color: [1.0; 3],
             thickness_source: MaterialThicknessSource::Unavailable,
+            baked_thickness_scale: 1.0,
         }
     }
 }
@@ -445,6 +451,16 @@ impl Default for MaterialTransmission {
 impl MaterialTransmission {
     pub(crate) fn effective_ior(self) -> f32 {
         effective_material_ior(self.ior)
+    }
+
+    pub(crate) fn effective_thickness_factor(self) -> f32 {
+        let baked_scale =
+            if self.baked_thickness_scale.is_finite() && self.baked_thickness_scale >= 0.0 {
+                self.baked_thickness_scale
+            } else {
+                1.0
+            };
+        self.thickness_factor.max(0.0) * baked_scale
     }
 
     /// True when the authored transmission lobe can contribute energy.
@@ -502,6 +518,7 @@ pub(crate) fn physical_transmission_requested() -> bool {
         .unwrap_or(true)
 }
 
+#[derive(Clone)]
 pub struct MeshData {
     pub vertices: Vec<Vertex3D>,
     /// Compact glTF TEXCOORD_1 sidecar retained only when an active physical

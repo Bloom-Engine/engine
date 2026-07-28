@@ -139,7 +139,7 @@ impl SceneTransmissionUniforms {
             transmission: [
                 transmission.factor.clamp(0.0, 1.0),
                 transmission.effective_ior(),
-                transmission.thickness_factor.max(0.0),
+                transmission.effective_thickness_factor(),
                 has_transmission_texture as u8 as f32,
             ],
             attenuation: [
@@ -1170,17 +1170,24 @@ mod physical_uv_tests {
 
     #[test]
     fn physical_uniform_carries_independent_texture_uv_selectors() {
-        let transmission = MaterialTransmission {
+        let mut transmission = MaterialTransmission {
             authored: true,
             factor: 1.0,
             texture: Some(binding(1)),
             thickness_texture: Some(binding(0)),
+            thickness_factor: 0.25,
+            baked_thickness_scale: 2.0,
             ..Default::default()
         };
         let uniforms = SceneTransmissionUniforms::new(transmission, true, true);
+        assert_eq!(uniforms.transmission[2], 0.5);
         assert_eq!(uniforms.transmission_rotation[3], 1.0);
         assert_eq!(uniforms.thickness_rotation[2], 0.0);
         assert_eq!(uniforms.transmission[3], 1.0);
         assert_eq!(uniforms.transmission_rotation[2], 1.0);
+
+        transmission.baked_thickness_scale = f32::NAN;
+        let defensive = SceneTransmissionUniforms::new(transmission, true, true);
+        assert_eq!(defensive.transmission[2], 0.25);
     }
 }

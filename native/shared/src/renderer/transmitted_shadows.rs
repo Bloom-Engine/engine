@@ -938,6 +938,7 @@ fn transmission_hash(mut hash: u64, transmission: crate::models::MaterialTransmi
         transmission.factor,
         transmission.ior,
         transmission.thickness_factor,
+        transmission.baked_thickness_scale,
         transmission.attenuation_distance,
         transmission.attenuation_color[0],
         transmission.attenuation_color[1],

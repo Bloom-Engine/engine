@@ -1543,9 +1543,9 @@ struct TransmissionFactors {{
 
     // Convert the refracted world-space direction into a stable screen-space
     // travel distance using the fragment's world-position derivatives. The
-    // authored thickness remains in model units and is promoted to world units
-    // with the mean model scale. A 64-pixel cap prevents pathological assets
-    // from sampling unrelated parts of the frame.
+    // material factor already carries static glTF node scale baked by the
+    // importer; the interpolant adds the later draw/instance scale. A 64-pixel
+    // cap prevents pathological assets from sampling unrelated frame regions.
     let world_dx = dpdx(in.world_pos);
     let world_dy = dpdy(in.world_pos);
     let world_dx_len = max(length(world_dx), 0.000001);

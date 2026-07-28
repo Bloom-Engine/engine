@@ -66,7 +66,7 @@ pub(super) fn instance_transport(
             + (transform[1][0].powi(2) + transform[1][1].powi(2) + transform[1][2].powi(2)).sqrt()
             + (transform[2][0].powi(2) + transform[2][1].powi(2) + transform[2][2].powi(2)).sqrt())
             / 3.0;
-    let thickness = transmission.thickness_factor.max(0.0) * model_scale;
+    let thickness = transmission.effective_thickness_factor() * model_scale;
     let absorption = if transmission.attenuation_distance.is_finite()
         && transmission.attenuation_distance > 0.0
         && thickness > 0.0
@@ -317,6 +317,13 @@ mod tests {
         assert!(transport.absorption[0] < transport.absorption[1]);
         assert!(transport.absorption[1] < transport.absorption[2]);
         assert!((transport.fresnel_pass - 0.96).abs() < 1.0e-5);
+
+        glass.transmission.baked_thickness_scale = 2.0;
+        let baked_scale_transport = instance_transport(&glass, &IDENTITY_MAT4, true);
+        assert!(
+            baked_scale_transport.absorption[0] < transport.absorption[0],
+            "baked glTF node scale must deepen GI absorption"
+        );
 
         glass.metalness = 1.0;
         assert!(

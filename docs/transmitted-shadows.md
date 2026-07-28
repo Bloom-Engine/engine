@@ -48,7 +48,7 @@ refraction:
 - thickness factor and texture;
 - attenuation color and distance;
 - IOR Fresnel partitioning; and
-- model scale for world-space thickness.
+- baked glTF node scale plus later instance scale for world-space thickness.
 
 Transmission and thickness textures use the same independent UV0/UV1
 selection and `KHR_texture_transform` contract as camera-facing refraction.

@@ -22,6 +22,20 @@ pub(super) fn mat4_transform_direction(m: &[[f32; 4]; 4], v: &[f32; 3]) -> [f32;
     ]
 }
 
+/// Mean scale of the affine basis, matching the refractive shader's bounded
+/// non-uniform-scale approximation.
+pub(super) fn mat4_mean_scale(m: &[[f32; 4]; 4]) -> f32 {
+    let axis_length = |axis: usize| {
+        (m[axis][0] * m[axis][0] + m[axis][1] * m[axis][1] + m[axis][2] * m[axis][2]).sqrt()
+    };
+    let scale = (axis_length(0) + axis_length(1) + axis_length(2)) / 3.0;
+    if scale.is_finite() {
+        scale
+    } else {
+        1.0
+    }
+}
+
 /// Transform a direction by a column-major 3x3 matrix.
 pub(super) fn mat3_transform_vec(m: &[[f32; 3]; 3], v: &[f32; 3]) -> [f32; 3] {
     [
@@ -126,6 +140,7 @@ mod tests {
             mat3_transform_vec(&mat4_inverse_transpose_3x3(&matrix), &[1.0, 0.0, 0.0]),
             [0.0, 0.5, 0.0],
         );
+        assert!((mat4_mean_scale(&matrix) - 3.0).abs() < 1e-6);
     }
 
     #[test]

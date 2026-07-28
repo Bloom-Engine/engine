@@ -17,8 +17,12 @@ use layered_pbr_import::{
 #[path = "models_gltf_transform.rs"]
 mod transform;
 use transform::{
-    mat3_transform_vec, mat4_inverse_transpose_3x3, mat4_transform_direction, mat4_transform_point,
+    mat3_transform_vec, mat4_inverse_transpose_3x3, mat4_mean_scale, mat4_transform_direction,
+    mat4_transform_point,
 };
+#[path = "models_gltf_bake.rs"]
+mod bake;
+use bake::{bake_scene_mesh_instances, model_bounds};
 
 /// Walk the scene graph and collect EVERY world-space transform that
 /// references each mesh. Unlike `walk_scene_for_mesh_transforms` which
@@ -703,6 +707,15 @@ pub(super) fn load_gltf_with_textures(
                     .read_tangents()
                     .map(|iter| iter.collect())
                     .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
+                let joint_vals: Option<Vec<[u16; 4]>> =
+                    reader.read_joints(0).map(|iter| iter.into_u16().collect());
+                let weight_vals: Option<Vec<[f32; 4]>> =
+                    reader.read_weights(0).map(|iter| iter.into_f32().collect());
+                let primitive_has_skinning = weight_vals.as_ref().is_some_and(|weights| {
+                    weights
+                        .iter()
+                        .any(|weights| weights.iter().sum::<f32>() > 0.01)
+                });
 
                 // Get vertex colors if available
                 let vert_colors: Option<Vec<[f32; 4]>> = reader
@@ -712,7 +725,7 @@ pub(super) fn load_gltf_with_textures(
                 let mat = primitive.material();
                 let pbr = mat.pbr_metallic_roughness();
                 let emissive_factor = mat.emissive_factor();
-                let transmission =
+                let mut transmission =
                     match transmission_from_material(&mat, Some(texture_indices.as_slice())) {
                         Ok(value) => value,
                         Err(error) => {
@@ -720,6 +733,11 @@ pub(super) fn load_gltf_with_textures(
                             return None;
                         }
                     };
+                if !primitive_has_skinning {
+                    if let Some(world) = mesh_world {
+                        transmission.baked_thickness_scale *= mat4_mean_scale(&world);
+                    }
+                }
                 let layered_pbr = match layered_pbr_from_material(
                     &gltf,
                     &mat,
@@ -811,23 +829,10 @@ pub(super) fn load_gltf_with_textures(
                 let mut vertices = Vec::with_capacity(positions.len());
                 for i in 0..positions.len() {
                     let p = positions[i];
-                    for k in 0..3 {
-                        if p[k] < bbox_min[k] {
-                            bbox_min[k] = p[k];
-                        }
-                        if p[k] > bbox_max[k] {
-                            bbox_max[k] = p[k];
-                        }
-                    }
                     let color = vert_colors
                         .as_ref()
                         .map(|colors| multiply_rgba(colors[i], base_color))
                         .unwrap_or(base_color);
-                    // Skin data (joints + weights)
-                    let joint_vals: Option<Vec<[u16; 4]>> =
-                        reader.read_joints(0).map(|iter| iter.into_u16().collect());
-                    let weight_vals: Option<Vec<[f32; 4]>> =
-                        reader.read_weights(0).map(|iter| iter.into_f32().collect());
 
                     let jv = if let Some(ref j) = joint_vals {
                         [
@@ -1107,9 +1112,8 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         scale
     };
 
-    let mut meshes = Vec::new();
-    let mut bbox_min = [f32::MAX; 3];
-    let mut bbox_max = [f32::MIN; 3];
+    let mut source_meshes: Vec<Vec<MeshData>> =
+        (0..gltf.meshes().count()).map(|_| Vec::new()).collect();
 
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
@@ -1130,6 +1134,10 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                 .read_tangents()
                 .map(|iter| iter.collect())
                 .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
+            let joint_vals: Option<Vec<[u16; 4]>> =
+                reader.read_joints(0).map(|iter| iter.into_u16().collect());
+            let weight_vals: Option<Vec<[f32; 4]>> =
+                reader.read_weights(0).map(|iter| iter.into_f32().collect());
             let vert_colors: Option<Vec<[f32; 4]>> = reader
                 .read_colors(0)
                 .map(|iter| iter.into_rgba_f32().collect());
@@ -1229,22 +1237,10 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
                 let p = positions[i];
-                for k in 0..3 {
-                    if p[k] < bbox_min[k] {
-                        bbox_min[k] = p[k];
-                    }
-                    if p[k] > bbox_max[k] {
-                        bbox_max[k] = p[k];
-                    }
-                }
                 let color = vert_colors
                     .as_ref()
                     .map(|colors| multiply_rgba(colors[i], base_color))
                     .unwrap_or(base_color);
-                let joint_vals: Option<Vec<[u16; 4]>> =
-                    reader.read_joints(0).map(|iter| iter.into_u16().collect());
-                let weight_vals: Option<Vec<[f32; 4]>> =
-                    reader.read_weights(0).map(|iter| iter.into_f32().collect());
                 let jv = if let Some(ref j) = joint_vals {
                     [
                         j[i][0] as f32,
@@ -1284,7 +1280,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                 Some(iter) => iter.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
             };
-            meshes.push(MeshData {
+            source_meshes[mesh.index()].push(MeshData {
                 vertices,
                 secondary_tex_coords,
                 indices,
@@ -1306,9 +1302,11 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         }
     }
 
+    let meshes = bake_scene_mesh_instances(&gltf, source_meshes);
     if meshes.is_empty() {
         return None;
     }
+    let (bbox_min, bbox_max) = model_bounds(&meshes);
     Some(StagedModel {
         model: ModelData {
             meshes,
@@ -1345,9 +1343,8 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
         }
     }
 
-    let mut meshes = Vec::new();
-    let mut bbox_min = [f32::MAX; 3];
-    let mut bbox_max = [f32::MIN; 3];
+    let mut source_meshes: Vec<Vec<MeshData>> =
+        (0..gltf.meshes().count()).map(|_| Vec::new()).collect();
 
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
@@ -1371,6 +1368,10 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 .read_tangents()
                 .map(|iter| iter.collect())
                 .unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
+            let joint_vals: Option<Vec<[u16; 4]>> =
+                reader.read_joints(0).map(|iter| iter.into_u16().collect());
+            let weight_vals: Option<Vec<[f32; 4]>> =
+                reader.read_weights(0).map(|iter| iter.into_f32().collect());
 
             // Material base color. The plain CPU-only loader intentionally
             // leaves texture runtime IDs empty, but it must still preserve
@@ -1402,19 +1403,6 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
                 let p = positions[i];
-                for k in 0..3 {
-                    if p[k] < bbox_min[k] {
-                        bbox_min[k] = p[k];
-                    }
-                    if p[k] > bbox_max[k] {
-                        bbox_max[k] = p[k];
-                    }
-                }
-                // Read skin data if available
-                let joint_vals: Option<Vec<[u16; 4]>> =
-                    reader.read_joints(0).map(|iter| iter.into_u16().collect());
-                let weight_vals: Option<Vec<[f32; 4]>> =
-                    reader.read_weights(0).map(|iter| iter.into_f32().collect());
                 let jv = if let Some(ref j) = joint_vals {
                     [
                         j[i][0] as f32,
@@ -1447,7 +1435,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 None => (0..positions.len() as u32).collect(),
             };
 
-            meshes.push(MeshData {
+            source_meshes[mesh.index()].push(MeshData {
                 vertices,
                 secondary_tex_coords,
                 indices,
@@ -1469,9 +1457,11 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
         }
     }
 
+    let meshes = bake_scene_mesh_instances(&gltf, source_meshes);
     if meshes.is_empty() {
         return None;
     }
+    let (bbox_min, bbox_max) = model_bounds(&meshes);
     Some(ModelData {
         meshes,
         bbox_min,

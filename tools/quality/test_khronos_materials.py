@@ -100,6 +100,27 @@ class KhronosMaterialQualificationTests(unittest.TestCase):
             ):
                 khronos.image_statistics(path, (2, 2), "material-variation")
 
+    def test_attenuation_gate_requires_a_node_scale_absorption_ramp(self) -> None:
+        width = 100
+        height = 100
+        pixels = [(0, 0, 0)] * (width * height)
+        centers = ((34, 69), (41, 69), (50, 69), (61, 69), (78, 69))
+        for index, (center_x, center_y) in enumerate(centers):
+            color = (100, 110, 110 + index * 10)
+            for y in range(center_y - 1, center_y + 2):
+                for x in range(center_x - 1, center_x + 2):
+                    pixels[y * width + x] = color
+        samples = khronos.attenuation_node_scale_samples(
+            width,
+            height,
+            pixels,
+            0,
+        )
+        self.assertEqual(
+            [sample["blue_minus_red"] for sample in samples],
+            [10, 20, 30, 40, 50],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

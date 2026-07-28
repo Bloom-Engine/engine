@@ -81,7 +81,7 @@ CASES = (
         license="CC-BY-4.0",
         camera=(0.0, 0.0, 20.0, 0.0, 0.0, 0.0, 45.0),
         resolution=(960, 720),
-        semantic_gate="blue-absorption",
+        semantic_gate="attenuation-node-scale-ramp",
     ),
     Case(
         id="transmission-order",
@@ -228,6 +228,46 @@ def png_rgb(path: Path) -> tuple[int, int, list[tuple[int, int, int]]]:
     return width, height, pixels
 
 
+def attenuation_node_scale_samples(
+    width: int,
+    height: int,
+    pixels: list[tuple[int, int, int]],
+    pixel_density: int,
+) -> list[dict[str, object]]:
+    # Centers of the five front faces in the fixed face-on camera. Sampling a
+    # small median patch avoids the chart grid lines and reflection outliers.
+    centers = (
+        (0.3385, 0.6875),
+        (0.4115, 0.6875),
+        (0.5000, 0.6875),
+        (0.6145, 0.6875),
+        (0.7760, 0.6875),
+    )
+    radius = max(1, 4 * pixel_density)
+    samples: list[dict[str, object]] = []
+    for normalized_x, normalized_y in centers:
+        center_x = round(normalized_x * width)
+        center_y = round(normalized_y * height)
+        patch = [
+            pixels[y * width + x]
+            for y in range(max(0, center_y - radius), min(height, center_y + radius + 1))
+            for x in range(max(0, center_x - radius), min(width, center_x + radius + 1))
+        ]
+        channels = [
+            sorted(pixel[channel] for pixel in patch)
+            for channel in range(3)
+        ]
+        middle = len(patch) // 2
+        rgb = [channel[middle] for channel in channels]
+        samples.append(
+            {
+                "rgb": rgb,
+                "blue_minus_red": rgb[2] - rgb[0],
+            }
+        )
+    return samples
+
+
 def image_statistics(
     path: Path,
     requested_resolution: tuple[int, int],
@@ -263,10 +303,11 @@ def image_statistics(
             blue > red * 1.10 and blue > green * 1.02 and blue > 80
         )
         chromatic += max(red, green, blue) - min(red, green, blue) > 25
-    metrics = {
+    pixel_density = width // requested_width
+    metrics: dict[str, object] = {
         "width": width,
         "height": height,
-        "pixel_density": width // requested_width,
+        "pixel_density": pixel_density,
         "mean_luminance": luma_sum / count,
         "luminance_range": luma_max - luma_min,
         "green_check_fraction": green_checks / count,
@@ -280,8 +321,25 @@ def image_statistics(
         failures.append("capture is effectively flat")
     if semantic_gate == "green-checks" and metrics["green_check_fraction"] < 0.0005:
         failures.append("expected alpha-mode green checks are absent")
-    if semantic_gate == "blue-absorption" and metrics["blue_absorption_fraction"] < 0.03:
-        failures.append("expected volume absorption variation is absent")
+    if semantic_gate == "attenuation-node-scale-ramp":
+        samples = attenuation_node_scale_samples(
+            width,
+            height,
+            pixels,
+            pixel_density,
+        )
+        ramp = [int(sample["blue_minus_red"]) for sample in samples]
+        metrics["node_scale_samples"] = samples
+        metrics["node_scale_chroma_ramp"] = ramp
+        if metrics["blue_absorption_fraction"] < 0.03:
+            failures.append("expected volume absorption variation is absent")
+        if ramp[-1] - ramp[0] < 15 or any(
+            following < previous - 4
+            for previous, following in zip(ramp, ramp[1:])
+        ):
+            failures.append(
+                "node-scale row does not deepen absorption from 0.25 to 2.0"
+            )
     if semantic_gate == "material-variation" and metrics["chromatic_pixel_fraction"] < 0.03:
         failures.append("expected material variation is absent")
     metrics["failures"] = failures

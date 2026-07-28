@@ -4,6 +4,10 @@ use crate::models::{
 };
 
 fn minimal_triangle_glb(material: &str) -> Vec<u8> {
+    minimal_triangle_glb_with_node_scale(material, None)
+}
+
+fn minimal_triangle_glb_with_node_scale(material: &str, node_scale: Option<[f32; 3]>) -> Vec<u8> {
     let mut binary = Vec::new();
     for value in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
         binary.extend_from_slice(&value.to_le_bytes());
@@ -25,9 +29,21 @@ fn minimal_triangle_glb(material: &str) -> Vec<u8> {
         binary.push(0);
     }
 
+    let node = node_scale.map_or_else(
+        || r#"{"mesh":0}"#.to_string(),
+        |scale| {
+            format!(
+                r#"{{"mesh":0,"scale":[{},{},{}]}}"#,
+                scale[0], scale[1], scale[2]
+            )
+        },
+    );
     let mut json = format!(
         r#"{{
             "asset":{{"version":"2.0"}},
+            "scene":0,
+            "scenes":[{{"nodes":[0]}}],
+            "nodes":[{node}],
             "extensionsUsed":[
                 "KHR_materials_transmission",
                 "KHR_materials_volume",
@@ -994,6 +1010,46 @@ fn physical_metadata_round_trips_through_plain_and_staged_glb_loaders() {
         assert_eq!(
             mesh.transmission.attenuation_color,
             [0.8, 0.9, 1.0],
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn baked_static_node_scale_preserves_world_space_volume_thickness() {
+    let glb = minimal_triangle_glb_with_node_scale(
+        r#"{
+            "extensions":{
+                "KHR_materials_transmission":{"transmissionFactor":1.0},
+                "KHR_materials_volume":{
+                    "thicknessFactor":0.25,
+                    "attenuationDistance":1.0,
+                    "attenuationColor":[0.2,0.5,0.8]
+                }
+            }
+        }"#,
+        Some([2.0, 2.0, 2.0]),
+    );
+    for (label, model) in [
+        ("plain", load_gltf(&glb).expect("plain scaled GLB load")),
+        (
+            "staged",
+            load_gltf_staged(&glb)
+                .expect("staged scaled GLB load")
+                .model,
+        ),
+    ] {
+        assert_eq!(model.meshes.len(), 1, "{label}");
+        let mesh = &model.meshes[0];
+        assert_eq!(mesh.vertices[1].position, [2.0, 0.0, 0.0], "{label}");
+        assert_eq!(mesh.vertices[2].position, [0.0, 2.0, 0.0], "{label}");
+        assert_eq!(model.bbox_min, [0.0, 0.0, 0.0], "{label}");
+        assert_eq!(model.bbox_max, [2.0, 2.0, 0.0], "{label}");
+        assert_eq!(mesh.transmission.thickness_factor, 0.25, "{label}");
+        assert_eq!(mesh.transmission.baked_thickness_scale, 2.0, "{label}");
+        assert_eq!(
+            mesh.transmission.effective_thickness_factor(),
+            0.5,
             "{label}"
         );
     }
