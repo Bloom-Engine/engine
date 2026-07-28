@@ -599,6 +599,7 @@ export function setOcclusionCulling(on: boolean): boolean {
   return bloom_set_occlusion_culling(on ? 1 : 0) !== 0;
 }
 
+/** Toggle temporal anti-aliasing without changing render resolution. */
 export function setTaaEnabled(on: boolean): boolean {
   return bloom_set_taa_enabled(on ? 1 : 0) !== 0;
 }

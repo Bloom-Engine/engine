@@ -307,6 +307,7 @@ fn json_escape(value: &str) -> String {
 fn write_report(
     config: &Config,
     adapter_snapshot: &str,
+    renderer_paths: &str,
     actual_render_scale: f32,
     render_submit: Percentiles,
     prepare: Percentiles,
@@ -352,6 +353,7 @@ fn write_report(
             "{{\n  \"schema\":\"bloom-render-perf-v1\",\n",
             "  \"revision\":\"{}\",\n",
             "  \"adapter\":{},\n",
+            "  \"renderer_paths\":{},\n",
             "  \"resolution\":[{},{}],\n",
             "  \"quality_preset\":{},\n",
             "  \"render_scale\":{:.6},\n",
@@ -369,6 +371,7 @@ fn write_report(
         ),
         json_escape(&revision),
         adapter_snapshot,
+        renderer_paths,
         config.width,
         config.height,
         config.quality_preset,
@@ -419,6 +422,7 @@ fn run() -> Result<(), String> {
     let render_submit = percentiles(timing_samples.iter().map(|sample| sample.render_submit_ms));
     let prepare = percentiles(timing_samples.iter().map(|sample| sample.prepare_ms));
     let end_frame = percentiles(timing_samples.iter().map(|sample| sample.end_frame_ms));
+    let renderer_paths = engine.renderer.quality_runtime_paths_json();
     drop(engine);
     let uploads = config
         .trace_dir
@@ -428,6 +432,7 @@ fn run() -> Result<(), String> {
     write_report(
         &config,
         &adapter_snapshot,
+        &renderer_paths,
         actual_render_scale,
         render_submit,
         prepare,

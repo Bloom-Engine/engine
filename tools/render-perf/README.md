@@ -41,4 +41,5 @@ The workload defaults to `--quality-preset 4`. Use
 `--quality-preset 0..4` to measure a complete tier, or add
 `--render-scale 0.15..1.0` after the preset to compare renderer revisions at
 an identical shading resolution. Reports record both the requested preset and
-the effective scale.
+the effective scale, plus the renderer-path/resource snapshot taken after the
+measured window.

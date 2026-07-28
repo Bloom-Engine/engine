@@ -75,6 +75,9 @@ cd dist/web && python3 -m http.server 8080
 - **True native** — Compiles to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU via wgpu.
 - **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, Android, and Web from one codebase.
 - **Unified 2D/3D** — Shapes, textures, text, 3D models, and audio in one engine.
+- **Coherent quality tiers** — Resolution, TAA, upscale filtering, sharpening,
+  and effects move together from 0.50-scale Off to native-resolution Ultra.
+  ([quality preset guide](docs/quality-presets.md))
 - **Zero magic** — Explicit game loops, no hidden framework overhead.
 
 ## How Bloom relates to raylib
