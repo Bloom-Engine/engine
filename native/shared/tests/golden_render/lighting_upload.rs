@@ -57,7 +57,11 @@ fn golden_many_point_lights() {
         total, named_total,
         "bind-group total must match named sites"
     );
-    assert_eq!(sites["scene_compose"].as_u64(), Some(1));
+    assert_eq!(
+        sites["scene_compose"].as_u64(),
+        Some(0),
+        "steady scene compose must reuse its SSR-source-specific bind group"
+    );
     assert_eq!(
         sites["final_composite"].as_u64(),
         Some(0),

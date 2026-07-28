@@ -1945,6 +1945,10 @@ budget for at 4K.
   Resize clears all sixteen entries before recreating their referenced views;
   after warmup the real-GPU many-light golden hard-gates
   `final_composite: 0`.
+- **Scene compose fixed in #139:** three distinct cached groups cover the SSR
+  fallback and both history slots. SSR toggles and PT ownership select a whole
+  binding identity, while resize clears all slots before replacing any input
+  view. The same golden now hard-gates `scene_compose: 0`.
 
 Remaining: eliminate the measured bind-group hotspots only with complete
 resource-generation keys, then instrument and eliminate the other steady-state

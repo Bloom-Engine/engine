@@ -156,6 +156,10 @@ Final-composite bindings are cached across the exact Cartesian product of
 eight possible source views and two exposure-history slots. Resize invalidates
 all sixteen entries before replacing any referenced render-target view, so a
 warmed stable path reports `final_composite: 0` without stale-view reuse.
+Scene-compose bindings likewise use distinct slots for the cleared SSR
+fallback and both SSR history views. A warmed stable path therefore also
+reports `scene_compose: 0`; SSR toggles and path-tracing ownership select a
+different complete binding instead of mutating or incompletely keying one.
 
 `examples/quality-transparency/main.ts` accepts `--sorted-interleaving` as an
 unversioned focused ordering oracle. It forces conventional sorted composition

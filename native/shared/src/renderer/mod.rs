@@ -526,6 +526,10 @@ pub struct Renderer {
     pub scene_compose_pipeline: wgpu::RenderPipeline,
     pub scene_compose_layout: wgpu::BindGroupLayout,
     pub scene_compose_uniform_buffer: wgpu::Buffer,
+    /// One scene-compose bind group for the cleared SSR fallback and both
+    /// temporal-history views. All other entries are stable until resize.
+    scene_compose_bind_group_cache:
+        [Option<wgpu::BindGroup>; postfx_chain::SsrCompositeSource::COUNT],
     /// Composite-tonemap pipeline + bind group layout. Single full-
     /// screen draw that samples hdr_rt and writes ACES-tonemapped
     /// linear-rgb (sRGB hardware encode handles the transfer fn).
@@ -7583,6 +7587,7 @@ impl Renderer {
             scene_compose_pipeline,
             scene_compose_layout,
             scene_compose_uniform_buffer,
+            scene_compose_bind_group_cache: std::array::from_fn(|_| None),
             composite_pipeline,
             composite_layout,
             composite_sampler,
@@ -8298,6 +8303,11 @@ impl Renderer {
             // at full surface.
             let (rw, rh) = self.render_extent();
 
+            // Drop every cache that owns a render-target view before replacing
+            // those views. Source/history indices select distinct cache slots.
+            self.composite_bind_group_cache = std::array::from_fn(|_| None);
+            self.scene_compose_bind_group_cache = std::array::from_fn(|_| None);
+
             let (dt, dv) = create_depth_texture(&self.device, rw, rh);
             self.depth_texture = dt;
             self.depth_view = dv;
@@ -8401,7 +8411,6 @@ impl Renderer {
 
             // Invalidate bind-group caches that reference any of the
             // RT views we just recreated.
-            self.composite_bind_group_cache = std::array::from_fn(|_| None);
             self.ssao_bg_cache = [None, None];
             self.ssao_blur_bg_cache = None;
             self.ssr_bg_cache = None;

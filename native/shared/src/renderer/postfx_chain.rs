@@ -27,6 +27,18 @@ impl CompositeSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(super) enum SsrCompositeSource {
+    Fallback,
+    History0,
+    History1,
+}
+
+impl SsrCompositeSource {
+    pub(super) const COUNT: usize = 3;
+}
+
 #[inline]
 fn bloom_threshold(auto_exposure: bool, manual_exposure: f32) -> f32 {
     if auto_exposure {
@@ -293,7 +305,7 @@ impl Renderer {
 mod tests {
     use super::{
         bloom_mip_extent, bloom_threshold, exposure_update_rate, taa_current_weight,
-        CompositeSource,
+        CompositeSource, SsrCompositeSource,
     };
 
     #[test]
@@ -343,6 +355,20 @@ mod tests {
     }
 
     #[test]
+    fn scene_compose_cache_has_one_slot_for_every_ssr_source() {
+        let sources = [
+            SsrCompositeSource::Fallback,
+            SsrCompositeSource::History0,
+            SsrCompositeSource::History1,
+        ];
+        let mut keys: Vec<_> = sources.into_iter().map(|source| source as usize).collect();
+        keys.sort_unstable();
+        keys.dedup();
+
+        assert_eq!(keys, (0..SsrCompositeSource::COUNT).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn invalid_taa_history_is_replaced_without_changing_steady_weights() {
         assert_eq!(taa_current_weight(false, 99, 0.5), 1.0);
         assert_eq!(taa_current_weight(true, 3, 1.0), 1.0);
@@ -368,12 +394,7 @@ impl Renderer {
         // PT-1: while path tracing, the SSR passes are skipped entirely,
         // so history is stale — route compose to ssr_rt, which the march
         // else-branch keeps cleared to transparent black.
-        let ssr_composite_view = if self.ssr_enabled && !self.pt_owns_frame() {
-            &self.ssr_history_views[self.ssr_history_idx]
-        } else {
-            &self.ssr_rt_view
-        };
-        let ssgi_composite_view = &self.ssgi_rt_view;
+        let ssr_composite_source = self.ssr_composite_source();
         // ============================================================
         // Scene-compose pass: merge HDR + SSR + SSGI*albedo + bloom
         // + fog + sun shafts into composed_rt. Runs unconditionally
@@ -462,75 +483,84 @@ impl Renderer {
             bytemuck::bytes_of(&cp),
         );
         {
-            self.frame_resource_stats
-                .created_bind_group(frame_resource_stats::BindGroupCreationSite::SceneCompose);
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("scene_compose_bg"),
-                layout: &self.scene_compose_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.scene_compose_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(ssr_composite_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(ssgi_composite_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 9,
-                        resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 10,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 11,
-                        resource: wgpu::BindingResource::TextureView(&self.depth_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 12,
-                        resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
-                    },
-                    // EN-005 V2 — always bound; shader gates use on `misc.y`.
-                    wgpu::BindGroupEntry {
-                        binding: 13,
-                        resource: wgpu::BindingResource::TextureView(&self.aerial_perspective_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 14,
-                        resource: wgpu::BindingResource::Sampler(&self.aerial_perspective_sampler),
-                    },
-                ],
-            });
+            let cache_index = ssr_composite_source as usize;
+            if self.scene_compose_bind_group_cache[cache_index].is_none() {
+                self.frame_resource_stats
+                    .created_bind_group(frame_resource_stats::BindGroupCreationSite::SceneCompose);
+                let ssr_composite_view = self.ssr_composite_view_for(ssr_composite_source);
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("scene_compose_bg"),
+                    layout: &self.scene_compose_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.scene_compose_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(ssr_composite_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&self.ssgi_rt_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(&self.bloom_mip_views[0]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 12,
+                            resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
+                        },
+                        // EN-005 V2 — always bound; shader gates use on `misc.y`.
+                        wgpu::BindGroupEntry {
+                            binding: 13,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.aerial_perspective_view,
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 14,
+                            resource: wgpu::BindingResource::Sampler(
+                                &self.aerial_perspective_sampler,
+                            ),
+                        },
+                    ],
+                });
+                self.scene_compose_bind_group_cache[cache_index] = Some(bg);
+            }
             // NOTE: GPU timestamp deliberately not requested on this pass.
             // Empirically (sponza, Metal) the reported delta was ~249 ms
             // for what should be a sub-millisecond fullscreen pass. Likely
@@ -554,8 +584,34 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.scene_compose_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(
+                0,
+                self.scene_compose_bind_group_cache[cache_index]
+                    .as_ref()
+                    .expect("scene-compose bind group was initialized"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
+        }
+    }
+
+    fn ssr_composite_source(&self) -> SsrCompositeSource {
+        if self.ssr_enabled && !self.pt_owns_frame() {
+            if self.ssr_history_idx == 0 {
+                SsrCompositeSource::History0
+            } else {
+                SsrCompositeSource::History1
+            }
+        } else {
+            SsrCompositeSource::Fallback
+        }
+    }
+
+    fn ssr_composite_view_for(&self, source: SsrCompositeSource) -> &wgpu::TextureView {
+        match source {
+            SsrCompositeSource::Fallback => &self.ssr_rt_view,
+            SsrCompositeSource::History0 => &self.ssr_history_views[0],
+            SsrCompositeSource::History1 => &self.ssr_history_views[1],
         }
     }
 }
