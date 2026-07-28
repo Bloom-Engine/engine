@@ -17,7 +17,7 @@ canonical shaders without VSM bindings or sampling branches.
 - 128 by 128 interior texels and a two-texel gutter on each physical page.
 - One deterministic 256-page pool. Its depth storage is 17,842,176 bytes;
   current page-table, parameter, and bounded render-uniform overhead is
-  2,109,456 bytes.
+  2,109,648 bytes.
 - Receiver-driven demand capped at 144, 64, and 16 pages by level.
 - A default render budget of eight dirty pages per frame.
 - Missing, dirty, denied, and deferred pages always sample live CSM.
@@ -25,8 +25,22 @@ canonical shaders without VSM bindings or sampling branches.
   affected dynamic footprint changes.
 - New resident static pages cross-fade from CSM over eight frames.
 
-The directional levels currently reuse fitted CSM light matrices. They are not
-yet independently snapped clipmaps.
+Each directional level now has an independent, camera-centered orthographic
+projection. The camera's light-space X and Y origin is snapped to one virtual
+page footprint, so sub-page camera motion leaves the matrix and cache
+byte-stable. Coverage is derived from the established cascade split with a
+guard for the snapped origin, filter footprint, and receiver bias. Scene depth
+bounds are pancaked and quantized independently from the planar origin.
+
+The three clipmap matrices are carried in a 208-byte sampling uniform and are
+used consistently for receiver demand, physical-page rendering, and VSM
+sampling. CSM retains its own fitted matrices. A receiver outside a clipmap or
+on any missing page samples that original CSM projection.
+
+Crossing a snapped origin currently invalidates the affected level. This is
+safe and bounded because its pages become missing before upload and use CSM
+until rebuilt. A later rolling/toroidal page-table milestone can preserve the
+overlapping cache region across that rebase.
 
 ## Dynamic and skinned casters
 
@@ -99,10 +113,14 @@ BLOOM_VSM=1 ./main \
 Qualification evidence for the current dynamic overlay milestone is in
 `docs/evidence/issue-132-dynamic-vsm-overlay-v1.md`.
 
+Qualification evidence for the independent page-snapped directional clipmap
+milestone is in `docs/evidence/issue-132-directional-clipmap-v1.md`.
+
 ## Work that remains on issue #132
 
-- Replace the fitted CSM matrices with independently snapped directional
-  clipmaps and qualify clip-level transitions.
+- Preserve overlapping physical pages across clipmap origin changes with a
+  rolling/toroidal page-table mapping, then qualify moving-camera and
+  moving-light transitions without pops.
 - Move receiver marking, request compaction, caster culling, and submission to
   bounded GPU-driven paths where the capability tier supports them.
 - Add explicit, default-off spot and point shadow requests, their virtual
@@ -112,4 +130,3 @@ Qualification evidence for the current dynamic overlay milestone is in
   geometric contact detail, and at least 100 explicitly shadow-requesting
   local lights.
 - Integrate quality tiers and enable by default only after those gates pass.
-
