@@ -1,8 +1,10 @@
 //! Deterministic parameter-matrix output for Bloom's layered-PBR contract.
 
+mod angular_reference;
 mod layered_pbr;
 mod sheen_lut;
 
+use angular_reference::build_angular_report;
 use glam::Vec3;
 use layered_pbr::{
     evaluate_base_brdf, evaluate_layered_brdf, integrate_layered_white_furnace,
@@ -731,12 +733,14 @@ fn build_iridescence_report() -> IridescenceContractReport {
 struct Options {
     output: Option<PathBuf>,
     version: u32,
+    angular: bool,
 }
 
 fn options() -> Result<Option<Options>, String> {
     let mut args = std::env::args().skip(1);
     let mut output = None;
     let mut version = LAYERED_PBR_REFERENCE_VERSION;
+    let mut angular = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => {
@@ -758,14 +762,22 @@ fn options() -> Result<Option<Options>, String> {
                     return Err("--version requires 1, 2, 3, or 4".to_owned());
                 }
             }
+            "--angular" => angular = true,
             "--help" | "-h" => {
-                println!("usage: bloom-brdf-reference [--version 1|2|3|4] [--out REPORT.json]");
+                println!(
+                    "usage: bloom-brdf-reference [--version 1|2|3|4 | --angular] \
+                     [--out REPORT.json]"
+                );
                 return Ok(None);
             }
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
-    Ok(Some(Options { output, version }))
+    Ok(Some(Options {
+        output,
+        version,
+        angular,
+    }))
 }
 
 fn main() -> ExitCode {
@@ -777,16 +789,22 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let encoded = match options.version {
-        LAYERED_PBR_REFERENCE_VERSION => serde_json::to_string_pretty(&build_report()),
-        CLEARCOAT_SPECULAR_REFERENCE_VERSION => {
-            serde_json::to_string_pretty(&build_layered_report())
+    let encoded = if options.angular {
+        serde_json::to_string_pretty(&build_angular_report())
+    } else {
+        match options.version {
+            LAYERED_PBR_REFERENCE_VERSION => serde_json::to_string_pretty(&build_report()),
+            CLEARCOAT_SPECULAR_REFERENCE_VERSION => {
+                serde_json::to_string_pretty(&build_layered_report())
+            }
+            SHEEN_ANISOTROPY_REFERENCE_VERSION => {
+                serde_json::to_string_pretty(&build_sheen_anisotropy_report())
+            }
+            IRIDESCENCE_REFERENCE_VERSION => {
+                serde_json::to_string_pretty(&build_iridescence_report())
+            }
+            _ => unreachable!("version validated by argument parser"),
         }
-        SHEEN_ANISOTROPY_REFERENCE_VERSION => {
-            serde_json::to_string_pretty(&build_sheen_anisotropy_report())
-        }
-        IRIDESCENCE_REFERENCE_VERSION => serde_json::to_string_pretty(&build_iridescence_report()),
-        _ => unreachable!("version validated by argument parser"),
     }
     .expect("serialize BRDF report");
     if let Some(path) = options.output {
@@ -836,11 +854,21 @@ mod tests {
 
     #[test]
     fn checked_in_v4_matrix_matches_the_reference_evaluator() {
-        let encoded =
-            serde_json::to_string_pretty(&build_iridescence_report()).expect("serialize BRDF matrix");
+        let encoded = serde_json::to_string_pretty(&build_iridescence_report())
+            .expect("serialize BRDF matrix");
         assert_eq!(
             format!("{encoded}\n"),
             include_str!("../reference/layered-pbr-v4.json")
+        );
+    }
+
+    #[test]
+    fn checked_in_angular_matrix_matches_the_reference_evaluator() {
+        let encoded =
+            serde_json::to_string_pretty(&build_angular_report()).expect("serialize BRDF matrix");
+        assert_eq!(
+            format!("{encoded}\n"),
+            include_str!("../reference/layered-pbr-angular-v1.json")
         );
     }
 }

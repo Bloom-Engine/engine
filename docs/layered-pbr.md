@@ -173,6 +173,39 @@ Recorded furnace channels range from `0.030422` to `0.834041`; broader tests
 also pin reciprocity, finite output, rotation periodicity, the version-2
 default, and LUT agreement with a 65,536-sample oracle.
 
+Version 4 adds bounded thin-film interference. Its 39-row checked matrix is
+`tools/bloom-reference/reference/layered-pbr-v4.json`, SHA-256
+`cc8b586bb69123be172987b5c974e1f001e9ef5df3f99df2687396a3f7ae7209`.
+It covers dielectric and conductor bases, three film thickness ranges,
+strength and IOR variation, clearcoat over film, and the combined layered
+model at three view cosines.
+
+The separate angular comparison corpus expands the complete version-4 model
+over three view directions and three light directions:
+
+```shell
+cargo run --release \
+  --manifest-path tools/bloom-reference/Cargo.toml \
+  --bin bloom-brdf-reference -- \
+  --angular \
+  --out tools/bloom-reference/reference/layered-pbr-angular-v1.json
+```
+
+Its 63 rows isolate base, specular/IOR, clearcoat, sheen, anisotropy,
+iridescence, and combined scenarios. Every row records lobe-separated linear
+BRDF output, total `BRDF * NdotL`, PDF, and view/light reciprocity error. The
+checked file's SHA-256 is
+`61d1d049652e99728d92cb8c521e8a56e5117d695cd02304033dcf07e8ddc19b`.
+Regeneration is byte-exact at six serialized decimals; the full-precision CPU
+component and reciprocity tolerance is `3e-5`.
+
+The corpus records its comparison boundary rather than hiding known model
+differences. It excludes IBL, SSR, exposure, tone mapping, realtime finite
+highlight compression, texture filtering, and normal variance. Stochastic
+path transport is compared after convergence rather than sample-for-sample,
+and iridescence is the bounded Khronos Belcour/Barla Rec.709 approximation,
+not spectral conductor Fresnel.
+
 ## Transport defect found by the foundation
 
 The audit found that the former CPU and GPU path-tracing Smith equations

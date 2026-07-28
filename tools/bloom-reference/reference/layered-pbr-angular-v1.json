@@ -1,0 +1,4056 @@
+{
+  "schema": "bloom-layered-pbr-angular-reference",
+  "corpus_version": 1,
+  "material_contract_version": 4,
+  "comparison_target": "tools/bloom-reference::layered_pbr::evaluate_layered_brdf (linear RGB)",
+  "coordinate_convention": "+Z normal, +X tangent, right-handed; azimuth is counter-clockwise from +X",
+  "coverage": "base, specular/IOR, clearcoat, sheen, anisotropy, iridescence, and combined; 3 view directions x 3 light directions per scenario",
+  "thresholds": {
+    "serialized_decimal_places": 6,
+    "checked_in_regeneration": "byte exact",
+    "cpu_brdf_component_absolute": 0.00003,
+    "reciprocity_max_absolute": 0.00003
+  },
+  "known_model_differences": [
+    "direct punctual-light BRDF only; environment IBL, SSR, exposure, and tone mapping are excluded",
+    "realtime finite-highlight compression is excluded and must be compared in image space",
+    "normal maps and their LEADR/Toksvig or derivative variance are evaluated by the motion corpus",
+    "path tracing is stochastic; transport comparison uses converged radiance tolerances, not byte equality",
+    "iridescence is the bounded Khronos Belcour/Barla Rec.709 approximation, not spectral conductor Fresnel"
+  ],
+  "maximum_reciprocity_error": 0.0,
+  "samples": [
+    {
+      "id": "base-v0-l0",
+      "lobe": "base",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.030005,
+        0.014294,
+        0.004605
+      ],
+      "direct_base_specular": [
+        0.009513,
+        0.007073,
+        0.005802
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.009879,
+        0.005342,
+        0.002602
+      ],
+      "direct_pdf": 0.047668,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "base-v0-l1",
+      "lobe": "base",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.04865,
+        0.023176,
+        0.007466
+      ],
+      "direct_base_specular": [
+        0.002408,
+        0.001413,
+        0.000894
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.028082,
+        0.013524,
+        0.004598
+      ],
+      "direct_pdf": 0.101592,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "base-v0-l2",
+      "lobe": "base",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.050598,
+        0.024104,
+        0.007765
+      ],
+      "direct_base_specular": [
+        0.002456,
+        0.00144,
+        0.00091
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.047748,
+        0.022989,
+        0.007808
+      ],
+      "direct_pdf": 0.166543,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "base-v1-l0",
+      "lobe": "base",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.052191,
+        0.024862,
+        0.00801
+      ],
+      "direct_base_specular": [
+        0.0027,
+        0.001601,
+        0.001029
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.013723,
+        0.006616,
+        0.00226
+      ],
+      "direct_pdf": 0.070056,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "base-v1-l1",
+      "lobe": "base",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.070052,
+        0.033371,
+        0.010751
+      ],
+      "direct_base_specular": [
+        0.001324,
+        0.000776,
+        0.000491
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.039257,
+        0.018781,
+        0.006183
+      ],
+      "direct_pdf": 0.153718,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "base-v1-l2",
+      "lobe": "base",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.070984,
+        0.033815,
+        0.010894
+      ],
+      "direct_base_specular": [
+        0.001919,
+        0.001125,
+        0.000711
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.065613,
+        0.031446,
+        0.010445
+      ],
+      "direct_pdf": 0.251904,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "base-v2-l0",
+      "lobe": "base",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.056423,
+        0.026879,
+        0.008659
+      ],
+      "direct_base_specular": [
+        0.002327,
+        0.001364,
+        0.000863
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.014687,
+        0.007061,
+        0.002381
+      ],
+      "direct_pdf": 0.072738,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "base-v2-l1",
+      "lobe": "base",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.071795,
+        0.034202,
+        0.011019
+      ],
+      "direct_base_specular": [
+        0.00166,
+        0.000973,
+        0.000615
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.0404,
+        0.019346,
+        0.006399
+      ],
+      "direct_pdf": 0.159803,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "base-v2-l2",
+      "lobe": "base",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.072847,
+        0.034702,
+        0.01118
+      ],
+      "direct_base_specular": [
+        0.006136,
+        0.003597,
+        0.002275
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.071084,
+        0.034469,
+        0.012109
+      ],
+      "direct_pdf": 0.264155,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "specular-ior-v0-l0",
+      "lobe": "specular-ior",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.82,
+        "specular_factor": 0.72,
+        "specular_color": [
+          1.2,
+          0.62,
+          0.28
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.041406,
+        0.017745,
+        0.005422
+      ],
+      "direct_base_specular": [
+        0.010046,
+        0.006171,
+        0.004059
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.012863,
+        0.005979,
+        0.00237
+      ],
+      "direct_pdf": 0.053255,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "specular-ior-v0-l1",
+      "lobe": "specular-ior",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.82,
+        "specular_factor": 0.72,
+        "specular_color": [
+          1.2,
+          0.62,
+          0.28
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.061715,
+        0.026449,
+        0.008082
+      ],
+      "direct_base_specular": [
+        0.002956,
+        0.001375,
+        0.000513
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.035569,
+        0.015303,
+        0.004727
+      ],
+      "direct_pdf": 0.114457,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "specular-ior-v0-l2",
+      "lobe": "specular-ior",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.82,
+        "specular_factor": 0.72,
+        "specular_color": [
+          1.2,
+          0.62,
+          0.28
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.063824,
+        0.027353,
+        0.008358
+      ],
+      "direct_base_specular": [
+        0.003015,
+        0.001401,
+        0.000522
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.060155,
+        0.025879,
+        0.007992
+      ],
+      "direct_pdf": 0.187543,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "specular-ior-v1-l0",
+      "lobe": "specular-ior",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.82,
+        "specular_factor": 0.72,
+        "specular_color": [
+          1.2,
+          0.62,
+          0.28
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.06339,
+        0.027167,
+        0.008301
+      ],
+      "direct_base_specular": [
+        0.003296,
+        0.00155,
+        0.000599
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.016671,
+        0.007179,
+        0.002225
+      ],
+      "direct_pdf": 0.07025,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "specular-ior-v1-l1",
+      "lobe": "specular-ior",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.82,
+        "specular_factor": 0.72,
+        "specular_color": [
+          1.2,
+          0.62,
+          0.28
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.078216,
+        0.033521,
+        0.010243
+      ],
+      "direct_base_specular": [
+        0.001626,
+        0.000756,
+        0.000281
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.043913,
+        0.018852,
+        0.005788
+      ],
+      "direct_pdf": 0.154152,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "specular-ior-v1-l2",
+      "lobe": "specular-ior",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.82,
+        "specular_factor": 0.72,
+        "specular_color": [
+          1.2,
+          0.62,
+          0.28
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.078809,
+        0.033775,
+        0.01032
+      ],
+      "direct_base_specular": [
+        0.002356,
+        0.001095,
+        0.000408
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.073049,
+        0.031383,
+        0.009655
+      ],
+      "direct_pdf": 0.252607,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "specular-ior-v2-l0",
+      "lobe": "specular-ior",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.82,
+        "specular_factor": 0.72,
+        "specular_color": [
+          1.2,
+          0.62,
+          0.28
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.06787,
+        0.029087,
+        0.008888
+      ],
+      "direct_base_specular": [
+        0.002857,
+        0.001328,
+        0.000495
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.017682,
+        0.007604,
+        0.002346
+      ],
+      "direct_pdf": 0.072341,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "specular-ior-v2-l1",
+      "lobe": "specular-ior",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.82,
+        "specular_factor": 0.72,
+        "specular_color": [
+          1.2,
+          0.62,
+          0.28
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.079391,
+        0.034025,
+        0.010396
+      ],
+      "direct_base_specular": [
+        0.002038,
+        0.000947,
+        0.000353
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.044786,
+        0.019234,
+        0.005912
+      ],
+      "direct_pdf": 0.158919,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "specular-ior-v2-l2",
+      "lobe": "specular-ior",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.82,
+        "specular_factor": 0.72,
+        "specular_color": [
+          1.2,
+          0.62,
+          0.28
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.080099,
+        0.034328,
+        0.010489
+      ],
+      "direct_base_specular": [
+        0.007535,
+        0.003502,
+        0.001303
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.07887,
+        0.034047,
+        0.010613
+      ],
+      "direct_pdf": 0.262862,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "clearcoat-v0-l0",
+      "lobe": "clearcoat",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.85,
+        "clearcoat_perceptual_roughness": 0.17,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.01619,
+        0.007713,
+        0.002485
+      ],
+      "direct_base_specular": [
+        0.005133,
+        0.003816,
+        0.003131
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.00023,
+        0.00023,
+        0.00023
+      ],
+      "direct_brdf_cos": [
+        0.005388,
+        0.00294,
+        0.001461
+      ],
+      "direct_pdf": 0.035701,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "clearcoat-v0-l1",
+      "lobe": "clearcoat",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.85,
+        "clearcoat_perceptual_roughness": 0.17,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.03232,
+        0.015397,
+        0.00496
+      ],
+      "direct_base_specular": [
+        0.0016,
+        0.000939,
+        0.000594
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000032,
+        0.000032,
+        0.000032
+      ],
+      "direct_brdf_cos": [
+        0.018674,
+        0.009002,
+        0.003072
+      ],
+      "direct_pdf": 0.076011,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "clearcoat-v0-l2",
+      "lobe": "clearcoat",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.85,
+        "clearcoat_perceptual_roughness": 0.17,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.034146,
+        0.016266,
+        0.005241
+      ],
+      "direct_base_specular": [
+        0.001657,
+        0.000972,
+        0.000614
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000033,
+        0.000033,
+        0.000033
+      ],
+      "direct_brdf_cos": [
+        0.032252,
+        0.015544,
+        0.005299
+      ],
+      "direct_pdf": 0.124615,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "clearcoat-v1-l0",
+      "lobe": "clearcoat",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.85,
+        "clearcoat_perceptual_roughness": 0.17,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.037912,
+        0.01806,
+        0.005818
+      ],
+      "direct_base_specular": [
+        0.001962,
+        0.001163,
+        0.000748
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000036,
+        0.000036,
+        0.000036
+      ],
+      "direct_brdf_cos": [
+        0.009977,
+        0.004815,
+        0.00165
+      ],
+      "direct_pdf": 0.065472,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "clearcoat-v1-l1",
+      "lobe": "clearcoat",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.85,
+        "clearcoat_perceptual_roughness": 0.17,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.062652,
+        0.029846,
+        0.009615
+      ],
+      "direct_base_specular": [
+        0.001184,
+        0.000694,
+        0.000439
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000016,
+        0.000016,
+        0.000016
+      ],
+      "direct_brdf_cos": [
+        0.035119,
+        0.016806,
+        0.005539
+      ],
+      "direct_pdf": 0.14365,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "clearcoat-v1-l2",
+      "lobe": "clearcoat",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.85,
+        "clearcoat_perceptual_roughness": 0.17,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.06449,
+        0.030722,
+        0.009898
+      ],
+      "direct_base_specular": [
+        0.001743,
+        0.001022,
+        0.000646
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000024,
+        0.000024,
+        0.000024
+      ],
+      "direct_brdf_cos": [
+        0.059632,
+        0.028591,
+        0.009511
+      ],
+      "direct_pdf": 0.235414,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "clearcoat-v2-l0",
+      "lobe": "clearcoat",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.85,
+        "clearcoat_perceptual_roughness": 0.17,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.042094,
+        0.020053,
+        0.00646
+      ],
+      "direct_base_specular": [
+        0.001736,
+        0.001018,
+        0.000644
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.00003,
+        0.00003,
+        0.00003
+      ],
+      "direct_brdf_cos": [
+        0.010965,
+        0.005275,
+        0.001784
+      ],
+      "direct_pdf": 0.06992,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "clearcoat-v2-l1",
+      "lobe": "clearcoat",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.85,
+        "clearcoat_perceptual_roughness": 0.17,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.065948,
+        0.031416,
+        0.010121
+      ],
+      "direct_base_specular": [
+        0.001525,
+        0.000894,
+        0.000565
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000021,
+        0.000021,
+        0.000021
+      ],
+      "direct_brdf_cos": [
+        0.037121,
+        0.017782,
+        0.005889
+      ],
+      "direct_pdf": 0.15361,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "clearcoat-v2-l2",
+      "lobe": "clearcoat",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.85,
+        "clearcoat_perceptual_roughness": 0.17,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.067972,
+        0.03238,
+        0.010432
+      ],
+      "direct_base_specular": [
+        0.005725,
+        0.003356,
+        0.002122
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.000086,
+        0.000086,
+        0.000086
+      ],
+      "direct_brdf_cos": [
+        0.066405,
+        0.03224,
+        0.011376
+      ],
+      "direct_pdf": 0.253974,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "sheen-v0-l0",
+      "lobe": "sheen",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.25,
+          0.65,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.43,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.019442,
+        0.009262,
+        0.002984
+      ],
+      "direct_base_specular": [
+        0.006164,
+        0.004583,
+        0.00376
+      ],
+      "direct_sheen_specular": [
+        0.056977,
+        0.14814,
+        0.205117
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.020646,
+        0.040496,
+        0.052965
+      ],
+      "direct_pdf": 0.088955,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "sheen-v0-l1",
+      "lobe": "sheen",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.25,
+          0.65,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.43,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.031524,
+        0.015017,
+        0.004838
+      ],
+      "direct_base_specular": [
+        0.001561,
+        0.000915,
+        0.000579
+      ],
+      "direct_sheen_specular": [
+        0.048258,
+        0.12547,
+        0.173728
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.044738,
+        0.077771,
+        0.09853
+      ],
+      "direct_pdf": 0.095325,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "sheen-v0-l2",
+      "lobe": "sheen",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.25,
+          0.65,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.43,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.032786,
+        0.015618,
+        0.005032
+      ],
+      "direct_base_specular": [
+        0.001591,
+        0.000933,
+        0.00059
+      ],
+      "direct_sheen_specular": [
+        0.017162,
+        0.04462,
+        0.061782
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.046385,
+        0.055054,
+        0.060663
+      ],
+      "direct_pdf": 0.122036,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "sheen-v1-l0",
+      "lobe": "sheen",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.25,
+          0.65,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.43,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.036453,
+        0.017366,
+        0.005595
+      ],
+      "direct_base_specular": [
+        0.001886,
+        0.001119,
+        0.000719
+      ],
+      "direct_sheen_specular": [
+        0.037209,
+        0.096742,
+        0.133951
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.018887,
+        0.028807,
+        0.035066
+      ],
+      "direct_pdf": 0.078558,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "sheen-v1-l1",
+      "lobe": "sheen",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.25,
+          0.65,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.43,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.060358,
+        0.028753,
+        0.009263
+      ],
+      "direct_base_specular": [
+        0.001141,
+        0.000669,
+        0.000423
+      ],
+      "direct_sheen_specular": [
+        0.027299,
+        0.070977,
+        0.098277
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.048839,
+        0.05522,
+        0.05938
+      ],
+      "direct_pdf": 0.116772,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "sheen-v1-l2",
+      "lobe": "sheen",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.25,
+          0.65,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.43,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.061162,
+        0.029136,
+        0.009387
+      ],
+      "direct_base_specular": [
+        0.001653,
+        0.000969,
+        0.000613
+      ],
+      "direct_sheen_specular": [
+        0.007064,
+        0.018366,
+        0.02543
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.062891,
+        0.043624,
+        0.031886
+      ],
+      "direct_pdf": 0.158957,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "sheen-v2-l0",
+      "lobe": "sheen",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.25,
+          0.65,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.43,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.039409,
+        0.018774,
+        0.006048
+      ],
+      "direct_base_specular": [
+        0.001625,
+        0.000953,
+        0.000603
+      ],
+      "direct_sheen_specular": [
+        0.015746,
+        0.040939,
+        0.056684
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.014195,
+        0.015166,
+        0.015834
+      ],
+      "direct_pdf": 0.064592,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "sheen-v2-l1",
+      "lobe": "sheen",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.25,
+          0.65,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.43,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.063382,
+        0.030194,
+        0.009728
+      ],
+      "direct_base_specular": [
+        0.001465,
+        0.000859,
+        0.000543
+      ],
+      "direct_sheen_specular": [
+        0.008268,
+        0.021496,
+        0.029763
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.040213,
+        0.028902,
+        0.022019
+      ],
+      "direct_pdf": 0.106072,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "sheen-v2-l2",
+      "lobe": "sheen",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.25,
+          0.65,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.43,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.070292,
+        0.033486,
+        0.010788
+      ],
+      "direct_base_specular": [
+        0.005921,
+        0.003471,
+        0.002195
+      ],
+      "direct_sheen_specular": [
+        0.000647,
+        0.001681,
+        0.002328
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.069174,
+        0.034774,
+        0.01378
+      ],
+      "direct_pdf": 0.155564,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "anisotropy-v0-l0",
+      "lobe": "anisotropy",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 1.0,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.82,
+        "anisotropy_rotation": 0.61,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.010932,
+        0.00559,
+        0.002808
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.002733,
+        0.001398,
+        0.000702
+      ],
+      "direct_pdf": 0.007654,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "anisotropy-v0-l1",
+      "lobe": "anisotropy",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 1.0,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.82,
+        "anisotropy_rotation": 0.61,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.357405,
+        0.153227,
+        0.046884
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.196573,
+        0.084275,
+        0.025786
+      ],
+      "direct_pdf": 0.113423,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "anisotropy-v0-l2",
+      "lobe": "anisotropy",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 1.0,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.82,
+        "anisotropy_rotation": 0.61,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.012919,
+        0.005537,
+        0.001692
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.011627,
+        0.004983,
+        0.001523
+      ],
+      "direct_pdf": 0.007973,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "anisotropy-v1-l0",
+      "lobe": "anisotropy",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 1.0,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.82,
+        "anisotropy_rotation": 0.61,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.002007,
+        0.000865,
+        0.000271
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.000502,
+        0.000216,
+        0.000068
+      ],
+      "direct_pdf": 0.000879,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "anisotropy-v1-l1",
+      "lobe": "anisotropy",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 1.0,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.82,
+        "anisotropy_rotation": 0.61,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.02922,
+        0.012523,
+        0.003826
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.016071,
+        0.006888,
+        0.002105
+      ],
+      "direct_pdf": 0.015519,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "anisotropy-v1-l2",
+      "lobe": "anisotropy",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 1.0,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.82,
+        "anisotropy_rotation": 0.61,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.260085,
+        0.111465,
+        0.034059
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.234076,
+        0.100319,
+        0.030653
+      ],
+      "direct_pdf": 0.28641,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "anisotropy-v2-l0",
+      "lobe": "anisotropy",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 1.0,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.82,
+        "anisotropy_rotation": 0.61,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.001587,
+        0.00068,
+        0.000208
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.000397,
+        0.00017,
+        0.000052
+      ],
+      "direct_pdf": 0.000698,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "anisotropy-v2-l1",
+      "lobe": "anisotropy",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 1.0,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.82,
+        "anisotropy_rotation": 0.61,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.005741,
+        0.00246,
+        0.000752
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.003158,
+        0.001353,
+        0.000413
+      ],
+      "direct_pdf": 0.005669,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "anisotropy-v2-l2",
+      "lobe": "anisotropy",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 1.0,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.82,
+        "anisotropy_rotation": 0.61,
+        "iridescence_factor": 0.0,
+        "iridescence_ior": 1.3,
+        "iridescence_thickness_nm": 400.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_base_specular": [
+        0.098465,
+        0.042199,
+        0.012894
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.088618,
+        0.037979,
+        0.011605
+      ],
+      "direct_pdf": 0.175813,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "iridescence-v0-l0",
+      "lobe": "iridescence",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.36,
+        "iridescence_thickness_nm": 475.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.030876,
+        0.013233,
+        0.004043
+      ],
+      "direct_base_specular": [
+        0.003239,
+        0.00699,
+        0.006497
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.008529,
+        0.005056,
+        0.002635
+      ],
+      "direct_pdf": 0.049043,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "iridescence-v0-l1",
+      "lobe": "iridescence",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.36,
+        "iridescence_thickness_nm": 475.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.052945,
+        0.022691,
+        0.006933
+      ],
+      "direct_base_specular": [
+        0.002727,
+        0.000911,
+        0.000326
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.03062,
+        0.012981,
+        0.003993
+      ],
+      "direct_pdf": 0.104758,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "iridescence-v0-l2",
+      "lobe": "iridescence",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.36,
+        "iridescence_thickness_nm": 475.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.054731,
+        0.023456,
+        0.007167
+      ],
+      "direct_base_specular": [
+        0.002955,
+        0.0007,
+        0.000414
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.051917,
+        0.02174,
+        0.006823
+      ],
+      "direct_pdf": 0.17171,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "iridescence-v1-l0",
+      "lobe": "iridescence",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.36,
+        "iridescence_thickness_nm": 475.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.057694,
+        0.024726,
+        0.007555
+      ],
+      "direct_base_specular": [
+        0.002313,
+        0.001545,
+        0.00038
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.015002,
+        0.006568,
+        0.001984
+      ],
+      "direct_pdf": 0.072233,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "iridescence-v1-l1",
+      "lobe": "iridescence",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.36,
+        "iridescence_thickness_nm": 475.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.081898,
+        0.035099,
+        0.010725
+      ],
+      "direct_base_specular": [
+        0.001581,
+        0.000209,
+        0.00033
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.045913,
+        0.019419,
+        0.00608
+      ],
+      "direct_pdf": 0.158601,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "iridescence-v1-l2",
+      "lobe": "iridescence",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.36,
+        "iridescence_thickness_nm": 475.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.082484,
+        0.03535,
+        0.010801
+      ],
+      "direct_base_specular": [
+        0.002339,
+        0.000362,
+        0.000428
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.07634,
+        0.032141,
+        0.010107
+      ],
+      "direct_pdf": 0.25981,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "iridescence-v2-l0",
+      "lobe": "iridescence",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.36,
+        "iridescence_thickness_nm": 475.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.062146,
+        0.026634,
+        0.008138
+      ],
+      "direct_base_specular": [
+        0.002725,
+        0.000777,
+        0.000347
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.016218,
+        0.006853,
+        0.002121
+      ],
+      "direct_pdf": 0.073686,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "iridescence-v2-l1",
+      "lobe": "iridescence",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.36,
+        "iridescence_thickness_nm": 475.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.083632,
+        0.035842,
+        0.010952
+      ],
+      "direct_base_specular": [
+        0.001988,
+        0.000267,
+        0.000409
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.047091,
+        0.01986,
+        0.006248
+      ],
+      "direct_pdf": 0.16192,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "iridescence-v2-l2",
+      "lobe": "iridescence",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.5,
+        "specular_factor": 1.0,
+        "specular_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "clearcoat_factor": 0.0,
+        "clearcoat_perceptual_roughness": 0.0,
+        "sheen_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sheen_perceptual_roughness": 0.0,
+        "anisotropy_strength": 0.0,
+        "anisotropy_rotation": 0.0,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.36,
+        "iridescence_thickness_nm": 475.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.084341,
+        0.036146,
+        0.011045
+      ],
+      "direct_base_specular": [
+        0.007384,
+        0.001017,
+        0.001483
+      ],
+      "direct_sheen_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_clearcoat_specular": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "direct_brdf_cos": [
+        0.082552,
+        0.033446,
+        0.011275
+      ],
+      "direct_pdf": 0.26725,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "combined-v0-l0",
+      "lobe": "combined",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.7,
+        "specular_factor": 0.8,
+        "specular_color": [
+          1.1,
+          0.7,
+          0.4
+        ],
+        "clearcoat_factor": 0.65,
+        "clearcoat_perceptual_roughness": 0.2,
+        "sheen_color": [
+          0.2,
+          0.55,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.38,
+        "anisotropy_strength": 0.75,
+        "anisotropy_rotation": 0.63,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.38,
+        "iridescence_thickness_nm": 560.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.014322,
+        0.006138,
+        0.001875
+      ],
+      "direct_base_specular": [
+        0.00291,
+        0.001384,
+        0.001084
+      ],
+      "direct_sheen_specular": [
+        0.025149,
+        0.069159,
+        0.113169
+      ],
+      "direct_clearcoat_specular": [
+        0.000334,
+        0.000334,
+        0.000334
+      ],
+      "direct_brdf_cos": [
+        0.010679,
+        0.019254,
+        0.029116
+      ],
+      "direct_pdf": 0.072358,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "combined-v0-l1",
+      "lobe": "combined",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.7,
+        "specular_factor": 0.8,
+        "specular_color": [
+          1.1,
+          0.7,
+          0.4
+        ],
+        "clearcoat_factor": 0.65,
+        "clearcoat_perceptual_roughness": 0.2,
+        "sheen_color": [
+          0.2,
+          0.55,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.38,
+        "anisotropy_strength": 0.75,
+        "anisotropy_rotation": 0.63,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.38,
+        "iridescence_thickness_nm": 560.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.026128,
+        0.011198,
+        0.003422
+      ],
+      "direct_base_specular": [
+        0.015545,
+        0.010741,
+        0.007937
+      ],
+      "direct_sheen_specular": [
+        0.027163,
+        0.074699,
+        0.122234
+      ],
+      "direct_clearcoat_specular": [
+        0.000047,
+        0.000047,
+        0.000047
+      ],
+      "direct_brdf_cos": [
+        0.037886,
+        0.053176,
+        0.073502
+      ],
+      "direct_pdf": 0.099033,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "combined-v0-l2",
+      "lobe": "combined",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.7,
+        "specular_factor": 0.8,
+        "specular_color": [
+          1.1,
+          0.7,
+          0.4
+        ],
+        "clearcoat_factor": 0.65,
+        "clearcoat_perceptual_roughness": 0.2,
+        "sheen_color": [
+          0.2,
+          0.55,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.38,
+        "anisotropy_strength": 0.75,
+        "anisotropy_rotation": 0.63,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.38,
+        "iridescence_thickness_nm": 560.0
+      },
+      "n_dot_v": 0.2,
+      "view_azimuth_radians": 0.0,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.029373,
+        0.012588,
+        0.003846
+      ],
+      "direct_base_specular": [
+        0.000573,
+        0.000809,
+        0.000477
+      ],
+      "direct_sheen_specular": [
+        0.008057,
+        0.022157,
+        0.036257
+      ],
+      "direct_clearcoat_specular": [
+        0.000048,
+        0.000048,
+        0.000048
+      ],
+      "direct_brdf_cos": [
+        0.034246,
+        0.032042,
+        0.036566
+      ],
+      "direct_pdf": 0.103747,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "combined-v1-l0",
+      "lobe": "combined",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.7,
+        "specular_factor": 0.8,
+        "specular_color": [
+          1.1,
+          0.7,
+          0.4
+        ],
+        "clearcoat_factor": 0.65,
+        "clearcoat_perceptual_roughness": 0.2,
+        "sheen_color": [
+          0.2,
+          0.55,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.38,
+        "anisotropy_strength": 0.75,
+        "anisotropy_rotation": 0.63,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.38,
+        "iridescence_thickness_nm": 560.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.032092,
+        0.013754,
+        0.004203
+      ],
+      "direct_base_specular": [
+        0.000433,
+        0.000069,
+        0.00009
+      ],
+      "direct_sheen_specular": [
+        0.020651,
+        0.056789,
+        0.092928
+      ],
+      "direct_clearcoat_specular": [
+        0.000053,
+        0.000053,
+        0.000053
+      ],
+      "direct_brdf_cos": [
+        0.013307,
+        0.017666,
+        0.024318
+      ],
+      "direct_pdf": 0.07308,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "combined-v1-l1",
+      "lobe": "combined",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.7,
+        "specular_factor": 0.8,
+        "specular_color": [
+          1.1,
+          0.7,
+          0.4
+        ],
+        "clearcoat_factor": 0.65,
+        "clearcoat_perceptual_roughness": 0.2,
+        "sheen_color": [
+          0.2,
+          0.55,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.38,
+        "anisotropy_strength": 0.75,
+        "anisotropy_rotation": 0.63,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.38,
+        "iridescence_thickness_nm": 560.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.059599,
+        0.025543,
+        0.007805
+      ],
+      "direct_base_specular": [
+        0.001765,
+        0.004516,
+        0.002055
+      ],
+      "direct_sheen_specular": [
+        0.017463,
+        0.048024,
+        0.078585
+      ],
+      "direct_clearcoat_specular": [
+        0.000024,
+        0.000024,
+        0.000024
+      ],
+      "direct_brdf_cos": [
+        0.043368,
+        0.042958,
+        0.048658
+      ],
+      "direct_pdf": 0.112004,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "combined-v1-l2",
+      "lobe": "combined",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.7,
+        "specular_factor": 0.8,
+        "specular_color": [
+          1.1,
+          0.7,
+          0.4
+        ],
+        "clearcoat_factor": 0.65,
+        "clearcoat_perceptual_roughness": 0.2,
+        "sheen_color": [
+          0.2,
+          0.55,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.38,
+        "anisotropy_strength": 0.75,
+        "anisotropy_rotation": 0.63,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.38,
+        "iridescence_thickness_nm": 560.0
+      },
+      "n_dot_v": 0.5,
+      "view_azimuth_radians": 0.7,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.065279,
+        0.027977,
+        0.008548
+      ],
+      "direct_base_specular": [
+        0.010644,
+        0.025506,
+        0.012328
+      ],
+      "direct_sheen_specular": [
+        0.003296,
+        0.009064,
+        0.014832
+      ],
+      "direct_clearcoat_specular": [
+        0.000035,
+        0.000035,
+        0.000035
+      ],
+      "direct_brdf_cos": [
+        0.071329,
+        0.056324,
+        0.032169
+      ],
+      "direct_pdf": 0.1672,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "combined-v2-l0",
+      "lobe": "combined",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.7,
+        "specular_factor": 0.8,
+        "specular_color": [
+          1.1,
+          0.7,
+          0.4
+        ],
+        "clearcoat_factor": 0.65,
+        "clearcoat_perceptual_roughness": 0.2,
+        "sheen_color": [
+          0.2,
+          0.55,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.38,
+        "anisotropy_strength": 0.75,
+        "anisotropy_rotation": 0.63,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.38,
+        "iridescence_thickness_nm": 560.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.25,
+      "light_azimuth_radians": 2.4,
+      "direct_diffuse": [
+        0.038152,
+        0.016351,
+        0.004996
+      ],
+      "direct_base_specular": [
+        0.000108,
+        0.000111,
+        0.000074
+      ],
+      "direct_sheen_specular": [
+        0.0077,
+        0.021175,
+        0.03465
+      ],
+      "direct_clearcoat_specular": [
+        0.000044,
+        0.000044,
+        0.000044
+      ],
+      "direct_brdf_cos": [
+        0.011501,
+        0.00942,
+        0.009941
+      ],
+      "direct_pdf": 0.061454,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "combined-v2-l1",
+      "lobe": "combined",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.7,
+        "specular_factor": 0.8,
+        "specular_color": [
+          1.1,
+          0.7,
+          0.4
+        ],
+        "clearcoat_factor": 0.65,
+        "clearcoat_perceptual_roughness": 0.2,
+        "sheen_color": [
+          0.2,
+          0.55,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.38,
+        "anisotropy_strength": 0.75,
+        "anisotropy_rotation": 0.63,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.38,
+        "iridescence_thickness_nm": 560.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.55,
+      "light_azimuth_radians": 1.2,
+      "direct_diffuse": [
+        0.068707,
+        0.029446,
+        0.008997
+      ],
+      "direct_base_specular": [
+        0.000366,
+        0.000937,
+        0.000429
+      ],
+      "direct_sheen_specular": [
+        0.004061,
+        0.011167,
+        0.018274
+      ],
+      "direct_clearcoat_specular": [
+        0.00003,
+        0.00003,
+        0.00003
+      ],
+      "direct_brdf_cos": [
+        0.040241,
+        0.022869,
+        0.015252
+      ],
+      "direct_pdf": 0.106296,
+      "reciprocity_max_abs_error": 0.0
+    },
+    {
+      "id": "combined-v2-l2",
+      "lobe": "combined",
+      "material": {
+        "base_color": [
+          0.42,
+          0.18,
+          0.055
+        ],
+        "metallic": 0.2,
+        "perceptual_roughness": 0.38,
+        "ior": 1.7,
+        "specular_factor": 0.8,
+        "specular_color": [
+          1.1,
+          0.7,
+          0.4
+        ],
+        "clearcoat_factor": 0.65,
+        "clearcoat_perceptual_roughness": 0.2,
+        "sheen_color": [
+          0.2,
+          0.55,
+          0.9
+        ],
+        "sheen_perceptual_roughness": 0.38,
+        "anisotropy_strength": 0.75,
+        "anisotropy_rotation": 0.63,
+        "iridescence_factor": 0.9,
+        "iridescence_ior": 1.38,
+        "iridescence_thickness_nm": 560.0
+      },
+      "n_dot_v": 0.85,
+      "view_azimuth_radians": 1.4,
+      "n_dot_l": 0.9,
+      "light_azimuth_radians": 0.35,
+      "direct_diffuse": [
+        0.081422,
+        0.034895,
+        0.010662
+      ],
+      "direct_base_specular": [
+        0.006331,
+        0.016116,
+        0.007448
+      ],
+      "direct_sheen_specular": [
+        0.000158,
+        0.000436,
+        0.000713
+      ],
+      "direct_clearcoat_specular": [
+        0.000124,
+        0.000124,
+        0.000124
+      ],
+      "direct_brdf_cos": [
+        0.079232,
+        0.046414,
+        0.017053
+      ],
+      "direct_pdf": 0.166093,
+      "reciprocity_max_abs_error": 0.0
+    }
+  ]
+}
