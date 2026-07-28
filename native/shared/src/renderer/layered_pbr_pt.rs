@@ -17,6 +17,8 @@ mod clearcoat_texture;
 mod iridescence_texture;
 #[path = "layered_pbr_pt_kernel.rs"]
 mod kernel;
+#[path = "layered_pbr_pt_resources.rs"]
+mod resources;
 #[path = "layered_pbr_pt_runtime.rs"]
 mod runtime;
 #[path = "layered_pbr_pt_sheen_texture.rs"]
@@ -44,6 +46,7 @@ use iridescence_texture::{
     PT_IRIDESCENCE_TEXTURE_RECORD_BYTES,
 };
 use kernel::layered_kernel_variant;
+use resources::ensure_pt_sidecar;
 pub(super) use sheen_texture::PtSheenTextureCpu;
 use sheen_texture::{
     PT_SHEEN_TEXTURE_BINDINGS_WGSL, PT_SHEEN_TEXTURE_DISABLED_WGSL, PT_SHEEN_TEXTURE_RECORD_BYTES,
@@ -1758,246 +1761,86 @@ impl Renderer {
             self.created_pipelines(1);
         }
 
-        let needed = PT_LAYERED_RECORD_BYTES * self.pt_layered.records.len() as u64;
-        let recreate = self
-            .pt_layered
-            .instance_buffer
-            .as_ref()
-            .is_none_or(|buffer| buffer.size() < needed);
-        if recreate {
-            let capacity = self.pt_layered.records.len().next_power_of_two() as u64;
-            self.pt_layered.instance_buffer =
-                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("pt_layered_instances"),
-                    size: PT_LAYERED_RECORD_BYTES * capacity,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
+        let mut records_recreated = ensure_pt_sidecar(
+            &self.device,
+            &self.queue,
+            &self.pt_layered.records,
+            &mut self.pt_layered.instance_buffer,
+            &mut self.pt_layered.dirty,
+            PT_LAYERED_RECORD_BYTES,
+            "pt_layered_instances",
+        );
+        if textures {
+            records_recreated |= ensure_pt_sidecar(
+                &self.device,
+                &self.queue,
+                &self.pt_layered.texture_records,
+                &mut self.pt_layered.texture_buffer,
+                &mut self.pt_layered.texture_dirty,
+                PT_LAYERED_TEXTURE_RECORD_BYTES,
+                "pt_layered_texture_instances",
+            );
+        }
+        if clearcoat_textures {
+            records_recreated |= ensure_pt_sidecar(
+                &self.device,
+                &self.queue,
+                &self.pt_layered.clearcoat_texture_records,
+                &mut self.pt_layered.clearcoat_texture_buffer,
+                &mut self.pt_layered.clearcoat_texture_dirty,
+                PT_CLEARCOAT_TEXTURE_RECORD_BYTES,
+                "pt_clearcoat_texture_instances",
+            );
+        }
+        if clearcoat_normals {
+            records_recreated |= ensure_pt_sidecar(
+                &self.device,
+                &self.queue,
+                &self.pt_layered.clearcoat_normal_records,
+                &mut self.pt_layered.clearcoat_normal_buffer,
+                &mut self.pt_layered.clearcoat_normal_dirty,
+                PT_CLEARCOAT_NORMAL_RECORD_BYTES,
+                "pt_clearcoat_normal_instances",
+            );
+        }
+        if sheen_textures {
+            records_recreated |= ensure_pt_sidecar(
+                &self.device,
+                &self.queue,
+                &self.pt_layered.sheen_texture_records,
+                &mut self.pt_layered.sheen_texture_buffer,
+                &mut self.pt_layered.sheen_texture_dirty,
+                PT_SHEEN_TEXTURE_RECORD_BYTES,
+                "pt_sheen_texture_instances",
+            );
+        }
+        if iridescence_textures {
+            records_recreated |= ensure_pt_sidecar(
+                &self.device,
+                &self.queue,
+                &self.pt_layered.iridescence_texture_records,
+                &mut self.pt_layered.iridescence_texture_buffer,
+                &mut self.pt_layered.iridescence_texture_dirty,
+                PT_IRIDESCENCE_TEXTURE_RECORD_BYTES,
+                "pt_iridescence_texture_instances",
+            );
+        }
+        if anisotropy_textures {
+            records_recreated |= ensure_pt_sidecar(
+                &self.device,
+                &self.queue,
+                &self.pt_layered.anisotropy_texture_records,
+                &mut self.pt_layered.anisotropy_texture_buffer,
+                &mut self.pt_layered.anisotropy_texture_dirty,
+                PT_ANISOTROPY_TEXTURE_RECORD_BYTES,
+                "pt_anisotropy_texture_instances",
+            );
+        }
+        if records_recreated {
             self.pt_layered
                 .bind_groups
                 .iter_mut()
                 .for_each(|group| *group = None);
-            self.pt_layered.dirty = true;
-        }
-        if self.pt_layered.dirty {
-            self.queue.write_buffer(
-                self.pt_layered.instance_buffer.as_ref().unwrap(),
-                0,
-                bytemuck::cast_slice(&self.pt_layered.records),
-            );
-            self.pt_layered.dirty = false;
-        }
-        if textures {
-            let needed =
-                PT_LAYERED_TEXTURE_RECORD_BYTES * self.pt_layered.texture_records.len() as u64;
-            let recreate = self
-                .pt_layered
-                .texture_buffer
-                .as_ref()
-                .is_none_or(|buffer| buffer.size() < needed);
-            if recreate {
-                let capacity = self.pt_layered.texture_records.len().next_power_of_two() as u64;
-                self.pt_layered.texture_buffer =
-                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("pt_layered_texture_instances"),
-                        size: PT_LAYERED_TEXTURE_RECORD_BYTES * capacity,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
-                self.pt_layered
-                    .bind_groups
-                    .iter_mut()
-                    .for_each(|group| *group = None);
-                self.pt_layered.texture_dirty = true;
-            }
-            if self.pt_layered.texture_dirty {
-                self.queue.write_buffer(
-                    self.pt_layered.texture_buffer.as_ref().unwrap(),
-                    0,
-                    bytemuck::cast_slice(&self.pt_layered.texture_records),
-                );
-                self.pt_layered.texture_dirty = false;
-            }
-        }
-        if clearcoat_textures {
-            let needed = PT_CLEARCOAT_TEXTURE_RECORD_BYTES
-                * self.pt_layered.clearcoat_texture_records.len() as u64;
-            let recreate = self
-                .pt_layered
-                .clearcoat_texture_buffer
-                .as_ref()
-                .is_none_or(|buffer| buffer.size() < needed);
-            if recreate {
-                let capacity = self
-                    .pt_layered
-                    .clearcoat_texture_records
-                    .len()
-                    .next_power_of_two() as u64;
-                self.pt_layered.clearcoat_texture_buffer =
-                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("pt_clearcoat_texture_instances"),
-                        size: PT_CLEARCOAT_TEXTURE_RECORD_BYTES * capacity,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
-                self.pt_layered
-                    .bind_groups
-                    .iter_mut()
-                    .for_each(|group| *group = None);
-                self.pt_layered.clearcoat_texture_dirty = true;
-            }
-            if self.pt_layered.clearcoat_texture_dirty {
-                self.queue.write_buffer(
-                    self.pt_layered.clearcoat_texture_buffer.as_ref().unwrap(),
-                    0,
-                    bytemuck::cast_slice(&self.pt_layered.clearcoat_texture_records),
-                );
-                self.pt_layered.clearcoat_texture_dirty = false;
-            }
-        }
-        if clearcoat_normals {
-            let needed = PT_CLEARCOAT_NORMAL_RECORD_BYTES
-                * self.pt_layered.clearcoat_normal_records.len() as u64;
-            let recreate = self
-                .pt_layered
-                .clearcoat_normal_buffer
-                .as_ref()
-                .is_none_or(|buffer| buffer.size() < needed);
-            if recreate {
-                let capacity = self
-                    .pt_layered
-                    .clearcoat_normal_records
-                    .len()
-                    .next_power_of_two() as u64;
-                self.pt_layered.clearcoat_normal_buffer =
-                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("pt_clearcoat_normal_instances"),
-                        size: PT_CLEARCOAT_NORMAL_RECORD_BYTES * capacity,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
-                self.pt_layered
-                    .bind_groups
-                    .iter_mut()
-                    .for_each(|group| *group = None);
-                self.pt_layered.clearcoat_normal_dirty = true;
-            }
-            if self.pt_layered.clearcoat_normal_dirty {
-                self.queue.write_buffer(
-                    self.pt_layered.clearcoat_normal_buffer.as_ref().unwrap(),
-                    0,
-                    bytemuck::cast_slice(&self.pt_layered.clearcoat_normal_records),
-                );
-                self.pt_layered.clearcoat_normal_dirty = false;
-            }
-        }
-        if sheen_textures {
-            let needed =
-                PT_SHEEN_TEXTURE_RECORD_BYTES * self.pt_layered.sheen_texture_records.len() as u64;
-            let recreate = self
-                .pt_layered
-                .sheen_texture_buffer
-                .as_ref()
-                .is_none_or(|buffer| buffer.size() < needed);
-            if recreate {
-                let capacity = self
-                    .pt_layered
-                    .sheen_texture_records
-                    .len()
-                    .next_power_of_two() as u64;
-                self.pt_layered.sheen_texture_buffer =
-                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("pt_sheen_texture_instances"),
-                        size: PT_SHEEN_TEXTURE_RECORD_BYTES * capacity,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
-                self.pt_layered
-                    .bind_groups
-                    .iter_mut()
-                    .for_each(|group| *group = None);
-                self.pt_layered.sheen_texture_dirty = true;
-            }
-            if self.pt_layered.sheen_texture_dirty {
-                self.queue.write_buffer(
-                    self.pt_layered.sheen_texture_buffer.as_ref().unwrap(),
-                    0,
-                    bytemuck::cast_slice(&self.pt_layered.sheen_texture_records),
-                );
-                self.pt_layered.sheen_texture_dirty = false;
-            }
-        }
-        if iridescence_textures {
-            let needed = PT_IRIDESCENCE_TEXTURE_RECORD_BYTES
-                * self.pt_layered.iridescence_texture_records.len() as u64;
-            let recreate = self
-                .pt_layered
-                .iridescence_texture_buffer
-                .as_ref()
-                .is_none_or(|buffer| buffer.size() < needed);
-            if recreate {
-                let capacity = self
-                    .pt_layered
-                    .iridescence_texture_records
-                    .len()
-                    .next_power_of_two() as u64;
-                self.pt_layered.iridescence_texture_buffer =
-                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("pt_iridescence_texture_instances"),
-                        size: PT_IRIDESCENCE_TEXTURE_RECORD_BYTES * capacity,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
-                self.pt_layered
-                    .bind_groups
-                    .iter_mut()
-                    .for_each(|group| *group = None);
-                self.pt_layered.iridescence_texture_dirty = true;
-            }
-            if self.pt_layered.iridescence_texture_dirty {
-                self.queue.write_buffer(
-                    self.pt_layered.iridescence_texture_buffer.as_ref().unwrap(),
-                    0,
-                    bytemuck::cast_slice(&self.pt_layered.iridescence_texture_records),
-                );
-                self.pt_layered.iridescence_texture_dirty = false;
-            }
-        }
-        if anisotropy_textures {
-            let needed = PT_ANISOTROPY_TEXTURE_RECORD_BYTES
-                * self.pt_layered.anisotropy_texture_records.len() as u64;
-            let recreate = self
-                .pt_layered
-                .anisotropy_texture_buffer
-                .as_ref()
-                .is_none_or(|buffer| buffer.size() < needed);
-            if recreate {
-                let capacity = self
-                    .pt_layered
-                    .anisotropy_texture_records
-                    .len()
-                    .next_power_of_two() as u64;
-                self.pt_layered.anisotropy_texture_buffer =
-                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("pt_anisotropy_texture_instances"),
-                        size: PT_ANISOTROPY_TEXTURE_RECORD_BYTES * capacity,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
-                self.pt_layered
-                    .bind_groups
-                    .iter_mut()
-                    .for_each(|group| *group = None);
-                self.pt_layered.anisotropy_texture_dirty = true;
-            }
-            if self.pt_layered.anisotropy_texture_dirty {
-                self.queue.write_buffer(
-                    self.pt_layered.anisotropy_texture_buffer.as_ref().unwrap(),
-                    0,
-                    bytemuck::cast_slice(&self.pt_layered.anisotropy_texture_records),
-                );
-                self.pt_layered.anisotropy_texture_dirty = false;
-            }
         }
         if self.pt_layered.bind_groups[resource_variant].is_none() {
             let mut entries = vec![wgpu::BindGroupEntry {
