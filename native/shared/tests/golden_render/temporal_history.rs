@@ -576,6 +576,112 @@ fn realtime_path_tracing_rigid_motion_bounds_trails_and_keeps_history() {
 }
 
 #[test]
+fn realtime_path_tracing_lighting_changes_converge_without_reset_or_lag() {
+    fn evaluate_lighting(label: &str, previous: &[u8], frames: &[Vec<u8>]) {
+        let stable = average_rgba(&frames[12..]);
+        let change = calculate_diff_metrics(previous, &stable, W, H);
+        let recovery = frames[..13]
+            .iter()
+            .map(|frame| calculate_diff_metrics(&stable, frame, W, H))
+            .collect::<Vec<_>>();
+        let stable_flicker = frames[12..]
+            .iter()
+            .map(|frame| calculate_diff_metrics(&stable, frame, W, H).mean_rgb)
+            .sum::<f64>()
+            / (frames.len() - 12) as f64;
+        eprintln!(
+            "temporal-corpus {label} change_mean={:.4} initial_mean={:.4} \
+             frame4_mean={:.4} frame8_mean={:.4} frame12_outliers={:.4}% \
+             stable_flicker={stable_flicker:.4}",
+            change.mean_rgb,
+            recovery[0].mean_rgb,
+            recovery[4].mean_rgb,
+            recovery[8].mean_rgb,
+            recovery[12].outlier_pixel_fraction * 100.0,
+        );
+        assert!(
+            change.mean_rgb >= 1.0 && change.outlier_pixel_fraction >= 0.01,
+            "{label} negative control did not produce a visible lighting change"
+        );
+        assert!(
+            recovery[8].mean_rgb <= recovery[0].mean_rgb * 0.65 + 0.25,
+            "{label} retained stale lighting beyond eight frames"
+        );
+        assert!(
+            recovery[12].outlier_pixel_fraction <= 0.02,
+            "{label} retained coherent stale lighting after twelve frames"
+        );
+        assert!(
+            stable_flicker <= 2.0,
+            "{label} did not settle to a stable stochastic estimate"
+        );
+    }
+
+    let _rt_guard = lock_rt_goldens();
+    let (mut eng, _) = match try_engine_rt() {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            skip_rt_golden("pt_lighting_change", "no-non-cpu-ray-query-adapter");
+            return;
+        }
+        Err(err) => panic!("{err}"),
+    };
+    build_pt_scene(&mut eng);
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(false);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_path_tracing(2);
+    r.set_path_tracing_debug_view(0);
+    r.set_path_tracing_seed(0);
+    r.reset_path_tracing_history(0);
+    let draw = |eng: &mut EngineState, bright: bool| {
+        draw_pt_static_frame(eng);
+        eng.renderer.set_directional_light(
+            0.5,
+            1.0,
+            0.3,
+            255.0,
+            242.25,
+            229.5,
+            if bright { 2.4 } else { 0.15 },
+        );
+    };
+    let capture_state =
+        |eng: &mut EngineState, bright: bool| render(eng, 1, |eng| draw(eng, bright)).2;
+
+    let _ = render(&mut eng, 24, |eng| draw(eng, false));
+    let dark = capture_state(&mut eng, false);
+    let before_bright = eng.renderer.path_tracing_sample_count();
+    let mut bright_frames = Vec::new();
+    for _ in 0..24 {
+        bright_frames.push(capture_state(&mut eng, true));
+    }
+    assert_eq!(
+        eng.renderer.path_tracing_sample_count(),
+        before_bright + 24,
+        "lighting change reset realtime PT history"
+    );
+    evaluate_lighting("pt-light-on", &dark, &bright_frames);
+
+    let bright = average_rgba(&bright_frames[12..]);
+    let before_dark = eng.renderer.path_tracing_sample_count();
+    let mut dark_frames = Vec::new();
+    for _ in 0..24 {
+        dark_frames.push(capture_state(&mut eng, false));
+    }
+    assert_eq!(
+        eng.renderer.path_tracing_sample_count(),
+        before_dark + 24,
+        "lighting removal reset realtime PT history"
+    );
+    evaluate_lighting("pt-light-off", &bright, &dark_frames);
+}
+
+#[test]
 fn common_camera_cut_reset_invalidates_every_temporal_owner() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
