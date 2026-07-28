@@ -13,6 +13,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -44,6 +45,12 @@ window.__bloomReady = new Promise((resolve, reject) => {
   window.__bloomReadyReject = reject;
 });
 globalThis.__joltFactory = async () => { throw new Error("physics omitted in render smoke"); };
+const requestAdapter = GPU.prototype.requestAdapter;
+GPU.prototype.requestAdapter = async function(...args) {
+  const adapter = await requestAdapter.apply(this, args);
+  globalThis.__bloomSmokeAdapter = adapter;
+  return adapter;
+};
 const requestDevice = GPUAdapter.prototype.requestDevice;
 GPUAdapter.prototype.requestDevice = async function(...args) {
   const device = await requestDevice.apply(this, args);
@@ -355,12 +362,30 @@ def main() -> int:
         "--disable-gpu-sandbox",
         "--enable-unsafe-webgpu",
         "--ignore-gpu-blocklist",
-        "--remote-allow-origins=*",
-        f"--remote-debugging-port={debug_port}",
-        "--window-size=320,240",
-        f"--user-data-dir={profile}",
-        url,
     ]
+    if sys.platform.startswith("linux"):
+        # Hosted Linux runners have no display GPU. Keep WebGPU and Chrome's
+        # compositor on a single explicit SwiftShader/Vulkan path so a canvas
+        # swap-chain image can be presented and captured deterministically.
+        command.extend(
+            [
+                "--use-angle=vulkan",
+                "--enable-features=Vulkan",
+                "--disable-vulkan-surface",
+                "--enable-unsafe-swiftshader",
+                "--use-webgpu-adapter=swiftshader",
+                "--use-gpu-in-tests",
+            ]
+        )
+    command.extend(
+        [
+            "--remote-allow-origins=*",
+            f"--remote-debugging-port={debug_port}",
+            "--window-size=320,240",
+            f"--user-data-dir={profile}",
+            url,
+        ]
+    )
     started = time.perf_counter()
     stdout_log = out_dir / "browser.stdout.log"
     stderr_log = out_dir / "browser.stderr.log"
@@ -368,6 +393,7 @@ def main() -> int:
     devtools: DevTools | None = None
     marker = "pending"
     browser_error: str | None = None
+    adapter_info: dict[str, Any] | None = None
     frame_signature: str | None = None
     failures: list[str] = []
     try:
@@ -406,6 +432,24 @@ def main() -> int:
             elif marker != "pass":
                 failures.append("browser timed out before completing a Bloom frame")
             else:
+                raw_adapter_info = evaluated_value(
+                    devtools,
+                    """(() => {
+                      const adapter = globalThis.__bloomSmokeAdapter;
+                      if (!adapter) return null;
+                      const info = adapter.info ?? {};
+                      return {
+                        vendor: info.vendor ?? "",
+                        architecture: info.architecture ?? "",
+                        device: info.device ?? "",
+                        description: info.description ?? "",
+                        backend: info.backend ?? "",
+                        type: info.type ?? "",
+                      };
+                    })()""",
+                )
+                if isinstance(raw_adapter_info, dict):
+                    adapter_info = raw_adapter_info
                 raw_frame_signature = evaluated_value(
                     devtools,
                     "document.documentElement.dataset.bloomFrame || null",
@@ -460,6 +504,7 @@ def main() -> int:
         "url": url,
         "dom_marker": marker,
         "browser_error": browser_error,
+        "adapter_info": adapter_info,
         "screenshot": "frame.png" if screenshot.is_file() else None,
         "frame_signature": frame_signature,
         "compositor_screenshot_rgb_means": means,
