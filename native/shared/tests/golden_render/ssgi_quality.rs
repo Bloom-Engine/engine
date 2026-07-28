@@ -1,6 +1,207 @@
 use super::super::*;
 
 #[test]
+fn wsrc_bake_double_wraps_all_octahedral_corners() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(false);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(true);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_shadows_enabled(false);
+
+    let capture = |eng: &mut EngineState| {
+        eng.begin_frame();
+        let r = &mut eng.renderer;
+        r.set_clear_color(6.0, 8.0, 15.0, 255.0);
+        r.begin_mode_3d(4.0, 3.0, 6.0, 0.0, 0.6, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.set_ambient_light(15.0, 18.0, 28.0, 0.2);
+        r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.85, 0.7, 1.8);
+        r.draw_cube(0.0, -0.1, 0.0, 12.0, 0.2, 12.0, 90.0, 96.0, 107.0, 255.0);
+        eng.end_frame();
+    };
+
+    // Profile the fixed-resolution bake independently of its normal
+    // once-per-cascade amortization. This is test-only state manipulation.
+    eng.profiler.set_enabled(true);
+    for _ in 0..120 {
+        eng.renderer.wsrc_built = [false; 3];
+        capture(&mut eng);
+    }
+    let bake_gpu_us = eng
+        .profiler
+        .snapshot()
+        .into_iter()
+        .find_map(|(label, _, gpu)| (label == "wsrc_bake_pass").then_some(gpu?))
+        .unwrap_or(0.0);
+    eng.profiler.set_enabled(false);
+
+    // The loop above repeatedly baked cascade zero. Let the established
+    // amortizer finish cascades one and two before reading the atlas.
+    capture(&mut eng);
+    capture(&mut eng);
+    assert_eq!(eng.renderer.wsrc_built, [true; 3]);
+
+    let shader = eng
+        .renderer
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wsrc_corner_readback_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                "
+@group(0) @binding(0) var atlas: texture_3d<f32>;
+@group(0) @binding(1) var atlas_sampler: sampler;
+@group(0) @binding(2) var<storage, read_write> samples: array<vec4<f32>, 16>;
+
+@compute @workgroup_size(1, 1, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= 8u) { return; }
+    let coords = array<vec2<i32>, 8>(
+        vec2<i32>(0, 0), vec2<i32>(8, 8),
+        vec2<i32>(0, 9), vec2<i32>(8, 1),
+        vec2<i32>(9, 0), vec2<i32>(1, 8),
+        vec2<i32>(9, 9), vec2<i32>(1, 1),
+    );
+    samples[gid.x] = textureLoad(atlas, vec3<i32>(coords[gid.x], 0), 0);
+    if (gid.x < 4u) {
+        let bases = array<vec2<i32>, 4>(
+            vec2<i32>(0, 0), vec2<i32>(8, 0),
+            vec2<i32>(0, 8), vec2<i32>(8, 8),
+        );
+        let sample_texels = array<vec2<f32>, 4>(
+            vec2<f32>(1.0, 1.0), vec2<f32>(9.0, 1.0),
+            vec2<f32>(1.0, 9.0), vec2<f32>(9.0, 9.0),
+        );
+        let base = bases[gid.x];
+        let filtered = textureSampleLevel(
+            atlas,
+            atlas_sampler,
+            vec3<f32>(sample_texels[gid.x] / 160.0, 0.5 / 48.0),
+            0.0,
+        );
+        let expected = (
+            textureLoad(atlas, vec3<i32>(base, 0), 0)
+            + textureLoad(atlas, vec3<i32>(base + vec2<i32>(1, 0), 0), 0)
+            + textureLoad(atlas, vec3<i32>(base + vec2<i32>(0, 1), 0), 0)
+            + textureLoad(atlas, vec3<i32>(base + vec2<i32>(1, 1), 0), 0)
+        ) * 0.25;
+        samples[8u + gid.x * 2u] = filtered;
+        samples[9u + gid.x * 2u] = expected;
+    }
+}
+"
+                .into(),
+            ),
+        });
+    let pipeline = eng
+        .renderer
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("wsrc_corner_readback_pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let output = eng.renderer.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("wsrc_corner_samples"),
+        size: 16 * 16,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = eng.renderer.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("wsrc_corner_staging"),
+        size: 16 * 16,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let bind_group = eng
+        .renderer
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("wsrc_corner_readback_bind_group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&eng.renderer.wsrc_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&eng.renderer.wsrc_atlas_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: output.as_entire_binding(),
+                },
+            ],
+        });
+    let mut encoder = eng
+        .renderer
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("wsrc_corner_readback_encoder"),
+        });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(8, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &staging, 0, 16 * 16);
+    eng.renderer.queue.submit(std::iter::once(encoder.finish()));
+
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    eng.renderer
+        .device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .expect("WSRC corner readback poll failed");
+    rx.recv()
+        .expect("WSRC corner map sender dropped")
+        .expect("WSRC corner map failed");
+    let mapped = slice.get_mapped_range();
+    let values = bytemuck::cast_slice::<u8, f32>(&mapped);
+    for pair in 0..4 {
+        let corner = &values[pair * 8..pair * 8 + 4];
+        let wrapped = &values[pair * 8 + 4..pair * 8 + 8];
+        assert!(corner.iter().all(|value| value.is_finite()));
+        assert_eq!(
+            corner, wrapped,
+            "WSRC padded corner pair {pair} did not double-wrap"
+        );
+    }
+    for corner in 0..4 {
+        let filtered_start = (8 + corner * 2) * 4;
+        let expected_start = filtered_start + 4;
+        for channel in 0..4 {
+            let filtered = values[filtered_start + channel];
+            let expected = values[expected_start + channel];
+            assert!(
+                (filtered - expected).abs() <= 0.0001,
+                "WSRC corner {corner} channel {channel} filter weight mismatch: \
+                 filtered={filtered}, expected={expected}"
+            );
+        }
+    }
+    eprintln!("wsrc-corner-wrap bake_gpu_us={bake_gpu_us:.3}");
+    drop(mapped);
+    staging.unmap();
+}
+
+#[test]
 fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");

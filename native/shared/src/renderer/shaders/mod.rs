@@ -74,6 +74,30 @@ mod ray_query_variant_tests {
             );
         }
     }
+
+    #[test]
+    fn wsrc_corner_wrap_is_shared_by_software_and_hardware_bakes() {
+        assert!(PROBE_HELPERS_WGSL.contains("select(oct_size - 1, 0, padded.x == padded_max)"));
+        assert!(PROBE_HELPERS_WGSL.contains("select(oct_size - 1, 0, padded.y == padded_max)"));
+        for source in [WSRC_BAKE_WGSL, WSRC_BAKE_HW_WGSL] {
+            assert_eq!(
+                source.matches("wsrc_real_octel(vec2<i32>(lid.xy))").count(),
+                1
+            );
+            assert!(!source.contains("Corner — nearest-inside"));
+        }
+
+        let software = format!("{PROBE_HELPERS_WGSL}{WSRC_BAKE_WGSL}");
+        wgpu::naga::front::wgsl::parse_str(&software)
+            .unwrap_or_else(|error| panic!("software WSRC WGSL failed: {error:?}"));
+        let hardware = format!(
+            "enable wgpu_ray_query;\n\
+             const BLOOM_RAY_QUERY_NEEDS_PROCEED: bool = false;\n\
+             {PROBE_HELPERS_WGSL}{WSRC_BAKE_HW_WGSL}"
+        );
+        wgpu::naga::front::wgsl::parse_str(&hardware)
+            .unwrap_or_else(|error| panic!("hardware WSRC WGSL failed: {error:?}"));
+    }
 }
 mod post;
 pub(super) use post::{

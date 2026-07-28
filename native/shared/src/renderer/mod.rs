@@ -860,13 +860,13 @@ pub struct Renderer {
     /// Current probe grid dimensions. Recomputed on resize.
     pub probe_grid_w: u32,
     pub probe_grid_h: u32,
-    /// Per-probe headers (32 B, storage/copy-dst), placed then read by trace/resolve.
+    /// Per-probe headers (48 B, storage/copy-dst), placed then read by trace/resolve.
     pub probe_header_buffer: wgpu::Buffer,
     /// Per-frame compute trace output; temporal reads it as current input.
     pub probe_trace_tex: wgpu::Texture,
     pub probe_trace_view: wgpu::TextureView,
-    /// Rgba16Float 3D history ping-pong (gw × gh × 64): temporal reads prior
-    /// plus trace, writes current, and resolve samples current.
+    /// Rgba16Float 3D history: temporal reads prior/trace and writes directions;
+    /// resolve reads cosine-convolved radiance cached in each probe header.
     pub probe_history_textures: [wgpu::Texture; 2],
     pub probe_history_views: [wgpu::TextureView; 2],
     pub probe_history_idx: usize,
@@ -12365,7 +12365,7 @@ impl Renderer {
             bind_optional_pass!("wsrc_bake", |c: &mut FrameCtx2| {
                 c.r.maybe_invalidate_wsrc();
                 c.profiler.begin("wsrc_bake");
-                c.r.bake_wsrc(c.encoder);
+                c.r.bake_wsrc(c.encoder, c.profiler);
                 c.profiler.end("wsrc_bake");
             });
             bind_optional_pass!("card_light", |c: &mut FrameCtx2| {

@@ -58,6 +58,34 @@ fn octel_direction(octel: vec2<u32>) -> vec3<f32> {
     return oct_decode(uv);
 }
 
+// Map a 10x10 WSRC slab texel to its wrapped 8x8 octahedral texel. The
+// double fold at each padded corner crosses both silhouette edges:
+// (0,0)->(7,7), (0,9)->(7,0), (9,0)->(0,7), (9,9)->(0,0).
+fn wsrc_real_octel(padded: vec2<i32>) -> vec2<u32> {
+    let oct_size = i32(PROBE_OCT_SIZE);
+    let padded_max = oct_size + 1;
+    let is_edge_x = padded.x == 0 || padded.x == padded_max;
+    let is_edge_y = padded.y == 0 || padded.y == padded_max;
+    var real = padded - vec2<i32>(1);
+    if (is_edge_x && is_edge_y) {
+        real = vec2<i32>(
+            select(oct_size - 1, 0, padded.x == padded_max),
+            select(oct_size - 1, 0, padded.y == padded_max),
+        );
+    } else if (is_edge_y) {
+        real = vec2<i32>(
+            oct_size - padded.x,
+            clamp(padded.y - 1, 0, oct_size - 1),
+        );
+    } else if (is_edge_x) {
+        real = vec2<i32>(
+            clamp(padded.x - 1, 0, oct_size - 1),
+            oct_size - padded.y,
+        );
+    }
+    return vec2<u32>(real);
+}
+
 // Ticket 016 V1/V2 — temporal octahedral direction jitter with
 // per-probe decorrelation (V2). V1 indexed a 2D R2 low-discrepancy
 // sequence by frame, giving every probe the same per-frame sample

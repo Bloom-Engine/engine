@@ -416,7 +416,11 @@ impl Renderer {
     /// sun/sky math, roughly matching a single card-lighting pixel.
     /// Runs at most once per `WSRC_REBAKE_THRESHOLD × extent` of
     /// camera travel — same amortisation pattern as the clipmap.
-    pub(super) fn bake_wsrc(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn bake_wsrc(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+    ) {
         // V13 — bake only cascades that are marked not-built. Each
         // cascade snaps to its own cell grid (cell = extent / 16)
         // and writes into its own 16-slice block of the shared
@@ -623,13 +627,15 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.wsrc_bake_uniform, 0, bytemuck::bytes_of(&params));
 
+            let label = if use_hw {
+                "wsrc_bake_hw_pass"
+            } else {
+                "wsrc_bake_pass"
+            };
+            let timestamp_writes = profiler.compute_pass_timestamp_writes(label);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(if use_hw {
-                    "wsrc_bake_hw_pass"
-                } else {
-                    "wsrc_bake_pass"
-                }),
-                timestamp_writes: None,
+                label: Some(label),
+                timestamp_writes,
             });
             if use_hw {
                 let pipeline = if self.transparent_gi_active {

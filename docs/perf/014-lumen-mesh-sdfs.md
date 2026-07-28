@@ -196,9 +196,13 @@ access will build cleanly; CI would need host-matching runners.
 - **GPU jump-flood SDF bake** — V1's brute-force point-triangle
   works at current mesh sizes; jump-flood would matter if meshes
   scale up significantly.
-- **True octahedral corner wrap (4 corners of each probe)** — V11
-  octahedrally wraps edges but keeps corners as edge-extend. Sampler
-  bilinear weights at corners are small so visual impact is limited.
+- ~~**True octahedral corner wrap (4 corners of each probe)**~~ — landed
+  under #23. Software and hardware WSRC bakes share one mapping for the
+  padded 10x10 slab; corners double-fold to `(7,7)`, `(7,0)`, `(0,7)`,
+  and `(0,0)`. A live-GPU readback verifies every corner exactly matches
+  its wrapped interior texel. The dispatch, ray count, bindings, textures,
+  and steady-state work are unchanged. On Apple M1 Max / Metal, ten
+  interleaved 120-bake runs measured 75.678 us before and 69.493 us after.
 - **Importance-sampled WSRC rebake cadence** — waiting on ticket
   016 (importance sampling) which provides the per-direction
   resolution hints needed to refresh hot octels more often than
