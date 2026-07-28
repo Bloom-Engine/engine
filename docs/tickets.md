@@ -1953,6 +1953,10 @@ budget for at 4K.
   are cached and shared with the diagnostics pass. Resize invalidates them
   before replacing history/raw/velocity views; the steady golden hard-gates
   `ssr_temporal: 0`.
+- **Ordinary TAA fixed in #139:** both previous-history bindings are cached and
+  invalidated before resize replaces composed/depth/velocity/history views.
+  The steady golden hard-gates `taa: 0`. Reactive TAA remains separately
+  measured until its transient plan ID and rebuild epoch are part of the key.
 
 Remaining: eliminate the measured bind-group hotspots only with complete
 resource-generation keys, then instrument and eliminate the other steady-state

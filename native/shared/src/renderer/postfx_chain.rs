@@ -798,52 +798,71 @@ impl Renderer {
                     ],
                 })
             } else {
-                self.frame_resource_stats
-                    .created_bind_group(frame_resource_stats::BindGroupCreationSite::Taa);
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("taa_bg"),
-                    layout: &self.taa_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: self.taa_uniform_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&self.composed_rt_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(
-                                &self.taa_views[taa_src_idx],
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: wgpu::BindingResource::TextureView(&self.depth_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 6,
-                            resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 7,
-                            resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 8,
-                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                        },
-                    ],
-                })
+                if self.taa_bind_group_cache[taa_src_idx].is_none() {
+                    self.frame_resource_stats
+                        .created_bind_group(frame_resource_stats::BindGroupCreationSite::Taa);
+                    self.taa_bind_group_cache[taa_src_idx] =
+                        Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("taa_bg"),
+                            layout: &self.taa_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: self.taa_uniform_buffer.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.composed_rt_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.composite_sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.taa_views[taa_src_idx],
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 4,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.composite_sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 5,
+                                    resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 6,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.ssao_depth_sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 7,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.velocity_rt_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 8,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.composite_sampler,
+                                    ),
+                                },
+                            ],
+                        }));
+                }
+                self.taa_bind_group_cache[taa_src_idx]
+                    .as_ref()
+                    .expect("ordinary TAA bind group was initialized")
+                    .clone()
             };
             let taa_ts = profiler.pass_timestamp_writes("taa_pass");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

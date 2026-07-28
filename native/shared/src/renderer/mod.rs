@@ -703,6 +703,8 @@ pub struct Renderer {
     pub taa_pipeline: wgpu::RenderPipeline,
     pub taa_layout: wgpu::BindGroupLayout,
     pub taa_uniform_buffer: wgpu::Buffer,
+    /// Ordinary TAA binding for each alternating previous-history input.
+    taa_bind_group_cache: [Option<wgpu::BindGroup>; 2],
     #[cfg(not(target_arch = "wasm32"))]
     temporal_diagnostics: Option<temporal_diagnostics::TaaDiagnosticResources>,
     /// Lazy TAA variant that consumes imported-transparency coverage.
@@ -7691,6 +7693,7 @@ impl Renderer {
             taa_pipeline,
             taa_layout,
             taa_uniform_buffer,
+            taa_bind_group_cache: [None, None],
             #[cfg(not(target_arch = "wasm32"))]
             temporal_diagnostics: None,
             taa_reactive_pipeline: None,
@@ -8311,6 +8314,7 @@ impl Renderer {
             self.composite_bind_group_cache = std::array::from_fn(|_| None);
             self.scene_compose_bind_group_cache = std::array::from_fn(|_| None);
             self.ssr_temporal_bind_group_cache = [None, None];
+            self.taa_bind_group_cache = [None, None];
 
             let (dt, dv) = create_depth_texture(&self.device, rw, rh);
             self.depth_texture = dt;
