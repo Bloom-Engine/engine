@@ -195,7 +195,7 @@ Its 63 rows isolate base, specular/IOR, clearcoat, sheen, anisotropy,
 iridescence, and combined scenarios. Every row records lobe-separated linear
 BRDF output, total `BRDF * NdotL`, PDF, and view/light reciprocity error. The
 checked file's SHA-256 is
-`61d1d049652e99728d92cb8c521e8a56e5117d695cd02304033dcf07e8ddc19b`.
+`110142a66bc22acaf0e7f6664a86f135b194fc62d203f1a92b685fbf2487f309`.
 Regeneration is byte-exact at six serialized decimals; the full-precision CPU
 component and reciprocity tolerance is `3e-5`.
 
@@ -205,6 +205,26 @@ highlight compression, texture filtering, and normal variance. Stochastic
 path transport is compared after convergence rather than sample-for-sample,
 and iridescence is the bounded Khronos Belcour/Barla Rec.709 approximation,
 not spectral conductor Fresnel.
+
+The hardware cross-path gate loads the exact `v1-l2` records from this file
+and renders them through forward MRT and Metal ray-query path tracing with
+IBL, screen-space effects, exposure adaptation, bloom, and shadows disabled.
+This isolates one white directional light while preserving each production
+shader's intentional stability behavior. A 32x32 center region must keep
+forward/path mean RGB error at or below 24 display levels, RGB direction
+cosine at or above `0.96`, and relative display-luminance error at or below
+`0.30`. Responses whose linear-reference length is at least `0.01` must also
+track the reference direction with cosine at or above `0.85`; smaller
+responses remain bounded to 12 display levels because the forward path's
+documented smooth highlight compression can legitimately dominate them.
+
+On the qualified Apple M1 Max run, the worst display error was `20.4333`
+(anisotropy), the minimum forward/path color cosine was `0.985835`, the
+maximum relative luminance error was `0.2365`, and the minimum significant
+path/reference response cosine was `0.904537`. Bloom does not currently ship
+a deferred-shading or visibility-buffer material evaluator: the renderer is
+forward MRT by design, and the future visibility path is tracked by issue
+#27. Its parity gate must consume this same corpus when that path lands.
 
 ## Transport defect found by the foundation
 
@@ -375,6 +395,14 @@ zero-scale normal to be byte-identical to scalar clearcoat, a directional map
 to create a bounded visible response, and transformed UV0/UV1 maps to rotate
 that response. Telemetry pins the normal record at 48 bytes and proves zero
 normal allocation for base, scalar, and factor/roughness-only materials.
+
+The realtime motion corpus minifies alternating two-texel tangent-space coat
+normals across a slowly moving camera. A matching flat-normal run removes
+ordinary edge and lighting motion before the texture-specific residual is
+measured. On Apple M1 Max / Metal, camera motion measured `2.432037` mean RGB,
+the filtered coat response measured `0.205539`, the worst adjacent-frame
+residual was `0.532235`, and no sampled channel crossed the coherent-outlier
+threshold. The hard gates remain `1.5` mean residual and 2% outlier channels.
 
 ## Public authoring API
 

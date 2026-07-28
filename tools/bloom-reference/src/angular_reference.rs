@@ -152,10 +152,6 @@ fn scenarios() -> [(&'static str, LayeredMaterial); 7] {
         (
             "anisotropy",
             LayeredMaterial {
-                base: BaseMaterial {
-                    metallic: 1.0,
-                    ..base().base
-                },
                 anisotropy_strength: 0.82,
                 anisotropy_rotation: 0.61,
                 ..base()

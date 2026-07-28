@@ -25,6 +25,8 @@ use std::time::Instant;
 
 #[path = "golden_render/layered_pbr_motion.rs"]
 mod layered_pbr_motion;
+#[path = "golden_render/layered_pbr_parity.rs"]
+mod layered_pbr_parity;
 #[path = "golden_render/lighting_upload.rs"]
 mod lighting_upload;
 #[path = "golden_render/motion_producer_audit.rs"]

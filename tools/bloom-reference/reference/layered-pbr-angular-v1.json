@@ -2333,7 +2333,7 @@
           0.18,
           0.055
         ],
-        "metallic": 1.0,
+        "metallic": 0.2,
         "perceptual_roughness": 0.38,
         "ior": 1.5,
         "specular_factor": 1.0,
@@ -2361,14 +2361,14 @@
       "n_dot_l": 0.25,
       "light_azimuth_radians": 2.4,
       "direct_diffuse": [
-        0.0,
-        0.0,
-        0.0
+        0.035386,
+        0.015165,
+        0.004634
       ],
       "direct_base_specular": [
-        0.010932,
-        0.00559,
-        0.002808
+        0.004166,
+        0.003097,
+        0.002541
       ],
       "direct_sheen_specular": [
         0.0,
@@ -2381,11 +2381,11 @@
         0.0
       ],
       "direct_brdf_cos": [
-        0.002733,
-        0.001398,
-        0.000702
+        0.009888,
+        0.004566,
+        0.001794
       ],
-      "direct_pdf": 0.007654,
+      "direct_pdf": 0.049153,
       "reciprocity_max_abs_error": 0.0
     },
     {
@@ -2397,7 +2397,7 @@
           0.18,
           0.055
         ],
-        "metallic": 1.0,
+        "metallic": 0.2,
         "perceptual_roughness": 0.38,
         "ior": 1.5,
         "specular_factor": 1.0,
@@ -2425,14 +2425,14 @@
       "n_dot_l": 0.55,
       "light_azimuth_radians": 1.2,
       "direct_diffuse": [
-        0.0,
-        0.0,
-        0.0
+        0.057374,
+        0.024589,
+        0.007513
       ],
       "direct_base_specular": [
-        0.357405,
-        0.153227,
-        0.046884
+        0.098779,
+        0.057944,
+        0.036675
       ],
       "direct_sheen_specular": [
         0.0,
@@ -2445,11 +2445,11 @@
         0.0
       ],
       "direct_brdf_cos": [
-        0.196573,
-        0.084275,
-        0.025786
+        0.085885,
+        0.045393,
+        0.024304
       ],
-      "direct_pdf": 0.113423,
+      "direct_pdf": 0.148993,
       "reciprocity_max_abs_error": 0.0
     },
     {
@@ -2461,7 +2461,7 @@
           0.18,
           0.055
         ],
-        "metallic": 1.0,
+        "metallic": 0.2,
         "perceptual_roughness": 0.38,
         "ior": 1.5,
         "specular_factor": 1.0,
@@ -2489,14 +2489,14 @@
       "n_dot_l": 0.9,
       "light_azimuth_radians": 0.35,
       "direct_diffuse": [
-        0.0,
-        0.0,
-        0.0
+        0.059672,
+        0.025574,
+        0.007814
       ],
       "direct_base_specular": [
-        0.012919,
-        0.005537,
-        0.001692
+        0.003568,
+        0.002092,
+        0.001323
       ],
       "direct_sheen_specular": [
         0.0,
@@ -2509,11 +2509,11 @@
         0.0
       ],
       "direct_brdf_cos": [
-        0.011627,
-        0.004983,
-        0.001523
+        0.056916,
+        0.024899,
+        0.008224
       ],
-      "direct_pdf": 0.007973,
+      "direct_pdf": 0.168667,
       "reciprocity_max_abs_error": 0.0
     },
     {
@@ -2525,7 +2525,7 @@
           0.18,
           0.055
         ],
-        "metallic": 1.0,
+        "metallic": 0.2,
         "perceptual_roughness": 0.38,
         "ior": 1.5,
         "specular_factor": 1.0,
@@ -2553,14 +2553,14 @@
       "n_dot_l": 0.25,
       "light_azimuth_radians": 2.4,
       "direct_diffuse": [
-        0.0,
-        0.0,
-        0.0
+        0.061551,
+        0.026379,
+        0.00806
       ],
       "direct_base_specular": [
-        0.002007,
-        0.000865,
-        0.000271
+        0.000561,
+        0.000333,
+        0.000214
       ],
       "direct_sheen_specular": [
         0.0,
@@ -2573,11 +2573,11 @@
         0.0
       ],
       "direct_brdf_cos": [
-        0.000502,
-        0.000216,
-        0.000068
+        0.015528,
+        0.006678,
+        0.002068
       ],
-      "direct_pdf": 0.000879,
+      "direct_pdf": 0.069881,
       "reciprocity_max_abs_error": 0.0
     },
     {
@@ -2589,7 +2589,7 @@
           0.18,
           0.055
         ],
-        "metallic": 1.0,
+        "metallic": 0.2,
         "perceptual_roughness": 0.38,
         "ior": 1.5,
         "specular_factor": 1.0,
@@ -2617,14 +2617,14 @@
       "n_dot_l": 0.55,
       "light_azimuth_radians": 1.2,
       "direct_diffuse": [
-        0.0,
-        0.0,
-        0.0
+        0.082615,
+        0.035406,
+        0.010819
       ],
       "direct_base_specular": [
-        0.02922,
-        0.012523,
-        0.003826
+        0.00807,
+        0.004731,
+        0.002992
       ],
       "direct_sheen_specular": [
         0.0,
@@ -2637,11 +2637,11 @@
         0.0
       ],
       "direct_brdf_cos": [
-        0.016071,
-        0.006888,
-        0.002105
+        0.049877,
+        0.022075,
+        0.007596
       ],
-      "direct_pdf": 0.015519,
+      "direct_pdf": 0.155412,
       "reciprocity_max_abs_error": 0.0
     },
     {
@@ -2653,7 +2653,7 @@
           0.18,
           0.055
         ],
-        "metallic": 1.0,
+        "metallic": 0.2,
         "perceptual_roughness": 0.38,
         "ior": 1.5,
         "specular_factor": 1.0,
@@ -2681,14 +2681,14 @@
       "n_dot_l": 0.9,
       "light_azimuth_radians": 0.35,
       "direct_diffuse": [
-        0.0,
-        0.0,
-        0.0
+        0.083714,
+        0.035877,
+        0.010963
       ],
       "direct_base_specular": [
-        0.260085,
-        0.111465,
-        0.034059
+        0.071833,
+        0.042109,
+        0.026628
       ],
       "direct_sheen_specular": [
         0.0,
@@ -2701,11 +2701,11 @@
         0.0
       ],
       "direct_brdf_cos": [
-        0.234076,
-        0.100319,
-        0.030653
+        0.139993,
+        0.070188,
+        0.033831
       ],
-      "direct_pdf": 0.28641,
+      "direct_pdf": 0.28647,
       "reciprocity_max_abs_error": 0.0
     },
     {
@@ -2717,7 +2717,7 @@
           0.18,
           0.055
         ],
-        "metallic": 1.0,
+        "metallic": 0.2,
         "perceptual_roughness": 0.38,
         "ior": 1.5,
         "specular_factor": 1.0,
@@ -2745,14 +2745,14 @@
       "n_dot_l": 0.25,
       "light_azimuth_radians": 2.4,
       "direct_diffuse": [
-        0.0,
-        0.0,
-        0.0
+        0.066542,
+        0.028518,
+        0.008714
       ],
       "direct_base_specular": [
-        0.001587,
-        0.00068,
-        0.000208
+        0.000439,
+        0.000257,
+        0.000163
       ],
       "direct_sheen_specular": [
         0.0,
@@ -2765,11 +2765,11 @@
         0.0
       ],
       "direct_brdf_cos": [
-        0.000397,
-        0.00017,
-        0.000052
+        0.016745,
+        0.007194,
+        0.002219
       ],
-      "direct_pdf": 0.000698,
+      "direct_pdf": 0.072496,
       "reciprocity_max_abs_error": 0.0
     },
     {
@@ -2781,7 +2781,7 @@
           0.18,
           0.055
         ],
-        "metallic": 1.0,
+        "metallic": 0.2,
         "perceptual_roughness": 0.38,
         "ior": 1.5,
         "specular_factor": 1.0,
@@ -2809,14 +2809,14 @@
       "n_dot_l": 0.55,
       "light_azimuth_radians": 1.2,
       "direct_diffuse": [
-        0.0,
-        0.0,
-        0.0
+        0.084671,
+        0.036288,
+        0.011088
       ],
       "direct_base_specular": [
-        0.005741,
-        0.00246,
-        0.000752
+        0.001586,
+        0.000929,
+        0.000588
       ],
       "direct_sheen_specular": [
         0.0,
@@ -2829,11 +2829,11 @@
         0.0
       ],
       "direct_brdf_cos": [
-        0.003158,
-        0.001353,
-        0.000413
+        0.047441,
+        0.020469,
+        0.006422
       ],
-      "direct_pdf": 0.005669,
+      "direct_pdf": 0.159863,
       "reciprocity_max_abs_error": 0.0
     },
     {
@@ -2845,7 +2845,7 @@
           0.18,
           0.055
         ],
-        "metallic": 1.0,
+        "metallic": 0.2,
         "perceptual_roughness": 0.38,
         "ior": 1.5,
         "specular_factor": 1.0,
@@ -2873,14 +2873,14 @@
       "n_dot_l": 0.9,
       "light_azimuth_radians": 0.35,
       "direct_diffuse": [
-        0.0,
-        0.0,
-        0.0
+        0.085911,
+        0.036819,
+        0.01125
       ],
       "direct_base_specular": [
-        0.098465,
-        0.042199,
-        0.012894
+        0.027195,
+        0.015942,
+        0.010081
       ],
       "direct_sheen_specular": [
         0.0,
@@ -2893,11 +2893,11 @@
         0.0
       ],
       "direct_brdf_cos": [
-        0.088618,
-        0.037979,
-        0.011605
+        0.101795,
+        0.047485,
+        0.019198
       ],
-      "direct_pdf": 0.175813,
+      "direct_pdf": 0.276544,
       "reciprocity_max_abs_error": 0.0
     },
     {
