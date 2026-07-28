@@ -314,6 +314,13 @@ frames, then requires finite nonzero HDR output, accepted history, valid
 reprojection, and accumulated SVGF confidence. It verifies all four diagnostic
 dimensions and the zero-persistent-memory capture contract in one frame.
 
+A second realtime PT sequence moves retained rigid geometry between two
+visibly distinct poses after 24 settled frames. The transition must write at
+least 100 motion texels, retain overlapping history, and classify at least 90%
+of moving texels as retained, depth-rejected, or footprint-retained. Severe
+trails must settle within four frames, coherent frame-four outliers must stay
+below 2%, and stable stochastic flicker must remain below 2 RGB levels.
+
 Render-scale changes must produce a first frame byte-identical to a freshly
 seeded history at the new scale. Resize changes must have no `>32/255`
 outliers against a fresh target-size seed, with mean RGB error at most 0.5 and
@@ -329,6 +336,6 @@ silently passing.
 
 ## Remaining #135 work
 
-Complete the PT-specific moving-object, lighting-change, and reset sequence
-coverage on required hardware runners, including the goldens owned by #127 and
-the timing/memory qualification owned by #128.
+Complete the PT-specific lighting-change and reset sequence coverage on
+required hardware runners, including the goldens owned by #127 and the
+timing/memory qualification owned by #128.

@@ -480,6 +480,102 @@ fn realtime_path_tracing_capture_exposes_svgf_history_without_normal_frame_resou
 }
 
 #[test]
+fn realtime_path_tracing_rigid_motion_bounds_trails_and_keeps_history() {
+    fn transform(x: f32, angle: f32) -> [[f32; 4]; 4] {
+        let (sin, cos) = angle.sin_cos();
+        [
+            [cos, 0.0, -sin, 0.0],
+            [0.0, 1.4, 0.0, 0.0],
+            [sin, 0.0, cos, 0.0],
+            [x, 1.0, -0.4, 1.0],
+        ]
+    }
+
+    let _rt_guard = lock_rt_goldens();
+    let (mut eng, _) = match try_engine_rt() {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            skip_rt_golden("pt_rigid_motion", "no-non-cpu-ray-query-adapter");
+            return;
+        }
+        Err(err) => panic!("{err}"),
+    };
+    build_pt_scene(&mut eng);
+    let (vertices, indices) = cube_verts(0.7, [0.95, 0.06, 0.02, 1.0]);
+    let node = eng.scene.create_node();
+    eng.scene.update_geometry(node, vertices, indices);
+    eng.scene.set_material_pbr(node, 0.15, 0.3);
+    eng.scene.set_material_color(node, 0.95, 0.06, 0.02, 1.0);
+    eng.scene.set_transform(node, transform(-2.0, -0.65));
+
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(false);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_path_tracing(2);
+    r.set_path_tracing_debug_view(0);
+    r.set_path_tracing_seed(0);
+    r.reset_path_tracing_history(0);
+    let _ = render(&mut eng, 24, draw_pt_static_frame);
+    let old_pose = render(&mut eng, 1, draw_pt_static_frame).2;
+
+    eng.scene.set_transform(node, transform(2.0, 0.8));
+    let directory =
+        std::env::temp_dir().join(format!("bloom-pt-rigid-motion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    let mut frames = Vec::new();
+    for _ in 0..24 {
+        frames.push(render(&mut eng, 1, draw_pt_static_frame).2);
+    }
+    evaluate_motion_recovery("pt-rigid", &old_pose, &frames);
+
+    let motion = image::open(directory.join("pt-motion.png"))
+        .expect("moving PT capture did not emit motion vectors")
+        .to_rgb8();
+    let moving = motion.pixels().filter(|pixel| pixel[2] > 16).count();
+    let reasons = image::open(directory.join("pt-rejection-reason.png"))
+        .expect("moving PT capture did not emit rejection reasons")
+        .to_rgb8();
+    let mut motion_history = 0usize;
+    let mut motion_rejected = 0usize;
+    let mut motion_flip = 0usize;
+    for (motion, reason) in motion.pixels().zip(reasons.pixels()) {
+        if motion[2] <= 16 {
+            continue;
+        }
+        motion_history +=
+            usize::from(reason[0] < 40 && reason[1] > 40 && reason[1] < 100 && reason[2] > 220);
+        motion_rejected +=
+            usize::from(reason[0] > 220 && reason[1] < 40 && (reason[2] > 160 || reason[2] < 40));
+        motion_flip += usize::from(reason[0] < 40 && reason[1] > 200 && reason[2] > 220);
+    }
+    let classified_motion = motion_history + motion_rejected + motion_flip;
+    eprintln!(
+        "temporal-corpus pt-rigid moving={moving} retained={motion_history} \
+         rejected={motion_rejected} footprint_flip={motion_flip} total={}",
+        motion.width() * motion.height()
+    );
+    assert!(moving >= 100, "rigid PT motion wrote no velocity coverage");
+    assert!(
+        motion_history >= 25,
+        "overlapping rigid PT motion retained no reprojected history"
+    );
+    assert!(
+        classified_motion * 10 >= moving * 9,
+        "moving PT texels were neither retained nor explicitly rejected"
+    );
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept PT rigid-motion diagnostics at {directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 fn common_camera_cut_reset_invalidates_every_temporal_owner() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
