@@ -160,6 +160,10 @@ Scene-compose bindings likewise use distinct slots for the cleared SSR
 fallback and both SSR history views. A warmed stable path therefore also
 reports `scene_compose: 0`; SSR toggles and path-tracing ownership select a
 different complete binding instead of mutating or incompletely keying one.
+SSR temporal bindings are also cached separately for the two alternating
+previous-history inputs. The optional diagnostics pass consumes the same
+cached binding, and resize invalidates both entries before history, raw SSR,
+or velocity views are replaced.
 
 `examples/quality-transparency/main.ts` accepts `--sorted-interleaving` as an
 unversioned focused ordering oracle. It forces conventional sorted composition

@@ -67,4 +67,9 @@ fn golden_many_point_lights() {
         Some(0),
         "steady final composite must reuse its source/exposure-specific bind group"
     );
+    assert_eq!(
+        sites["ssr_temporal"].as_u64(),
+        Some(0),
+        "steady SSR temporal must reuse its previous-history-specific bind group"
+    );
 }

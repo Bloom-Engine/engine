@@ -1949,6 +1949,10 @@ budget for at 4K.
   fallback and both history slots. SSR toggles and PT ownership select a whole
   binding identity, while resize clears all slots before replacing any input
   view. The same golden now hard-gates `scene_compose: 0`.
+- **SSR temporal fixed in #139:** both alternating previous-history bindings
+  are cached and shared with the diagnostics pass. Resize invalidates them
+  before replacing history/raw/velocity views; the steady golden hard-gates
+  `ssr_temporal: 0`.
 
 Remaining: eliminate the measured bind-group hotspots only with complete
 resource-generation keys, then instrument and eliminate the other steady-state

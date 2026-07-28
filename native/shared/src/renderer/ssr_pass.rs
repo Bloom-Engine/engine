@@ -264,45 +264,50 @@ impl Renderer {
                 bytemuck::bytes_of(&tp),
             );
 
-            self.frame_resource_stats.created_bind_group(
-                super::frame_resource_stats::BindGroupCreationSite::SsrTemporal,
-            );
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ssr_temporal_bg"),
-                layout: &self.ssr_temporal_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.ssr_temporal_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(
-                            &self.ssr_history_views[prev_idx],
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                ],
-            });
+            if self.ssr_temporal_bind_group_cache[prev_idx].is_none() {
+                self.frame_resource_stats.created_bind_group(
+                    super::frame_resource_stats::BindGroupCreationSite::SsrTemporal,
+                );
+                self.ssr_temporal_bind_group_cache[prev_idx] =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("ssr_temporal_bg"),
+                        layout: &self.ssr_temporal_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.ssr_temporal_uniform_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&self.ssr_rt_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.ssr_history_views[prev_idx],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.velocity_rt_view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                        ],
+                    }));
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ssr_temporal_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -320,12 +325,22 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.ssr_temporal_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(
+                0,
+                self.ssr_temporal_bind_group_cache[prev_idx]
+                    .as_ref()
+                    .expect("SSR temporal bind group was initialized"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
             drop(pass);
             #[cfg(not(target_arch = "wasm32"))]
             if self.pending_quality_capture_dir.is_some() {
-                self.record_ssr_temporal_diagnostics(encoder, &bg);
+                let diagnostic_bg = self.ssr_temporal_bind_group_cache[prev_idx]
+                    .as_ref()
+                    .expect("SSR temporal bind group was initialized")
+                    .clone();
+                self.record_ssr_temporal_diagnostics(encoder, &diagnostic_bg);
             }
             self.ssr_history_valid = true;
         }

@@ -832,6 +832,8 @@ pub struct Renderer {
     pub ssr_temporal_pipeline: wgpu::RenderPipeline,
     pub ssr_temporal_layout: wgpu::BindGroupLayout,
     pub ssr_temporal_uniform_buffer: wgpu::Buffer,
+    /// Two exact bindings for the alternating previous-history input.
+    ssr_temporal_bind_group_cache: [Option<wgpu::BindGroup>; 2],
     #[cfg(not(target_arch = "wasm32"))]
     ssr_temporal_diagnostics: Option<ssr_temporal_diagnostics::SsrTemporalDiagnosticResources>,
 
@@ -7733,6 +7735,7 @@ impl Renderer {
             ssr_temporal_pipeline,
             ssr_temporal_layout,
             ssr_temporal_uniform_buffer,
+            ssr_temporal_bind_group_cache: [None, None],
             #[cfg(not(target_arch = "wasm32"))]
             ssr_temporal_diagnostics: None,
             ssgi_rt_texture,
@@ -8307,6 +8310,7 @@ impl Renderer {
             // those views. Source/history indices select distinct cache slots.
             self.composite_bind_group_cache = std::array::from_fn(|_| None);
             self.scene_compose_bind_group_cache = std::array::from_fn(|_| None);
+            self.ssr_temporal_bind_group_cache = [None, None];
 
             let (dt, dv) = create_depth_texture(&self.device, rw, rh);
             self.depth_texture = dt;
