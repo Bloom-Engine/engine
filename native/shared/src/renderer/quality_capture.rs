@@ -466,6 +466,21 @@ impl Renderer {
                     ));
                 }
             }
+            if let Some(textures) = self.pt_temporal_diagnostic_textures() {
+                for (&name, texture) in super::pt_temporal_diagnostics::PT_TEMPORAL_DIAGNOSTIC_NAMES
+                    .iter()
+                    .zip(textures)
+                {
+                    quality_readbacks.push(self.record_quality_texture(
+                        encoder,
+                        texture,
+                        name,
+                        ReadbackKind::Rgba8,
+                        wgpu::TextureAspect::All,
+                        4,
+                    ));
+                }
+            }
         }
         FrameReadback {
             staging,
@@ -534,6 +549,7 @@ impl Renderer {
         self.release_temporal_diagnostics();
         self.release_ssr_temporal_diagnostics();
         self.release_ssgi_temporal_diagnostics();
+        self.release_pt_temporal_diagnostics();
         self.screenshot_requested = false;
     }
 
@@ -843,6 +859,7 @@ impl Renderer {
         } else {
             "false"
         });
+        self.append_pt_temporal_diagnostic_telemetry(&mut out);
         out.push('}');
         out.push_str(",\"transparent_gi\":{");
         out.push_str("\"enabled\":");

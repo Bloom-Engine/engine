@@ -369,6 +369,114 @@ fn path_tracing_mode_transitions_reset_incompatible_history() {
 }
 
 #[test]
+fn realtime_path_tracing_capture_exposes_svgf_history_without_normal_frame_resources() {
+    let _rt_guard = lock_rt_goldens();
+    let (mut eng, _) = match try_engine_rt() {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            skip_rt_golden("pt_temporal_capture", "no-non-cpu-ray-query-adapter");
+            return;
+        }
+        Err(err) => panic!("{err}"),
+    };
+    build_pt_scene(&mut eng);
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(false);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    // The current frame graph builds PT's shared TLAS/card inputs under the
+    // SSGI infrastructure node; PT still owns the rendered GI result.
+    r.set_ssgi_enabled(true);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_path_tracing(2);
+    r.set_path_tracing_debug_view(0);
+    r.set_path_tracing_seed(0);
+    r.reset_path_tracing_history(0);
+
+    let mut frame = 0u32;
+    let _ = render(&mut eng, 24, |eng| {
+        draw_pt_motion_frame(eng, frame);
+        frame += 1;
+    });
+    let samples_before_capture = eng.renderer.path_tracing_sample_count();
+    assert!(
+        samples_before_capture >= 8,
+        "realtime PT reached only {samples_before_capture} history frames before capture"
+    );
+    let normal_paths = eng.renderer.quality_runtime_paths_json();
+    assert!(normal_paths.contains("\"pt_diagnostic_persistent_bytes\":0"));
+    assert!(normal_paths.contains("\"pt_diagnostic_resources_live\":false"));
+
+    let directory =
+        std::env::temp_dir().join(format!("bloom-pt-diagnostics-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    eng.begin_frame();
+    draw_pt_motion_frame(&mut eng, frame);
+    eng.end_frame();
+    assert!(
+        eng.renderer.path_tracing_sample_count() > samples_before_capture,
+        "qualification frame did not execute the realtime PT pass"
+    );
+
+    let reasons = image::open(directory.join("pt-rejection-reason.png"))
+        .expect("PT capture did not emit temporal rejection reasons")
+        .to_rgb8();
+    let accepted = reasons
+        .pixels()
+        .filter(|pixel| {
+            (pixel[0] < 40 && pixel[1] > 140 && pixel[2] < 60) || (pixel[0] < 40 && pixel[2] > 200)
+        })
+        .count();
+    let motion = image::open(directory.join("pt-motion.png"))
+        .expect("PT capture did not emit motion vectors")
+        .to_rgb8();
+    let reprojection = image::open(directory.join("pt-reprojected-uv.png"))
+        .expect("PT capture did not emit reprojected UVs")
+        .to_rgb8();
+    let valid_reprojection = reprojection.pixels().filter(|pixel| pixel[2] > 200).count();
+    let confidence = image::open(directory.join("pt-temporal-confidence.png"))
+        .expect("PT capture did not emit temporal confidence")
+        .to_rgb8();
+    let accumulated = confidence
+        .pixels()
+        .filter(|pixel| pixel[1] > 16 && pixel[2] > 16)
+        .count();
+    let metrics: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(directory.join("hdr-scene.metrics.json"))
+            .expect("PT capture did not emit raw HDR metrics"),
+    )
+    .unwrap();
+    let non_finite = metrics["non_finite_pixels"].as_u64().unwrap();
+    let max_luminance = metrics["max_luminance"].as_f64().unwrap();
+    eprintln!(
+        "temporal-corpus pt-svgf accepted={accepted} valid_reprojection={valid_reprojection} \
+         accumulated={accumulated} non_finite={non_finite} max_luma={max_luminance:.4} total={}",
+        reasons.width() * reasons.height()
+    );
+    assert!(
+        accepted >= 100 && valid_reprojection >= 100 && accumulated >= 100,
+        "settled realtime PT exposed no accepted, reprojected, accumulated history"
+    );
+    assert_eq!(non_finite, 0, "realtime PT emitted non-finite HDR radiance");
+    assert!(max_luminance > 0.0001, "realtime PT produced no radiance");
+    assert_eq!(reasons.dimensions(), motion.dimensions());
+    assert_eq!(reasons.dimensions(), reprojection.dimensions());
+    assert_eq!(reasons.dimensions(), confidence.dimensions());
+
+    let paths = eng.renderer.quality_runtime_paths_json();
+    assert!(paths.contains("\"pt_diagnostic_persistent_bytes\":0"));
+    assert!(paths.contains("\"pt_diagnostic_capture_passes\":1"));
+    assert!(paths.contains("\"pt_diagnostic_resources_live\":false"));
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept PT diagnostics at {directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 fn common_camera_cut_reset_invalidates_every_temporal_owner() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");

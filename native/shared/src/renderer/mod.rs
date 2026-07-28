@@ -42,6 +42,8 @@ mod postfx_chain;
 mod pt_geometry;
 mod pt_pass;
 #[cfg(not(target_arch = "wasm32"))]
+mod pt_temporal_diagnostics;
+#[cfg(not(target_arch = "wasm32"))]
 mod quality_capture;
 mod refractive_reflections;
 mod scene_pass;
@@ -927,7 +929,6 @@ pub struct Renderer {
     /// probe history on a per-frame ping-pong index, matching the
     /// SW cache shape.
     probe_trace_hw_bg_cache: [Option<wgpu::BindGroup>; 2],
-
     // --- Path tracing (PT-1, docs/pt/pt-roadmap.md) ---
     /// Base megakernel; None when the adapter lacks ray query.
     pub pt_pipeline: Option<wgpu::ComputePipeline>,
@@ -941,21 +942,18 @@ pub struct Renderer {
     pt_accum_buffers: [Option<wgpu::Buffer>; 2],
     /// SVGF (mu1, mu2, history length, raw depth) ping-pong.
     pt_moments_buffers: [Option<wgpu::Buffer>; 2],
-    /// Previous-frame/read-side accumulation index.
     pt_accum_idx: usize,
-    /// Samples accumulated at the current view; 0 = history invalid.
     pt_accum_count: u32,
     /// Last accumulated VP; motion resets progressive accumulation.
     pt_prev_vp: [[f32; 4]; 4],
     /// TLAS version last traced; a rebuild invalidates accumulation.
     pt_last_tlas_version: u64,
-    /// BLOOM_PT_DEBUG view selector, forwarded to the kernel via cfg.w.
     pt_debug: f32,
-    /// Independent RNG frame counter; TAA's counter can freeze.
     pt_frame_index: u32,
-    /// Global scramble for the deterministic per-pixel PT sample stream.
-    /// Zero preserves the historical sequence used by checked-in goldens.
+    /// Global sample scramble; zero preserves checked-in golden sequences.
     pt_rng_seed: u32,
+    #[cfg(not(target_arch = "wasm32"))]
+    pt_temporal_diagnostics: Option<pt_temporal_diagnostics::PtTemporalDiagnosticResources>,
     /// BLOOM_PT_RESTIR=1 — PT-4 experimental ReSTIR DI (kernel ext.w).
     pt_restir: bool,
     /// PT-4 — ReSTIR reservoir ping-pong, sized with the accum pair.
@@ -7791,6 +7789,8 @@ impl Renderer {
             pt_debug,
             pt_frame_index: 0,
             pt_rng_seed: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            pt_temporal_diagnostics: None,
             pt_restir,
             pt_resv_buffers: [None, None],
             pt_dynamic_draws: Vec::new(),

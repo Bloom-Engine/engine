@@ -604,6 +604,10 @@ impl Renderer {
         // frame's read side.
         let written_idx = 1 - self.pt_accum_idx;
         self.pt_accum_idx = written_idx;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.pt_mode >= 2 && self.pending_quality_capture_dir.is_some() {
+            self.record_pt_temporal_diagnostics(encoder, written_idx, trace_w, trace_h);
+        }
 
         // ---- PT-3b: SVGF wavelet filter (realtime mode only) ----
         // Six variance-guided à-trous iterations on the trace grid

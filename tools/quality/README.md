@@ -166,6 +166,12 @@ The one debug-capture API snapshots existing render-graph products:
 - `shadow-cascade-0`, `shadow-cascade-1`, `shadow-cascade-2`: Depth32F shadow
   maps normalized per cascade.
 
+Active temporal systems add capture-only evidence beside those physical graph
+products. Realtime PT emits trace-resolution rejection reason, motion,
+reprojected UV, and variance/history confidence in one temporary compute pass.
+The normal renderer creates none of those resources; runtime telemetry reports
+their exact temporary byte/pass contract and release state.
+
 The API is dormant during ordinary rendering and throughout the measured
 window. It reuses textures already marked `COPY_SRC` and records copies in a
 keyed terminal render-graph pass during the post-measurement screenshot

@@ -233,6 +233,24 @@ indirect radiance after the SDF/card backend has warmed up, independently of
 the display tonemap. Marking the existing SSGI target as `COPY_SRC` adds no
 normal-frame pass or allocation.
 
+Realtime path tracing emits `pt-rejection-reason.png`, `pt-motion.png`,
+`pt-reprojected-uv.png`, and `pt-temporal-confidence.png` at its trace-grid
+resolution. One capture-only compute pass reads the current and previous SVGF
+moment buffers, current irradiance/variance, depth, velocity, and the existing
+PT matrices. It reproduces the denoiser's bilinear depth validation and
+footprint-retention decision without writing production history.
+
+The PT reason palette uses gray for seed/sky, red for off-screen reprojection,
+magenta for invalid or depth-rejected history, cyan for a retained
+subpixel-surface flip, blue for accepted motion-vector reprojection, and green
+for accepted matrix/static history. Motion and reprojected UV follow the shared
+encoding. Confidence RGB stores variance heat, normalized 32-frame history
+length, and retained-history contribution. The four RGBA8 textures, bind
+group, pipeline, and readbacks exist only for a requested native capture and
+are released after encoding. `pt_diagnostic_*` telemetry reports zero
+persistent bytes, exact temporary bytes, one capture pass, and resource
+lifetime.
+
 ## Temporal sequence gates
 
 The headless GPU corpus now evaluates a sequence rather than only a final
@@ -291,6 +309,11 @@ Hi-Z-to-SDF backend transition, then requires a finite, nonzero resolved HDR
 target and real retained probe history. It also verifies the probe-domain
 reason/confidence dimensions and the zero-persistent-memory capture contract.
 
+The realtime PT gate orbits the deterministic retained ray-query scene for 24
+frames, then requires finite nonzero HDR output, accepted history, valid
+reprojection, and accumulated SVGF confidence. It verifies all four diagnostic
+dimensions and the zero-persistent-memory capture contract in one frame.
+
 Render-scale changes must produce a first frame byte-identical to a freshly
 seeded history at the new scale. Resize changes must have no `>32/255`
 outliers against a fresh target-size seed, with mean RGB error at most 0.5 and
@@ -306,5 +329,9 @@ silently passing.
 
 ## Remaining #135 work
 
-Extend the shared reason/confidence semantics to the path-tracing denoiser
-where its representation matches the raster temporal contract.
+Complete the PT-specific moving-object, lighting-change, and reset sequence
+coverage on required hardware runners, including the goldens owned by #127 and
+the timing/memory qualification owned by #128. PT's shared TLAS/card
+preparation is currently scheduled through the SSGI infrastructure feature;
+decouple that ownership before claiming an independent PT-on/SSGI-off mode
+matrix.
