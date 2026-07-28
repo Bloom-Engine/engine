@@ -284,16 +284,20 @@ fn unkeyed_editor_skin_pose_writes_velocity_and_bounds_trails() {
         vertex.weights = [1.0, 0.0, 0.0, 0.0];
     }
 
+    let draw_scene = |eng: &mut EngineState| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(7.0, 10.0, 20.0, 255.0);
+        r.begin_mode_3d(0.0, 2.2, 6.5, 0.0, 0.8, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.add_directional_light(-0.4, -1.0, -0.25, 1.0, 0.95, 0.88, 2.2);
+        r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 30.0, 38.0, 52.0, 255.0);
+        r.draw_cube(0.0, 1.1, -1.8, 5.0, 3.2, 0.35, 30.0, 170.0, 235.0, 255.0);
+    };
     let capture = |eng: &mut EngineState, x, bend, facing| {
         render(eng, 1, |eng| {
-            let r = &mut eng.renderer;
-            r.set_clear_color(7.0, 10.0, 20.0, 255.0);
-            r.begin_mode_3d(0.0, 2.2, 6.5, 0.0, 0.8, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
-            r.add_directional_light(-0.4, -1.0, -0.25, 1.0, 0.95, 0.88, 2.2);
-            r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 30.0, 38.0, 52.0, 255.0);
-            r.draw_cube(0.0, 1.1, -1.8, 5.0, 3.2, 0.35, 30.0, 170.0, 235.0, 255.0);
-            r.set_joint_matrices(&palette(x, bend, facing));
-            r.draw_model_mesh(&vertices, &indices, [0.0; 3], 1.0);
+            draw_scene(eng);
+            eng.renderer.set_joint_matrices(&palette(x, bend, facing));
+            eng.renderer
+                .draw_model_mesh(&vertices, &indices, [0.0; 3], 1.0);
         })
         .2
     };
@@ -321,6 +325,21 @@ fn unkeyed_editor_skin_pose_writes_velocity_and_bounds_trails() {
     );
     temporal_history::evaluate_motion_recovery("unkeyed-skin", &old_pose, &frames);
 
+    // A missing frame breaks slot identity. Reappearance must seed from the
+    // current pose instead of inheriting the last visible pose's velocity.
+    render(&mut eng, 1, |eng| draw_scene(eng));
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    capture(&mut eng, -0.5, -0.2, 0.1);
+    let gap_motion = image::open(directory.join("taa-motion.png"))
+        .expect("unkeyed skin gap capture did not emit the TAA velocity map")
+        .to_rgb8();
+    let gap_moving_pixels = gap_motion.pixels().filter(|pixel| pixel[2] > 8).count();
+    eprintln!("temporal-corpus unkeyed-skin gap_moving_pixels={gap_moving_pixels}");
+    assert!(
+        gap_moving_pixels <= 16,
+        "unkeyed skin reappearance inherited stale pre-gap velocity"
+    );
+
     let paths: serde_json::Value =
         serde_json::from_str(&eng.renderer.quality_runtime_paths_json()).unwrap();
     assert_eq!(
@@ -334,6 +353,14 @@ fn unkeyed_editor_skin_pose_writes_velocity_and_bounds_trails() {
     assert_eq!(
         paths["temporal_history"]["unkeyed_skin_motion_passes"].as_u64(),
         Some(0)
+    );
+    let cpu_capacity = paths["temporal_history"]["unkeyed_skin_motion_cpu_capacity_bytes"]
+        .as_u64()
+        .unwrap();
+    eprintln!("temporal-corpus unkeyed-skin cpu_capacity_bytes={cpu_capacity}");
+    assert!(
+        cpu_capacity <= 1024,
+        "one two-joint unkeyed skin retained excessive CPU history"
     );
 
     if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {

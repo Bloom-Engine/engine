@@ -194,6 +194,48 @@ history is two grow-on-demand position streams plus compact slot ranges.
 Telemetry reports `immediate_motion_entries`,
 `immediate_motion_cpu_capacity_bytes`, zero GPU bytes, and zero added passes.
 
+## Skinned and procedural motion
+
+Both retained and Raylib-style immediate skinned draws consume current and
+previous joint palettes at the same offsets in the existing 1024-matrix GPU
+buffers. The legacy immediate vertex shader now reconstructs `prev_clip` from
+the previous palette instead of silently using the current pose for both
+frames. This adds only the previous-palette matrix operations to weighted
+vertices; the buffer, bind group, two palette uploads, velocity attachment,
+draw, and pass already existed.
+
+Animation-handle submissions use the handle as their identity. A palette is
+eligible as history only when it was submitted in the immediately preceding
+renderer frame and has the same joint count. First sighting, a skipped frame,
+a topology change, or an explicit temporal reset seeds previous=current.
+This prevents a respawned character from inheriting an old pose or locomotion
+vector.
+
+The unkeyed editor/test API uses stable submission order as its identity,
+matching immediate primitives and ordinary cached models. It keeps two
+grow-on-demand CPU palette streams and reuses their inner allocations after
+warm-up. A missing slot in the preceding frame, changed joint count, or reset
+also seeds previous=current. Telemetry reports
+`unkeyed_skin_motion_entries`,
+`unkeyed_skin_motion_cpu_capacity_bytes`, zero added GPU bytes, and zero added
+passes.
+
+Procedural foliage writes velocity from its actual previous wind time and
+previous model transform, rather than treating vertex-shader deformation as
+static. Static decals deliberately write zero velocity; spawn and expiry are
+qualified through TAA's color, depth, and neighborhood rejection. Procedural
+cloud radiance is likewise an explicit zero-velocity producer: field changes
+are rejected and converged as radiance changes rather than misrepresented as
+screen-space geometry motion.
+
+The native sequence corpus covers retained rigid transforms, cached and
+legacy skinning, keyed and unkeyed palette identity, immediate primitives,
+alpha-tested foliage, procedural wind, reactive and ordinary particles,
+static decal spawn/expiry, cloud-field changes, emissive switches,
+refraction, and camera/reset discontinuities. Each moving geometry route also
+captures the velocity target directly; a visually changed negative control
+prevents a vacuous pass.
+
 ## Custom translucency and particles
 
 Custom translucent materials keep `fs_main -> TranslucentOut` as their
