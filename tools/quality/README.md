@@ -44,6 +44,22 @@ python3 tools/quality/run.py faults
 python3 -m unittest tools/quality/test_run.py -v
 ```
 
+For the official Khronos alpha, transmission, volume, and ordering controls:
+
+```sh
+python3 tools/quality/khronos_materials.py \
+  --out tools/quality/out/khronos-materials
+```
+
+That opt-in command downloads four `.glb` files from one pinned
+`glTF-Sample-Assets` revision into the ignored output directory and verifies
+their SHA-256 hashes. It builds `examples/renderer-test`, captures each case
+twice, rejects supported-field importer/validation diagnostics, rejects
+flat/black output, and records exact same-machine repeatability. Its
+`summary.md` links the candidate images for review. It deliberately does not
+install or approve a baseline; semantic reference-image approval remains a
+human action.
+
 The output directory contains:
 
 - `result.json`: the authoritative machine-readable result;

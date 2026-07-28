@@ -247,8 +247,12 @@ run_component() {
       python3 -m py_compile \
         tools/quality/run.py \
         tools/quality/build_example.py \
+        tools/quality/khronos_materials.py \
         tools/quality/prepare_bistro.py
-      python3 -m unittest tools/quality/test_run.py -v
+      python3 -m unittest \
+        tools/quality/test_run.py \
+        tools/quality/test_khronos_materials.py \
+        -v
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
       hr "offline asset cooker format, corruption, and determinism tests"
