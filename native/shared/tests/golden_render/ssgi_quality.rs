@@ -102,6 +102,7 @@ fn ssgi_capture_exposes_probe_history_without_normal_frame_resources() {
     );
 
     let paths = eng.renderer.quality_runtime_paths_json();
+    assert!(paths.contains("\"ray_scene_preparation\":\"ssgi\""));
     assert!(paths.contains("\"ssgi_diagnostic_persistent_bytes\":0"));
     assert!(paths.contains("\"ssgi_diagnostic_capture_passes\":1"));
     assert!(paths.contains("\"ssgi_diagnostic_resources_live\":false"));

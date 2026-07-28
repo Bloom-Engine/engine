@@ -34,8 +34,11 @@ fixed exposure) so images are comparable number-to-number.
 
 Mode is a runtime setting (`bloom_set_path_tracing`), toggleable per frame.
 When PT is active, SSGI/SSR/GTAO are skipped (their output would be
-overwritten; skipping banks their cost). Shadow cascades still render — mode 2
-reuses them nowhere, but the card-light pass (Tier 1 hit shading) does.
+overwritten; skipping banks their cost). PT independently keeps only the
+shared TLAS/geometry rebuild and raw-albedo card capture it consumes. SSGI-only
+SDF, clipmap, radiance-cache, and card-light passes remain absent when SSGI is
+off. Shadow cascades still render because realtime PT can use them for its
+noise-free hybrid sun path.
 
 ## Tiers
 

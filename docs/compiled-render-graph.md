@@ -25,9 +25,10 @@ counts, allowed usage, load policy, and alias class.
 - generates a stable plan ID from the complete execution contract.
 
 The live topology is declared in `renderer/graph/frame_plan.rs`. Optional
-SSAO, SSR, SSGI (including acceleration/card/SDF/radiance-cache preparation),
-bloom, scene-snapshot, and capture work is selected before compilation by
-`FramePlanKey`. Uniform-only changes do not affect the key.
+SSAO, SSR, SSGI, PT, bloom, scene-snapshot, and capture work is selected before
+compilation by `FramePlanKey`. SSGI and PT independently select their shared
+acceleration/card-capture prefix; SDF, clipmap, radiance-cache, and card-light
+preparation remain SSGI-only. Uniform-only changes do not affect the key.
 `ExecutableGraph` binds only frame-local recording closures to cached pass
 positions; it does not rebuild or schedule a declaration graph per frame.
 

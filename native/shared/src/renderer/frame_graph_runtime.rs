@@ -123,7 +123,11 @@ impl Renderer {
             quality_tier,
             feature_mask,
             capability,
-            path_tracing: graph::PathTracingMode::from_u32(self.pt_mode),
+            path_tracing: graph::PathTracingMode::from_u32(if self.pt_active() {
+                self.pt_mode
+            } else {
+                0
+            }),
             post_pass_count: self.post_passes.len().min(u16::MAX as usize) as u16,
             render_target_output,
         }

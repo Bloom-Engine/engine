@@ -30,9 +30,9 @@ pub(super) use ssgi::{
     SSR_TEMPORAL_SHADER_WGSL,
 };
 mod pt;
-pub(super) use pt::{pt_fault_constants, pt_kernel_variant, PT_ATROUS_WGSL, PT_SKIN_WGSL};
 #[cfg(test)]
 pub(super) use pt::PT_KERNEL_WGSL;
+pub(super) use pt::{pt_fault_constants, pt_kernel_variant, PT_ATROUS_WGSL, PT_SKIN_WGSL};
 
 /// Naga's Metal lowering completes a query in `rayQueryInitialize`; its
 /// non-modern `rayQueryProceed` only reads a `ready` flag that never clears.

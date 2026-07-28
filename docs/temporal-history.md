@@ -331,7 +331,4 @@ silently passing.
 
 Complete the PT-specific moving-object, lighting-change, and reset sequence
 coverage on required hardware runners, including the goldens owned by #127 and
-the timing/memory qualification owned by #128. PT's shared TLAS/card
-preparation is currently scheduled through the SSGI infrastructure feature;
-decouple that ownership before claiming an independent PT-on/SSGI-off mode
-matrix.
+the timing/memory qualification owned by #128.

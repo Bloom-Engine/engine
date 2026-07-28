@@ -153,7 +153,10 @@ The native renderer reports the adapter name, vendor/device IDs, device type,
 driver fields when exposed by wgpu, backend, capability tier, semantic feature
 set, actual SSGI trace backend, and path-tracing availability. Empty driver
 strings are valid on Metal because the backend does not expose them; they are
-recorded rather than invented.
+recorded rather than invented. Runtime evidence also reports
+`ray_scene_preparation` as `disabled`, `ssgi`, `pt`, or `ssgi+pt`; this makes
+the shared acceleration/card prefix observable without conflating it with
+SSGI-only baking.
 
 The one debug-capture API snapshots existing render-graph products:
 

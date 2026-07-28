@@ -727,6 +727,16 @@ impl Renderer {
         } else {
             "false"
         });
+        out.push_str(",\"ray_scene_preparation\":");
+        json_string(
+            &mut out,
+            match (self.ssgi_enabled, self.pt_active()) {
+                (true, true) => "ssgi+pt",
+                (true, false) => "ssgi",
+                (false, true) => "pt",
+                (false, false) => "disabled",
+            },
+        );
         out.push_str(",\"temporal_history\":{");
         out.push_str("\"ssr_valid\":");
         out.push_str(if self.ssr_history_valid {

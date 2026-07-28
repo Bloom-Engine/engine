@@ -406,16 +406,18 @@ pub fn build_renderer_frame_plan(
         },
     );
 
+    let ssgi_preparation = key.feature_mask & super::FRAME_FEATURE_SSGI != 0;
+    let pt_preparation = key.path_tracing != super::PathTracingMode::Off;
     let mut previous_gi = None;
-    if key.feature_mask & super::FRAME_FEATURE_SSGI != 0 {
-        for name in [
-            "accel_rebuild",
-            "card_capture",
-            "sdf_bake",
-            "scene_sdf_clipmap",
-            "wsrc_bake",
-            "card_light",
-        ] {
+    for (name, enabled) in [
+        ("accel_rebuild", ssgi_preparation || pt_preparation),
+        ("card_capture", ssgi_preparation || pt_preparation),
+        ("sdf_bake", ssgi_preparation),
+        ("scene_sdf_clipmap", ssgi_preparation),
+        ("wsrc_bake", ssgi_preparation),
+        ("card_light", ssgi_preparation),
+    ] {
+        if enabled {
             let pass = graph.add_pass(name);
             if let Some(previous) = previous_gi {
                 graph.after(pass, previous);
@@ -744,6 +746,65 @@ mod tests {
         );
         assert!(plan.pass("compose").is_some());
         assert!(plan.pass("capture_readback").is_none());
+    }
+
+    #[test]
+    fn path_tracing_owns_shared_ray_scene_preparation_without_ssgi_bakes() {
+        let mut pt_key = key(0);
+        pt_key.path_tracing = PathTracingMode::Realtime;
+        pt_key.capability = CapabilityTier::HardwareRayQuery;
+        let plan = build_renderer_frame_plan(pt_key, wgpu::TextureFormat::Bgra8UnormSrgb)
+            .compile(CompileOptions::CONSERVATIVE_ALIASING)
+            .unwrap();
+        for present in ["accel_rebuild", "card_capture", "pt"] {
+            assert!(plan.pass(present).is_some(), "{present} must serve PT");
+        }
+        for absent in [
+            "sdf_bake",
+            "scene_sdf_clipmap",
+            "wsrc_bake",
+            "card_light",
+            "ssgi",
+        ] {
+            assert!(
+                plan.pass(absent).is_none(),
+                "{absent} must remain SSGI-only"
+            );
+        }
+        let names = plan
+            .passes
+            .iter()
+            .map(|pass| pass.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            names
+                .iter()
+                .position(|name| *name == "card_capture")
+                .unwrap()
+                < names.iter().position(|name| *name == "pt").unwrap()
+        );
+
+        let mut combined_key = key(FRAME_FEATURE_SSGI);
+        combined_key.path_tracing = PathTracingMode::Realtime;
+        combined_key.capability = CapabilityTier::HardwareRayQuery;
+        let combined = build_renderer_frame_plan(combined_key, wgpu::TextureFormat::Bgra8UnormSrgb)
+            .compile(CompileOptions::CONSERVATIVE_ALIASING)
+            .unwrap();
+        for present in [
+            "accel_rebuild",
+            "card_capture",
+            "sdf_bake",
+            "scene_sdf_clipmap",
+            "wsrc_bake",
+            "card_light",
+            "pt",
+            "ssgi",
+        ] {
+            assert!(
+                combined.pass(present).is_some(),
+                "{present} must serve the combined SSGI+PT topology"
+            );
+        }
     }
 
     #[test]

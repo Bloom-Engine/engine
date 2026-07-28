@@ -356,6 +356,10 @@ fn path_tracing_mode_transitions_reset_incompatible_history() {
     eng.renderer.set_path_tracing(2);
     let _ = render(&mut eng, 1, draw_pt_static_frame);
     assert!(eng.renderer.path_tracing_sample_count() > 0);
+    assert!(eng
+        .renderer
+        .quality_runtime_paths_json()
+        .contains("\"ray_scene_preparation\":\"ssgi+pt\""));
 
     eng.renderer.set_path_tracing(1);
     assert_eq!(eng.renderer.path_tracing_sample_count(), 0);
@@ -384,9 +388,7 @@ fn realtime_path_tracing_capture_exposes_svgf_history_without_normal_frame_resou
     r.set_taa_enabled(false);
     r.set_ssao_enabled(false);
     r.set_ssr_enabled(false);
-    // The current frame graph builds PT's shared TLAS/card inputs under the
-    // SSGI infrastructure node; PT still owns the rendered GI result.
-    r.set_ssgi_enabled(true);
+    r.set_ssgi_enabled(false);
     r.set_bloom_enabled(false);
     r.set_auto_exposure(false);
     r.set_path_tracing(2);
@@ -405,6 +407,7 @@ fn realtime_path_tracing_capture_exposes_svgf_history_without_normal_frame_resou
         "realtime PT reached only {samples_before_capture} history frames before capture"
     );
     let normal_paths = eng.renderer.quality_runtime_paths_json();
+    assert!(normal_paths.contains("\"ray_scene_preparation\":\"pt\""));
     assert!(normal_paths.contains("\"pt_diagnostic_persistent_bytes\":0"));
     assert!(normal_paths.contains("\"pt_diagnostic_resources_live\":false"));
 
