@@ -130,10 +130,14 @@ does not alter the ordinary fixture. Qualification evidence for rolling page
 preservation during that camera motion is in
 `docs/evidence/issue-132-clipmap-scroll-v1.md`.
 
+Add `--vsm-light-motion` beside `--vsm-dynamic` to alternate the primary
+directional-light basis every 30 frames. The capture frame returns to the
+ordinary fixture direction, allowing a direct comparison between the
+one-frame invalidation and a settled cache. Qualification evidence is in
+`docs/evidence/issue-132-moving-light-v1.md`.
+
 ## Work that remains on issue #132
 
-- Qualify moving-light transitions, including the conservative full-level
-  invalidation path, without pops.
 - Move receiver marking, request compaction, caster culling, and submission to
   bounded GPU-driven paths where the capability tier supports them.
 - Add explicit, default-off spot and point shadow requests, their virtual

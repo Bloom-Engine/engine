@@ -1,0 +1,113 @@
+{
+  "schema": "bloom-directional-vsm-moving-light-evidence-v1",
+  "issue": 132,
+  "qualified_revision": "2f73135cc454fc81d8661db9b887b56dee7a0254",
+  "settled_control_revision": "f4da02121646799d156133236ebe1c252e111933",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end"
+  },
+  "fixture": {
+    "example": "examples/quality-motion --vsm-dynamic --vsm-light-motion",
+    "warmup_frames": 120,
+    "measured_frames": 120,
+    "fixed_timestep": 0.016666667,
+    "quality_preset": 3,
+    "render_scale": 1.0,
+    "transition_period_frames": 30,
+    "capture_frame": 240,
+    "primary_direction": [0.45, 0.85, 0.25],
+    "alternate_direction": [0.28, 0.90, 0.34]
+  },
+  "invalidation_contract": {
+    "changed_light_basis": "invalidate-every-directional-level",
+    "virtual_ownership": "retained",
+    "dirty_page_table_state": "missing",
+    "missing_page_fallback": "live-csm",
+    "page_render_budget": 8,
+    "dynamic_overlay_page_budget": 4,
+    "dynamic_overlay_draw_budget": 64
+  },
+  "final_transition_telemetry": {
+    "captures_with_identical_counters": 3,
+    "clipmap_level_rebases": 0,
+    "clipmap_pages_preserved": 0,
+    "clipmap_pages_dropped": 0,
+    "invalidated_clean_pages": 108,
+    "rendered_pages": 8,
+    "pending_pages": 8,
+    "resident_pages": 236,
+    "dirty_pages": 228,
+    "demand_pages": 224,
+    "cache_hits": 224,
+    "cache_misses": 0,
+    "denied_pages": 0,
+    "evictions": 0,
+    "dynamic_guarded_pages": 153,
+    "dynamic_rendered_pages": 4,
+    "dynamic_overlay_draws": 8,
+    "physical_capacity": 256,
+    "gpu_total_bytes": 19951824
+  },
+  "image_comparisons": {
+    "transition_repeat_envelope": {
+      "captures": 3,
+      "reference_sha256": "8204eaee547796a7caeed44134a0f62baf66d168144b0ad0645e73c27cd2a974",
+      "candidate_sha256": [
+        "fcb4b735c0af5f5b5bb0c5e487f38fa845a1b40c45dca1547afb4af7d082ab67",
+        "53681fec66bc3345ec1de33cf73f529bbf375887adad315d217cbe982cd169cc"
+      ],
+      "max_rmse_luminance": 0.000023677,
+      "min_ssim_luminance": 0.999999821,
+      "max_percent_above_0_02": 0.0,
+      "max_mean_oklab_delta": 0.000000101,
+      "max_mean_edge_delta": 0.000000133
+    },
+    "transition_to_settled_same_light": {
+      "settled_sha256": "1864d6c4eaf837793a717c8b6d76d55ccbb1436589cc5db92becf8112bef3091",
+      "transition_sha256": "8204eaee547796a7caeed44134a0f62baf66d168144b0ad0645e73c27cd2a974",
+      "rmse_luminance": 0.006145390,
+      "ssim_luminance": 0.999100208,
+      "percent_above_0_02": 2.612083435,
+      "mean_oklab_delta": 0.002966288,
+      "mean_edge_delta": 0.000771535
+    },
+    "transition_to_csm_same_history": {
+      "csm_sha256": "df8e06621d258a0088232a22a6c94e343cd6406c606cc0800ddf2963b4a1ef99",
+      "vsm_sha256": "8204eaee547796a7caeed44134a0f62baf66d168144b0ad0645e73c27cd2a974",
+      "rmse_luminance": 0.008730293,
+      "ssim_luminance": 0.992735803,
+      "percent_above_0_02": 3.500416756,
+      "mean_oklab_delta": 0.001763211,
+      "mean_edge_delta": 0.001498817
+    }
+  },
+  "moving_workload_performance": {
+    "runs": 3,
+    "median_wall_ms": 14.385408,
+    "median_shadow_cpu_ms": 0.218197,
+    "median_shadow_gpu_ms": 2.969117,
+    "median_virtual_page_cpu_ms": 0.044228,
+    "median_virtual_page_gpu_ms": 2.541226
+  },
+  "qualification": {
+    "perry_compile": "pass",
+    "renderer_quick_lane_at_source_revision": "pass",
+    "shared_unit_tests_passed": 340,
+    "shared_unit_tests_ignored": 1,
+    "headless_device_tests_passed": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "focused_vsm_tests_passed": 33,
+    "visual_review": "pass-no-page-boundaries-missing-bands-or-stale-light-direction"
+  },
+  "remaining": [
+    "GPU request compaction and caster submission",
+    "spot and point virtual projections with shared arbitration",
+    "Bistro, small-pool, contact-detail, and 100-light qualification",
+    "quality-tier rollout"
+  ]
+}
