@@ -682,6 +682,94 @@ fn realtime_path_tracing_lighting_changes_converge_without_reset_or_lag() {
 }
 
 #[test]
+fn realtime_path_tracing_resets_are_byte_exact_fresh_seeds() {
+    let _rt_guard = lock_rt_goldens();
+    let (mut eng, _) = match try_engine_rt() {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            skip_rt_golden("pt_reset_seed", "no-non-cpu-ray-query-adapter");
+            return;
+        }
+        Err(err) => panic!("{err}"),
+    };
+    build_pt_scene(&mut eng);
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(false);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_path_tracing(2);
+    r.set_path_tracing_debug_view(0);
+    r.set_path_tracing_seed(0);
+    let draw = |eng: &mut EngineState, camera: [f32; 3]| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(0.05, 0.07, 0.1, 1.0);
+        r.begin_mode_3d(
+            camera[0], camera[1], camera[2], 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 50.0, 0.0,
+        );
+        r.set_directional_light(0.5, 1.0, 0.3, 255.0, 242.25, 229.5, 1.2);
+    };
+    let capture =
+        |eng: &mut EngineState, camera: [f32; 3]| render(eng, 1, |eng| draw(eng, camera)).2;
+    let camera_a = [-5.5, 3.2, 5.0];
+    let camera_b = [5.0, 4.0, 7.0];
+
+    // Drain shared card/TLAS warm-up before establishing the seed oracle.
+    let _ = render(&mut eng, 8, |eng| draw(eng, camera_b));
+    eng.renderer.reset_temporal_history();
+    let fresh_b = capture(&mut eng, camera_b);
+    assert_eq!(eng.renderer.path_tracing_sample_count(), 1);
+
+    let _ = render(&mut eng, 16, |eng| draw(eng, camera_a));
+    eng.renderer.reset_temporal_history();
+    let directory =
+        std::env::temp_dir().join(format!("bloom-pt-reset-seed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    let cut_b = capture(&mut eng, camera_b);
+    let cut_metrics = calculate_diff_metrics(&fresh_b, &cut_b, W, H);
+    assert_eq!(
+        cut_metrics.max_diff, 0,
+        "explicit PT reset retained pixels from the prior camera"
+    );
+    assert_eq!(eng.renderer.path_tracing_sample_count(), 1);
+    let reasons = image::open(directory.join("pt-rejection-reason.png"))
+        .expect("PT reset capture did not emit rejection reasons")
+        .to_rgb8();
+    let non_seed = reasons
+        .pixels()
+        .filter(|pixel| pixel[0].abs_diff(pixel[1]) > 2 || pixel[1].abs_diff(pixel[2]) > 2)
+        .count();
+    assert_eq!(
+        non_seed, 0,
+        "fresh PT history was not entirely classified as seed/sky"
+    );
+
+    let _ = render(&mut eng, 16, |eng| draw(eng, camera_a));
+    eng.renderer.set_path_tracing(0);
+    let _ = capture(&mut eng, camera_a);
+    eng.renderer.set_path_tracing(2);
+    let toggled_b = capture(&mut eng, camera_b);
+    let toggle_metrics = calculate_diff_metrics(&fresh_b, &toggled_b, W, H);
+    eprintln!(
+        "temporal-corpus pt-reset cut_max={} toggle_max={} non_seed={non_seed}",
+        cut_metrics.max_diff, toggle_metrics.max_diff,
+    );
+    assert_eq!(
+        toggle_metrics.max_diff, 0,
+        "PT off/on transition retained pixels from the prior ownership epoch"
+    );
+    assert_eq!(eng.renderer.path_tracing_sample_count(), 1);
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept PT reset diagnostics at {directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 fn common_camera_cut_reset_invalidates_every_temporal_owner() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");

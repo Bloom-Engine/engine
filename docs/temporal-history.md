@@ -328,6 +328,13 @@ different, contract its settled-reference mean error by at least 35% (plus a
 frame twelve, and settle below 2 RGB levels of stochastic flicker. The sample
 counter must advance continuously across both edits.
 
+The PT reset gate drains shared asset warm-up, records a deterministic
+one-frame seed, accumulates a different camera, and then exercises both the
+explicit common reset and PT off/on ownership transition. Each reseed must be
+byte-identical to the fresh oracle, restart at one accumulated sample, and
+classify every trace texel as gray seed/sky rather than retaining any prior
+reason.
+
 Render-scale changes must produce a first frame byte-identical to a freshly
 seeded history at the new scale. Resize changes must have no `>32/255`
 outliers against a fresh target-size seed, with mean RGB error at most 0.5 and
@@ -343,6 +350,6 @@ silently passing.
 
 ## Remaining #135 work
 
-Complete the PT-specific reset image sequence coverage on required hardware
-runners, including the goldens owned by #127 and the timing/memory
+Run the complete temporal and PT corpus on every required hardware backend,
+including the cross-backend goldens owned by #127 and the timing/memory
 qualification owned by #128.
