@@ -598,53 +598,56 @@ impl DirectionalVirtualShadowMap {
         self.dynamic_overlay_deferred_pages = 0;
         let level_vps_unchanged = self.previous_level_vps == Some(level_vps);
         let content_unchanged = self.previous_content_signatures == Some(content_signatures);
-        if let (Some(previous_keys), Some(current_keys)) =
-            (self.previous_clipmap_keys, clipmap_keys)
-        {
-            let scrolls = std::array::from_fn::<_, { VSM_CLIP_LEVELS as usize }, _>(|level| {
-                current_keys[level].scroll_from(previous_keys[level])
-            });
-            if scrolls.iter().flatten().any(|delta| *delta != [0, 0]) {
-                // Dynamic depth is frame-specific. Dirty its old address before
-                // the physical owner is moved to the new virtual coordinate.
-                self.cache.invalidate_pages(&self.dynamic_overlay_pages);
-            }
-            for level in 0..VSM_CLIP_LEVELS as usize {
-                match scrolls[level] {
-                    Some(delta) if delta != [0, 0] => {
-                        self.cache.scroll_level(0, level as u8, delta);
-                    }
-                    Some(_)
-                        if self
-                            .previous_level_vps
-                            .is_some_and(|vps| vps[level] != level_vps[level]) =>
-                    {
-                        // Same origin and stable matrix fields should produce
-                        // the exact same VP. Treat any discrepancy as unsafe.
-                        self.cache.invalidate_level(0, level as u8);
-                    }
-                    Some(_) => {}
-                    None => self.cache.invalidate_level(0, level as u8),
+        if !level_vps_unchanged || !content_unchanged {
+            if let (Some(previous_keys), Some(current_keys)) =
+                (self.previous_clipmap_keys, clipmap_keys)
+            {
+                let scrolls = std::array::from_fn::<_, { VSM_CLIP_LEVELS as usize }, _>(|level| {
+                    current_keys[level].scroll_from(previous_keys[level])
+                });
+                if scrolls.iter().flatten().any(|delta| *delta != [0, 0]) {
+                    // Dynamic depth is frame-specific. Dirty its old address
+                    // before the physical owner moves to the new coordinate.
+                    self.cache.invalidate_pages(&self.dynamic_overlay_pages);
                 }
-                if self
-                    .previous_content_signatures
-                    .is_some_and(|signatures| signatures[level] != content_signatures[level])
-                {
-                    self.cache.invalidate_level(0, level as u8);
-                }
-            }
-        } else if let Some(previous) = self.previous_level_vps {
-            for level in 0..VSM_CLIP_LEVELS as usize {
-                if previous[level] != level_vps[level]
-                    || self
+                for level in 0..VSM_CLIP_LEVELS as usize {
+                    match scrolls[level] {
+                        Some(delta) if delta != [0, 0] => {
+                            self.cache.scroll_level(0, level as u8, delta);
+                        }
+                        Some(_)
+                            if self
+                                .previous_level_vps
+                                .is_some_and(|vps| vps[level] != level_vps[level]) =>
+                        {
+                            // Same origin and stable matrix fields should
+                            // produce the exact same VP. Treat any discrepancy
+                            // as unsafe.
+                            self.cache.invalidate_level(0, level as u8);
+                        }
+                        Some(_) => {}
+                        None => self.cache.invalidate_level(0, level as u8),
+                    }
+                    if self
                         .previous_content_signatures
                         .is_some_and(|signatures| signatures[level] != content_signatures[level])
-                {
-                    self.cache.invalidate_level(0, level as u8);
+                    {
+                        self.cache.invalidate_level(0, level as u8);
+                    }
                 }
+            } else if let Some(previous) = self.previous_level_vps {
+                for level in 0..VSM_CLIP_LEVELS as usize {
+                    if previous[level] != level_vps[level]
+                        || self.previous_content_signatures.is_some_and(|signatures| {
+                            signatures[level] != content_signatures[level]
+                        })
+                    {
+                        self.cache.invalidate_level(0, level as u8);
+                    }
+                }
+            } else {
+                self.cache.invalidate_light(0);
             }
-        } else {
-            self.cache.invalidate_light(0);
         }
         self.previous_level_vps = Some(level_vps);
         self.previous_clipmap_keys = clipmap_keys;
