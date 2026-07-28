@@ -43,6 +43,7 @@ for (const [lane, expected] of expectedLanes) {
 
 const testWorkflow = read(".github/workflows/test.yml");
 const qualityWorkflow = read(".github/workflows/quality.yml");
+const releaseWorkflow = read(".github/workflows/release.yml");
 const failureAction = read(".github/actions/upload-ci-failure/action.yml");
 const workflowCommands = [
   "./scripts/ci-check.sh --quick --component shared-tests",
@@ -93,6 +94,21 @@ if ((testWorkflow.match(/uses: \.\/\.github\/actions\/upload-ci-failure/g) || []
 }
 if (!qualityWorkflow.includes("uses: ./.github/actions/upload-ci-failure")) {
   console.error("FAIL  quality contract job must upload failure evidence");
+  failures += 1;
+}
+for (const requiredReleaseText of [
+  "resolve-release:",
+  "SHA: ${{ needs.resolve-release.outputs.sha }}",
+  "ref: ${{ needs.resolve-release.outputs.sha }}",
+  'if [ "$type" != "commit" ]',
+]) {
+  if (!releaseWorkflow.includes(requiredReleaseText)) {
+    console.error(`FAIL  release workflow omits exact-ref contract: ${requiredReleaseText}`);
+    failures += 1;
+  }
+}
+if (releaseWorkflow.includes("bypassing test gate")) {
+  console.error("FAIL  manual releases may not bypass the exact-SHA test gate");
   failures += 1;
 }
 
