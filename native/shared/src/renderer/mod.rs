@@ -1373,10 +1373,17 @@ pub struct Renderer {
     /// real (they were exactly zero before — no history existed).
     pub pending_skin_groups_prev: Vec<Vec<[[f32; 4]; 4]>>,
     pub frame_joint_data_prev: Vec<[[f32; 4]; 4]>,
+    /// Submission-slot history for the unkeyed editor/test API. A skipped
+    /// frame empties the previous slot stream, so reappearance seeds current.
+    skin_unkeyed_previous: Vec<Vec<[[f32; 4]; 4]>>,
+    skin_unkeyed_current: Vec<Vec<[[f32; 4]; 4]>>,
+    skin_unkeyed_previous_count: usize,
+    skin_unkeyed_slot: usize,
+    skin_motion_epoch: u64,
     /// Last staged palette per animation key (FFI anim handle). A few
     /// dozen entries at most — anim handles are per model slot, not
     /// per spawn — so no eviction is needed.
-    skin_prev_palettes: std::collections::HashMap<u64, Vec<[[f32; 4]; 4]>>,
+    skin_prev_palettes: std::collections::HashMap<u64, (u64, Vec<[[f32; 4]; 4]>)>,
     pub model_skin_scale: f32,
 
     // Shadow mapping
@@ -8005,6 +8012,11 @@ impl Renderer {
             frame_joint_data: Vec::with_capacity(256),
             pending_skin_groups_prev: Vec::with_capacity(8),
             frame_joint_data_prev: Vec::with_capacity(256),
+            skin_unkeyed_previous: Vec::new(),
+            skin_unkeyed_current: Vec::new(),
+            skin_unkeyed_previous_count: 0,
+            skin_unkeyed_slot: 0,
+            skin_motion_epoch: 0,
             skin_prev_palettes: std::collections::HashMap::new(),
             model_skin_scale: 1.0,
             clear_color: wgpu::Color::BLACK,
@@ -11736,6 +11748,7 @@ impl Renderer {
         self.indices_3d.clear();
         self.draw_calls_3d.clear();
         self.immediate_motion.begin_frame();
+        self.begin_skin_motion_frame();
         self.begin_cached_model_frame();
         self.has_blend_model_draws = false;
         self.has_layered_blend_model_draws = false;
@@ -13126,91 +13139,6 @@ impl Renderer {
 
     pub fn end_mode_3d(&mut self) {
         self.render_mode = RenderMode::ScreenSpace;
-    }
-
-    // Joint matrices (GPU skinning)
-
-    /// Set a single joint matrix for testing (joint_index 0-63, angle in radians around X axis)
-    pub fn set_joint_test(&mut self, joint_index: usize, angle: f32) {
-        if joint_index >= 128 {
-            return;
-        }
-        let c = angle.cos();
-        let s = angle.sin();
-        // Rotation around X axis, column-major m[col][row]
-        let mat: [[f32; 4]; 4] = [
-            [1.0, 0.0, 0.0, 0.0], // column 0
-            [0.0, c, s, 0.0],     // column 1
-            [0.0, -s, c, 0.0],    // column 2
-            [0.0, 0.0, 0.0, 1.0], // column 3
-        ];
-        self.queue.write_buffer(
-            &self.joint_buffer,
-            (joint_index * 64) as u64,
-            bytemuck::cast_slice(&mat),
-        );
-    }
-
-    pub fn set_joint_matrices(&mut self, matrices: &[[[f32; 4]; 4]]) {
-        // Unkeyed path (editor/tests): no palette history, so previous
-        // pose = current pose (zero skeletal velocity).
-        self.pending_skin_groups_prev.push(matrices.to_vec());
-        self.pending_skin_groups.push(matrices.to_vec());
-    }
-
-    pub fn set_model_skin_scale(&mut self, scale: f32) {
-        self.model_skin_scale = scale;
-    }
-
-    /// `key` pairs this pose with the SAME model's pose last frame
-    /// (PT-7 motion vectors) — pass the FFI animation handle. The
-    /// world placement is baked into every joint matrix, so the prev
-    /// palette carries last frame's position/rotation too: skeletal
-    /// AND locomotion motion both land in the velocity buffer.
-    pub fn set_joint_matrices_scaled(
-        &mut self,
-        key: u64,
-        matrices: &[[[f32; 4]; 4]],
-        scale: f32,
-        position: [f32; 3],
-        rot_sin: f32,
-        rot_cos: f32,
-    ) {
-        let cos_r = rot_cos;
-        let sin_r = rot_sin;
-        let mut scaled = Vec::with_capacity(matrices.len());
-        for m in matrices {
-            let mut sm = *m;
-            // Scale
-            for col in 0..4 {
-                sm[col][0] *= scale;
-                sm[col][1] *= scale;
-                sm[col][2] *= scale;
-            }
-            // Rotate around Y axis
-            for col in 0..4 {
-                let x = sm[col][0];
-                let z = sm[col][2];
-                sm[col][0] = cos_r * x + sin_r * z;
-                sm[col][2] = -sin_r * x + cos_r * z;
-            }
-            // Translate
-            sm[3][0] += position[0];
-            sm[3][1] += position[1];
-            sm[3][2] += position[2];
-            scaled.push(sm);
-        }
-
-        // First sighting of a key (spawn) has no history: previous =
-        // current, i.e. zero velocity — correct for something that
-        // just appeared.
-        let prev = match self.skin_prev_palettes.get(&key) {
-            Some(p) if p.len() == scaled.len() => p.clone(),
-            _ => scaled.clone(),
-        };
-        self.pending_skin_groups_prev.push(prev);
-        self.skin_prev_palettes.insert(key, scaled.clone());
-        self.pending_skin_groups.push(scaled);
     }
 
     /// Ensure persistent 3D buffers are large enough. Grows with doubling strategy.

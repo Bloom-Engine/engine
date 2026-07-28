@@ -689,7 +689,10 @@ impl Renderer {
         let (_, cached_motion_bytes) = self.cached_model_motion_stats();
         #[cfg(target_arch = "wasm32")]
         let cached_motion_bytes = 0;
-        total.saturating_add(cached_motion_bytes)
+        let (_, unkeyed_skin_motion_bytes) = self.unkeyed_skin_motion_stats();
+        total
+            .saturating_add(cached_motion_bytes)
+            .saturating_add(unkeyed_skin_motion_bytes)
     }
 
     pub fn quality_runtime_paths_json(&self) -> String {
@@ -782,6 +785,13 @@ impl Renderer {
         out.push_str(&cached_motion_cpu_bytes.to_string());
         out.push_str(",\"cached_model_motion_gpu_bytes\":0");
         out.push_str(",\"cached_model_motion_passes\":0");
+        let (unkeyed_skin_entries, unkeyed_skin_cpu_bytes) = self.unkeyed_skin_motion_stats();
+        out.push_str(",\"unkeyed_skin_motion_entries\":");
+        out.push_str(&unkeyed_skin_entries.to_string());
+        out.push_str(",\"unkeyed_skin_motion_cpu_capacity_bytes\":");
+        out.push_str(&unkeyed_skin_cpu_bytes.to_string());
+        out.push_str(",\"unkeyed_skin_motion_gpu_bytes\":0");
+        out.push_str(",\"unkeyed_skin_motion_passes\":0");
         let (immediate_motion_entries, immediate_motion_cpu_bytes) = self.immediate_motion.stats();
         out.push_str(",\"immediate_motion_entries\":");
         out.push_str(&immediate_motion_entries.to_string());

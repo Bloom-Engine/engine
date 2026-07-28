@@ -236,3 +236,109 @@ fn procedural_cloud_zero_velocity_opt_out_rejects_field_changes() {
         &frames,
     );
 }
+
+#[test]
+fn unkeyed_editor_skin_pose_writes_velocity_and_bounds_trails() {
+    fn palette(x: f32, bend: f32, facing: f32) -> [[[f32; 4]; 4]; 2] {
+        let (sin, cos) = bend.sin_cos();
+        let mut matrices = [
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, cos, sin, 0.0],
+                [0.0, -sin, cos, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        ];
+        let (rot_sin, rot_cos) = facing.sin_cos();
+        for matrix in &mut matrices {
+            for column in matrix.iter_mut() {
+                let old_x = column[0];
+                let old_z = column[2];
+                column[0] = rot_cos * old_x + rot_sin * old_z;
+                column[2] = -rot_sin * old_x + rot_cos * old_z;
+            }
+            matrix[3][0] += x;
+            matrix[3][1] += 1.0;
+        }
+        matrices
+    }
+
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    temporal_history::configure_taa_motion_corpus(&mut eng.renderer);
+    let (mut vertices, indices) = cube_verts(0.9, [0.9, 0.08, 0.025, 1.0]);
+    for vertex in &mut vertices {
+        vertex.joints = if vertex.position[1] > 0.0 {
+            [1.0, 0.0, 0.0, 0.0]
+        } else {
+            [0.0; 4]
+        };
+        vertex.weights = [1.0, 0.0, 0.0, 0.0];
+    }
+
+    let capture = |eng: &mut EngineState, x, bend, facing| {
+        render(eng, 1, |eng| {
+            let r = &mut eng.renderer;
+            r.set_clear_color(7.0, 10.0, 20.0, 255.0);
+            r.begin_mode_3d(0.0, 2.2, 6.5, 0.0, 0.8, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+            r.add_directional_light(-0.4, -1.0, -0.25, 1.0, 0.95, 0.88, 2.2);
+            r.draw_plane(0.0, 0.0, 0.0, 12.0, 12.0, 30.0, 38.0, 52.0, 255.0);
+            r.draw_cube(0.0, 1.1, -1.8, 5.0, 3.2, 0.35, 30.0, 170.0, 235.0, 255.0);
+            r.set_joint_matrices(&palette(x, bend, facing));
+            r.draw_model_mesh(&vertices, &indices, [0.0; 3], 1.0);
+        })
+        .2
+    };
+    eng.renderer.reset_temporal_history();
+    for _ in 0..8 {
+        capture(&mut eng, -1.5, -0.55, -0.45);
+    }
+    let old_pose = capture(&mut eng, -1.5, -0.55, -0.45);
+    let directory =
+        std::env::temp_dir().join(format!("bloom-unkeyed-skin-motion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    let mut frames = Vec::new();
+    for _ in 0..24 {
+        frames.push(capture(&mut eng, 1.5, 0.75, 0.6));
+    }
+    let motion = image::open(directory.join("taa-motion.png"))
+        .expect("unkeyed skin capture did not emit the TAA velocity map")
+        .to_rgb8();
+    let moving_pixels = motion.pixels().filter(|pixel| pixel[2] > 8).count();
+    eprintln!("temporal-corpus unkeyed-skin moving_pixels={moving_pixels}");
+    assert!(
+        moving_pixels >= 250,
+        "unkeyed skin pose wrote no meaningful velocity"
+    );
+    temporal_history::evaluate_motion_recovery("unkeyed-skin", &old_pose, &frames);
+
+    let paths: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json()).unwrap();
+    assert_eq!(
+        paths["temporal_history"]["unkeyed_skin_motion_entries"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        paths["temporal_history"]["unkeyed_skin_motion_gpu_bytes"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        paths["temporal_history"]["unkeyed_skin_motion_passes"].as_u64(),
+        Some(0)
+    );
+
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept unkeyed skin diagnostics at {directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

@@ -24,6 +24,16 @@ pub(super) struct CachedModelMotionHistory {
 }
 
 impl Renderer {
+    pub(super) fn begin_skin_motion_frame(&mut self) {
+        self.skin_motion_epoch = self.skin_motion_epoch.wrapping_add(1);
+        std::mem::swap(
+            &mut self.skin_unkeyed_previous,
+            &mut self.skin_unkeyed_current,
+        );
+        self.skin_unkeyed_previous_count = self.skin_unkeyed_slot;
+        self.skin_unkeyed_slot = 0;
+    }
+
     pub(super) fn begin_cached_model_frame(&mut self) {
         self.model_draw_commands.clear();
         std::mem::swap(
@@ -37,6 +47,10 @@ impl Renderer {
     pub(super) fn reset_model_motion_history(&mut self) {
         self.material_system.reset_motion_history();
         self.cached_model_motion.previous.clear();
+        self.skin_unkeyed_previous.clear();
+        self.skin_unkeyed_current.clear();
+        self.skin_unkeyed_previous_count = 0;
+        self.skin_unkeyed_slot = 0;
         self.skin_prev_palettes.clear();
     }
 
@@ -46,6 +60,122 @@ impl Renderer {
         let bytes = (history.previous.capacity() + history.current.capacity())
             * std::mem::size_of::<CachedModelMotionEntry>();
         (history.current.len(), bytes)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn unkeyed_skin_motion_stats(&self) -> (usize, usize) {
+        let palettes = [&self.skin_unkeyed_previous, &self.skin_unkeyed_current];
+        let outer = palettes
+            .iter()
+            .map(|values| {
+                values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Vec<[[f32; 4]; 4]>>())
+            })
+            .sum::<usize>();
+        let inner = palettes
+            .iter()
+            .flat_map(|values| values.iter())
+            .map(|palette| {
+                palette
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<[[f32; 4]; 4]>())
+            })
+            .sum::<usize>();
+        (self.skin_unkeyed_slot, outer.saturating_add(inner))
+    }
+
+    /// Set a single joint matrix for testing (joint_index 0-127).
+    pub fn set_joint_test(&mut self, joint_index: usize, angle: f32) {
+        if joint_index >= 128 {
+            return;
+        }
+        let c = angle.cos();
+        let s = angle.sin();
+        let mat: [[f32; 4]; 4] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, c, s, 0.0],
+            [0.0, -s, c, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        self.queue.write_buffer(
+            &self.joint_buffer,
+            (joint_index * 64) as u64,
+            bytemuck::cast_slice(&mat),
+        );
+    }
+
+    /// Stage a skin pose using stable submission order as its identity.
+    pub fn set_joint_matrices(&mut self, matrices: &[[[f32; 4]; 4]]) {
+        let slot = self.skin_unkeyed_slot;
+        self.skin_unkeyed_slot += 1;
+        let previous = self
+            .skin_unkeyed_previous
+            .get(slot)
+            .filter(|palette| {
+                slot < self.skin_unkeyed_previous_count && palette.len() == matrices.len()
+            })
+            .cloned()
+            .unwrap_or_else(|| matrices.to_vec());
+        if let Some(current) = self.skin_unkeyed_current.get_mut(slot) {
+            current.clear();
+            current.extend_from_slice(matrices);
+        } else {
+            self.skin_unkeyed_current.push(matrices.to_vec());
+        }
+        self.pending_skin_groups_prev.push(previous);
+        self.pending_skin_groups.push(matrices.to_vec());
+    }
+
+    pub fn set_model_skin_scale(&mut self, scale: f32) {
+        self.model_skin_scale = scale;
+    }
+
+    /// `key` pairs this pose with the same model's pose in the immediately
+    /// preceding frame. World placement is baked into each matrix, so the
+    /// previous palette captures both skeletal deformation and locomotion.
+    pub fn set_joint_matrices_scaled(
+        &mut self,
+        key: u64,
+        matrices: &[[[f32; 4]; 4]],
+        scale: f32,
+        position: [f32; 3],
+        rot_sin: f32,
+        rot_cos: f32,
+    ) {
+        let mut scaled = Vec::with_capacity(matrices.len());
+        for matrix in matrices {
+            let mut transformed = *matrix;
+            for col in 0..4 {
+                transformed[col][0] *= scale;
+                transformed[col][1] *= scale;
+                transformed[col][2] *= scale;
+            }
+            for col in 0..4 {
+                let x = transformed[col][0];
+                let z = transformed[col][2];
+                transformed[col][0] = rot_cos * x + rot_sin * z;
+                transformed[col][2] = -rot_sin * x + rot_cos * z;
+            }
+            transformed[3][0] += position[0];
+            transformed[3][1] += position[1];
+            transformed[3][2] += position[2];
+            scaled.push(transformed);
+        }
+
+        let previous = match self.skin_prev_palettes.get(&key) {
+            Some((epoch, palette))
+                if epoch.wrapping_add(1) == self.skin_motion_epoch
+                    && palette.len() == scaled.len() =>
+            {
+                palette.clone()
+            }
+            _ => scaled.clone(),
+        };
+        self.pending_skin_groups_prev.push(previous);
+        self.skin_prev_palettes
+            .insert(key, (self.skin_motion_epoch, scaled.clone()));
+        self.pending_skin_groups.push(scaled);
     }
 
     /// Pair an ordinary cached instance with the same submission slot from the
