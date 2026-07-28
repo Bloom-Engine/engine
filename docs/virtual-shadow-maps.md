@@ -22,6 +22,13 @@ canonical shaders without VSM bindings or sampling branches.
 - Receiver coverage uses one fixed 1,024-entry R32 counter domain per level
   plus a sparse touched-address list. Ranking performs no hash-table work and
   retains byte-for-byte compatibility with the prior deterministic oracle.
+- On capable native adapters, continuously changing sets of 1,024 through
+  4,096 camera-visible receivers mark the same fixed coverage domain in a
+  bounded compute pass. Smaller sets stay on the faster fixed CPU oracle.
+- GPU receiver resources are lazy. The first result must exactly match the
+  complete ordered CPU demand before later asynchronous results are consumed.
+  Failure disables the backend, and projection transitions remain synchronous
+  CPU work.
 - A default render budget of eight dirty pages per frame.
 - Missing, dirty, denied, and deferred pages always sample live CSM.
 - Static page depth persists until its light matrix, caster signature, or
@@ -84,6 +91,9 @@ Quality telemetry reports the VSM state under
 - `requested`, `active`, `fallback`, and `dynamic_fallback_mode`;
 - physical capacity and depth/metadata/total bytes;
 - receiver demand source and count;
+- receiver-bounds count and active marking backend;
+- GPU receiver enablement, exact-validation state, in-flight work, dispatches,
+  completions, validation failures, and lazy allocation bytes;
 - resident, dirty, hit, miss, eviction, denial, invalidation, and render
   counts;
 - clipmap level rebases and pages preserved or dropped by those rebases;
@@ -144,10 +154,31 @@ The fixed-address receiver request-compaction oracle is qualified in
 CPU reference and storage ABI for later compute marking without introducing a
 GPU readback or changing request order.
 
+Add `--vsm-gpu-receivers` beside `--vsm-dynamic` to create an opt-in,
+continuously moving set of at least 1,024 camera-visible receive-only bounds.
+The tiny stress nodes remain below the ground and therefore do not appear in
+the capture. Disable GPU marking for a same-revision control:
+
+```sh
+BLOOM_VSM=1 BLOOM_VSM_GPU_RECEIVER=0 ./main \
+  --vsm-dynamic \
+  --vsm-gpu-receivers \
+  --quality-preset 3 \
+  --render-scale 1 \
+  --quality-run 120 120 0.016666666667 \
+  /tmp/vsm-gpu-receiver-control.png \
+  /tmp/vsm-gpu-receiver-control.json \
+  /tmp/vsm-gpu-receiver-control-intermediates
+```
+
+The capability/workload-gated asynchronous GPU receiver marker is qualified
+in `docs/evidence/issue-132-async-gpu-receiver-v1.md`. Its dense result is
+read back without a same-frame wait and compacted by the exact CPU oracle.
+
 ## Work that remains on issue #132
 
-- Move the fixed-address receiver marking and compaction ABI to a bounded
-  GPU-driven path without a same-frame CPU readback.
+- Compact requests and schedule page residency entirely on the GPU so the
+  current bounded dense asynchronous readback can be removed.
 - Move caster culling and submission to bounded GPU-driven paths where the
   capability tier and shared geometry representation support them.
 - Add explicit, default-off spot and point shadow requests, their virtual
