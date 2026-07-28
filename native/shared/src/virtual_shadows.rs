@@ -1,13 +1,12 @@
 //! Deterministic virtual-shadow page residency for issue #132.
 //!
-//! This module deliberately contains no renderer policy. It owns the bounded
-//! virtual-to-physical mapping, invalidation, and page-table encoding used by
-//! the directional VSM path. The existing cascaded shadow map remains the
-//! sampling fallback whenever a page is absent, dirty, over budget, or not yet
-//! rendered.
+//! Owns bounded virtual-to-physical mapping, invalidation, and page tables.
+//! CSM remains the fallback for absent, dirty, over-budget, or unrendered pages.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
+#[path = "virtual_shadow_page_priority.rs"]
+mod page_priority;
 
 pub const VSM_CLIP_LEVELS: u8 = 3;
 pub const VSM_VIRTUAL_PAGES_PER_AXIS: u16 = 32;
@@ -16,6 +15,8 @@ pub const VSM_PAGE_BORDER: u16 = 2;
 pub const VSM_PHYSICAL_PAGE_SIZE: u16 = VSM_PAGE_INTERIOR + VSM_PAGE_BORDER * 2;
 pub const VSM_DEFAULT_PHYSICAL_PAGES: u16 = 256;
 pub const VSM_MAX_PAGE_RENDER_BUDGET: u16 = 64;
+pub const VSM_DYNAMIC_OVERLAY_PAGE_BUDGET: usize = 4;
+pub const VSM_DYNAMIC_OVERLAY_DRAW_BUDGET: usize = 64;
 const VSM_DIRECTIONAL_LEVEL_PAGE_CAPS: [usize; VSM_CLIP_LEVELS as usize] = [144, 64, 16];
 
 /// Page-table value zero means "sample the conventional shadow fallback".
@@ -254,6 +255,20 @@ impl VirtualShadowPageCache {
         self.refresh_counts();
     }
 
+    pub fn invalidate_pages(&mut self, pages: &[VirtualShadowPage]) {
+        for page in pages {
+            let Some(&physical_page) = self.mapping.get(page) else {
+                continue;
+            };
+            let slot = &mut self.physical[physical_page as usize];
+            if !slot.dirty {
+                slot.dirty = true;
+                self.stats.invalidated = self.stats.invalidated.saturating_add(1);
+            }
+        }
+        self.refresh_counts();
+    }
+
     pub fn page_table(&self, light: u16) -> Vec<u32> {
         let axis = VSM_VIRTUAL_PAGES_PER_AXIS as usize;
         let mut table = vec![VSM_PAGE_TABLE_MISSING; VSM_CLIP_LEVELS as usize * axis * axis];
@@ -404,7 +419,10 @@ pub struct DirectionalVirtualShadowMap {
     requested: bool,
     sampling_active: bool,
     dynamic_global_fallback: bool,
-    dynamic_fallback_pages: Vec<VirtualShadowPage>,
+    dynamic_overlay_pages: Vec<VirtualShadowPage>,
+    dynamic_overlay_rendered_pages: usize,
+    dynamic_overlay_draws: usize,
+    dynamic_overlay_deferred_pages: usize,
     cache: VirtualShadowPageCache,
     gpu: Option<GpuVirtualShadowResources>,
     frame: u64,
@@ -463,7 +481,10 @@ impl DirectionalVirtualShadowMap {
             requested,
             sampling_active: false,
             dynamic_global_fallback: false,
-            dynamic_fallback_pages: Vec::new(),
+            dynamic_overlay_pages: Vec::new(),
+            dynamic_overlay_rendered_pages: 0,
+            dynamic_overlay_draws: 0,
+            dynamic_overlay_deferred_pages: 0,
             cache: VirtualShadowPageCache::new(capacity),
             gpu,
             frame: 0,
@@ -490,6 +511,7 @@ impl DirectionalVirtualShadowMap {
         level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
         content_signatures: [u64; VSM_CLIP_LEVELS as usize],
         receiver_bounds: Option<&[([f32; 3], [f32; 3])]>,
+        dynamic_bounds: &[([f32; 3], [f32; 3])],
     ) {
         self.frame = self.frame.wrapping_add(1).max(1);
         self.cache.begin_frame(self.frame);
@@ -497,6 +519,9 @@ impl DirectionalVirtualShadowMap {
         if !self.requested {
             return;
         }
+        self.dynamic_overlay_rendered_pages = 0;
+        self.dynamic_overlay_draws = 0;
+        self.dynamic_overlay_deferred_pages = 0;
         let receiver_bounds_signature = receiver_bounds
             .filter(|bounds| !bounds.is_empty())
             .map(receiver_bounds_signature);
@@ -514,14 +539,25 @@ impl DirectionalVirtualShadowMap {
             self.receiver_bounds_signature = 0;
             self.receiver_demand_level_vps = None;
         }
-        let (demand, receiver_demand_active) = if self.receiver_demand.is_empty() {
-            (&self.fallback_demand[..], false)
+        let receiver_demand_active = !self.receiver_demand.is_empty();
+        let demand_len = if receiver_demand_active {
+            self.receiver_demand.len()
         } else {
-            (&self.receiver_demand[..], true)
+            self.fallback_demand.len()
+        };
+        self.update_dynamic_policy(queue, level_vps, dynamic_bounds, demand_len);
+        let demand = if receiver_demand_active {
+            &self.receiver_demand[..]
+        } else {
+            &self.fallback_demand[..]
         };
         let demand_signature = demand_signature(demand);
         self.last_demand_count = demand.len();
         self.receiver_demand_active = receiver_demand_active;
+        if self.dynamic_global_fallback {
+            self.cache.finish_requests();
+            return;
+        }
         let demand_unchanged = self.previous_level_vps == Some(level_vps)
             && self.previous_content_signatures == Some(content_signatures)
             && self.previous_demand_signature == demand_signature;
@@ -545,15 +581,35 @@ impl DirectionalVirtualShadowMap {
         self.previous_content_signatures = Some(content_signatures);
         self.previous_demand_signature = demand_signature;
 
-        for &page in demand {
+        for &page in &self.dynamic_overlay_pages {
+            if !demand.contains(&page) {
+                continue;
+            }
             let Some(request) = self
                 .cache
                 .request(page, content_signatures[page.level as usize])
             else {
                 continue;
             };
-            if request.needs_render && self.pending.len() < self.render_budget {
-                self.pending.push(request);
+            if request.needs_render {
+                if self.pending.len() < VSM_DYNAMIC_OVERLAY_PAGE_BUDGET {
+                    self.pending.push(request);
+                } else {
+                    self.dynamic_overlay_deferred_pages += 1;
+                }
+            }
+        }
+        for &page in demand {
+            if self.dynamic_overlay_contains(page) {
+                continue;
+            }
+            if let Some(request) = self
+                .cache
+                .request(page, content_signatures[page.level as usize])
+            {
+                if request.needs_render && self.pending.len() < self.render_budget {
+                    self.pending.push(request);
+                }
             }
         }
         self.cache.finish_requests();
@@ -581,32 +637,33 @@ impl DirectionalVirtualShadowMap {
         self.upload_page_table_if_changed(queue);
     }
 
-    /// Route pages touched by dynamic casters through the live CSM.
-    ///
-    /// Static physical pages stay valid: moving a character changes which
-    /// page-table entries are masked, not cached depth. This avoids stale
-    /// animated shadows without invalidating or re-rendering unrelated pages.
-    pub fn set_dynamic_fallback_pages(
+    fn update_dynamic_policy(
         &mut self,
         queue: &wgpu::Queue,
-        mut pages: Vec<VirtualShadowPage>,
+        level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
+        dynamic_bounds: &[([f32; 3], [f32; 3])],
+        demand_count: usize,
     ) {
-        pages.sort_unstable();
-        pages.dedup();
-        self.dynamic_global_fallback = false;
-        let mask_changed = pages != self.dynamic_fallback_pages;
-        self.dynamic_fallback_pages = pages;
-        let demand = if self.receiver_demand_active {
-            &self.receiver_demand
-        } else {
-            &self.fallback_demand
-        };
-        let all_demand_masked = !demand.is_empty()
-            && demand
-                .iter()
-                .all(|page| self.dynamic_fallback_pages.binary_search(page).is_ok());
-        let sampling_active = self.requested && self.gpu.is_some() && !all_demand_masked;
-        let sampling_changed = sampling_active != self.sampling_active;
+        let mut next = directional_dynamic_fallback_pages(level_vps, dynamic_bounds, 0);
+        let full_address_space = VSM_VIRTUAL_PAGES_PER_AXIS as usize
+            * VSM_VIRTUAL_PAGES_PER_AXIS as usize
+            * VSM_CLIP_LEVELS as usize;
+        let global_fallback =
+            !next.is_empty() && (demand_count < 128 || next.len() == full_address_space);
+        if global_fallback {
+            next.clear();
+        }
+
+        let mut dirty_pages = std::mem::replace(&mut self.dynamic_overlay_pages, next);
+        dirty_pages.extend_from_slice(&self.dynamic_overlay_pages);
+        dirty_pages.sort_unstable();
+        dirty_pages.dedup();
+        self.cache.invalidate_pages(&dirty_pages);
+        self.dynamic_global_fallback = global_fallback;
+        if global_fallback {
+            self.cache.invalidate_light(0);
+        }
+        let sampling_active = self.requested && self.gpu.is_some() && !global_fallback;
         if !self.sampling_params_initialized || sampling_active != self.sampling_active {
             if let Some(gpu) = self.gpu.as_ref() {
                 gpu.upload_sampling_params(queue, sampling_active);
@@ -614,34 +671,21 @@ impl DirectionalVirtualShadowMap {
             self.sampling_params_initialized = true;
         }
         self.sampling_active = sampling_active;
-        if sampling_active && (mask_changed || sampling_changed) {
-            self.upload_page_table_if_changed(queue);
-        }
     }
 
-    /// Small receiver footprints cannot retain enough unmasked pages for a
-    /// dynamic page mask to repay its CPU work and shader indirection.
-    pub fn dynamic_page_mask_worthwhile(&self) -> bool {
-        self.requested && self.last_demand_count >= 128
+    pub fn dynamic_overlay_contains(&self, page: VirtualShadowPage) -> bool {
+        self.dynamic_overlay_pages.contains(&page)
     }
 
-    pub fn set_global_dynamic_fallback(&mut self, queue: &wgpu::Queue, present: bool) {
-        let state_changed =
-            present != self.dynamic_global_fallback || !self.dynamic_fallback_pages.is_empty();
-        self.dynamic_global_fallback = present;
-        self.dynamic_fallback_pages.clear();
-        let sampling_active = self.requested && self.gpu.is_some() && !present;
-        let sampling_changed = sampling_active != self.sampling_active;
-        if !self.sampling_params_initialized || sampling_changed {
-            if let Some(gpu) = self.gpu.as_ref() {
-                gpu.upload_sampling_params(queue, sampling_active);
-            }
-            self.sampling_params_initialized = true;
-        }
-        self.sampling_active = sampling_active;
-        if sampling_active && (state_changed || sampling_changed) {
-            self.upload_page_table_if_changed(queue);
-        }
+    pub fn record_dynamic_overlay_work(
+        &mut self,
+        rendered_pages: usize,
+        draws: usize,
+        deferred_pages: usize,
+    ) {
+        self.dynamic_overlay_rendered_pages = rendered_pages;
+        self.dynamic_overlay_draws = draws;
+        self.dynamic_overlay_deferred_pages += deferred_pages;
     }
 
     pub fn requested(&self) -> bool {
@@ -680,7 +724,7 @@ impl DirectionalVirtualShadowMap {
             return;
         }
         let mut table = self.cache.page_table(0);
-        apply_dynamic_page_mask(&mut table, &self.dynamic_fallback_pages);
+        force_dynamic_overlay_age(&mut table, &self.dynamic_overlay_pages);
         if table == self.uploaded_page_table {
             return;
         }
@@ -696,7 +740,7 @@ impl DirectionalVirtualShadowMap {
         self.previous_content_signatures = None;
         self.previous_demand_signature = 0;
         self.dynamic_global_fallback = false;
-        self.dynamic_fallback_pages.clear();
+        self.dynamic_overlay_pages.clear();
         self.pending.clear();
         self.sampling_active = false;
         self.sampling_params_initialized = false;
@@ -752,6 +796,9 @@ impl DirectionalVirtualShadowMap {
                 "{{\"requested\":{},\"active\":{},",
                 "\"fallback\":\"csm\",\"dynamic_fallback\":{},",
                 "\"dynamic_fallback_mode\":\"{}\",\"dynamic_fallback_pages\":{},",
+                "\"dynamic_overlay_pages\":{},\"dynamic_overlay_rendered_pages\":{},",
+                "\"dynamic_overlay_draws\":{},\"dynamic_overlay_deferred_pages\":{},",
+                "\"dynamic_overlay_page_budget\":{},\"dynamic_overlay_draw_budget\":{},",
                 "\"physical_capacity\":{},\"physical_bytes\":{},",
                 "\"gpu_overhead_bytes\":{},\"gpu_total_bytes\":{},",
                 "\"resident\":{},\"dirty\":{},\"requested_pages\":{},",
@@ -766,17 +813,23 @@ impl DirectionalVirtualShadowMap {
             ),
             self.requested,
             self.sampling_active,
-            self.dynamic_global_fallback || !self.dynamic_fallback_pages.is_empty(),
+            self.dynamic_global_fallback || self.dynamic_overlay_deferred_pages > 0,
             if self.dynamic_global_fallback {
                 "whole-frame-csm"
-            } else if self.dynamic_fallback_pages.is_empty() {
+            } else if self.dynamic_overlay_pages.is_empty() {
                 "none"
-            } else if !self.sampling_active {
-                "full-demand-csm"
+            } else if self.dynamic_overlay_deferred_pages > 0 {
+                "bounded-page-overlay-with-csm"
             } else {
-                "per-page-csm"
+                "page-overlay"
             },
-            self.dynamic_fallback_pages.len(),
+            self.dynamic_overlay_deferred_pages,
+            self.dynamic_overlay_pages.len(),
+            self.dynamic_overlay_rendered_pages,
+            self.dynamic_overlay_draws,
+            self.dynamic_overlay_deferred_pages,
+            VSM_DYNAMIC_OVERLAY_PAGE_BUDGET,
+            VSM_DYNAMIC_OVERLAY_DRAW_BUDGET,
             physical_capacity,
             physical_bytes,
             gpu_overhead_bytes,
@@ -1339,7 +1392,7 @@ fn projected_directional_page_rect(
     ))
 }
 
-fn apply_dynamic_page_mask(table: &mut [u32], pages: &[VirtualShadowPage]) {
+fn force_dynamic_overlay_age(table: &mut [u32], pages: &[VirtualShadowPage]) {
     for &page in pages {
         if page.light == 0
             && page.level < VSM_CLIP_LEVELS
@@ -1347,18 +1400,16 @@ fn apply_dynamic_page_mask(table: &mut [u32], pages: &[VirtualShadowPage]) {
             && page.y < VSM_VIRTUAL_PAGES_PER_AXIS
         {
             if let Some(entry) = table.get_mut(page.table_index()) {
-                *entry = VSM_PAGE_TABLE_MISSING;
+                if *entry != VSM_PAGE_TABLE_MISSING {
+                    *entry = (*entry & 0xffff) | (8 << 16);
+                }
             }
         }
     }
 }
 
-/// Virtual pages whose light-space rays intersect a dynamic caster.
-///
-/// These pages sample the live CSM instead of static VSM depth. Two guard
-/// pages cover PCF taps, temporal jitter, and conservative AABB projection.
-/// An unbounded caster returns the complete virtual address space, preserving
-/// the former whole-frame fallback rather than risking a stale shadow.
+/// Pages intersecting a dynamic caster, with a two-page PCF/jitter guard.
+/// Unbounded casters return the full address space to request global CSM.
 pub fn directional_dynamic_fallback_pages(
     level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
     dynamic_bounds: &[([f32; 3], [f32; 3])],
@@ -1378,6 +1429,7 @@ pub fn directional_dynamic_fallback_pages(
                 .any(|value| !value.is_finite())
     });
     let mut marked = vec![unbounded; page_count];
+    let mut priority = vec![(u16::MAX, u16::MAX); page_count];
     if !unbounded {
         for level in 0..VSM_CLIP_LEVELS as usize {
             let planes = crate::scene::extract_frustum_planes(&level_vps[level]);
@@ -1387,6 +1439,8 @@ pub fn directional_dynamic_fallback_pages(
                 else {
                     continue;
                 };
+                let center_x = i32::from(min_x + max_x);
+                let center_y = i32::from(min_y + max_y);
                 for y in min_y..=max_y {
                     for x in min_x..=max_x {
                         let page = VirtualShadowPage {
@@ -1395,7 +1449,11 @@ pub fn directional_dynamic_fallback_pages(
                             x,
                             y,
                         };
-                        marked[page.table_index()] = true;
+                        let index = page.table_index();
+                        let dx = (i32::from(x) * 2 - center_x).unsigned_abs() as u16;
+                        let dy = (i32::from(y) * 2 - center_y).unsigned_abs() as u16;
+                        priority[index] = priority[index].min((dx.max(dy), dx + dy));
+                        marked[index] = true;
                     }
                 }
             }
@@ -1403,7 +1461,7 @@ pub fn directional_dynamic_fallback_pages(
     }
 
     let axis = VSM_VIRTUAL_PAGES_PER_AXIS as usize;
-    marked
+    let pages: Vec<_> = marked
         .into_iter()
         .enumerate()
         .filter_map(|(index, is_marked)| {
@@ -1418,7 +1476,8 @@ pub fn directional_dynamic_fallback_pages(
                 }
             })
         })
-        .collect()
+        .collect();
+    page_priority::center_first(pages, &priority)
 }
 
 /// Mark directional virtual pages touched by camera-visible receiver bounds.
@@ -1747,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_fallback_masks_only_guarded_caster_pages() {
+    fn dynamic_overlays_cover_only_guarded_caster_pages() {
         let pages = directional_dynamic_fallback_pages(
             [crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize],
             &[([-0.02, -0.02, 0.4], [0.02, 0.02, 0.6])],
@@ -1757,6 +1816,9 @@ mod tests {
         assert!(pages
             .iter()
             .all(|page| { (13..=18).contains(&page.x) && (13..=18).contains(&page.y) }));
+        assert!(pages[..4].iter().all(|page| page.level == 0
+            && (15..=16).contains(&page.x)
+            && (15..=16).contains(&page.y)));
 
         let mut table = vec![
             99;
@@ -1764,15 +1826,33 @@ mod tests {
                 * VSM_VIRTUAL_PAGES_PER_AXIS as usize
                 * VSM_CLIP_LEVELS as usize
         ];
-        apply_dynamic_page_mask(&mut table, &pages);
+        force_dynamic_overlay_age(&mut table, &pages);
         assert_eq!(
-            table.iter().filter(|entry| **entry == 0).count(),
+            table
+                .iter()
+                .filter(|entry| **entry == 99 | (8 << 16))
+                .count(),
             pages.len()
         );
         assert_eq!(
             table.iter().filter(|entry| **entry == 99).count(),
             table.len() - pages.len()
         );
+    }
+
+    #[test]
+    fn targeted_invalidation_never_exposes_stale_dynamic_depth() {
+        let mut cache = VirtualShadowPageCache::new(2);
+        cache.begin_frame(1);
+        for x in 0..2 {
+            cache.request(page(x), 7).unwrap();
+            cache.mark_rendered(page(x), 7);
+        }
+        cache.invalidate_pages(&[page(1)]);
+        let table = cache.page_table(0);
+        assert_ne!(table[page(0).table_index()], VSM_PAGE_TABLE_MISSING);
+        assert_eq!(table[page(1).table_index()], VSM_PAGE_TABLE_MISSING);
+        assert_eq!(cache.stats().dirty, 1);
     }
 
     #[test]

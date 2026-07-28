@@ -680,11 +680,21 @@ impl Renderer {
                 }
                 cascade_sigs[c] = h;
             }
+            let dynamic_bounds: Vec<([f32; 3], [f32; 3])> = if vsm_requested {
+                shadow_nodes
+                    .iter()
+                    .filter(|entry| entry.dynamic)
+                    .map(|entry| (entry.wmin, entry.wmax))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             self.shadow_map.virtual_map.prepare(
                 &self.queue,
                 self.shadow_map.light_vps,
                 cascade_sigs,
                 vsm_receiver_bounds.as_deref(),
+                &dynamic_bounds,
             );
 
             // Render each cascade. Static casters live in a cached depth
@@ -967,17 +977,22 @@ impl Renderer {
                     self.shadow_map.live_cascade_generation[cascade].wrapping_add(1);
             }
 
-            // Issue #132 — render a bounded number of dirty directional virtual
-            // pages. This is opt-in (`BLOOM_VSM=1`) and does not yet replace CSM
-            // sampling. Only static casters enter this cache; dynamic casters
-            // continue to use the always-correct live cascades.
+            // Issue #132 — render a bounded number of dirty directional
+            // pages. Static pages persist. Up to four pages touched by bounded
+            // dynamic/skinned casters are rebuilt with current-frame geometry;
+            // excess work remains dirty and therefore samples live CSM.
             let pending_vsm_pages = self.shadow_map.virtual_map.pending().to_vec();
             if !pending_vsm_pages.is_empty() {
                 profiler.begin("virtual_shadow_pages");
                 let stride = crate::shadows::SHADOW_UNIFORM_STRIDE as usize;
                 let max_entries = crate::shadows::SHADOW_MAX_NODES as usize;
+                let max_dynamic = crate::shadows::SHADOW_MAX_DYNAMIC as usize;
+                let max_static = max_entries - max_dynamic;
                 let page_region = stride * max_entries;
                 let mut rendered_vsm_pages = Vec::with_capacity(pending_vsm_pages.len());
+                let mut dynamic_overlay_rendered_pages = 0usize;
+                let mut dynamic_overlay_draws = 0usize;
+                let mut dynamic_overlay_deferred_pages = 0usize;
 
                 for (page_slot, request) in pending_vsm_pages.iter().enumerate() {
                     let level = request.page.level as usize;
@@ -986,7 +1001,11 @@ impl Renderer {
                         request.page,
                     );
                     let page_planes = crate::scene::extract_frustum_planes(&page_vp);
-                    let page_entries: Vec<usize> = cascade_indices[level]
+                    let dynamic_overlay = self
+                        .shadow_map
+                        .virtual_map
+                        .dynamic_overlay_contains(request.page);
+                    let mut page_entries: Vec<usize> = cascade_indices[level]
                         .iter()
                         .copied()
                         .filter(|&entry_index| {
@@ -1001,8 +1020,47 @@ impl Renderer {
                                     entry.wmax,
                                 )
                         })
-                        .take(max_entries)
+                        .take(if dynamic_overlay {
+                            max_static
+                        } else {
+                            max_entries
+                        })
                         .collect();
+                    if dynamic_overlay {
+                        let mut dynamic_entries: Vec<usize> = cascade_indices[level]
+                            .iter()
+                            .copied()
+                            .filter(|&entry_index| {
+                                let entry = &shadow_nodes[entry_index];
+                                entry.dynamic
+                                    && (entry.wmin[0] > entry.wmax[0]
+                                        || !crate::scene::aabb_outside_frustum(
+                                            &page_planes,
+                                            entry.wmin,
+                                            entry.wmax,
+                                        ))
+                            })
+                            .collect();
+                        dynamic_entries.sort_by_key(|&entry_index| {
+                            let entry = &shadow_nodes[entry_index];
+                            if entry.skinned {
+                                0u8
+                            } else if entry.foliage > 0.0 {
+                                2u8
+                            } else {
+                                1u8
+                            }
+                        });
+                        dynamic_entries.truncate(max_dynamic);
+                        page_entries.extend(dynamic_entries);
+                        if dynamic_overlay_draws + page_entries.len()
+                            > crate::virtual_shadows::VSM_DYNAMIC_OVERLAY_DRAW_BUDGET
+                        {
+                            dynamic_overlay_deferred_pages += 1;
+                            continue;
+                        }
+                        dynamic_overlay_draws += page_entries.len();
+                    }
 
                     let mut uniform_data = vec![0u8; stride * page_entries.len().max(1)];
                     for (slot, &entry_index) in page_entries.iter().enumerate() {
@@ -1065,12 +1123,18 @@ impl Renderer {
                         for (slot, &entry_index) in page_entries.iter().enumerate() {
                             let entry = &shadow_nodes[entry_index];
                             let offset = (page_base + slot * stride) as u32;
-                            let kind = if entry.cutout_idx >= 0 { 1 } else { 0 };
+                            let kind = if entry.skinned {
+                                2
+                            } else if entry.cutout_idx >= 0 {
+                                1
+                            } else {
+                                0
+                            };
                             if kind != current_kind {
-                                page_pass.set_pipeline(if kind == 1 {
-                                    &self.shadow_map.pipeline_cutout
-                                } else {
-                                    &self.shadow_map.pipeline
+                                page_pass.set_pipeline(match kind {
+                                    1 => &self.shadow_map.pipeline_cutout,
+                                    2 => &self.shadow_map.pipeline_skinned,
+                                    _ => &self.shadow_map.pipeline,
                                 });
                                 current_kind = kind;
                             }
@@ -1081,6 +1145,8 @@ impl Renderer {
                                     cutout_bgs[entry.cutout_idx as usize],
                                     &[],
                                 );
+                            } else if kind == 2 {
+                                page_pass.set_bind_group(1, &self.joint_bind_group, &[]);
                             }
                             page_pass.set_vertex_buffer(0, shadow_vbs[entry.vb_idx].slice(..));
                             page_pass.set_index_buffer(
@@ -1095,36 +1161,18 @@ impl Renderer {
                         }
                     }
                     rendered_vsm_pages.push((request.page, cascade_sigs[level]));
+                    dynamic_overlay_rendered_pages += usize::from(dynamic_overlay);
                 }
                 self.shadow_map
                     .virtual_map
                     .finish_rendered_pages(&self.queue, &rendered_vsm_pages);
+                self.shadow_map.virtual_map.record_dynamic_overlay_work(
+                    dynamic_overlay_rendered_pages,
+                    dynamic_overlay_draws,
+                    dynamic_overlay_deferred_pages,
+                );
                 profiler.end("virtual_shadow_pages");
             }
-            if vsm_requested {
-                let has_dynamic = shadow_nodes.iter().any(|entry| entry.dynamic);
-                if has_dynamic && !self.shadow_map.virtual_map.dynamic_page_mask_worthwhile() {
-                    self.shadow_map
-                        .virtual_map
-                        .set_global_dynamic_fallback(&self.queue, true);
-                } else {
-                    let dynamic_bounds: Vec<([f32; 3], [f32; 3])> = shadow_nodes
-                        .iter()
-                        .filter(|entry| entry.dynamic)
-                        .map(|entry| (entry.wmin, entry.wmax))
-                        .collect();
-                    let dynamic_fallback_pages =
-                        crate::virtual_shadows::directional_dynamic_fallback_pages(
-                            self.shadow_map.light_vps,
-                            &dynamic_bounds,
-                            0,
-                        );
-                    self.shadow_map
-                        .virtual_map
-                        .set_dynamic_fallback_pages(&self.queue, dynamic_fallback_pages);
-                }
-            }
-
             // Cache bookkeeping — next frame skips every cascade whose VP
             // and caster content stay put.
             self.shadow_caster_tf = caster_ids_now;

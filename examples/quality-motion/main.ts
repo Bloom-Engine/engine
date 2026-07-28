@@ -10,7 +10,7 @@ import {
 } from "bloom/core";
 import { parseQualityRun, QualityRun } from "bloom/quality";
 import {
-  loadModel, loadModelAnimation, updateModelAnimation, drawModel,
+  loadModel, loadModelAnimation, updateModelAnimation, drawModel, genMeshCube,
   setAmbientLight, setDirectionalLight,
 } from "bloom/models";
 import {
@@ -21,6 +21,10 @@ import { mat4Identity, mat4Translate, mat4Scale } from "bloom/math";
 
 const argv: string[] = getCommandLineArgs();
 const config = parseQualityRun(argv);
+let vsmDynamicFixture = false;
+for (let i = 0; i < argv.length; i = i + 1) {
+  if (argv[i] === "--vsm-dynamic") vsmDynamicFixture = true;
+}
 
 initWindow(800, 450, "Bloom Quality: Skinned + Alpha Motion", 0);
 if (config !== null) resize(800, 450, 800, 450);
@@ -62,6 +66,23 @@ curtainTransform = mat4Translate(
 setSceneNodeTransform(curtain, curtainTransform);
 setSceneNodeCastShadow(curtain, true);
 setSceneNodeReceiveShadow(curtain, true);
+
+// Opt-in VSM oracle: the large static receiver creates a production-sized
+// demand set while the animated Fox exercises current-frame skinned overlays.
+// The ordinary quality-motion corpus remains byte-for-byte unchanged.
+if (vsmDynamicFixture) {
+  const groundModel = genMeshCube(28.0, 0.08, 24.0);
+  const ground = createSceneNode();
+  attachModelToNode(ground, groundModel.handle, 0);
+  let groundTransform = mat4Identity();
+  groundTransform = mat4Translate(
+    groundTransform,
+    { x: 4.86, y: 0.02, z: -5.0 },
+  );
+  setSceneNodeTransform(ground, groundTransform);
+  setSceneNodeCastShadow(ground, false);
+  setSceneNodeReceiveShadow(ground, true);
+}
 
 let simulationTime = 0.0;
 while (!windowShouldClose()) {
