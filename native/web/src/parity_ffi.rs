@@ -83,18 +83,18 @@ pub fn bloom_create_instance_buffer_scratch(instance_count: f64) -> f64 {
 /// TS `setMaterialParams` wrapper uses everywhere (Perry 0.5.x rejects JS
 /// arrays in pointer params). Forwards to the existing floats path.
 #[wasm_bindgen]
-pub fn bloom_set_material_params_scratch(handle: f64, param_count: f64) {
+pub fn bloom_set_material_params_scratch(handle: f64, param_count: f64) -> f64 {
     let count = param_count as usize;
     let params: Vec<f32> = {
         let eng = engine();
         if eng.models.scratch_f32.len() < count {
-            return;
+            return 0.0;
         }
         let p = eng.models.scratch_f32[..count].to_vec();
         eng.models.mesh_scratch_reset();
         p
     };
-    crate::material_ffi::bloom_set_material_params_floats(handle, &params);
+    crate::material_ffi::bloom_set_material_params_floats(handle, &params)
 }
 
 // ============================================================
@@ -231,12 +231,13 @@ pub fn bloom_splat_impulse(x: f64, z: f64, radius: f64, strength: f64) {
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_gi_only(handle: f64, gi_only: f64) {
+pub fn bloom_scene_set_gi_only(handle: f64, gi_only: f64) -> f64 {
     engine().scene.set_gi_only(handle, gi_only != 0.0);
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_material_emissive(handle: f64, r: f64, g: f64, b: f64) {
+pub fn bloom_scene_set_material_emissive(handle: f64, r: f64, g: f64, b: f64) -> f64 {
     let finite_non_negative = |value: f64| {
         if value.is_finite() {
             (value as f32).max(0.0)
@@ -250,6 +251,7 @@ pub fn bloom_scene_set_material_emissive(handle: f64, r: f64, g: f64, b: f64) {
         finite_non_negative(g),
         finite_non_negative(b),
     );
+    1.0
 }
 
 #[wasm_bindgen]
@@ -275,7 +277,7 @@ pub fn bloom_scene_set_material_layered_pbr(
     iridescence_ior: f64,
     iridescence_thickness_minimum: f64,
     iridescence_thickness_maximum: f64,
-) {
+) -> f64 {
     let layered = bloom_shared::models::MaterialLayeredPbr::from_authoring_factors(
         lobe_mask as u32,
         clearcoat_factor as f32,
@@ -294,6 +296,7 @@ pub fn bloom_scene_set_material_layered_pbr(
         iridescence_thickness_maximum as f32,
     );
     engine().scene.set_material_layered_pbr(handle, layered);
+    1.0
 }
 
 // ============================================================
@@ -392,11 +395,22 @@ pub fn bloom_profiler_hist_gpu_us(i: f64) -> f64 {
 // the calls stay cheap typed no-ops
 // ============================================================
 
+/// Browser builds cannot resolve a native filesystem path for HDR input.
+/// Call the byte-oriented web loader instead.
+#[wasm_bindgen]
+pub fn bloom_set_env_clear_from_hdr(_path: f64) -> f64 {
+    0.0
+}
+
 /// The browser owns presentation (rAF + compositor); Fifo-equivalent
 /// behaviour is all a canvas surface can do, so the mode is fixed.
 #[wasm_bindgen]
 pub fn bloom_set_present_mode(mode: f64) -> f64 {
-    if mode == 0.0 { 1.0 } else { 0.0 }
+    if mode == 0.0 {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
@@ -406,7 +420,11 @@ pub fn bloom_get_present_mode() -> f64 {
 
 #[wasm_bindgen]
 pub fn bloom_set_path_tracing(mode: f64) -> f64 {
-    if mode == 0.0 { 1.0 } else { 0.0 }
+    if mode == 0.0 {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
@@ -430,10 +448,11 @@ pub fn bloom_get_imported_refraction_mode() -> f64 {
 }
 
 #[wasm_bindgen]
-pub fn bloom_set_transparency_composition_mode(mode: f64) {
+pub fn bloom_set_transparency_composition_mode(mode: f64) -> f64 {
     engine()
         .renderer
         .set_transparency_composition_mode(mode as u32);
+    1.0
 }
 
 #[wasm_bindgen]

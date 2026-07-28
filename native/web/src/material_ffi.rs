@@ -15,7 +15,7 @@ pub fn bloom_set_material_params(_handle: f64, _params_ptr: f64, _param_count: f
 }
 
 #[wasm_bindgen]
-pub fn bloom_set_material_params_floats(handle: f64, params: &[f32]) {
+pub fn bloom_set_material_params_floats(handle: f64, params: &[f32]) -> f64 {
     let count = params.len();
     if count > 64 {
         web_sys::console::error_1(
@@ -25,7 +25,7 @@ pub fn bloom_set_material_params_floats(handle: f64, params: &[f32]) {
             )
             .into(),
         );
-        return;
+        return 0.0;
     }
     let mut bytes = vec![0u8; count * 4];
     for (i, &v) in params.iter().enumerate() {
@@ -39,7 +39,9 @@ pub fn bloom_set_material_params_floats(handle: f64, params: &[f32]) {
         &bytes,
     ) {
         web_sys::console::error_1(&format!("[material] set_material_params failed: {}", e).into());
+        return 0.0;
     }
+    1.0
 }
 
 #[wasm_bindgen]
@@ -238,10 +240,11 @@ pub fn bloom_create_planar_reflection(
 /// EN-011 — link a material to a planar reflection probe. `probe = 0`
 /// reverts the binding to the engine's default 1×1 black texture.
 #[wasm_bindgen]
-pub fn bloom_set_material_reflection_probe(material: f64, probe: f64) {
+pub fn bloom_set_material_reflection_probe(material: f64, probe: f64) -> f64 {
     engine()
         .renderer
         .set_material_reflection_probe(material as u32, probe as u32);
+    1.0
 }
 
 /// EN-014 — pointer-shaped variant exists only so the FFI manifest
@@ -330,29 +333,32 @@ pub fn bloom_create_texture_array_ex_bytes(
 /// (0 = albedo / 1 = normal / 2 = MR). `array = 0` reverts to the
 /// engine's 1×1×1 stub.
 #[wasm_bindgen]
-pub fn bloom_set_material_texture_array(material: f64, slot: f64, array: f64) {
+pub fn bloom_set_material_texture_array(material: f64, slot: f64, array: f64) -> f64 {
     engine()
         .renderer
         .set_material_texture_array(material as u32, slot as u32, array as u32);
+    1.0
 }
 
 /// EN-012 — set the shading model for a material (0=default lit,
 /// 1=foliage, 2=subsurface V2 stub).
 #[wasm_bindgen]
-pub fn bloom_set_material_shading_model(material: f64, model: f64) {
+pub fn bloom_set_material_shading_model(material: f64, model: f64) -> f64 {
     engine()
         .renderer
         .set_material_shading_model(material as u32, model as u32);
+    1.0
 }
 
 /// Whether a material's draws render into planar-reflection probes
 /// (default true). Authoring control for content that is sub-pixel at
 /// probe resolution (e.g. instanced grass).
 #[wasm_bindgen]
-pub fn bloom_set_material_probe_visible(material: f64, visible: f64) {
+pub fn bloom_set_material_probe_visible(material: f64, visible: f64) -> f64 {
     engine()
         .renderer
         .set_material_probe_visible(material as u32, visible != 0.0);
+    1.0
 }
 
 /// EN-012 — set the foliage shading parameters for a material.
@@ -365,13 +371,14 @@ pub fn bloom_set_material_foliage(
     trans_b: f64,
     trans_amount: f64,
     wrap_factor: f64,
-) {
+) -> f64 {
     engine().renderer.set_material_foliage(
         material as u32,
         [trans_r as f32, trans_g as f32, trans_b as f32],
         trans_amount as f32,
         wrap_factor as f32,
     );
+    1.0
 }
 
 #[wasm_bindgen]
@@ -433,8 +440,9 @@ pub fn bloom_set_post_pass_str(source: &str) -> f64 {
 
 /// EN-017 — uninstall the active post-pass.
 #[wasm_bindgen]
-pub fn bloom_clear_post_pass() {
+pub fn bloom_clear_post_pass() -> f64 {
     engine().renderer.clear_post_pass();
+    1.0
 }
 
 /// EN-017 V2 — stub: JS glue calls `bloom_add_post_pass_str` instead.
@@ -459,8 +467,9 @@ pub fn bloom_add_post_pass_str(source: &str) -> f64 {
 
 /// EN-017 V2 — wipe the entire post-pass stack.
 #[wasm_bindgen]
-pub fn bloom_clear_all_post_passes() {
+pub fn bloom_clear_all_post_passes() -> f64 {
     engine().renderer.clear_all_post_passes();
+    1.0
 }
 
 #[wasm_bindgen]

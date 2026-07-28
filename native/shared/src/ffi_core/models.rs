@@ -934,15 +934,15 @@ macro_rules! __bloom_ffi_models {
         // Same idiom as bloom_create_instance_buffer_scratch. ≤ 64 floats.
         #[cfg(feature = "models3d")]
         #[no_mangle]
-        pub extern "C" fn bloom_set_material_params_scratch(handle: f64, param_count: f64) {
+        pub extern "C" fn bloom_set_material_params_scratch(handle: f64, param_count: f64) -> f64 {
             $crate::ffi::guard("bloom_set_material_params_scratch", move || {
                 let eng = engine();
                 let count = param_count as usize;
                 if count > 64 {
                     eprintln!("[material] set_material_params_scratch: param_count {} > 64 (256-byte UBO cap)", count);
-                    return;
+                    return 0.0;
                 }
-                if eng.models.scratch_f32.len() < count { return; }
+                if eng.models.scratch_f32.len() < count { return 0.0; }
                 let mut bytes = vec![0u8; count * 4];
                 for i in 0..count {
                     bytes[i*4..i*4+4].copy_from_slice(&eng.models.scratch_f32[i].to_le_bytes());
@@ -953,13 +953,16 @@ macro_rules! __bloom_ffi_models {
                     handle as u32, &bytes,
                 ) {
                     eprintln!("[material] set_material_params_scratch failed: {}", e);
+                    return 0.0;
                 }
+                1.0
         })
         }
         #[cfg(not(feature = "models3d"))]
         #[no_mangle]
-        pub extern "C" fn bloom_set_material_params_scratch(_handle: f64, _param_count: f64) {
+        pub extern "C" fn bloom_set_material_params_scratch(_handle: f64, _param_count: f64) -> f64 {
             $crate::ffi::feature_off_warn_once("bloom_set_material_params_scratch", "models3d");
+            0.0
         }
 
         // bloom_set_material_params  [source: linux; gated: models3d]

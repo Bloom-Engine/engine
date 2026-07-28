@@ -22,12 +22,12 @@
 
 declare function bloom_scene_create_node(): number;
 declare function bloom_scene_destroy_node(handle: number): void;
-declare function bloom_scene_set_visible(handle: number, visible: number): void;
-declare function bloom_scene_set_gi_only(handle: number, gi_only: number): void;
-declare function bloom_scene_set_cast_shadow(handle: number, cast: number): void;
-declare function bloom_scene_set_receive_shadow(handle: number, receive: number): void;
-declare function bloom_scene_set_parent(handle: number, parent: number): void;
-declare function bloom_scene_set_transform(handle: number, matrix: number): void;
+declare function bloom_scene_set_visible(handle: number, visible: number): number;
+declare function bloom_scene_set_gi_only(handle: number, gi_only: number): number;
+declare function bloom_scene_set_cast_shadow(handle: number, cast: number): number;
+declare function bloom_scene_set_receive_shadow(handle: number, receive: number): number;
+declare function bloom_scene_set_parent(handle: number, parent: number): number;
+declare function bloom_scene_set_transform(handle: number, matrix: number): number;
 // All-scalar transform + geometry entry points. Perry 0.5.x cannot pass a
 // `number[]` into the i64 pointer params above, so these are the ones the
 // wrappers actually call.
@@ -37,7 +37,7 @@ declare function bloom_scene_set_transform16(
   m4: number, m5: number, m6: number, m7: number,
   m8: number, m9: number, m10: number, m11: number,
   m12: number, m13: number, m14: number, m15: number,
-): void;
+): number;
 declare function bloom_scene_update_geometry_scratch(
   handle: number,
   vertexCount: number,
@@ -46,7 +46,7 @@ declare function bloom_scene_update_geometry_scratch(
 declare function bloom_mesh_scratch_reset(): void;
 declare function bloom_mesh_scratch_push_f32(v: number): void;
 declare function bloom_mesh_scratch_push_u32(v: number): void;
-declare function bloom_scene_set_trs(handle: number, px: number, py: number, pz: number, yaw: number, scale: number): void;
+declare function bloom_scene_set_trs(handle: number, px: number, py: number, pz: number, yaw: number, scale: number): number;
 declare function bloom_scene_update_geometry(
   handle: number,
   vertices: number,
@@ -54,9 +54,25 @@ declare function bloom_scene_update_geometry(
   indices: number,
   indexCount: number,
 ): void;
-declare function bloom_scene_set_material_color(handle: number, r: number, g: number, b: number, a: number): void;
-declare function bloom_scene_set_material_pbr(handle: number, roughness: number, metalness: number): void;
-declare function bloom_scene_set_material_emissive(handle: number, r: number, g: number, b: number): void;
+declare function bloom_scene_set_lod(
+  handle: number,
+  lodIndex: number,
+  vertices: number,
+  vertexCount: number,
+  indices: number,
+  indexCount: number,
+  maxCoverage: number,
+): number;
+declare function bloom_scene_attach_model_lod(
+  node: number,
+  model: number,
+  meshIndex: number,
+  lodIndex: number,
+  maxCoverage: number,
+): number;
+declare function bloom_scene_set_material_color(handle: number, r: number, g: number, b: number, a: number): number;
+declare function bloom_scene_set_material_pbr(handle: number, roughness: number, metalness: number): number;
+declare function bloom_scene_set_material_emissive(handle: number, r: number, g: number, b: number): number;
 declare function bloom_scene_set_material_layered_pbr(
   handle: number,
   lobeMask: number,
@@ -78,8 +94,8 @@ declare function bloom_scene_set_material_layered_pbr(
   iridescenceIor: number,
   iridescenceThicknessMinimum: number,
   iridescenceThicknessMaximum: number,
-): void;
-declare function bloom_scene_set_material_texture(handle: number, textureIdx: number): void;
+): number;
+declare function bloom_scene_set_material_texture(handle: number, textureIdx: number): number;
 declare function bloom_scene_node_count(): number;
 
 // Frame callbacks
@@ -99,17 +115,17 @@ declare function bloom_add_point_light(
 ): void;
 
 // Shadows
-declare function bloom_enable_shadows(): void;
-declare function bloom_disable_shadows(): void;
+declare function bloom_enable_shadows(): number;
+declare function bloom_disable_shadows(): number;
 declare function bloom_dump_shadow_map(path: number): void;
 
 // Post-processing
 declare function bloom_enable_postfx(): void;
 declare function bloom_disable_postfx(): void;
-declare function bloom_postfx_set_selected(handle: number): void;
-declare function bloom_postfx_set_hovered(handle: number): void;
-declare function bloom_postfx_set_outline_color(r: number, g: number, b: number, a: number): void;
-declare function bloom_postfx_set_outline_thickness(thickness: number): void;
+declare function bloom_postfx_set_selected(handle: number): number;
+declare function bloom_postfx_set_hovered(handle: number): number;
+declare function bloom_postfx_set_outline_color(r: number, g: number, b: number, a: number): number;
+declare function bloom_postfx_set_outline_thickness(thickness: number): number;
 
 // Model attachment
 declare function bloom_scene_attach_model(nodeHandle: number, modelHandle: number, meshIndex: number): void;
@@ -136,7 +152,7 @@ declare function bloom_pick_all_handle(index: number): number;
 declare function bloom_pick_all_distance(index: number): number;
 
 // Q8: water material
-declare function bloom_scene_set_material_water(handle: number, waveAmp: number, waveSpeed: number, r: number, g: number, b: number, a: number): void;
+declare function bloom_scene_set_material_water(handle: number, waveAmp: number, waveSpeed: number, r: number, g: number, b: number, a: number): number;
 
 // Q4: transform read-back
 declare function bloom_scene_get_transform(handle: number, index: number): number;
@@ -148,7 +164,7 @@ declare function bloom_scene_get_bounds_max_x(handle: number): number;
 declare function bloom_scene_get_bounds_max_y(handle: number): number;
 declare function bloom_scene_get_bounds_max_z(handle: number): number;
 // Q7: user data
-declare function bloom_scene_set_user_data(handle: number, data: number): void;
+declare function bloom_scene_set_user_data(handle: number, data: number): number;
 declare function bloom_scene_get_user_data(handle: number): number;
 
 declare function bloom_scene_extrude_polygon(
@@ -251,22 +267,22 @@ export function destroySceneNode(handle: SceneNodeHandle): void {
 /**
  * Set visibility of a scene node.
  */
-export function setSceneNodeVisible(handle: SceneNodeHandle, visible: boolean): void {
-  bloom_scene_set_visible(handle, visible ? 1 : 0);
+export function setSceneNodeVisible(handle: SceneNodeHandle, visible: boolean): boolean {
+  return bloom_scene_set_visible(handle, visible ? 1 : 0) !== 0;
 }
 
 /**
  * Set whether this node casts shadows.
  */
-export function setSceneNodeCastShadow(handle: SceneNodeHandle, cast: boolean): void {
-  bloom_scene_set_cast_shadow(handle, cast ? 1 : 0);
+export function setSceneNodeCastShadow(handle: SceneNodeHandle, cast: boolean): boolean {
+  return bloom_scene_set_cast_shadow(handle, cast ? 1 : 0) !== 0;
 }
 
 /**
  * Set whether this node receives shadows.
  */
-export function setSceneNodeReceiveShadow(handle: SceneNodeHandle, receive: boolean): void {
-  bloom_scene_set_receive_shadow(handle, receive ? 1 : 0);
+export function setSceneNodeReceiveShadow(handle: SceneNodeHandle, receive: boolean): boolean {
+  return bloom_scene_set_receive_shadow(handle, receive ? 1 : 0) !== 0;
 }
 
 /**
@@ -281,15 +297,15 @@ export function setSceneNodeReceiveShadow(handle: SceneNodeHandle, receive: bool
  * flat base colour via setSceneNodeMaterialPbr so the bounce carries the
  * right hue; leave the node visible (the flag handles exclusion).
  */
-export function setSceneNodeGiOnly(handle: SceneNodeHandle, giOnly: boolean): void {
-  bloom_scene_set_gi_only(handle, giOnly ? 1 : 0);
+export function setSceneNodeGiOnly(handle: SceneNodeHandle, giOnly: boolean): boolean {
+  return bloom_scene_set_gi_only(handle, giOnly ? 1 : 0) !== 0;
 }
 
 /**
  * Set the parent of a scene node. Pass 0 for no parent (root node).
  */
-export function setSceneNodeParent(handle: SceneNodeHandle, parent: SceneNodeHandle): void {
-  bloom_scene_set_parent(handle, parent);
+export function setSceneNodeParent(handle: SceneNodeHandle, parent: SceneNodeHandle): boolean {
+  return bloom_scene_set_parent(handle, parent) !== 0;
 }
 
 /**
@@ -305,14 +321,14 @@ export function setSceneNodeParent(handle: SceneNodeHandle, parent: SceneNodeHan
  * ("Expected safe integer for native i64 parameter"), which made the old
  * pointer-based entry point unreachable from TypeScript.
  */
-export function setSceneNodeTransform(handle: SceneNodeHandle, matrix: number[]): void {
-  bloom_scene_set_transform16(
+export function setSceneNodeTransform(handle: SceneNodeHandle, matrix: number[]): boolean {
+  return bloom_scene_set_transform16(
     handle,
     matrix[0], matrix[1], matrix[2], matrix[3],
     matrix[4], matrix[5], matrix[6], matrix[7],
     matrix[8], matrix[9], matrix[10], matrix[11],
     matrix[12], matrix[13], matrix[14], matrix[15],
-  );
+  ) !== 0;
 }
 
 /**
@@ -325,8 +341,8 @@ export function setSceneNodeTrs(
   x: number, y: number, z: number,
   yaw: number = 0,
   scale: number = 1,
-): void {
-  bloom_scene_set_trs(handle, x, y, z, yaw, scale);
+): boolean {
+  return bloom_scene_set_trs(handle, x, y, z, yaw, scale) !== 0;
 }
 
 /**
@@ -369,8 +385,8 @@ export function updateSceneNodeGeometry(
  * alone took 0-1 floats; passing a `Colors` constant silently rendered
  * white. Values are clamped; alpha defaults to opaque.
  */
-export function setSceneNodeColor(handle: SceneNodeHandle, r: number, g: number, b: number, a: number = 255): void {
-  bloom_scene_set_material_color(handle, r / 255, g / 255, b / 255, a / 255);
+export function setSceneNodeColor(handle: SceneNodeHandle, r: number, g: number, b: number, a: number = 255): boolean {
+  return bloom_scene_set_material_color(handle, r / 255, g / 255, b / 255, a / 255) !== 0;
 }
 
 /**
@@ -389,8 +405,8 @@ export function setSceneNodeColor(handle: SceneNodeHandle, r: number, g: number,
 export function setSceneNodeLod(
   handle: SceneNodeHandle, lodIndex: number,
   vertices: number[], indices: number[], maxCoverage: number,
-): void {
-  bloom_scene_set_lod(handle, lodIndex, vertices as any, vertices.length / 12, indices as any, indices.length, maxCoverage);
+): boolean {
+  return bloom_scene_set_lod(handle, lodIndex, vertices as any, vertices.length / 12, indices as any, indices.length, maxCoverage) !== 0;
 }
 
 /**
@@ -401,12 +417,12 @@ export function setSceneNodeLod(
 export function attachModelLodToNode(
   node: SceneNodeHandle, model: { handle: number }, meshIndex: number,
   lodIndex: number, maxCoverage: number,
-): void {
-  bloom_scene_attach_model_lod(node, model.handle, meshIndex, lodIndex, maxCoverage);
+): boolean {
+  return bloom_scene_attach_model_lod(node, model.handle, meshIndex, lodIndex, maxCoverage) !== 0;
 }
 
-export function setSceneNodePbr(handle: SceneNodeHandle, roughness: number, metalness: number): void {
-  bloom_scene_set_material_pbr(handle, roughness, metalness);
+export function setSceneNodePbr(handle: SceneNodeHandle, roughness: number, metalness: number): boolean {
+  return bloom_scene_set_material_pbr(handle, roughness, metalness) !== 0;
 }
 
 /**
@@ -424,31 +440,34 @@ export function setSceneNodePbr(handle: SceneNodeHandle, roughness: number, meta
 export function setSceneNodeMaterial(
   handle: SceneNodeHandle,
   material: PbrMaterial = {},
-): void {
+): boolean {
   const color = material.color ?? [255, 255, 255];
   const emissive = material.emissive ?? [0, 0, 0];
-  bloom_scene_set_material_color(
+  const emissiveR = Math.max(0, finiteOr(emissive[0], 0));
+  const emissiveG = Math.max(0, finiteOr(emissive[1], 0));
+  const emissiveB = Math.max(0, finiteOr(emissive[2], 0));
+  const colorApplied = bloom_scene_set_material_color(
     handle,
     Math.min(255, Math.max(0, finiteOr(color[0], 255))) / 255,
     Math.min(255, Math.max(0, finiteOr(color[1], 255))) / 255,
     Math.min(255, Math.max(0, finiteOr(color[2], 255))) / 255,
     unitMaterialValue(material.opacity ?? 1, 1),
-  );
-  bloom_scene_set_material_pbr(
+  ) !== 0;
+  const pbrApplied = bloom_scene_set_material_pbr(
     handle,
     unitMaterialValue(material.roughness ?? 0.8, 0.8),
     unitMaterialValue(material.metalness ?? 0, 0),
-  );
-  bloom_scene_set_material_emissive(
+  ) !== 0;
+  const emissiveApplied = bloom_scene_set_material_emissive(
     handle,
-    Math.max(0, finiteOr(emissive[0], 0)),
-    Math.max(0, finiteOr(emissive[1], 0)),
-    Math.max(0, finiteOr(emissive[2], 0)),
-  );
-  bloom_scene_set_material_texture(
+    emissiveR,
+    emissiveG,
+    emissiveB,
+  ) !== 0;
+  const textureApplied = bloom_scene_set_material_texture(
     handle,
     Math.floor(Math.max(0, finiteOr(material.textureIdx ?? 0, 0))),
-  );
+  ) !== 0;
 
   const clearcoat = material.layered?.clearcoat;
   const specular = material.layered?.specular;
@@ -462,7 +481,7 @@ export function setSceneNodeMaterial(
     | (specular === undefined ? 0 : 1 << 4);
   const specularColor = specular?.color ?? [1, 1, 1];
   const sheenColor = sheen?.color ?? [0, 0, 0];
-  bloom_scene_set_material_layered_pbr(
+  const layeredApplied = bloom_scene_set_material_layered_pbr(
     handle,
     lobeMask,
     clearcoat?.factor ?? 0,
@@ -483,15 +502,22 @@ export function setSceneNodeMaterial(
     iridescence?.ior ?? 1.3,
     iridescence?.thicknessMinimum ?? 100,
     iridescence?.thicknessMaximum ?? 400,
-  );
+  ) !== 0;
+  const emissiveDisabled =
+    emissiveR === 0 && emissiveG === 0 && emissiveB === 0;
+  return colorApplied
+    && pbrApplied
+    && textureApplied
+    && (emissiveApplied || emissiveDisabled)
+    && (layeredApplied || lobeMask === 0);
 }
 
 /**
  * Set the texture for a scene node's material.
  * Pass 0 for the default white texture.
  */
-export function setSceneNodeTexture(handle: SceneNodeHandle, textureIdx: number): void {
-  bloom_scene_set_material_texture(handle, textureIdx);
+export function setSceneNodeTexture(handle: SceneNodeHandle, textureIdx: number): boolean {
+  return bloom_scene_set_material_texture(handle, textureIdx) !== 0;
 }
 
 /**
@@ -557,15 +583,15 @@ export function addDirectionalLight(
  * Enable shadow mapping (single directional light).
  * Shadows are rendered from the primary directional light's perspective.
  */
-export function enableShadows(): void {
-  bloom_enable_shadows();
+export function enableShadows(): boolean {
+  return bloom_enable_shadows() !== 0;
 }
 
 /**
  * Disable shadow mapping.
  */
-export function disableShadows(): void {
-  bloom_disable_shadows();
+export function disableShadows(): boolean {
+  return bloom_disable_shadows() !== 0;
 }
 
 /**
@@ -598,31 +624,31 @@ export function disablePostFx(): void {
  * Set the selected scene node for outline rendering.
  * Pass 0 to clear selection. Matching Pascal Editor's outliner.selectedObjects.
  */
-export function setPostFxSelected(handle: SceneNodeHandle): void {
-  bloom_postfx_set_selected(handle);
+export function setPostFxSelected(handle: SceneNodeHandle): boolean {
+  return bloom_postfx_set_selected(handle) !== 0;
 }
 
 /**
  * Set the hovered scene node for outline rendering.
  * Pass 0 to clear hover.
  */
-export function setPostFxHovered(handle: SceneNodeHandle): void {
-  bloom_postfx_set_hovered(handle);
+export function setPostFxHovered(handle: SceneNodeHandle): boolean {
+  return bloom_postfx_set_hovered(handle) !== 0;
 }
 
 /**
  * Set the outline color for selected objects (0-1 range).
  */
 /** Selection-outline color, 0-255 per channel (engine-wide convention). */
-export function setOutlineColor(r: number, g: number, b: number, a: number = 255): void {
-  bloom_postfx_set_outline_color(r / 255, g / 255, b / 255, a / 255);
+export function setOutlineColor(r: number, g: number, b: number, a: number = 255): boolean {
+  return bloom_postfx_set_outline_color(r / 255, g / 255, b / 255, a / 255) !== 0;
 }
 
 /**
  * Set the outline thickness in pixels.
  */
-export function setOutlineThickness(thickness: number): void {
-  bloom_postfx_set_outline_thickness(thickness);
+export function setOutlineThickness(thickness: number): boolean {
+  return bloom_postfx_set_outline_thickness(thickness) !== 0;
 }
 
 // ============================================================
@@ -791,8 +817,8 @@ export function getSceneNodeBounds(handle: SceneNodeHandle): { min: { x: number;
  * Attach an arbitrary integer to a scene node. Used by editors to associate
  * entity ids with scene nodes so picking can return the entity id directly.
  */
-export function setSceneNodeUserData(handle: SceneNodeHandle, data: number): void {
-  bloom_scene_set_user_data(handle, data);
+export function setSceneNodeUserData(handle: SceneNodeHandle, data: number): boolean {
+  return bloom_scene_set_user_data(handle, data) !== 0;
 }
 
 export function getSceneNodeUserData(handle: SceneNodeHandle): number {
@@ -837,8 +863,8 @@ export function setSceneNodeWaterMaterial(
   handle: SceneNodeHandle,
   waveAmplitude: number, waveSpeed: number,
   r: number, g: number, b: number, a: number,
-): void {
-  bloom_scene_set_material_water(handle, waveAmplitude, waveSpeed, r / 255, g / 255, b / 255, a / 255);
+): boolean {
+  return bloom_scene_set_material_water(handle, waveAmplitude, waveSpeed, r / 255, g / 255, b / 255, a / 255) !== 0;
 }
 
 export function addPointLight(

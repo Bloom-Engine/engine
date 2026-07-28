@@ -313,8 +313,8 @@ macro_rules! __bloom_ffi_game_loop {
 
         // bloom_clear_post_pass  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_clear_post_pass() {
-            $crate::ffi::guard("bloom_clear_post_pass", move || {
+        pub extern "C" fn bloom_clear_post_pass() -> f64 {
+            $crate::ffi::guard_applied("bloom_clear_post_pass", move || {
                 engine().renderer.clear_post_pass();
             })
         }
@@ -336,8 +336,8 @@ macro_rules! __bloom_ffi_game_loop {
 
         // bloom_clear_all_post_passes  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_clear_all_post_passes() {
-            $crate::ffi::guard("bloom_clear_all_post_passes", move || {
+        pub extern "C" fn bloom_clear_all_post_passes() -> f64 {
+            $crate::ffi::guard_applied("bloom_clear_all_post_passes", move || {
                 engine().renderer.clear_all_post_passes();
             })
         }
@@ -510,7 +510,7 @@ macro_rules! __bloom_ffi_game_loop {
 
         // bloom_postfx_set_selected  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_postfx_set_selected(handle: f64) {
+        pub extern "C" fn bloom_postfx_set_selected(handle: f64) -> f64 {
             $crate::ffi::guard("bloom_postfx_set_selected", move || {
                 if let Some(pfx) = &mut engine().postfx {
                     if handle == 0.0 {
@@ -518,36 +518,48 @@ macro_rules! __bloom_ffi_game_loop {
                     } else {
                         pfx.set_selected(vec![handle]);
                     }
+                    1.0
+                } else {
+                    0.0
                 }
             })
         }
 
         // bloom_postfx_set_hovered  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_postfx_set_hovered(handle: f64) {
+        pub extern "C" fn bloom_postfx_set_hovered(handle: f64) -> f64 {
             $crate::ffi::guard("bloom_postfx_set_hovered", move || {
                 if let Some(pfx) = &mut engine().postfx {
                     pfx.set_hovered(handle);
+                    1.0
+                } else {
+                    0.0
                 }
             })
         }
 
         // bloom_postfx_set_outline_color  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_postfx_set_outline_color(r: f64, g: f64, b: f64, a: f64) {
+        pub extern "C" fn bloom_postfx_set_outline_color(r: f64, g: f64, b: f64, a: f64) -> f64 {
             $crate::ffi::guard("bloom_postfx_set_outline_color", move || {
                 if let Some(pfx) = &mut engine().postfx {
                     pfx.outline_params.color_selected = [r as f32, g as f32, b as f32, a as f32];
+                    1.0
+                } else {
+                    0.0
                 }
             })
         }
 
         // bloom_postfx_set_outline_thickness  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_postfx_set_outline_thickness(thickness: f64) {
+        pub extern "C" fn bloom_postfx_set_outline_thickness(thickness: f64) -> f64 {
             $crate::ffi::guard("bloom_postfx_set_outline_thickness", move || {
                 if let Some(pfx) = &mut engine().postfx {
                     pfx.outline_params.thickness[0] = thickness as f32;
+                    1.0
+                } else {
+                    0.0
                 }
             })
         }

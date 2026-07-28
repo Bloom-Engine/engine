@@ -1134,8 +1134,9 @@ pub fn bloom_create_mesh(
 // ============================================================
 
 #[wasm_bindgen]
-pub fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) {
+pub fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) -> f64 {
     engine().renderer.set_ambient_light(r, g, b, intensity);
+    1.0
 }
 
 #[wasm_bindgen]
@@ -1147,10 +1148,11 @@ pub fn bloom_set_directional_light(
     g: f64,
     b: f64,
     intensity: f64,
-) {
+) -> f64 {
     engine()
         .renderer
         .set_directional_light(dx, dy, dz, r, g, b, intensity);
+    1.0
 }
 
 #[wasm_bindgen]
@@ -1159,27 +1161,30 @@ pub fn bloom_set_procedural_sky(
     rayleigh_density: f64,
     mie_density: f64,
     ground_albedo: f64,
-) {
+) -> f64 {
     engine().renderer.set_procedural_sky(
         enabled != 0.0,
         rayleigh_density as f32,
         mie_density as f32,
         ground_albedo as f32,
     );
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_set_sun_direction(dx: f64, dy: f64, dz: f64, intensity: f64) {
+pub fn bloom_set_sun_direction(dx: f64, dy: f64, dz: f64, intensity: f64) -> f64 {
     engine()
         .renderer
         .set_sun_direction(dx as f32, dy as f32, dz as f32, intensity as f32);
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_set_joint_test(joint_index: f64, angle: f64) {
+pub fn bloom_set_joint_test(joint_index: f64, angle: f64) -> f64 {
     engine()
         .renderer
         .set_joint_test(joint_index as usize, angle as f32);
+    1.0
 }
 
 #[wasm_bindgen]
@@ -1412,33 +1417,51 @@ pub fn bloom_scene_destroy_node(handle: f64) {
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_visible(handle: f64, visible: f64) {
+pub fn bloom_scene_set_visible(handle: f64, visible: f64) -> f64 {
     engine().scene.set_visible(handle, visible != 0.0);
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_cast_shadow(handle: f64, cast: f64) {
+pub fn bloom_scene_set_cast_shadow(handle: f64, cast: f64) -> f64 {
     engine().scene.set_cast_shadow(handle, cast != 0.0);
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_receive_shadow(handle: f64, receive: f64) {
+pub fn bloom_scene_set_receive_shadow(handle: f64, receive: f64) -> f64 {
     engine().scene.set_receive_shadow(handle, receive != 0.0);
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_parent(handle: f64, parent: f64) {
+pub fn bloom_scene_set_parent(handle: f64, parent: f64) -> f64 {
     engine().scene.set_parent(handle, parent);
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_transform(_handle: f64, _matrix_ptr: f64) {
+pub fn bloom_scene_set_transform(_handle: f64, _matrix_ptr: f64) -> f64 {
     // Pointer-taking form — unreachable from Perry on wasm (a `number[]`
     // cannot cross an i64 param), like the other pointer stubs here. The
     // 16-scalar `_transform16` below is the live path; it used to carry
     // THIS name, which meant setSceneNodeTransform resolved to nothing and
     // was auto-stubbed by Perry's FFI proxy — a silent no-op on web while
     // the working implementation sat one rename away.
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_scene_set_trs(handle: f64, px: f64, py: f64, pz: f64, yaw: f64, scale: f64) -> f64 {
+    engine().scene.set_trs(
+        handle,
+        px as f32,
+        py as f32,
+        pz as f32,
+        yaw as f32,
+        scale as f32,
+    );
+    1.0
 }
 
 #[wasm_bindgen]
@@ -1461,7 +1484,7 @@ pub fn bloom_scene_set_transform16(
     m31: f64,
     m32: f64,
     m33: f64,
-) {
+) -> f64 {
     // On web we pass the 16 matrix elements as individual f64 args
     // (no raw pointer passing from WASM)
     let mat = [
@@ -1471,6 +1494,7 @@ pub fn bloom_scene_set_transform16(
         [m30 as f32, m31 as f32, m32 as f32, m33 as f32],
     ];
     engine().scene.set_transform(handle, mat);
+    1.0
 }
 
 #[wasm_bindgen]
@@ -1487,24 +1511,27 @@ pub fn bloom_scene_update_geometry(
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_material_color(handle: f64, r: f64, g: f64, b: f64, a: f64) {
+pub fn bloom_scene_set_material_color(handle: f64, r: f64, g: f64, b: f64, a: f64) -> f64 {
     engine()
         .scene
         .set_material_color(handle, r as f32, g as f32, b as f32, a as f32);
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_material_pbr(handle: f64, roughness: f64, metalness: f64) {
+pub fn bloom_scene_set_material_pbr(handle: f64, roughness: f64, metalness: f64) -> f64 {
     engine()
         .scene
         .set_material_pbr(handle, roughness as f32, metalness as f32);
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_material_texture(handle: f64, texture_idx: f64) {
+pub fn bloom_scene_set_material_texture(handle: f64, texture_idx: f64) -> f64 {
     engine()
         .scene
         .set_material_texture(handle, texture_idx as u32);
+    1.0
 }
 
 #[wasm_bindgen]
@@ -1629,13 +1656,15 @@ pub fn bloom_scene_subtract_box(
 // ============================================================
 
 #[wasm_bindgen]
-pub fn bloom_enable_shadows() {
+pub fn bloom_enable_shadows() -> f64 {
     engine().renderer.shadow_map.enable();
+    1.0
 }
 
 #[wasm_bindgen]
-pub fn bloom_disable_shadows() {
+pub fn bloom_disable_shadows() -> f64 {
     engine().renderer.shadow_map.disable();
+    1.0
 }
 
 // ============================================================
@@ -1662,34 +1691,46 @@ pub fn bloom_disable_postfx() {
 }
 
 #[wasm_bindgen]
-pub fn bloom_postfx_set_selected(handle: f64) {
+pub fn bloom_postfx_set_selected(handle: f64) -> f64 {
     if let Some(pfx) = &mut engine().postfx {
         if handle == 0.0 {
             pfx.set_selected(Vec::new());
         } else {
             pfx.set_selected(vec![handle]);
         }
+        1.0
+    } else {
+        0.0
     }
 }
 
 #[wasm_bindgen]
-pub fn bloom_postfx_set_hovered(handle: f64) {
+pub fn bloom_postfx_set_hovered(handle: f64) -> f64 {
     if let Some(pfx) = &mut engine().postfx {
         pfx.set_hovered(handle);
+        1.0
+    } else {
+        0.0
     }
 }
 
 #[wasm_bindgen]
-pub fn bloom_postfx_set_outline_color(r: f64, g: f64, b: f64, a: f64) {
+pub fn bloom_postfx_set_outline_color(r: f64, g: f64, b: f64, a: f64) -> f64 {
     if let Some(pfx) = &mut engine().postfx {
         pfx.outline_params.color_selected = [r as f32, g as f32, b as f32, a as f32];
+        1.0
+    } else {
+        0.0
     }
 }
 
 #[wasm_bindgen]
-pub fn bloom_postfx_set_outline_thickness(thickness: f64) {
+pub fn bloom_postfx_set_outline_thickness(thickness: f64) -> f64 {
     if let Some(pfx) = &mut engine().postfx {
         pfx.outline_params.thickness[0] = thickness as f32;
+        1.0
+    } else {
+        0.0
     }
 }
 
@@ -2068,8 +2109,9 @@ pub fn bloom_scene_get_bounds_max_z(handle: f64) -> f64 {
     engine().scene.get_bounds(handle).1[2] as f64
 }
 #[wasm_bindgen]
-pub fn bloom_scene_set_user_data(handle: f64, data: f64) {
+pub fn bloom_scene_set_user_data(handle: f64, data: f64) -> f64 {
     engine().scene.set_user_data(handle, data as i64);
+    1.0
 }
 #[wasm_bindgen]
 pub fn bloom_scene_get_user_data(handle: f64) -> f64 {
@@ -2108,7 +2150,7 @@ pub fn bloom_scene_set_material_water(
     g: f64,
     b: f64,
     a: f64,
-) {
+) -> f64 {
     engine().scene.set_material_water(
         handle,
         wave_amp as f32,
@@ -2118,6 +2160,7 @@ pub fn bloom_scene_set_material_water(
         b as f32,
         a as f32,
     );
+    1.0
 }
 
 // Q9: Spline ribbon mesh
@@ -2205,51 +2248,6 @@ pub fn bloom_save_file_dialog(_default_name_ptr: *const u8, _title_ptr: *const u
     0.0
 }
 
-// ============================================================
-// Render quality toggles (individual + preset) — ticket 011
-// Mirror of the macOS FFI surface added in commit 95da6af, exposed to
-// the browser via wasm_bindgen. Without these the TS API's
-// setQualityPreset / setShadowsEnabled / etc. would fail with
-// "bloom_set_quality_preset is not a function" on the web target.
-// ============================================================
-
-#[wasm_bindgen]
-pub fn bloom_set_quality_preset(preset: f64) {
-    engine().renderer.apply_quality_preset(preset as u32);
-}
-#[wasm_bindgen]
-pub fn bloom_set_shadows_enabled(on: f64) {
-    engine().renderer.set_shadows_enabled(on != 0.0);
-}
-#[wasm_bindgen]
-pub fn bloom_set_shadows_always_fresh(on: f64) {
-    engine().renderer.set_shadows_always_fresh(on != 0.0);
-}
-#[wasm_bindgen]
-pub fn bloom_set_bloom_enabled(on: f64) {
-    engine().renderer.set_bloom_enabled(on != 0.0);
-}
-#[wasm_bindgen]
-pub fn bloom_set_ssao_enabled(on: f64) {
-    engine().renderer.set_ssao_enabled(on != 0.0);
-}
-#[wasm_bindgen]
-pub fn bloom_set_ssao_intensity(value: f64) {
-    engine().renderer.set_ssao_strength(value as f32);
-}
-#[wasm_bindgen]
-pub fn bloom_set_ssao_radius(world_radius: f64) {
-    engine().renderer.set_ssao_radius(world_radius as f32);
-}
-#[wasm_bindgen]
-pub fn bloom_set_wind(dir_x: f64, dir_z: f64, amplitude: f64, frequency: f64) {
-    engine().renderer.set_wind(
-        dir_x as f32,
-        dir_z as f32,
-        amplitude as f32,
-        frequency as f32,
-    );
-}
 #[wasm_bindgen]
 pub fn bloom_launch_process(_cmd: f64, _args: f64, _cwd: f64) -> f64 {
     // A web page does not get to launch processes.
@@ -2266,50 +2264,6 @@ pub fn bloom_command_line_arg(_index: f64) -> f64 {
     // unreachable through the public helper. Web has no Perry string
     // allocator and must not pretend a native pointer exists.
     0.0
-}
-#[wasm_bindgen]
-pub fn bloom_set_output_scale(scale: f64) {
-    engine().renderer.set_output_scale(scale as f32);
-}
-#[wasm_bindgen]
-pub fn bloom_get_output_scale() -> f64 {
-    engine().renderer.output_scale() as f64
-}
-#[wasm_bindgen]
-pub fn bloom_set_model_foliage_wind(model: f64, amount: f64) {
-    engine()
-        .renderer
-        .set_model_foliage_wind(model.to_bits(), amount as f32);
-}
-#[wasm_bindgen]
-pub fn bloom_set_foliage_shadow_motion(on: f64) {
-    engine().renderer.set_foliage_shadow_motion(on > 0.5);
-}
-#[wasm_bindgen]
-pub fn bloom_set_cloud_shadows(
-    strength: f64,
-    deck_height: f64,
-    feature_scale: f64,
-    drift_speed: f64,
-) {
-    engine().renderer.set_cloud_shadows(
-        strength as f32,
-        deck_height as f32,
-        feature_scale as f32,
-        drift_speed as f32,
-    );
-}
-#[wasm_bindgen]
-pub fn bloom_set_ssr_enabled(on: f64) {
-    engine().renderer.set_ssr_enabled(on != 0.0);
-}
-#[wasm_bindgen]
-pub fn bloom_set_motion_blur_enabled(on: f64) {
-    engine().renderer.set_motion_blur_enabled(on != 0.0);
-}
-#[wasm_bindgen]
-pub fn bloom_set_sss_enabled(on: f64) {
-    engine().renderer.set_sss_enabled(on != 0.0);
 }
 
 // ============================================================

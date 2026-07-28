@@ -27,8 +27,8 @@ macro_rules! __bloom_ffi_scene {
 
         // bloom_scene_set_visible  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_scene_set_visible(handle: f64, visible: f64) {
-            $crate::ffi::guard("bloom_scene_set_visible", move || {
+        pub extern "C" fn bloom_scene_set_visible(handle: f64, visible: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_visible", move || {
                 engine().scene.set_visible(handle, visible != 0.0);
             })
         }
@@ -45,8 +45,8 @@ macro_rules! __bloom_ffi_scene {
             pz: f64,
             yaw: f64,
             scale: f64,
-        ) {
-            $crate::ffi::guard("bloom_scene_set_trs", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_trs", move || {
                 engine().scene.set_trs(
                     handle,
                     px as f32,
@@ -60,8 +60,8 @@ macro_rules! __bloom_ffi_scene {
 
         // bloom_scene_set_cast_shadow  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_scene_set_cast_shadow(handle: f64, cast: f64) {
-            $crate::ffi::guard("bloom_scene_set_cast_shadow", move || {
+        pub extern "C" fn bloom_scene_set_cast_shadow(handle: f64, cast: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_cast_shadow", move || {
                 engine().scene.set_cast_shadow(handle, cast != 0.0);
             })
         }
@@ -72,34 +72,34 @@ macro_rules! __bloom_ffi_scene {
         // and the sun-shadow pass. For material-system games whose world
         // never becomes scene nodes.
         #[no_mangle]
-        pub extern "C" fn bloom_scene_set_gi_only(handle: f64, gi_only: f64) {
-            $crate::ffi::guard("bloom_scene_set_gi_only", move || {
+        pub extern "C" fn bloom_scene_set_gi_only(handle: f64, gi_only: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_gi_only", move || {
                 engine().scene.set_gi_only(handle, gi_only != 0.0);
             })
         }
 
         // bloom_scene_set_receive_shadow  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_scene_set_receive_shadow(handle: f64, receive: f64) {
-            $crate::ffi::guard("bloom_scene_set_receive_shadow", move || {
+        pub extern "C" fn bloom_scene_set_receive_shadow(handle: f64, receive: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_receive_shadow", move || {
                 engine().scene.set_receive_shadow(handle, receive != 0.0);
             })
         }
 
         // bloom_scene_set_parent  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_scene_set_parent(handle: f64, parent: f64) {
-            $crate::ffi::guard("bloom_scene_set_parent", move || {
+        pub extern "C" fn bloom_scene_set_parent(handle: f64, parent: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_parent", move || {
                 engine().scene.set_parent(handle, parent);
             })
         }
 
         // bloom_scene_set_transform  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_scene_set_transform(handle: f64, mat_ptr: *const f64) {
+        pub extern "C" fn bloom_scene_set_transform(handle: f64, mat_ptr: *const f64) -> f64 {
             $crate::ffi::guard("bloom_scene_set_transform", move || {
                 if mat_ptr.is_null() {
-                    return;
+                    return 0.0;
                 }
                 let slice = unsafe { std::slice::from_raw_parts(mat_ptr, 16) };
                 let mut mat = [[0.0f32; 4]; 4];
@@ -109,6 +109,7 @@ macro_rules! __bloom_ffi_scene {
                     }
                 }
                 engine().scene.set_transform(handle, mat);
+                1.0
             })
         }
 
@@ -140,8 +141,8 @@ macro_rules! __bloom_ffi_scene {
             m13: f64,
             m14: f64,
             m15: f64,
-        ) {
-            $crate::ffi::guard("bloom_scene_set_transform16", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_transform16", move || {
                 let s = [
                     m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15,
                 ];
@@ -220,10 +221,10 @@ macro_rules! __bloom_ffi_scene {
             idx_ptr: *const f64,
             idx_count: f64,
             max_coverage: f64,
-        ) {
+        ) -> f64 {
             $crate::ffi::guard("bloom_scene_set_lod", move || {
                 if vert_ptr.is_null() || idx_ptr.is_null() {
-                    return;
+                    return 0.0;
                 }
                 let nv = vert_count as usize;
                 let ni = idx_count as usize;
@@ -263,6 +264,7 @@ macro_rules! __bloom_ffi_scene {
                     indices,
                     max_coverage as f32,
                 );
+                1.0
             })
         }
 
@@ -276,16 +278,16 @@ macro_rules! __bloom_ffi_scene {
             mesh_index: f64,
             lod_index: f64,
             max_coverage: f64,
-        ) {
+        ) -> f64 {
             $crate::ffi::guard("bloom_scene_attach_model_lod", move || {
                 let eng = engine();
                 let mi = mesh_index as usize;
                 let model_data = match eng.models.models.get(model_handle) {
                     Some(md) => md,
-                    None => return,
+                    None => return 0.0,
                 };
                 if mi >= model_data.meshes.len() {
-                    return;
+                    return 0.0;
                 }
                 let mesh = &model_data.meshes[mi];
                 let vertices = mesh.vertices.clone();
@@ -299,6 +301,7 @@ macro_rules! __bloom_ffi_scene {
                     indices,
                     max_coverage as f32,
                 );
+                1.0
             })
         }
         #[cfg(not(feature = "models3d"))]
@@ -309,8 +312,9 @@ macro_rules! __bloom_ffi_scene {
             _mesh_index: f64,
             _lod_index: f64,
             _max_coverage: f64,
-        ) {
+        ) -> f64 {
             $crate::ffi::feature_off_warn_once("bloom_scene_attach_model_lod", "models3d");
+            0.0
         }
 
         // bloom_scene_set_material_color  [source: macos]
@@ -321,8 +325,8 @@ macro_rules! __bloom_ffi_scene {
             g: f64,
             b: f64,
             a: f64,
-        ) {
-            $crate::ffi::guard("bloom_scene_set_material_color", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_material_color", move || {
                 engine()
                     .scene
                     .set_material_color(handle, r as f32, g as f32, b as f32, a as f32);
@@ -335,8 +339,8 @@ macro_rules! __bloom_ffi_scene {
             handle: f64,
             roughness: f64,
             metalness: f64,
-        ) {
-            $crate::ffi::guard("bloom_scene_set_material_pbr", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_material_pbr", move || {
                 engine()
                     .scene
                     .set_material_pbr(handle, roughness as f32, metalness as f32);
@@ -345,8 +349,13 @@ macro_rules! __bloom_ffi_scene {
 
         // bloom_scene_set_material_emissive  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_scene_set_material_emissive(handle: f64, r: f64, g: f64, b: f64) {
-            $crate::ffi::guard("bloom_scene_set_material_emissive", move || {
+        pub extern "C" fn bloom_scene_set_material_emissive(
+            handle: f64,
+            r: f64,
+            g: f64,
+            b: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_material_emissive", move || {
                 let finite_non_negative = |value: f64| {
                     if value.is_finite() {
                         (value as f32).max(0.0)
@@ -387,8 +396,8 @@ macro_rules! __bloom_ffi_scene {
             iridescence_ior: f64,
             iridescence_thickness_minimum: f64,
             iridescence_thickness_maximum: f64,
-        ) {
-            $crate::ffi::guard("bloom_scene_set_material_layered_pbr", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_material_layered_pbr", move || {
                 let layered = $crate::models::MaterialLayeredPbr::from_authoring_factors(
                     lobe_mask as u32,
                     clearcoat_factor as f32,
@@ -412,8 +421,8 @@ macro_rules! __bloom_ffi_scene {
 
         // bloom_scene_set_material_texture  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_scene_set_material_texture(handle: f64, texture_idx: f64) {
-            $crate::ffi::guard("bloom_scene_set_material_texture", move || {
+        pub extern "C" fn bloom_scene_set_material_texture(handle: f64, texture_idx: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_material_texture", move || {
                 engine()
                     .scene
                     .set_material_texture(handle, texture_idx as u32);
@@ -519,8 +528,8 @@ macro_rules! __bloom_ffi_scene {
             g: f64,
             b: f64,
             a: f64,
-        ) {
-            $crate::ffi::guard("bloom_scene_set_material_water", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_material_water", move || {
                 engine().scene.set_material_water(
                     handle,
                     wave_amp as f32,
@@ -599,8 +608,8 @@ macro_rules! __bloom_ffi_scene {
 
         // bloom_scene_set_user_data  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_scene_set_user_data(handle: f64, data: f64) {
-            $crate::ffi::guard("bloom_scene_set_user_data", move || {
+        pub extern "C" fn bloom_scene_set_user_data(handle: f64, data: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_scene_set_user_data", move || {
                 engine().scene.set_user_data(handle, data as i64);
             })
         }

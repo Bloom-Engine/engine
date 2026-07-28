@@ -14,8 +14,8 @@ declare function bloom_draw_model_transform16(
   m12: number, m13: number, m14: number, m15: number,
   colorPackedArgb: number,
 ): void;
-declare function bloom_set_model_foliage_wind(handle: number, amount: number): void;
-declare function bloom_set_foliage_shadow_motion(on: number): void;
+declare function bloom_set_model_foliage_wind(handle: number, amount: number): number;
+declare function bloom_set_foliage_shadow_motion(on: number): number;
 declare function bloom_unload_model(handle: number): void;
 declare function bloom_draw_cube(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_draw_cube_wires(x: number, y: number, z: number, w: number, h: number, d: number, r: number, g: number, b: number, a: number): void;
@@ -40,13 +40,13 @@ declare function bloom_create_instance_buffer_scratch(instanceCount: number): nu
 declare function bloom_submit_material_draw_instanced(material: number, meshHandle: number, meshIdx: number, instanceBuffer: number, instanceCount: number): void;
 declare function bloom_destroy_instance_buffer(handle: number): void;
 declare function bloom_create_planar_reflection(planeY: number, normalX: number, normalY: number, normalZ: number, resolution: number): number;
-declare function bloom_set_material_reflection_probe(material: number, probe: number): void;
-declare function bloom_set_material_texture_array(material: number, slot: number, array: number): void;
-declare function bloom_set_material_shading_model(material: number, model: number): void;
-declare function bloom_set_material_probe_visible(material: number, visible: number): void;
-declare function bloom_set_material_foliage(material: number, transR: number, transG: number, transB: number, transAmount: number, wrapFactor: number): void;
+declare function bloom_set_material_reflection_probe(material: number, probe: number): number;
+declare function bloom_set_material_texture_array(material: number, slot: number, array: number): number;
+declare function bloom_set_material_shading_model(material: number, model: number): number;
+declare function bloom_set_material_probe_visible(material: number, visible: number): number;
+declare function bloom_set_material_foliage(material: number, transR: number, transG: number, transB: number, transAmount: number, wrapFactor: number): number;
 declare function bloom_compile_material_from_file(path: number, bucketKind: number): number;
-declare function bloom_set_material_params_scratch(handle: number, paramCount: number): void;
+declare function bloom_set_material_params_scratch(handle: number, paramCount: number): number;
 declare function bloom_draw_material(material: number, meshHandle: number, meshIdx: number, x: number, y: number, z: number, scale: number, r: number, g: number, b: number, a: number): void;
 declare function bloom_load_model_animation(path: number): number;
 declare function bloom_instantiate_animation(src: number): number;
@@ -56,10 +56,10 @@ declare function bloom_mesh_scratch_reset(): void;
 declare function bloom_mesh_scratch_push_f32(v: number): void;
 declare function bloom_mesh_scratch_push_u32(v: number): void;
 declare function bloom_create_mesh_scratch(vertexCount: number, indexCount: number): number;
-declare function bloom_set_ambient_light(r: number, g: number, b: number, intensity: number): void;
-declare function bloom_set_directional_light(dx: number, dy: number, dz: number, r: number, g: number, b: number, intensity: number): void;
-declare function bloom_set_procedural_sky(enabled: number, rayleighDensity: number, mieDensity: number, groundAlbedo: number): void;
-declare function bloom_set_sun_direction(dx: number, dy: number, dz: number, intensity: number): void;
+declare function bloom_set_ambient_light(r: number, g: number, b: number, intensity: number): number;
+declare function bloom_set_directional_light(dx: number, dy: number, dz: number, r: number, g: number, b: number, intensity: number): number;
+declare function bloom_set_procedural_sky(enabled: number, rayleighDensity: number, mieDensity: number, groundAlbedo: number): number;
+declare function bloom_set_sun_direction(dx: number, dy: number, dz: number, intensity: number): number;
 declare function bloom_gen_mesh_spline_ribbon(pointsPtr: number, pointCount: number, widthsPtr: number, widthCount: number): number;
 declare function bloom_gen_mesh_spline_ribbon_scratch(pointCount: number, widthCount: number): number;
 declare function bloom_get_model_mesh_count(handle: number): number;
@@ -534,8 +534,8 @@ export function createPlanarReflection(
 ///
 /// Materials linked to any probe are automatically excluded from
 /// every probe's render — the water surface doesn't reflect itself.
-export function setMaterialReflectionProbe(material: number, probe: number): void {
-  bloom_set_material_reflection_probe(material, probe);
+export function setMaterialReflectionProbe(material: number, probe: number): boolean {
+  return bloom_set_material_reflection_probe(material, probe) !== 0;
 }
 
 /// Whether this material's draws render into planar-reflection probes
@@ -543,8 +543,8 @@ export function setMaterialReflectionProbe(material: number, probe: number): voi
 /// resolution — e.g. an instanced grass field in a 512-px water probe —
 /// where it costs full vertex + raster work and contributes nothing
 /// resolvable to the reflection.
-export function setMaterialProbeVisible(material: number, visible: boolean): void {
-  bloom_set_material_probe_visible(material, visible ? 1 : 0);
+export function setMaterialProbeVisible(material: number, visible: boolean): boolean {
+  return bloom_set_material_probe_visible(material, visible ? 1 : 0) !== 0;
 }
 
 /// EN-014 — slot indices for `setMaterialTextureArray`.
@@ -704,8 +704,8 @@ export function createTextureArrayFromFiles(
 /// Materials don't need to bind every slot — the stub is safe to
 /// sample. A common pattern is to bind only `TEXTURE_ARRAY_ALBEDO`
 /// for a non-PBR splat-mapped terrain.
-export function setMaterialTextureArray(material: number, slot: number, array: number): void {
-  bloom_set_material_texture_array(material, slot, array);
+export function setMaterialTextureArray(material: number, slot: number, array: number): boolean {
+  return bloom_set_material_texture_array(material, slot, array) !== 0;
 }
 
 /// EN-012 — shading-model selectors. Pass to `setMaterialShadingModel`.
@@ -721,8 +721,8 @@ export const SHADING_MODEL_SUBSURFACE  = 2;   // V2 stub — currently behaves a
 /// V1 limitation: SSAO doesn't half-strength on backfaces — the
 /// G-buffer doesn't carry an isFrontFace channel today. Documented as a
 /// follow-up requirement on the EN-012 ticket.
-export function setMaterialShadingModel(material: number, model: number): void {
-  bloom_set_material_shading_model(material, model);
+export function setMaterialShadingModel(material: number, model: number): boolean {
+  return bloom_set_material_shading_model(material, model) !== 0;
 }
 
 /// EN-012 — set the foliage shading parameters for a material. Only
@@ -737,8 +737,8 @@ export function setMaterialFoliage(
   material: number,
   transmissionR: number, transmissionG: number, transmissionB: number,
   transmissionAmount: number, wrapFactor: number,
-): void {
-  bloom_set_material_foliage(material, transmissionR, transmissionG, transmissionB, transmissionAmount, wrapFactor);
+): boolean {
+  return bloom_set_material_foliage(material, transmissionR, transmissionG, transmissionB, transmissionAmount, wrapFactor) !== 0;
 }
 
 /**
@@ -971,12 +971,12 @@ export function createMeshExplicit(
   return uploadMeshScratch(vertices, vertexCount, indices, indexCount);
 }
 
-export function setAmbientLight(color: Color, intensity: number): void {
-  bloom_set_ambient_light(color.r, color.g, color.b, intensity);
+export function setAmbientLight(color: Color, intensity: number): boolean {
+  return bloom_set_ambient_light(color.r, color.g, color.b, intensity) !== 0;
 }
 
-export function setDirectionalLight(direction: Vec3, color: Color, intensity: number): void {
-  bloom_set_directional_light(direction.x, direction.y, direction.z, color.r, color.g, color.b, intensity);
+export function setDirectionalLight(direction: Vec3, color: Color, intensity: number): boolean {
+  return bloom_set_directional_light(direction.x, direction.y, direction.z, color.r, color.g, color.b, intensity) !== 0;
 }
 
 // EN-005 — Hillaire 2020 procedural sky.
@@ -1002,20 +1002,20 @@ export interface ProceduralSkyOptions {
   groundAlbedo?: number;
 }
 
-export function setProceduralSky(enabled: boolean, opts?: ProceduralSkyOptions): void {
+export function setProceduralSky(enabled: boolean, opts?: ProceduralSkyOptions): boolean {
   const rd = opts?.rayleighDensity ?? 1.0;
   const md = opts?.mieDensity ?? 1.0;
   const ga = opts?.groundAlbedo ?? 0.1;
-  bloom_set_procedural_sky(enabled ? 1 : 0, rd, md, ga);
+  return bloom_set_procedural_sky(enabled ? 1 : 0, rd, md, ga) !== 0;
 }
 
-export function setSunDirection(direction: Vec3, intensity: number = 1.0): void {
-  bloom_set_sun_direction(direction.x, direction.y, direction.z, intensity);
+export function setSunDirection(direction: Vec3, intensity: number = 1.0): boolean {
+  return bloom_set_sun_direction(direction.x, direction.y, direction.z, intensity) !== 0;
 }
 
-declare function bloom_set_joint_test(joint: number, angle: number): void;
-export function setJointTest(joint: number, angle: number): void {
-  bloom_set_joint_test(joint, angle);
+declare function bloom_set_joint_test(joint: number, angle: number): number;
+export function setJointTest(joint: number, angle: number): boolean {
+  return bloom_set_joint_test(joint, angle) !== 0;
 }
 
 // Async / threaded loading
@@ -1243,8 +1243,8 @@ export function releaseRagdoll(rag: number): void {
 /// origin — nothing has to be authored into the mesh. Before this the engine
 /// swayed alpha-cut materials only, which meant leaf cards fluttered while every
 /// trunk in the scene stood perfectly rigid.
-export function setModelFoliageWind(model: Model, amount: number): void {
-  bloom_set_model_foliage_wind(model.handle, amount);
+export function setModelFoliageWind(model: Model, amount: number): boolean {
+  return bloom_set_model_foliage_wind(model.handle, amount) !== 0;
 }
 
 /// Let foliage sway in the SHADOW pass too, so a bending tree and its shadow bend
@@ -1253,6 +1253,6 @@ export function setModelFoliageWind(model: Model, amount: number): void {
 /// Off by default, and not free: a caster that moves every frame cannot reuse the
 /// cached static shadow depth, so every plant re-renders into every cascade every
 /// frame. Measure before leaving it on.
-export function setFoliageShadowMotion(on: boolean): void {
-  bloom_set_foliage_shadow_motion(on ? 1 : 0);
+export function setFoliageShadowMotion(on: boolean): boolean {
+  return bloom_set_foliage_shadow_motion(on ? 1 : 0) !== 0;
 }

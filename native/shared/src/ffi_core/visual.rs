@@ -12,8 +12,8 @@ macro_rules! __bloom_ffi_visual {
         // bloom_set_env_clear_from_hdr  [source: curated; gated: image-extras]
         #[cfg(feature = "image-extras")]
         #[no_mangle]
-        pub extern "C" fn bloom_set_env_clear_from_hdr(path_ptr: *const u8) {
-            $crate::ffi::guard("bloom_set_env_clear_from_hdr", move || {
+        pub extern "C" fn bloom_set_env_clear_from_hdr(path_ptr: *const u8) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_env_clear_from_hdr", move || {
                 let path = $crate::string_header::str_from_header(path_ptr);
                 let path: &str = &bloom_resolve_asset_path(path);
                 engine().renderer.set_env_clear_from_hdr_file(path);
@@ -21,8 +21,9 @@ macro_rules! __bloom_ffi_visual {
         }
         #[cfg(not(feature = "image-extras"))]
         #[no_mangle]
-        pub extern "C" fn bloom_set_env_clear_from_hdr(_path_ptr: *const u8) {
+        pub extern "C" fn bloom_set_env_clear_from_hdr(_path_ptr: *const u8) -> f64 {
             $crate::ffi::feature_off_warn_once("bloom_set_env_clear_from_hdr", "image-extras");
+            0.0
         }
 
         // bloom_set_target_fps  [source: macos]
@@ -88,8 +89,8 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_material_reflection_probe  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_material_reflection_probe(material: f64, probe: f64) {
-            $crate::ffi::guard("bloom_set_material_reflection_probe", move || {
+        pub extern "C" fn bloom_set_material_reflection_probe(material: f64, probe: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_material_reflection_probe", move || {
                 engine()
                     .renderer
                     .set_material_reflection_probe(material as u32, probe as u32);
@@ -98,8 +99,12 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_material_texture_array  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_material_texture_array(material: f64, slot: f64, array: f64) {
-            $crate::ffi::guard("bloom_set_material_texture_array", move || {
+        pub extern "C" fn bloom_set_material_texture_array(
+            material: f64,
+            slot: f64,
+            array: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_material_texture_array", move || {
                 engine().renderer.set_material_texture_array(
                     material as u32,
                     slot as u32,
@@ -110,8 +115,8 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_material_shading_model  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_material_shading_model(material: f64, model: f64) {
-            $crate::ffi::guard("bloom_set_material_shading_model", move || {
+        pub extern "C" fn bloom_set_material_shading_model(material: f64, model: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_material_shading_model", move || {
                 engine()
                     .renderer
                     .set_material_shading_model(material as u32, model as u32);
@@ -120,8 +125,8 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_material_probe_visible  [source: shared]
         #[no_mangle]
-        pub extern "C" fn bloom_set_material_probe_visible(material: f64, visible: f64) {
-            $crate::ffi::guard("bloom_set_material_probe_visible", move || {
+        pub extern "C" fn bloom_set_material_probe_visible(material: f64, visible: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_material_probe_visible", move || {
                 engine()
                     .renderer
                     .set_material_probe_visible(material as u32, visible != 0.0);
@@ -137,8 +142,8 @@ macro_rules! __bloom_ffi_visual {
             trans_b: f64,
             trans_amount: f64,
             wrap_factor: f64,
-        ) {
-            $crate::ffi::guard("bloom_set_material_foliage", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_material_foliage", move || {
                 engine().renderer.set_material_foliage(
                     material as u32,
                     [trans_r as f32, trans_g as f32, trans_b as f32],
@@ -165,8 +170,8 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_joint_test  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_joint_test(joint_index: f64, angle: f64) {
-            $crate::ffi::guard("bloom_set_joint_test", move || {
+        pub extern "C" fn bloom_set_joint_test(joint_index: f64, angle: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_joint_test", move || {
                 engine()
                     .renderer
                     .set_joint_test(joint_index as usize, angle as f32);
@@ -175,8 +180,8 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_ambient_light  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) {
-            $crate::ffi::guard("bloom_set_ambient_light", move || {
+        pub extern "C" fn bloom_set_ambient_light(r: f64, g: f64, b: f64, intensity: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ambient_light", move || {
                 engine().renderer.set_ambient_light(r, g, b, intensity);
             })
         }
@@ -191,8 +196,8 @@ macro_rules! __bloom_ffi_visual {
             g: f64,
             b: f64,
             intensity: f64,
-        ) {
-            $crate::ffi::guard("bloom_set_directional_light", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_directional_light", move || {
                 engine()
                     .renderer
                     .set_directional_light(dx, dy, dz, r, g, b, intensity);
@@ -206,8 +211,8 @@ macro_rules! __bloom_ffi_visual {
             rayleigh_density: f64,
             mie_density: f64,
             ground_albedo: f64,
-        ) {
-            $crate::ffi::guard("bloom_set_procedural_sky", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_procedural_sky", move || {
                 engine().renderer.set_procedural_sky(
                     enabled != 0.0,
                     rayleigh_density as f32,
@@ -219,8 +224,13 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_sun_direction  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_sun_direction(dx: f64, dy: f64, dz: f64, intensity: f64) {
-            $crate::ffi::guard("bloom_set_sun_direction", move || {
+        pub extern "C" fn bloom_set_sun_direction(
+            dx: f64,
+            dy: f64,
+            dz: f64,
+            intensity: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_sun_direction", move || {
                 engine().renderer.set_sun_direction(
                     dx as f32,
                     dy as f32,
@@ -239,8 +249,8 @@ macro_rules! __bloom_ffi_visual {
             density: f64,
             height_ref: f64,
             height_falloff: f64,
-        ) {
-            $crate::ffi::guard("bloom_set_fog", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_fog", move || {
                 let r_ = engine();
                 r_.renderer.set_fog_color(r as f32, g as f32, b as f32);
                 r_.renderer.set_fog_density(density as f32);
@@ -251,16 +261,16 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_chromatic_aberration  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) {
-            $crate::ffi::guard("bloom_set_chromatic_aberration", move || {
+        pub extern "C" fn bloom_set_chromatic_aberration(strength: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_chromatic_aberration", move || {
                 engine().renderer.set_chromatic_aberration(strength as f32);
             })
         }
 
         // bloom_set_vignette  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_vignette(strength: f64, softness: f64) {
-            $crate::ffi::guard("bloom_set_vignette", move || {
+        pub extern "C" fn bloom_set_vignette(strength: f64, softness: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_vignette", move || {
                 engine()
                     .renderer
                     .set_vignette(strength as f32, softness as f32);
@@ -269,16 +279,16 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_film_grain  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_film_grain(strength: f64) {
-            $crate::ffi::guard("bloom_set_film_grain", move || {
+        pub extern "C" fn bloom_set_film_grain(strength: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_film_grain", move || {
                 engine().renderer.set_film_grain(strength as f32);
             })
         }
 
         // bloom_set_sharpen_strength  [round-2 audit F8]
         #[no_mangle]
-        pub extern "C" fn bloom_set_sharpen_strength(strength: f64) {
-            $crate::ffi::guard("bloom_set_sharpen_strength", move || {
+        pub extern "C" fn bloom_set_sharpen_strength(strength: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_sharpen_strength", move || {
                 engine().renderer.set_sharpen_strength(strength as f32);
             })
         }
@@ -333,8 +343,8 @@ macro_rules! __bloom_ffi_visual {
         // GH #133 — conventional imported-transparency composition.
         // preference: 0=sorted, 1=auto, 2=weighted; active: 0=sorted, 1=weighted.
         #[no_mangle]
-        pub extern "C" fn bloom_set_transparency_composition_mode(mode: f64) {
-            $crate::ffi::guard("bloom_set_transparency_composition_mode", move || {
+        pub extern "C" fn bloom_set_transparency_composition_mode(mode: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_transparency_composition_mode", move || {
                 engine()
                     .renderer
                     .set_transparency_composition_mode(mode as u32);
@@ -372,8 +382,14 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_sun_shafts  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_sun_shafts(strength: f64, decay: f64, r: f64, g: f64, b: f64) {
-            $crate::ffi::guard("bloom_set_sun_shafts", move || {
+        pub extern "C" fn bloom_set_sun_shafts(
+            strength: f64,
+            decay: f64,
+            r: f64,
+            g: f64,
+            b: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_sun_shafts", move || {
                 let eng = engine();
                 eng.renderer.set_sun_shaft_strength(strength as f32);
                 eng.renderer.set_sun_shaft_decay(decay as f32);
@@ -384,55 +400,55 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_auto_exposure  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_auto_exposure(on: f64) {
-            $crate::ffi::guard("bloom_set_auto_exposure", move || {
+        pub extern "C" fn bloom_set_auto_exposure(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_auto_exposure", move || {
                 engine().renderer.set_auto_exposure(on != 0.0);
             })
         }
 
         #[no_mangle]
-        pub extern "C" fn bloom_set_occlusion_culling(on: f64) {
-            $crate::ffi::guard("bloom_set_occlusion_culling", move || {
+        pub extern "C" fn bloom_set_occlusion_culling(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_occlusion_culling", move || {
                 engine().renderer.occlusion.enabled = on != 0.0;
             })
         }
 
         // bloom_set_taa_enabled  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_taa_enabled(on: f64) {
-            $crate::ffi::guard("bloom_set_taa_enabled", move || {
+        pub extern "C" fn bloom_set_taa_enabled(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_taa_enabled", move || {
                 engine().renderer.set_taa_enabled(on != 0.0);
             })
         }
 
         // bloom_set_render_scale  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_render_scale(scale: f64) {
-            $crate::ffi::guard("bloom_set_render_scale", move || {
+        pub extern "C" fn bloom_set_render_scale(scale: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_render_scale", move || {
                 engine().renderer.set_render_scale(scale as f32);
             })
         }
 
         // bloom_set_upscale_mode  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_upscale_mode(mode: f64) {
-            $crate::ffi::guard("bloom_set_upscale_mode", move || {
+        pub extern "C" fn bloom_set_upscale_mode(mode: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_upscale_mode", move || {
                 engine().renderer.set_upscale_mode(mode as u32);
             })
         }
 
         // bloom_set_cas_strength  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_cas_strength(strength: f64) {
-            $crate::ffi::guard("bloom_set_cas_strength", move || {
+        pub extern "C" fn bloom_set_cas_strength(strength: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_cas_strength", move || {
                 engine().renderer.set_cas_strength(strength as f32);
             })
         }
 
         // bloom_set_auto_resolution  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_auto_resolution(target_hz: f64, enabled: f64) {
-            $crate::ffi::guard("bloom_set_auto_resolution", move || {
+        pub extern "C" fn bloom_set_auto_resolution(target_hz: f64, enabled: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_auto_resolution", move || {
                 let eng = engine();
                 if enabled != 0.0 {
                     let current = eng.renderer.render_scale();
@@ -445,24 +461,24 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_manual_exposure  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_manual_exposure(value: f64) {
-            $crate::ffi::guard("bloom_set_manual_exposure", move || {
+        pub extern "C" fn bloom_set_manual_exposure(value: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_manual_exposure", move || {
                 engine().renderer.set_manual_exposure(value as f32);
             })
         }
 
         // bloom_set_env_intensity  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_env_intensity(intensity: f64) {
-            $crate::ffi::guard("bloom_set_env_intensity", move || {
+        pub extern "C" fn bloom_set_env_intensity(intensity: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_env_intensity", move || {
                 engine().renderer.set_env_intensity(intensity as f32);
             })
         }
 
         // bloom_set_ssgi_enabled  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_ssgi_enabled(enabled: f64) {
-            $crate::ffi::guard("bloom_set_ssgi_enabled", move || {
+        pub extern "C" fn bloom_set_ssgi_enabled(enabled: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssgi_enabled", move || {
                 engine().renderer.set_ssgi_enabled(enabled != 0.0);
             })
         }
@@ -487,8 +503,8 @@ macro_rules! __bloom_ffi_visual {
         // bloom_reset_temporal_history — call before the next 3D camera
         // after a cut, teleport, FOV discontinuity, or world load.
         #[no_mangle]
-        pub extern "C" fn bloom_reset_temporal_history() {
-            $crate::ffi::guard("bloom_reset_temporal_history", move || {
+        pub extern "C" fn bloom_reset_temporal_history() -> f64 {
+            $crate::ffi::guard_applied("bloom_reset_temporal_history", move || {
                 engine().renderer.reset_temporal_history();
             })
         }
@@ -508,24 +524,24 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_ssgi_intensity  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_ssgi_intensity(intensity: f64) {
-            $crate::ffi::guard("bloom_set_ssgi_intensity", move || {
+        pub extern "C" fn bloom_set_ssgi_intensity(intensity: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssgi_intensity", move || {
                 engine().renderer.set_ssgi_intensity(intensity as f32);
             })
         }
 
         // bloom_set_ssgi_radius  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_ssgi_radius(radius: f64) {
-            $crate::ffi::guard("bloom_set_ssgi_radius", move || {
+        pub extern "C" fn bloom_set_ssgi_radius(radius: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssgi_radius", move || {
                 engine().renderer.set_ssgi_radius(radius as f32);
             })
         }
 
         // bloom_set_dof  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_dof(enabled: f64, focus_distance: f64, aperture: f64) {
-            $crate::ffi::guard("bloom_set_dof", move || {
+        pub extern "C" fn bloom_set_dof(enabled: f64, focus_distance: f64, aperture: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_dof", move || {
                 let r = &mut engine().renderer;
                 r.set_dof_enabled(enabled != 0.0);
                 r.set_dof_focus_distance(focus_distance as f32);
@@ -535,32 +551,32 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_quality_preset  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_quality_preset(preset: f64) {
-            $crate::ffi::guard("bloom_set_quality_preset", move || {
+        pub extern "C" fn bloom_set_quality_preset(preset: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_quality_preset", move || {
                 engine().renderer.apply_quality_preset(preset as u32);
             })
         }
 
         // bloom_set_shadows_enabled  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_shadows_enabled(on: f64) {
-            $crate::ffi::guard("bloom_set_shadows_enabled", move || {
+        pub extern "C" fn bloom_set_shadows_enabled(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_shadows_enabled", move || {
                 engine().renderer.set_shadows_enabled(on != 0.0);
             })
         }
 
         // bloom_set_shadows_always_fresh  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_shadows_always_fresh(on: f64) {
-            $crate::ffi::guard("bloom_set_shadows_always_fresh", move || {
+        pub extern "C" fn bloom_set_shadows_always_fresh(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_shadows_always_fresh", move || {
                 engine().renderer.set_shadows_always_fresh(on != 0.0);
             })
         }
 
         // bloom_set_bloom_enabled  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_bloom_enabled(on: f64) {
-            $crate::ffi::guard("bloom_set_bloom_enabled", move || {
+        pub extern "C" fn bloom_set_bloom_enabled(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_bloom_enabled", move || {
                 engine().renderer.set_bloom_enabled(on != 0.0);
             })
         }
@@ -569,8 +585,8 @@ macro_rules! __bloom_ffi_visual {
         // Scales the bloom contribution added to the HDR scene before tonemap
         // (0 = none, ~0.04 subtle default, higher = stronger glow).
         #[no_mangle]
-        pub extern "C" fn bloom_set_bloom_intensity(value: f64) {
-            $crate::ffi::guard("bloom_set_bloom_intensity", move || {
+        pub extern "C" fn bloom_set_bloom_intensity(value: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_bloom_intensity", move || {
                 engine().renderer.set_bloom_intensity(value as f32);
             })
         }
@@ -579,8 +595,8 @@ macro_rules! __bloom_ffi_visual {
         // Selects the tonemap operator: 0 = ACES (default), 1 = AgX (more
         // filmic, better highlight desaturation + a punchier look).
         #[no_mangle]
-        pub extern "C" fn bloom_set_tonemap(kind: f64) {
-            $crate::ffi::guard("bloom_set_tonemap", move || {
+        pub extern "C" fn bloom_set_tonemap(kind: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_tonemap", move || {
                 engine().renderer.set_tonemap_kind(kind as u32);
             })
         }
@@ -590,8 +606,8 @@ macro_rules! __bloom_ffi_visual {
         // exposure aims for a darker, more saturated midpoint (less wash-out);
         // higher = brighter.
         #[no_mangle]
-        pub extern "C" fn bloom_set_auto_exposure_key(key: f64) {
-            $crate::ffi::guard("bloom_set_auto_exposure_key", move || {
+        pub extern "C" fn bloom_set_auto_exposure_key(key: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_auto_exposure_key", move || {
                 engine().renderer.set_auto_exposure_key(key as f32);
             })
         }
@@ -600,40 +616,45 @@ macro_rules! __bloom_ffi_visual {
         // Per-frame adaptation rate for auto-exposure (0 = frozen, ~0.05 = a
         // smooth eye-adaptation feel, 1 = instant).
         #[no_mangle]
-        pub extern "C" fn bloom_set_auto_exposure_rate(rate: f64) {
-            $crate::ffi::guard("bloom_set_auto_exposure_rate", move || {
+        pub extern "C" fn bloom_set_auto_exposure_rate(rate: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_auto_exposure_rate", move || {
                 engine().renderer.set_auto_exposure_rate(rate as f32);
             })
         }
 
         // bloom_set_ssao_enabled  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_ssao_enabled(on: f64) {
-            $crate::ffi::guard("bloom_set_ssao_enabled", move || {
+        pub extern "C" fn bloom_set_ssao_enabled(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssao_enabled", move || {
                 engine().renderer.set_ssao_enabled(on != 0.0);
             })
         }
 
         // bloom_set_ssao_intensity  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_ssao_intensity(value: f64) {
-            $crate::ffi::guard("bloom_set_ssao_intensity", move || {
+        pub extern "C" fn bloom_set_ssao_intensity(value: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssao_intensity", move || {
                 engine().renderer.set_ssao_strength(value as f32);
             })
         }
 
         // bloom_set_ssao_radius  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_ssao_radius(world_radius: f64) {
-            $crate::ffi::guard("bloom_set_ssao_radius", move || {
+        pub extern "C" fn bloom_set_ssao_radius(world_radius: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssao_radius", move || {
                 engine().renderer.set_ssao_radius(world_radius as f32);
             })
         }
 
         // bloom_set_wind  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_wind(dir_x: f64, dir_z: f64, amplitude: f64, frequency: f64) {
-            $crate::ffi::guard("bloom_set_wind", move || {
+        pub extern "C" fn bloom_set_wind(
+            dir_x: f64,
+            dir_z: f64,
+            amplitude: f64,
+            frequency: f64,
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_wind", move || {
                 engine().renderer.set_wind(
                     dir_x as f32,
                     dir_z as f32,
@@ -649,8 +670,8 @@ macro_rules! __bloom_ffi_visual {
         // tree. The engine used to sway alpha-cut materials only, so leaf cards
         // fluttered and every trunk stood rigid.
         #[no_mangle]
-        pub extern "C" fn bloom_set_model_foliage_wind(model: f64, amount: f64) {
-            $crate::ffi::guard("bloom_set_model_foliage_wind", move || {
+        pub extern "C" fn bloom_set_model_foliage_wind(model: f64, amount: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_model_foliage_wind", move || {
                 engine()
                     .renderer
                     .set_model_foliage_wind(model.to_bits(), amount as f32);
@@ -662,8 +683,8 @@ macro_rules! __bloom_ffi_visual {
         // Let foliage sway in the shadow pass too, so the canopy dapple moves.
         // NOT free: a moving caster cannot reuse the cached static shadow depth.
         #[no_mangle]
-        pub extern "C" fn bloom_set_foliage_shadow_motion(on: f64) {
-            $crate::ffi::guard("bloom_set_foliage_shadow_motion", move || {
+        pub extern "C" fn bloom_set_foliage_shadow_motion(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_foliage_shadow_motion", move || {
                 engine().renderer.set_foliage_shadow_motion(on > 0.5);
             })
         }
@@ -674,8 +695,8 @@ macro_rules! __bloom_ffi_visual {
         // the fixed cost of the TSR upscale + final composite, which is what actually
         // dominates a 4K frame — render_scale does not.
         #[no_mangle]
-        pub extern "C" fn bloom_set_output_scale(scale: f64) {
-            $crate::ffi::guard("bloom_set_output_scale", move || {
+        pub extern "C" fn bloom_set_output_scale(scale: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_output_scale", move || {
                 engine().renderer.set_output_scale(scale as f32);
             })
         }
@@ -698,8 +719,8 @@ macro_rules! __bloom_ffi_visual {
             deck_height: f64,
             feature_scale: f64,
             drift_speed: f64,
-        ) {
-            $crate::ffi::guard("bloom_set_cloud_shadows", move || {
+        ) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_cloud_shadows", move || {
                 engine().renderer.set_cloud_shadows(
                     strength as f32,
                     deck_height as f32,
@@ -711,24 +732,24 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_set_ssr_enabled  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_ssr_enabled(on: f64) {
-            $crate::ffi::guard("bloom_set_ssr_enabled", move || {
+        pub extern "C" fn bloom_set_ssr_enabled(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_ssr_enabled", move || {
                 engine().renderer.set_ssr_enabled(on != 0.0);
             })
         }
 
         // bloom_set_motion_blur_enabled  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_motion_blur_enabled(on: f64) {
-            $crate::ffi::guard("bloom_set_motion_blur_enabled", move || {
+        pub extern "C" fn bloom_set_motion_blur_enabled(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_motion_blur_enabled", move || {
                 engine().renderer.set_motion_blur_enabled(on != 0.0);
             })
         }
 
         // bloom_set_sss_enabled  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_set_sss_enabled(on: f64) {
-            $crate::ffi::guard("bloom_set_sss_enabled", move || {
+        pub extern "C" fn bloom_set_sss_enabled(on: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_sss_enabled", move || {
                 engine().renderer.set_sss_enabled(on != 0.0);
             })
         }
@@ -809,16 +830,16 @@ macro_rules! __bloom_ffi_visual {
 
         // bloom_enable_shadows  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_enable_shadows() {
-            $crate::ffi::guard("bloom_enable_shadows", move || {
+        pub extern "C" fn bloom_enable_shadows() -> f64 {
+            $crate::ffi::guard_applied("bloom_enable_shadows", move || {
                 engine().renderer.shadow_map.enable();
             })
         }
 
         // bloom_disable_shadows  [source: macos]
         #[no_mangle]
-        pub extern "C" fn bloom_disable_shadows() {
-            $crate::ffi::guard("bloom_disable_shadows", move || {
+        pub extern "C" fn bloom_disable_shadows() -> f64 {
+            $crate::ffi::guard_applied("bloom_disable_shadows", move || {
                 engine().renderer.shadow_map.disable();
             })
         }
