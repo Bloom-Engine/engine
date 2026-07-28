@@ -711,6 +711,10 @@ pub struct Renderer {
     /// Opaque and TAA-disabled frames never compile or bind it.
     taa_reactive_pipeline: Option<wgpu::RenderPipeline>,
     taa_reactive_layout: Option<wgpu::BindGroupLayout>,
+    /// Reactive TAA history bindings, additionally keyed by compiled plan ID
+    /// and transient-pool rebuild epoch for the coverage texture view.
+    taa_reactive_bind_group_cache: [Option<wgpu::BindGroup>; 2],
+    taa_reactive_bind_group_cache_keys: [Option<(u64, u64)>; 2],
     /// Frame counter used to pick a different Halton offset every
     /// frame for sub-pixel camera jitter — accumulating over the
     /// jitter sequence is what gives TAA its anti-aliasing.
@@ -7698,6 +7702,8 @@ impl Renderer {
             temporal_diagnostics: None,
             taa_reactive_pipeline: None,
             taa_reactive_layout: None,
+            taa_reactive_bind_group_cache: [None, None],
+            taa_reactive_bind_group_cache_keys: [None, None],
             taa_frame_index: 0,
             taa_enabled: true,
             taa_history_valid: false,
@@ -8315,6 +8321,8 @@ impl Renderer {
             self.scene_compose_bind_group_cache = std::array::from_fn(|_| None);
             self.ssr_temporal_bind_group_cache = [None, None];
             self.taa_bind_group_cache = [None, None];
+            self.taa_reactive_bind_group_cache = [None, None];
+            self.taa_reactive_bind_group_cache_keys = [None, None];
 
             let (dt, dv) = create_depth_texture(&self.device, rw, rh);
             self.depth_texture = dt;

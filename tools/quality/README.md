@@ -165,9 +165,10 @@ previous-history inputs. The optional diagnostics pass consumes the same
 cached binding, and resize invalidates both entries before history, raw SSR,
 or velocity views are replaced.
 Ordinary TAA uses the same two-slot history-keyed cache and reports `taa: 0`
-after warmup. Reactive TAA remains a separately named counter because its
-coverage view belongs to the compiled transient plan; it is not folded into
-the ordinary cache without the plan identity and rebuild epoch.
+after warmup. Reactive TAA remains a separately named counter and uses two
+history slots keyed by both compiled plan ID and transient-pool rebuild epoch,
+because its coverage view belongs to that compiled transient generation. It
+also reports `taa_reactive: 0` after warmup and after a resize rebuild settles.
 
 `examples/quality-transparency/main.ts` accepts `--sorted-interleaving` as an
 unversioned focused ordering oracle. It forces conventional sorted composition

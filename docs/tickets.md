@@ -1955,8 +1955,11 @@ budget for at 4K.
   `ssr_temporal: 0`.
 - **Ordinary TAA fixed in #139:** both previous-history bindings are cached and
   invalidated before resize replaces composed/depth/velocity/history views.
-  The steady golden hard-gates `taa: 0`. Reactive TAA remains separately
-  measured until its transient plan ID and rebuild epoch are part of the key.
+  The steady golden hard-gates `taa: 0`.
+- **Reactive TAA fixed in #139:** both history slots are additionally keyed by
+  the compiled plan ID and transient-pool rebuild epoch that own the reactive
+  coverage view. The retained transparent-motion corpus hard-gates
+  `taa_reactive: 0` before and after a resize/rebuild cycle.
 
 Remaining: eliminate the measured bind-group hotspots only with complete
 resource-generation keys, then instrument and eliminate the other steady-state

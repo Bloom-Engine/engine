@@ -1197,6 +1197,27 @@ fn retained_rigid_and_reactive_motion_sequences_bound_trails() {
             .contains("\"temporal_reactive\":{\"enabled\":true,\"active\":true"),
         "transparent retained motion did not select reactive TAA coverage"
     );
+    let paths: serde_json::Value = serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+        .expect("reactive motion telemetry is valid JSON");
+    assert_eq!(
+        paths["steady_state_resources"]["bind_group_creations"]["sites"]["taa_reactive"].as_u64(),
+        Some(0),
+        "warmed reactive TAA must reuse its plan/generation/history-specific bind group"
+    );
+
+    eng.renderer.resize(320, 192, 320, 192);
+    advance(&mut eng, 3);
+    eng.renderer.resize(W, H, W, H);
+    advance(&mut eng, 4);
+    let resized_paths: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+            .expect("resized reactive motion telemetry is valid JSON");
+    assert_eq!(
+        resized_paths["steady_state_resources"]["bind_group_creations"]["sites"]["taa_reactive"]
+            .as_u64(),
+        Some(0),
+        "reactive TAA must rebuild for resize generation then return to zero churn"
+    );
 }
 
 #[test]

@@ -58,6 +58,10 @@ fn taa_current_weight(history_valid: bool, frame_index: u32, render_scale: f32) 
     }
 }
 
+fn reactive_taa_cache_key(plan_id: u64, rebuild_epoch: u64) -> (u64, u64) {
+    (plan_id, rebuild_epoch)
+}
+
 #[inline]
 fn exposure_update_rate(history_valid: bool, authored_rate: f32) -> f32 {
     if history_valid {
@@ -304,8 +308,8 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::{
-        bloom_mip_extent, bloom_threshold, exposure_update_rate, taa_current_weight,
-        CompositeSource, SsrCompositeSource,
+        bloom_mip_extent, bloom_threshold, exposure_update_rate, reactive_taa_cache_key,
+        taa_current_weight, CompositeSource, SsrCompositeSource,
     };
 
     #[test]
@@ -366,6 +370,13 @@ mod tests {
         keys.dedup();
 
         assert_eq!(keys, (0..SsrCompositeSource::COUNT).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn reactive_taa_cache_key_includes_plan_and_pool_generation() {
+        let key = reactive_taa_cache_key(41, 7);
+        assert_ne!(key, reactive_taa_cache_key(42, 7));
+        assert_ne!(key, reactive_taa_cache_key(41, 8));
     }
 
     #[test]
@@ -732,71 +743,98 @@ impl Renderer {
                 self.ensure_taa_reactive_resources();
             }
             let bg = if self.temporal_reactive_active {
-                let plan = self
-                    .last_frame_plan
-                    .as_ref()
-                    .expect("reactive TAA has an active frame plan");
-                let reactive = plan
-                    .resource("transparency-reactive")
-                    .expect("reactive topology declares its coverage input")
-                    .id;
-                let reactive_view = self
-                    .transient_pool
-                    .compiled_view(plan.plan_id, reactive)
-                    .expect("reactive coverage is materialized before post-FX");
-                self.frame_resource_stats
-                    .created_bind_group(frame_resource_stats::BindGroupCreationSite::TaaReactive);
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("taa_reactive_bg"),
-                    layout: self
-                        .taa_reactive_layout
+                let (plan_id, reactive) = {
+                    let plan = self
+                        .last_frame_plan
                         .as_ref()
-                        .expect("reactive TAA layout initialized"),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: self.taa_uniform_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&self.composed_rt_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(
-                                &self.taa_views[taa_src_idx],
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: wgpu::BindingResource::TextureView(&self.depth_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 6,
-                            resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 7,
-                            resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 8,
-                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 9,
-                            resource: wgpu::BindingResource::TextureView(reactive_view),
-                        },
-                    ],
-                })
+                        .expect("reactive TAA has an active frame plan");
+                    (
+                        plan.plan_id,
+                        plan.resource("transparency-reactive")
+                            .expect("reactive topology declares its coverage input")
+                            .id,
+                    )
+                };
+                let cache_key = reactive_taa_cache_key(plan_id, self.transient_pool.rebuild_epoch);
+                if self.taa_reactive_bind_group_cache_keys[taa_src_idx] != Some(cache_key) {
+                    let reactive_view = self
+                        .transient_pool
+                        .compiled_view(plan_id, reactive)
+                        .expect("reactive coverage is materialized before post-FX");
+                    self.frame_resource_stats.created_bind_group(
+                        frame_resource_stats::BindGroupCreationSite::TaaReactive,
+                    );
+                    self.taa_reactive_bind_group_cache[taa_src_idx] = Some(
+                        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("taa_reactive_bg"),
+                            layout: self
+                                .taa_reactive_layout
+                                .as_ref()
+                                .expect("reactive TAA layout initialized"),
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: self.taa_uniform_buffer.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.composed_rt_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.composite_sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.taa_views[taa_src_idx],
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 4,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.composite_sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 5,
+                                    resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 6,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.ssao_depth_sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 7,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.velocity_rt_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 8,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.composite_sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 9,
+                                    resource: wgpu::BindingResource::TextureView(reactive_view),
+                                },
+                            ],
+                        }),
+                    );
+                    self.taa_reactive_bind_group_cache_keys[taa_src_idx] = Some(cache_key);
+                }
+                self.taa_reactive_bind_group_cache[taa_src_idx]
+                    .as_ref()
+                    .expect("reactive TAA bind group was initialized")
+                    .clone()
             } else {
                 if self.taa_bind_group_cache[taa_src_idx].is_none() {
                     self.frame_resource_stats
