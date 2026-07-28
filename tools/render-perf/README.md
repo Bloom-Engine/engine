@@ -11,6 +11,10 @@ Never use trace-mode timings as performance evidence: the report marks them as
 including trace I/O. Run an untraced command for timing and a separate short
 traced command for upload volume.
 
+When the tool is cherry-picked onto an older comparison revision, set
+`BLOOM_RENDER_PERF_ENGINE_REVISION` to that engine commit so the JSON preserves
+the actual code-under-test identity rather than the instrumentation commit.
+
 ```sh
 cargo run --release --manifest-path tools/render-perf/Cargo.toml -- \
   --width 1920 --height 1080 --warmup 180 --frames 300 \

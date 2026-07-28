@@ -266,14 +266,16 @@ fn write_report(
     cpu: Percentiles,
     uploads: Option<UploadStats>,
 ) -> Result<(), String> {
-    let revision = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_owned())
-        .unwrap_or_else(|| "unknown".to_owned());
+    let revision = std::env::var("BLOOM_RENDER_PERF_ENGINE_REVISION").unwrap_or_else(|_| {
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|| "unknown".to_owned())
+    });
     let upload_json = uploads.map_or_else(
         || "null".to_owned(),
         |value| {
