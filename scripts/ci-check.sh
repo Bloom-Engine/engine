@@ -251,6 +251,11 @@ run_component() {
       python3 -m unittest tools/quality/test_run.py -v
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
+      hr "offline asset cooker format, corruption, and determinism tests"
+      cargo fmt --manifest-path tools/bloom-cook/Cargo.toml -- --check
+      cargo clippy --release --manifest-path tools/bloom-cook/Cargo.toml \
+        --no-deps -- -D warnings
+      cargo test --release --manifest-path tools/bloom-cook/Cargo.toml
       ;;
     example-inventory)
       hr "canonical TypeScript example inventory"

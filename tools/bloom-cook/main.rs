@@ -16,11 +16,17 @@
 //! Usage:
 //!   bloom-cook texture <in.(png|jpg|bmp|tga)> <out.dds> [--normal] [--linear]
 //!   bloom-cook texture-dir <in-dir> <out-dir> [--linear]
+//!   bloom-cook geometry <in.(glb|gltf)> <out.bgeo> [geometry limits]
+//!   bloom-cook geometry-inspect <in.bgeo>
 //!
 //! --normal  treat as a normal map (linear color, BC7)
 //! --linear  non-color data (masks, LUTs): skip the sRGB transfer
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+mod geometry_cook;
+mod geometry_format;
+mod meshlet;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -51,9 +57,42 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("geometry") if args.len() >= 3 => {
+            match geometry_cook::cook_geometry_command(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                &args[3..],
+            ) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("geometry-inspect") if args.len() == 2 => {
+            match geometry_cook::inspect_geometry_command(Path::new(&args[1])) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!("usage: bloom-cook texture <in> <out.dds> [--normal] [--linear]");
             eprintln!("       bloom-cook texture-dir <in-dir> <out-dir> [--linear]");
+            eprintln!(
+                "       bloom-cook geometry <in.glb|gltf> <out.bgeo> \
+                 [--max-vertices N] [--max-triangles N] [--page-bytes N]"
+            );
+            eprintln!("       bloom-cook geometry-inspect <in.bgeo>");
             ExitCode::FAILURE
         }
     }
@@ -61,7 +100,9 @@ fn main() -> ExitCode {
 
 fn cook_texture(input: &Path, output: &Path, flags: &[&str]) -> Result<String, String> {
     let linear = flags.contains(&"--linear") || flags.contains(&"--normal");
-    let src_len = std::fs::metadata(input).map_err(|e| format!("{input:?}: {e}"))?.len();
+    let src_len = std::fs::metadata(input)
+        .map_err(|e| format!("{input:?}: {e}"))?
+        .len();
     let img = image::open(input)
         .map_err(|e| format!("{input:?}: {e}"))?
         .to_rgba8();
@@ -88,7 +129,8 @@ fn cook_texture(input: &Path, output: &Path, flags: &[&str]) -> Result<String, S
     let mut out = std::io::BufWriter::new(
         std::fs::File::create(output).map_err(|e| format!("{output:?}: {e}"))?,
     );
-    dds.write(&mut out).map_err(|e| format!("write {output:?}: {e}"))?;
+    dds.write(&mut out)
+        .map_err(|e| format!("write {output:?}: {e}"))?;
     drop(out);
     let dst_len = std::fs::metadata(output).map_err(|e| e.to_string())?.len();
     Ok(format!(
@@ -108,8 +150,13 @@ fn cook_dir(in_dir: &Path, out_dir: &Path, flags: &[&str]) -> Result<usize, Stri
     for entry in std::fs::read_dir(in_dir).map_err(|e| format!("{in_dir:?}: {e}"))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else { continue };
-        if !matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "bmp" | "tga") {
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "bmp" | "tga"
+        ) {
             continue;
         }
         let mut out: PathBuf = out_dir.join(path.file_name().unwrap());

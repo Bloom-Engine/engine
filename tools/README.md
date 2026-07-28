@@ -9,6 +9,25 @@ The companion binaries below close the loop between the Bloom realtime
 renderer and reference ground truth. The quality harness reuses them; direct
 invocation remains useful for investigation and reference generation.
 
+## `bloom-cook` — offline asset cooking
+
+The cooker produces BC7 texture artifacts and the versioned, opt-in meshlet
+geometry artifacts used by the staged virtualized-geometry work:
+
+```shell
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  geometry examples/renderer-test/assets/DamagedHelmet.glb /tmp/helmet.bgeo
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  geometry-inspect /tmp/helmet.bgeo
+```
+
+The geometry path is offline-only today. It does not change ordinary glTF
+rendering or allocate runtime resources. See
+[`docs/virtualized-geometry.md`](../docs/virtualized-geometry.md) for the
+format, corruption guarantees, limits, compatibility reasons, and staged
+runtime boundary.
+
 ## `bloom-reference` — CPU path tracer
 
 Renders a glTF/GLB scene via Monte-Carlo path tracing. Produces

@@ -8,6 +8,9 @@ edition = "2021"
 # place that pays that build cost; the engine runtime only decodes.
 image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image", "encode"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga"] }
+gltf = { version = "1.4", default-features = false, features = ["import", "utils"] }
+serde_json = "1"
+sha2 = "0.10"
 
 [[bin]]
 name = "bloom-cook"
