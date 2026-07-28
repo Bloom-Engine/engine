@@ -1,17 +1,22 @@
-# Issue #132 asynchronous GPU receiver-marking qualification v1
+# Issue #132 asynchronous GPU receiver-marking experiment v1
 
-This checkpoint qualifies revision
+This evidence validates the exactness and fallback behavior introduced at
 `ad6e7c625c4350589d0dc5346845505ac1e6b31b` on an Apple M1 Max using
-Metal and Bloom's native high-end profile.
+Metal and Bloom's native high-end profile. Its original automatic performance
+qualification is superseded: direct pass instrumentation subsequently showed
+that GPU marking cost more GPU time than the fixed CPU work it removed.
+Current revisions therefore keep this backend explicit opt-in and default to
+the fixed CPU oracle. That corrected default begins at
+`9fe0371a8c020e56289cff5555f9110f048677d0`.
 
-## Qualified behavior
+## Validated behavior
 
 Large directional-receiver sets can now mark the fixed 32 by 32 by 3
 coverage domain in a compute pass. The runtime remains deliberately
 conservative:
 
-- GPU marking activates only for 1,024 through 4,096 camera-visible receiver
-  bounds on a capable native adapter.
+- With `BLOOM_VSM_GPU_RECEIVER=1`, GPU marking activates only for 1,024 through
+  4,096 camera-visible receiver bounds on a capable native adapter.
 - Small scenes continue to use the qualified fixed-address CPU oracle. They
   create no marker pipeline, buffer, pass, copy, or readback.
 - The first GPU result is compared with the complete ordered CPU demand
@@ -43,9 +48,9 @@ allocation is 102,896 bytes:
 - 12,288 bytes for dense atomic coverage;
 - two 12,288-byte readback buffers.
 
-`BLOOM_VSM_GPU_RECEIVER=0` provides a same-revision CPU control. It is also the
-fail-safe selected by unsupported capability limits. Web remains on the CPU
-path.
+Omitting `BLOOM_VSM_GPU_RECEIVER`, or setting it to `0`, provides the
+same-revision CPU control and the production default. Unsupported capability
+limits and Web also remain on the CPU path.
 
 ## Exact GPU validation
 
@@ -86,7 +91,7 @@ With VSM disabled, telemetry again reported zero VSM capacity, bytes,
 residency, and work. The image matched the previous milestone at RMSE
 `0.000006775`, SSIM `1.000000000`, with zero pixels above tolerance.
 
-## Workload gate and performance evidence
+## Rejected performance qualification
 
 The original experimental threshold of 256 was rejected rather than shipped.
 At roughly 285 moving receivers, three CPU controls and three GPU candidates
@@ -94,7 +99,7 @@ showed a small CPU/wall improvement but inflated GPU timestamp measurements
 from the cost of a readback every frame. That workload therefore stays on the
 fixed CPU path and allocates nothing for this feature.
 
-At the accepted 1,140-receiver workload, the paired moving probe measured:
+The preliminary 1,140-receiver paired moving probe measured:
 
 - wall mean: `4539.346179` to `4470.161396 ms`;
 - CPU frame mean: `18.615338` to `18.306413 ms`;
@@ -102,11 +107,22 @@ At the accepted 1,140-receiver workload, the paired moving probe measured:
 - shadow CPU mean: `0.637508` to `0.386642 ms`;
 - virtual-page CPU mean: `0.034791` to `0.034375 ms`.
 
-macOS window-server throttling made the absolute wall values unsuitable as a
-general engine benchmark, but it affected both paired runs and did not hide
-the pass-local CPU reduction. The overall CPU, GPU, and wall measurements all
-moved down. The threshold is intentionally conservative; no smaller workload
-uses the GPU path.
+Those totals were dominated by macOS window-server throttling and by Bloom's
+diagnostic profiler synchronizing GPU results. They were not sufficient to
+attribute the GPU marker's own cost.
+
+Follow-up timestamp instrumentation measured the unchanged marking dispatch
+directly at `0.485908 ms`. The fixed CPU control's complete shadow-pass delta
+was only `0.250866 ms`, so even the marker alone consumed more GPU time than
+the CPU work it removed. The attempted GPU rank/compact follow-up measured
+`0.436717 ms` and `0.504675 ms` in addition; a single-pass version measured
+`1.510075 ms` for the combined work. That candidate was discarded before
+commit.
+
+This fails the project's across-the-board no-regression requirement. No
+receiver-count crossover has been qualified, so there is no automatic
+workload threshold. The fixed CPU oracle is the default; the retained GPU
+backend is an explicit experiment for future architectures and profiling.
 
 ## Regression gates
 
@@ -126,6 +142,7 @@ uses the GPU path.
 Machine-readable measurements accompany this note in
 `docs/evidence/issue-132-async-gpu-receiver-v1.json`.
 
-The next milestone is GPU-resident request compaction/page scheduling, which
-removes the dense asynchronous readback. GPU page-caster culling and
-submission follow separately.
+The next VSM implementation work must start from a GPU-resident design that
+amortizes or eliminates dispatch/readback cost and must pass direct pass-level
+timing before automatic activation. GPU page-caster culling and submission
+remain separate milestones.

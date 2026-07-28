@@ -157,10 +157,12 @@ GPU readback or changing request order.
 Add `--vsm-gpu-receivers` beside `--vsm-dynamic` to create an opt-in,
 continuously moving set of at least 1,024 camera-visible receive-only bounds.
 The tiny stress nodes remain below the ground and therefore do not appear in
-the capture. Disable GPU marking for a same-revision control:
+the capture. GPU marking itself is experimental and default-off after direct
+pass instrumentation showed that it did not meet the no-regression
+performance gate on the qualification adapter. Enable it explicitly:
 
 ```sh
-BLOOM_VSM=1 BLOOM_VSM_GPU_RECEIVER=0 ./main \
+BLOOM_VSM=1 BLOOM_VSM_GPU_RECEIVER=1 ./main \
   --vsm-dynamic \
   --vsm-gpu-receivers \
   --quality-preset 3 \
@@ -171,9 +173,13 @@ BLOOM_VSM=1 BLOOM_VSM_GPU_RECEIVER=0 ./main \
   /tmp/vsm-gpu-receiver-control-intermediates
 ```
 
-The capability/workload-gated asynchronous GPU receiver marker is qualified
-in `docs/evidence/issue-132-async-gpu-receiver-v1.md`. Its dense result is
-read back without a same-frame wait and compacted by the exact CPU oracle.
+Omit `BLOOM_VSM_GPU_RECEIVER`, or set it to `0`, for the same-revision fixed
+CPU control. Exactness, fallback safety, and the rejected performance
+qualification are recorded in
+`docs/evidence/issue-132-async-gpu-receiver-v1.md`. The retained experimental
+path reads its dense result without a same-frame wait and compacts it with the
+exact CPU oracle. It must not be enabled automatically until a new direct
+GPU-cost qualification proves a net win.
 
 ## Work that remains on issue #132
 

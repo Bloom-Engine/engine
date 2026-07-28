@@ -1,7 +1,11 @@
 {
-  "schema": "bloom-directional-vsm-async-gpu-receiver-evidence-v1",
+  "schema": "bloom-directional-vsm-async-gpu-receiver-experiment-v1",
   "issue": 132,
-  "qualified_revision": "ad6e7c625c4350589d0dc5346845505ac1e6b31b",
+  "validated_revision": "ad6e7c625c4350589d0dc5346845505ac1e6b31b",
+  "default_off_revision": "9fe0371a8c020e56289cff5555f9110f048677d0",
+  "performance_qualification": "rejected",
+  "current_default": "fixed-cpu",
+  "gpu_backend_activation": "explicit-BLOOM_VSM_GPU_RECEIVER=1",
   "adapter": {
     "name": "Apple M1 Max",
     "backend": "Metal",
@@ -73,7 +77,7 @@
       "gpu_receiver_dispatches": 0
     }
   },
-  "accepted_large_workload_performance": {
+  "preliminary_indirect_large_workload_performance": {
     "control": "BLOOM_VSM_GPU_RECEIVER=0",
     "candidate": "capability-and-workload-gated-gpu",
     "wall_frame_mean_ms": {
@@ -101,7 +105,19 @@
       "candidate": 0.034375,
       "absolute_delta": -0.000416
     },
-    "presentation_throttled": true
+    "presentation_throttled": true,
+    "attribution_verdict": "insufficient"
+  },
+  "direct_pass_performance": {
+    "receiver_bounds": 1140,
+    "fixed_cpu_shadow_pass_delta_ms": 0.250866,
+    "gpu_dense_mark_ms": 0.485908,
+    "experimental_gpu_rank_ms": 0.436717,
+    "experimental_gpu_compact_ms": 0.504675,
+    "experimental_combined_one_pass_ms": 1.510075,
+    "gpu_compaction_candidate": "discarded-before-commit",
+    "automatic_activation": "rejected",
+    "reason": "direct GPU cost exceeds removed CPU cost"
   },
   "rejected_lower_threshold": {
     "receiver_bounds": 285,
@@ -109,7 +125,7 @@
     "runs_per_backend": 3,
     "decision": "rejected-keep-fixed-cpu",
     "reason": "gpu-timestamp-inflation-from-per-frame-readback",
-    "selected_minimum_receiver_bounds": 1024
+    "selected_minimum_receiver_bounds": null
   },
   "qualification": {
     "quick_lane": "pass",
