@@ -1,11 +1,13 @@
 //! Versioned, little-endian cooked geometry container.
 //!
-//! Version 1 stores deterministic leaf meshlets in independently hashed,
-//! budget-bounded pages. Hierarchy relation/error fields are present from the
-//! first version so adding parent clusters does not require changing the
-//! container layout. All offsets are validated before payload access.
+//! Version 1 stores deterministic meshlets in independently hashed,
+//! budget-bounded pages. Its fixed cluster record supports either the default
+//! leaf-only artifact or opt-in atomic parent/child replacement groups. All
+//! offsets and hierarchy relations are validated before payload access.
 
-use crate::meshlet::{Meshlet, StaticVertex, NO_RELATION};
+use crate::meshlet::{
+    Meshlet, StaticVertex, FLAG_ALPHA_MASKED, FLAG_COARSE_ROOT, FLAG_DOUBLE_SIDED, NO_RELATION,
+};
 use sha2::{Digest, Sha256};
 
 pub const MAGIC: [u8; 8] = *b"BLMGEO1\0";
@@ -68,6 +70,7 @@ pub struct ClusterRecord {
     pub page_index: u32,
     pub vertex_count: u32,
     pub triangle_count: u32,
+    pub lod_level: u32,
     pub vertex_offset: u64,
     pub index_offset: u64,
     pub aabb_min: [f32; 3],
@@ -78,6 +81,7 @@ pub struct ClusterRecord {
     pub normal_cone_cutoff: f32,
     pub geometric_error: f32,
     pub parent: u32,
+    pub parent_count: u32,
     pub first_child: u32,
     pub child_count: u32,
     pub vertex_stride: u32,
@@ -182,6 +186,7 @@ pub fn encode_geometry(
             page_index,
             vertex_count: meshlet.vertices.len() as u32,
             triangle_count: meshlet.triangle_count(),
+            lod_level: meshlet.lod_level,
             vertex_offset,
             index_offset,
             aabb_min: meshlet.bounds.aabb_min,
@@ -192,6 +197,7 @@ pub fn encode_geometry(
             normal_cone_cutoff: meshlet.bounds.normal_cone_cutoff,
             geometric_error: meshlet.geometric_error,
             parent: meshlet.parent,
+            parent_count: meshlet.parent_count,
             first_child: meshlet.first_child,
             child_count: meshlet.child_count,
             vertex_stride: StaticVertex::ENCODED_BYTES,
@@ -518,7 +524,7 @@ fn encode_cluster_record(output: &mut Vec<u8>, record: &ClusterRecord) {
     push_u32(output, record.page_index);
     push_u32(output, record.vertex_count);
     push_u32(output, record.triangle_count);
-    push_u32(output, 0);
+    push_u32(output, record.lod_level);
     push_u64(output, record.vertex_offset);
     push_u64(output, record.index_offset);
     push_f32x3(output, record.aabb_min);
@@ -532,7 +538,7 @@ fn encode_cluster_record(output: &mut Vec<u8>, record: &ClusterRecord) {
     push_u32(output, record.first_child);
     push_u32(output, record.child_count);
     push_u32(output, record.vertex_stride);
-    push_u32(output, 0);
+    push_u32(output, record.parent_count);
     debug_assert_eq!(output.len() - start, CLUSTER_RECORD_BYTES);
 }
 
@@ -549,6 +555,7 @@ fn decode_cluster_record(bytes: &[u8], offset: usize) -> Result<ClusterRecord, S
         page_index: read_u32(bytes, offset + 16, "cluster page")?,
         vertex_count: read_u32(bytes, offset + 20, "cluster vertex count")?,
         triangle_count: read_u32(bytes, offset + 24, "cluster triangle count")?,
+        lod_level: read_u32(bytes, offset + 28, "cluster LOD level")?,
         vertex_offset: read_u64(bytes, offset + 32, "cluster vertex offset")?,
         index_offset: read_u64(bytes, offset + 40, "cluster index offset")?,
         aabb_min: read_f32x3(bytes, offset + 48, "cluster aabb min")?,
@@ -562,6 +569,7 @@ fn decode_cluster_record(bytes: &[u8], offset: usize) -> Result<ClusterRecord, S
         first_child: read_u32(bytes, offset + 112, "cluster first child")?,
         child_count: read_u32(bytes, offset + 116, "cluster child count")?,
         vertex_stride: read_u32(bytes, offset + 120, "cluster vertex stride")?,
+        parent_count: read_u32(bytes, offset + 124, "cluster parent count")?,
     })
 }
 
@@ -653,11 +661,15 @@ fn validate_clusters(
     payload: &[u8],
 ) -> Result<(), String> {
     for (cluster_index, cluster) in clusters.iter().enumerate() {
+        let known_flags = FLAG_DOUBLE_SIDED | FLAG_ALPHA_MASKED | FLAG_COARSE_ROOT;
         if cluster.vertex_stride != StaticVertex::ENCODED_BYTES
             || !(3..=u8::MAX as u32).contains(&cluster.vertex_count)
             || cluster.triangle_count == 0
+            || cluster.flags & !known_flags != 0
         {
-            return Err(format!("cluster {cluster_index} has invalid counts/stride"));
+            return Err(format!(
+                "cluster {cluster_index} has invalid counts, stride, or flags"
+            ));
         }
         let page = pages
             .get(cluster.page_index as usize)
@@ -736,6 +748,22 @@ fn validate_clusters(
             return Err(format!("cluster {cluster_index} has invalid bounds/error"));
         }
         validate_relation(cluster_index, "parent", cluster.parent, clusters.len())?;
+        if cluster.parent == NO_RELATION {
+            if cluster.parent_count != 0 {
+                return Err(format!(
+                    "cluster {cluster_index} has no parent but a non-zero parent count"
+                ));
+            }
+        } else {
+            let parent_end = (cluster.parent as usize)
+                .checked_add(cluster.parent_count as usize)
+                .ok_or_else(|| format!("cluster {cluster_index} parent range overflow"))?;
+            if cluster.parent_count == 0 || parent_end > clusters.len() {
+                return Err(format!(
+                    "cluster {cluster_index} parent range exceeds cluster table"
+                ));
+            }
+        }
         if cluster.child_count == 0 {
             if cluster.first_child != NO_RELATION {
                 return Err(format!(
@@ -750,6 +778,89 @@ fn validate_clusters(
             if first >= clusters.len() || end > clusters.len() {
                 return Err(format!(
                     "cluster {cluster_index} child range exceeds cluster table"
+                ));
+            }
+        }
+    }
+    validate_hierarchy(clusters)?;
+    Ok(())
+}
+
+fn validate_hierarchy(clusters: &[ClusterRecord]) -> Result<(), String> {
+    let hierarchy_present = clusters.iter().any(|cluster| {
+        cluster.parent_count != 0
+            || cluster.child_count != 0
+            || cluster.lod_level != 0
+            || cluster.flags & FLAG_COARSE_ROOT != 0
+    });
+    for (cluster_index, cluster) in clusters.iter().enumerate() {
+        if cluster.parent == NO_RELATION {
+            if hierarchy_present && cluster.flags & FLAG_COARSE_ROOT == 0 {
+                return Err(format!(
+                    "hierarchy cluster {cluster_index} has no parent and is not a coarse root"
+                ));
+            }
+            continue;
+        }
+        if cluster.flags & FLAG_COARSE_ROOT != 0 {
+            return Err(format!(
+                "cluster {cluster_index} is both a hierarchy child and coarse root"
+            ));
+        }
+        let parent_start = cluster.parent as usize;
+        let parent_end = parent_start + cluster.parent_count as usize;
+        let first_parent = &clusters[parent_start];
+        for (parent_index, parent) in clusters[parent_start..parent_end].iter().enumerate() {
+            let parent_index = parent_start + parent_index;
+            let child_start = parent.first_child as usize;
+            let child_end = child_start
+                .checked_add(parent.child_count as usize)
+                .ok_or_else(|| format!("cluster {parent_index} child range overflow"))?;
+            if !(child_start..child_end).contains(&cluster_index)
+                || parent.lod_level <= cluster.lod_level
+                || parent.first_child != first_parent.first_child
+                || parent.child_count != first_parent.child_count
+                || parent.lod_level != first_parent.lod_level
+                || parent.geometric_error != first_parent.geometric_error
+            {
+                return Err(format!(
+                    "cluster {cluster_index} has a non-reciprocal or inconsistent parent group"
+                ));
+            }
+        }
+    }
+    for (parent_index, parent) in clusters.iter().enumerate() {
+        if parent.child_count == 0 {
+            continue;
+        }
+        let child_start = parent.first_child as usize;
+        let child_end = child_start + parent.child_count as usize;
+        let first_child = &clusters[child_start];
+        let parent_start = first_child.parent as usize;
+        let parent_end = parent_start
+            .checked_add(first_child.parent_count as usize)
+            .ok_or_else(|| format!("cluster {parent_index} sibling range overflow"))?;
+        if first_child.parent == NO_RELATION
+            || first_child.parent_count == 0
+            || !(parent_start..parent_end).contains(&parent_index)
+        {
+            return Err(format!(
+                "parent {parent_index} is outside its reciprocal sibling group"
+            ));
+        }
+        for (child_index, child) in clusters[child_start..child_end].iter().enumerate() {
+            let child_index = child_start + child_index;
+            if child.parent != first_child.parent
+                || child.parent_count != first_child.parent_count
+                || child.lod_level >= parent.lod_level
+                || child.mesh_index != parent.mesh_index
+                || child.primitive_index != parent.primitive_index
+                || child.material_index != parent.material_index
+                || (child.flags & !FLAG_COARSE_ROOT) != (parent.flags & !FLAG_COARSE_ROOT)
+                || parent.geometric_error < child.geometric_error
+            {
+                return Err(format!(
+                    "parent {parent_index} and child {child_index} violate hierarchy identity/error"
                 ));
             }
         }
@@ -851,7 +962,9 @@ fn read_hash(bytes: &[u8], offset: usize, label: &str) -> Result<[u8; 32], Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meshlet::{build_leaf_meshlets, MeshletLimits, StaticPrimitive, StaticVertex};
+    use crate::meshlet::{
+        build_leaf_meshlets, MeshletLimits, StaticPrimitive, StaticVertex, FLAG_COARSE_ROOT,
+    };
 
     fn triangle(x: f32, primitive_index: u32) -> Meshlet {
         let vertex = |position| StaticVertex {
@@ -985,5 +1098,33 @@ mod tests {
         let mut bytes = sample_archive(DEFAULT_PAGE_BYTES);
         bytes[16..20].copy_from_slice(&ENDIAN_TAG.swap_bytes().to_le_bytes());
         assert!(decode_geometry(&bytes).unwrap_err().contains("endian tag"));
+    }
+
+    #[test]
+    fn malformed_atomic_parent_groups_are_rejected() {
+        let mut child = triangle(0.0, 0);
+        child.parent = 1;
+        child.parent_count = 1;
+        let mut parent = child.clone();
+        parent.flags |= FLAG_COARSE_ROOT;
+        parent.lod_level = 1;
+        parent.geometric_error = 0.25;
+        parent.parent = NO_RELATION;
+        parent.parent_count = 0;
+        parent.first_child = 0;
+        parent.child_count = 1;
+        let mut bytes = encode_geometry(
+            &[child, parent],
+            &[],
+            sha256(b"hierarchy"),
+            DEFAULT_PAGE_BYTES,
+        )
+        .unwrap();
+
+        let child_parent_count = HEADER_BYTES + 124;
+        bytes[child_parent_count..child_parent_count + 4].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_geometry(&bytes)
+            .unwrap_err()
+            .contains("parent range exceeds cluster table"));
     }
 }

@@ -4,6 +4,9 @@ use crate::geometry_format::{
     decode_geometry, encode_geometry, hex_hash, CompatibilityReason, CompatibilityRecord,
     DEFAULT_PAGE_BYTES,
 };
+use crate::hierarchy::{
+    build_meshlet_hierarchy, build_spatial_leaf_meshlets, offset_relations, HierarchyStats,
+};
 use crate::meshlet::{build_leaf_meshlets, Meshlet, MeshletLimits, StaticPrimitive, StaticVertex};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -15,6 +18,7 @@ use std::path::Path;
 struct CookOptions {
     meshlet_limits: MeshletLimits,
     page_bytes: u32,
+    hierarchy_levels: u32,
 }
 
 impl Default for CookOptions {
@@ -22,6 +26,7 @@ impl Default for CookOptions {
         Self {
             meshlet_limits: MeshletLimits::default(),
             page_bytes: DEFAULT_PAGE_BYTES,
+            hierarchy_levels: 0,
         }
     }
 }
@@ -44,8 +49,23 @@ pub fn cook_geometry_command(
     let options = parse_options(flags)?;
     let source = load_geometry_source(input)?;
     let mut meshlets = Vec::<Meshlet>::new();
+    let mut hierarchy = HierarchyStats::default();
     for primitive in &source.primitives {
-        meshlets.extend(build_leaf_meshlets(primitive, options.meshlet_limits)?);
+        let leaves = if options.hierarchy_levels == 0 {
+            build_leaf_meshlets(primitive, options.meshlet_limits)?
+        } else {
+            build_spatial_leaf_meshlets(primitive, options.meshlet_limits)?
+        };
+        if options.hierarchy_levels == 0 {
+            meshlets.extend(leaves);
+        } else {
+            let base = meshlets.len();
+            let (mut primitive_hierarchy, stats) =
+                build_meshlet_hierarchy(leaves, options.meshlet_limits, options.hierarchy_levels)?;
+            offset_relations(&mut primitive_hierarchy, base)?;
+            hierarchy.merge(stats);
+            meshlets.extend(primitive_hierarchy);
+        }
     }
     let bytes = encode_geometry(
         &meshlets,
@@ -77,7 +97,21 @@ pub fn cook_geometry_command(
             "maximum_page_bytes": archive.maximum_page_bytes(),
             "max_vertices_per_meshlet": options.meshlet_limits.max_vertices,
             "max_triangles_per_meshlet": options.meshlet_limits.max_triangles,
-            "leaf_hierarchy_only": true,
+            "leaf_hierarchy_only": options.hierarchy_levels == 0,
+            "hierarchy": {
+                "requested_levels": options.hierarchy_levels,
+                "leaf_clusters": hierarchy.leaf_clusters,
+                "leaf_triangles": hierarchy.leaf_triangles,
+                "leaf_payload_bytes": hierarchy.leaf_payload_bytes,
+                "parent_clusters": hierarchy.parent_clusters,
+                "root_clusters": hierarchy.root_clusters,
+                "root_triangles": hierarchy.root_triangles,
+                "maximum_level": hierarchy.maximum_level,
+                "maximum_absolute_error": hierarchy.maximum_error,
+                "root_payload_bytes": hierarchy.root_payload_bytes,
+                "root_clusters_by_level": hierarchy.root_clusters_by_level,
+                "root_payload_bytes_by_level": hierarchy.root_payload_bytes_by_level,
+            },
         },
         "compatibility": compatibility_json(&archive.compatibility),
         "shipping_runtime_changes": {
@@ -143,11 +177,18 @@ fn parse_options(flags: &[String]) -> Result<CookOptions, String> {
             "--max-vertices" => options.meshlet_limits.max_vertices = parsed,
             "--max-triangles" => options.meshlet_limits.max_triangles = parsed,
             "--page-bytes" => options.page_bytes = parsed,
+            "--hierarchy-levels" => options.hierarchy_levels = parsed,
             _ => return Err(format!("unknown geometry option {flag:?}")),
         }
         index += 2;
     }
     options.meshlet_limits.validate()?;
+    if options.hierarchy_levels > 16 {
+        return Err(format!(
+            "geometry hierarchy levels must be in 0..=16, got {}",
+            options.hierarchy_levels
+        ));
+    }
     // The format writer owns the exact power-of-two/range validation. This
     // dry call keeps CLI errors local without duplicating that contract.
     if options.page_bytes == 0 {
@@ -512,11 +553,14 @@ mod tests {
             "48".to_string(),
             "--page-bytes".to_string(),
             "32768".to_string(),
+            "--hierarchy-levels".to_string(),
+            "6".to_string(),
         ];
         let options = parse_options(&flags).unwrap();
         assert_eq!(options.meshlet_limits.max_vertices, 32);
         assert_eq!(options.meshlet_limits.max_triangles, 48);
         assert_eq!(options.page_bytes, 32768);
+        assert_eq!(options.hierarchy_levels, 6);
         assert!(parse_options(&["--surprise".to_string(), "1".to_string()])
             .unwrap_err()
             .contains("unknown"));

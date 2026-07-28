@@ -9,6 +9,7 @@ edition = "2021"
 image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image", "encode"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga"] }
 gltf = { version = "1.4", default-features = false, features = ["import", "utils"] }
+meshopt = "0.6.2"
 serde_json = "1"
 sha2 = "0.10"
 

@@ -28,6 +28,10 @@ rendering or allocate runtime resources. See
 format, corruption guarantees, limits, compatibility reasons, and staged
 runtime boundary.
 
+The opt-in hierarchy cooker uses the `meshopt` Rust wrapper (MIT OR
+Apache-2.0) and its vendored meshoptimizer implementation (MIT). It is linked
+only into this offline tool, not the engine runtime.
+
 ## `bloom-reference` — CPU path tracer
 
 Renders a glTF/GLB scene via Monte-Carlo path tracing. Produces

@@ -22,6 +22,9 @@ override them:
 ```shell
 bloom-cook geometry scene.glb scene.bgeo \
   --max-vertices 32 --max-triangles 48 --page-bytes 32768
+
+# Opt in to the offline coarse hierarchy (up to 16 levels).
+bloom-cook geometry scene.glb scene.bgeo --hierarchy-levels 8
 ```
 
 Vertex limits must be 3–255. Page size must be a power of two between 4 KiB
@@ -52,6 +55,8 @@ clusters because each glTF primitive is partitioned independently.
 The source hash covers the glTF/GLB bytes and the complete resolved buffer
 contents, including external buffers. The payload and every page have separate
 SHA-256 hashes. Regenerating the same source and settings is byte-identical.
+The hierarchy level count is a cook setting and must therefore be captured by
+the future #136 artifact key alongside the source hash and meshlet/page limits.
 
 The reader rejects before payload access when it sees:
 
@@ -61,6 +66,9 @@ The reader rejects before payload access when it sees:
 - a payload or page hash mismatch;
 - invalid vertex/index counts, stride, local indices, bounds, cone, hierarchy
   links, NaN/Inf values, or page-budget overflow;
+- hierarchy roots without the coarse-root flag, missing or out-of-range parent
+  groups, non-reciprocal group ranges, non-increasing levels,
+  identity/material crossings, or decreasing accumulated error;
 - unknown compatibility reason codes.
 
 Writers run the strict reader on the in-memory result before atomically
@@ -69,11 +77,42 @@ artifact on disk.
 
 ## Geometry and compatibility behavior
 
-Version 1 builds deterministic leaf meshlets in source triangle order. Bounds
-include object-space AABB/sphere and a conservative face-normal cone.
-Double-sided material clusters explicitly disable backface-cone rejection.
-Missing normals are regenerated deterministically with area-weighted triangle
-normals. Opaque and alpha-masked triangles are eligible.
+By default, version 1 builds deterministic leaf meshlets in source triangle
+order, exactly as the first milestone did. `--hierarchy-levels` is explicit
+opt-in and uses meshoptimizer's deterministic locality-aware leaf builder
+before constructing coarse levels. Bounds include object-space AABB/sphere and
+a conservative face-normal cone. Double-sided material clusters explicitly
+disable backface-cone rejection. Missing normals are regenerated
+deterministically with area-weighted triangle normals. Opaque and alpha-masked
+triangles are eligible.
+
+## Atomic coarse hierarchy
+
+Hierarchy traversal operates on atomic cluster groups. Every child stores the
+first cluster and count of its replacement parent group. Every parent sibling
+stores the same contiguous child range. A group can therefore simplify into
+several ordinary 64-vertex meshlets; a future runtime must select all parents
+or all children for that edge. The reader validates both directions before
+accepting the archive.
+
+Each level combines up to eight spatially ordered child groups and targets
+half their triangle count. Exact complete-vertex welding restores adjacency
+without merging normal, tangent, UV, or color discontinuities. The
+attribute-aware simplifier weighs normals, tangents, both UV sets, and color,
+and locks the complete group's topological border. Independently selected
+neighboring groups therefore retain their shared boundary. A replacement that
+does not reduce cluster count is rejected and its children become terminal
+roots.
+
+The simplifier reports absolute object-space error. Each parent group stores
+that error plus the maximum error accumulated by its children. Parent
+AABB/sphere bounds conservatively cover the complete replaced child group;
+normal cones remain per rendered parent meshlet. The cook report exposes root
+cluster/payload counts by level so an always-resident budget cannot be hidden
+by aggregate totals.
+
+The cooker integration uses the Rust `meshopt` wrapper and its vendored
+meshoptimizer implementation under their permissive MIT/Apache-2.0 terms.
 
 The following content is recorded for the existing compatibility renderer and
 does not produce virtualized meshlets:
@@ -109,19 +148,21 @@ Runtime integration remains gated on the #131 dependencies:
 - the existing #28 shared geometry arena and indirect submission remain the
   compatibility/performance foundation.
 
-The format reserves parent, first-child, child-count, and geometric-error
-fields, but version 1 currently emits leaf-only clusters (`parent` and
-`first_child` are absent, `child_count = 0`, `error = 0`). A later milestone
-must build and qualify the coarse always-resident hierarchy before runtime
-streaming is enabled. Until then, no #131 end-state acceptance box is complete.
+The default version 1 artifact remains byte-identical to the qualified
+leaf-only milestone (`parent` and `first_child` absent, both relation counts
+zero, level/error zero). Opt-in artifacts populate those formerly reserved
+fields without changing the 128-byte cluster record or format version.
+Runtime streaming remains disabled until residency, traversal, occlusion, and
+fallback milestones are independently qualified.
 
 ## Qualification
 
 The quick CI quality contract runs release tests and strict Clippy for
-`bloom-cook`. The focused tests cover deterministic partitioning and encoding,
-limits, normal generation, conservative bounds/cones, real GLB import,
-metadata-only compatibility artifacts, repeated output replacement, and the
-corruption/range/hash cases above.
+`bloom-cook`. The focused tests cover deterministic partitioning, hierarchy
+construction and encoding, atomic reciprocal relations, monotonic
+error/bounds, locked outer boundaries, limits, normal generation, conservative
+bounds/cones, real GLB import, metadata-only compatibility artifacts, repeated
+output replacement, and the corruption/range/hash cases above.
 
 The canonical static smoke asset is
 `examples/renderer-test/assets/DamagedHelmet.glb`. With default limits it

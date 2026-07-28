@@ -12,6 +12,9 @@ pub const NO_RELATION: u32 = u32::MAX;
 
 pub const FLAG_DOUBLE_SIDED: u32 = 1 << 0;
 pub const FLAG_ALPHA_MASKED: u32 = 1 << 1;
+/// The cluster is a root of the cooked hierarchy and must be part of the
+/// coarse always-resident set before runtime traversal can be enabled.
+pub const FLAG_COARSE_ROOT: u32 = 1 << 2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StaticVertex {
@@ -92,7 +95,14 @@ pub struct Meshlet {
     /// Leaf clusters have zero geometric error. Hierarchy construction will
     /// assign non-zero parent errors without changing the format.
     pub geometric_error: f32,
+    pub lod_level: u32,
+    /// First cluster in the atomic parent replacement group.
     pub parent: u32,
+    /// Number of clusters in the atomic parent replacement group. Zero when
+    /// `parent` is absent.
+    pub parent_count: u32,
+    /// First cluster in the atomic child group replaced by this cluster and
+    /// its siblings.
     pub first_child: u32,
     pub child_count: u32,
 }
@@ -222,7 +232,9 @@ fn finish_meshlet(
         local_indices: local_indices.to_vec(),
         bounds,
         geometric_error: 0.0,
+        lod_level: 0,
         parent: NO_RELATION,
+        parent_count: 0,
         first_child: NO_RELATION,
         child_count: 0,
     }
