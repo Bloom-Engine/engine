@@ -39,6 +39,23 @@ impl SsrCompositeSource {
     pub(super) const COUNT: usize = 3;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(super) enum PostFxSource {
+    Hdr,
+    Composed,
+    Upscale,
+    Taa0,
+    Taa1,
+    DepthOfField,
+    MotionBlur,
+    SubsurfaceScattering,
+}
+
+impl PostFxSource {
+    pub(super) const COUNT: usize = 8;
+}
+
 #[inline]
 fn bloom_threshold(auto_exposure: bool, manual_exposure: f32) -> f32 {
     if auto_exposure {
@@ -309,7 +326,7 @@ impl Renderer {
 mod tests {
     use super::{
         bloom_mip_extent, bloom_threshold, exposure_update_rate, reactive_taa_cache_key,
-        taa_current_weight, CompositeSource, SsrCompositeSource,
+        taa_current_weight, CompositeSource, PostFxSource, SsrCompositeSource,
     };
 
     #[test]
@@ -377,6 +394,24 @@ mod tests {
         let key = reactive_taa_cache_key(41, 7);
         assert_ne!(key, reactive_taa_cache_key(42, 7));
         assert_ne!(key, reactive_taa_cache_key(41, 8));
+    }
+
+    #[test]
+    fn postfx_source_keys_are_dense_and_unique() {
+        let sources = [
+            PostFxSource::Hdr,
+            PostFxSource::Composed,
+            PostFxSource::Upscale,
+            PostFxSource::Taa0,
+            PostFxSource::Taa1,
+            PostFxSource::DepthOfField,
+            PostFxSource::MotionBlur,
+            PostFxSource::SubsurfaceScattering,
+        ];
+        let mut keys: Vec<_> = sources.into_iter().map(|source| source as usize).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys, (0..PostFxSource::COUNT).collect::<Vec<_>>());
     }
 
     #[test]
@@ -954,12 +989,16 @@ impl Renderer {
         // DoF pass: variable-radius Poisson disc blur driven by CoC
         // Reads TAA output / upscale_rt / hdr_rt + depth → dof_rt
         // ============================================================
-        let pre_dof_view = if self.taa_enabled {
-            &self.taa_views[taa_dst_idx]
+        let pre_dof_source = if self.taa_enabled {
+            if taa_dst_idx == 0 {
+                PostFxSource::Taa0
+            } else {
+                PostFxSource::Taa1
+            }
         } else if self.render_scale < 0.999 {
-            &self.upscale_rt_view
+            PostFxSource::Upscale
         } else {
-            &self.hdr_rt_view
+            PostFxSource::Hdr
         };
 
         if self.dof_enabled && self.dof_aperture > 0.0 {
@@ -976,34 +1015,39 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.dof_uniform_buffer, 0, bytemuck::bytes_of(&dp));
 
-            self.frame_resource_stats
-                .created_bind_group(frame_resource_stats::BindGroupCreationSite::DepthOfField);
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dof_bg"),
-                layout: &self.dof_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.dof_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(pre_dof_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.depth_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
-                    },
-                ],
-            });
+            let cache_index = pre_dof_source as usize;
+            if self.dof_bind_group_cache[cache_index].is_none() {
+                self.frame_resource_stats
+                    .created_bind_group(frame_resource_stats::BindGroupCreationSite::DepthOfField);
+                let pre_dof_view = self.postfx_source_view_for(pre_dof_source);
+                self.dof_bind_group_cache[cache_index] =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("dof_bg"),
+                        layout: &self.dof_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.dof_uniform_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(pre_dof_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
+                            },
+                        ],
+                    }));
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("dof_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1021,7 +1065,13 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.dof_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(
+                0,
+                self.dof_bind_group_cache[cache_index]
+                    .as_ref()
+                    .expect("depth-of-field bind group was initialized"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
         }
 
@@ -1029,14 +1079,18 @@ impl Renderer {
         // Motion blur pass: 8-tap directional blur along velocity
         // Reads upstream color + velocity_rt → motion_blur_rt
         // ============================================================
-        let pre_mblur_view = if self.dof_enabled && self.dof_aperture > 0.0 {
-            &self.dof_rt_view
+        let pre_mblur_source = if self.dof_enabled && self.dof_aperture > 0.0 {
+            PostFxSource::DepthOfField
         } else if self.taa_enabled {
-            &self.taa_views[taa_dst_idx]
+            if taa_dst_idx == 0 {
+                PostFxSource::Taa0
+            } else {
+                PostFxSource::Taa1
+            }
         } else if self.render_scale < 0.999 {
-            &self.upscale_rt_view
+            PostFxSource::Upscale
         } else {
-            &self.hdr_rt_view
+            PostFxSource::Hdr
         };
 
         if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
@@ -1054,34 +1108,41 @@ impl Renderer {
                 bytemuck::bytes_of(&mbp),
             );
 
-            self.frame_resource_stats
-                .created_bind_group(frame_resource_stats::BindGroupCreationSite::MotionBlur);
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("motion_blur_bg"),
-                layout: &self.motion_blur_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.motion_blur_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(pre_mblur_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                ],
-            });
+            let cache_index = pre_mblur_source as usize;
+            if self.motion_blur_bind_group_cache[cache_index].is_none() {
+                self.frame_resource_stats
+                    .created_bind_group(frame_resource_stats::BindGroupCreationSite::MotionBlur);
+                let pre_mblur_view = self.postfx_source_view_for(pre_mblur_source);
+                self.motion_blur_bind_group_cache[cache_index] =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("motion_blur_bg"),
+                        layout: &self.motion_blur_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.motion_blur_uniform_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(pre_mblur_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.velocity_rt_view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                        ],
+                    }));
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("motion_blur_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1099,7 +1160,13 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.motion_blur_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(
+                0,
+                self.motion_blur_bind_group_cache[cache_index]
+                    .as_ref()
+                    .expect("motion-blur bind group was initialized"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
         }
 
@@ -1109,16 +1176,20 @@ impl Renderer {
         // Runs after motion blur so it applies to the fully composited
         // motion state, not to individual geometry.
         // ============================================================
-        let pre_sss_view = if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
-            &self.motion_blur_rt_view
+        let pre_sss_source = if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
+            PostFxSource::MotionBlur
         } else if self.dof_enabled && self.dof_aperture > 0.0 {
-            &self.dof_rt_view
+            PostFxSource::DepthOfField
         } else if self.taa_enabled {
-            &self.taa_views[taa_dst_idx]
+            if taa_dst_idx == 0 {
+                PostFxSource::Taa0
+            } else {
+                PostFxSource::Taa1
+            }
         } else if self.render_scale < 0.999 {
-            &self.upscale_rt_view
+            PostFxSource::Upscale
         } else {
-            &self.hdr_rt_view
+            PostFxSource::Hdr
         };
 
         if self.sss_enabled && self.sss_strength > 0.0 {
@@ -1128,35 +1199,40 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.sss_uniform_buffer, 0, bytemuck::bytes_of(&sp));
 
-            self.frame_resource_stats.created_bind_group(
-                frame_resource_stats::BindGroupCreationSite::SubsurfaceScattering,
-            );
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("sss_bg"),
-                layout: &self.sss_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.sss_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(pre_sss_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.depth_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
-                    },
-                ],
-            });
+            let cache_index = pre_sss_source as usize;
+            if self.sss_bind_group_cache[cache_index].is_none() {
+                self.frame_resource_stats.created_bind_group(
+                    frame_resource_stats::BindGroupCreationSite::SubsurfaceScattering,
+                );
+                let pre_sss_view = self.postfx_source_view_for(pre_sss_source);
+                self.sss_bind_group_cache[cache_index] =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("sss_bg"),
+                        layout: &self.sss_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.sss_uniform_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(pre_sss_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::Sampler(&self.ssao_depth_sampler),
+                            },
+                        ],
+                    }));
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sss_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1174,7 +1250,13 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.sss_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(
+                0,
+                self.sss_bind_group_cache[cache_index]
+                    .as_ref()
+                    .expect("subsurface-scattering bind group was initialized"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
         }
 
@@ -1184,20 +1266,24 @@ impl Renderer {
         // taa/upscale/composed) and writes cas_rt. Off by default —
         // gated on cas_strength > 0.
         // ============================================================
-        let cas_input_view: &wgpu::TextureView = if self.sss_enabled && self.sss_strength > 0.0 {
-            &self.sss_rt_view
+        let cas_input_source = if self.sss_enabled && self.sss_strength > 0.0 {
+            PostFxSource::SubsurfaceScattering
         } else if self.motion_blur_enabled && self.motion_blur_strength > 0.0 {
-            &self.motion_blur_rt_view
+            PostFxSource::MotionBlur
         } else if self.dof_enabled && self.dof_aperture > 0.0 {
-            &self.dof_rt_view
+            PostFxSource::DepthOfField
         } else if self.taa_enabled {
-            &self.taa_views[taa_dst_idx]
+            if taa_dst_idx == 0 {
+                PostFxSource::Taa0
+            } else {
+                PostFxSource::Taa1
+            }
         } else if self.render_scale < 0.999 {
-            &self.upscale_rt_view
+            PostFxSource::Upscale
         } else {
             // TAA off, native res: composed_rt is already full-surface
             // and carries SSR / SSGI / bloom / fog / shafts.
-            &self.composed_rt_view
+            PostFxSource::Composed
         };
 
         if self.cas_strength > 0.0 {
@@ -1206,27 +1292,32 @@ impl Renderer {
             };
             self.queue
                 .write_buffer(&self.cas_uniform_buffer, 0, bytemuck::bytes_of(&cp));
-            self.frame_resource_stats.created_bind_group(
-                frame_resource_stats::BindGroupCreationSite::ContrastAdaptiveSharpen,
-            );
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("cas_bg"),
-                layout: &self.cas_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.cas_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(cas_input_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                ],
-            });
+            let cache_index = cas_input_source as usize;
+            if self.cas_bind_group_cache[cache_index].is_none() {
+                self.frame_resource_stats.created_bind_group(
+                    frame_resource_stats::BindGroupCreationSite::ContrastAdaptiveSharpen,
+                );
+                let cas_input_view = self.postfx_source_view_for(cas_input_source);
+                self.cas_bind_group_cache[cache_index] =
+                    Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("cas_bg"),
+                        layout: &self.cas_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.cas_uniform_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(cas_input_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                        ],
+                    }));
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cas_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1244,7 +1335,13 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.cas_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(
+                0,
+                self.cas_bind_group_cache[cache_index]
+                    .as_ref()
+                    .expect("contrast-adaptive-sharpen bind group was initialized"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
         }
     }
@@ -1290,6 +1387,19 @@ impl Renderer {
 
     pub(super) fn composite_source_view(&self) -> &wgpu::TextureView {
         self.composite_source_view_for(self.composite_source())
+    }
+
+    fn postfx_source_view_for(&self, source: PostFxSource) -> &wgpu::TextureView {
+        match source {
+            PostFxSource::Hdr => &self.hdr_rt_view,
+            PostFxSource::Composed => &self.composed_rt_view,
+            PostFxSource::Upscale => &self.upscale_rt_view,
+            PostFxSource::Taa0 => &self.taa_views[0],
+            PostFxSource::Taa1 => &self.taa_views[1],
+            PostFxSource::DepthOfField => &self.dof_rt_view,
+            PostFxSource::MotionBlur => &self.motion_blur_rt_view,
+            PostFxSource::SubsurfaceScattering => &self.sss_rt_view,
+        }
     }
 }
 

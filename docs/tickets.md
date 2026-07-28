@@ -1964,6 +1964,11 @@ budget for at 4K.
   binding is invalidated before resize. A dedicated half-resolution real-GPU
   test proves rendered geometry survives and hard-gates `upscale: 0` after
   warmup.
+- **Optional color-chain passes fixed in #139:** DoF, motion blur, SSS, and CAS
+  cache lazily against the exact upstream target, including both TAA slots.
+  Resize invalidates all source arrays before replacing views. A forced
+  full-chain GPU test renders geometry and hard-gates all four counters to
+  zero after warmup.
 
 Remaining: eliminate the measured bind-group hotspots only with complete
 resource-generation keys, then instrument and eliminate the other steady-state

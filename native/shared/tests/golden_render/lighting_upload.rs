@@ -106,3 +106,78 @@ fn steady_half_resolution_upscale_reuses_its_bind_group() {
         "warmed upscale path must reuse its persistent bind group"
     );
 }
+
+#[test]
+fn steady_depth_of_field_reuses_its_history_specific_bind_group() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    eng.renderer.set_taa_enabled(true);
+    eng.renderer.set_dof_enabled(true);
+    eng.renderer.set_dof_focus_distance(4.0);
+    eng.renderer.set_dof_aperture(0.04);
+    let (_, _, rgba) = render(&mut eng, 5, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(8.0, 12.0, 20.0, 255.0);
+        r.begin_mode_3d(3.0, 2.5, 5.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.draw_cube(0.0, 0.75, 0.0, 1.5, 1.5, 1.5, 220.0, 90.0, 35.0, 255.0);
+    });
+    assert!(
+        rgba.chunks_exact(4)
+            .any(|pixel| pixel[0] != 8 || pixel[1] != 12 || pixel[2] != 20),
+        "depth-of-field frame did not render scene geometry"
+    );
+    let paths: serde_json::Value = serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+        .expect("depth-of-field telemetry is valid JSON");
+    assert_eq!(
+        paths["steady_state_resources"]["bind_group_creations"]["sites"]["depth_of_field"].as_u64(),
+        Some(0),
+        "warmed depth of field must reuse its TAA-history-specific bind group"
+    );
+}
+
+#[test]
+fn steady_optional_postfx_chain_reuses_every_source_specific_bind_group() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(true);
+    r.set_dof_enabled(true);
+    r.set_dof_focus_distance(4.0);
+    r.set_dof_aperture(0.04);
+    r.set_motion_blur_enabled(true);
+    r.set_motion_blur_strength(0.75);
+    r.set_sss_enabled(true);
+    r.set_sss_strength(0.4);
+    r.set_cas_strength(0.35);
+
+    let (_, _, rgba) = render(&mut eng, 5, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(8.0, 12.0, 20.0, 255.0);
+        r.begin_mode_3d(3.0, 2.5, 5.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0);
+        r.draw_cube(0.0, 0.75, 0.0, 1.5, 1.5, 1.5, 220.0, 90.0, 35.0, 255.0);
+    });
+    assert!(
+        rgba.chunks_exact(4)
+            .any(|pixel| pixel[0] != 8 || pixel[1] != 12 || pixel[2] != 20),
+        "optional post-FX frame did not render scene geometry"
+    );
+    let paths: serde_json::Value = serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+        .expect("optional post-FX telemetry is valid JSON");
+    let sites = &paths["steady_state_resources"]["bind_group_creations"]["sites"];
+    for site in [
+        "depth_of_field",
+        "motion_blur",
+        "subsurface_scattering",
+        "contrast_adaptive_sharpen",
+    ] {
+        assert_eq!(
+            sites[site].as_u64(),
+            Some(0),
+            "warmed optional post-FX site {site} must reuse its source-specific bind group"
+        );
+    }
+}

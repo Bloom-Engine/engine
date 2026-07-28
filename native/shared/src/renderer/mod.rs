@@ -1173,6 +1173,7 @@ pub struct Renderer {
     pub dof_pipeline: wgpu::RenderPipeline,
     pub dof_layout: wgpu::BindGroupLayout,
     pub dof_uniform_buffer: wgpu::Buffer,
+    dof_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::PostFxSource::COUNT],
     /// DoF master switch. Default false — no perf cost when off.
     pub dof_enabled: bool,
     /// Focus distance in world units from the camera. Objects at
@@ -1201,6 +1202,7 @@ pub struct Renderer {
     pub motion_blur_pipeline: wgpu::RenderPipeline,
     pub motion_blur_layout: wgpu::BindGroupLayout,
     pub motion_blur_uniform_buffer: wgpu::Buffer,
+    motion_blur_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::PostFxSource::COUNT],
     /// Motion blur master switch. Default false — no perf cost when off.
     pub motion_blur_enabled: bool,
     /// Velocity multiplier. Higher = more blur for the same motion.
@@ -1219,6 +1221,7 @@ pub struct Renderer {
     pub sss_pipeline: wgpu::RenderPipeline,
     pub sss_layout: wgpu::BindGroupLayout,
     pub sss_uniform_buffer: wgpu::Buffer,
+    sss_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::PostFxSource::COUNT],
     /// SSS master switch. Default false — zero perf cost when off.
     pub sss_enabled: bool,
     /// SSS scatter strength: 0 = no blur (even when enabled), 1 = full
@@ -1252,6 +1255,7 @@ pub struct Renderer {
     pub cas_pipeline: wgpu::RenderPipeline,
     pub cas_layout: wgpu::BindGroupLayout,
     pub cas_uniform_buffer: wgpu::Buffer,
+    cas_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::PostFxSource::COUNT],
     /// 0 = off (default), 0.3 subtle, 0.6 punchy, 1.0 max.
     pub cas_strength: f32,
 
@@ -7915,6 +7919,7 @@ impl Renderer {
             dof_pipeline,
             dof_layout,
             dof_uniform_buffer,
+            dof_bind_group_cache: std::array::from_fn(|_| None),
             dof_enabled: false,
             dof_focus_distance: 10.0,
             dof_aperture: 0.0,
@@ -7926,6 +7931,7 @@ impl Renderer {
             motion_blur_pipeline,
             motion_blur_layout,
             motion_blur_uniform_buffer,
+            motion_blur_bind_group_cache: std::array::from_fn(|_| None),
             motion_blur_enabled: false,
             motion_blur_strength: 1.0,
             motion_blur_max_blur: 0.05,
@@ -7934,6 +7940,7 @@ impl Renderer {
             sss_pipeline,
             sss_layout,
             sss_uniform_buffer,
+            sss_bind_group_cache: std::array::from_fn(|_| None),
             sss_enabled: false,
             sss_strength: 0.5,
             sss_width: 0.01,
@@ -7949,6 +7956,7 @@ impl Renderer {
             cas_pipeline,
             cas_layout,
             cas_uniform_buffer,
+            cas_bind_group_cache: std::array::from_fn(|_| None),
             cas_strength: 0.0, // off by default
             vertices_2d: Vec::with_capacity(4096),
             indices_2d: Vec::with_capacity(8192),
@@ -8326,6 +8334,10 @@ impl Renderer {
             self.taa_reactive_bind_group_cache = [None, None];
             self.taa_reactive_bind_group_cache_keys = [None, None];
             self.upscale_bind_group_cache = None;
+            self.dof_bind_group_cache = std::array::from_fn(|_| None);
+            self.motion_blur_bind_group_cache = std::array::from_fn(|_| None);
+            self.sss_bind_group_cache = std::array::from_fn(|_| None);
+            self.cas_bind_group_cache = std::array::from_fn(|_| None);
 
             let (dt, dv) = create_depth_texture(&self.device, rw, rh);
             self.depth_texture = dt;

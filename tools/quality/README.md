@@ -173,6 +173,11 @@ The non-TAA half-resolution upscale binding is a single persistent slot,
 invalidated before resize replaces its composed input. A dedicated real-GPU
 half-resolution test proves scene pixels are produced and `upscale: 0` is
 restored after warmup.
+DoF, motion blur, SSS, and CAS use lazy bind-group arrays indexed by the exact
+upstream color target selected by the post-FX chain (including both TAA
+history slots). Resize clears every array before replacing those views. A
+forced full-chain GPU test renders geometry and hard-gates all four named
+creation counters to zero after warmup.
 
 `examples/quality-transparency/main.ts` accepts `--sorted-interleaving` as an
 unversioned focused ordering oracle. It forces conventional sorted composition
