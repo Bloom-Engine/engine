@@ -19,6 +19,9 @@ canonical shaders without VSM bindings or sampling branches.
   current page-table, parameter, and bounded render-uniform overhead is
   2,109,648 bytes.
 - Receiver-driven demand capped at 144, 64, and 16 pages by level.
+- Receiver coverage uses one fixed 1,024-entry R32 counter domain per level
+  plus a sparse touched-address list. Ranking performs no hash-table work and
+  retains byte-for-byte compatibility with the prior deterministic oracle.
 - A default render budget of eight dirty pages per frame.
 - Missing, dirty, denied, and deferred pages always sample live CSM.
 - Static page depth persists until its light matrix, caster signature, or
@@ -136,10 +139,17 @@ ordinary fixture direction, allowing a direct comparison between the
 one-frame invalidation and a settled cache. Qualification evidence is in
 `docs/evidence/issue-132-moving-light-v1.md`.
 
+The fixed-address receiver request-compaction oracle is qualified in
+`docs/evidence/issue-132-request-compaction-v1.md`. It establishes the bounded
+CPU reference and storage ABI for later compute marking without introducing a
+GPU readback or changing request order.
+
 ## Work that remains on issue #132
 
-- Move receiver marking, request compaction, caster culling, and submission to
-  bounded GPU-driven paths where the capability tier supports them.
+- Move the fixed-address receiver marking and compaction ABI to a bounded
+  GPU-driven path without a same-frame CPU readback.
+- Move caster culling and submission to bounded GPU-driven paths where the
+  capability tier and shared geometry representation support them.
 - Add explicit, default-off spot and point shadow requests, their virtual
   projections, and deterministic shared-pool arbitration. Existing unshadowed
   point lights must remain behaviorally and performance compatible.

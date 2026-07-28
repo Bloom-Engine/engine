@@ -1,0 +1,122 @@
+{
+  "schema": "bloom-directional-vsm-request-compaction-evidence-v1",
+  "issue": 132,
+  "qualified_revision": "b4e96f0dd4a30537448dfd2dd8a0f33c06a7fc5b",
+  "control_revision": "2f73135cc454fc81d8661db9b887b56dee7a0254",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end"
+  },
+  "request_abi": {
+    "levels": 3,
+    "virtual_pages_per_axis": 32,
+    "coverage_entries_per_level": 1024,
+    "coverage_entry_bytes": 4,
+    "coverage_bytes_per_level": 4096,
+    "selected_page_caps": [144, 64, 16],
+    "maximum_compacted_requests": 224,
+    "sparse_iteration": "first-touched-address-list",
+    "fallback": "csm",
+    "persistent_bytes_added": 0,
+    "gpu_passes_added": 0,
+    "gpu_readback": false
+  },
+  "equivalence": {
+    "control": "hash-map-coverage-ranking",
+    "candidate": "fixed-r32-coverage-plus-touched-list",
+    "complete_ordered_vector": "exact",
+    "cases": [
+      "overlapping-bounds",
+      "outside-bounds",
+      "invalid-bounds",
+      "duplicate-coverage",
+      "coverage-and-center-ties"
+    ]
+  },
+  "image_comparisons": {
+    "stationary_dynamic": {
+      "reference_sha256": "1864d6c4eaf837793a717c8b6d76d55ccbb1436589cc5db92becf8112bef3091",
+      "candidate_sha256": "2b56fb91d5b20386d15d098484aaf33b0f2dbb945eacc01070eda06881c4815d",
+      "rmse_luminance": 0.000009371,
+      "ssim_luminance": 1.0,
+      "percent_above_0_02": 0.0,
+      "mean_oklab_delta": 0.000000022,
+      "mean_edge_delta": 0.000000034
+    },
+    "moving_light": {
+      "reference_sha256": "8204eaee547796a7caeed44134a0f62baf66d168144b0ad0645e73c27cd2a974",
+      "candidate_sha256": "78847f064f75e992fe32c94e21530fb221fc1e199d8bacc834690464c2c964df",
+      "rmse_luminance": 0.000013946,
+      "ssim_luminance": 1.0,
+      "percent_above_0_02": 0.0,
+      "mean_oklab_delta": 0.000000089,
+      "mean_edge_delta": 0.000000104
+    },
+    "vsm_disabled": {
+      "reference_sha256": "a36be7ec7f668df5faec1971d607f216b9ddf538f9279a0be15fef6f421e19c3",
+      "candidate_sha256": "b8f8c0c308f13138e5f3c2d329199b3d00503a8a34914c077eb471b11610e3f6",
+      "rmse_luminance": 0.000007557,
+      "ssim_luminance": 1.0,
+      "percent_above_0_02": 0.0,
+      "mean_oklab_delta": 0.000000035,
+      "mean_edge_delta": 0.000000041,
+      "physical_capacity": 0,
+      "gpu_total_bytes": 0,
+      "work_pages": 0
+    }
+  },
+  "moving_light_performance": {
+    "control_runs": 3,
+    "candidate_runs": 3,
+    "median_wall_ms": {
+      "control": 14.385408,
+      "candidate": 12.873031,
+      "absolute_delta": -1.512377
+    },
+    "median_shadow_cpu_ms": {
+      "control": 0.218197,
+      "candidate": 0.181323,
+      "absolute_delta": -0.036874
+    },
+    "median_shadow_gpu_ms": {
+      "control": 2.969117,
+      "candidate": 2.864068,
+      "absolute_delta": -0.105049
+    },
+    "median_virtual_page_cpu_ms": {
+      "control": 0.044228,
+      "candidate": 0.034917,
+      "absolute_delta": -0.009311
+    },
+    "median_virtual_page_gpu_ms": {
+      "control": 2.541226,
+      "candidate": 2.505326,
+      "absolute_delta": -0.035900
+    }
+  },
+  "qualification": {
+    "ffi_schema_parity": "pass",
+    "format": "pass",
+    "strict_clippy": "pass",
+    "file_size_ratchet": "pass",
+    "native_release_check": "pass",
+    "wasm32_web_feature_check": "pass",
+    "shared_unit_tests_passed": 342,
+    "shared_unit_tests_ignored": 1,
+    "headless_device_tests_passed": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "focused_vsm_tests_passed": 35,
+    "canonical_examples": 20
+  },
+  "remaining": [
+    "GPU receiver marking and compaction without blocking readback",
+    "GPU page-caster culling and submission",
+    "spot and point virtual projections with shared arbitration",
+    "Bistro, small-pool, contact-detail, and 100-light qualification",
+    "quality-tier rollout"
+  ]
+}
