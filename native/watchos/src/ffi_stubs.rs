@@ -301,9 +301,6 @@
 #[no_mangle] pub extern "C" fn bloom_get_present_mode() -> f64 {
     0.0
 }
-#[no_mangle] pub extern "C" fn bloom_get_material_binding_capabilities() -> i64 {
-    0
-}
 #[no_mangle] pub extern "C" fn bloom_get_imported_refraction_mode() -> f64 {
     0.0
 }

@@ -308,6 +308,15 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // GH #138 — complete public renderer capability report.
+        #[no_mangle]
+        pub extern "C" fn bloom_get_renderer_capabilities() -> *const u8 {
+            $crate::ffi::guard("bloom_get_renderer_capabilities", move || {
+                let report = engine().renderer.renderer_capability_report_json();
+                $crate::string_header::alloc_perry_string(&report)
+            })
+        }
+
         // GH #133 — selected imported glTF transmission/refraction route.
         // 0=legacy opt-out, 1=scene snapshot, 2=environment fallback.
         #[no_mangle]

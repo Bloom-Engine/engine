@@ -1689,6 +1689,11 @@
           "returns": "string"
         },
         {
+          "name": "bloom_get_renderer_capabilities",
+          "params": [],
+          "returns": "string"
+        },
+        {
           "name": "bloom_get_imported_refraction_mode",
           "params": [],
           "returns": "f64"

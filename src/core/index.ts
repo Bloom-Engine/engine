@@ -39,6 +39,7 @@ declare function bloom_set_sharpen_strength(strength: number): void;
 declare function bloom_set_present_mode(mode: number): void;
 declare function bloom_get_present_mode(): number;
 declare function bloom_get_material_binding_capabilities(): string;
+declare function bloom_get_renderer_capabilities(): string;
 declare function bloom_get_imported_refraction_mode(): number;
 declare function bloom_set_transparency_composition_mode(mode: number): void;
 declare function bloom_get_transparency_composition_mode(): number;
@@ -415,6 +416,109 @@ export function getMaterialBindingCapabilities(): MaterialBindingCapabilityRepor
   return JSON.parse(
     bloom_get_material_binding_capabilities(),
   ) as MaterialBindingCapabilityReport;
+}
+
+export type RendererCapabilityTier = "baseline" | "modern" | "high-end";
+
+export interface RendererSystemPaths {
+  readonly materials: string;
+  readonly geometry: string;
+  readonly shadows: string;
+  readonly gi: string;
+  readonly reflections: string;
+  readonly anti_aliasing: string;
+  readonly textures: string;
+  readonly path_tracing: string;
+}
+
+export interface RendererCapabilityReport {
+  readonly version: 1;
+  readonly availability: "available" | "unavailable";
+  readonly reason: string | null;
+  readonly adapter: Readonly<{
+    availability: "reported";
+    name: string;
+    vendor_id: number;
+    device_id: number;
+    device_type: string;
+    driver: string;
+    driver_info: string;
+    backend: string;
+    capability_tier: RendererCapabilityTier;
+    renderer_capabilities: Readonly<{
+      detected: RendererCapabilityTier;
+      selected: RendererCapabilityTier;
+      requested: RendererCapabilityTier | null;
+      forced: RendererCapabilityTier | null;
+      diagnostic: string | null;
+      available: Readonly<{
+        features: Readonly<{
+          texture_binding_array: boolean;
+          non_uniform_indexing: boolean;
+          indirect_first_instance: boolean;
+          ray_query: boolean;
+        }>;
+        limits: Readonly<{
+          max_binding_array_elements_per_shader_stage: number;
+          max_binding_array_sampler_elements_per_shader_stage: number;
+          max_texture_array_layers: number;
+          max_sampled_textures_per_shader_stage: number;
+          max_samplers_per_shader_stage: number;
+          max_bind_groups: number;
+          max_color_attachments: number;
+        }>;
+      }>;
+      paths: Readonly<RendererSystemPaths>;
+    }>;
+    device_negotiation: Readonly<{
+      preferred_tier: RendererCapabilityTier;
+      selected_tier: RendererCapabilityTier;
+      profile: "native-full" | "folded-mobile";
+      selected_request: string;
+      fallback_cause: string | null;
+      required_features: string;
+      required_limits: Readonly<{
+        max_bind_groups: number;
+        max_color_attachments: number;
+        max_sampled_textures_per_shader_stage: number;
+        max_samplers_per_shader_stage: number;
+        max_storage_buffers_per_shader_stage: number;
+        max_uniform_buffer_binding_size: number;
+        max_binding_array_elements_per_shader_stage: number;
+        max_binding_array_sampler_elements_per_shader_stage: number;
+      }>;
+    }> | null;
+    features: readonly string[];
+  }> | null;
+  readonly material_binding: Readonly<MaterialBindingCapabilityReport> | null;
+  readonly runtime_support: Readonly<{
+    hardware_ray_query: boolean;
+    path_tracing: boolean;
+    gpu_driven: Readonly<{
+      enabled: boolean;
+      indirect_count_supported: boolean;
+      submitted: number;
+      compatibility: number;
+      indirect_calls: number;
+      frustum_visible_oracle: number;
+      frustum_culled_oracle: number;
+      frustum_culled_ratio: number;
+      classification_source: string;
+    }>;
+    imported_refraction: ImportedRefractionMode;
+    transparency_modes: readonly ("sorted" | "auto" | "weighted")[];
+  }>;
+}
+
+/**
+ * Adapter, tier, renderer-path, material-capacity, and fallback information.
+ * Read this to choose content/settings; do not infer capabilities from GPU
+ * names or startup logs.
+ */
+export function getRendererCapabilities(): RendererCapabilityReport {
+  return JSON.parse(
+    bloom_get_renderer_capabilities(),
+  ) as RendererCapabilityReport;
 }
 
 export type ImportedRefractionMode =

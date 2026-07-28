@@ -86,6 +86,23 @@ fn alloc_perry_string(s: &str) -> i64 {
     }
 }
 
+/// watchOS currently ships the explicit SceneKit proof-of-life renderer, not
+/// the shared wgpu renderer. Capability queries must say so instead of
+/// returning a null string or pretending a setter succeeded.
+#[no_mangle]
+pub extern "C" fn bloom_get_renderer_capabilities() -> i64 {
+    alloc_perry_string(
+        r#"{"version":1,"availability":"unavailable","reason":"watchOS uses the proof-of-life SceneKit renderer; shared wgpu rendering is unavailable","adapter":null,"material_binding":null,"runtime_support":{"hardware_ray_query":false,"path_tracing":false,"gpu_driven":{"enabled":false,"indirect_count_supported":false,"submitted":0,"compatibility":0,"indirect_calls":0,"frustum_visible_oracle":0,"frustum_culled_oracle":0,"frustum_culled_ratio":0.0,"classification_source":"unavailable"},"imported_refraction":"disabled-legacy","transparency_modes":[]}}"#,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn bloom_get_material_binding_capabilities() -> i64 {
+    alloc_perry_string(
+        r#"{"version":1,"detected_tier":"C","selected_tier":"C","override_tier":null,"features":{"texture_binding_array":false,"non_uniform_indexing":false},"limits":{"max_binding_array_elements":0,"max_binding_array_samplers":0,"max_texture_array_layers":0,"max_sampled_textures":0,"max_samplers":0,"max_material_records":0},"capacities":{"tier_a_textures":0,"tier_a_samplers":0,"tier_b_page_layers":0},"diagnostic":"watchOS shared wgpu renderer unavailable","residency":{"materials":0,"textures":0,"samplers":0,"meshes":0,"buffer_views":0,"stale_fallbacks":0,"limit_fallbacks":0},"dispatch":{"tier_a_per_material_bind_group_switches":0,"tier_b_last_page_count":0,"tier_b_last_page_switches":0,"tier_b_last_fallback_materials":0}}"#,
+    )
+}
+
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;

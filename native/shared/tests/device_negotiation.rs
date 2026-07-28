@@ -24,4 +24,14 @@ fn negotiated_headless_device_constructs_the_complete_renderer() {
             .as_u64()
             .is_some_and(|value| value >= 19)
     );
+
+    let public_report = engine.renderer.renderer_capability_report_json();
+    let public: serde_json::Value =
+        serde_json::from_str(&public_report).expect("public renderer capability report is valid");
+    assert_eq!(public["version"], 1);
+    assert_eq!(public["availability"], "available");
+    assert!(public["adapter"]["renderer_capabilities"]["paths"]["materials"].is_string());
+    assert!(public["material_binding"]["selected_tier"].is_string());
+    assert!(public["runtime_support"]["path_tracing"].is_boolean());
+    assert!(public["runtime_support"]["gpu_driven"]["enabled"].is_boolean());
 }

@@ -33,7 +33,7 @@ export {
   runGame,
   setProfilerEnabled, getProfilerFrameCpuUs, getProfilerFrameGpuUs,
   printProfilerSummary, getProfilerOverlay, getProfilerFrameHistory,
-  getMaterialBindingCapabilities, getImportedRefractionMode,
+  getMaterialBindingCapabilities, getRendererCapabilities, getImportedRefractionMode,
   setTransparencyCompositionMode, getTransparencyCompositionMode,
   getActiveTransparencyCompositionMode,
   setMaterialBindingTierOverride,
@@ -44,7 +44,9 @@ export type {
   Rect, Camera2D, Camera3D,
   Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4,
   RayHit, FrustumPlanes,
-  MaterialBindingTier, MaterialBindingCapabilityReport, ImportedRefractionMode,
+  MaterialBindingTier, MaterialBindingCapabilityReport,
+  RendererCapabilityTier, RendererSystemPaths, RendererCapabilityReport,
+  ImportedRefractionMode,
   TransparencyCompositionMode, ActiveTransparencyCompositionMode,
 } from './core/index';
 

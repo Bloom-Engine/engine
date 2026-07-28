@@ -212,6 +212,10 @@ impl RendererCapabilities {
     }
 
     pub fn report_json(&self) -> String {
+        let selected_definition = CAPABILITY_TIER_DEFINITIONS
+            .iter()
+            .find(|definition| definition.tier == self.selected_tier)
+            .expect("selected renderer tier has a definition");
         let requested = self
             .requested_tier
             .map(|tier| format!("\"{}\"", tier.name()))
@@ -225,7 +229,7 @@ impl RendererCapabilities {
             .as_deref()
             .map(json_string)
             .unwrap_or_else(|| "null".to_owned());
-        format!(
+        let mut out = format!(
             concat!(
                 "{{\"detected\":\"{}\",\"selected\":\"{}\",\"requested\":{},\"forced\":{},",
                 "\"diagnostic\":{},\"available\":{{\"features\":{{",
@@ -254,7 +258,26 @@ impl RendererCapabilities {
             self.max_samplers,
             self.max_bind_groups,
             self.max_color_attachments,
-        )
+        );
+        out.pop();
+        out.push_str(",\"paths\":{\"materials\":");
+        out.push_str(&json_string(selected_definition.material_bindings));
+        out.push_str(",\"geometry\":");
+        out.push_str(&json_string(selected_definition.geometry_submission));
+        out.push_str(",\"shadows\":");
+        out.push_str(&json_string(selected_definition.shadows));
+        out.push_str(",\"gi\":");
+        out.push_str(&json_string(selected_definition.gi));
+        out.push_str(",\"reflections\":");
+        out.push_str(&json_string(selected_definition.reflections));
+        out.push_str(",\"anti_aliasing\":");
+        out.push_str(&json_string(selected_definition.anti_aliasing));
+        out.push_str(",\"textures\":");
+        out.push_str(&json_string(selected_definition.textures));
+        out.push_str(",\"path_tracing\":");
+        out.push_str(&json_string(selected_definition.path_tracing));
+        out.push_str("}}");
+        out
     }
 }
 
@@ -413,5 +436,10 @@ mod tests {
         assert!(json["available"]["limits"]["max_bind_groups"]
             .as_u64()
             .is_some());
+        assert_eq!(
+            json["paths"]["materials"],
+            "Tier C per-material bind groups"
+        );
+        assert_eq!(json["paths"]["anti_aliasing"], "TAA/CAS/FXAA");
     }
 }

@@ -408,6 +408,11 @@ pub fn bloom_get_material_binding_capabilities() -> String {
 }
 
 #[wasm_bindgen]
+pub fn bloom_get_renderer_capabilities() -> String {
+    engine().renderer.renderer_capability_report_json()
+}
+
+#[wasm_bindgen]
 pub fn bloom_get_imported_refraction_mode() -> f64 {
     engine().renderer.imported_refraction_mode_code() as f64
 }

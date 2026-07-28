@@ -6,7 +6,6 @@
 
 use std::sync::mpsc;
 
-use super::capabilities::RendererCapabilities;
 use super::util::encode_png_simple;
 use super::weighted_transparency::WEIGHTED_TRANSPARENCY_AUTO_DRAW_THRESHOLD;
 use super::Renderer;
@@ -53,10 +52,6 @@ fn json_string(out: &mut String, value: &str) {
         }
     }
     out.push('"');
-}
-
-fn enum_name(value: impl std::fmt::Debug) -> String {
-    format!("{value:?}").to_ascii_lowercase().replace('_', "-")
 }
 
 fn linear_to_srgb(value: f32) -> u8 {
@@ -239,10 +234,6 @@ fn rgba8_rgb(data: &[u8], width: u32, height: u32, padded_bytes_per_row: u32) ->
 }
 
 impl Renderer {
-    pub fn set_device_negotiation_report(&mut self, report: String) {
-        self.device_negotiation_report = Some(report);
-    }
-
     fn record_quality_texture(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -648,70 +639,6 @@ impl Renderer {
                 None => eprintln!("bloom: VSM debug PNG encode failed for '{name}'"),
             }
         }
-    }
-
-    pub fn quality_adapter_json(&self) -> String {
-        let info = self.device.adapter_info();
-        let features = self.device.features();
-        let renderer_capabilities = RendererCapabilities::detect(features, &self.device.limits());
-        let mut semantic_features = Vec::new();
-        for (feature, enabled) in [
-            (
-                "timestamp-query",
-                features.contains(wgpu::Features::TIMESTAMP_QUERY),
-            ),
-            (
-                "ray-query",
-                features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
-            ),
-            (
-                "texture-binding-array",
-                features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY),
-            ),
-            (
-                "non-uniform-indexing",
-                features.contains(
-                    wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
-                ),
-            ),
-            (
-                "texture-compression-bc",
-                features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
-            ),
-        ] {
-            if enabled {
-                semantic_features.push(feature);
-            }
-        }
-        let mut out = String::from("{\"availability\":\"reported\",\"name\":");
-        json_string(&mut out, &info.name);
-        out.push_str(",\"vendor_id\":");
-        out.push_str(&info.vendor.to_string());
-        out.push_str(",\"device_id\":");
-        out.push_str(&info.device.to_string());
-        out.push_str(",\"device_type\":");
-        json_string(&mut out, &enum_name(info.device_type));
-        out.push_str(",\"driver\":");
-        json_string(&mut out, &info.driver);
-        out.push_str(",\"driver_info\":");
-        json_string(&mut out, &info.driver_info);
-        out.push_str(",\"backend\":");
-        json_string(&mut out, &enum_name(info.backend));
-        out.push_str(",\"capability_tier\":");
-        json_string(&mut out, renderer_capabilities.selected_tier.name());
-        out.push_str(",\"renderer_capabilities\":");
-        out.push_str(&renderer_capabilities.report_json());
-        out.push_str(",\"device_negotiation\":");
-        out.push_str(self.device_negotiation_report.as_deref().unwrap_or("null"));
-        out.push_str(",\"features\":[");
-        for (index, feature) in semantic_features.iter().enumerate() {
-            if index > 0 {
-                out.push(',');
-            }
-            json_string(&mut out, feature);
-        }
-        out.push_str("]}");
-        out
     }
 
     pub fn quality_runtime_paths_json(&self) -> String {

@@ -17,6 +17,7 @@ fn default_flat_normal_carries_no_filtered_variance() {
 }
 
 mod alpha_coverage;
+mod capability_api;
 mod draw2d;
 mod env_prefilter;
 mod final_pass;
@@ -419,7 +420,6 @@ pub(crate) fn srgb_u8_to_linear(c: f64) -> f32 {
 
 pub struct Renderer {
     pub device: wgpu::Device,
-    #[cfg(not(target_arch = "wasm32"))]
     device_negotiation_report: Option<String>,
     pub queue: wgpu::Queue,
     /// None in headless mode; frames render into `headless_target`.
@@ -7527,7 +7527,6 @@ impl Renderer {
             },
             headless_in_flight: std::collections::VecDeque::with_capacity(4),
             device,
-            #[cfg(not(target_arch = "wasm32"))]
             device_negotiation_report: None,
             queue,
             surface,
