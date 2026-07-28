@@ -1,8 +1,9 @@
 use bloom_shared::engine::EngineState;
+use bloom_shared::models::MaterialAlphaMode;
 use bloom_shared::renderer::device_negotiation::{
     request_device_with_fallback_and_trace, DeviceRequestOptions, DeviceRequestProfile,
 };
-use bloom_shared::renderer::Renderer;
+use bloom_shared::renderer::{Renderer, Vertex3D};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -14,6 +15,8 @@ struct Config {
     measured_frames: u32,
     quality_preset: u32,
     render_scale: Option<f32>,
+    reactive_transparency: bool,
+    profile_passes: bool,
     trace_dir: Option<PathBuf>,
     output: PathBuf,
 }
@@ -64,6 +67,8 @@ fn config() -> Result<Config, String> {
     let mut measured_frames = 300;
     let mut quality_preset = 4;
     let mut render_scale = None;
+    let mut reactive_transparency = false;
+    let mut profile_passes = false;
     let mut trace_dir = None;
     let mut output = None;
     let mut args = std::env::args().skip(1);
@@ -79,6 +84,8 @@ fn config() -> Result<Config, String> {
             "--render-scale" => {
                 render_scale = Some(parse_f32(args.next(), "--render-scale")?.clamp(0.15, 1.0));
             }
+            "--reactive-transparency" => reactive_transparency = true,
+            "--profile-passes" => profile_passes = true,
             "--trace-dir" => {
                 trace_dir = Some(PathBuf::from(
                     args.next()
@@ -104,6 +111,8 @@ fn config() -> Result<Config, String> {
         measured_frames,
         quality_preset,
         render_scale,
+        reactive_transparency,
+        profile_passes,
         trace_dir,
         output: output.ok_or_else(|| "--out is required".to_owned())?,
     })
@@ -154,6 +163,68 @@ fn draw_static_ultra_scene(engine: &mut EngineState) {
             1.6,
         );
     }
+}
+
+fn setup_reactive_transparency(engine: &mut EngineState) {
+    let h = 0.9;
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        (
+            [0.0, 0.0, -1.0],
+            [[-h, -h, -h], [h, -h, -h], [h, h, -h], [-h, h, -h]],
+        ),
+        (
+            [0.0, 0.0, 1.0],
+            [[h, -h, h], [-h, -h, h], [-h, h, h], [h, h, h]],
+        ),
+        (
+            [-1.0, 0.0, 0.0],
+            [[-h, -h, h], [-h, -h, -h], [-h, h, -h], [-h, h, h]],
+        ),
+        (
+            [1.0, 0.0, 0.0],
+            [[h, -h, -h], [h, -h, h], [h, h, h], [h, h, -h]],
+        ),
+        (
+            [0.0, 1.0, 0.0],
+            [[-h, h, -h], [h, h, -h], [h, h, h], [-h, h, h]],
+        ),
+        (
+            [0.0, -1.0, 0.0],
+            [[-h, -h, h], [h, -h, h], [h, -h, -h], [-h, -h, -h]],
+        ),
+    ];
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (normal, positions) in faces {
+        let base = vertices.len() as u32;
+        for position in positions {
+            vertices.push(Vertex3D {
+                position,
+                normal,
+                color: [0.1, 0.8, 1.0, 0.65],
+                uv: [0.0, 0.0],
+                joints: [0.0; 4],
+                weights: [0.0; 4],
+                tangent: [0.0; 4],
+            });
+        }
+        indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+    }
+    let node = engine.scene.create_node();
+    engine.scene.update_geometry(node, vertices, indices);
+    engine.scene.set_transform(
+        node,
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.2, 0.0, 1.0],
+        ],
+    );
+    engine
+        .scene
+        .set_material_gltf_alpha(node, MaterialAlphaMode::Blend, 0.0, false);
+    engine.scene.set_material_color(node, 0.1, 0.8, 1.0, 0.65);
 }
 
 fn render_frame(engine: &mut EngineState) -> FrameTiming {
@@ -222,6 +293,9 @@ fn create_engine(config: &Config) -> Result<(EngineState, String), String> {
     }
     let adapter_snapshot = renderer.quality_adapter_json();
     let mut engine = EngineState::new(renderer);
+    if config.reactive_transparency {
+        setup_reactive_transparency(&mut engine);
+    }
     engine.target_fps = 0.0;
     Ok((engine, adapter_snapshot))
 }
@@ -313,6 +387,7 @@ fn write_report(
     prepare: Percentiles,
     end_frame: Percentiles,
     uploads: Option<UploadStats>,
+    pass_profile: Option<&str>,
 ) -> Result<(), String> {
     let revision = std::env::var("BLOOM_RENDER_PERF_ENGINE_REVISION").unwrap_or_else(|_| {
         std::process::Command::new("git")
@@ -348,6 +423,7 @@ fn write_report(
             )
         },
     );
+    let pass_profile_json = pass_profile.unwrap_or("null");
     let report = format!(
         concat!(
             "{{\n  \"schema\":\"bloom-render-perf-v1\",\n",
@@ -357,6 +433,8 @@ fn write_report(
             "  \"resolution\":[{},{}],\n",
             "  \"quality_preset\":{},\n",
             "  \"render_scale\":{:.6},\n",
+            "  \"reactive_transparency_workload\":{},\n",
+            "  \"pass_profile\":{},\n",
             "  \"headless_uncapped\":true,\n",
             "  \"warmup_frames\":{},\n",
             "  \"measured_frames\":{},\n",
@@ -376,6 +454,8 @@ fn write_report(
         config.height,
         config.quality_preset,
         actual_render_scale,
+        config.reactive_transparency,
+        pass_profile_json,
         config.warmup_frames,
         config.measured_frames,
         config.trace_dir.is_some(),
@@ -411,10 +491,15 @@ fn run() -> Result<(), String> {
     for _ in 0..config.warmup_frames {
         let _ = render_frame(&mut engine);
     }
+    if config.profile_passes {
+        engine.profiler.set_enabled(true);
+    }
+    let measurement_start = Instant::now();
     let mut timing_samples = Vec::with_capacity(config.measured_frames as usize);
     for _ in 0..config.measured_frames {
         timing_samples.push(render_frame(&mut engine));
     }
+    let measurement_wall_ms = measurement_start.elapsed().as_secs_f64() * 1000.0;
     let _ = engine.renderer.device.poll(wgpu::PollType::Wait {
         submission_index: None,
         timeout: None,
@@ -423,6 +508,19 @@ fn run() -> Result<(), String> {
     let prepare = percentiles(timing_samples.iter().map(|sample| sample.prepare_ms));
     let end_frame = percentiles(timing_samples.iter().map(|sample| sample.end_frame_ms));
     let renderer_paths = engine.renderer.quality_runtime_paths_json();
+    let pass_profile = config.profile_passes.then(|| {
+        engine.profiler.quality_report_json(
+            3,
+            config.warmup_frames,
+            config.measured_frames,
+            1.0 / 60.0,
+            config.quality_preset,
+            actual_render_scale as f64,
+            measurement_wall_ms,
+            &adapter_snapshot,
+            &renderer_paths,
+        )
+    });
     drop(engine);
     let uploads = config
         .trace_dir
@@ -438,6 +536,7 @@ fn run() -> Result<(), String> {
         prepare,
         end_frame,
         uploads,
+        pass_profile.as_deref(),
     )?;
     println!(
         "bloom-render-perf {}x{} CPU p50={:.3} p95={:.3} p99={:.3} ms{}",

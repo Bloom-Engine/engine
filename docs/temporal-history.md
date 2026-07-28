@@ -455,5 +455,10 @@ silently passing.
 ## Remaining #135 work
 
 Run the complete temporal and PT corpus on every required hardware backend,
-including the cross-backend goldens owned by #127 and the timing/memory
+including the cross-backend goldens owned by #127 and full-corpus hardware
 qualification owned by #128.
+
+The consolidated production-history, reactive-mask, motion-CPU-history, and
+capture-only diagnostic cost ledger is checked in at
+`docs/evidence/issue-135-temporal-cost-ledger.md`, with machine-readable values
+in the adjacent JSON file.

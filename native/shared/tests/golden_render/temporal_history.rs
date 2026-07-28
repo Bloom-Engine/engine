@@ -1822,6 +1822,7 @@ fn cached_alpha_tested_card_motion_writes_velocity_and_bounds_trails() {
     let cpu_capacity = paths["temporal_history"]["cached_model_motion_cpu_capacity_bytes"]
         .as_u64()
         .unwrap();
+    eprintln!("temporal-corpus cached-model history_cpu_capacity={cpu_capacity} bytes");
     assert!(
         cpu_capacity <= 1024,
         "one cached instance retained excessive transform history: {cpu_capacity} bytes"
