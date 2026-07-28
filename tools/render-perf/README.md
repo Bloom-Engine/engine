@@ -3,7 +3,9 @@
 `bloom-render-perf` runs a fixed Ultra static scene through the production
 headless renderer. It measures only `EngineState::end_frame`, after draw
 submission and before any FPS cap, and reports P50/P95/P99 CPU render-submit
-time.
+time. The tool disables Bloom's unrelated default audio/physics/model-loading
+features so comparison worktrees do not depend on optional submodules and both
+revisions compile the same renderer-only workload.
 
 The optional `--trace-dir` mode enables wgpu's API trace only in this tool and
 sums every traced buffer/texture upload between the final measured submits.
