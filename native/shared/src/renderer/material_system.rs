@@ -576,7 +576,7 @@ impl MaterialSystem {
             });
             let params = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("material_stub_vsm_params"),
-                size: std::mem::size_of::<[u32; 4]>() as u64,
+                size: crate::virtual_shadows::VSM_SAMPLING_PARAMS_BYTES,
                 usage: wgpu::BufferUsages::UNIFORM,
                 mapped_at_creation: false,
             });

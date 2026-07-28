@@ -135,7 +135,7 @@ pub(super) fn create_lighting_layout(
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: std::num::NonZeroU64::new(
-                        std::mem::size_of::<[u32; 4]>() as u64
+                        crate::virtual_shadows::VSM_SAMPLING_PARAMS_BYTES,
                     ),
                 },
                 count: None,

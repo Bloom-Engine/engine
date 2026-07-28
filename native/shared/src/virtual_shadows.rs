@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
+#[path = "directional_shadow_clipmap.rs"]
+mod clipmap;
 #[path = "virtual_shadow_page_priority.rs"]
 mod page_priority;
 
@@ -18,6 +20,18 @@ pub const VSM_MAX_PAGE_RENDER_BUDGET: u16 = 64;
 pub const VSM_DYNAMIC_OVERLAY_PAGE_BUDGET: usize = 4;
 pub const VSM_DYNAMIC_OVERLAY_DRAW_BUDGET: usize = 64;
 const VSM_DIRECTIONAL_LEVEL_PAGE_CAPS: [usize; VSM_CLIP_LEVELS as usize] = [144, 64, 16];
+
+pub(crate) use clipmap::level_vps as directional_clipmap_vps;
+
+#[repr(C, align(16))]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DirectionalVsmSamplingParams {
+    level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
+    words: [u32; 4],
+}
+
+pub(crate) const VSM_SAMPLING_PARAMS_BYTES: u64 =
+    std::mem::size_of::<DirectionalVsmSamplingParams>() as u64;
 
 /// Page-table value zero means "sample the conventional shadow fallback".
 ///
@@ -439,6 +453,7 @@ pub struct DirectionalVirtualShadowMap {
     uploaded_page_table: Vec<u32>,
     page_table_may_age_until: u64,
     sampling_params_initialized: bool,
+    sampling_level_vps: Option<[[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize]>,
     render_budget: usize,
 }
 
@@ -501,6 +516,7 @@ impl DirectionalVirtualShadowMap {
             uploaded_page_table: Vec::new(),
             page_table_may_age_until: 0,
             sampling_params_initialized: false,
+            sampling_level_vps: None,
             render_budget,
         }
     }
@@ -664,11 +680,15 @@ impl DirectionalVirtualShadowMap {
             self.cache.invalidate_light(0);
         }
         let sampling_active = self.requested && self.gpu.is_some() && !global_fallback;
-        if !self.sampling_params_initialized || sampling_active != self.sampling_active {
+        if !self.sampling_params_initialized
+            || sampling_active != self.sampling_active
+            || (sampling_active && self.sampling_level_vps != Some(level_vps))
+        {
             if let Some(gpu) = self.gpu.as_ref() {
-                gpu.upload_sampling_params(queue, sampling_active);
+                gpu.upload_sampling_params(queue, sampling_active, level_vps);
             }
             self.sampling_params_initialized = true;
+            self.sampling_level_vps = sampling_active.then_some(level_vps);
         }
         self.sampling_active = sampling_active;
     }
@@ -744,6 +764,7 @@ impl DirectionalVirtualShadowMap {
         self.pending.clear();
         self.sampling_active = false;
         self.sampling_params_initialized = false;
+        self.sampling_level_vps = None;
     }
 
     pub fn debug_images(&self) -> Vec<(&'static str, u32, u32, Vec<u8>)> {
@@ -779,7 +800,7 @@ impl DirectionalVirtualShadowMap {
             * crate::shadows::SHADOW_MAX_NODES as u64
             * self.render_budget as u64;
         let gpu_overhead_bytes =
-            page_table_bytes + render_staging_bytes + std::mem::size_of::<[u32; 4]>() as u64;
+            page_table_bytes + render_staging_bytes + VSM_SAMPLING_PARAMS_BYTES;
         let (physical_capacity, physical_bytes, gpu_overhead_bytes, render_budget) =
             if self.requested {
                 (
@@ -794,6 +815,7 @@ impl DirectionalVirtualShadowMap {
         format!(
             concat!(
                 "{{\"requested\":{},\"active\":{},",
+                "\"projection\":\"camera-centered-page-snapped-clipmap\",",
                 "\"fallback\":\"csm\",\"dynamic_fallback\":{},",
                 "\"dynamic_fallback_mode\":\"{}\",\"dynamic_fallback_pages\":{},",
                 "\"dynamic_overlay_pages\":{},\"dynamic_overlay_rendered_pages\":{},",
@@ -957,7 +979,7 @@ impl GpuVirtualShadowResources {
         });
         let sampling_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vsm_sampling_params"),
-            size: std::mem::size_of::<[u32; 4]>() as u64,
+            size: VSM_SAMPLING_PARAMS_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1007,18 +1029,22 @@ impl GpuVirtualShadowResources {
         );
     }
 
-    fn upload_sampling_params(&self, queue: &wgpu::Queue, sampling_active: bool) {
-        let params = [
-            u32::from(sampling_active),
-            VSM_VIRTUAL_PAGES_PER_AXIS as u32,
-            VSM_PAGE_INTERIOR as u32,
-            VSM_PAGE_BORDER as u32,
-        ];
-        queue.write_buffer(
-            &self.sampling_params_buffer,
-            0,
-            bytemuck::cast_slice(&params),
-        );
+    fn upload_sampling_params(
+        &self,
+        queue: &wgpu::Queue,
+        sampling_active: bool,
+        level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
+    ) {
+        let params = DirectionalVsmSamplingParams {
+            level_vps,
+            words: [
+                u32::from(sampling_active),
+                VSM_VIRTUAL_PAGES_PER_AXIS as u32,
+                VSM_PAGE_INTERIOR as u32,
+                VSM_PAGE_BORDER as u32,
+            ],
+        };
+        queue.write_buffer(&self.sampling_params_buffer, 0, bytemuck::bytes_of(&params));
     }
 }
 
@@ -1041,83 +1067,10 @@ pub fn directional_page_vp(level_vp: [[f32; 4]; 4], page: VirtualShadowPage) -> 
     crate::renderer::mat4_multiply(crop, level_vp)
 }
 
-const DIRECTIONAL_VSM_SCENE_BINDINGS: &str = r#"
-struct DirectionalVsmParams {
-    enabled: u32,
-    virtual_pages_per_axis: u32,
-    page_interior: u32,
-    page_border: u32,
-};
-@group(1) @binding(13) var vsm_page_table: texture_2d_array<u32>;
-@group(1) @binding(14) var vsm_physical_pages: texture_depth_2d_array;
-@group(1) @binding(15) var<uniform> vsm_params: DirectionalVsmParams;
-"#;
-
-const DIRECTIONAL_VSM_SCENE_HELPER: &str = r#"
-fn sample_virtual_shadow(
-    cascade: i32,
-    shadow_uv: vec2<f32>,
-    depth_ref: f32,
-) -> f32 {
-    if (vsm_params.enabled == 0u) {
-        return sample_cascade(cascade, shadow_uv, depth_ref);
-    }
-    if (any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0))) {
-        return sample_cascade(cascade, shadow_uv, depth_ref);
-    }
-    let axis = vsm_params.virtual_pages_per_axis;
-    let scaled_uv = shadow_uv * f32(axis);
-    let page_xy = min(vec2<u32>(scaled_uv), vec2<u32>(axis - 1u));
-    let encoded = textureLoad(
-        vsm_page_table,
-        vec2<i32>(page_xy),
-        cascade,
-        0,
-    ).x;
-    if (encoded == 0u) {
-        return sample_cascade(cascade, shadow_uv, depth_ref);
-    }
-
-    let physical_layer = i32((encoded & 0xffffu) - 1u);
-    let interior = f32(vsm_params.page_interior);
-    let border = f32(vsm_params.page_border);
-    let physical_size = interior + 2.0 * border;
-    let local_uv = clamp(
-        scaled_uv - vec2<f32>(page_xy),
-        vec2<f32>(0.0),
-        vec2<f32>(1.0),
-    );
-    let page_uv = (vec2<f32>(border) + local_uv * interior)
-                / physical_size;
-    let texel = vec2<f32>(1.0 / physical_size);
-    let offsets = array<vec2<f32>, 4>(
-        vec2<f32>(-0.5, -0.5),
-        vec2<f32>( 0.5, -0.5),
-        vec2<f32>(-0.5,  0.5),
-        vec2<f32>( 0.5,  0.5),
-    );
-    var virtual_value = 0.0;
-    for (var i = 0; i < 4; i = i + 1) {
-        virtual_value += textureSampleCompareLevel(
-            vsm_physical_pages,
-            shadow_samp,
-            page_uv + offsets[i] * texel,
-            physical_layer,
-            depth_ref,
-        );
-    }
-    virtual_value *= 0.25;
-    let residency_age = f32(encoded >> 16u);
-    if (residency_age < 8.0) {
-        return mix(
-            sample_cascade(cascade, shadow_uv, depth_ref),
-            virtual_value,
-            residency_age / 8.0,
-        );
-    }
-    return virtual_value;
-}
-"#;
+const DIRECTIONAL_VSM_SCENE_BINDINGS: &str =
+    include_str!("../shaders/virtual_shadows/scene_bindings.wgsl");
+const DIRECTIONAL_VSM_SCENE_HELPER: &str =
+    include_str!("../shaders/virtual_shadows/scene_helper.wgsl");
 
 /// Build the opt-in scene-shader variant. The canonical source remains
 /// byte-for-byte unchanged when VSM is disabled, avoiding an extra branch or
@@ -1136,98 +1089,18 @@ pub(crate) fn directional_scene_shader(source: &str) -> String {
     output.push_str(&source[helper_offset..]);
     output = output.replace(
         "let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);",
-        "let shadow_val = sample_virtual_shadow(cascade, shadow_uv, depth_ref);",
+        "let shadow_val = sample_virtual_shadow(cascade, recv_pos, shadow_uv, depth_ref);",
     );
     output.replace(
         "let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);",
-        "let next_val = sample_virtual_shadow(next_cascade, next_uv, next_depth_ref);",
+        "let next_val = sample_virtual_shadow(next_cascade, next_pos, next_uv, next_depth_ref);",
     )
 }
 
-const DIRECTIONAL_VSM_MATERIAL_BINDINGS: &str = r#"
-struct DirectionalVsmParams {
-    enabled: u32,
-    virtual_pages_per_axis: u32,
-    page_interior: u32,
-    page_border: u32,
-};
-@group(1) @binding(10) var vsm_page_table: texture_2d_array<u32>;
-@group(1) @binding(11) var vsm_physical_pages: texture_depth_2d_array;
-@group(1) @binding(12) var<uniform> vsm_params: DirectionalVsmParams;
-"#;
-
-const DIRECTIONAL_VSM_MATERIAL_HELPER: &str = r#"
-fn sample_shadow_cascade(
-    cascade_idx: u32,
-    world_pos: vec3<f32>,
-) -> f32 {
-    if (vsm_params.enabled == 0u) {
-        return sample_shadow_cascade_csm(cascade_idx, world_pos);
-    }
-    let light_clip = view.shadow_cascades[cascade_idx]
-                   * vec4<f32>(world_pos, 1.0);
-    let light_ndc = light_clip.xyz / light_clip.w;
-    if (abs(light_ndc.x) > 1.0 || abs(light_ndc.y) > 1.0
-        || light_ndc.z < 0.0 || light_ndc.z > 1.0) {
-        return 1.0;
-    }
-    let shadow_uv = vec2<f32>(
-        light_ndc.x * 0.5 + 0.5,
-        1.0 - (light_ndc.y * 0.5 + 0.5),
-    );
-    let depth_ref = light_ndc.z - 0.001;
-    let axis = vsm_params.virtual_pages_per_axis;
-    let scaled_uv = shadow_uv * f32(axis);
-    let page_xy = min(vec2<u32>(scaled_uv), vec2<u32>(axis - 1u));
-    let encoded = textureLoad(
-        vsm_page_table,
-        vec2<i32>(page_xy),
-        i32(cascade_idx),
-        0,
-    ).x;
-    if (encoded == 0u) {
-        return sample_shadow_cascade_csm(cascade_idx, world_pos);
-    }
-    let physical_layer = i32((encoded & 0xffffu) - 1u);
-    let interior = f32(vsm_params.page_interior);
-    let border = f32(vsm_params.page_border);
-    let physical_size = interior + 2.0 * border;
-    let local_uv = clamp(
-        scaled_uv - vec2<f32>(page_xy),
-        vec2<f32>(0.0),
-        vec2<f32>(1.0),
-    );
-    let page_uv = (vec2<f32>(border) + local_uv * interior)
-                / physical_size;
-    let texel = vec2<f32>(1.0 / physical_size);
-    let offsets = array<vec2<f32>, 4>(
-        vec2<f32>(-0.5, -0.5),
-        vec2<f32>( 0.5, -0.5),
-        vec2<f32>(-0.5,  0.5),
-        vec2<f32>( 0.5,  0.5),
-    );
-    var virtual_value = 0.0;
-    for (var i = 0; i < 4; i = i + 1) {
-        virtual_value += textureSampleCompareLevel(
-            vsm_physical_pages,
-            shadow_samp,
-            page_uv + offsets[i] * texel,
-            physical_layer,
-            depth_ref,
-        );
-    }
-    virtual_value *= 0.25;
-    let residency_age = f32(encoded >> 16u);
-    if (residency_age < 8.0) {
-        return mix(
-            sample_shadow_cascade_csm(cascade_idx, world_pos),
-            virtual_value,
-            residency_age / 8.0,
-        );
-    }
-    return virtual_value;
-}
-"#;
+const DIRECTIONAL_VSM_MATERIAL_BINDINGS: &str =
+    include_str!("../shaders/virtual_shadows/material_bindings.wgsl");
+const DIRECTIONAL_VSM_MATERIAL_HELPER: &str =
+    include_str!("../shaders/virtual_shadows/material_helper.wgsl");
 
 /// Add VSM sampling to ABI materials that include the engine shadow helper.
 /// Materials that do not receive sun shadows only gain unused declarations
@@ -1959,6 +1832,9 @@ let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);
         assert!(variant.contains("@binding(14) var vsm_physical_pages"));
         assert!(variant.contains("@binding(15) var<uniform> vsm_params"));
         assert_eq!(variant.matches("sample_virtual_shadow(").count(), 3);
+        assert!(variant.contains("sample_virtual_shadow(cascade, recv_pos,"));
+        assert!(variant.contains("sample_virtual_shadow(next_cascade, next_pos,"));
+        assert!(variant.contains("level_vps: array<mat4x4<f32>, 3>"));
         assert!(!source.contains("vsm_page_table"));
     }
 
@@ -1979,6 +1855,13 @@ fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
         assert!(variant.contains("fn sample_shadow_cascade_csm("));
         assert_eq!(variant.matches("fn sample_shadow_cascade(").count(), 1);
         assert!(variant.contains("sample_shadow_cascade_csm(cascade_idx, world_pos)"));
+        assert!(variant.contains("level_vps: array<mat4x4<f32>, 3>"));
+    }
+
+    #[test]
+    fn sampling_uniform_matches_wgsl_layout() {
+        assert_eq!(VSM_SAMPLING_PARAMS_BYTES, 3 * 64 + 16);
+        assert_eq!(std::mem::align_of::<DirectionalVsmSamplingParams>(), 16);
     }
 
     #[test]
