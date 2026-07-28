@@ -23,9 +23,11 @@ const argv: string[] = getCommandLineArgs();
 const config = parseQualityRun(argv);
 let vsmDynamicFixture = false;
 let vsmScrollFixture = false;
+let vsmLightMotionFixture = false;
 for (let i = 0; i < argv.length; i = i + 1) {
   if (argv[i] === "--vsm-dynamic") vsmDynamicFixture = true;
   if (argv[i] === "--vsm-scroll") vsmScrollFixture = true;
+  if (argv[i] === "--vsm-light-motion") vsmLightMotionFixture = true;
 }
 
 initWindow(800, 450, "Bloom Quality: Skinned + Alpha Motion", 0);
@@ -99,8 +101,17 @@ while (!windowShouldClose()) {
 
   beginDrawing();
   setAmbientLight({ r: 120, g: 130, b: 145, a: 255 }, 0.25);
+  // Opt-in light-basis transition oracle. Frame 240 returns to the ordinary
+  // fixture direction, so it can be compared directly with a settled capture
+  // while telemetry observes the conservative one-frame invalidation.
+  const alternateLight = vsmLightMotionFixture
+    ? Math.floor(fixtureFrame / 30) % 2
+    : 0;
+  const lightDirection = alternateLight !== 0
+    ? { x: 0.28, y: 0.90, z: 0.34 }
+    : { x: 0.45, y: 0.85, z: 0.25 };
   setDirectionalLight(
-    { x: 0.45, y: 0.85, z: 0.25 },
+    lightDirection,
     { r: 255, g: 244, b: 226, a: 255 },
     1.8,
   );
