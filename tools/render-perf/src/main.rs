@@ -12,6 +12,8 @@ struct Config {
     height: u32,
     warmup_frames: u32,
     measured_frames: u32,
+    quality_preset: u32,
+    render_scale: Option<f32>,
     trace_dir: Option<PathBuf>,
     output: PathBuf,
 }
@@ -48,11 +50,20 @@ fn parse_u32(value: Option<String>, flag: &str) -> Result<u32, String> {
         .map_err(|_| format!("{flag} must be an unsigned integer"))
 }
 
+fn parse_f32(value: Option<String>, flag: &str) -> Result<f32, String> {
+    value
+        .ok_or_else(|| format!("missing value for {flag}"))?
+        .parse()
+        .map_err(|_| format!("{flag} must be a number"))
+}
+
 fn config() -> Result<Config, String> {
     let mut width = 1920;
     let mut height = 1080;
     let mut warmup_frames = 180;
     let mut measured_frames = 300;
+    let mut quality_preset = 4;
+    let mut render_scale = None;
     let mut trace_dir = None;
     let mut output = None;
     let mut args = std::env::args().skip(1);
@@ -62,6 +73,12 @@ fn config() -> Result<Config, String> {
             "--height" => height = parse_u32(args.next(), "--height")?,
             "--warmup" => warmup_frames = parse_u32(args.next(), "--warmup")?,
             "--frames" => measured_frames = parse_u32(args.next(), "--frames")?,
+            "--quality-preset" => {
+                quality_preset = parse_u32(args.next(), "--quality-preset")?.min(4);
+            }
+            "--render-scale" => {
+                render_scale = Some(parse_f32(args.next(), "--render-scale")?.clamp(0.15, 1.0));
+            }
             "--trace-dir" => {
                 trace_dir = Some(PathBuf::from(
                     args.next()
@@ -85,6 +102,8 @@ fn config() -> Result<Config, String> {
         height,
         warmup_frames,
         measured_frames,
+        quality_preset,
+        render_scale,
         trace_dir,
         output: output.ok_or_else(|| "--out is required".to_owned())?,
     })
@@ -197,7 +216,10 @@ fn create_engine(config: &Config) -> Result<(EngineState, String), String> {
         config.height,
     );
     renderer.set_device_negotiation_report(negotiation_report);
-    renderer.apply_quality_preset(4);
+    renderer.apply_quality_preset(config.quality_preset);
+    if let Some(render_scale) = config.render_scale {
+        renderer.set_render_scale(render_scale);
+    }
     let adapter_snapshot = renderer.quality_adapter_json();
     let mut engine = EngineState::new(renderer);
     engine.target_fps = 0.0;
@@ -285,6 +307,7 @@ fn json_escape(value: &str) -> String {
 fn write_report(
     config: &Config,
     adapter_snapshot: &str,
+    actual_render_scale: f32,
     render_submit: Percentiles,
     prepare: Percentiles,
     end_frame: Percentiles,
@@ -330,7 +353,8 @@ fn write_report(
             "  \"revision\":\"{}\",\n",
             "  \"adapter\":{},\n",
             "  \"resolution\":[{},{}],\n",
-            "  \"quality_preset\":4,\n",
+            "  \"quality_preset\":{},\n",
+            "  \"render_scale\":{:.6},\n",
             "  \"headless_uncapped\":true,\n",
             "  \"warmup_frames\":{},\n",
             "  \"measured_frames\":{},\n",
@@ -347,6 +371,8 @@ fn write_report(
         adapter_snapshot,
         config.width,
         config.height,
+        config.quality_preset,
+        actual_render_scale,
         config.warmup_frames,
         config.measured_frames,
         config.trace_dir.is_some(),
@@ -378,6 +404,7 @@ fn write_report(
 fn run() -> Result<(), String> {
     let config = config()?;
     let (mut engine, adapter_snapshot) = create_engine(&config)?;
+    let actual_render_scale = engine.renderer.render_scale();
     for _ in 0..config.warmup_frames {
         let _ = render_frame(&mut engine);
     }
@@ -401,6 +428,7 @@ fn run() -> Result<(), String> {
     write_report(
         &config,
         &adapter_snapshot,
+        actual_render_scale,
         render_submit,
         prepare,
         end_frame,

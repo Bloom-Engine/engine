@@ -36,3 +36,9 @@ cargo run --release --manifest-path tools/render-perf/Cargo.toml -- \
   --trace-dir tools/quality/out/render-perf/trace-1080p \
   --out tools/quality/out/render-perf/1080p-uploads.json
 ```
+
+The workload defaults to `--quality-preset 4`. Use
+`--quality-preset 0..4` to measure a complete tier, or add
+`--render-scale 0.15..1.0` after the preset to compare renderer revisions at
+an identical shading resolution. Reports record both the requested preset and
+the effective scale.

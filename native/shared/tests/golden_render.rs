@@ -512,8 +512,10 @@ fn try_engine() -> Option<EngineState> {
     .ok()?;
     let renderer = Renderer::new_headless(device, queue, W, H);
     let mut eng = EngineState::new(renderer);
-    // Deterministic output: no sub-pixel jitter accumulation.
+    // Deterministic native-resolution output: TAA and resolution are
+    // independent controls, so the golden harness sets both explicitly.
     eng.renderer.set_taa_enabled(false);
+    eng.renderer.set_render_scale(1.0);
     Some(eng)
 }
 

@@ -5,9 +5,9 @@
 //! depth/HDR/G-buffer targets. Those two must agree from the very first
 //! frame.
 //!
-//! The golden suite cannot cover this: its harness calls
-//! `set_taa_enabled(false)` immediately after construction, which
-//! internally resizes and so always repairs the invariant before
+//! The golden suite cannot cover this: its harness explicitly selects native
+//! render scale immediately after construction, which resizes and repairs the
+//! invariant before
 //! anything renders. A real host does not — every `attach_engine`
 //! platform (macOS/iOS/tvOS/Linux/Android) boots and then only resizes
 //! when the OS-reported window size *changes*, which is false on frame
