@@ -9242,6 +9242,7 @@ impl Renderer {
         let mut pt_layered_records = None;
         let mut pt_layered_texture_records = None;
         let mut pt_clearcoat_texture_records = None;
+        let mut pt_clearcoat_normal_records = None;
         let mut pt_sheen_texture_records = None;
         let mut pt_iridescence_texture_records = None;
         let mut pt_anisotropy_texture_records = None;
@@ -9294,6 +9295,7 @@ impl Renderer {
                 &mut pt_layered_records,
                 &mut pt_layered_texture_records,
                 &mut pt_clearcoat_texture_records,
+                &mut pt_clearcoat_normal_records,
                 &mut pt_sheen_texture_records,
                 &mut pt_iridescence_texture_records,
                 &mut pt_anisotropy_texture_records,
@@ -9387,6 +9389,7 @@ impl Renderer {
                 &mut pt_layered_records,
                 &mut pt_layered_texture_records,
                 &mut pt_clearcoat_texture_records,
+                &mut pt_clearcoat_normal_records,
                 &mut pt_sheen_texture_records,
                 &mut pt_iridescence_texture_records,
                 &mut pt_anisotropy_texture_records,
@@ -9439,6 +9442,7 @@ impl Renderer {
             pt_layered_records,
             pt_layered_texture_records,
             pt_clearcoat_texture_records,
+            pt_clearcoat_normal_records,
             pt_sheen_texture_records,
             pt_iridescence_texture_records,
             pt_anisotropy_texture_records,

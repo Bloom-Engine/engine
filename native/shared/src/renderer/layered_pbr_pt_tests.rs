@@ -168,6 +168,7 @@ fn specialization_uses_separate_group_without_touching_base_kernel() {
     assert!(PT_LAYERED_BINDINGS_WGSL.contains("@group(2) @binding(0)"));
     assert!(PT_LAYERED_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(2)"));
     assert!(PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(4)"));
+    assert!(PT_CLEARCOAT_NORMAL_BINDINGS_WGSL.contains("@group(2) @binding(8)"));
     assert!(PT_SHEEN_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(5)"));
     assert!(PT_IRIDESCENCE_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(6)"));
     assert!(PT_ANISOTROPY_TEXTURE_BINDINGS_WGSL.contains("@group(2) @binding(7)"));
@@ -196,6 +197,9 @@ fn layered_specialization_rewrites_every_transport_vertex() {
         );
         assert!(specialized.contains("layered_cur = layered_hit;"));
         assert!(specialized.contains("layered_tangent_cur = layered_tangent_hit;"));
+        assert!(
+            specialized.contains("layered_clearcoat_normal_cur = layered_clearcoat_normal_hit;")
+        );
         assert_eq!(base.matches("pt_layered_").count(), 0);
     }
 }

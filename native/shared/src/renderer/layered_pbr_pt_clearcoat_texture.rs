@@ -1,8 +1,4 @@
 //! Independently lazy clearcoat factor/roughness metadata for path tracing.
-//!
-//! Clearcoat normal maps remain unqualified until their complete
-//! tangent-space hit-shading path lands. Keeping this record separate from
-//! specular textures preserves the established specular-only ABI and cost.
 
 use super::*;
 
@@ -82,11 +78,7 @@ impl PtClearcoatTextureCpu {
             .is_none_or(|binding| usable(binding, runtime_texture_count, has_secondary_uv))
             && roughness
                 .is_none_or(|binding| usable(binding, runtime_texture_count, has_secondary_uv));
-        if !material.has_clearcoat()
-            || !has_texture
-            || !all_usable
-            || material.clearcoat_normal_texture.is_some()
-        {
+        if !material.has_clearcoat() || !has_texture || !all_usable {
             return Self::default();
         }
 
@@ -242,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn qualification_requires_resolved_coordinates_and_no_normal_map() {
+    fn qualification_requires_resolved_coordinates() {
         let material = crate::models::MaterialLayeredPbr {
             clearcoat_authored: true,
             clearcoat_factor: 0.8,
@@ -265,7 +257,7 @@ mod tests {
             clearcoat_normal_texture: Some(binding(Some(1), 0)),
             ..material
         };
-        assert!(!PtClearcoatTextureCpu::from_material(normal_mapped, 4, true).active());
+        assert!(PtClearcoatTextureCpu::from_material(normal_mapped, 4, true).active());
     }
 
     #[test]
@@ -273,6 +265,7 @@ mod tests {
         let mut records = None;
         let mut specular_records = None;
         let mut clearcoat_records = None;
+        let mut clearcoat_normal_records = None;
         let mut sheen_records = None;
         let mut iridescence_records = None;
         let mut anisotropy_records = None;
@@ -280,6 +273,7 @@ mod tests {
             &mut records,
             &mut specular_records,
             &mut clearcoat_records,
+            &mut clearcoat_normal_records,
             &mut sheen_records,
             &mut iridescence_records,
             &mut anisotropy_records,
@@ -298,6 +292,7 @@ mod tests {
             &mut records,
             &mut specular_records,
             &mut clearcoat_records,
+            &mut clearcoat_normal_records,
             &mut sheen_records,
             &mut iridescence_records,
             &mut anisotropy_records,

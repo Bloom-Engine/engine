@@ -62,10 +62,13 @@ on entry and exit removes that unexplained gain while retaining reciprocity.
 This convention is the target for every Bloom realtime and path-traced
 consumer.
 
-Version 2 does not yet evaluate the independent clearcoat normal map. Import
-preserves the normal texture, transform, UV set, and scale losslessly; live
-normal sampling is enabled together with the layered shader specialization so
-there is no silent scalar approximation in a released rendering path.
+The independent clearcoat normal uses the same authored tangent-space
+orientation in realtime and path-traced shading. Import preserves its
+texture, transform, UV set, and scale losslessly. The mapped normal affects
+only the coat interface, is constrained to the base geometric hemisphere, and
+widens coat roughness from baked normal-length/variance metadata. Realtime
+shading additionally applies screen-space curvature variance; path tracing
+has no derivatives and therefore consumes only the baked terms.
 
 ## Version 3 sheen and anisotropy
 
@@ -222,17 +225,19 @@ color from sRGB; clearcoat reads factor from red and roughness from green;
 sheen converts color from sRGB and reads roughness from alpha; iridescence
 reads factor from red and maps thickness texture green across the authored
 minimum/maximum range; anisotropy reconstructs its tangent-space direction
-from centered red/green and scales strength by blue, matching glTF. Each lobe
-owns a separate, independently lazy 64-byte-per-instance transform sidecar, so
-adding a new lobe does not grow prior texture records and none of the paths
-change the established 96-byte scalar ABI or scalar-only bind groups.
+from centered red/green and scales strength by blue, matching glTF. Each
+factor/color lobe owns a separate, independently lazy 64-byte-per-instance
+transform sidecar. Clearcoat normals use a separate 48-byte-per-instance
+sidecar, so adding normal transport does not grow the established clearcoat
+factor/roughness record. None of the texture paths change the 96-byte scalar
+ABI or scalar-only bind groups.
 
 Resolved UV1 textures additionally use an aligned storage sidecar that is
 backfilled from retained or skinned CPU geometry only when a qualified texture
 actually selects `TEXCOORD_1`. Missing streams remain explicitly unqualified
-instead of receiving an incorrect scalar approximation. A material carrying a
-clearcoat normal texture keeps the exact established fallback until complete
-tangent-space clearcoat-normal transport lands.
+instead of receiving an incorrect scalar approximation. On adapters without
+PT texture arrays, a clearcoat normal is ignored while its scalar clearcoat
+factor/roughness remains active; the entire lobe is never silently dropped.
 
 ## Runtime material-record ABI
 
@@ -306,7 +311,10 @@ the group-2 pipeline and allocates/binds its storage buffer. Base-only scenes
 retain the established shader source, pipeline, bindings, instance record, and
 GPU cost. Qualified specular, clearcoat, sheen, iridescence, and anisotropy
 textures independently backfill separate 64-byte texture-transform records
-and select independent pipeline/resource bits. Textured sheen reuses the
+and select independent pipeline/resource bits. Clearcoat normals independently
+backfill a 48-byte transform/scale record at group 2 binding 8 and carry a
+separate pipeline/resource bit; factor-only clearcoat retains its exact
+64-byte record and allocates zero normal bytes. Textured sheen reuses the
 scalar path's lazily allocated directional-albedo LUT. UV1 adds a separate
 8-byte-per-vertex stream and its own pipeline/layout bit only on
 texture-array-capable adapters; no texture record, binding, UV interpolation,
@@ -328,9 +336,12 @@ documented quantization tolerance. Varying factor/color/roughness/thickness
 and anisotropy direction/strength textures must produce visible bounded
 responses, 90-degree texture transforms must turn those responses, and UV1
 must select independently retained coordinates on capable adapters. Adapters
-without PT texture arrays remain byte-identical to the base path and allocate
-no texture or UV1 storage. Clearcoat-normal transport remains the next
-reviewed texture slice.
+without PT texture arrays retain scalar-lobe output and allocate no texture or
+UV1 storage. Clearcoat-normal qualification additionally requires a flat
+zero-scale normal to be byte-identical to scalar clearcoat, a directional map
+to create a bounded visible response, and transformed UV0/UV1 maps to rotate
+that response. Telemetry pins the normal record at 48 bytes and proves zero
+normal allocation for base, scalar, and factor/roughness-only materials.
 
 ## Public authoring API
 

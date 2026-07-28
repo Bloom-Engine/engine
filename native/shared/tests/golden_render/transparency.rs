@@ -647,6 +647,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
             MaterialTextureTransform,
         )>,
+        clearcoat_normal_texture: Option<(&[u8], MaterialTextureTransform)>,
         sheen_textures: Option<(
             &[u8],
             &[u8],
@@ -698,6 +699,17 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
                 source_image_index: 1,
                 runtime_texture_idx: Some(roughness_index),
                 transform: roughness_transform,
+            });
+        }
+        if let (Some(material), Some((normal, transform))) =
+            (layered.as_mut(), clearcoat_normal_texture)
+        {
+            let normal_index = eng.renderer.register_texture_kind(2, 2, normal, true);
+            material.clearcoat_normal_texture = Some(MaterialTextureBinding {
+                source_texture_index: 2,
+                source_image_index: 2,
+                runtime_texture_idx: Some(normal_index),
+                transform,
             });
         }
         if let (Some(material), Some((color, roughness, color_transform, roughness_transform))) =
@@ -780,6 +792,9 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
                     .clearcoat_roughness_texture
                     .is_some_and(|binding| binding.transform.tex_coord == 1)
                 || material
+                    .clearcoat_normal_texture
+                    .is_some_and(|binding| binding.transform.tex_coord == 1)
+                || material
                     .sheen_color_texture
                     .is_some_and(|binding| binding.transform.tex_coord == 1)
                 || material
@@ -822,7 +837,15 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, specular_textures, None, None, None, None)
+        render_variant_with_layered_textures(
+            layered,
+            specular_textures,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     fn render_variant_with_clearcoat_textures(
@@ -834,7 +857,30 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, clearcoat_textures, None, None, None)
+        render_variant_with_layered_textures(
+            layered,
+            None,
+            clearcoat_textures,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn render_variant_with_clearcoat_normal(
+        layered: Option<MaterialLayeredPbr>,
+        clearcoat_normal: Option<(&[u8], MaterialTextureTransform)>,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
+        render_variant_with_layered_textures(
+            layered,
+            None,
+            None,
+            clearcoat_normal,
+            None,
+            None,
+            None,
+        )
     }
 
     fn render_variant_with_sheen_textures(
@@ -846,7 +892,7 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None, sheen_textures, None, None)
+        render_variant_with_layered_textures(layered, None, None, None, sheen_textures, None, None)
     }
 
     fn render_variant_with_iridescence_textures(
@@ -858,20 +904,36 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             MaterialTextureTransform,
         )>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None, None, iridescence_textures, None)
+        render_variant_with_layered_textures(
+            layered,
+            None,
+            None,
+            None,
+            None,
+            iridescence_textures,
+            None,
+        )
     }
 
     fn render_variant_with_anisotropy_texture(
         layered: Option<MaterialLayeredPbr>,
         anisotropy_texture: Option<(&[u8], MaterialTextureTransform)>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None, None, None, anisotropy_texture)
+        render_variant_with_layered_textures(
+            layered,
+            None,
+            None,
+            None,
+            None,
+            None,
+            anisotropy_texture,
+        )
     }
 
     fn render_variant(
         layered: Option<MaterialLayeredPbr>,
     ) -> Result<Option<(Vec<u8>, String)>, String> {
-        render_variant_with_layered_textures(layered, None, None, None, None, None)
+        render_variant_with_layered_textures(layered, None, None, None, None, None, None)
     }
 
     fn mean_display_luminance(rgba: &[u8]) -> f64 {
@@ -1028,6 +1090,64 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         )
         .expect("UV1 textured clearcoat PT variant initializes")
         .expect("same ray-query adapter remains available");
+    let flat_clearcoat_normals = [
+        128, 128, 255, 255, 128, 128, 255, 255, 128, 128, 255, 255, 128, 128, 255, 255,
+    ];
+    let directional_clearcoat_normals = [
+        230, 128, 220, 255, 128, 230, 220, 255, 26, 128, 220, 255, 128, 26, 220, 255,
+    ];
+    let (flat_clearcoat_normal, flat_clearcoat_normal_paths) =
+        render_variant_with_clearcoat_normal(
+            Some(MaterialLayeredPbr {
+                clearcoat_authored: true,
+                clearcoat_factor: 0.85,
+                clearcoat_roughness_factor: 0.2,
+                clearcoat_normal_scale: 0.0,
+                ..Default::default()
+            }),
+            Some((&flat_clearcoat_normals, Default::default())),
+        )
+        .expect("flat clearcoat normal PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let clearcoat_normal_material = MaterialLayeredPbr {
+        clearcoat_authored: true,
+        clearcoat_factor: 0.85,
+        clearcoat_roughness_factor: 0.2,
+        clearcoat_normal_scale: 0.75,
+        ..Default::default()
+    };
+    let (textured_clearcoat_normal, textured_clearcoat_normal_paths) =
+        render_variant_with_clearcoat_normal(
+            Some(clearcoat_normal_material),
+            Some((&directional_clearcoat_normals, Default::default())),
+        )
+        .expect("textured clearcoat normal PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (rotated_clearcoat_normal, rotated_clearcoat_normal_paths) =
+        render_variant_with_clearcoat_normal(
+            Some(clearcoat_normal_material),
+            Some((
+                &directional_clearcoat_normals,
+                MaterialTextureTransform {
+                    rotation: std::f32::consts::FRAC_PI_2,
+                    ..Default::default()
+                },
+            )),
+        )
+        .expect("rotated clearcoat normal PT variant initializes")
+        .expect("same ray-query adapter remains available");
+    let (uv1_clearcoat_normal, uv1_clearcoat_normal_paths) = render_variant_with_clearcoat_normal(
+        Some(clearcoat_normal_material),
+        Some((
+            &directional_clearcoat_normals,
+            MaterialTextureTransform {
+                tex_coord: 1,
+                ..Default::default()
+            },
+        )),
+    )
+    .expect("UV1 clearcoat normal PT variant initializes")
+    .expect("same ray-query adapter remains available");
     let textured_specular_material = MaterialLayeredPbr {
         specular_authored: true,
         specular_factor: 0.8,
@@ -1356,6 +1476,10 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         base_paths.contains("\"path_tracing_clearcoat_texture_specialization_initialized\":false")
     );
     assert!(base_paths.contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
+    assert!(
+        base_paths.contains("\"path_tracing_clearcoat_normal_specialization_initialized\":false")
+    );
+    assert!(base_paths.contains("\"path_tracing_clearcoat_normal_sidecar_allocated_bytes\":0"));
     assert!(base_paths.contains("\"path_tracing_sheen_texture_specialization_initialized\":false"));
     assert!(base_paths.contains("\"path_tracing_sheen_texture_sidecar_allocated_bytes\":0"));
     assert!(base_paths
@@ -1379,6 +1503,9 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     );
     assert!(clearcoat_paths.contains("\"sheen_lut_initialized\":false"));
     assert!(clearcoat_paths.contains("\"path_tracing_active_instance_count\":1"));
+    assert!(clearcoat_paths
+        .contains("\"path_tracing_clearcoat_normal_specialization_initialized\":false"));
+    assert!(clearcoat_paths.contains("\"path_tracing_clearcoat_normal_sidecar_allocated_bytes\":0"));
     let textured_clearcoat_supported = textured_clearcoat_white_paths
         .contains("\"path_tracing_clearcoat_texture_specialization_initialized\":true");
     if textured_clearcoat_supported {
@@ -1403,6 +1530,8 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             .contains("\"path_tracing_clearcoat_texture_sidecar_record_bytes\":64"));
         assert!(!textured_clearcoat_paths
             .contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
+        assert!(textured_clearcoat_paths
+            .contains("\"path_tracing_clearcoat_normal_sidecar_allocated_bytes\":0"));
         assert!(textured_clearcoat_uv1_paths
             .contains("\"path_tracing_uv1_specialization_initialized\":true"));
         assert!(!textured_clearcoat_uv1_paths
@@ -1420,6 +1549,47 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
             .contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
         assert!(
             textured_clearcoat_uv1_paths.contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0")
+        );
+    }
+    let clearcoat_normal_supported = flat_clearcoat_normal_paths
+        .contains("\"path_tracing_clearcoat_normal_specialization_initialized\":true");
+    if clearcoat_normal_supported {
+        assert_eq!(
+            clearcoat, flat_clearcoat_normal,
+            "a flat zero-scale coat normal changed scalar path-traced transport"
+        );
+        assert!(textured_clearcoat_normal_paths
+            .contains("\"path_tracing_clearcoat_normal_specialization_initialized\":true"));
+        assert!(rotated_clearcoat_normal_paths
+            .contains("\"path_tracing_clearcoat_normal_specialization_initialized\":true"));
+        assert!(textured_clearcoat_normal_paths
+            .contains("\"path_tracing_clearcoat_normal_sidecar_record_bytes\":48"));
+        assert!(!textured_clearcoat_normal_paths
+            .contains("\"path_tracing_clearcoat_normal_sidecar_allocated_bytes\":0"));
+        assert!(textured_clearcoat_normal_paths
+            .contains("\"path_tracing_clearcoat_texture_sidecar_allocated_bytes\":0"));
+        assert!(uv1_clearcoat_normal_paths
+            .contains("\"path_tracing_uv1_specialization_initialized\":true"));
+        assert!(
+            !uv1_clearcoat_normal_paths.contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0")
+        );
+    } else {
+        assert_eq!(
+            clearcoat, flat_clearcoat_normal,
+            "an adapter without PT texture arrays must preserve scalar clearcoat fallback"
+        );
+        assert_eq!(
+            clearcoat, textured_clearcoat_normal,
+            "an adapter without PT texture arrays must ignore only the coat normal texture"
+        );
+        assert_eq!(
+            clearcoat, uv1_clearcoat_normal,
+            "an adapter without PT texture arrays must not partially enable coat-normal UV1"
+        );
+        assert!(flat_clearcoat_normal_paths
+            .contains("\"path_tracing_clearcoat_normal_sidecar_allocated_bytes\":0"));
+        assert!(
+            uv1_clearcoat_normal_paths.contains("\"path_tracing_uv1_sidecar_allocated_bytes\":0")
         );
     }
     assert!(specular_ior_paths.contains("\"path_tracing_specialization_initialized\":true"));
@@ -1671,6 +1841,27 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         assert!(
             uv_set_response.mean_rgb >= 0.02,
             "clearcoat UV1 did not select retained secondary coordinates: {uv_set_response:?}"
+        );
+    }
+    if clearcoat_normal_supported {
+        assert_transport_response(
+            "textured clearcoat normal",
+            &flat_clearcoat_normal,
+            &textured_clearcoat_normal,
+        );
+        let transform_response =
+            calculate_diff_metrics(&textured_clearcoat_normal, &rotated_clearcoat_normal, W, H);
+        assert!(
+            transform_response.mean_rgb >= 0.02,
+            "clearcoat normal UV rotation did not turn the path-traced response: \
+             {transform_response:?}"
+        );
+        let uv_set_response =
+            calculate_diff_metrics(&textured_clearcoat_normal, &uv1_clearcoat_normal, W, H);
+        assert!(
+            uv_set_response.mean_rgb >= 0.02,
+            "clearcoat normal UV1 did not select retained secondary coordinates: \
+             {uv_set_response:?}"
         );
     }
     assert_transport_response("specular/IOR", &base, &specular_ior);

@@ -9,6 +9,8 @@ use super::*;
 
 #[path = "layered_pbr_pt_anisotropy_texture.rs"]
 mod anisotropy_texture;
+#[path = "layered_pbr_pt_clearcoat_normal.rs"]
+mod clearcoat_normal;
 #[path = "layered_pbr_pt_clearcoat_texture.rs"]
 mod clearcoat_texture;
 #[path = "layered_pbr_pt_iridescence_texture.rs"]
@@ -25,6 +27,11 @@ pub(super) use anisotropy_texture::PtAnisotropyTextureCpu;
 use anisotropy_texture::{
     PT_ANISOTROPY_TEXTURE_BINDINGS_WGSL, PT_ANISOTROPY_TEXTURE_DISABLED_WGSL,
     PT_ANISOTROPY_TEXTURE_RECORD_BYTES,
+};
+pub(super) use clearcoat_normal::PtClearcoatNormalCpu;
+use clearcoat_normal::{
+    PT_CLEARCOAT_NORMAL_BINDINGS_WGSL, PT_CLEARCOAT_NORMAL_DISABLED_WGSL,
+    PT_CLEARCOAT_NORMAL_RECORD_BYTES,
 };
 pub(super) use clearcoat_texture::PtClearcoatTextureCpu;
 use clearcoat_texture::{
@@ -98,10 +105,7 @@ impl PtLayeredMaterialCpu {
         if material.has_clearcoat() {
             mask |= crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE;
         }
-        if material.clearcoat_texture.is_some()
-            || material.clearcoat_roughness_texture.is_some()
-            || material.clearcoat_normal_texture.is_some()
-        {
+        if material.clearcoat_texture.is_some() || material.clearcoat_roughness_texture.is_some() {
             texture_mask |= crate::models::MaterialLayeredPbr::CLEARCOAT_LOBE;
         }
         if material.has_sheen() {
@@ -231,6 +235,7 @@ const PT_LAYERED_SPECULAR_IOR_LOBE: u32 = 16u;
 struct PtLayeredSurface {
     material: PtLayeredMaterial,
     tangent: vec4<f32>,
+    clearcoat_normal: vec3<f32>,
 };
 
 fn pt_layered_default() -> PtLayeredMaterial {
@@ -524,7 +529,9 @@ fn pt_layered_primary_surface(
     let to_surface = p - u.cam_pos.xyz;
     let distance = length(to_surface);
     if (distance <= 1e-4) {
-        return PtLayeredSurface(pt_layered_default(), vec4<f32>(0.0));
+        return PtLayeredSurface(
+            pt_layered_default(), vec4<f32>(0.0), n,
+        );
     }
     var query: ray_query;
     rayQueryInitialize(
@@ -542,44 +549,72 @@ fn pt_layered_primary_surface(
     }
     let hit = rayQueryGetCommittedIntersection(&query);
     if (hit.kind == RAY_QUERY_INTERSECTION_NONE) {
-        return PtLayeredSurface(pt_layered_default(), vec4<f32>(0.0));
+        return PtLayeredSurface(
+            pt_layered_default(), vec4<f32>(0.0), n,
+        );
     }
     var material = pt_layered_materials[hit.instance_custom_data];
     let instance = instance_data[hit.instance_custom_data];
-    if (PT_HAS_LAYERED_TEXTURES && instance.geo.z > 0u) {
+    var primary_uv = vec2<f32>(0.0);
+    var secondary_uv = vec2<f32>(0.0);
+    if ((
+        PT_HAS_LAYERED_TEXTURES
+            || PT_HAS_CLEARCOAT_TEXTURES
+            || PT_HAS_CLEARCOAT_NORMALS
+            || PT_HAS_SHEEN_TEXTURES
+            || PT_HAS_IRIDESCENCE_TEXTURES
+            || PT_HAS_ANISOTROPY_TEXTURES
+    ) && instance.geo.z > 0u) {
         let attributes = fetch_hit_attrs(
             instance.geo, hit.primitive_index, hit.barycentrics,
         );
-        let secondary_uv = pt_layered_hit_uv1(
+        primary_uv = attributes.uv;
+        secondary_uv = pt_layered_hit_uv1(
             instance.geo, hit.primitive_index, hit.barycentrics,
         );
         material = pt_layered_apply_textures(
-            material, hit.instance_custom_data, attributes.uv, secondary_uv,
+            material, hit.instance_custom_data, primary_uv, secondary_uv,
         );
         material = pt_layered_apply_clearcoat_textures(
-            material, hit.instance_custom_data, attributes.uv, secondary_uv,
+            material, hit.instance_custom_data, primary_uv, secondary_uv,
         );
         material = pt_layered_apply_sheen_textures(
-            material, hit.instance_custom_data, attributes.uv, secondary_uv,
+            material, hit.instance_custom_data, primary_uv, secondary_uv,
         );
         material = pt_layered_apply_anisotropy_texture(
-            material, hit.instance_custom_data, attributes.uv, secondary_uv,
+            material, hit.instance_custom_data, primary_uv, secondary_uv,
         );
         material = pt_layered_apply_iridescence_textures(
-            material, hit.instance_custom_data, attributes.uv, secondary_uv,
+            material, hit.instance_custom_data, primary_uv, secondary_uv,
         );
     }
-    if (!pt_layered_has_anisotropy(material)) {
-        return PtLayeredSurface(material, vec4<f32>(0.0));
+    var tangent = vec4<f32>(0.0);
+    if (
+        pt_layered_has_anisotropy(material)
+            || (
+                PT_HAS_CLEARCOAT_NORMALS
+                    && pt_layered_has_clearcoat_normal(hit.instance_custom_data)
+            )
+    ) {
+        tangent = pt_layered_hit_tangent(
+            instance.geo,
+            hit.primitive_index,
+            hit.barycentrics,
+            hit.object_to_world,
+            n,
+        );
     }
-    let tangent = pt_layered_hit_tangent(
-        instance.geo,
-        hit.primitive_index,
-        hit.barycentrics,
-        hit.object_to_world,
+    let coat_sample = pt_layered_apply_clearcoat_normal(
+        material,
+        hit.instance_custom_data,
+        primary_uv,
+        secondary_uv,
         n,
+        tangent,
     );
-    return PtLayeredSurface(material, tangent);
+    return PtLayeredSurface(
+        coat_sample.material, tangent, coat_sample.normal,
+    );
 }
 
 fn pt_layered_base_nee(
@@ -648,6 +683,7 @@ fn pt_layered_base_nee(
 
 fn pt_layered_nee(
     n: vec3<f32>,
+    clearcoat_normal: vec3<f32>,
     tangent: vec4<f32>,
     view: vec3<f32>,
     ldir: vec3<f32>,
@@ -657,31 +693,39 @@ fn pt_layered_nee(
     metal: f32,
     material: PtLayeredMaterial,
 ) -> vec3<f32> {
-    let undercoat = pt_layered_undercoat_nee(
-        n, tangent, view, ldir, ndl, full_alb, rough, metal, material,
-    );
+    var undercoat = vec3<f32>(0.0);
+    if (ndl > 0.0) {
+        undercoat = pt_layered_undercoat_nee(
+            n, tangent, view, ldir, ndl, full_alb, rough, metal, material,
+        );
+    }
     let half_raw = view + ldir;
     if (!pt_layered_has_clearcoat(material) || dot(half_raw, half_raw) <= 1e-8) {
         return undercoat;
     }
+    let coat_ndl = max(dot(clearcoat_normal, ldir), 0.0);
+    if (coat_ndl <= 0.0) {
+        return undercoat;
+    }
     let half = normalize(half_raw);
-    let ndv = max(dot(n, view), 1e-4);
-    let ndh = max(dot(n, half), 0.0);
+    let ndv = max(dot(clearcoat_normal, view), 1e-4);
+    let ndh = max(dot(clearcoat_normal, half), 0.0);
     let vdh = max(dot(view, half), 1e-4);
     let alpha = pt_clearcoat_alpha(material);
     let a2 = alpha * alpha;
     let denominator = ndh * ndh * (a2 - 1.0) + 1.0;
     let distribution = a2 / (3.14159265 * denominator * denominator);
     let clearcoat = pt_clearcoat_fresnel(vdh, material)
-        * distribution * v_smith(ndv, ndl, alpha) * ndl;
+        * distribution * v_smith(ndv, coat_ndl, alpha) * coat_ndl;
     let attenuation = pt_clearcoat_transmission(ndv, material)
-        * pt_clearcoat_transmission(ndl, material);
+        * pt_clearcoat_transmission(coat_ndl, material);
     return undercoat * attenuation + vec3<f32>(clearcoat);
 }
 
 fn pt_layered_direct_light(
     p: vec3<f32>,
     n: vec3<f32>,
+    clearcoat_normal: vec3<f32>,
     tangent: vec4<f32>,
     sun_r2: vec2<f32>,
     view: vec3<f32>,
@@ -696,11 +740,12 @@ fn pt_layered_direct_light(
     }
     var result = vec3<f32>(0.0);
     let sun_ndl = max(dot(n, u.sun_dir.xyz), 0.0);
-    if (sun_ndl > 0.0) {
+    let sun_coat_ndl = max(dot(clearcoat_normal, u.sun_dir.xyz), 0.0);
+    if (sun_ndl > 0.0 || sun_coat_ndl > 0.0) {
         let visibility = sun_visibility(p, n, sun_r2);
         if (visibility > 0.0) {
             result += pt_layered_nee(
-                n, tangent, view, u.sun_dir.xyz, sun_ndl,
+                n, clearcoat_normal, tangent, view, u.sun_dir.xyz, sun_ndl,
                 full_alb, rough, metal, material,
             ) * u.sun_color.rgb * visibility;
         }
@@ -715,12 +760,16 @@ fn pt_layered_direct_light(
         if (distance < range && distance > 1e-3) {
             let direction = to_light / distance;
             let ndl = dot(n, direction);
-            if (ndl > 0.0 && !occluded(p, direction, distance - 0.02)) {
+            let coat_ndl = dot(clearcoat_normal, direction);
+            if (
+                (ndl > 0.0 || coat_ndl > 0.0)
+                    && !occluded(p, direction, distance - 0.02)
+            ) {
                 let falloff = 1.0 - distance / range;
                 let incident = light.color_int.rgb * light.color_int.w
                     * falloff * falloff * f32(count);
                 result += pt_layered_nee(
-                    n, tangent, view, direction, ndl,
+                    n, clearcoat_normal, tangent, view, direction, ndl,
                     full_alb, rough, metal, material,
                 ) * incident;
             }
@@ -851,6 +900,7 @@ fn pt_sample_layered_base(
 
 fn pt_sample_layered_brdf(
     n: vec3<f32>,
+    clearcoat_normal: vec3<f32>,
     tangent: vec4<f32>,
     view: vec3<f32>,
     base_color: vec3<f32>,
@@ -868,11 +918,13 @@ fn pt_sample_layered_brdf(
     }
     var out: BrdfSample;
     out.valid = false;
-    let ndv = max(dot(n, view), 0.0);
-    if (ndv <= 0.0) {
+    let base_ndv = max(dot(n, view), 0.0);
+    if (base_ndv <= 0.0) {
         return out;
     }
-    let base_f = pt_layered_base_fresnel(ndv, base_color, metallic, material);
+    let base_f = pt_layered_base_fresnel(
+        base_ndv, base_color, metallic, material,
+    );
     let base_specular_weight = (base_f.x + base_f.y + base_f.z) / 3.0;
     var diffuse_weight = (1.0 - base_specular_weight) * (1.0 - metallic);
     if (
@@ -880,10 +932,12 @@ fn pt_sample_layered_brdf(
             || pt_layered_has_anisotropy(material)
             || pt_layered_has_iridescence(material)
     ) {
-        diffuse_weight = pt_dielectric_transmission(ndv, material) * (1.0 - metallic);
+        diffuse_weight =
+            pt_dielectric_transmission(base_ndv, material) * (1.0 - metallic);
     }
     let sheen_weight = pt_layered_sheen_weight(material);
-    let clearcoat_weight = pt_clearcoat_fresnel(ndv, material);
+    let coat_ndv = max(dot(clearcoat_normal, view), 1e-4);
+    let clearcoat_weight = pt_clearcoat_fresnel(coat_ndv, material);
     let clearcoat_probability = clearcoat_weight
         / (
             base_specular_weight + diffuse_weight + sheen_weight
@@ -891,9 +945,11 @@ fn pt_sample_layered_brdf(
         );
 
     if (rand_f() < clearcoat_probability) {
-        let basis = onb(n);
+        let basis = onb(clearcoat_normal);
         let view_tangent = vec3<f32>(
-            dot(view, basis[0]), dot(view, basis[1]), dot(view, n),
+            dot(view, basis[0]),
+            dot(view, basis[1]),
+            dot(view, clearcoat_normal),
         );
         let alpha = pt_clearcoat_alpha(material);
         let half_tangent = sample_ggx_vndf(view_tangent, alpha, rand_2f());
@@ -925,9 +981,9 @@ fn pt_sample_layered_brdf(
     if (!out.valid) {
         return out;
     }
-    let n_dot_l = max(dot(n, out.dir), 0.0);
-    let attenuation = pt_clearcoat_transmission(ndv, material)
-        * pt_clearcoat_transmission(n_dot_l, material);
+    let coat_n_dot_l = max(dot(clearcoat_normal, out.dir), 0.0);
+    let attenuation = pt_clearcoat_transmission(coat_ndv, material)
+        * pt_clearcoat_transmission(coat_n_dot_l, material);
     out.weight *= attenuation / max(1.0 - clearcoat_probability, 1e-6);
     if (u.cfg.x >= 2.0) {
         out.weight = min(out.weight, vec3<f32>(4.0));
@@ -1395,6 +1451,8 @@ impl Renderer {
         let textures = self.pt_texture_arrays_enabled && self.pt_layered_texture_active();
         let clearcoat_textures =
             self.pt_texture_arrays_enabled && self.pt_layered_clearcoat_texture_active();
+        let clearcoat_normals =
+            self.pt_texture_arrays_enabled && self.pt_layered_clearcoat_normal_active();
         let sheen_textures =
             self.pt_texture_arrays_enabled && self.pt_layered_sheen_texture_active();
         let iridescence_textures =
@@ -1403,6 +1461,7 @@ impl Renderer {
             self.pt_texture_arrays_enabled && self.pt_layered_anisotropy_texture_active();
         let any_textures = textures
             || clearcoat_textures
+            || clearcoat_normals
             || sheen_textures
             || iridescence_textures
             || anisotropy_textures;
@@ -1413,7 +1472,8 @@ impl Renderer {
             | ((clearcoat_textures as usize) << 3)
             | ((sheen_textures as usize) << 4)
             | ((iridescence_textures as usize) << 5)
-            | ((anisotropy_textures as usize) << 6);
+            | ((anisotropy_textures as usize) << 6)
+            | ((clearcoat_normals as usize) << 7);
         let pipeline_variant = sheen as usize
             | ((anisotropy as usize) << 1)
             | ((iridescence as usize) << 2)
@@ -1422,7 +1482,8 @@ impl Renderer {
             | ((clearcoat_textures as usize) << 5)
             | ((sheen_textures as usize) << 6)
             | ((iridescence_textures as usize) << 7)
-            | ((anisotropy_textures as usize) << 8);
+            | ((anisotropy_textures as usize) << 8)
+            | ((clearcoat_normals as usize) << 9);
         if self.pt_layered.layouts.len() <= resource_variant {
             self.pt_layered
                 .layouts
@@ -1542,6 +1603,20 @@ impl Renderer {
                     count: None,
                 });
             }
+            if clearcoat_normals {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(
+                            PT_CLEARCOAT_NORMAL_RECORD_BYTES,
+                        ),
+                    },
+                    count: None,
+                });
+            }
             self.pt_layered.layouts[resource_variant] = Some(self.device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
                     label: Some(if any_textures {
@@ -1567,7 +1642,7 @@ impl Renderer {
             let base_kernel = pt_kernel_variant(query_diagnostics);
             let layered_kernel = layered_kernel_variant(base_kernel.as_ref());
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 ray_query_backend_variant(&self.device),
                 pt_fault_constants(fault.as_deref()),
                 layered_kernel,
@@ -1582,6 +1657,11 @@ impl Renderer {
                     PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL
                 } else {
                     PT_CLEARCOAT_TEXTURE_DISABLED_WGSL
+                },
+                if clearcoat_normals {
+                    PT_CLEARCOAT_NORMAL_BINDINGS_WGSL
+                } else {
+                    PT_CLEARCOAT_NORMAL_DISABLED_WGSL
                 },
                 if sheen_textures {
                     PT_SHEEN_TEXTURE_BINDINGS_WGSL
@@ -1775,6 +1855,42 @@ impl Renderer {
                 self.pt_layered.clearcoat_texture_dirty = false;
             }
         }
+        if clearcoat_normals {
+            let needed = PT_CLEARCOAT_NORMAL_RECORD_BYTES
+                * self.pt_layered.clearcoat_normal_records.len() as u64;
+            let recreate = self
+                .pt_layered
+                .clearcoat_normal_buffer
+                .as_ref()
+                .is_none_or(|buffer| buffer.size() < needed);
+            if recreate {
+                let capacity = self
+                    .pt_layered
+                    .clearcoat_normal_records
+                    .len()
+                    .next_power_of_two() as u64;
+                self.pt_layered.clearcoat_normal_buffer =
+                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("pt_clearcoat_normal_instances"),
+                        size: PT_CLEARCOAT_NORMAL_RECORD_BYTES * capacity,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                self.pt_layered
+                    .bind_groups
+                    .iter_mut()
+                    .for_each(|group| *group = None);
+                self.pt_layered.clearcoat_normal_dirty = true;
+            }
+            if self.pt_layered.clearcoat_normal_dirty {
+                self.queue.write_buffer(
+                    self.pt_layered.clearcoat_normal_buffer.as_ref().unwrap(),
+                    0,
+                    bytemuck::cast_slice(&self.pt_layered.clearcoat_normal_records),
+                );
+                self.pt_layered.clearcoat_normal_dirty = false;
+            }
+        }
         if sheen_textures {
             let needed =
                 PT_SHEEN_TEXTURE_RECORD_BYTES * self.pt_layered.sheen_texture_records.len() as u64;
@@ -1962,6 +2078,17 @@ impl Renderer {
                     resource: self
                         .pt_layered
                         .anisotropy_texture_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                });
+            }
+            if clearcoat_normals {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: self
+                        .pt_layered
+                        .clearcoat_normal_buffer
                         .as_ref()
                         .unwrap()
                         .as_entire_binding(),

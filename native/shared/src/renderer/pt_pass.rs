@@ -94,6 +94,9 @@ impl Renderer {
         let layered_clearcoat_textures = layered_active
             && self.pt_texture_arrays_enabled
             && self.pt_layered_clearcoat_texture_active();
+        let layered_clearcoat_normals = layered_active
+            && self.pt_texture_arrays_enabled
+            && self.pt_layered_clearcoat_normal_active();
         let layered_sheen_textures = layered_active
             && self.pt_texture_arrays_enabled
             && self.pt_layered_sheen_texture_active();
@@ -105,6 +108,7 @@ impl Renderer {
             && self.pt_layered_anisotropy_texture_active();
         let layered_uv1 = (layered_textures
             || layered_clearcoat_textures
+            || layered_clearcoat_normals
             || layered_sheen_textures
             || layered_iridescence_textures
             || layered_anisotropy_textures)
@@ -117,14 +121,16 @@ impl Renderer {
             | ((layered_clearcoat_textures as usize) << 5)
             | ((layered_sheen_textures as usize) << 6)
             | ((layered_iridescence_textures as usize) << 7)
-            | ((layered_anisotropy_textures as usize) << 8);
+            | ((layered_anisotropy_textures as usize) << 8)
+            | ((layered_clearcoat_normals as usize) << 9);
         let layered_resource_variant = layered_sheen as usize
             | ((layered_textures as usize) << 1)
             | ((layered_uv1 as usize) << 2)
             | ((layered_clearcoat_textures as usize) << 3)
             | ((layered_sheen_textures as usize) << 4)
             | ((layered_iridescence_textures as usize) << 5)
-            | ((layered_anisotropy_textures as usize) << 6);
+            | ((layered_anisotropy_textures as usize) << 6)
+            | ((layered_clearcoat_normals as usize) << 7);
         if layered_active {
             self.ensure_pt_layered_resources();
         }

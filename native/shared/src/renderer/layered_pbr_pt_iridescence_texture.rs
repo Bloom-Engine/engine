@@ -274,6 +274,7 @@ mod tests {
         let mut records = None;
         let mut specular_records = None;
         let mut clearcoat_records = None;
+        let mut clearcoat_normal_records = None;
         let mut sheen_records = None;
         let mut iridescence_records = None;
         let mut anisotropy_records = None;
@@ -281,6 +282,7 @@ mod tests {
             &mut records,
             &mut specular_records,
             &mut clearcoat_records,
+            &mut clearcoat_normal_records,
             &mut sheen_records,
             &mut iridescence_records,
             &mut anisotropy_records,
@@ -301,6 +303,7 @@ mod tests {
             &mut records,
             &mut specular_records,
             &mut clearcoat_records,
+            &mut clearcoat_normal_records,
             &mut sheen_records,
             &mut iridescence_records,
             &mut anisotropy_records,

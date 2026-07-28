@@ -20,6 +20,8 @@ pub(in crate::renderer) struct PtLayeredRuntimeState {
     pub(in crate::renderer) texture_records: Vec<PtLayeredTextureCpu>,
     pub(in crate::renderer) clearcoat_texture_buffer: Option<wgpu::Buffer>,
     pub(in crate::renderer) clearcoat_texture_records: Vec<PtClearcoatTextureCpu>,
+    pub(in crate::renderer) clearcoat_normal_buffer: Option<wgpu::Buffer>,
+    pub(in crate::renderer) clearcoat_normal_records: Vec<PtClearcoatNormalCpu>,
     pub(in crate::renderer) sheen_texture_buffer: Option<wgpu::Buffer>,
     pub(in crate::renderer) sheen_texture_records: Vec<PtSheenTextureCpu>,
     pub(in crate::renderer) iridescence_texture_buffer: Option<wgpu::Buffer>,
@@ -29,6 +31,7 @@ pub(in crate::renderer) struct PtLayeredRuntimeState {
     pub(in crate::renderer) dirty: bool,
     pub(in crate::renderer) texture_dirty: bool,
     pub(in crate::renderer) clearcoat_texture_dirty: bool,
+    pub(in crate::renderer) clearcoat_normal_dirty: bool,
     pub(in crate::renderer) sheen_texture_dirty: bool,
     pub(in crate::renderer) iridescence_texture_dirty: bool,
     pub(in crate::renderer) anisotropy_texture_dirty: bool,
@@ -47,6 +50,8 @@ impl Default for PtLayeredRuntimeState {
             texture_records: Vec::new(),
             clearcoat_texture_buffer: None,
             clearcoat_texture_records: Vec::new(),
+            clearcoat_normal_buffer: None,
+            clearcoat_normal_records: Vec::new(),
             sheen_texture_buffer: None,
             sheen_texture_records: Vec::new(),
             iridescence_texture_buffer: None,
@@ -56,6 +61,7 @@ impl Default for PtLayeredRuntimeState {
             dirty: false,
             texture_dirty: false,
             clearcoat_texture_dirty: false,
+            clearcoat_normal_dirty: false,
             sheen_texture_dirty: false,
             iridescence_texture_dirty: false,
             anisotropy_texture_dirty: false,
@@ -189,6 +195,7 @@ pub(in crate::renderer) fn append_record(
     records: &mut Option<Vec<PtLayeredMaterialCpu>>,
     texture_records: &mut Option<Vec<PtLayeredTextureCpu>>,
     clearcoat_texture_records: &mut Option<Vec<PtClearcoatTextureCpu>>,
+    clearcoat_normal_records: &mut Option<Vec<PtClearcoatNormalCpu>>,
     sheen_texture_records: &mut Option<Vec<PtSheenTextureCpu>>,
     iridescence_texture_records: &mut Option<Vec<PtIridescenceTextureCpu>>,
     anisotropy_texture_records: &mut Option<Vec<PtAnisotropyTextureCpu>>,
@@ -233,6 +240,17 @@ pub(in crate::renderer) fn append_record(
     if let Some(clearcoat_texture_records) = clearcoat_texture_records {
         debug_assert_eq!(clearcoat_texture_records.len(), instance_index);
         clearcoat_texture_records.push(clearcoat_texture_record);
+    }
+
+    let clearcoat_normal_record =
+        PtClearcoatNormalCpu::from_material(material, runtime_texture_count, has_secondary_uv);
+    let uses_uv1 = uses_uv1 || clearcoat_normal_record.has_uv1();
+    if clearcoat_normal_records.is_none() && clearcoat_normal_record.active() {
+        *clearcoat_normal_records = Some(vec![PtClearcoatNormalCpu::default(); instance_index]);
+    }
+    if let Some(clearcoat_normal_records) = clearcoat_normal_records {
+        debug_assert_eq!(clearcoat_normal_records.len(), instance_index);
+        clearcoat_normal_records.push(clearcoat_normal_record);
     }
 
     let sheen_texture_record =
@@ -433,6 +451,7 @@ mod tests {
         let mut records = None;
         let mut texture_records = None;
         let mut clearcoat_texture_records = None;
+        let mut clearcoat_normal_records = None;
         let mut sheen_texture_records = None;
         let mut iridescence_texture_records = None;
         let mut anisotropy_texture_records = None;
@@ -440,6 +459,7 @@ mod tests {
             &mut records,
             &mut texture_records,
             &mut clearcoat_texture_records,
+            &mut clearcoat_normal_records,
             &mut sheen_texture_records,
             &mut iridescence_texture_records,
             &mut anisotropy_texture_records,
@@ -452,6 +472,7 @@ mod tests {
             &mut records,
             &mut texture_records,
             &mut clearcoat_texture_records,
+            &mut clearcoat_normal_records,
             &mut sheen_texture_records,
             &mut iridescence_texture_records,
             &mut anisotropy_texture_records,
@@ -488,6 +509,7 @@ mod tests {
             &mut records,
             &mut texture_records,
             &mut clearcoat_texture_records,
+            &mut clearcoat_normal_records,
             &mut sheen_texture_records,
             &mut iridescence_texture_records,
             &mut anisotropy_texture_records,
@@ -568,32 +590,36 @@ mod tests {
         for (
             textures,
             clearcoat_textures,
+            clearcoat_normals,
             sheen_textures,
             iridescence_textures,
             anisotropy_textures,
             uv1,
         ) in [
-            (false, false, false, false, false, false),
-            (true, false, false, false, false, false),
-            (true, false, false, false, false, true),
-            (false, true, false, false, false, false),
-            (false, true, false, false, false, true),
-            (false, false, true, false, false, false),
-            (false, false, true, false, false, true),
-            (false, false, false, true, false, false),
-            (false, false, false, true, false, true),
-            (false, false, false, false, true, false),
-            (false, false, false, false, true, true),
-            (true, true, true, true, true, true),
+            (false, false, false, false, false, false, false),
+            (true, false, false, false, false, false, false),
+            (true, false, false, false, false, false, true),
+            (false, true, false, false, false, false, false),
+            (false, true, false, false, false, false, true),
+            (false, false, true, false, false, false, false),
+            (false, false, true, false, false, false, true),
+            (false, false, false, true, false, false, false),
+            (false, false, false, true, false, false, true),
+            (false, false, false, false, true, false, false),
+            (false, false, false, false, true, false, true),
+            (false, false, false, false, false, true, false),
+            (false, false, false, false, false, true, true),
+            (true, true, true, true, true, true, true),
         ] {
             let source = format!(
-                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "enable wgpu_ray_query;\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 "const BLOOM_RAY_QUERY_NEEDS_PROCEED: bool = false;",
                 pt_fault_constants(None),
                 layered_kernel_variant(pt_kernel_variant(false).as_ref()),
                 texture_variant(
                     textures
                         || clearcoat_textures
+                        || clearcoat_normals
                         || sheen_textures
                         || iridescence_textures
                         || anisotropy_textures
@@ -608,6 +634,11 @@ mod tests {
                     super::super::PT_CLEARCOAT_TEXTURE_BINDINGS_WGSL
                 } else {
                     super::super::PT_CLEARCOAT_TEXTURE_DISABLED_WGSL
+                },
+                if clearcoat_normals {
+                    super::super::PT_CLEARCOAT_NORMAL_BINDINGS_WGSL
+                } else {
+                    super::super::PT_CLEARCOAT_NORMAL_DISABLED_WGSL
                 },
                 if sheen_textures {
                     super::super::PT_SHEEN_TEXTURE_BINDINGS_WGSL
@@ -649,6 +680,7 @@ mod tests {
             wgpu::naga::front::wgsl::parse_str(&source).unwrap_or_else(|error| {
                 panic!(
                     "layered PT WGSL (specular={textures}, clearcoat={clearcoat_textures}, \
+                     clearcoat_normal={clearcoat_normals}, \
                      sheen={sheen_textures}, iridescence={iridescence_textures}, \
                      anisotropy={anisotropy_textures}, uv1={uv1}) failed: {error}"
                 )
