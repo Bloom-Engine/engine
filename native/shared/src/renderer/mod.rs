@@ -13081,8 +13081,7 @@ impl Renderer {
             self.temporal_camera_cut_pending = false;
             self.temporal_camera_cut_active = true;
         }
-
-        // EN-022 fix — compose the velocity reference VP: the previous
+        // EN-022 fix — compose the velocity reference VP: previous
         // frame's UNJITTERED projection with the CURRENT frame's jitter
         // re-applied, times the previous view. Every prev_mvp built
         // from this cancels the jitter term exactly in the shader's
@@ -13091,9 +13090,10 @@ impl Renderer {
         // wobbled TAA history reprojection and cycled fine detail
         // between sharp and soft — the periodic material-surface
         // flicker).
-        let mut prev_proj_j = self.prev_proj_matrix_unjittered;
-        prev_proj_j[2][0] += self.current_jitter_ndc[0];
-        prev_proj_j[2][1] += self.current_jitter_ndc[1];
+        let prev_proj_j = temporal_history::velocity_reference_projection(
+            self.prev_proj_matrix_unjittered,
+            self.current_jitter_ndc,
+        );
         self.velocity_ref_vp = mat4_multiply(prev_proj_j, self.prev_view_matrix);
         self.material_system
             .set_velocity_reference_vp(self.velocity_ref_vp);
