@@ -87,6 +87,38 @@ fn render_targets_track_render_extent_through_changes() {
         r.render_extent(),
         "after set_taa_enabled(false)"
     );
+    assert_eq!(
+        r.render_scale(),
+        0.5,
+        "TAA toggles must not silently change render resolution"
+    );
+}
+
+#[test]
+fn quality_presets_own_resolution_reconstruction_and_sharpening() {
+    let Some(mut r) = try_renderer() else {
+        eprintln!("no GPU adapter — skipping");
+        return;
+    };
+
+    let expected = [
+        (0, (128, 128), false, 0, 0.0),
+        (1, (172, 172), false, 1, 0.25),
+        (2, (192, 192), true, 1, 0.40),
+        (3, (218, 218), true, 1, 0.45),
+        (4, (256, 256), true, 1, 0.50),
+    ];
+    for (preset, extent, taa, upscale, sharpen) in expected {
+        r.apply_quality_preset(preset);
+        assert_eq!(r.render_extent(), extent, "preset {preset} extent");
+        assert_eq!(r.taa_enabled, taa, "preset {preset} TAA");
+        assert_eq!(r.upscale_mode, upscale, "preset {preset} upscale");
+        assert_eq!(
+            r.sharpen_strength, sharpen,
+            "preset {preset} composite sharpen"
+        );
+        assert_eq!(r.cas_strength, 0.0, "preset {preset} extra CAS pass");
+    }
 }
 
 /// The deferred frame path must honor the render-target override — the

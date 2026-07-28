@@ -27,6 +27,8 @@ use std::time::Instant;
 mod lighting_upload;
 #[path = "golden_render/motion_producer_audit.rs"]
 mod motion_producer_audit;
+#[path = "golden_render/quality_presets.rs"]
+mod quality_presets;
 #[path = "golden_render/temporal_history.rs"]
 mod temporal_history;
 #[path = "golden_render/transparency.rs"]

@@ -49,6 +49,7 @@ mod pt_pass;
 mod pt_temporal_diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 mod quality_capture;
+mod quality_preset;
 mod refractive_reflections;
 mod scene_pass;
 mod shaders;
@@ -728,7 +729,7 @@ pub struct Renderer {
     taa_history_written: bool,
     /// Whether the history's scene-color source was path traced.
     taa_history_pt_owned: bool,
-    /// Render-resolution multiplier in [0.5, 1.0]. The G-buffer,
+    /// Render-resolution multiplier in [0.15, 1.0]. The G-buffer,
     /// HDR, and composed RTs are sized to `surface * render_scale`;
     /// TAA (or the upscale pass) brings the output back up to the
     /// full surface for composite. At 0.5 = quarter-pixel shading
@@ -750,11 +751,6 @@ pub struct Renderer {
     /// the scale can be changed at runtime without the platform telling us again.
     native_width: u32,
     native_height: u32,
-    /// Set once `set_render_scale` is called explicitly. While false,
-    /// `set_taa_enabled` keeps the legacy coupling (TAA on = 0.5,
-    /// TAA off = 1.0). Once the user opts into explicit control, the
-    /// scale they picked sticks across subsequent TAA toggles.
-    pub render_scale_explicit: bool,
     /// Previous frame's view-projection matrix — TAA reads this to
     /// reproject the history texture into current-frame UV space,
     /// removing ghosting under camera motion. Updated at the end
@@ -7714,12 +7710,11 @@ impl Renderer {
             taa_history_valid: false,
             taa_history_written: false,
             taa_history_pt_owned: false,
-            render_scale: 0.5,
+            render_scale: quality_preset::DEFAULT_RENDER_SCALE,
             // 1.0 = native output. Games that never touch it are unaffected.
             output_scale: 1.0,
             native_width: 0,
             native_height: 0,
-            render_scale_explicit: false,
             prev_vp_matrix: IDENTITY_MAT4,
             prev_proj_matrix_unjittered: IDENTITY_MAT4,
             prev_view_matrix: IDENTITY_MAT4,
@@ -8161,7 +8156,7 @@ impl Renderer {
         };
 
         // The targets above are sized to the full surface, but the pass
-        // chain runs at `render_extent()` (surface * render_scale, 0.5 by
+        // chain runs at `render_extent()` (surface * render_scale, 0.75 by
         // default) and `resize` is the only thing that reconciles the two.
         // Run it once here rather than trusting the host to: every
         // `attach_engine` platform (macOS/iOS/tvOS/Linux/Android) resizes
@@ -8662,31 +8657,23 @@ impl Renderer {
         ];
     }
 
-    /// Toggle TAA on/off. Off = no jitter, no history blend, no
-    /// extra texture writes. Until `set_render_scale` is called
-    /// explicitly this also flips `render_scale` between 0.5 (on)
-    /// and 1.0 (off) for backwards compat with the former TSR
-    /// coupling; once the user sets scale explicitly that choice
-    /// sticks across subsequent TAA toggles.
+    /// Toggle TAA on/off. Resolution is an independent quality control:
+    /// this never changes `render_scale` or reallocates render targets.
     pub fn set_taa_enabled(&mut self, enabled: bool) {
         if enabled != self.taa_enabled {
             self.taa_enabled = enabled;
-            if !self.render_scale_explicit {
-                self.render_scale = if enabled { 0.5 } else { 1.0 };
-            }
+            self.taa_current_idx = 0;
             self.taa_frame_index = 0;
-            let (w, h) = (self.surface_config.width, self.surface_config.height);
-            self.resize(w, h, self.logical_width, self.logical_height);
+            self.taa_history_valid = false;
+            self.taa_history_written = false;
         }
     }
 
     /// Set the render-resolution multiplier explicitly. Clamped to
-    /// [0.5, 1.0]. Triggers a resize so render-res intermediates
-    /// pick up the new extent. Marks the scale as user-set so future
-    /// `set_taa_enabled` calls leave it alone.
+    /// [0.15, 1.0]. Triggers a resize so render-res intermediates
+    /// pick up the new extent.
     pub fn set_render_scale(&mut self, scale: f32) {
         let s = scale.clamp(0.15, 1.0); // SH-055 — see render_extent()
-        self.render_scale_explicit = true;
         if (s - self.render_scale).abs() > 1e-4 {
             self.render_scale = s;
             self.taa_frame_index = 0;
@@ -10033,7 +10020,7 @@ impl Renderer {
         self.grain_strength = strength.max(0.0);
     }
 
-    /// Composite-pass unsharp mask. Default 0.8; 0 disables the 4 extra
+    /// Composite-pass unsharp mask. Default 0.5; 0 disables the 4 extra
     /// HDR taps + extra tonemap entirely. Round-2 audit: this was
     /// hardcoded with no runtime control while visibly haloing
     /// silhouettes at 4K output (F3/F8).
@@ -10100,38 +10087,6 @@ impl Renderer {
             self.ssao_history_frame = 0;
         }
         self.ssao_enabled = on;
-    }
-
-    /// Batch-configure every quality flag based on a preset level.
-    /// Presets:
-    ///   0 = Off     — bare minimum, for the slowest integrated GPUs.
-    ///                 No shadows, no SSAO, no bloom, no TAA, no SSR/SSGI,
-    ///                 no DoF/motion blur/SSS, no chromatic aberration.
-    ///   1 = Low     — shadows off, SSAO off, bloom low, TAA off. Keeps
-    ///                 the base HDR/tonemap pipeline only.
-    ///   2 = Medium  — shadows on, SSAO on, bloom on, TAA on. No SSR/SSGI
-    ///                 or cinematic effects.
-    ///   3 = High    — adds SSR + SSGI + subtle chromatic aberration.
-    ///   4 = Ultra   — everything on (plus DoF if aperture > 0).
-    /// Individual setters override preset choices on the current frame —
-    /// call `apply_quality_preset` first, then customize as needed.
-    pub fn apply_quality_preset(&mut self, preset: u32) {
-        let (shadows, ssao, bloom, taa, ssr, ssgi, motion_blur, sss, ca) = match preset {
-            0 => (false, false, false, false, false, false, false, false, 0.0),
-            1 => (false, false, true, false, false, false, false, false, 0.0),
-            2 => (true, true, true, true, false, false, false, false, 0.0),
-            3 => (true, true, true, true, true, true, false, false, 0.002),
-            _ => (true, true, true, true, true, true, true, true, 0.003),
-        };
-        self.set_shadows_enabled(shadows);
-        self.set_ssao_enabled(ssao);
-        self.set_bloom_enabled(bloom);
-        self.set_taa_enabled(taa);
-        self.set_ssr_enabled(ssr);
-        self.set_ssgi_enabled(ssgi);
-        self.set_motion_blur_enabled(motion_blur);
-        self.set_sss_enabled(sss);
-        self.set_chromatic_aberration(ca);
     }
 
     /// Upload an HDR equirectangular environment map. The `data` is

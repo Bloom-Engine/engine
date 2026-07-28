@@ -345,7 +345,7 @@ export function setFilmGrain(strength: number): boolean {
 }
 
 /**
- * Composite unsharp-mask strength. Engine default 0.8; 0 disables the
+ * Composite unsharp-mask strength. Engine default 0.5; 0 disables the
  * sharpen taps entirely. At high output resolutions the default visibly
  * halos high-contrast silhouettes — tune per game.
  */
@@ -605,9 +605,8 @@ export function setTaaEnabled(on: boolean): boolean {
 
 /**
  * Render-resolution multiplier. 0.5 = quarter-pixel shading (cheap, soft);
- * 1.0 = native (sharp, expensive). Clamped to [0.5, 1.0]. Once called
- * explicitly, the choice sticks across `setTaaEnabled` toggles instead of
- * being overridden by the legacy 0.5↔1.0 coupling.
+ * 1.0 = native (sharp, expensive). Clamped to [0.15, 1.0]. Resolution and
+ * TAA are independent: `setTaaEnabled` never changes this value.
  *
  * On a 4K display: 0.75 hits a quality/perf sweet spot for 3D scenes.
  * Catmull-Rom is the default upscale filter (see `setUpscaleMode`).
@@ -734,19 +733,22 @@ export function setDepthOfField(focusDistance: number, aperture: number): boolea
 // ============================================================
 
 export enum QualityPreset {
-  /** Bare minimum — no shadows, no SSAO, no bloom, no TAA, no SSR/SSGI/DoF/MB/SSS. */
+  /** 0.50 scale, bilinear upscale, no TAA/sharpening or optional effects. */
   Off = 0,
-  /** Base pipeline only: HDR tonemap + bloom. No shadows/SSAO/TAA. */
+  /** 0.67 scale, Catmull-Rom + light sharpen, bloom; no TAA/shadows/GI. */
   Low = 1,
-  /** Balanced default: shadows + SSAO + bloom + TAA. No SSR/SSGI/cinematic FX. */
+  /** 0.75 scale, TAA + balanced sharpen, shadows/SSAO/bloom. */
   Medium = 2,
-  /** + SSR, SSGI, subtle chromatic aberration. */
+  /** 0.85 scale, TAA + stronger sharpen, SSR/SSGI and subtle CA. */
   High = 3,
-  /** Everything on (plus DoF if aperture > 0). */
+  /** Native 1.0 scale and the full effect stack. */
   Ultra = 4,
 }
 
-/** Apply a quality preset in one call. Call individual setters after for fine-tuning. */
+/**
+ * Apply a coherent resolution, reconstruction, sharpening, and effect tier.
+ * Call individual setters afterward for fine-tuning.
+ */
 export function setQualityPreset(preset: QualityPreset): boolean {
   return bloom_set_quality_preset(preset) !== 0;
 }
