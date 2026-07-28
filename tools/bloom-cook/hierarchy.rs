@@ -11,6 +11,7 @@ use crate::meshlet::{
     FLAG_COARSE_ROOT, NO_RELATION,
 };
 use meshopt::{SimplifyOptions, VertexDataAdapter};
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 const GROUP_FANOUT: usize = 8;
@@ -283,6 +284,74 @@ pub fn offset_relations(meshlets: &mut [Meshlet], base: usize) -> Result<(), Str
     Ok(())
 }
 
+/// Put all coarse roots first, followed by non-root clusters from coarse to
+/// fine, while preserving the contiguity of every atomic relation range.
+pub fn order_for_streaming(meshlets: &mut Vec<Meshlet>) -> Result<(), String> {
+    if meshlets.len() <= 1 {
+        return Ok(());
+    }
+    let mut order: Vec<_> = (0..meshlets.len()).collect();
+    order.sort_by_key(|index| {
+        let meshlet = &meshlets[*index];
+        (
+            u8::from(meshlet.flags & FLAG_COARSE_ROOT == 0),
+            Reverse(meshlet.lod_level),
+            meshlet.mesh_index,
+            meshlet.primitive_index,
+            meshlet.material_index,
+            *index,
+        )
+    });
+    let mut new_index = vec![0usize; meshlets.len()];
+    for (new, old) in order.iter().enumerate() {
+        new_index[*old] = new;
+    }
+    let mut reordered: Vec<_> = order.iter().map(|old| meshlets[*old].clone()).collect();
+    for (new, old) in order.iter().enumerate() {
+        let source = &meshlets[*old];
+        if source.parent != NO_RELATION {
+            reordered[new].parent =
+                remap_contiguous_range(source.parent, source.parent_count, &new_index, "parent")?;
+        }
+        if source.first_child != NO_RELATION {
+            reordered[new].first_child = remap_contiguous_range(
+                source.first_child,
+                source.child_count,
+                &new_index,
+                "child",
+            )?;
+        }
+    }
+    *meshlets = reordered;
+    Ok(())
+}
+
+fn remap_contiguous_range(
+    old_start: u32,
+    count: u32,
+    new_index: &[usize],
+    label: &str,
+) -> Result<u32, String> {
+    let old_start = old_start as usize;
+    let old_end = old_start
+        .checked_add(count as usize)
+        .ok_or_else(|| format!("{label} relation range overflow during streaming order"))?;
+    if count == 0 || old_end > new_index.len() {
+        return Err(format!(
+            "{label} relation range exceeds cluster table during streaming order"
+        ));
+    }
+    let new_start = new_index[old_start];
+    for (ordinal, mapped) in new_index[old_start..old_end].iter().enumerate() {
+        if *mapped != new_start + ordinal {
+            return Err(format!(
+                "{label} relation group lost contiguity during streaming order"
+            ));
+        }
+    }
+    u32::try_from(new_start).map_err(|_| format!("{label} relation start exceeds u32"))
+}
+
 fn merge_contiguous_groups(groups: &[ClusterGroup]) -> Result<ClusterGroup, String> {
     let first = *groups
         .first()
@@ -476,7 +545,7 @@ fn distance3(a: [f32; 3], b: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry_format::{encode_geometry, sha256, DEFAULT_PAGE_BYTES};
+    use crate::geometry_format::{decode_geometry, encode_geometry, sha256, DEFAULT_PAGE_BYTES};
 
     fn grid_primitive(width: usize, height: usize) -> StaticPrimitive {
         let mut vertices = Vec::new();
@@ -525,16 +594,25 @@ mod tests {
         };
         let leaves = build_spatial_leaf_meshlets(&primitive, limits).unwrap();
         let leaf_count = leaves.len();
-        let (a, stats) = build_meshlet_hierarchy(leaves.clone(), limits, 8).unwrap();
-        let (b, other_stats) = build_meshlet_hierarchy(leaves, limits, 8).unwrap();
+        let (mut a, stats) = build_meshlet_hierarchy(leaves.clone(), limits, 8).unwrap();
+        let (mut b, other_stats) = build_meshlet_hierarchy(leaves, limits, 8).unwrap();
         assert_eq!(stats, other_stats);
         assert!(stats.parent_clusters > 0);
         assert!(stats.root_clusters < leaf_count as u32);
         assert!(stats.maximum_level > 0);
 
+        order_for_streaming(&mut a).unwrap();
+        order_for_streaming(&mut b).unwrap();
         let encoded_a = encode_geometry(&a, &[], sha256(b"grid"), DEFAULT_PAGE_BYTES).unwrap();
         let encoded_b = encode_geometry(&b, &[], sha256(b"grid"), DEFAULT_PAGE_BYTES).unwrap();
         assert_eq!(encoded_a, encoded_b);
+        let archive = decode_geometry(&encoded_a).unwrap();
+        assert!(archive.coarse_root_page_count() > 0);
+        let root_cluster_count: usize = archive.pages[..archive.coarse_root_page_count()]
+            .iter()
+            .map(|page| page.cluster_count as usize)
+            .sum();
+        assert_eq!(root_cluster_count, stats.root_clusters as usize);
 
         for (index, node) in a.iter().enumerate() {
             if node.parent == NO_RELATION {

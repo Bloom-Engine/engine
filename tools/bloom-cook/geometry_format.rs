@@ -128,6 +128,23 @@ impl GeometryArchive {
             .max()
             .unwrap_or(0)
     }
+
+    pub fn coarse_root_page_count(&self) -> usize {
+        self.pages
+            .iter()
+            .take_while(|page| {
+                self.clusters[page.first_cluster as usize].flags & FLAG_COARSE_ROOT != 0
+            })
+            .count()
+    }
+
+    pub fn coarse_root_page_bytes(&self) -> u64 {
+        self.pages
+            .iter()
+            .take(self.coarse_root_page_count())
+            .map(|page| page.payload_bytes as u64)
+            .sum()
+    }
 }
 
 pub fn encode_geometry(
@@ -143,6 +160,7 @@ pub fn encode_geometry(
     let mut pages = Vec::<PageRecord>::new();
     let mut page_start = 0usize;
     let mut page_first_cluster = 0usize;
+    let mut previous_page_class = None;
 
     for meshlet in meshlets {
         validate_meshlet(meshlet)?;
@@ -153,10 +171,12 @@ pub fn encode_geometry(
             ));
         }
         let current_page_bytes = payload.len() - page_start;
+        let page_class = (meshlet.lod_level, meshlet.flags & FLAG_COARSE_ROOT != 0);
         if current_page_bytes > 0
-            && current_page_bytes
-                .checked_add(encoded_bytes)
-                .is_none_or(|bytes| bytes > page_budget_bytes as usize)
+            && (previous_page_class != Some(page_class)
+                || current_page_bytes
+                    .checked_add(encoded_bytes)
+                    .is_none_or(|bytes| bytes > page_budget_bytes as usize))
         {
             finish_page(
                 &payload,
@@ -168,6 +188,7 @@ pub fn encode_geometry(
             page_start = payload.len();
             page_first_cluster = clusters.len();
         }
+        previous_page_class = Some(page_class);
 
         let page_index = pages.len() as u32;
         let vertex_offset = payload.len() as u64;
@@ -610,6 +631,7 @@ fn validate_pages(
     }
     let mut expected_payload_offset = 0u64;
     let mut expected_cluster = 0u32;
+    let mut reached_non_root_pages = false;
     for (page_index, page) in pages.iter().enumerate() {
         if page.payload_offset != expected_payload_offset
             || page.first_cluster != expected_cluster
@@ -624,6 +646,31 @@ fn validate_pages(
                 "page {page_index} length {} violates budget {page_budget_bytes}",
                 page.payload_bytes
             ));
+        }
+        let cluster_start = page.first_cluster as usize;
+        let cluster_end = cluster_start + page.cluster_count as usize;
+        let page_clusters = clusters
+            .get(cluster_start..cluster_end)
+            .ok_or_else(|| format!("page {page_index} cluster range exceeds cluster table"))?;
+        let first_class = (
+            page_clusters[0].lod_level,
+            page_clusters[0].flags & FLAG_COARSE_ROOT != 0,
+        );
+        if page_clusters.iter().any(|cluster| {
+            (cluster.lod_level, cluster.flags & FLAG_COARSE_ROOT != 0) != first_class
+        }) {
+            return Err(format!(
+                "page {page_index} mixes hierarchy levels or root residency classes"
+            ));
+        }
+        if first_class.1 {
+            if reached_non_root_pages {
+                return Err(format!(
+                    "page {page_index} places coarse roots after streamable pages"
+                ));
+            }
+        } else {
+            reached_non_root_pages = true;
         }
         let start = usize::try_from(page.payload_offset)
             .map_err(|_| format!("page {page_index} offset exceeds host address space"))?;
@@ -1103,7 +1150,7 @@ mod tests {
     #[test]
     fn malformed_atomic_parent_groups_are_rejected() {
         let mut child = triangle(0.0, 0);
-        child.parent = 1;
+        child.parent = 0;
         child.parent_count = 1;
         let mut parent = child.clone();
         parent.flags |= FLAG_COARSE_ROOT;
@@ -1111,20 +1158,51 @@ mod tests {
         parent.geometric_error = 0.25;
         parent.parent = NO_RELATION;
         parent.parent_count = 0;
-        parent.first_child = 0;
+        parent.first_child = 1;
         parent.child_count = 1;
         let mut bytes = encode_geometry(
-            &[child, parent],
+            &[parent, child],
             &[],
             sha256(b"hierarchy"),
             DEFAULT_PAGE_BYTES,
         )
         .unwrap();
 
-        let child_parent_count = HEADER_BYTES + 124;
+        let child_parent_count = HEADER_BYTES + CLUSTER_RECORD_BYTES + 124;
         bytes[child_parent_count..child_parent_count + 4].copy_from_slice(&0u32.to_le_bytes());
         assert!(decode_geometry(&bytes)
             .unwrap_err()
             .contains("parent range exceeds cluster table"));
+    }
+
+    #[test]
+    fn pages_may_not_mix_hierarchy_residency_classes() {
+        let mut child_a = triangle(0.0, 0);
+        let mut child_b = triangle(2.0, 0);
+        child_a.parent = 0;
+        child_a.parent_count = 1;
+        child_b.parent = 0;
+        child_b.parent_count = 1;
+        let mut parent = child_a.clone();
+        parent.flags |= FLAG_COARSE_ROOT;
+        parent.lod_level = 1;
+        parent.geometric_error = 0.25;
+        parent.parent = NO_RELATION;
+        parent.parent_count = 0;
+        parent.first_child = 1;
+        parent.child_count = 2;
+        let mut bytes = encode_geometry(
+            &[parent, child_a, child_b],
+            &[],
+            sha256(b"page-classes"),
+            DEFAULT_PAGE_BYTES,
+        )
+        .unwrap();
+
+        let second_child_level = HEADER_BYTES + CLUSTER_RECORD_BYTES * 2 + 28;
+        bytes[second_child_level..second_child_level + 4].copy_from_slice(&1u32.to_le_bytes());
+        assert!(decode_geometry(&bytes)
+            .unwrap_err()
+            .contains("mixes hierarchy levels or root residency classes"));
     }
 }

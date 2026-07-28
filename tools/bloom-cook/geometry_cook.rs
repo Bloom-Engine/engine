@@ -5,7 +5,8 @@ use crate::geometry_format::{
     DEFAULT_PAGE_BYTES,
 };
 use crate::hierarchy::{
-    build_meshlet_hierarchy, build_spatial_leaf_meshlets, offset_relations, HierarchyStats,
+    build_meshlet_hierarchy, build_spatial_leaf_meshlets, offset_relations, order_for_streaming,
+    HierarchyStats,
 };
 use crate::meshlet::{build_leaf_meshlets, Meshlet, MeshletLimits, StaticPrimitive, StaticVertex};
 use serde_json::json;
@@ -67,6 +68,9 @@ pub fn cook_geometry_command(
             meshlets.extend(primitive_hierarchy);
         }
     }
+    if options.hierarchy_levels != 0 {
+        order_for_streaming(&mut meshlets)?;
+    }
     let bytes = encode_geometry(
         &meshlets,
         &source.compatibility,
@@ -109,6 +113,8 @@ pub fn cook_geometry_command(
                 "maximum_level": hierarchy.maximum_level,
                 "maximum_absolute_error": hierarchy.maximum_error,
                 "root_payload_bytes": hierarchy.root_payload_bytes,
+                "root_pages": archive.coarse_root_page_count(),
+                "root_resident_page_bytes": archive.coarse_root_page_bytes(),
                 "root_clusters_by_level": hierarchy.root_clusters_by_level,
                 "root_payload_bytes_by_level": hierarchy.root_payload_bytes_by_level,
             },
@@ -140,6 +146,8 @@ pub fn inspect_geometry_command(input: &Path) -> Result<String, String> {
         "payload_bytes": archive.payload_bytes(),
         "page_budget_bytes": archive.page_budget_bytes,
         "maximum_page_bytes": archive.maximum_page_bytes(),
+        "coarse_root_pages": archive.coarse_root_page_count(),
+        "coarse_root_page_bytes": archive.coarse_root_page_bytes(),
         "compatibility": compatibility_json(&archive.compatibility),
         "validation": "pass",
     }))

@@ -44,7 +44,7 @@ the complete artifact before reporting it.
 |---|---:|---|
 | Header | 160 B | Magic/version/endian tag, counts, canonical offsets, source and payload SHA-256, page budget |
 | Cluster | 128 B | Mesh/primitive/material identity, page and payload ranges, bounds, normal cone, error and hierarchy links |
-| Page | 64 B | Contiguous payload range, contiguous cluster range, independent SHA-256 |
+| Page | 64 B | Contiguous payload/cluster range for one LOD/residency class, independent SHA-256 |
 | Compatibility | 16 B | Mesh/primitive, stable reason code, reason detail |
 
 Cluster payloads contain fixed 72-byte static vertices—position, normal,
@@ -111,6 +111,14 @@ normal cones remain per rendered parent meshlet. The cook report exposes root
 cluster/payload counts by level so an always-resident budget cannot be hidden
 by aggregate totals.
 
+Before encoding, hierarchy clusters are deterministically remapped into
+coarse-first order while every atomic relation range remains contiguous.
+Coarse roots occupy a page prefix, and no page may mix root/streamable classes
+or LOD levels. `geometry` and `geometry-inspect` report the exact root-page
+count and bytes. The reader rejects mixed classes or roots placed after
+streamable pages, making the future always-resident upload a bounded prefix
+instead of a heuristic scan.
+
 The cooker integration uses the Rust `meshopt` wrapper and its vendored
 meshoptimizer implementation under their permissive MIT/Apache-2.0 terms.
 
@@ -174,6 +182,9 @@ cooks are byte-identical. The canonical compatibility control is
 With `--hierarchy-levels 8`, the same static asset produces 247 leaf clusters,
 385 parent clusters, and 100 level-3 coarse roots. The roots reduce the
 triangle set by 70.8% and raw payload by 60.2%; two cooks are byte-identical.
-This is structural hierarchy qualification, not yet a final residency budget.
+Those roots occupy the first eight pages and require exactly 469,360 resident
+payload bytes, only 790 bytes of packing overhead beyond their raw cluster
+payload. This is structural hierarchy/page qualification, not yet a measured
+runtime residency budget.
 The full record is
 `docs/evidence/issue-131-atomic-hierarchy-v1.{md,json}`.
