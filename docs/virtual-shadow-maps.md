@@ -269,6 +269,17 @@ classes, and unchanged skinned shadows fail closed. Qualification captures,
 metrics, repeat tolerance, and bounded-work telemetry are in
 `docs/evidence/issue-132-caster-coverage-v1.md`.
 
+Full-scene camera transitions use the opt-in `--vsm-motion-path` flag in both
+`examples/sponza` and `examples/bistro`. Each path alternates along the sun
+light plane and returns to the established camera at frame 240. The offline
+`tools/quality/vsm_motion_corpus.py` gate consumes settled/motion VSM and CSM
+pairs, isolating the VSM transition residual from shared exposure and temporal
+history. It rejects coherent page seams, clip rings, missing-page flashes,
+stale/doubled shadows, unbounded work, and missing transition telemetry.
+Sponza and the governed 96-unique-mesh Bistro subset pass; captures, negative
+controls, cache statistics, and repeat tolerance are in
+`docs/evidence/issue-132-full-scene-motion-v1.md`.
+
 ## Work that remains on issue #132
 
 - Compact requests and schedule page residency entirely on the GPU so the
@@ -280,7 +291,7 @@ metrics, repeat tolerance, and bounded-work telemetry are in
 - Add explicit, default-off spot and point shadow requests, their virtual
   projections, and deterministic shared-pool arbitration. Existing unshadowed
   point lights must remain behaviorally and performance compatible.
-- Qualify Bistro camera/light motion, forced small pools, and at least 100
-  explicitly shadow-requesting local lights. The fixed directional
-  geometric-contact and alpha/skinned caster oracles are now qualified.
+- Qualify forced small pools and at least 100 explicitly shadow-requesting
+  local lights. The fixed full-scene motion, directional geometric-contact,
+  and alpha/skinned caster oracles are now qualified.
 - Integrate quality tiers and enable by default only after those gates pass.
