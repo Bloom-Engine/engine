@@ -210,6 +210,24 @@ uses 512 casting/receiving nodes and alternates the directional light every
 Exact image, direct-pass, end-to-end, fallback, and lazy-resource evidence is
 in `docs/evidence/issue-132-vsm-caster-indirect-v1.md`.
 
+Add `--vsm-contact-detail` to `quality-motion` for the fixed 266-post
+directional contact-detail oracle. After capturing once with `BLOOM_VSM=1`
+and once without it, run:
+
+```sh
+python3 tools/quality/shadow_detail.py \
+  --vsm /tmp/vsm-detail.png \
+  --csm /tmp/csm-detail.png \
+  --output /tmp/vsm-contact-detail.json
+```
+
+The gate measures a common neutral-ground mask, excludes colored geometry,
+and requires stronger high-percentile contact edges, more retained strong-edge
+pixels, and more shadow contrast than CSM. Synthetic sharp/blurred and
+chromatic-exclusion controls run in the quick CI lane. Qualification evidence,
+including deterministic images, incremental memory, and timings, is in
+`docs/evidence/issue-132-contact-detail-v1.md`.
+
 ## Work that remains on issue #132
 
 - Compact requests and schedule page residency entirely on the GPU so the
@@ -221,7 +239,7 @@ in `docs/evidence/issue-132-vsm-caster-indirect-v1.md`.
 - Add explicit, default-off spot and point shadow requests, their virtual
   projections, and deterministic shared-pool arbitration. Existing unshadowed
   point lights must remain behaviorally and performance compatible.
-- Qualify Bistro camera/light motion, forced small pools, alpha foliage,
-  geometric contact detail, and at least 100 explicitly shadow-requesting
-  local lights.
+- Qualify Bistro camera/light motion, forced small pools, alpha foliage, and
+  at least 100 explicitly shadow-requesting local lights. The fixed
+  directional geometric-contact oracle is now qualified.
 - Integrate quality tiers and enable by default only after those gates pass.
