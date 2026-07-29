@@ -13,6 +13,11 @@ cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
 
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   geometry-inspect scene.bgeo
+
+# Content-addressed store and logical manifest (offline only).
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  geometry-store scenes/example scene.glb out/assets \
+  --hierarchy-levels 8 --vertex-format quantized32
 ```
 
 The default leaf limits are 64 unique vertices and 124 triangles per meshlet.
@@ -42,6 +47,13 @@ compatibility-routed primitive. For a packed cook it also constructs the
 equivalent float32 artifact in memory and reports exact payload/root-page byte
 reductions. `geometry-inspect` validates the complete artifact before
 reporting it.
+
+`geometry-store` uses the same cooker but writes the immutable artifact under
+its complete SHA-256 and atomically maps a logical ID to it. Its recipe key
+includes the source closure, hierarchy level count, meshlet/page limits,
+vertex format, and explicit recipe version. A valid repeat is a strict
+zero-write cache hit. See `docs/cooked-asset-store.md`; runtime lookup remains
+disabled.
 
 ## Versioned payload contract
 
@@ -238,3 +250,5 @@ The hierarchy, page-placement, and packed-payload records are
 `docs/evidence/issue-131-atomic-hierarchy-v1.{md,json}` and
 `docs/evidence/issue-131-coarse-page-prefix-v1.{md,json}`, and
 `docs/evidence/issue-131-quantized-vertices-v2.{md,json}`.
+The content-addressed manifest handoff to #136 is recorded in
+`docs/evidence/issue-136-geometry-store-v1.{md,json}`.
