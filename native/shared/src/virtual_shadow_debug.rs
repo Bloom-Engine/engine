@@ -6,13 +6,16 @@ pub(super) const INVALIDATED: [u8; 3] = [255, 55, 190];
 pub(super) const LEVELS: [[u8; 3]; VSM_CLIP_LEVELS as usize] =
     [[70, 210, 110], [70, 150, 255], [190, 100, 255]];
 
-fn page_color(slot: &PhysicalPage, level: u8) -> [u8; 3] {
+fn page_color(slot: &PhysicalPage, page: super::VirtualShadowPage) -> [u8; 3] {
     if slot.dirty && slot.rendered_frame == 0 {
         MISS_UNRENDERED
     } else if slot.dirty {
         INVALIDATED
     } else {
-        LEVELS[level as usize]
+        // Local cube faces share the established diagnostic palette in
+        // repeating XYZ pairs. This keeps the v1 capture contract stable
+        // while avoiding an out-of-range clip-level lookup.
+        LEVELS[page.level as usize % LEVELS.len()]
     }
 }
 
@@ -36,7 +39,7 @@ pub(super) fn virtual_rgb(
             scale,
             u32::from(page.x),
             u32::from(page.y) + u32::from(page.level) * axis,
-            page_color(&cache.physical[physical_page as usize], page.level),
+            page_color(&cache.physical[physical_page as usize], page),
         );
     }
     (width, height, rgb)
@@ -59,7 +62,7 @@ pub(super) fn physical_rgb(cache: &VirtualShadowPageCache, scale: u32) -> (u32, 
             scale,
             index as u32 % columns,
             index as u32 / columns,
-            page_color(slot, owner.level),
+            page_color(slot, owner),
         );
     }
     (width, height, rgb)

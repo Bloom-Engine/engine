@@ -1,9 +1,13 @@
+struct LocalVsmSamplingSlot {
+    face_vps: array<mat4x4<f32>, 6>,
+    face_pages_0_3: vec4<u32>,
+    face_pages_4_5: vec4<u32>,
+};
 struct DirectionalVsmParams {
     level_vps: array<mat4x4<f32>, 3>,
-    enabled: u32,
-    virtual_pages_per_axis: u32,
-    page_interior: u32,
-    page_border: u32,
+    words: vec4<u32>,
+    local_light_meta: array<vec4<u32>, 256>,
+    local_slots: array<LocalVsmSamplingSlot, 5>,
 };
 @group(1) @binding(10) var vsm_page_table: texture_2d_array<u32>;
 @group(1) @binding(11) var vsm_physical_pages: texture_depth_2d_array;

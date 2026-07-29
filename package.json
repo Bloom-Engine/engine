@@ -2471,6 +2471,20 @@
           "returns": "void"
         },
         {
+          "name": "bloom_add_shadowed_point_light",
+          "params": [
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64",
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_scene_create_node",
           "params": [],
           "returns": "f64"

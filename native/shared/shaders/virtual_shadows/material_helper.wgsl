@@ -2,7 +2,7 @@ fn sample_shadow_cascade(
     cascade_idx: u32,
     world_pos: vec3<f32>,
 ) -> f32 {
-    if (vsm_params.enabled == 0u) {
+    if (vsm_params.words.x == 0u) {
         return sample_shadow_cascade_csm(cascade_idx, world_pos);
     }
     let light_clip = vsm_params.level_vps[cascade_idx]
@@ -17,7 +17,7 @@ fn sample_shadow_cascade(
         1.0 - (light_ndc.y * 0.5 + 0.5),
     );
     let depth_ref = light_ndc.z - 0.001;
-    let axis = vsm_params.virtual_pages_per_axis;
+    let axis = vsm_params.words.y;
     let scaled_uv = shadow_uv * f32(axis);
     let page_xy = min(vec2<u32>(scaled_uv), vec2<u32>(axis - 1u));
     let encoded = textureLoad(
@@ -30,8 +30,8 @@ fn sample_shadow_cascade(
         return sample_shadow_cascade_csm(cascade_idx, world_pos);
     }
     let physical_layer = i32((encoded & 0xffffu) - 1u);
-    let interior = f32(vsm_params.page_interior);
-    let border = f32(vsm_params.page_border);
+    let interior = f32(vsm_params.words.z);
+    let border = f32(vsm_params.words.w);
     let physical_size = interior + 2.0 * border;
     let local_uv = clamp(
         scaled_uv - vec2<f32>(page_xy),

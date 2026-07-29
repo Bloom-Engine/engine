@@ -1884,9 +1884,15 @@ impl Renderer {
             label: Some("shader_2d"),
             source: wgpu::ShaderSource::Wgsl(SHADER_2D.into()),
         });
+        let shader_3d_source: std::borrow::Cow<'static, str> =
+            if crate::virtual_shadows::virtual_shadows_requested() {
+                crate::virtual_shadows::local_immediate_shader(SHADER_3D).into()
+            } else {
+                SHADER_3D.into()
+            };
         let shader_3d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader_3d"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_3D.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_3d_source),
         });
 
         // --- Uniform bind group layouts ---
@@ -13747,6 +13753,50 @@ impl Renderer {
         self.lighting_uniforms.point_light_count[0] = (idx + 1) as f32;
     }
 
+    /// Submit a point light whose direct contribution must never silently
+    /// fall back to an unshadowed light. Unsupported renderers reject the
+    /// request before changing the live light list.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_shadowed_point_light(
+        &mut self,
+        x: f32,
+        y: f32,
+        z: f32,
+        range: f32,
+        r: f32,
+        g: f32,
+        b: f32,
+        intensity: f32,
+    ) -> bool {
+        let index = self.lighting_uniforms.point_light_count[0] as usize;
+        if index >= MAX_POINT_LIGHTS
+            || !self.shadow_map.enabled
+            // The path tracer consumes the point-light list directly and
+            // does not sample raster VSM pages. Reject instead of silently
+            // turning this into an unshadowed traced light.
+            || self.pt_active()
+            || [r, g, b].iter().any(|value| !value.is_finite())
+            || !self.shadow_map.virtual_map.submit_local_request(
+                index as u16,
+                [x, y, z],
+                range,
+                intensity,
+            )
+        {
+            return false;
+        }
+        self.lighting_uniforms.point_lights[index] = PointLight {
+            position: [x, y, z, range],
+            // Fail closed at submission. The shadow pass restores intensity
+            // only for a camera-visible request admitted to the shared page
+            // budget; paths that never prepare shadows cannot leak an
+            // unshadowed local light.
+            color: [r, g, b, 0.0],
+        };
+        self.lighting_uniforms.point_light_count[0] = (index + 1) as f32;
+        true
+    }
+
     /// Clear all additional lights (called at begin_frame).
     pub fn clear_additional_lights(&mut self) {
         // dir_light_count.y carries the shadows-enabled flag for the shadow
@@ -13766,6 +13816,7 @@ impl Renderer {
         };
         self.lighting_uniforms.dir_light_count = [0.0, shadows_flag, ssr_share, 0.0];
         self.lighting_uniforms.point_light_count = [0.0; 4];
+        self.shadow_map.virtual_map.clear_local_requests();
     }
 
     // ============================================================

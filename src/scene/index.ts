@@ -113,6 +113,11 @@ declare function bloom_add_point_light(
   r: number, g: number, b: number,
   intensity: number,
 ): void;
+declare function bloom_add_shadowed_point_light(
+  x: number, y: number, z: number, range: number,
+  r: number, g: number, b: number,
+  intensity: number,
+): number;
 
 // Shadows
 declare function bloom_enable_shadows(): number;
@@ -873,4 +878,23 @@ export function addPointLight(
   intensity: number,
 ): void {
   bloom_add_point_light(x, y, z, range, r, g, b, intensity);
+}
+
+/**
+ * Submit a point light that must remain shadowed.
+ *
+ * Returns false when the active renderer cannot provide local virtual
+ * shadows; no unshadowed replacement light is submitted in that case.
+ * Call each frame, like addPointLight. More than 100 requests are accepted
+ * on the high tier, while visibility and the shared page budget bound the
+ * lights that are actually shaded.
+ */
+export function addShadowedPointLight(
+  x: number, y: number, z: number, range: number,
+  r: number, g: number, b: number,
+  intensity: number,
+): boolean {
+  return bloom_add_shadowed_point_light(
+    x, y, z, range, r, g, b, intensity,
+  ) !== 0;
 }

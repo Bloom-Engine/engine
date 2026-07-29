@@ -1231,6 +1231,23 @@ pub fn bloom_add_point_light(
     );
 }
 
+#[wasm_bindgen]
+pub fn bloom_add_shadowed_point_light(
+    _x: f64,
+    _y: f64,
+    _z: f64,
+    _range: f64,
+    _r: f64,
+    _g: f64,
+    _b: f64,
+    _intensity: f64,
+) -> f64 {
+    // Web's conventional lighting path has no local VSM address space. A
+    // status-bearing rejection prevents a requested shadow from becoming an
+    // unshadowed light without the caller noticing.
+    0.0
+}
+
 // ============================================================
 // Audio
 // ============================================================

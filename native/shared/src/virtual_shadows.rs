@@ -10,6 +10,8 @@ mod clipmap;
 mod debug;
 #[path = "virtual_shadow_gpu_receiver.rs"]
 mod gpu_receiver;
+#[path = "virtual_shadow_local_lights.rs"]
+mod local_lights;
 #[path = "virtual_shadow_page_priority.rs"]
 mod page_priority;
 #[path = "virtual_shadow_receiver_demand.rs"]
@@ -19,6 +21,7 @@ mod report;
 #[path = "virtual_shadow_selection.rs"]
 mod selection;
 
+pub(crate) use local_lights::{LocalShadowAdmissionStats, LocalShadowRequest};
 use selection::selection as virtual_shadow_selection;
 pub(crate) use selection::{configure_capability_tier, virtual_shadows_requested};
 
@@ -31,6 +34,9 @@ pub const VSM_DEFAULT_PHYSICAL_PAGES: u16 = 256;
 pub const VSM_MAX_PAGE_RENDER_BUDGET: u16 = 64;
 pub const VSM_DYNAMIC_OVERLAY_PAGE_BUDGET: usize = 4;
 pub const VSM_DYNAMIC_OVERLAY_DRAW_BUDGET: usize = 64;
+pub const VSM_LOCAL_FACES: u8 = 6;
+pub const VSM_MAX_LOCAL_SHADOW_LIGHTS: usize = 5;
+pub const VSM_MAX_LOCAL_SHADOW_REQUESTS: usize = 256;
 const VSM_DIRECTIONAL_LEVEL_PAGE_CAPS: [usize; VSM_CLIP_LEVELS as usize] = [144, 64, 16];
 
 pub(crate) use clipmap::{
@@ -39,10 +45,20 @@ pub(crate) use clipmap::{
 pub use receiver_demand::directional_receiver_demand;
 
 #[repr(C, align(16))]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct LocalVsmSamplingSlot {
+    face_vps: [[[f32; 4]; 4]; VSM_LOCAL_FACES as usize],
+    face_pages_0_3: [u32; 4],
+    face_pages_4_5: [u32; 4],
+}
+
+#[repr(C, align(16))]
+#[derive(Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct DirectionalVsmSamplingParams {
     level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
     words: [u32; 4],
+    local_light_meta: [[u32; 4]; VSM_MAX_LOCAL_SHADOW_REQUESTS],
+    local_slots: [LocalVsmSamplingSlot; VSM_MAX_LOCAL_SHADOW_LIGHTS],
 }
 
 pub(crate) const VSM_SAMPLING_PARAMS_BYTES: u64 =
@@ -55,6 +71,20 @@ pub(crate) const VSM_SAMPLING_PARAMS_BYTES: u64 =
 /// cross-fade a newly rendered VSM page over the CSM result without another
 /// texture or buffer.
 pub const VSM_PAGE_TABLE_MISSING: u32 = 0;
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct PreparedLocalShadowLight {
+    pub request: LocalShadowRequest,
+    pub shading_index: u16,
+    pub face_vps: [[[f32; 4]; 4]; VSM_LOCAL_FACES as usize],
+    pub face_signatures: [u64; VSM_LOCAL_FACES as usize],
+}
+
+pub(crate) fn local_shadow_face_vps(
+    request: LocalShadowRequest,
+) -> [[[f32; 4]; 4]; VSM_LOCAL_FACES as usize] {
+    local_lights::face_vps(request)
+}
 
 #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct VirtualShadowPage {
@@ -70,6 +100,21 @@ impl VirtualShadowPage {
             && x < VSM_VIRTUAL_PAGES_PER_AXIS
             && y < VSM_VIRTUAL_PAGES_PER_AXIS)
             .then_some(Self { light, level, x, y })
+    }
+
+    pub fn new_local(point_light_index: u16, face: u8) -> Option<Self> {
+        (usize::from(point_light_index) < VSM_MAX_LOCAL_SHADOW_REQUESTS && face < VSM_LOCAL_FACES)
+            .then_some(Self {
+                light: point_light_index + 1,
+                level: face,
+                x: 0,
+                y: 0,
+            })
+    }
+
+    pub fn local_light_index(self) -> Option<u16> {
+        (self.light > 0 && self.level < VSM_LOCAL_FACES && self.x == 0 && self.y == 0)
+            .then_some(self.light - 1)
     }
 
     fn table_index(self) -> usize {
@@ -101,6 +146,16 @@ pub struct VirtualShadowCacheStats {
     pub clipmap_level_rebases: u32,
     pub clipmap_pages_preserved: u32,
     pub clipmap_pages_dropped: u32,
+}
+
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct LocalShadowPageStats {
+    requested: u32,
+    hits: u32,
+    misses: u32,
+    denied: u32,
+    invalidated: u32,
+    rendered: u32,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -249,11 +304,23 @@ impl VirtualShadowPageCache {
 
     pub fn record_stable_requests(&mut self, requested: usize) {
         let requested = requested.min(u32::MAX as usize) as u32;
-        let hits = requested.min(u32::from(self.stats.resident));
-        self.stats.requested = requested;
-        self.stats.hits = hits;
-        self.stats.misses = requested.saturating_sub(hits);
-        self.stats.denied = requested.saturating_sub(hits);
+        let directional_resident = self
+            .physical
+            .iter()
+            .filter(|slot| slot.owner.is_some_and(|owner| owner.light == 0))
+            .count()
+            .min(u32::MAX as usize) as u32;
+        let hits = requested.min(directional_resident);
+        self.stats.requested = self.stats.requested.saturating_add(requested);
+        self.stats.hits = self.stats.hits.saturating_add(hits);
+        self.stats.misses = self
+            .stats
+            .misses
+            .saturating_add(requested.saturating_sub(hits));
+        self.stats.denied = self
+            .stats
+            .denied
+            .saturating_add(requested.saturating_sub(hits));
     }
 
     pub fn invalidate_light(&mut self, light: u16) {
@@ -373,6 +440,41 @@ impl VirtualShadowPageCache {
         table
     }
 
+    fn encoded_page(&self, page: VirtualShadowPage) -> u32 {
+        let Some(&physical_page) = self.mapping.get(&page) else {
+            return VSM_PAGE_TABLE_MISSING;
+        };
+        let slot = &self.physical[physical_page as usize];
+        if slot.dirty || slot.rendered_frame == 0 {
+            return VSM_PAGE_TABLE_MISSING;
+        }
+        let age = self
+            .frame
+            .saturating_sub(slot.rendered_frame)
+            .saturating_add(1)
+            .min(8) as u32;
+        u32::from(physical_page) + 1 | (age << 16)
+    }
+
+    fn request_state(&self, page: VirtualShadowPage) -> Option<(bool, u64)> {
+        let physical_page = *self.mapping.get(&page)?;
+        let slot = &self.physical[physical_page as usize];
+        Some((slot.dirty, slot.rendered_signature))
+    }
+
+    fn light_counts(&self, light: u16) -> (u16, u16) {
+        let mut resident = 0u16;
+        let mut dirty = 0u16;
+        for slot in &self.physical {
+            if !slot.owner.is_some_and(|owner| owner.light == light) {
+                continue;
+            }
+            resident = resident.saturating_add(1);
+            dirty = dirty.saturating_add(u16::from(slot.dirty));
+        }
+        (resident, dirty)
+    }
+
     pub fn stats(&self) -> VirtualShadowCacheStats {
         self.stats
     }
@@ -462,9 +564,12 @@ pub struct DirectionalVirtualShadowMap {
     pending: Vec<PageRequest>,
     uploaded_page_table: Vec<u32>,
     page_table_may_age_until: u64,
-    sampling_params_initialized: bool,
-    sampling_level_vps: Option<[[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize]>,
+    uploaded_sampling_params: Option<DirectionalVsmSamplingParams>,
     render_budget: usize,
+    local_requests: Vec<local_lights::LocalShadowRequest>,
+    local_selected: Vec<PreparedLocalShadowLight>,
+    local_admission_stats: LocalShadowAdmissionStats,
+    local_page_stats: [LocalShadowPageStats; VSM_MAX_LOCAL_SHADOW_REQUESTS],
 }
 
 impl DirectionalVirtualShadowMap {
@@ -533,10 +638,68 @@ impl DirectionalVirtualShadowMap {
             pending: Vec::with_capacity(render_budget),
             uploaded_page_table: Vec::new(),
             page_table_may_age_until: 0,
-            sampling_params_initialized: false,
-            sampling_level_vps: None,
+            uploaded_sampling_params: None,
             render_budget,
+            local_requests: Vec::with_capacity(if selection.enabled {
+                VSM_MAX_LOCAL_SHADOW_REQUESTS
+            } else {
+                0
+            }),
+            local_selected: Vec::with_capacity(VSM_MAX_LOCAL_SHADOW_LIGHTS),
+            local_admission_stats: LocalShadowAdmissionStats::default(),
+            local_page_stats: [LocalShadowPageStats::default(); VSM_MAX_LOCAL_SHADOW_REQUESTS],
         }
+    }
+
+    pub fn clear_local_requests(&mut self) {
+        self.local_requests.clear();
+        if self.enabled {
+            self.local_selected.clear();
+            self.local_admission_stats = LocalShadowAdmissionStats::default();
+            self.local_page_stats =
+                [LocalShadowPageStats::default(); VSM_MAX_LOCAL_SHADOW_REQUESTS];
+        }
+    }
+
+    pub fn submit_local_request(
+        &mut self,
+        light_index: u16,
+        position: [f32; 3],
+        range: f32,
+        intensity: f32,
+    ) -> bool {
+        if !self.enabled
+            || self.local_requests.len() >= VSM_MAX_LOCAL_SHADOW_REQUESTS
+            || usize::from(light_index) >= VSM_MAX_LOCAL_SHADOW_REQUESTS
+            || position.iter().any(|value| !value.is_finite())
+            || !range.is_finite()
+            || range <= 0.0
+            || !intensity.is_finite()
+            || intensity <= 0.0
+        {
+            return false;
+        }
+        self.local_requests.push(local_lights::LocalShadowRequest {
+            light_index,
+            position,
+            range,
+            intensity,
+        });
+        true
+    }
+
+    pub(crate) fn admit_local_requests(
+        &mut self,
+        camera: [f32; 3],
+        camera_planes: &[[f32; 4]; 6],
+    ) -> Vec<LocalShadowRequest> {
+        let (admitted, stats) = local_lights::admit(&self.local_requests, camera, camera_planes);
+        self.local_admission_stats = stats;
+        admitted
+    }
+
+    pub(crate) fn local_requests(&self) -> &[LocalShadowRequest] {
+        &self.local_requests
     }
 
     pub fn prepare(
@@ -549,6 +712,7 @@ impl DirectionalVirtualShadowMap {
         content_signatures: [u64; VSM_CLIP_LEVELS as usize],
         receiver_bounds: Option<&[([f32; 3], [f32; 3])]>,
         dynamic_bounds: &[([f32; 3], [f32; 3])],
+        local_lights: &[PreparedLocalShadowLight],
     ) {
         self.frame = self.frame.wrapping_add(1).max(1);
         self.cache.begin_frame(self.frame);
@@ -561,6 +725,7 @@ impl DirectionalVirtualShadowMap {
         self.dynamic_overlay_deferred_pages = 0;
         self.page_cutout_draws = 0;
         self.page_skinned_draws = 0;
+        self.local_page_stats = [LocalShadowPageStats::default(); VSM_MAX_LOCAL_SHADOW_REQUESTS];
         let level_vps_unchanged = self.previous_level_vps == Some(level_vps);
         let content_unchanged = self.previous_content_signatures == Some(content_signatures);
         if !level_vps_unchanged || !content_unchanged {
@@ -706,7 +871,36 @@ impl DirectionalVirtualShadowMap {
         } else {
             self.fallback_demand.len()
         };
-        self.update_dynamic_policy(queue, level_vps, dynamic_bounds, demand_len);
+        self.update_dynamic_policy(level_vps, dynamic_bounds, demand_len);
+        self.local_selected.clear();
+        self.local_selected.extend_from_slice(local_lights);
+        for local in local_lights {
+            let page_stats = &mut self.local_page_stats[local.request.light_index as usize];
+            for face in 0..VSM_LOCAL_FACES {
+                let page = VirtualShadowPage::new_local(local.request.light_index, face)
+                    .expect("admitted local light has a valid face address");
+                page_stats.requested = page_stats.requested.saturating_add(1);
+                match self.cache.request_state(page) {
+                    Some((was_dirty, signature)) => {
+                        page_stats.hits = page_stats.hits.saturating_add(1);
+                        if signature != local.face_signatures[face as usize] && !was_dirty {
+                            page_stats.invalidated = page_stats.invalidated.saturating_add(1);
+                        }
+                    }
+                    None => page_stats.misses = page_stats.misses.saturating_add(1),
+                }
+                let Some(request) = self
+                    .cache
+                    .request(page, local.face_signatures[face as usize])
+                else {
+                    page_stats.denied = page_stats.denied.saturating_add(1);
+                    continue;
+                };
+                if request.needs_render && self.pending.len() < self.render_budget {
+                    self.pending.push(request);
+                }
+            }
+        }
         let demand = if receiver_demand_active {
             &self.receiver_demand[..]
         } else {
@@ -717,6 +911,7 @@ impl DirectionalVirtualShadowMap {
         self.receiver_demand_active = receiver_demand_active;
         if self.dynamic_global_fallback {
             self.cache.finish_requests();
+            self.sync_sampling_params(queue);
             return;
         }
         let demand_unchanged = level_vps_unchanged
@@ -727,6 +922,8 @@ impl DirectionalVirtualShadowMap {
             if self.frame <= self.page_table_may_age_until {
                 self.upload_page_table_if_changed(queue);
             }
+            self.cache.finish_requests();
+            self.sync_sampling_params(queue);
             return;
         }
         self.previous_demand_signature = demand_signature;
@@ -764,6 +961,7 @@ impl DirectionalVirtualShadowMap {
         }
         self.cache.finish_requests();
         self.upload_page_table_if_changed(queue);
+        self.sync_sampling_params(queue);
     }
 
     pub fn pending(&self) -> &[PageRequest] {
@@ -776,7 +974,12 @@ impl DirectionalVirtualShadowMap {
         rendered: &[(VirtualShadowPage, u64)],
     ) {
         for &(page, signature) in rendered {
-            self.cache.mark_rendered(page, signature);
+            if self.cache.mark_rendered(page, signature) {
+                if let Some(light_index) = page.local_light_index() {
+                    let stats = &mut self.local_page_stats[light_index as usize];
+                    stats.rendered = stats.rendered.saturating_add(1);
+                }
+            }
         }
         if !rendered.is_empty() {
             self.page_table_may_age_until = self
@@ -785,11 +988,11 @@ impl DirectionalVirtualShadowMap {
         }
         self.cache.finish_requests();
         self.upload_page_table_if_changed(queue);
+        self.sync_sampling_params(queue);
     }
 
     fn update_dynamic_policy(
         &mut self,
-        queue: &wgpu::Queue,
         level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
         dynamic_bounds: &[([f32; 3], [f32; 3])],
         demand_count: usize,
@@ -814,16 +1017,6 @@ impl DirectionalVirtualShadowMap {
             self.cache.invalidate_light(0);
         }
         let sampling_active = self.enabled && self.gpu.is_some() && !global_fallback;
-        if !self.sampling_params_initialized
-            || sampling_active != self.sampling_active
-            || (sampling_active && self.sampling_level_vps != Some(level_vps))
-        {
-            if let Some(gpu) = self.gpu.as_ref() {
-                gpu.upload_sampling_params(queue, sampling_active, level_vps);
-            }
-            self.sampling_params_initialized = true;
-            self.sampling_level_vps = sampling_active.then_some(level_vps);
-        }
         self.sampling_active = sampling_active;
     }
 
@@ -901,6 +1094,56 @@ impl DirectionalVirtualShadowMap {
         self.uploaded_page_table = table;
     }
 
+    fn sampling_params(&self) -> DirectionalVsmSamplingParams {
+        let mut local_light_meta = [[0u32; 4]; VSM_MAX_LOCAL_SHADOW_REQUESTS];
+        let mut local_slots = [LocalVsmSamplingSlot {
+            face_vps: [crate::renderer::IDENTITY_MAT4; VSM_LOCAL_FACES as usize],
+            face_pages_0_3: [0; 4],
+            face_pages_4_5: [0; 4],
+        }; VSM_MAX_LOCAL_SHADOW_LIGHTS];
+        for (slot_index, local) in self.local_selected.iter().enumerate() {
+            local_light_meta[local.shading_index as usize][0] = 1;
+            let mut encoded = [0u32; VSM_LOCAL_FACES as usize];
+            for face in 0..VSM_LOCAL_FACES {
+                let page = VirtualShadowPage::new_local(local.request.light_index, face)
+                    .expect("selected local light has a valid face address");
+                encoded[face as usize] = self.cache.encoded_page(page);
+            }
+            local_slots[slot_index] = LocalVsmSamplingSlot {
+                face_vps: local.face_vps,
+                face_pages_0_3: encoded[..4].try_into().expect("four local faces"),
+                face_pages_4_5: [encoded[4], encoded[5], 0, 0],
+            };
+            if encoded.iter().all(|entry| *entry != VSM_PAGE_TABLE_MISSING) {
+                local_light_meta[local.shading_index as usize][0] = slot_index as u32 + 2;
+            }
+        }
+        DirectionalVsmSamplingParams {
+            level_vps: self
+                .previous_level_vps
+                .unwrap_or([crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize]),
+            words: [
+                u32::from(self.sampling_active),
+                VSM_VIRTUAL_PAGES_PER_AXIS as u32,
+                VSM_PAGE_INTERIOR as u32,
+                VSM_PAGE_BORDER as u32,
+            ],
+            local_light_meta,
+            local_slots,
+        }
+    }
+
+    fn sync_sampling_params(&mut self, queue: &wgpu::Queue) {
+        let params = self.sampling_params();
+        if self.uploaded_sampling_params.as_ref() == Some(&params) {
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_ref() {
+            gpu.upload_sampling_params(queue, &params);
+        }
+        self.uploaded_sampling_params = Some(params);
+    }
+
     pub fn invalidate(&mut self) {
         self.cache.invalidate_all();
         self.previous_level_vps = None;
@@ -911,8 +1154,7 @@ impl DirectionalVirtualShadowMap {
         self.dynamic_overlay_pages.clear();
         self.pending.clear();
         self.sampling_active = false;
-        self.sampling_params_initialized = false;
-        self.sampling_level_vps = None;
+        self.uploaded_sampling_params = None;
     }
 
     pub fn debug_images(&self) -> Vec<(&'static str, u32, u32, Vec<u8>)> {
@@ -1096,22 +1338,8 @@ impl GpuVirtualShadowResources {
         );
     }
 
-    fn upload_sampling_params(
-        &self,
-        queue: &wgpu::Queue,
-        sampling_active: bool,
-        level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
-    ) {
-        let params = DirectionalVsmSamplingParams {
-            level_vps,
-            words: [
-                u32::from(sampling_active),
-                VSM_VIRTUAL_PAGES_PER_AXIS as u32,
-                VSM_PAGE_INTERIOR as u32,
-                VSM_PAGE_BORDER as u32,
-            ],
-        };
-        queue.write_buffer(&self.sampling_params_buffer, 0, bytemuck::bytes_of(&params));
+    fn upload_sampling_params(&self, queue: &wgpu::Queue, params: &DirectionalVsmSamplingParams) {
+        queue.write_buffer(&self.sampling_params_buffer, 0, bytemuck::bytes_of(params));
     }
 }
 
@@ -1158,9 +1386,44 @@ pub(crate) fn directional_scene_shader(source: &str) -> String {
         "let shadow_val = sample_cascade(cascade, shadow_uv, depth_ref);",
         "let shadow_val = sample_virtual_shadow(cascade, recv_pos, shadow_uv, depth_ref);",
     );
-    output.replace(
+    output = output.replace(
         "let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);",
         "let next_val = sample_virtual_shadow(next_cascade, next_pos, next_uv, next_depth_ref);",
+    );
+    let light_index = if source.contains("let light_index = cluster_indices[") {
+        "light_index"
+    } else {
+        "i"
+    };
+    let point_intensity = "pl.color.w * atten2,\n                             base_color";
+    let shadowed_point_intensity = format!(
+        "pl.color.w * atten2 * sample_local_shadow({light_index}, in.world_pos),\n                             base_color"
+    );
+    let output = output.replace(point_intensity, &shadowed_point_intensity);
+    debug_assert!(
+        !source.contains("point_light_count") || output.contains(&shadowed_point_intensity),
+        "VSM scene variant must shade its point-light path"
+    );
+    output
+}
+
+/// Add fail-closed local VSM sampling to the legacy/immediate 3D path.
+/// The canonical shader remains byte-identical when VSM is not selected.
+pub(crate) fn local_immediate_shader(source: &str) -> String {
+    let local_helper_offset = DIRECTIONAL_VSM_SCENE_HELPER
+        .find("fn local_shadow_face(")
+        .expect("VSM scene helper missing local-shadow section");
+    let local_helper = &DIRECTIONAL_VSM_SCENE_HELPER[local_helper_offset..];
+    let point_term = "pl.color.rgb * pl.color.w * diff * atten2;";
+    let shadowed_point_term =
+        "pl.color.rgb * pl.color.w * diff * atten2 * sample_local_shadow(i, in.world_pos);";
+    let shaded = source.replace(point_term, shadowed_point_term);
+    debug_assert!(
+        shaded.contains(shadowed_point_term),
+        "VSM immediate variant must shade its point-light path"
+    );
+    format!(
+        "{DIRECTIONAL_VSM_SCENE_BINDINGS}\n@group(1) @binding(8) var shadow_samp: sampler_comparison;\n{local_helper}\n{shaded}"
     )
 }
 
@@ -1941,8 +2204,39 @@ fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
 
     #[test]
     fn sampling_uniform_matches_wgsl_layout() {
-        assert_eq!(VSM_SAMPLING_PARAMS_BYTES, 3 * 64 + 16);
+        assert_eq!(
+            VSM_SAMPLING_PARAMS_BYTES,
+            3 * 64
+                + 16
+                + VSM_MAX_LOCAL_SHADOW_REQUESTS as u64 * 16
+                + VSM_MAX_LOCAL_SHADOW_LIGHTS as u64 * (VSM_LOCAL_FACES as u64 * 64 + 32)
+        );
         assert_eq!(std::mem::align_of::<DirectionalVsmSamplingParams>(), 16);
+    }
+
+    #[test]
+    fn immediate_shader_variant_injects_local_shadow_sampling() {
+        let source = r#"
+struct PointLight { position: vec4<f32>, color: vec4<f32> };
+struct Lighting { point_lights: array<PointLight, 256> };
+struct VertexOutput3D { world_pos: vec3<f32> };
+@group(1) @binding(0) var<uniform> lighting: Lighting;
+fn local_lighting(in: VertexOutput3D, i: u32, diff: f32, atten2: f32) -> vec3<f32> {
+    let pl = lighting.point_lights[i];
+    return pl.color.rgb * pl.color.w * diff * atten2;
+}
+"#;
+        let variant = local_immediate_shader(source);
+        assert!(variant.contains("@binding(14) var vsm_physical_pages"));
+        assert!(variant.contains("@binding(8) var shadow_samp"));
+        assert!(variant.contains("diff * atten2 * sample_local_shadow(i, in.world_pos)"));
+        let result = wgpu::naga::front::wgsl::parse_str(&variant);
+        if let Err(error) = result.as_ref() {
+            panic!(
+                "VSM immediate variant failed WGSL parsing:\n{}",
+                error.emit_to_string(&variant),
+            );
+        }
     }
 
     #[test]

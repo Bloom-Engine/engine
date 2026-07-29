@@ -734,6 +734,74 @@ impl Renderer {
             } else {
                 Vec::new()
             };
+            let prepared_local_lights = if let Some(camera_planes) = camera_planes.as_ref() {
+                let admitted = self
+                    .shadow_map
+                    .virtual_map
+                    .admit_local_requests(self.current_camera_pos, camera_planes);
+                let mut requested = [false; crate::virtual_shadows::VSM_MAX_LOCAL_SHADOW_REQUESTS];
+                for request in self.shadow_map.virtual_map.local_requests() {
+                    requested[request.light_index as usize] = true;
+                }
+                let mut shading_indices =
+                    [u16::MAX; crate::virtual_shadows::VSM_MAX_LOCAL_SHADOW_REQUESTS];
+                let original_count = self.lighting_uniforms.point_light_count[0] as usize;
+                let mut compact_count = 0usize;
+                for original_index in 0..original_count {
+                    if requested[original_index] {
+                        let Some(request) = admitted
+                            .iter()
+                            .find(|request| usize::from(request.light_index) == original_index)
+                        else {
+                            continue;
+                        };
+                        let mut light = self.lighting_uniforms.point_lights[original_index];
+                        light.color[3] = request.intensity;
+                        self.lighting_uniforms.point_lights[compact_count] = light;
+                        shading_indices[original_index] = compact_count as u16;
+                        compact_count += 1;
+                    } else {
+                        self.lighting_uniforms.point_lights[compact_count] =
+                            self.lighting_uniforms.point_lights[original_index];
+                        compact_count += 1;
+                    }
+                }
+                self.lighting_uniforms.point_light_count[0] = compact_count as f32;
+                self.refresh_froxel_lights();
+                admitted
+                    .into_iter()
+                    .map(|request| {
+                        let shading_index = shading_indices[request.light_index as usize];
+                        debug_assert_ne!(shading_index, u16::MAX);
+                        let face_vps = crate::virtual_shadows::local_shadow_face_vps(request);
+                        let face_signatures = std::array::from_fn(|face| {
+                            let page_planes = crate::scene::extract_frustum_planes(&face_vps[face]);
+                            let mut signature =
+                                fnv1a_bytes(FNV_OFFSET, bytemuck::bytes_of(&face_vps[face]));
+                            for entry in &shadow_nodes {
+                                if entry.wmin[0] > entry.wmax[0]
+                                    || !crate::scene::aabb_outside_frustum(
+                                        &page_planes,
+                                        entry.wmin,
+                                        entry.wmax,
+                                    )
+                                {
+                                    signature = fnv1a_bytes(signature, &entry.sig.to_le_bytes());
+                                }
+                            }
+                            signature
+                        });
+                        crate::virtual_shadows::PreparedLocalShadowLight {
+                            request,
+                            shading_index,
+                            face_vps,
+                            face_signatures,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             self.shadow_map.virtual_map.prepare(
                 &self.device,
                 &self.queue,
@@ -743,6 +811,7 @@ impl Renderer {
                 cascade_sigs,
                 vsm_receiver_bounds.as_deref(),
                 &dynamic_bounds,
+                &prepared_local_lights,
             );
 
             // Render each cascade. Static casters live in a cached depth
@@ -1047,11 +1116,11 @@ impl Renderer {
 
                 struct VsmPageWork {
                     request: crate::virtual_shadows::PageRequest,
-                    level: usize,
                     page_vp: [[f32; 4]; 4],
                     page_entries: Vec<usize>,
                     gpu_range: std::ops::Range<u32>,
                     dynamic_overlay: bool,
+                    signature: u64,
                 }
                 let gpu_casters_enabled = self.vsm_gpu_casters.enabled();
                 let mut gpu_page_count = 0usize;
@@ -1060,6 +1129,45 @@ impl Renderer {
                 let mut page_work = Vec::with_capacity(pending_vsm_pages.len());
 
                 for request in pending_vsm_pages.iter() {
+                    if let Some(local_light_index) = request.page.local_light_index() {
+                        let Some(local) = prepared_local_lights
+                            .iter()
+                            .find(|local| local.request.light_index == local_light_index)
+                        else {
+                            continue;
+                        };
+                        let face = request.page.level as usize;
+                        let page_vp = local.face_vps[face];
+                        let page_planes = crate::scene::extract_frustum_planes(&page_vp);
+                        let page_entries: Vec<_> = shadow_nodes
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(entry_index, entry)| {
+                                (entry.wmin[0] > entry.wmax[0]
+                                    || !crate::scene::aabb_outside_frustum(
+                                        &page_planes,
+                                        entry.wmin,
+                                        entry.wmax,
+                                    ))
+                                .then_some(entry_index)
+                            })
+                            .collect();
+                        // Never publish a partial local shadow. The page stays
+                        // dirty and the light stays suppressed until its full
+                        // caster set fits the fixed per-page draw allocation.
+                        if page_entries.len() > max_entries {
+                            continue;
+                        }
+                        page_work.push(VsmPageWork {
+                            request: *request,
+                            page_vp,
+                            page_entries,
+                            gpu_range: 0..0,
+                            dynamic_overlay: false,
+                            signature: local.face_signatures[face],
+                        });
+                        continue;
+                    }
                     let level = request.page.level as usize;
                     let page_vp = crate::virtual_shadows::directional_page_vp(
                         vsm_level_vps[level],
@@ -1181,11 +1289,11 @@ impl Renderer {
                     }
                     page_work.push(VsmPageWork {
                         request: *request,
-                        level,
                         page_vp,
                         page_entries,
                         gpu_range,
                         dynamic_overlay,
+                        signature: cascade_sigs[level],
                     });
                 }
                 if gpu_page_count == 0 {
@@ -1206,7 +1314,6 @@ impl Renderer {
 
                 for (page_slot, work) in page_work.iter().enumerate() {
                     let request = &work.request;
-                    let level = work.level;
                     let page_vp = work.page_vp;
                     let page_entries = &work.page_entries;
                     let mut uniform_data = vec![0u8; stride * page_entries.len().max(1)];
@@ -1318,7 +1425,7 @@ impl Renderer {
                             );
                         }
                     }
-                    rendered_vsm_pages.push((request.page, cascade_sigs[level]));
+                    rendered_vsm_pages.push((request.page, work.signature));
                     dynamic_overlay_rendered_pages += usize::from(work.dynamic_overlay);
                 }
                 self.shadow_map

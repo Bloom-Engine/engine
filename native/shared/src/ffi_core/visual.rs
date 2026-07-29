@@ -820,6 +820,32 @@ macro_rules! __bloom_ffi_visual {
             })
         }
 
+        // bloom_add_shadowed_point_light  [issue #132 local VSM]
+        #[no_mangle]
+        pub extern "C" fn bloom_add_shadowed_point_light(
+            x: f64,
+            y: f64,
+            z: f64,
+            range: f64,
+            r: f64,
+            g: f64,
+            b: f64,
+            intensity: f64,
+        ) -> f64 {
+            $crate::ffi::guard("bloom_add_shadowed_point_light", move || {
+                f64::from(engine().renderer.add_shadowed_point_light(
+                    x as f32,
+                    y as f32,
+                    z as f32,
+                    range as f32,
+                    r as f32,
+                    g as f32,
+                    b as f32,
+                    intensity as f32,
+                ))
+            })
+        }
+
         // bloom_set_cursor_shape  [source: macos]
         #[no_mangle]
         pub extern "C" fn bloom_set_cursor_shape(shape: f64) {

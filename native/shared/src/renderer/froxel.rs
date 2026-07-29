@@ -157,7 +157,8 @@ const CLUSTERED_LOOP: &str = "
     let cl_count = cluster_counts[cluster];
     let cl_base = cluster * 256u;
     for (var ci = 0u; ci < cl_count; ci++) {
-        let pl = lighting.point_lights[cluster_indices[cl_base + ci]];
+        let light_index = cluster_indices[cl_base + ci];
+        let pl = lighting.point_lights[light_index];
         let to_light = pl.position.xyz - in.world_pos;
         let dist = length(to_light);
         let range = pl.position.w;
@@ -413,6 +414,21 @@ impl FroxelPass {
 }
 
 impl super::Renderer {
+    /// Replace the already-queued froxel light snapshot after local-shadow
+    /// admission compacts suppressed requests out of the live lighting list.
+    pub(super) fn refresh_froxel_lights(&self) {
+        let Some(froxel) = &self.froxel else { return };
+        let n = (self.lighting_uniforms.point_light_count[0] as u32).min(MAX_LIGHTS_PER_CLUSTER);
+        let count = [n as f32, 0.0, 0.0, 0.0_f32];
+        self.queue
+            .write_buffer(&froxel.lights_buffer, 0, bytemuck::bytes_of(&count));
+        self.queue.write_buffer(
+            &froxel.lights_buffer,
+            16,
+            bytemuck::cast_slice(&self.lighting_uniforms.point_lights),
+        );
+    }
+
     /// Upload froxel params + the compact light list and dispatch the
     /// assignment pass. Runs every 3D frame on supported devices —
     /// even with zero lights, so `cluster_counts` never carries stale
@@ -451,14 +467,7 @@ impl super::Renderer {
         };
         self.queue
             .write_buffer(&froxel.params_buffer, 0, bytemuck::bytes_of(&params));
-        let count = [n as f32, 0.0, 0.0, 0.0_f32];
-        self.queue
-            .write_buffer(&froxel.lights_buffer, 0, bytemuck::bytes_of(&count));
-        self.queue.write_buffer(
-            &froxel.lights_buffer,
-            16,
-            bytemuck::cast_slice(&self.lighting_uniforms.point_lights),
-        );
+        self.refresh_froxel_lights();
         froxel.record(encoder);
     }
 }
