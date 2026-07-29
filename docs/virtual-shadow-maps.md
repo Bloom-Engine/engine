@@ -265,7 +265,9 @@ fixed while moving the animated Fox. From the repository root, run
 files. The gate requires alpha and skinned page draws, segmented alpha
 coverage in a ground ROI, and moving skinned-shadow pixels outside the visible
 Fox silhouette. Empty assets, opaque replacement coverage, missing draw
-classes, and unchanged skinned shadows fail closed.
+classes, and unchanged skinned shadows fail closed. Qualification captures,
+metrics, repeat tolerance, and bounded-work telemetry are in
+`docs/evidence/issue-132-caster-coverage-v1.md`.
 
 ## Work that remains on issue #132
 
