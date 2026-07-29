@@ -163,6 +163,8 @@ impl Renderer {
         });
         out.push_str(",\"gpu_driven\":");
         out.push_str(&self.gpu_driven.report_json());
+        out.push_str(",\"vsm_gpu_casters\":");
+        out.push_str(&self.vsm_gpu_casters.report_json());
         out.push_str(",\"imported_refraction\":");
         json_string(&mut out, imported_refraction);
         out.push_str(",\"transparency_modes\":[\"sorted\",\"auto\",\"weighted\"]}}");

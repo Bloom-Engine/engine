@@ -20,10 +20,14 @@ import { mat4Identity, mat4Translate, mat4Scale } from "bloom/math";
 
 const argv: string[] = getCommandLineArgs();
 const config = parseQualityRun(argv);
+let vsmGpuCasterFixture = false;
+for (let i = 0; i < argv.length; i = i + 1) {
+  if (argv[i] === "--vsm-gpu-casters") vsmGpuCasterFixture = true;
+}
 
-const GRID_X = 128;
-const GRID_Z = 80;
-const DRAW_COUNT = GRID_X * GRID_Z; // 10,240 independently submitted nodes.
+const GRID_X = vsmGpuCasterFixture ? 32 : 128;
+const GRID_Z = vsmGpuCasterFixture ? 16 : 80;
+const DRAW_COUNT = GRID_X * GRID_Z;
 const LIGHT_COUNT = 192;
 
 initWindow(1280, 720, "Bloom Quality: 10k Draws + Many Lights", 0);
@@ -57,18 +61,22 @@ for (let i = 0; i < DRAW_COUNT; i = i + 1) {
     130 + ((xIndex + zIndex) % 4) * 24,
   );
   setSceneNodePbr(node, 0.22 + (xIndex % 6) * 0.12, (zIndex % 9 === 0) ? 0.8 : 0.05);
-  // Keep the stress focused on main-view draw submission. A 10k-caster
-  // shadow map would test a different budget and conceal clustered-light cost.
-  setSceneNodeCastShadow(node, false);
+  // The ordinary 10k case stays focused on main-view submission. The opt-in
+  // 512-node VSM oracle stays below the per-page compatibility cap.
+  setSceneNodeCastShadow(node, vsmGpuCasterFixture);
   setSceneNodeReceiveShadow(node, true);
 }
 
+let fixtureFrame = 0;
 while (!windowShouldClose()) {
   const capture = quality !== null ? quality.beginFrame() : false;
+  fixtureFrame = fixtureFrame + 1;
   beginDrawing();
   setAmbientLight({ r: 105, g: 115, b: 135, a: 255 }, 0.25);
   setDirectionalLight(
-    { x: -0.4, y: 0.85, z: 0.3 },
+    vsmGpuCasterFixture && Math.floor(fixtureFrame / 30) % 2 !== 0
+      ? { x: -0.28, y: 0.90, z: 0.34 }
+      : { x: -0.4, y: 0.85, z: 0.3 },
     { r: 255, g: 244, b: 228, a: 255 },
     1.4,
   );

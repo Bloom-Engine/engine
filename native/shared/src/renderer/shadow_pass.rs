@@ -197,6 +197,11 @@ impl Renderer {
                 // caster MOVE, which is why it also forces `dynamic` — a swaying tree
                 // cannot reuse its cached static shadow depth.
                 foliage: f32,
+                // Rigid opaque geometry resident in the shared arena can use
+                // the workload-gated per-page indirect path.
+                gpu_opaque_shared: bool,
+                gpu_index_start: u32,
+                gpu_base_vertex: i32,
                 // EN-043 — stable identity (NOT including the transform), so a caster
                 // that moved can be told apart from a caster that appeared.
                 key: u64,
@@ -268,6 +273,9 @@ impl Renderer {
                     }
                     None => -1,
                 };
+                let gpu_shared_draw = node
+                    .gpu_geometry
+                    .map(|slice| (slice.first_index, slice.base_vertex));
                 shadow_nodes.push(ShadowDrawEntry {
                     vb_idx,
                     ib_idx: vb_idx,
@@ -283,6 +291,9 @@ impl Renderer {
                     dynamic: false,
                     joint_offset: 0.0,
                     foliage: 0.0,
+                    gpu_opaque_shared: gpu_shared_draw.is_some() && cutout_idx < 0,
+                    gpu_index_start: gpu_shared_draw.map_or(0, |draw| draw.0),
+                    gpu_base_vertex: gpu_shared_draw.map_or(0, |draw| draw.1),
                     key: caster_id(0, i as u64, node.gpu_index_count as u64, &node.transform),
                 });
             }
@@ -319,6 +330,9 @@ impl Renderer {
                         dynamic: true,
                         joint_offset: 0.0,
                         foliage: 0.0,
+                        gpu_opaque_shared: false,
+                        gpu_index_start: 0,
+                        gpu_base_vertex: 0,
                         key: 0,
                     });
                 } else {
@@ -353,6 +367,9 @@ impl Renderer {
                             dynamic: true,
                             joint_offset: 0.0,
                             foliage: 0.0,
+                            gpu_opaque_shared: false,
+                            gpu_index_start: 0,
+                            gpu_base_vertex: 0,
                             key: 0,
                         });
                     }
@@ -416,6 +433,9 @@ impl Renderer {
                                 dynamic: true,
                                 joint_offset: cmd.joint_offset,
                                 foliage: 0.0,
+                                gpu_opaque_shared: false,
+                                gpu_index_start: draw.first_index,
+                                gpu_base_vertex: draw.base_vertex,
                                 key: 0,
                             });
                         } else {
@@ -475,6 +495,14 @@ impl Renderer {
                                 dynamic: fol > 0.0,
                                 joint_offset: 0.0,
                                 foliage: fol,
+                                gpu_opaque_shared: fol == 0.0
+                                    && cutout_idx < 0
+                                    && matches!(
+                                        &mesh.geometry,
+                                        gpu_driven::MeshGeometry::Shared(_)
+                                    ),
+                                gpu_index_start: draw.first_index,
+                                gpu_base_vertex: draw.base_vertex,
                                 key: caster_id(
                                     1,
                                     cmd.cache_handle,
@@ -533,6 +561,10 @@ impl Renderer {
                             dynamic: false,
                             joint_offset: 0.0,
                             foliage: 0.0,
+                            gpu_opaque_shared: cutout_idx < 0
+                                && matches!(&mesh.geometry, gpu_driven::MeshGeometry::Shared(_)),
+                            gpu_index_start: draw.first_index,
+                            gpu_base_vertex: draw.base_vertex,
                             key: caster_id(2, cmd.mesh_handle, cmd.mesh_idx as u64, &cmd.model),
                         });
                     }
@@ -997,6 +1029,7 @@ impl Renderer {
             // pages. Static pages persist. Up to four pages touched by bounded
             // dynamic/skinned casters are rebuilt with current-frame geometry;
             // excess work remains dirty and therefore samples live CSM.
+            self.vsm_gpu_casters.reset_stats();
             let pending_vsm_pages = self.shadow_map.virtual_map.pending().to_vec();
             if !pending_vsm_pages.is_empty() {
                 profiler.begin("virtual_shadow_pages");
@@ -1010,7 +1043,21 @@ impl Renderer {
                 let mut dynamic_overlay_draws = 0usize;
                 let mut dynamic_overlay_deferred_pages = 0usize;
 
-                for (page_slot, request) in pending_vsm_pages.iter().enumerate() {
+                struct VsmPageWork {
+                    request: crate::virtual_shadows::PageRequest,
+                    level: usize,
+                    page_vp: [[f32; 4]; 4],
+                    page_entries: Vec<usize>,
+                    gpu_range: std::ops::Range<u32>,
+                    dynamic_overlay: bool,
+                }
+                let gpu_casters_enabled = self.vsm_gpu_casters.enabled();
+                let mut gpu_page_count = 0usize;
+                let mut gpu_casters = Vec::new();
+                let mut max_gpu_page_candidates = 0usize;
+                let mut page_work = Vec::with_capacity(pending_vsm_pages.len());
+
+                for request in pending_vsm_pages.iter() {
                     let level = request.page.level as usize;
                     let page_vp = crate::virtual_shadows::directional_page_vp(
                         vsm_level_vps[level],
@@ -1021,27 +1068,61 @@ impl Renderer {
                         .shadow_map
                         .virtual_map
                         .dynamic_overlay_contains(request.page);
-                    let mut page_entries: Vec<usize> = cascade_indices[level]
-                        .iter()
-                        .copied()
-                        .filter(|&entry_index| {
+                    let gpu_scan = gpu_casters_enabled
+                        && !dynamic_overlay
+                        && cascade_indices[level].len() <= max_entries;
+                    let mut gpu_candidate_indices = Vec::new();
+                    let mut page_entries = Vec::new();
+                    if gpu_scan {
+                        gpu_candidate_indices.reserve(cascade_indices[level].len());
+                        page_entries.reserve(cascade_indices[level].len());
+                        for &entry_index in &cascade_indices[level] {
                             let entry = &shadow_nodes[entry_index];
-                            if entry.dynamic {
-                                return false;
+                            if entry.dynamic
+                                || (entry.wmin[0] <= entry.wmax[0]
+                                    && crate::scene::aabb_outside_frustum(
+                                        &page_planes,
+                                        entry.wmin,
+                                        entry.wmax,
+                                    ))
+                            {
+                                continue;
                             }
-                            entry.wmin[0] > entry.wmax[0]
-                                || !crate::scene::aabb_outside_frustum(
-                                    &page_planes,
-                                    entry.wmin,
-                                    entry.wmax,
-                                )
-                        })
-                        .take(if dynamic_overlay {
-                            max_static
-                        } else {
-                            max_entries
-                        })
-                        .collect();
+                            if entry.gpu_opaque_shared {
+                                gpu_candidate_indices.push(entry_index);
+                            }
+                            page_entries.push(entry_index);
+                        }
+                    } else {
+                        page_entries.extend(
+                            cascade_indices[level]
+                                .iter()
+                                .copied()
+                                .filter(|&entry_index| {
+                                    let entry = &shadow_nodes[entry_index];
+                                    !entry.dynamic
+                                        && (entry.wmin[0] > entry.wmax[0]
+                                            || !crate::scene::aabb_outside_frustum(
+                                                &page_planes,
+                                                entry.wmin,
+                                                entry.wmax,
+                                            ))
+                                })
+                                .take(if dynamic_overlay {
+                                    max_static
+                                } else {
+                                    max_entries
+                                }),
+                        );
+                    }
+                    let use_gpu =
+                        gpu_candidate_indices.len() >= vsm_gpu_casters::VSM_GPU_CASTER_MIN_DRAWS;
+                    max_gpu_page_candidates =
+                        max_gpu_page_candidates.max(gpu_candidate_indices.len());
+                    if use_gpu {
+                        page_entries
+                            .retain(|&entry_index| !shadow_nodes[entry_index].gpu_opaque_shared);
+                    }
                     if dynamic_overlay {
                         let mut dynamic_entries: Vec<usize> = cascade_indices[level]
                             .iter()
@@ -1078,6 +1159,54 @@ impl Renderer {
                         dynamic_overlay_draws += page_entries.len();
                     }
 
+                    let mut gpu_range = 0..0;
+                    if use_gpu {
+                        gpu_page_count += 1;
+                        let gpu_start = gpu_casters.len() as u32;
+                        for entry_index in gpu_candidate_indices {
+                            let entry = &shadow_nodes[entry_index];
+                            gpu_casters.push(vsm_gpu_casters::VsmGpuCaster {
+                                clip_from_local: mat4_multiply(page_vp, entry.transform),
+                                draw: [
+                                    entry.index_count,
+                                    entry.gpu_index_start,
+                                    entry.gpu_base_vertex as u32,
+                                    0,
+                                ],
+                            });
+                        }
+                        gpu_range = gpu_start..gpu_casters.len() as u32;
+                    }
+                    page_work.push(VsmPageWork {
+                        request: *request,
+                        level,
+                        page_vp,
+                        page_entries,
+                        gpu_range,
+                        dynamic_overlay,
+                    });
+                }
+                if gpu_page_count == 0 {
+                    gpu_casters.clear();
+                }
+                self.vsm_gpu_casters
+                    .record_scan(page_work.len(), max_gpu_page_candidates);
+                let gpu_active = self.vsm_gpu_casters.prepare(
+                    &self.device,
+                    &self.queue,
+                    gpu_page_count,
+                    &gpu_casters,
+                );
+                debug_assert!(
+                    gpu_active || gpu_casters.is_empty(),
+                    "qualified VSM GPU caster work must prepare successfully"
+                );
+
+                for (page_slot, work) in page_work.iter().enumerate() {
+                    let request = &work.request;
+                    let level = work.level;
+                    let page_vp = work.page_vp;
+                    let page_entries = &work.page_entries;
                     let mut uniform_data = vec![0u8; stride * page_entries.len().max(1)];
                     for (slot, &entry_index) in page_entries.iter().enumerate() {
                         let entry = &shadow_nodes[entry_index];
@@ -1134,6 +1263,15 @@ impl Renderer {
                                 occlusion_query_set: None,
                                 multiview_mask: None,
                             });
+                        if gpu_active && !work.gpu_range.is_empty() {
+                            let (vertex, index) = self.gpu_driven.shared_geometry();
+                            self.vsm_gpu_casters.draw_page(
+                                &mut page_pass,
+                                work.gpu_range.clone(),
+                                vertex,
+                                index,
+                            );
+                        }
                         let mut current_kind = 0u8;
                         page_pass.set_pipeline(&self.shadow_map.pipeline);
                         for (slot, &entry_index) in page_entries.iter().enumerate() {
@@ -1177,7 +1315,7 @@ impl Renderer {
                         }
                     }
                     rendered_vsm_pages.push((request.page, cascade_sigs[level]));
-                    dynamic_overlay_rendered_pages += usize::from(dynamic_overlay);
+                    dynamic_overlay_rendered_pages += usize::from(work.dynamic_overlay);
                 }
                 self.shadow_map
                     .virtual_map

@@ -68,6 +68,7 @@ mod temporal_reactive;
 mod texture_store;
 mod transmitted_shadows;
 mod transparent_gi;
+mod vsm_gpu_casters;
 mod weighted_transparency;
 pub use occlusion::OcclusionCuller;
 use shaders::*;
@@ -1277,6 +1278,8 @@ pub struct Renderer {
     model_gpu_cache: HashMap<u64, Option<Vec<GpuMesh>>>,
     /// Shared static geometry, GPU culling, and indirect submission.
     gpu_driven: gpu_driven::GpuDrivenRenderer,
+    /// Lazy buffers for workload-gated per-page VSM indirect submission.
+    vsm_gpu_casters: vsm_gpu_casters::VsmGpuCasters,
     /// Handles whose cached meshes carry skin weights, recorded at cache
     /// time so `bloom_draw_model` can pick the skinned cached path
     /// without rescanning vertices every frame.
@@ -7496,6 +7499,7 @@ impl Renderer {
             material_system.indirection.global_layout.as_ref(),
             &gpu_scene_shader_source,
         );
+        let vsm_gpu_casters = vsm_gpu_casters::VsmGpuCasters::new(&device, gpu_driven.enabled());
         let transient_pool = transient::TransientPool::new();
         let frame_plan_cache = graph::PlanCache::new();
         let impulse_field = impulse_field::ImpulseField::new(&device);
@@ -7971,6 +7975,7 @@ impl Renderer {
             persistent_ib_3d_capacity: ib_3d_cap,
             model_gpu_cache: HashMap::new(),
             gpu_driven,
+            vsm_gpu_casters,
             model_skinned: std::collections::HashSet::new(),
             model_blended: std::collections::HashSet::new(),
             model_layered_blended: std::collections::HashSet::new(),

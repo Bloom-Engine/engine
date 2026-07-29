@@ -502,6 +502,10 @@ impl GpuDrivenRenderer {
         self.enabled && !self.draw_scratch.is_empty()
     }
 
+    pub(super) fn shared_geometry(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
+        (&self.arena.vertex, &self.arena.index)
+    }
+
     pub fn upload_static(
         &mut self,
         device: &wgpu::Device,
