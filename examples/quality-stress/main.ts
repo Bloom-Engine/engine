@@ -13,6 +13,7 @@ import {
 } from "bloom/models";
 import {
   enableShadows, addPointLight, addShadowedPointLight, createSceneNode, attachModelToNode,
+  addShadowedSpotLight,
   setSceneNodeTransform, setSceneNodeColor, setSceneNodePbr,
   setSceneNodeCastShadow, setSceneNodeReceiveShadow,
 } from "bloom/scene";
@@ -23,13 +24,19 @@ const config = parseQualityRun(argv);
 let vsmGpuCasterFixture = false;
 let vsmLocalLightsFixture = false;
 let vsmLocalReferenceFixture = false;
+let vsmSpotLightsFixture = false;
+let vsmSpotReferenceFixture = false;
 for (let i = 0; i < argv.length; i = i + 1) {
   if (argv[i] === "--vsm-gpu-casters") vsmGpuCasterFixture = true;
   if (argv[i] === "--vsm-local-lights") vsmLocalLightsFixture = true;
   if (argv[i] === "--vsm-local-reference") vsmLocalReferenceFixture = true;
+  if (argv[i] === "--vsm-spot-lights") vsmSpotLightsFixture = true;
+  if (argv[i] === "--vsm-spot-reference") vsmSpotReferenceFixture = true;
 }
 
-const localLightLayout = vsmLocalLightsFixture || vsmLocalReferenceFixture;
+const spotLightLayout = vsmSpotLightsFixture || vsmSpotReferenceFixture;
+const localLightLayout =
+  vsmLocalLightsFixture || vsmLocalReferenceFixture || spotLightLayout;
 const GRID_X = localLightLayout ? 16 : (vsmGpuCasterFixture ? 32 : 128);
 const GRID_Z = localLightLayout ? 16 : (vsmGpuCasterFixture ? 16 : 80);
 const DRAW_COUNT = GRID_X * GRID_Z;
@@ -80,7 +87,10 @@ for (let i = 0; i < DRAW_COUNT; i = i + 1) {
   setSceneNodePbr(node, 0.22 + (xIndex % 6) * 0.12, (zIndex % 9 === 0) ? 0.8 : 0.05);
   // The ordinary 10k case stays focused on main-view submission. The opt-in
   // 512-node VSM oracle stays below the per-page compatibility cap.
-  setSceneNodeCastShadow(node, vsmGpuCasterFixture || localLightLayout);
+  setSceneNodeCastShadow(
+    node,
+    vsmGpuCasterFixture || (localLightLayout && !vsmSpotReferenceFixture),
+  );
   setSceneNodeReceiveShadow(node, true);
 }
 
@@ -97,8 +107,10 @@ while (!windowShouldClose()) {
     vsmGpuCasterFixture && Math.floor(fixtureFrame / 30) % 2 !== 0
       ? { x: -0.28, y: 0.90, z: 0.34 }
       : { x: -0.4, y: 0.85, z: 0.3 },
-    { r: 255, g: 244, b: 228, a: 255 },
-    localLightLayout ? 0.15 : 1.4,
+    spotLightLayout
+      ? { r: 0, g: 0, b: 0, a: 255 }
+      : { r: 255, g: 244, b: 228, a: 255 },
+    spotLightLayout ? 1.0 : (localLightLayout ? 0.15 : 1.4),
   );
   for (let i = 0; i < LIGHT_COUNT; i = i + 1) {
     const columns = localLightLayout ? 16 : 24;
@@ -118,7 +130,21 @@ while (!windowShouldClose()) {
       hue === 2 ? 1.0 : 0.2,
       priorityLocalLight ? 2.0 : (localLightLayout ? 8.0 : 3.0),
     ] as const;
-    if (vsmLocalLightsFixture) {
+    if (spotLightLayout) {
+      const spotX = priorityLocalLight ? (i - 2) * 2.0 : args[0];
+      const spotY = priorityLocalLight ? 7.0 : args[1] + 3.0;
+      const spotZ = priorityLocalLight ? 4.0 : args[2];
+      if (!addShadowedSpotLight(
+        spotX, spotY, spotZ,
+        0.0, -1.0, priorityLocalLight ? -0.25 : 0.0,
+        priorityLocalLight ? 15.0 : 4.5,
+        30.0, 50.0,
+        args[4], args[5], args[6],
+        priorityLocalLight ? 4.0 : 8.0,
+      ) && fixtureFrame === 1) {
+        throw new Error(`shadowed spot-light request ${i} was rejected`);
+      }
+    } else if (vsmLocalLightsFixture) {
       if (!addShadowedPointLight(...args) && fixtureFrame === 1) {
         throw new Error(`shadowed point-light request ${i} was rejected`);
       }

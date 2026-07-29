@@ -4,11 +4,52 @@ const LOCAL_SHADOW_NEAR_MIN: f32 = 0.02;
 const LOCAL_SHADOW_NEAR_MAX: f32 = 0.25;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum LocalShadowProjection {
+    PointCube,
+    Spot {
+        direction: [f32; 3],
+        inner_radius: f32,
+        projection_scale: f32,
+    },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) struct LocalShadowRequest {
     pub light_index: u16,
     pub position: [f32; 3],
     pub range: f32,
     pub intensity: f32,
+    pub projection: LocalShadowProjection,
+}
+
+impl LocalShadowRequest {
+    pub(crate) fn face_count(self) -> u8 {
+        match self.projection {
+            LocalShadowProjection::PointCube => super::VSM_LOCAL_FACES,
+            LocalShadowProjection::Spot { .. } => 1,
+        }
+    }
+
+    pub(crate) fn kind(self) -> &'static str {
+        match self.projection {
+            LocalShadowProjection::PointCube => "point",
+            LocalShadowProjection::Spot { .. } => "spot",
+        }
+    }
+
+    pub(crate) fn shader_kind(self) -> u32 {
+        u32::from(matches!(
+            self.projection,
+            LocalShadowProjection::Spot { .. }
+        ))
+    }
+
+    pub(crate) fn inner_radius(self) -> f32 {
+        match self.projection {
+            LocalShadowProjection::PointCube => 0.0,
+            LocalShadowProjection::Spot { inner_radius, .. } => inner_radius,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -42,9 +83,9 @@ fn distance_to_influence(request: LocalShadowRequest, camera: [f32; 3]) -> f32 {
     (dx * dx + dy * dy + dz * dz).sqrt() - request.range
 }
 
-/// Six right-handed cube-face view projections using WebGPU's `[0, 1]`
-/// depth convention. Face order is shared with the shader's major-axis
-/// selector: +X, -X, +Y, -Y, +Z, -Z.
+/// Right-handed local-light projections using WebGPU's `[0, 1]` depth
+/// convention. Point lights use the six shader-major-axis cube faces;
+/// spot lights use face zero and leave the remaining slots as identities.
 pub(super) fn face_vps(request: LocalShadowRequest) -> [[[f32; 4]; 4]; 6] {
     let position = request.position;
     let near = (request.range * 0.002)
@@ -52,9 +93,15 @@ pub(super) fn face_vps(request: LocalShadowRequest) -> [[[f32; 4]; 4]; 6] {
         .min(request.range * 0.5);
     let far = request.range.max(near + f32::EPSILON);
     let reciprocal_depth = 1.0 / (near - far);
+    let projection_scale = match request.projection {
+        LocalShadowProjection::PointCube => 1.0,
+        LocalShadowProjection::Spot {
+            projection_scale, ..
+        } => projection_scale,
+    };
     let projection = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
+        [projection_scale, 0.0, 0.0, 0.0],
+        [0.0, projection_scale, 0.0, 0.0],
         [0.0, 0.0, far * reciprocal_depth, -1.0],
         [0.0, 0.0, near * far * reciprocal_depth, 0.0],
     ];
@@ -67,7 +114,18 @@ pub(super) fn face_vps(request: LocalShadowRequest) -> [[[f32; 4]; 4]; 6] {
         ([0.0, 0.0, -1.0], [0.0, -1.0, 0.0]),
     ];
     std::array::from_fn(|face| {
-        let (direction, up) = directions_and_up[face];
+        let (direction, up) = match request.projection {
+            LocalShadowProjection::PointCube => directions_and_up[face],
+            LocalShadowProjection::Spot { direction, .. } if face == 0 => {
+                let up = if direction[1].abs() < 0.999 {
+                    [0.0, 1.0, 0.0]
+                } else {
+                    [0.0, 0.0, 1.0]
+                };
+                (direction, up)
+            }
+            LocalShadowProjection::Spot { .. } => return crate::renderer::IDENTITY_MAT4,
+        };
         let center = [
             position[0] + direction[0],
             position[1] + direction[1],
@@ -135,6 +193,7 @@ mod tests {
             position: [x, 0.0, -5.0],
             range: 1.0,
             intensity,
+            projection: LocalShadowProjection::PointCube,
         }
     }
 
@@ -209,6 +268,7 @@ mod tests {
             position: [2.0, 3.0, 4.0],
             range: 10.0,
             intensity: 1.0,
+            projection: LocalShadowProjection::PointCube,
         };
         let directions = [
             [1.0, 0.0, 0.0],
@@ -232,5 +292,41 @@ mod tests {
                 "face {face}: {projected:?}"
             );
         }
+    }
+
+    #[test]
+    fn spot_uses_one_perspective_face_with_a_circular_outer_cone() {
+        let outer_half = 30.0_f32.to_radians();
+        let inner_half = 15.0_f32.to_radians();
+        let request = LocalShadowRequest {
+            light_index: 0,
+            position: [2.0, 3.0, 4.0],
+            range: 10.0,
+            intensity: 1.0,
+            projection: LocalShadowProjection::Spot {
+                direction: [0.0, -1.0, 0.0],
+                inner_radius: inner_half.tan() / outer_half.tan(),
+                projection_scale: outer_half.tan().recip(),
+            },
+        };
+        assert_eq!(request.face_count(), 1);
+        let faces = face_vps(request);
+        let center = ndc(&faces[0], [2.0, -2.0, 4.0]);
+        assert!(center[0].abs() < 1.0e-5, "{center:?}");
+        assert!(center[1].abs() < 1.0e-5, "{center:?}");
+        assert!((0.0..=1.0).contains(&center[2]), "{center:?}");
+
+        let edge_direction = [outer_half.sin(), -outer_half.cos(), 0.0];
+        let edge = ndc(
+            &faces[0],
+            [
+                request.position[0] + edge_direction[0] * 5.0,
+                request.position[1] + edge_direction[1] * 5.0,
+                request.position[2],
+            ],
+        );
+        assert!((edge[0].abs() - 1.0).abs() < 1.0e-4, "{edge:?}");
+        assert!(edge[1].abs() < 1.0e-5, "{edge:?}");
+        assert_eq!(faces[1], crate::renderer::IDENTITY_MAT4);
     }
 }

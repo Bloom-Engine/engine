@@ -1248,6 +1248,25 @@ pub fn bloom_add_shadowed_point_light(
     0.0
 }
 
+#[wasm_bindgen]
+pub fn bloom_add_shadowed_spot_light(
+    _x: f64,
+    _y: f64,
+    _z: f64,
+    _direction_x: f64,
+    _direction_y: f64,
+    _direction_z: f64,
+    _range: f64,
+    _inner_cone_degrees: f64,
+    _outer_cone_degrees: f64,
+    _r: f64,
+    _g: f64,
+    _b: f64,
+    _intensity: f64,
+) -> f64 {
+    0.0
+}
+
 // ============================================================
 // Audio
 // ============================================================

@@ -118,6 +118,13 @@ declare function bloom_add_shadowed_point_light(
   r: number, g: number, b: number,
   intensity: number,
 ): number;
+declare function bloom_add_shadowed_spot_light(
+  x: number, y: number, z: number,
+  directionX: number, directionY: number, directionZ: number,
+  range: number, innerConeDegrees: number, outerConeDegrees: number,
+  r: number, g: number, b: number,
+  intensity: number,
+): number;
 
 // Shadows
 declare function bloom_enable_shadows(): number;
@@ -896,5 +903,28 @@ export function addShadowedPointLight(
 ): boolean {
   return bloom_add_shadowed_point_light(
     x, y, z, range, r, g, b, intensity,
+  ) !== 0;
+}
+
+/**
+ * Submit a shadow-required spot light.
+ *
+ * The direction need not be normalized. Inner and outer cone values are full
+ * vertex angles in degrees. Capable high-tier renderers use one perspective
+ * page in the shared local-light VSM budget; unsupported paths return false
+ * and never substitute an unshadowed light.
+ */
+export function addShadowedSpotLight(
+  x: number, y: number, z: number,
+  directionX: number, directionY: number, directionZ: number,
+  range: number, innerConeDegrees: number, outerConeDegrees: number,
+  r: number, g: number, b: number,
+  intensity: number,
+): boolean {
+  return bloom_add_shadowed_spot_light(
+    x, y, z,
+    directionX, directionY, directionZ,
+    range, innerConeDegrees, outerConeDegrees,
+    r, g, b, intensity,
   ) !== 0;
 }

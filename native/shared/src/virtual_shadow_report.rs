@@ -80,12 +80,22 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
         .local_selected
         .iter()
         .filter(|local| {
-            (0..VSM_LOCAL_FACES).all(|face| {
+            (0..local.request.face_count()).all(|face| {
                 let page = VirtualShadowPage::new_local(local.request.light_index, face)
                     .expect("selected local light has valid page addresses");
                 vsm.cache.encoded_page(page) != VSM_PAGE_TABLE_MISSING
             })
         })
+        .count();
+    let local_point_submitted = vsm
+        .local_requests
+        .iter()
+        .filter(|request| matches!(request.projection, LocalShadowProjection::PointCube))
+        .count();
+    let local_spot_submitted = vsm
+        .local_requests
+        .iter()
+        .filter(|request| matches!(request.projection, LocalShadowProjection::Spot { .. }))
         .count();
     let directional_requested_pages = stats.requested.saturating_sub(local_requested_pages);
     let directional_cache_hits = stats.hits.saturating_sub(local_cache_hits);
@@ -100,13 +110,25 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
         let point_index = request.light_index as usize;
         let cache_light = request.light_index + 1;
         let page_stats = vsm.local_page_stats[point_index];
-        let (resident_pages, dirty_pages) = vsm.cache.light_counts(cache_light);
+        let (resident_pages, dirty_pages) =
+            (0..request.face_count()).fold((0u16, 0u16), |(resident, dirty), face| {
+                let Some(page) = VirtualShadowPage::new_local(request.light_index, face) else {
+                    return (resident, dirty);
+                };
+                let Some((page_dirty, _)) = vsm.cache.request_state(page) else {
+                    return (resident, dirty);
+                };
+                (
+                    resident.saturating_add(1),
+                    dirty.saturating_add(u16::from(page_dirty)),
+                )
+            });
         let selected = vsm
             .local_selected
             .iter()
             .any(|local| local.request.light_index == request.light_index);
         let active = selected
-            && (0..VSM_LOCAL_FACES).all(|face| {
+            && (0..request.face_count()).all(|face| {
                 VirtualShadowPage::new_local(request.light_index, face)
                     .is_some_and(|page| vsm.cache.encoded_page(page) != VSM_PAGE_TABLE_MISSING)
             });
@@ -120,7 +142,7 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
         write!(
             local_cost_rows,
             concat!(
-                ",{{\"light\":{},\"cache_light\":{},\"kind\":\"point\",",
+                ",{{\"light\":{},\"cache_light\":{},\"kind\":\"{}\",",
                 "\"state\":\"{}\",\"requested_pages\":{},\"cache_hits\":{},",
                 "\"cache_misses\":{},\"denied_pages\":{},\"invalidated_pages\":{},",
                 "\"rendered_pages\":{},\"resident_pages\":{},\"dirty_pages\":{},",
@@ -129,6 +151,7 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
             ),
             point_index,
             cache_light,
+            request.kind(),
             state,
             page_stats.requested,
             page_stats.hits,
@@ -157,7 +180,9 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
             "\"page_cutout_draws\":{},\"page_skinned_draws\":{},",
             "\"dynamic_overlay_page_budget\":{},\"dynamic_overlay_draw_budget\":{},",
             "\"local_lights\":{{\"submission_limit\":{},\"admission_limit\":{},",
-            "\"faces_per_light\":{},\"submitted\":{},\"visible\":{},\"admitted\":{},",
+            "\"faces_per_light\":{},\"point_faces_per_light\":{},",
+            "\"spot_faces_per_light\":1,\"point_submitted\":{},\"spot_submitted\":{},",
+            "\"submitted\":{},\"visible\":{},\"admitted\":{},",
             "\"active_shaded\":{},\"visibility_rejected\":{},\"budget_suppressed\":{},",
             "\"requested_pages\":{},\"resident_pages\":{},\"dirty_pages\":{},",
             "\"rendered_pages\":{},\"shared_page_budget\":true,",
@@ -225,6 +250,9 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
         VSM_MAX_LOCAL_SHADOW_REQUESTS,
         VSM_MAX_LOCAL_SHADOW_LIGHTS,
         VSM_LOCAL_FACES,
+        VSM_LOCAL_FACES,
+        local_point_submitted,
+        local_spot_submitted,
         vsm.local_admission_stats.submitted,
         vsm.local_admission_stats.visible,
         vsm.local_admission_stats.admitted,

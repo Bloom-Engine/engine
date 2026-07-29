@@ -21,7 +21,9 @@ mod report;
 #[path = "virtual_shadow_selection.rs"]
 mod selection;
 
-pub(crate) use local_lights::{LocalShadowAdmissionStats, LocalShadowRequest};
+pub(crate) use local_lights::{
+    LocalShadowAdmissionStats, LocalShadowProjection, LocalShadowRequest,
+};
 use selection::selection as virtual_shadow_selection;
 pub(crate) use selection::{configure_capability_tier, virtual_shadows_requested};
 
@@ -464,19 +466,6 @@ impl VirtualShadowPageCache {
         Some((slot.dirty, slot.rendered_signature))
     }
 
-    fn light_counts(&self, light: u16) -> (u16, u16) {
-        let mut resident = 0u16;
-        let mut dirty = 0u16;
-        for slot in &self.physical {
-            if !slot.owner.is_some_and(|owner| owner.light == light) {
-                continue;
-            }
-            resident = resident.saturating_add(1);
-            dirty = dirty.saturating_add(u16::from(slot.dirty));
-        }
-        (resident, dirty)
-    }
-
     pub fn stats(&self) -> VirtualShadowCacheStats {
         self.stats
     }
@@ -686,6 +675,62 @@ impl DirectionalVirtualShadowMap {
             position,
             range,
             intensity,
+            projection: LocalShadowProjection::PointCube,
+        });
+        true
+    }
+
+    pub fn submit_local_spot_request(
+        &mut self,
+        light_index: u16,
+        position: [f32; 3],
+        direction: [f32; 3],
+        range: f32,
+        inner_cone_degrees: f32,
+        outer_cone_degrees: f32,
+        intensity: f32,
+    ) -> bool {
+        let direction_length = (direction[0] * direction[0]
+            + direction[1] * direction[1]
+            + direction[2] * direction[2])
+            .sqrt();
+        if !self.enabled
+            || self.local_requests.len() >= VSM_MAX_LOCAL_SHADOW_REQUESTS
+            || usize::from(light_index) >= VSM_MAX_LOCAL_SHADOW_REQUESTS
+            || position.iter().any(|value| !value.is_finite())
+            || direction.iter().any(|value| !value.is_finite())
+            || !direction_length.is_finite()
+            || direction_length <= f32::EPSILON
+            || !range.is_finite()
+            || range <= 0.0
+            || !inner_cone_degrees.is_finite()
+            || !outer_cone_degrees.is_finite()
+            || inner_cone_degrees < 0.0
+            || outer_cone_degrees <= 0.0
+            || inner_cone_degrees > outer_cone_degrees
+            || outer_cone_degrees >= 179.0
+            || !intensity.is_finite()
+            || intensity <= 0.0
+        {
+            return false;
+        }
+        let direction = [
+            direction[0] / direction_length,
+            direction[1] / direction_length,
+            direction[2] / direction_length,
+        ];
+        let inner_tan = (0.5 * inner_cone_degrees.to_radians()).tan();
+        let outer_tan = (0.5 * outer_cone_degrees.to_radians()).tan();
+        self.local_requests.push(local_lights::LocalShadowRequest {
+            light_index,
+            position,
+            range,
+            intensity,
+            projection: LocalShadowProjection::Spot {
+                direction,
+                inner_radius: inner_tan / outer_tan,
+                projection_scale: outer_tan.recip(),
+            },
         });
         true
     }
@@ -878,7 +923,7 @@ impl DirectionalVirtualShadowMap {
         self.local_selected.extend_from_slice(local_lights);
         for local in local_lights {
             let page_stats = &mut self.local_page_stats[local.request.light_index as usize];
-            for face in 0..VSM_LOCAL_FACES {
+            for face in 0..local.request.face_count() {
                 let page = VirtualShadowPage::new_local(local.request.light_index, face)
                     .expect("admitted local light has a valid face address");
                 page_stats.requested = page_stats.requested.saturating_add(1);
@@ -1104,9 +1149,12 @@ impl DirectionalVirtualShadowMap {
             face_pages_4_5: [0; 4],
         }; VSM_MAX_LOCAL_SHADOW_LIGHTS];
         for (slot_index, local) in self.local_selected.iter().enumerate() {
-            local_light_meta[local.shading_index as usize][0] = 1;
+            let metadata = &mut local_light_meta[local.shading_index as usize];
+            metadata[0] = 1;
+            metadata[1] = local.request.shader_kind();
+            metadata[2] = local.request.inner_radius().to_bits();
             let mut encoded = [0u32; VSM_LOCAL_FACES as usize];
-            for face in 0..VSM_LOCAL_FACES {
+            for face in 0..local.request.face_count() {
                 let page = VirtualShadowPage::new_local(local.request.light_index, face)
                     .expect("selected local light has a valid face address");
                 encoded[face as usize] = self.cache.encoded_page(page);
@@ -1116,8 +1164,11 @@ impl DirectionalVirtualShadowMap {
                 face_pages_0_3: encoded[..4].try_into().expect("four local faces"),
                 face_pages_4_5: [encoded[4], encoded[5], 0, 0],
             };
-            if encoded.iter().all(|entry| *entry != VSM_PAGE_TABLE_MISSING) {
-                local_light_meta[local.shading_index as usize][0] = slot_index as u32 + 2;
+            if encoded[..local.request.face_count() as usize]
+                .iter()
+                .all(|entry| *entry != VSM_PAGE_TABLE_MISSING)
+            {
+                metadata[0] = slot_index as u32 + 2;
             }
         }
         DirectionalVsmSamplingParams {

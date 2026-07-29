@@ -775,6 +775,9 @@ impl Renderer {
                         debug_assert_ne!(shading_index, u16::MAX);
                         let face_vps = crate::virtual_shadows::local_shadow_face_vps(request);
                         let face_signatures = std::array::from_fn(|face| {
+                            if face >= request.face_count() as usize {
+                                return 0;
+                            }
                             let page_planes = crate::scene::extract_frustum_planes(&face_vps[face]);
                             let mut signature =
                                 fnv1a_bytes(FNV_OFFSET, bytemuck::bytes_of(&face_vps[face]));

@@ -88,10 +88,12 @@ fn local_shadow_page(slot: LocalVsmSamplingSlot, face: u32) -> u32 {
     return slot.face_pages_4_5[face - 4u];
 }
 
-// Metadata states are deliberately fail-closed:
+// Metadata x states are deliberately fail-closed:
 //   0 = ordinary point light (unshadowed),
 //   1 = shadow requested but not fully resident (suppress contribution),
 //   2..6 = fully resident local slot + 2.
+// Metadata y is 0 for a point cube and 1 for a spot projection. For spots,
+// metadata z stores the inner/outer projected-radius ratio as f32 bits.
 fn sample_local_shadow(light_index: u32, world_pos: vec3<f32>) -> f32 {
     // words.x bit 1 is uniform for the whole draw. Keep the established
     // directional-only VSM path out of the dynamically indexed metadata
@@ -99,7 +101,8 @@ fn sample_local_shadow(light_index: u32, world_pos: vec3<f32>) -> f32 {
     if ((vsm_params.words.x & 2u) == 0u) {
         return 1.0;
     }
-    let state = vsm_params.local_light_meta[light_index].x;
+    let metadata = vsm_params.local_light_meta[light_index];
+    let state = metadata.x;
     if (state == 0u) {
         return 1.0;
     }
@@ -108,7 +111,7 @@ fn sample_local_shadow(light_index: u32, world_pos: vec3<f32>) -> f32 {
     }
     let slot = vsm_params.local_slots[state - 2u];
     let direction = world_pos - lighting.point_lights[light_index].position.xyz;
-    let face = local_shadow_face(direction);
+    let face = select(local_shadow_face(direction), 0u, metadata.y == 1u);
     let encoded = local_shadow_page(slot, face);
     if (encoded == 0u) {
         return 0.0;
@@ -118,6 +121,26 @@ fn sample_local_shadow(light_index: u32, world_pos: vec3<f32>) -> f32 {
     if (abs(light_ndc.x) > 1.0 || abs(light_ndc.y) > 1.0
         || light_ndc.z < 0.0 || light_ndc.z > 1.0) {
         return 0.0;
+    }
+    var cone_attenuation = 1.0;
+    if (metadata.y == 1u) {
+        let projected_radius = length(light_ndc.xy);
+        if (projected_radius > 1.0) {
+            return 0.0;
+        }
+        let inner_radius = bitcast<f32>(metadata.z);
+        // Equal inner/outer angles author a hard-edged cone. Avoid passing
+        // equal edges to smoothstep (undefined by WGSL) while preserving
+        // the exact outer boundary.
+        if (inner_radius >= 1.0) {
+            cone_attenuation = select(0.0, 1.0, projected_radius < 1.0);
+        } else {
+            cone_attenuation = 1.0 - smoothstep(
+                inner_radius,
+                1.0,
+                projected_radius,
+            );
+        }
     }
     let shadow_uv = vec2<f32>(
         light_ndc.x * 0.5 + 0.5,
@@ -149,5 +172,6 @@ fn sample_local_shadow(light_index: u32, world_pos: vec3<f32>) -> f32 {
     shadow_value *= 0.25;
     // New pages fade in from the fail-closed state, never from an
     // unshadowed local light.
-    return shadow_value * min(f32(encoded >> 16u) / 8.0, 1.0);
+    return shadow_value * cone_attenuation
+        * min(f32(encoded >> 16u) / 8.0, 1.0);
 }

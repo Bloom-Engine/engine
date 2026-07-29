@@ -36,7 +36,9 @@ def integer(mapping: dict[str, object], field: str, source: str) -> int:
     return value
 
 
-def evaluate(state: dict[str, object], min_submitted: int) -> list[str]:
+def evaluate(
+    state: dict[str, object], min_submitted: int, kind: str = "point"
+) -> list[str]:
     failures: list[str] = []
     if state.get("enabled") is not True or state.get("active") is not True:
         failures.append("VSM was not enabled and active")
@@ -44,12 +46,12 @@ def evaluate(state: dict[str, object], min_submitted: int) -> list[str]:
     local = state.get("local_lights")
     if not isinstance(local, dict):
         raise ValidationError("telemetry has no local_lights object")
+    face_field = "spot_faces_per_light" if kind == "spot" else "faces_per_light"
     values = {
         field: integer(local, field, "local_lights")
         for field in (
             "submission_limit",
             "admission_limit",
-            "faces_per_light",
             "submitted",
             "visible",
             "admitted",
@@ -62,6 +64,7 @@ def evaluate(state: dict[str, object], min_submitted: int) -> list[str]:
             "rendered_pages",
         )
     }
+    values["faces_per_light"] = integer(local, face_field, "local_lights")
     if values["submitted"] < min_submitted:
         failures.append(
             f"submitted {values['submitted']} local lights; require at least {min_submitted}"
@@ -76,7 +79,7 @@ def evaluate(state: dict[str, object], min_submitted: int) -> list[str]:
         failures.append("admitted lights exceed the fixed light budget")
     expected_requested = values["admitted"] * values["faces_per_light"]
     if values["requested_pages"] != expected_requested:
-        failures.append("requested pages are not admitted lights times cube faces")
+        failures.append("requested pages are not admitted lights times projection faces")
     if not 0 <= values["active_shaded"] <= values["admitted"]:
         failures.append("active shaded lights exceed admitted lights")
     if not 0 <= values["dirty_pages"] <= values["resident_pages"] <= expected_requested:
@@ -102,9 +105,9 @@ def evaluate(state: dict[str, object], min_submitted: int) -> list[str]:
         raise ValidationError("telemetry has no per_light_cost rows")
     if rows[0].get("kind") != "directional":
         failures.append("first per-light row is not the directional light")
-    point_rows = [row for row in rows[1:] if isinstance(row, dict) and row.get("kind") == "point"]
-    if len(point_rows) != values["submitted"]:
-        failures.append("point-light cost row count differs from submitted lights")
+    light_rows = [row for row in rows[1:] if isinstance(row, dict) and row.get("kind") == kind]
+    if len(light_rows) != values["submitted"]:
+        failures.append(f"{kind}-light cost row count differs from submitted lights")
         return failures
 
     indices: set[int] = set()
@@ -115,8 +118,8 @@ def evaluate(state: dict[str, object], min_submitted: int) -> list[str]:
         "rendered_pages": 0,
     }
     active_rows = 0
-    for row in point_rows:
-        light = integer(row, "light", "point-light cost")
+    for row in light_rows:
+        light = integer(row, "light", f"{kind}-light cost")
         if light in indices:
             failures.append(f"duplicate point-light cost row {light}")
         indices.add(light)
@@ -145,7 +148,7 @@ def evaluate(state: dict[str, object], min_submitted: int) -> list[str]:
             failures.append(f"point light {light} reports a different page budget")
 
     if active_rows != values["active_shaded"]:
-        failures.append("active point-light rows differ from active_shaded")
+        failures.append(f"active {kind}-light rows differ from active_shaded")
     for field, expected in (
         ("requested_pages", values["requested_pages"]),
         ("rendered_pages", values["rendered_pages"]),
@@ -160,14 +163,15 @@ def evaluate(state: dict[str, object], min_submitted: int) -> list[str]:
     return failures
 
 
-def validate(path: Path, min_submitted: int) -> dict[str, object]:
+def validate(path: Path, min_submitted: int, kind: str = "point") -> dict[str, object]:
     state = state_from(path)
-    failures = evaluate(state, min_submitted)
+    failures = evaluate(state, min_submitted, kind)
     local = state.get("local_lights")
     return {
         "schema": SCHEMA,
         "telemetry": str(path),
         "minimum_submitted": min_submitted,
+        "kind": kind,
         "observed": local,
         "failures": failures,
         "passed": not failures,
@@ -178,10 +182,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--telemetry", type=Path, required=True)
     parser.add_argument("--min-submitted", type=int, default=100)
+    parser.add_argument("--kind", choices=("point", "spot"), default="point")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        result = validate(args.telemetry, args.min_submitted)
+        result = validate(args.telemetry, args.min_submitted, args.kind)
     except ValidationError as error:
         parser.error(str(error))
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -190,7 +195,10 @@ def main() -> int:
         print(f"FAIL: {failure}")
     if result["failures"]:
         return 1
-    print("PASS: local VSM submission, visibility, residency, and page cost are bounded")
+    print(
+        f"PASS: local {args.kind} VSM submission, visibility, residency, "
+        "and page cost are bounded"
+    )
     return 0
 
 

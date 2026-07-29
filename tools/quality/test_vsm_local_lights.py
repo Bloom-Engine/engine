@@ -70,7 +70,7 @@ class LocalVsmValidationTests(unittest.TestCase):
         assert isinstance(local, dict)
         local["requested_pages"] = 29
         failures = evaluate(state, 100)
-        self.assertTrue(any("cube faces" in failure for failure in failures))
+        self.assertTrue(any("projection faces" in failure for failure in failures))
 
     def test_unbounded_same_frame_rendering_fails(self) -> None:
         state = fixture()
@@ -93,6 +93,22 @@ class LocalVsmValidationTests(unittest.TestCase):
         rows[-1]["requested_pages"] = 6
         failures = evaluate(state, 100)
         self.assertTrue(any("suppressed" in failure for failure in failures))
+
+    def test_one_page_spot_projection_passes(self) -> None:
+        state = fixture()
+        local = state["local_lights"]
+        rows = state["per_light_cost"]
+        assert isinstance(local, dict) and isinstance(rows, list)
+        local["spot_faces_per_light"] = 1
+        local["requested_pages"] = 5
+        local["resident_pages"] = 5
+        for row in rows[1:]:
+            assert isinstance(row, dict)
+            row["kind"] = "spot"
+            if row["state"] == "active":
+                row["requested_pages"] = 1
+                row["resident_pages"] = 1
+        self.assertEqual(evaluate(state, 100, "spot"), [])
 
 
 if __name__ == "__main__":

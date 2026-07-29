@@ -13797,6 +13797,51 @@ impl Renderer {
         true
     }
 
+    /// Submit a perspective spot light whose direct contribution remains
+    /// fail-closed until its single local VSM page is resident and clean.
+    /// Cone angles are full vertex angles in degrees.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_shadowed_spot_light(
+        &mut self,
+        x: f32,
+        y: f32,
+        z: f32,
+        direction_x: f32,
+        direction_y: f32,
+        direction_z: f32,
+        range: f32,
+        inner_cone_degrees: f32,
+        outer_cone_degrees: f32,
+        r: f32,
+        g: f32,
+        b: f32,
+        intensity: f32,
+    ) -> bool {
+        let index = self.lighting_uniforms.point_light_count[0] as usize;
+        if index >= MAX_POINT_LIGHTS
+            || !self.shadow_map.enabled
+            || self.pt_active()
+            || [r, g, b].iter().any(|value| !value.is_finite())
+            || !self.shadow_map.virtual_map.submit_local_spot_request(
+                index as u16,
+                [x, y, z],
+                [direction_x, direction_y, direction_z],
+                range,
+                inner_cone_degrees,
+                outer_cone_degrees,
+                intensity,
+            )
+        {
+            return false;
+        }
+        self.lighting_uniforms.point_lights[index] = PointLight {
+            position: [x, y, z, range],
+            color: [r, g, b, 0.0],
+        };
+        self.lighting_uniforms.point_light_count[0] = (index + 1) as f32;
+        true
+    }
+
     /// Clear all additional lights (called at begin_frame).
     pub fn clear_additional_lights(&mut self) {
         // dir_light_count.y carries the shadows-enabled flag for the shadow

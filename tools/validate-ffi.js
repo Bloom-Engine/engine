@@ -103,6 +103,7 @@ const RENDERER_STATUS_FUNCTIONS = new Set([
   'bloom_set_foliage_shadow_motion',
   'bloom_set_cloud_shadows',
   'bloom_add_shadowed_point_light',
+  'bloom_add_shadowed_spot_light',
   'bloom_set_ssr_enabled',
   'bloom_set_motion_blur_enabled',
   'bloom_set_sss_enabled',
