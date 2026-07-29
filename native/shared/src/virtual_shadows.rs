@@ -504,6 +504,8 @@ pub struct DirectionalVirtualShadowMap {
     dynamic_overlay_rendered_pages: usize,
     dynamic_overlay_draws: usize,
     dynamic_overlay_deferred_pages: usize,
+    page_cutout_draws: usize,
+    page_skinned_draws: usize,
     cache: VirtualShadowPageCache,
     gpu: Option<GpuVirtualShadowResources>,
     frame: u64,
@@ -573,6 +575,8 @@ impl DirectionalVirtualShadowMap {
             dynamic_overlay_rendered_pages: 0,
             dynamic_overlay_draws: 0,
             dynamic_overlay_deferred_pages: 0,
+            page_cutout_draws: 0,
+            page_skinned_draws: 0,
             cache: VirtualShadowPageCache::new(capacity),
             gpu,
             frame: 0,
@@ -617,6 +621,8 @@ impl DirectionalVirtualShadowMap {
         self.dynamic_overlay_rendered_pages = 0;
         self.dynamic_overlay_draws = 0;
         self.dynamic_overlay_deferred_pages = 0;
+        self.page_cutout_draws = 0;
+        self.page_skinned_draws = 0;
         let level_vps_unchanged = self.previous_level_vps == Some(level_vps);
         let content_unchanged = self.previous_content_signatures == Some(content_signatures);
         if !level_vps_unchanged || !content_unchanged {
@@ -892,10 +898,14 @@ impl DirectionalVirtualShadowMap {
         rendered_pages: usize,
         draws: usize,
         deferred_pages: usize,
+        cutout_draws: usize,
+        skinned_draws: usize,
     ) {
         self.dynamic_overlay_rendered_pages = rendered_pages;
         self.dynamic_overlay_draws = draws;
         self.dynamic_overlay_deferred_pages += deferred_pages;
+        self.page_cutout_draws = cutout_draws;
+        self.page_skinned_draws = skinned_draws;
     }
 
     pub fn requested(&self) -> bool {

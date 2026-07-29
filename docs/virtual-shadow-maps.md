@@ -115,7 +115,9 @@ Quality telemetry reports the VSM state under
 - clipmap level rebases and pages preserved or dropped by those rebases;
 - per-level resident and dirty counts;
 - dynamic overlay footprint, rendered pages, draws, deferred pages, and both
-  hard budgets.
+  hard budgets;
+- alpha-tested and skinned page-draw counts, so qualification cannot pass with
+  either named caster silently absent.
 
 `renderer_paths.vsm_gpu_casters` separately reports whether the native
 indirect path is available and active, considered pages, the maximum per-page
@@ -237,6 +239,34 @@ chromatic-exclusion controls run in the quick CI lane. Qualification evidence,
 including deterministic images, incremental memory, and timings, is in
 `docs/evidence/issue-132-contact-detail-v1.md`.
 
+The same `--vsm-dynamic` scene is the alpha-tested/skinned caster oracle. Run
+it from the example directory so the Fox, Sponza, and HDR paths resolve:
+
+```sh
+cd examples/quality-motion
+
+BLOOM_VSM=1 ./main --vsm-dynamic \
+  --quality-run 120 120 0.016666667 \
+  /tmp/vsm-casters.png /tmp/vsm-casters.json
+
+BLOOM_VSM=1 ./main --vsm-dynamic --vsm-alpha-no-cast \
+  --quality-run 120 120 0.016666667 \
+  /tmp/vsm-alpha-control.png /tmp/vsm-alpha-control.json
+
+BLOOM_VSM=1 ./main --vsm-dynamic \
+  --quality-run 120 128 0.016666667 \
+  /tmp/vsm-skinned-later.png /tmp/vsm-skinned-later.json
+```
+
+The no-cast control leaves the Sponza MASK curtain visible but removes only
+its shadow submission. The eight-frame pose offset keeps the TAA jitter phase
+fixed while moving the animated Fox. From the repository root, run
+`tools/quality/vsm_caster_coverage.py` with the three images and telemetry
+files. The gate requires alpha and skinned page draws, segmented alpha
+coverage in a ground ROI, and moving skinned-shadow pixels outside the visible
+Fox silhouette. Empty assets, opaque replacement coverage, missing draw
+classes, and unchanged skinned shadows fail closed.
+
 ## Work that remains on issue #132
 
 - Compact requests and schedule page residency entirely on the GPU so the
@@ -248,7 +278,7 @@ including deterministic images, incremental memory, and timings, is in
 - Add explicit, default-off spot and point shadow requests, their virtual
   projections, and deterministic shared-pool arbitration. Existing unshadowed
   point lights must remain behaviorally and performance compatible.
-- Qualify Bistro camera/light motion, forced small pools, alpha foliage, and
-  at least 100 explicitly shadow-requesting local lights. The fixed
-  directional geometric-contact oracle is now qualified.
+- Qualify Bistro camera/light motion, forced small pools, and at least 100
+  explicitly shadow-requesting local lights. The fixed directional
+  geometric-contact and alpha/skinned caster oracles are now qualified.
 - Integrate quality tiers and enable by default only after those gates pass.

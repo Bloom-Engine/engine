@@ -1042,6 +1042,8 @@ impl Renderer {
                 let mut dynamic_overlay_rendered_pages = 0usize;
                 let mut dynamic_overlay_draws = 0usize;
                 let mut dynamic_overlay_deferred_pages = 0usize;
+                let mut page_cutout_draws = 0usize;
+                let mut page_skinned_draws = 0usize;
 
                 struct VsmPageWork {
                     request: crate::virtual_shadows::PageRequest,
@@ -1284,6 +1286,8 @@ impl Renderer {
                             } else {
                                 0
                             };
+                            page_cutout_draws += usize::from(kind == 1);
+                            page_skinned_draws += usize::from(kind == 2);
                             if kind != current_kind {
                                 page_pass.set_pipeline(match kind {
                                     1 => &self.shadow_map.pipeline_cutout,
@@ -1324,6 +1328,8 @@ impl Renderer {
                     dynamic_overlay_rendered_pages,
                     dynamic_overlay_draws,
                     dynamic_overlay_deferred_pages,
+                    page_cutout_draws,
+                    page_skinned_draws,
                 );
                 profiler.end("virtual_shadow_pages");
             }

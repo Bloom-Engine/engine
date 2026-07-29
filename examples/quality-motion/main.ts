@@ -27,12 +27,14 @@ let vsmScrollFixture = false;
 let vsmLightMotionFixture = false;
 let vsmGpuReceiverFixture = false;
 let vsmContactDetailFixture = false;
+let vsmAlphaNoCastControl = false;
 for (let i = 0; i < argv.length; i = i + 1) {
   if (argv[i] === "--vsm-dynamic") vsmDynamicFixture = true;
   if (argv[i] === "--vsm-scroll") vsmScrollFixture = true;
   if (argv[i] === "--vsm-light-motion") vsmLightMotionFixture = true;
   if (argv[i] === "--vsm-gpu-receivers") vsmGpuReceiverFixture = true;
   if (argv[i] === "--vsm-contact-detail") vsmContactDetailFixture = true;
+  if (argv[i] === "--vsm-alpha-no-cast") vsmAlphaNoCastControl = true;
 }
 
 const captureWidth = vsmContactDetailFixture ? 1280 : 800;
@@ -75,7 +77,7 @@ curtainTransform = mat4Translate(
   { x: -3.962, y: -1.185, z: -1.588 },
 );
 setSceneNodeTransform(curtain, curtainTransform);
-setSceneNodeCastShadow(curtain, true);
+setSceneNodeCastShadow(curtain, !vsmAlphaNoCastControl);
 setSceneNodeReceiveShadow(curtain, true);
 if (vsmContactDetailFixture) setSceneNodeVisible(curtain, false);
 
