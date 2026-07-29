@@ -1,6 +1,7 @@
 import unittest
 
-from tools.quality.vsm_debug_views import ORDER, evaluate
+from tools.quality.khronos_materials import QualificationError
+from tools.quality.vsm_debug_views import COLORS, ORDER, evaluate, validate_legend
 
 
 def summary(counts: dict[str, int], width: int, height: int) -> dict[str, object]:
@@ -123,6 +124,21 @@ class VsmDebugViewTests(unittest.TestCase):
             self.virtual, self.physical, self.state, False, False
         )
         self.assertTrue(any("clip-level-1" in failure for failure in failures))
+
+    def test_exact_machine_readable_legend_passes(self) -> None:
+        pixels = [
+            color
+            for _y in range(2)
+            for color in COLORS
+            for _x in range(2)
+        ]
+        validate_legend(12, 2, pixels, "synthetic")
+
+    def test_reordered_legend_fails_closed(self) -> None:
+        pixels = list(COLORS)
+        pixels[1], pixels[2] = pixels[2], pixels[1]
+        with self.assertRaisesRegex(QualificationError, "legend cell"):
+            validate_legend(6, 1, pixels, "synthetic")
 
 
 if __name__ == "__main__":

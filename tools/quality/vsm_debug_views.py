@@ -82,17 +82,26 @@ def image_summary(
     }
 
 
-def legend_summary(path: Path) -> dict[str, object]:
-    width, height, pixels = png_rgb(path)
+def validate_legend(
+    width: int,
+    height: int,
+    pixels: list[tuple[int, int, int]],
+    source: str,
+) -> None:
     if height < 1 or width != len(ORDER) * height:
-        raise QualificationError(f"{path}: expected a six-cell horizontal legend")
+        raise QualificationError(f"{source}: expected a six-cell horizontal legend")
     for index, expected in enumerate(COLORS):
         for y in range(height):
             start = y * width + index * height
             if any(pixel != expected for pixel in pixels[start : start + height]):
                 raise QualificationError(
-                    f"{path}: legend cell {index} is not {ORDER[index]!r}"
+                    f"{source}: legend cell {index} is not {ORDER[index]!r}"
                 )
+
+
+def legend_summary(path: Path) -> dict[str, object]:
+    width, height, pixels = png_rgb(path)
+    validate_legend(width, height, pixels, str(path))
     return {
         "path": str(path),
         "sha256": sha256_file(path),
