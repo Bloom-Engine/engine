@@ -280,6 +280,17 @@ Sponza and the governed 96-unique-mesh Bistro subset pass; captures, negative
 controls, cache statistics, and repeat tolerance are in
 `docs/evidence/issue-132-full-scene-motion-v1.md`.
 
+Explicit local shadow requests are available through
+`addShadowedPointLight(...)` and `addShadowedSpotLight(...)`. Point lights use
+six cube faces; spots use one circular perspective projection with smooth
+inner/outer cone attenuation. Both share deterministic visibility admission,
+the physical page pool, and the existing eight-page render budget. Pending,
+suppressed, and unsupported requests fail closed instead of leaking an
+unshadowed direct contribution. Fixtures, exact compatibility gates, bounded
+100-plus-light telemetry, and image review are in
+`docs/evidence/issue-132-local-lights-v1.md` and
+`docs/evidence/issue-132-spot-lights-v1.md`.
+
 ## Work that remains on issue #132
 
 - Compact requests and schedule page residency entirely on the GPU so the
@@ -288,10 +299,4 @@ controls, cache statistics, and repeat tolerance are in
   backends where it outperforms the shipped CPU-exact compact list.
 - Independently qualify indirect caster paths for cutout, skinned,
   foliage-motion, dynamic-overlay, instanced, and dedicated-buffer geometry.
-- Add explicit, default-off spot and point shadow requests, their virtual
-  projections, and deterministic shared-pool arbitration. Existing unshadowed
-  point lights must remain behaviorally and performance compatible.
-- Qualify forced small pools and at least 100 explicitly shadow-requesting
-  local lights. The fixed full-scene motion, directional geometric-contact,
-  and alpha/skinned caster oracles are now qualified.
 - Integrate quality tiers and enable by default only after those gates pass.
