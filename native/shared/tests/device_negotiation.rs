@@ -38,6 +38,23 @@ fn negotiated_headless_device_constructs_the_complete_renderer() {
     assert!(public["runtime_support"]["virtual_shadows"]["capability_eligible"].is_boolean());
     assert!(public["runtime_support"]["virtual_shadows"]["enabled"].is_boolean());
     assert!(public["runtime_support"]["virtual_shadows"]["selection_reason"].is_string());
+    assert!(
+        public["runtime_support"]["virtual_shadows"]["debug_views"]["capture_only"].is_boolean()
+    );
+    assert!(public["runtime_support"]["virtual_shadows"]["debug_views"]["legend_order"].is_array());
+    assert_eq!(
+        public["runtime_support"]["virtual_shadows"]["debug_views"]["report"],
+        "virtual-shadow-report.json"
+    );
+    assert_eq!(
+        public["runtime_support"]["virtual_shadows"]["per_light_cost"][0]["light"],
+        0
+    );
+    assert!(
+        public["runtime_support"]["virtual_shadows"]["per_light_cost"][0]
+            ["physical_depth_bytes_owned"]
+            .is_number()
+    );
 
     // Headless qualification has no swapchain to configure, but it is still
     // uncapped and must retain the requested mode for truthful telemetry.

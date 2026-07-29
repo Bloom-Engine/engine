@@ -628,7 +628,16 @@ impl Renderer {
                 None => eprintln!("bloom: intermediate '{}' PNG encode failed", readback.name),
             }
         }
-        for (name, width, height, rgb) in self.shadow_map.virtual_map.debug_images() {
+        let vsm_debug_images = self.shadow_map.virtual_map.debug_images();
+        if !vsm_debug_images.is_empty() {
+            let path = directory.join("virtual-shadow-report.json");
+            if let Err(error) =
+                std::fs::write(&path, self.shadow_map.virtual_map.report_json() + "\n")
+            {
+                eprintln!("bloom: VSM debug report write '{path:?}' failed: {error}");
+            }
+        }
+        for (name, width, height, rgb) in vsm_debug_images {
             let path = directory.join(format!("{name}.png"));
             match encode_png_simple(width, height, &rgb) {
                 Some(png) => {

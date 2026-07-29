@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 #[path = "directional_shadow_clipmap.rs"]
 mod clipmap;
+#[path = "virtual_shadow_debug.rs"]
+mod debug;
 #[path = "virtual_shadow_gpu_receiver.rs"]
 mod gpu_receiver;
 #[path = "virtual_shadow_page_priority.rs"]
@@ -393,61 +395,15 @@ impl VirtualShadowPageCache {
     }
 
     pub fn debug_virtual_rgb(&self, light: u16, scale: u32) -> (u32, u32, Vec<u8>) {
-        let scale = scale.max(1);
-        let axis = VSM_VIRTUAL_PAGES_PER_AXIS as u32;
-        let width = axis * scale;
-        let height = axis * VSM_CLIP_LEVELS as u32 * scale;
-        let mut rgb = vec![8u8; (width * height * 3) as usize];
-        let level_colors = [[70u8, 210, 110], [70, 150, 255], [190, 100, 255]];
-        for (&page, &physical_page) in &self.mapping {
-            if page.light != light {
-                continue;
-            }
-            let slot = &self.physical[physical_page as usize];
-            let color = if slot.dirty || slot.rendered_frame == 0 {
-                [255, 55, 45]
-            } else {
-                level_colors[page.level as usize]
-            };
-            paint_debug_cell(
-                &mut rgb,
-                width,
-                scale,
-                u32::from(page.x),
-                u32::from(page.y) + u32::from(page.level) * axis,
-                color,
-            );
-        }
-        (width, height, rgb)
+        debug::virtual_rgb(self, light, scale)
     }
 
     pub fn debug_physical_rgb(&self, scale: u32) -> (u32, u32, Vec<u8>) {
-        let scale = scale.max(1);
-        let columns = 16u32.min(self.physical.len().max(1) as u32);
-        let rows = (self.physical.len() as u32).div_ceil(columns);
-        let width = columns * scale;
-        let height = rows.max(1) * scale;
-        let mut rgb = vec![8u8; (width * height * 3) as usize];
-        let level_colors = [[70u8, 210, 110], [70, 150, 255], [190, 100, 255]];
-        for (index, slot) in self.physical.iter().enumerate() {
-            let Some(owner) = slot.owner else {
-                continue;
-            };
-            let color = if slot.dirty || slot.rendered_frame == 0 {
-                [255, 55, 45]
-            } else {
-                level_colors[owner.level as usize]
-            };
-            paint_debug_cell(
-                &mut rgb,
-                width,
-                scale,
-                index as u32 % columns,
-                index as u32 / columns,
-                color,
-            );
-        }
-        (width, height, rgb)
+        debug::physical_rgb(self, scale)
+    }
+
+    pub fn debug_legend_rgb(scale: u32) -> (u32, u32, Vec<u8>) {
+        debug::legend_rgb(scale)
     }
 
     pub fn memory_bytes(&self) -> u64 {
@@ -466,24 +422,6 @@ impl VirtualShadowPageCache {
             .iter()
             .filter(|slot| slot.owner.is_some() && slot.dirty)
             .count() as u16;
-    }
-}
-
-fn paint_debug_cell(
-    rgb: &mut [u8],
-    width: u32,
-    scale: u32,
-    cell_x: u32,
-    cell_y: u32,
-    color: [u8; 3],
-) {
-    for y in 0..scale {
-        for x in 0..scale {
-            let pixel_x = cell_x * scale + x;
-            let pixel_y = cell_y * scale + y;
-            let offset = ((pixel_y * width + pixel_x) * 3) as usize;
-            rgb[offset..offset + 3].copy_from_slice(&color);
-        }
     }
 }
 
@@ -983,6 +921,8 @@ impl DirectionalVirtualShadowMap {
         }
         let (virtual_width, virtual_height, virtual_rgb) = self.cache.debug_virtual_rgb(0, 4);
         let (physical_width, physical_height, physical_rgb) = self.cache.debug_physical_rgb(4);
+        let (legend_width, legend_height, legend_rgb) =
+            VirtualShadowPageCache::debug_legend_rgb(12);
         vec![
             (
                 "virtual-shadow-pages",
@@ -995,6 +935,12 @@ impl DirectionalVirtualShadowMap {
                 physical_width,
                 physical_height,
                 physical_rgb,
+            ),
+            (
+                "virtual-shadow-legend",
+                legend_width,
+                legend_height,
+                legend_rgb,
             ),
         ]
     }
@@ -1524,6 +1470,11 @@ mod tests {
         VirtualShadowPage::new(0, 0, x, 0).unwrap()
     }
 
+    fn rgb_at(rgb: &[u8], width: u32, x: u32, y: u32) -> [u8; 3] {
+        let offset = ((y * width + x) * 3) as usize;
+        rgb[offset..offset + 3].try_into().unwrap()
+    }
+
     #[test]
     fn invalid_virtual_coordinates_are_rejected() {
         assert!(VirtualShadowPage::new(0, VSM_CLIP_LEVELS, 0, 0).is_none());
@@ -1569,12 +1520,18 @@ mod tests {
     }
 
     #[test]
-    fn debug_images_expose_virtual_and_physical_occupancy() {
-        let mut cache = VirtualShadowPageCache::new(2);
+    fn debug_images_distinguish_misses_invalidations_levels_and_free_pages() {
+        let mut cache = VirtualShadowPageCache::new(4);
         cache.begin_frame(1);
-        cache.request(page(0), 1).unwrap();
-        cache.mark_rendered(page(0), 1);
+        for level in 0..VSM_CLIP_LEVELS {
+            let page = VirtualShadowPage::new(0, level, 0, 0).unwrap();
+            cache.request(page, 1).unwrap();
+            if level > 0 {
+                cache.mark_rendered(page, 1);
+            }
+        }
         cache.finish_requests();
+
         let (virtual_width, virtual_height, virtual_rgb) = cache.debug_virtual_rgb(0, 2);
         assert_eq!(virtual_width, u32::from(VSM_VIRTUAL_PAGES_PER_AXIS) * 2);
         assert_eq!(
@@ -1585,12 +1542,78 @@ mod tests {
             virtual_rgb.len(),
             (virtual_width * virtual_height * 3) as usize
         );
+        assert_eq!(
+            rgb_at(&virtual_rgb, virtual_width, 0, 0),
+            debug::MISS_UNRENDERED
+        );
+        assert_eq!(
+            rgb_at(
+                &virtual_rgb,
+                virtual_width,
+                0,
+                u32::from(VSM_VIRTUAL_PAGES_PER_AXIS) * 2,
+            ),
+            debug::LEVELS[1],
+        );
+        assert_eq!(
+            rgb_at(
+                &virtual_rgb,
+                virtual_width,
+                0,
+                u32::from(VSM_VIRTUAL_PAGES_PER_AXIS) * 4,
+            ),
+            debug::LEVELS[2],
+        );
+
         let (physical_width, physical_height, physical_rgb) = cache.debug_physical_rgb(2);
         assert_eq!(
             physical_rgb.len(),
             (physical_width * physical_height * 3) as usize
         );
-        assert!(physical_rgb.iter().any(|channel| *channel > 8));
+        assert_eq!(
+            rgb_at(&physical_rgb, physical_width, 0, 0),
+            debug::MISS_UNRENDERED
+        );
+        assert_eq!(
+            rgb_at(&physical_rgb, physical_width, 2, 0),
+            debug::LEVELS[1]
+        );
+        assert_eq!(
+            rgb_at(&physical_rgb, physical_width, 4, 0),
+            debug::LEVELS[2]
+        );
+        assert_eq!(rgb_at(&physical_rgb, physical_width, 6, 0), debug::FREE);
+
+        cache.mark_rendered(page(0), 1);
+        cache.begin_frame(2);
+        assert!(cache.request(page(0), 2).unwrap().needs_render);
+        let (virtual_width, _, virtual_rgb) = cache.debug_virtual_rgb(0, 1);
+        assert_eq!(
+            rgb_at(&virtual_rgb, virtual_width, 0, 0),
+            debug::INVALIDATED
+        );
+        let (physical_width, _, physical_rgb) = cache.debug_physical_rgb(1);
+        assert_eq!(
+            rgb_at(&physical_rgb, physical_width, 0, 0),
+            debug::INVALIDATED
+        );
+    }
+
+    #[test]
+    fn debug_legend_is_a_stable_machine_readable_palette() {
+        let (width, height, rgb) = VirtualShadowPageCache::debug_legend_rgb(2);
+        assert_eq!((width, height), (12, 2));
+        let expected = [
+            debug::FREE,
+            debug::MISS_UNRENDERED,
+            debug::INVALIDATED,
+            debug::LEVELS[0],
+            debug::LEVELS[1],
+            debug::LEVELS[2],
+        ];
+        for (index, color) in expected.into_iter().enumerate() {
+            assert_eq!(rgb_at(&rgb, width, index as u32 * 2, 0), color);
+        }
     }
 
     #[test]

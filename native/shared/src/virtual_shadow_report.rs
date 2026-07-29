@@ -33,6 +33,9 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
         .map_or(0, |gpu| gpu.receiver_demand.in_flight());
     let gpu_overhead_bytes =
         page_table_bytes + render_staging_bytes + VSM_SAMPLING_PARAMS_BYTES + gpu_receiver_bytes;
+    let page_depth_bytes = VSM_PHYSICAL_PAGE_SIZE as u64
+        * VSM_PHYSICAL_PAGE_SIZE as u64
+        * std::mem::size_of::<f32>() as u64;
     let (physical_capacity, physical_bytes, gpu_overhead_bytes, render_budget) = if vsm.enabled {
         (
             stats.capacity,
@@ -69,6 +72,22 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
             "\"gpu_receiver_in_flight\":{},",
             "\"gpu_receiver_dispatches\":{},\"gpu_receiver_completions\":{},",
             "\"gpu_receiver_validation_failures\":{},\"gpu_receiver_bytes\":{},",
+            "\"debug_views\":{{\"available\":{},\"capture_only\":true,",
+            "\"virtual_pages\":\"virtual-shadow-pages.png\",",
+            "\"physical_occupancy\":\"virtual-shadow-physical.png\",",
+            "\"legend\":\"virtual-shadow-legend.png\",",
+            "\"report\":\"virtual-shadow-report.json\",",
+            "\"legend_order\":[\"free\",\"miss-unrendered\",\"invalidated\",",
+            "\"clip-level-0\",\"clip-level-1\",\"clip-level-2\"],",
+            "\"colors\":[\"#080808\",\"#ffb423\",\"#ff37be\",",
+            "\"#46d26e\",\"#4696ff\",\"#be64ff\"]}},",
+            "\"per_light_cost\":[{{\"light\":0,\"kind\":\"directional\",",
+            "\"requested_pages\":{},\"cache_hits\":{},\"cache_misses\":{},",
+            "\"invalidated_pages\":{},\"rendered_pages\":{},",
+            "\"resident_pages\":{},\"dirty_pages\":{},",
+            "\"clipmap_level_rebases\":{},\"dynamic_overlay_draws\":{},",
+            "\"physical_depth_bytes_owned\":{},\"shared_pool_bytes\":{},",
+            "\"shared_metadata_staging_bytes\":{},\"render_budget_pages\":{}}}],",
             "\"levels\":[",
             "{{\"level\":0,\"resident\":{},\"dirty\":{}}},",
             "{{\"level\":1,\"resident\":{},\"dirty\":{}}},",
@@ -135,6 +154,20 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
         gpu_receiver_stats.completions,
         gpu_receiver_stats.validation_failures,
         gpu_receiver_bytes,
+        vsm.enabled,
+        stats.requested,
+        stats.hits,
+        stats.misses,
+        stats.invalidated,
+        stats.rendered,
+        stats.resident,
+        stats.dirty,
+        stats.clipmap_level_rebases,
+        vsm.dynamic_overlay_draws,
+        u64::from(stats.resident) * page_depth_bytes,
+        physical_bytes,
+        gpu_overhead_bytes,
+        render_budget,
         levels[0].0,
         levels[0].1,
         levels[1].0,

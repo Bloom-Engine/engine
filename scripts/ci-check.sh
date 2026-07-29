@@ -250,6 +250,7 @@ run_component() {
         tools/quality/khronos_materials.py \
         tools/quality/shadow_detail.py \
         tools/quality/vsm_caster_coverage.py \
+        tools/quality/vsm_debug_views.py \
         tools/quality/vsm_motion_corpus.py \
         tools/quality/prepare_bistro.py
       python3 -m unittest \
@@ -257,6 +258,7 @@ run_component() {
         tools/quality/test_khronos_materials.py \
         tools/quality/test_shadow_detail.py \
         tools/quality/test_vsm_caster_coverage.py \
+        tools/quality/test_vsm_debug_views.py \
         tools/quality/test_vsm_motion_corpus.py \
         -v
       hr "visual metric and fault-engine tests"
