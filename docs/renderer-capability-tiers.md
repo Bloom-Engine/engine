@@ -13,9 +13,9 @@ because an unrelated optional feature is absent.
 <!-- BEGIN GENERATED CAPABILITY TIERS -->
 | Tier | Materials | Geometry | Shadows | GI | Reflections | AA | Textures | Path tracing | Minimum contract |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| baseline | Tier C per-material bind groups | CPU direct draws | Cascaded/VSM raster paths | Software SDF, probes, and SSGI | SSR, planar, and probe fallbacks | TAA/CAS/FXAA | Per-material resident textures | Disabled when this tier is forced | Active platform profile |
-| modern | Tier B deterministic paged arrays | CPU direct draws | Cascaded/VSM raster paths | Software SDF, probes, and SSGI | SSR, planar, and probe fallbacks | TAA/CAS/FXAA | Paged texture arrays/atlases | Disabled when this tier is forced | 16 texture-array layers; 8 sampled textures/stage |
-| high-end | Tier A descriptor-indexed global tables | GPU indirect when supported; CPU oracle fallback | Cascaded/VSM raster paths | Ray query when supported; software SDF/SSGI fallback | Ray query when supported; SSR/planar/probe fallback | TAA/CAS/FXAA | Descriptor-indexed texture/sampler arrays | Available only with ray query and required limits | Texture-binding arrays + non-uniform indexing; 2 array elements |
+| baseline | Tier C per-material bind groups | CPU direct draws | Cascaded raster shadows (VSM capability fallback) | Software SDF, probes, and SSGI | SSR, planar, and probe fallbacks | TAA/CAS/FXAA | Per-material resident textures | Disabled when this tier is forced | Active platform profile |
+| modern | Tier B deterministic paged arrays | CPU direct draws | Cascaded raster shadows (VSM capability fallback) | Software SDF, probes, and SSGI | SSR, planar, and probe fallbacks | TAA/CAS/FXAA | Paged texture arrays/atlases | Disabled when this tier is forced | 16 texture-array layers; 8 sampled textures/stage |
+| high-end | Tier A descriptor-indexed global tables | GPU indirect when supported; CPU oracle fallback | VSM page cache with cascaded fallback | Ray query when supported; software SDF/SSGI fallback | Ray query when supported; SSR/planar/probe fallback | TAA/CAS/FXAA | Descriptor-indexed texture/sampler arrays | Available only with ray query and required limits | Texture-binding arrays + non-uniform indexing; 2 array elements |
 <!-- END GENERATED CAPABILITY TIERS -->
 
 This table describes the cross-system path contract after device creation.

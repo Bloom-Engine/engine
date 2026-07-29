@@ -11,6 +11,14 @@ The default path remains the established cascaded shadow map (CSM). When VSM
 is not requested, Bloom allocates no VSM textures or buffers and compiles the
 canonical shaders without VSM bindings or sampling branches.
 
+VSM is also capability-gated at renderer startup. If `BLOOM_VSM=1` is present
+while `BLOOM_FORCE_RENDER_TIER=baseline` or `modern` selects a supported lower
+tier, Bloom compiles the same canonical CSM shaders and allocates no VSM or
+VSM-caster resources. The request remains visible in telemetry, together with
+`capability_eligible: false`, `enabled: false`, and
+`selection_reason: "lower-tier-csm-fallback"`. The public renderer capability
+report exposes the same state under `runtime_support.virtual_shadows`.
+
 ## Current contract
 
 - Three directional levels, each with a 32 by 32 virtual address space.
@@ -95,7 +103,8 @@ quality and performance fallbacks, not failure states.
 Quality telemetry reports the VSM state under
 `renderer_paths.virtual_shadows`:
 
-- `requested`, `active`, `fallback`, and `dynamic_fallback_mode`;
+- `requested`, `capability_eligible`, `enabled`, `active`,
+  `selection_reason`, `fallback`, and `dynamic_fallback_mode`;
 - physical capacity and depth/metadata/total bytes;
 - receiver demand source and count;
 - receiver-bounds count and active marking backend;

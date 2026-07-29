@@ -34,6 +34,10 @@ fn negotiated_headless_device_constructs_the_complete_renderer() {
     assert!(public["material_binding"]["selected_tier"].is_string());
     assert!(public["runtime_support"]["path_tracing"].is_boolean());
     assert!(public["runtime_support"]["gpu_driven"]["enabled"].is_boolean());
+    assert!(public["runtime_support"]["virtual_shadows"]["requested"].is_boolean());
+    assert!(public["runtime_support"]["virtual_shadows"]["capability_eligible"].is_boolean());
+    assert!(public["runtime_support"]["virtual_shadows"]["enabled"].is_boolean());
+    assert!(public["runtime_support"]["virtual_shadows"]["selection_reason"].is_string());
 
     // Headless qualification has no swapchain to configure, but it is still
     // uncapped and must retain the requested mode for truthful telemetry.

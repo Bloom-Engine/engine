@@ -1832,6 +1832,14 @@ impl Renderer {
         logical_width: u32,
         logical_height: u32,
     ) -> Self {
+        // Optional renderer paths must observe the same accepted tier as
+        // device negotiation before selecting shader variants or resources.
+        // A forced baseline/modern run therefore stays on canonical CSM even
+        // when the high-tier VSM environment switch is also present.
+        let renderer_capabilities =
+            capabilities::RendererCapabilities::detect(device.features(), &device.limits());
+        crate::virtual_shadows::configure_capability_tier(renderer_capabilities.selected_tier);
+
         // EN-063 — the format frames are RENDERED in, as opposed to the
         // format the surface is CONFIGURED with. The tonemapper writes
         // LINEAR values and relies on hardware encode-on-store into an sRGB

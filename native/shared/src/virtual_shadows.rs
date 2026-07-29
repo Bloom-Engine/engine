@@ -4,7 +4,6 @@
 //! CSM remains the fallback for absent, dirty, over-budget, or unrendered pages.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 #[path = "directional_shadow_clipmap.rs"]
 mod clipmap;
 #[path = "virtual_shadow_gpu_receiver.rs"]
@@ -15,6 +14,11 @@ mod page_priority;
 mod receiver_demand;
 #[path = "virtual_shadow_report.rs"]
 mod report;
+#[path = "virtual_shadow_selection.rs"]
+mod selection;
+
+use selection::selection as virtual_shadow_selection;
+pub(crate) use selection::{configure_capability_tier, virtual_shadows_requested};
 
 pub const VSM_CLIP_LEVELS: u8 = 3;
 pub const VSM_VIRTUAL_PAGES_PER_AXIS: u16 = 32;
@@ -490,7 +494,10 @@ fn paint_debug_cell(
 /// performs no demand walk and allocates no GPU memory, so landing the
 /// foundation cannot change images, frame time, or residency.
 pub struct DirectionalVirtualShadowMap {
-    requested: bool,
+    requested_by_user: bool,
+    capability_eligible: bool,
+    enabled: bool,
+    selection_reason: &'static str,
     sampling_active: bool,
     dynamic_global_fallback: bool,
     dynamic_overlay_pages: Vec<VirtualShadowPage>,
@@ -522,8 +529,8 @@ pub struct DirectionalVirtualShadowMap {
 
 impl DirectionalVirtualShadowMap {
     pub fn new(device: &wgpu::Device, shadow_uniform_layout: &wgpu::BindGroupLayout) -> Self {
-        let requested = virtual_shadows_requested();
-        let requested_capacity = if requested {
+        let selection = virtual_shadow_selection();
+        let requested_capacity = if selection.enabled {
             env_u16(
                 "BLOOM_VSM_PHYSICAL_PAGES",
                 VSM_DEFAULT_PHYSICAL_PAGES,
@@ -547,16 +554,19 @@ impl DirectionalVirtualShadowMap {
             .min(VSM_MAX_PAGE_RENDER_BUDGET)
             .min(buffer_limited_budget.max(1));
         let render_budget = env_u16("BLOOM_VSM_PAGE_BUDGET", 8, 1, max_render_budget).into();
-        let gpu = requested.then(|| {
+        let gpu = selection.enabled.then(|| {
             GpuVirtualShadowResources::new(device, shadow_uniform_layout, capacity, render_budget)
         });
-        let fallback_demand = if requested {
+        let fallback_demand = if selection.enabled {
             centered_directional_demand(0)
         } else {
             Vec::new()
         };
         Self {
-            requested,
+            requested_by_user: selection.requested_by_user,
+            capability_eligible: selection.capability_eligible,
+            enabled: selection.enabled,
+            selection_reason: selection.reason,
             sampling_active: false,
             dynamic_global_fallback: false,
             dynamic_overlay_pages: Vec::new(),
@@ -601,7 +611,7 @@ impl DirectionalVirtualShadowMap {
         self.frame = self.frame.wrapping_add(1).max(1);
         self.cache.begin_frame(self.frame);
         self.pending.clear();
-        if !self.requested {
+        if !self.enabled {
             return;
         }
         self.dynamic_overlay_rendered_pages = 0;
@@ -740,7 +750,7 @@ impl DirectionalVirtualShadowMap {
             self.receiver_demand.clear();
             self.receiver_bounds_signature = 0;
             self.receiver_demand_level_vps = None;
-            self.receiver_marking_backend = if self.requested {
+            self.receiver_marking_backend = if self.enabled {
                 "center-fallback"
             } else {
                 "disabled"
@@ -859,7 +869,7 @@ impl DirectionalVirtualShadowMap {
         if global_fallback {
             self.cache.invalidate_light(0);
         }
-        let sampling_active = self.requested && self.gpu.is_some() && !global_fallback;
+        let sampling_active = self.enabled && self.gpu.is_some() && !global_fallback;
         if !self.sampling_params_initialized
             || sampling_active != self.sampling_active
             || (sampling_active && self.sampling_level_vps != Some(level_vps))
@@ -889,7 +899,7 @@ impl DirectionalVirtualShadowMap {
     }
 
     pub fn requested(&self) -> bool {
-        self.requested
+        self.enabled
     }
 
     pub fn physical_page_view(&self, physical_page: u16) -> Option<&wgpu::TextureView> {
@@ -958,7 +968,7 @@ impl DirectionalVirtualShadowMap {
     }
 
     pub fn debug_images(&self) -> Vec<(&'static str, u32, u32, Vec<u8>)> {
-        if !self.requested {
+        if !self.enabled {
             return Vec::new();
         }
         let (virtual_width, virtual_height, virtual_rgb) = self.cache.debug_virtual_rgb(0, 4);
@@ -1230,20 +1240,6 @@ pub(crate) fn directional_material_shader(source: String) -> String {
     output.push_str(DIRECTIONAL_VSM_MATERIAL_HELPER);
     output.push_str(&renamed[offset..]);
     output
-}
-
-pub(crate) fn virtual_shadows_requested() -> bool {
-    static REQUESTED: OnceLock<bool> = OnceLock::new();
-    *REQUESTED.get_or_init(|| {
-        std::env::var("BLOOM_VSM")
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "on" | "true" | "enabled"
-                )
-            })
-            .unwrap_or(false)
-    })
 }
 
 fn env_u16(name: &str, default: u16, min: u16, max: u16) -> u16 {

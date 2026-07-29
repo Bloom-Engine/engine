@@ -33,7 +33,7 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
         .map_or(0, |gpu| gpu.receiver_demand.in_flight());
     let gpu_overhead_bytes =
         page_table_bytes + render_staging_bytes + VSM_SAMPLING_PARAMS_BYTES + gpu_receiver_bytes;
-    let (physical_capacity, physical_bytes, gpu_overhead_bytes, render_budget) = if vsm.requested {
+    let (physical_capacity, physical_bytes, gpu_overhead_bytes, render_budget) = if vsm.enabled {
         (
             stats.capacity,
             vsm.cache.memory_bytes(),
@@ -45,7 +45,8 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
     };
     format!(
         concat!(
-            "{{\"requested\":{},\"active\":{},",
+            "{{\"requested\":{},\"capability_eligible\":{},\"enabled\":{},\"active\":{},",
+            "\"selection_reason\":\"{}\",",
             "\"projection\":\"camera-centered-page-snapped-clipmap\",",
             "\"fallback\":\"csm\",\"dynamic_fallback\":{},",
             "\"dynamic_fallback_mode\":\"{}\",\"dynamic_fallback_pages\":{},",
@@ -72,8 +73,11 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
             "{{\"level\":1,\"resident\":{},\"dirty\":{}}},",
             "{{\"level\":2,\"resident\":{},\"dirty\":{}}}]}}"
         ),
-        vsm.requested,
+        vsm.requested_by_user,
+        vsm.capability_eligible,
+        vsm.enabled,
         vsm.sampling_active,
+        vsm.selection_reason,
         vsm.dynamic_global_fallback || vsm.dynamic_overlay_deferred_pages > 0,
         if vsm.dynamic_global_fallback {
             "whole-frame-csm"
@@ -109,7 +113,7 @@ pub(super) fn json(vsm: &DirectionalVirtualShadowMap) -> String {
         stats.clipmap_pages_dropped,
         vsm.pending.len(),
         render_budget,
-        if !vsm.requested {
+        if !vsm.enabled {
             "disabled"
         } else if vsm.receiver_demand_active {
             "receiver-bounds"
