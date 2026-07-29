@@ -248,10 +248,12 @@ run_component() {
         tools/quality/run.py \
         tools/quality/build_example.py \
         tools/quality/khronos_materials.py \
+        tools/quality/shadow_detail.py \
         tools/quality/prepare_bistro.py
       python3 -m unittest \
         tools/quality/test_run.py \
         tools/quality/test_khronos_materials.py \
+        tools/quality/test_shadow_detail.py \
         -v
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml

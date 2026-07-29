@@ -16,6 +16,7 @@ import {
 import {
   enableShadows, createSceneNode, attachModelToNode,
   setSceneNodeTransform, setSceneNodeCastShadow, setSceneNodeReceiveShadow,
+  setSceneNodeVisible, setSceneNodeColor, setSceneNodePbr,
 } from "bloom/scene";
 import { mat4Identity, mat4Translate, mat4Scale } from "bloom/math";
 
@@ -25,15 +26,19 @@ let vsmDynamicFixture = false;
 let vsmScrollFixture = false;
 let vsmLightMotionFixture = false;
 let vsmGpuReceiverFixture = false;
+let vsmContactDetailFixture = false;
 for (let i = 0; i < argv.length; i = i + 1) {
   if (argv[i] === "--vsm-dynamic") vsmDynamicFixture = true;
   if (argv[i] === "--vsm-scroll") vsmScrollFixture = true;
   if (argv[i] === "--vsm-light-motion") vsmLightMotionFixture = true;
   if (argv[i] === "--vsm-gpu-receivers") vsmGpuReceiverFixture = true;
+  if (argv[i] === "--vsm-contact-detail") vsmContactDetailFixture = true;
 }
 
-initWindow(800, 450, "Bloom Quality: Skinned + Alpha Motion", 0);
-if (config !== null) resize(800, 450, 800, 450);
+const captureWidth = vsmContactDetailFixture ? 1280 : 800;
+const captureHeight = vsmContactDetailFixture ? 720 : 450;
+initWindow(captureWidth, captureHeight, "Bloom Quality: Skinned + Alpha Motion", 0);
+if (config !== null) resize(captureWidth, captureHeight, captureWidth, captureHeight);
 setTargetFPS(60);
 setEnvClearFromHdr("../renderer-test/assets/outdoor.hdr");
 setEnvIntensity(0.8);
@@ -72,11 +77,12 @@ curtainTransform = mat4Translate(
 setSceneNodeTransform(curtain, curtainTransform);
 setSceneNodeCastShadow(curtain, true);
 setSceneNodeReceiveShadow(curtain, true);
+if (vsmContactDetailFixture) setSceneNodeVisible(curtain, false);
 
 // Opt-in VSM oracle: the large static receiver creates a production-sized
 // demand set while the animated Fox exercises current-frame skinned overlays.
 // The ordinary quality-motion corpus remains byte-for-byte unchanged.
-if (vsmDynamicFixture) {
+if (vsmDynamicFixture || vsmContactDetailFixture) {
   const groundModel = genMeshCube(28.0, 0.08, 24.0);
   const ground = createSceneNode();
   attachModelToNode(ground, groundModel.handle, 0);
@@ -88,6 +94,42 @@ if (vsmDynamicFixture) {
   setSceneNodeTransform(ground, groundTransform);
   setSceneNodeCastShadow(ground, false);
   setSceneNodeReceiveShadow(ground, true);
+  if (vsmContactDetailFixture) {
+    setSceneNodeColor(ground, 178, 184, 194);
+    setSceneNodePbr(ground, 0.82, 0.0);
+  }
+}
+
+// Opt-in directional contact-detail oracle. Repeated sub-pixel-width posts
+// and their ground contacts expose the resolution retained by page-local VSM
+// depth without changing the established motion fixture.
+if (vsmContactDetailFixture) {
+  const postModel = genMeshCube(0.055, 0.72, 0.055);
+  for (let row = 0; row < 14; row = row + 1) {
+    for (let column = 0; column < 19; column = column + 1) {
+      const post = createSceneNode();
+      attachModelToNode(post, postModel.handle, 0);
+      let postTransform = mat4Identity();
+      postTransform = mat4Translate(
+        postTransform,
+        {
+          x: 4.86 + (column - 9) * 0.24,
+          y: 0.42,
+          z: -0.45 - row * 0.42,
+        },
+      );
+      setSceneNodeTransform(post, postTransform);
+      setSceneNodeCastShadow(post, true);
+      setSceneNodeReceiveShadow(post, true);
+      setSceneNodeColor(
+        post,
+        142 + (column % 3) * 18,
+        132 + (row % 3) * 14,
+        118,
+      );
+      setSceneNodePbr(post, 0.7, 0.0);
+    }
+  }
 }
 
 // Opt-in receiver-compaction stress oracle. These small receive-only nodes
@@ -134,7 +176,9 @@ while (!windowShouldClose()) {
   }
 
   // Fox clip 1 ("Walk") has continuous limb motion and a stable loop.
-  updateModelAnimation(foxAnimation, 1, simulationTime, 0.02, 4.86, 0.15, -1.25, 0.0);
+  if (!vsmContactDetailFixture) {
+    updateModelAnimation(foxAnimation, 1, simulationTime, 0.02, 4.86, 0.15, -1.25, 0.0);
+  }
 
   beginDrawing();
   setAmbientLight({ r: 120, g: 130, b: 145, a: 255 }, 0.25);
@@ -144,9 +188,11 @@ while (!windowShouldClose()) {
   const alternateLight = vsmLightMotionFixture
     ? Math.floor(fixtureFrame / 30) % 2
     : 0;
-  const lightDirection = alternateLight !== 0
-    ? { x: 0.28, y: 0.90, z: 0.34 }
-    : { x: 0.45, y: 0.85, z: 0.25 };
+  const lightDirection = vsmContactDetailFixture
+    ? { x: 0.62, y: 0.58, z: 0.36 }
+    : alternateLight !== 0
+      ? { x: 0.28, y: 0.90, z: 0.34 }
+      : { x: 0.45, y: 0.85, z: 0.25 };
   setDirectionalLight(
     lightDirection,
     { r: 255, g: 244, b: 226, a: 255 },
@@ -163,18 +209,24 @@ while (!windowShouldClose()) {
   const cameraScrollX = cameraScroll * 0.25;
   const cameraScrollZ = cameraScroll * -0.45;
   beginMode3D({
-    position: { x: 4.86 + cameraScrollX, y: 1.45, z: 2.2 + cameraScrollZ },
-    target: { x: 4.86 + cameraScrollX, y: 1.2, z: -1.6 + cameraScrollZ },
+    position: vsmContactDetailFixture
+      ? { x: 4.86, y: 2.5, z: 3.4 }
+      : { x: 4.86 + cameraScrollX, y: 1.45, z: 2.2 + cameraScrollZ },
+    target: vsmContactDetailFixture
+      ? { x: 4.86, y: 0.18, z: -3.25 }
+      : { x: 4.86 + cameraScrollX, y: 1.2, z: -1.6 + cameraScrollZ },
     up: { x: 0, y: 1, z: 0 },
     fovy: 48,
     projection: "perspective",
   });
-  drawModel(
-    foxModel,
-    { x: 4.86, y: 0.15, z: -1.25 },
-    0.02,
-    { r: 255, g: 255, b: 255, a: 255 },
-  );
+  if (!vsmContactDetailFixture) {
+    drawModel(
+      foxModel,
+      { x: 4.86, y: 0.15, z: -1.25 },
+      0.02,
+      { r: 255, g: 255, b: 255, a: 255 },
+    );
+  }
   endMode3D();
   if (capture && quality !== null) quality.requestCapture();
   endDrawing();
