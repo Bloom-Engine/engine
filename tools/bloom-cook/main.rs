@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod asset_store;
 mod geometry_cook;
 mod geometry_format;
 mod geometry_quantization;
@@ -87,6 +88,35 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("geometry-store") if args.len() >= 4 => {
+            match asset_store::store_geometry_command(
+                &args[1],
+                Path::new(&args[2]),
+                Path::new(&args[3]),
+                &args[4..],
+            ) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("asset-inspect") if args.len() == 3 => {
+            match asset_store::inspect_asset_command(&args[1], Path::new(&args[2])) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!("usage: bloom-cook texture <in> <out.dds> [--normal] [--linear]");
             eprintln!("       bloom-cook texture-dir <in-dir> <out-dir> [--linear]");
@@ -96,6 +126,11 @@ fn main() -> ExitCode {
                  [--hierarchy-levels N] [--vertex-format float32|quantized32]"
             );
             eprintln!("       bloom-cook geometry-inspect <in.bgeo>");
+            eprintln!(
+                "       bloom-cook geometry-store <logical-id> <in.glb|gltf> <store-dir> \
+                 [geometry limits]"
+            );
+            eprintln!("       bloom-cook asset-inspect <logical-id> <store-dir>");
             ExitCode::FAILURE
         }
     }

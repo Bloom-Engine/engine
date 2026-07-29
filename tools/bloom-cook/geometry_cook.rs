@@ -16,6 +16,8 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
+pub(crate) const GEOMETRY_RECIPE_VERSION: u32 = 1;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CookOptions {
     meshlet_limits: MeshletLimits,
@@ -45,13 +47,102 @@ struct GeometrySource {
     eligible_triangles: u64,
 }
 
+pub(crate) struct PreparedGeometry {
+    options: CookOptions,
+    source: GeometrySource,
+}
+
+pub(crate) struct CookedGeometry {
+    pub bytes: Vec<u8>,
+    pub report: serde_json::Value,
+}
+
+impl PreparedGeometry {
+    pub fn source_sha256(&self) -> [u8; 32] {
+        self.source.source_sha256
+    }
+
+    pub fn build_key_sha256(&self) -> [u8; 32] {
+        geometry_build_key_sha256(
+            self.source.source_sha256,
+            self.options.meshlet_limits.max_vertices,
+            self.options.meshlet_limits.max_triangles,
+            self.options.page_bytes,
+            self.options.hierarchy_levels,
+            self.options.vertex_encoding,
+        )
+    }
+
+    pub fn settings_json(&self) -> serde_json::Value {
+        json!({
+            "hierarchy_levels": self.options.hierarchy_levels,
+            "max_triangles_per_meshlet": self.options.meshlet_limits.max_triangles,
+            "max_vertices_per_meshlet": self.options.meshlet_limits.max_vertices,
+            "page_budget_bytes": self.options.page_bytes,
+            "vertex_format": self.options.vertex_encoding.label(),
+        })
+    }
+
+    pub fn expected_format_version(&self) -> u32 {
+        match self.options.vertex_encoding {
+            VertexEncoding::Float32 => crate::geometry_format::VERSION,
+            VertexEncoding::Quantized => crate::geometry_format::QUANTIZED_VERSION,
+        }
+    }
+}
+
+pub(crate) fn geometry_build_key_sha256(
+    source_sha256: [u8; 32],
+    max_vertices: u32,
+    max_triangles: u32,
+    page_bytes: u32,
+    hierarchy_levels: u32,
+    vertex_encoding: VertexEncoding,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"bloom-geometry-recipe\0");
+    hasher.update(GEOMETRY_RECIPE_VERSION.to_le_bytes());
+    hasher.update(source_sha256);
+    hasher.update(max_vertices.to_le_bytes());
+    hasher.update(max_triangles.to_le_bytes());
+    hasher.update(page_bytes.to_le_bytes());
+    hasher.update(hierarchy_levels.to_le_bytes());
+    hasher.update(
+        match vertex_encoding {
+            VertexEncoding::Float32 => 1u32,
+            VertexEncoding::Quantized => 2u32,
+        }
+        .to_le_bytes(),
+    );
+    hasher.finalize().into()
+}
+
+pub(crate) fn prepare_geometry(input: &Path, flags: &[String]) -> Result<PreparedGeometry, String> {
+    Ok(PreparedGeometry {
+        options: parse_options(flags)?,
+        source: load_geometry_source(input)?,
+    })
+}
+
 pub fn cook_geometry_command(
     input: &Path,
     output: &Path,
     flags: &[String],
 ) -> Result<String, String> {
-    let options = parse_options(flags)?;
-    let source = load_geometry_source(input)?;
+    let prepared = prepare_geometry(input, flags)?;
+    let mut cooked = cook_prepared_geometry(input, prepared)?;
+    write_atomically(output, &cooked.bytes)?;
+    cooked.report["output"] = json!(output.display().to_string());
+    serde_json::to_string_pretty(&cooked.report)
+        .map_err(|error| format!("serialize geometry report: {error}"))
+}
+
+pub(crate) fn cook_prepared_geometry(
+    input: &Path,
+    prepared: PreparedGeometry,
+) -> Result<CookedGeometry, String> {
+    let options = prepared.options;
+    let source = prepared.source;
     let mut meshlets = Vec::<Meshlet>::new();
     let mut hierarchy = HierarchyStats::default();
     for primitive in &source.primitives {
@@ -81,7 +172,6 @@ pub fn cook_geometry_command(
         options.page_bytes,
         options.vertex_encoding,
     )?;
-    write_atomically(output, &bytes)?;
     let archive = decode_geometry(&bytes)?;
     let quantization = measure_vertex_error(&meshlets, &bytes)?;
     let float32_archive = if options.vertex_encoding == VertexEncoding::Quantized {
@@ -112,10 +202,10 @@ pub fn cook_geometry_command(
         }
     };
 
-    serde_json::to_string_pretty(&json!({
+    let report = json!({
         "schema": "bloom-geometry-cook-report-v1",
         "input": input.display().to_string(),
-        "output": output.display().to_string(),
+        "output": serde_json::Value::Null,
         "format_version": archive.format_version,
         "source_sha256": hex_hash(archive.source_sha256),
         "payload_sha256": hex_hash(archive.payload_sha256),
@@ -181,8 +271,8 @@ pub fn cook_geometry_command(
             "buffers": 0,
             "shader_branches": 0,
         }
-    }))
-    .map_err(|error| format!("serialize geometry report: {error}"))
+    });
+    Ok(CookedGeometry { bytes, report })
 }
 
 pub fn inspect_geometry_command(input: &Path) -> Result<String, String> {
@@ -520,7 +610,7 @@ fn mode_code(mode: gltf::mesh::Mode) -> u32 {
     }
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
