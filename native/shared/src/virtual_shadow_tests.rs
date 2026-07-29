@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn transform_ndc(matrix: &[[f32; 4]; 4], point: [f32; 4]) -> [f32; 3] {
