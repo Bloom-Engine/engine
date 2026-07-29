@@ -93,6 +93,12 @@ fn local_shadow_page(slot: LocalVsmSamplingSlot, face: u32) -> u32 {
 //   1 = shadow requested but not fully resident (suppress contribution),
 //   2..6 = fully resident local slot + 2.
 fn sample_local_shadow(light_index: u32, world_pos: vec3<f32>) -> f32 {
+    // words.x bit 1 is uniform for the whole draw. Keep the established
+    // directional-only VSM path out of the dynamically indexed metadata
+    // array when no local-shadow request was admitted this frame.
+    if ((vsm_params.words.x & 2u) == 0u) {
+        return 1.0;
+    }
     let state = vsm_params.local_light_meta[light_index].x;
     if (state == 0u) {
         return 1.0;

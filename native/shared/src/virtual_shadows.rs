@@ -56,6 +56,8 @@ struct LocalVsmSamplingSlot {
 #[derive(Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct DirectionalVsmSamplingParams {
     level_vps: [[[f32; 4]; 4]; VSM_CLIP_LEVELS as usize],
+    // x: bit 0 = directional sampling active, bit 1 = admitted local
+    // requests present. y/z/w retain page axis/interior/border.
     words: [u32; 4],
     local_light_meta: [[u32; 4]; VSM_MAX_LOCAL_SHADOW_REQUESTS],
     local_slots: [LocalVsmSamplingSlot; VSM_MAX_LOCAL_SHADOW_LIGHTS],
@@ -1123,7 +1125,7 @@ impl DirectionalVirtualShadowMap {
                 .previous_level_vps
                 .unwrap_or([crate::renderer::IDENTITY_MAT4; VSM_CLIP_LEVELS as usize]),
             words: [
-                u32::from(self.sampling_active),
+                u32::from(self.sampling_active) | (u32::from(!self.local_selected.is_empty()) << 1),
                 VSM_VIRTUAL_PAGES_PER_AXIS as u32,
                 VSM_PAGE_INTERIOR as u32,
                 VSM_PAGE_BORDER as u32,
@@ -2178,6 +2180,7 @@ let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);
         assert_eq!(variant.matches("sample_virtual_shadow(").count(), 3);
         assert!(variant.contains("sample_virtual_shadow(cascade, recv_pos,"));
         assert!(variant.contains("sample_virtual_shadow(next_cascade, next_pos,"));
+        assert!(variant.contains("(vsm_params.words.x & 2u) == 0u"));
         assert!(variant.contains("level_vps: array<mat4x4<f32>, 3>"));
         assert!(!source.contains("vsm_page_table"));
     }
