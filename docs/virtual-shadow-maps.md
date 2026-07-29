@@ -22,13 +22,20 @@ canonical shaders without VSM bindings or sampling branches.
 - Receiver coverage uses one fixed 1,024-entry R32 counter domain per level
   plus a sparse touched-address list. Ranking performs no hash-table work and
   retains byte-for-byte compatibility with the prior deterministic oracle.
-- On capable native adapters, continuously changing sets of 1,024 through
-  4,096 camera-visible receivers mark the same fixed coverage domain in a
-  bounded compute pass. Smaller sets stay on the faster fixed CPU oracle.
-- GPU receiver resources are lazy. The first result must exactly match the
-  complete ordered CPU demand before later asynchronous results are consumed.
-  Failure disables the backend, and projection transitions remain synchronous
-  CPU work.
+- The fixed CPU receiver oracle is the production default. An explicit
+  `BLOOM_VSM_GPU_RECEIVER=1` experiment can mark continuously changing sets of
+  1,024 through 4,096 camera-visible receivers in a bounded compute pass, but
+  direct timing has not qualified automatic activation.
+- Experimental GPU receiver resources are lazy. The first result must exactly
+  match the complete ordered CPU demand before later asynchronous results are
+  consumed. Failure disables the backend, and projection transitions remain
+  synchronous CPU work.
+- On capable native adapters, page lists with at least 48 visible rigid-opaque
+  shared-geometry casters use compact multi-draw indirect submission. Exact
+  page classification remains on the CPU; small and compatibility lists keep
+  direct submission.
+- VSM caster-indirect resources are lazy and bounded to 80 bytes of caster
+  data plus 20 bytes of command data per active record.
 - A default render budget of eight dirty pages per frame.
 - Missing, dirty, denied, and deferred pages always sample live CSM.
 - Static page depth persists until its light matrix, caster signature, or
@@ -100,6 +107,11 @@ Quality telemetry reports the VSM state under
 - per-level resident and dirty counts;
 - dynamic overlay footprint, rendered pages, draws, deferred pages, and both
   hard budgets.
+
+`renderer_paths.vsm_gpu_casters` separately reports whether the native
+indirect path is available and active, considered pages, the maximum per-page
+candidate count, indirect pages, caster records, indirect calls,
+classification source, and lazy allocation bytes.
 
 Expected dynamic modes are:
 
@@ -181,12 +193,31 @@ path reads its dense result without a same-frame wait and compacts it with the
 exact CPU oracle. It must not be enabled automatically until a new direct
 GPU-cost qualification proves a net win.
 
+`quality-stress` has an independent caster-submission fixture:
+
+```sh
+perry compile examples/quality-stress/main.ts -o examples/quality-stress/main
+BLOOM_VSM=1 ./examples/quality-stress/main \
+  --vsm-gpu-casters \
+  --quality-run 60 180 0.016666667 \
+  /tmp/vsm-indirect.png \
+  /tmp/vsm-indirect.json
+```
+
+Add `BLOOM_VSM_GPU_CASTERS=0` for the same-revision CPU control. The fixture
+uses 512 casting/receiving nodes and alternates the directional light every
+30 frames; it does not change the ordinary 10,240-node quality-stress case.
+Exact image, direct-pass, end-to-end, fallback, and lazy-resource evidence is
+in `docs/evidence/issue-132-vsm-caster-indirect-v1.md`.
+
 ## Work that remains on issue #132
 
 - Compact requests and schedule page residency entirely on the GPU so the
   current bounded dense asynchronous readback can be removed.
-- Move caster culling and submission to bounded GPU-driven paths where the
-  capability tier and shared geometry representation support them.
+- Add true GPU caster classification plus indirect-count compaction on
+  backends where it outperforms the shipped CPU-exact compact list.
+- Independently qualify indirect caster paths for cutout, skinned,
+  foliage-motion, dynamic-overlay, instanced, and dedicated-buffer geometry.
 - Add explicit, default-off spot and point shadow requests, their virtual
   projections, and deterministic shared-pool arbitration. Existing unshadowed
   point lights must remain behaviorally and performance compatible.
