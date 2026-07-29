@@ -57,6 +57,7 @@ let frameCount = 0;
 let initYaw = 0.0;
 let scenePath = "assets/bistro.gltf";
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
+let vsmMotionPath = false;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -70,6 +71,9 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--scene" && i + 1 < argv.length) {
     scenePath = argv[i + 1];
+  }
+  if (argv[i] === "--vsm-motion-path") {
+    vsmMotionPath = true;
   }
 }
 
@@ -123,11 +127,13 @@ let camZ = 11.17;
 let camYaw = initYaw !== 0.0 ? initYaw : -1.17; // ≈ 67° left of -Z
 let camPitch = 0.0;
 let cursorLocked = false;
+let fixtureFrame = 0;
 
 // ---- Main loop ----
 while (!windowShouldClose()) {
   const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
   const dt = qualityRun !== null ? qualityRun.deltaTime() : getDeltaTime();
+  fixtureFrame = fixtureFrame + 1;
 
   if (cursorLocked) {
     camYaw = camYaw - getMouseDeltaX() * MOUSE_SENS;
@@ -153,9 +159,17 @@ while (!windowShouldClose()) {
     if (cursorLocked) { disableCursor(); } else { enableCursor(); }
   }
 
-  const lookX = camX + Math.cos(camPitch) * fwdX * 100;
+  // Opt-in VSM transition oracle. Move six metres along the exact sun
+  // light-plane right vector every 30 frames, returning to the established
+  // Bistro camera on frame 240 for a matched static/transition comparison.
+  const pathStep = vsmMotionPath
+    ? Math.floor(fixtureFrame / 30) % 2
+    : 0;
+  const renderCamX = camX + pathStep * 3.748170285;
+  const renderCamZ = camZ + pathStep * 4.685212856;
+  const lookX = renderCamX + Math.cos(camPitch) * fwdX * 100;
   const lookY = camY + Math.sin(camPitch) * 100;
-  const lookZ = camZ + Math.cos(camPitch) * fwdZ * 100;
+  const lookZ = renderCamZ + Math.cos(camPitch) * fwdZ * 100;
 
   beginDrawing();
 
@@ -175,7 +189,7 @@ while (!windowShouldClose()) {
   addDirectionalLight(0.0, -1.0, 0.0, 0.5, 0.55, 0.7, 0.4);
 
   beginMode3D({
-    position: { x: camX, y: camY, z: camZ },
+    position: { x: renderCamX, y: camY, z: renderCamZ },
     target: { x: lookX, y: lookY, z: lookZ },
     up: { x: 0, y: 1, z: 0 },
     fovy: 60,

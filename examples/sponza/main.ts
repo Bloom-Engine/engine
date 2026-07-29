@@ -44,6 +44,7 @@ let capturePath = "";
 let frameCount = 0;
 let initYaw = 0.0;
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
+let vsmMotionPath = false;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -54,6 +55,9 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--vsm-motion-path") {
+    vsmMotionPath = true;
   }
 }
 
@@ -95,11 +99,13 @@ let camZ = 0.0;
 let camYaw = initYaw;
 let camPitch = 0.0;
 let cursorLocked = false;
+let fixtureFrame = 0;
 
 // ---- Main loop ----
 while (!windowShouldClose()) {
   const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
   const dt = qualityRun !== null ? qualityRun.deltaTime() : getDeltaTime();
+  fixtureFrame = fixtureFrame + 1;
 
   // Camera controls
   if (cursorLocked) {
@@ -126,9 +132,18 @@ while (!windowShouldClose()) {
     if (cursorLocked) { disableCursor(); } else { enableCursor(); }
   }
 
-  const lookX = camX + Math.cos(camPitch) * fwdX * 100;
+  // Opt-in VSM transition oracle. The exact light-plane move alternates every
+  // 30 frames and returns to the ordinary camera on frame 240. The captured
+  // frame therefore has identical camera geometry to the static control while
+  // cache telemetry observes the preceding snapped-origin transition.
+  const pathStep = vsmMotionPath
+    ? Math.floor(fixtureFrame / 30) % 2
+    : 0;
+  const renderCamX = camX + pathStep * 1.118033989;
+  const renderCamZ = camZ - pathStep * 2.236067978;
+  const lookX = renderCamX + Math.cos(camPitch) * fwdX * 100;
   const lookY = camY + Math.sin(camPitch) * 100;
-  const lookZ = camZ + Math.cos(camPitch) * fwdZ * 100;
+  const lookZ = renderCamZ + Math.cos(camPitch) * fwdZ * 100;
 
   // ---- Rendering ----
   beginDrawing();
@@ -146,7 +161,7 @@ while (!windowShouldClose()) {
   addDirectionalLight(0.0, -1.0, 0.0, 0.5, 0.55, 0.65, 0.5);
 
   beginMode3D({
-    position: { x: camX, y: camY, z: camZ },
+    position: { x: renderCamX, y: camY, z: renderCamZ },
     target: { x: lookX, y: lookY, z: lookZ },
     up: { x: 0, y: 1, z: 0 },
     fovy: 60,
