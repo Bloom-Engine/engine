@@ -133,7 +133,6 @@ let fixtureFrame = 0;
 while (!windowShouldClose()) {
   const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
   const dt = qualityRun !== null ? qualityRun.deltaTime() : getDeltaTime();
-  fixtureFrame = fixtureFrame + 1;
 
   if (cursorLocked) {
     camYaw = camYaw - getMouseDeltaX() * MOUSE_SENS;
@@ -162,11 +161,14 @@ while (!windowShouldClose()) {
   // Opt-in VSM transition oracle. Move six metres along the exact sun
   // light-plane right vector every 30 frames, returning to the established
   // Bistro camera on frame 240 for a matched static/transition comparison.
-  const pathStep = vsmMotionPath
-    ? Math.floor(fixtureFrame / 30) % 2
-    : 0;
-  const renderCamX = camX + pathStep * 3.748170285;
-  const renderCamZ = camZ + pathStep * 4.685212856;
+  let renderCamX = camX;
+  let renderCamZ = camZ;
+  if (vsmMotionPath) {
+    fixtureFrame = fixtureFrame + 1;
+    const pathStep = Math.floor(fixtureFrame / 30) % 2;
+    renderCamX = camX + pathStep * 3.748170285;
+    renderCamZ = camZ + pathStep * 4.685212856;
+  }
   const lookX = renderCamX + Math.cos(camPitch) * fwdX * 100;
   const lookY = camY + Math.sin(camPitch) * 100;
   const lookZ = renderCamZ + Math.cos(camPitch) * fwdZ * 100;

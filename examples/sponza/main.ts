@@ -105,7 +105,6 @@ let fixtureFrame = 0;
 while (!windowShouldClose()) {
   const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
   const dt = qualityRun !== null ? qualityRun.deltaTime() : getDeltaTime();
-  fixtureFrame = fixtureFrame + 1;
 
   // Camera controls
   if (cursorLocked) {
@@ -136,11 +135,14 @@ while (!windowShouldClose()) {
   // 30 frames and returns to the ordinary camera on frame 240. The captured
   // frame therefore has identical camera geometry to the static control while
   // cache telemetry observes the preceding snapped-origin transition.
-  const pathStep = vsmMotionPath
-    ? Math.floor(fixtureFrame / 30) % 2
-    : 0;
-  const renderCamX = camX + pathStep * 1.118033989;
-  const renderCamZ = camZ - pathStep * 2.236067978;
+  let renderCamX = camX;
+  let renderCamZ = camZ;
+  if (vsmMotionPath) {
+    fixtureFrame = fixtureFrame + 1;
+    const pathStep = Math.floor(fixtureFrame / 30) % 2;
+    renderCamX = camX + pathStep * 1.118033989;
+    renderCamZ = camZ - pathStep * 2.236067978;
+  }
   const lookX = renderCamX + Math.cos(camPitch) * fwdX * 100;
   const lookY = camY + Math.sin(camPitch) * 100;
   const lookZ = renderCamZ + Math.cos(camPitch) * fwdZ * 100;
