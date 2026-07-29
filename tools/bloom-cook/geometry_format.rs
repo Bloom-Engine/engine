@@ -5,13 +5,15 @@
 //! leaf-only artifact or opt-in atomic parent/child replacement groups. All
 //! offsets and hierarchy relations are validated before payload access.
 
+use crate::geometry_quantization::{self, QuantizationStats, VertexEncoding};
 use crate::meshlet::{
-    Meshlet, StaticVertex, FLAG_ALPHA_MASKED, FLAG_COARSE_ROOT, FLAG_DOUBLE_SIDED, NO_RELATION,
+    Meshlet, FLAG_ALPHA_MASKED, FLAG_COARSE_ROOT, FLAG_DOUBLE_SIDED, NO_RELATION,
 };
 use sha2::{Digest, Sha256};
 
 pub const MAGIC: [u8; 8] = *b"BLMGEO1\0";
 pub const VERSION: u32 = 1;
+pub const QUANTIZED_VERSION: u32 = 2;
 pub const ENDIAN_TAG: u32 = 0x0102_0304;
 pub const HEADER_BYTES: usize = 160;
 pub const CLUSTER_RECORD_BYTES: usize = 128;
@@ -98,6 +100,8 @@ pub struct PageRecord {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GeometryArchive {
+    pub format_version: u32,
+    pub vertex_encoding: VertexEncoding,
     pub source_sha256: [u8; 32],
     pub payload_sha256: [u8; 32],
     pub page_budget_bytes: u32,
@@ -153,6 +157,22 @@ pub fn encode_geometry(
     source_sha256: [u8; 32],
     page_budget_bytes: u32,
 ) -> Result<Vec<u8>, String> {
+    encode_geometry_with_vertex_encoding(
+        meshlets,
+        compatibility,
+        source_sha256,
+        page_budget_bytes,
+        VertexEncoding::Float32,
+    )
+}
+
+pub fn encode_geometry_with_vertex_encoding(
+    meshlets: &[Meshlet],
+    compatibility: &[CompatibilityRecord],
+    source_sha256: [u8; 32],
+    page_budget_bytes: u32,
+    vertex_encoding: VertexEncoding,
+) -> Result<Vec<u8>, String> {
     validate_page_budget(page_budget_bytes)?;
 
     let mut payload = Vec::new();
@@ -164,7 +184,10 @@ pub fn encode_geometry(
 
     for meshlet in meshlets {
         validate_meshlet(meshlet)?;
-        let encoded_bytes = align_up(meshlet.encoded_payload_bytes(), 16);
+        let encoded_bytes = align_up(
+            geometry_quantization::encoded_meshlet_bytes(meshlet, vertex_encoding),
+            16,
+        );
         if encoded_bytes > page_budget_bytes as usize {
             return Err(format!(
                 "meshlet payload {encoded_bytes} bytes exceeds page budget {page_budget_bytes}"
@@ -193,7 +216,13 @@ pub fn encode_geometry(
         let page_index = pages.len() as u32;
         let vertex_offset = payload.len() as u64;
         for vertex in &meshlet.vertices {
-            encode_vertex(&mut payload, vertex);
+            geometry_quantization::encode_vertex(
+                &mut payload,
+                vertex,
+                meshlet.bounds.aabb_min,
+                meshlet.bounds.aabb_max,
+                vertex_encoding,
+            )?;
         }
         let index_offset = payload.len() as u64;
         payload.extend_from_slice(&meshlet.local_indices);
@@ -221,7 +250,7 @@ pub fn encode_geometry(
             parent_count: meshlet.parent_count,
             first_child: meshlet.first_child,
             child_count: meshlet.child_count,
-            vertex_stride: StaticVertex::ENCODED_BYTES,
+            vertex_stride: vertex_encoding.stride(),
         });
     }
     finish_page(
@@ -259,7 +288,13 @@ pub fn encode_geometry(
 
     let mut output = Vec::with_capacity(file_bytes);
     output.extend_from_slice(&MAGIC);
-    push_u32(&mut output, VERSION);
+    push_u32(
+        &mut output,
+        match vertex_encoding {
+            VertexEncoding::Float32 => VERSION,
+            VertexEncoding::Quantized => QUANTIZED_VERSION,
+        },
+    );
     push_u32(&mut output, HEADER_BYTES as u32);
     push_u32(&mut output, ENDIAN_TAG);
     push_u32(&mut output, 0);
@@ -315,11 +350,16 @@ pub fn decode_geometry(bytes: &[u8]) -> Result<GeometryArchive, String> {
         return Err("invalid cooked geometry magic".to_string());
     }
     let version = read_u32(bytes, 8, "version")?;
-    if version != VERSION {
-        return Err(format!(
-            "unsupported cooked geometry version {version}; expected {VERSION}"
-        ));
-    }
+    let vertex_encoding = match version {
+        VERSION => VertexEncoding::Float32,
+        QUANTIZED_VERSION => VertexEncoding::Quantized,
+        _ => {
+            return Err(format!(
+                "unsupported cooked geometry version {version}; expected {VERSION} or \
+                 {QUANTIZED_VERSION}"
+            ))
+        }
+    };
     let header_bytes = read_u32(bytes, 12, "header size")? as usize;
     if header_bytes != HEADER_BYTES {
         return Err(format!(
@@ -424,8 +464,10 @@ pub fn decode_geometry(bytes: &[u8]) -> Result<GeometryArchive, String> {
     }
 
     validate_pages(&pages, &clusters, payload, page_budget_bytes)?;
-    validate_clusters(&clusters, &pages, payload)?;
+    validate_clusters(&clusters, &pages, payload, vertex_encoding)?;
     Ok(GeometryArchive {
+        format_version: version,
+        vertex_encoding,
         source_sha256,
         payload_sha256,
         page_budget_bytes,
@@ -433,6 +475,23 @@ pub fn decode_geometry(bytes: &[u8]) -> Result<GeometryArchive, String> {
         pages,
         compatibility,
     })
+}
+
+pub fn measure_vertex_error(
+    meshlets: &[Meshlet],
+    bytes: &[u8],
+) -> Result<QuantizationStats, String> {
+    let archive = decode_geometry(bytes)?;
+    let payload_offset = read_usize(bytes, 128, "payload offset")?;
+    let payload = bytes
+        .get(payload_offset..)
+        .ok_or("cooked geometry payload is truncated")?;
+    geometry_quantization::measure(
+        meshlets,
+        &archive.clusters,
+        payload,
+        archive.vertex_encoding,
+    )
 }
 
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -520,20 +579,6 @@ fn finish_page(
         sha256: sha256(slice),
     });
     Ok(())
-}
-
-fn encode_vertex(output: &mut Vec<u8>, vertex: &StaticVertex) {
-    for value in vertex
-        .position
-        .iter()
-        .chain(vertex.normal.iter())
-        .chain(vertex.tangent.iter())
-        .chain(vertex.uv0.iter())
-        .chain(vertex.uv1.iter())
-        .chain(vertex.color.iter())
-    {
-        push_f32(output, *value);
-    }
 }
 
 fn encode_cluster_record(output: &mut Vec<u8>, record: &ClusterRecord) {
@@ -706,11 +751,11 @@ fn validate_clusters(
     clusters: &[ClusterRecord],
     pages: &[PageRecord],
     payload: &[u8],
+    vertex_encoding: VertexEncoding,
 ) -> Result<(), String> {
     for (cluster_index, cluster) in clusters.iter().enumerate() {
         let known_flags = FLAG_DOUBLE_SIDED | FLAG_ALPHA_MASKED | FLAG_COARSE_ROOT;
-        if cluster.vertex_stride != StaticVertex::ENCODED_BYTES
-            || !(3..=u8::MAX as u32).contains(&cluster.vertex_count)
+        if !(3..=u8::MAX as u32).contains(&cluster.vertex_count)
             || cluster.triangle_count == 0
             || cluster.flags & !known_flags != 0
         {
@@ -753,17 +798,14 @@ fn validate_clusters(
                 "cluster {cluster_index} payload offsets exceed or overlap its page"
             ));
         }
-        let vertex_start = cluster.vertex_offset as usize;
-        let vertex_end = vertex_end as usize;
         let index_start = cluster.index_offset as usize;
         let index_end = index_end as usize;
-        for component in payload[vertex_start..vertex_end].chunks_exact(4) {
-            if !f32::from_le_bytes(component.try_into().unwrap()).is_finite() {
-                return Err(format!(
-                    "cluster {cluster_index} vertex payload contains NaN/Inf"
-                ));
-            }
-        }
+        geometry_quantization::validate_cluster_vertices(
+            cluster_index,
+            cluster,
+            payload,
+            vertex_encoding,
+        )?;
         if payload[index_start..index_end]
             .iter()
             .any(|index| *index as u32 >= cluster.vertex_count)
@@ -1066,11 +1108,108 @@ mod tests {
         assert_eq!(decoded.pages.len(), 1);
         assert_eq!(decoded.compatibility.len(), 1);
         assert_eq!(decoded.triangle_count(), 2);
+        assert_eq!(decoded.format_version, VERSION);
+        assert_eq!(decoded.vertex_encoding, VertexEncoding::Float32);
         assert_eq!(decoded.source_sha256, sha256(b"source"));
         assert_eq!(
             decoded.compatibility[0].reason,
             CompatibilityReason::Skinned
         );
+    }
+
+    #[test]
+    fn quantized_v2_is_smaller_bounded_and_preserves_missing_tangents() {
+        let vertex = |position, uv0, color, tangent| StaticVertex {
+            position,
+            normal: [0.25, 0.5, 0.829_156_2],
+            tangent,
+            uv0,
+            uv1: [uv0[0] * 0.25, uv0[1] * 0.5],
+            color,
+        };
+        let primitive = StaticPrimitive {
+            mesh_index: 0,
+            primitive_index: 0,
+            material_index: Some(2),
+            double_sided: false,
+            alpha_masked: false,
+            vertices: vec![
+                vertex(
+                    [0.0, 0.0, 0.0],
+                    [0.123_45, -0.75],
+                    [0.1, 0.2, 0.3, 1.0],
+                    [1.0, 0.25, 0.0, -1.0],
+                ),
+                vertex(
+                    [1.0, 0.0, 0.0],
+                    [1.5, 0.333_3],
+                    [0.4, 0.5, 0.6, 0.7],
+                    [1.0, 0.25, 0.0, 1.0],
+                ),
+                vertex(
+                    [0.333_333, 1.0, 0.0],
+                    [-2.25, 0.875],
+                    [0.8, 0.9, 1.0, 0.0],
+                    [0.0; 4],
+                ),
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let meshlets = build_leaf_meshlets(&primitive, MeshletLimits::default()).unwrap();
+        let float32 =
+            encode_geometry(&meshlets, &[], sha256(b"quantized"), DEFAULT_PAGE_BYTES).unwrap();
+        let quantized = encode_geometry_with_vertex_encoding(
+            &meshlets,
+            &[],
+            sha256(b"quantized"),
+            DEFAULT_PAGE_BYTES,
+            VertexEncoding::Quantized,
+        )
+        .unwrap();
+        let float32_archive = decode_geometry(&float32).unwrap();
+        let quantized_archive = decode_geometry(&quantized).unwrap();
+        assert_eq!(quantized_archive.format_version, QUANTIZED_VERSION);
+        assert_eq!(quantized_archive.vertex_encoding, VertexEncoding::Quantized);
+        assert_eq!(
+            quantized_archive.clusters[0].vertex_stride,
+            geometry_quantization::QUANTIZED_VERTEX_BYTES
+        );
+        assert!(quantized_archive.payload_bytes() < float32_archive.payload_bytes());
+
+        let stats = measure_vertex_error(&meshlets, &quantized).unwrap();
+        assert!(stats.max_position_cluster_relative_error <= 1.0 / 65_000.0);
+        assert!(stats.max_normal_angular_error_degrees < 0.05);
+        assert!(stats.max_tangent_angular_error_degrees < 0.05);
+        assert!(stats.max_uv_absolute_error < 0.001);
+        assert!(stats.max_color_absolute_error <= 1.0 / 255.0);
+        assert!(stats.max_tangent_handedness_error <= 1.0 / 32_767.0);
+    }
+
+    #[test]
+    fn quantized_v2_rejects_values_that_cannot_be_represented_safely() {
+        let mut invalid_color = triangle(0.0, 0);
+        invalid_color.vertices[0].color[0] = 1.01;
+        assert!(encode_geometry_with_vertex_encoding(
+            &[invalid_color],
+            &[],
+            sha256(b"invalid-color"),
+            DEFAULT_PAGE_BYTES,
+            VertexEncoding::Quantized,
+        )
+        .unwrap_err()
+        .contains("outside 0..=1"));
+
+        let mut invalid_uv = triangle(0.0, 0);
+        invalid_uv.vertices[0].uv0[0] = 70_000.0;
+        assert!(encode_geometry_with_vertex_encoding(
+            &[invalid_uv],
+            &[],
+            sha256(b"invalid-uv"),
+            DEFAULT_PAGE_BYTES,
+            VertexEncoding::Quantized,
+        )
+        .unwrap_err()
+        .contains("finite f16 range"));
     }
 
     #[test]
@@ -1137,7 +1276,7 @@ mod tests {
             .contains("non-canonical or overlapping"));
 
         let mut bytes = sample_archive(DEFAULT_PAGE_BYTES);
-        bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(QUANTIZED_VERSION + 1).to_le_bytes());
         assert!(decode_geometry(&bytes)
             .unwrap_err()
             .contains("unsupported cooked geometry version"));

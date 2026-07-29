@@ -46,6 +46,7 @@ name = "bloom-cook"
 version = "0.1.0"
 dependencies = [
  "gltf",
+ "half",
  "image",
  "image_dds",
  "meshopt",

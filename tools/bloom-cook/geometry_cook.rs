@@ -1,9 +1,10 @@
 //! glTF-to-meshlet cooking and command-line reporting.
 
 use crate::geometry_format::{
-    decode_geometry, encode_geometry, hex_hash, CompatibilityReason, CompatibilityRecord,
-    DEFAULT_PAGE_BYTES,
+    decode_geometry, encode_geometry, encode_geometry_with_vertex_encoding, hex_hash,
+    measure_vertex_error, CompatibilityReason, CompatibilityRecord, DEFAULT_PAGE_BYTES,
 };
+use crate::geometry_quantization::VertexEncoding;
 use crate::hierarchy::{
     build_meshlet_hierarchy, build_spatial_leaf_meshlets, offset_relations, order_for_streaming,
     HierarchyStats,
@@ -20,6 +21,7 @@ struct CookOptions {
     meshlet_limits: MeshletLimits,
     page_bytes: u32,
     hierarchy_levels: u32,
+    vertex_encoding: VertexEncoding,
 }
 
 impl Default for CookOptions {
@@ -28,6 +30,7 @@ impl Default for CookOptions {
             meshlet_limits: MeshletLimits::default(),
             page_bytes: DEFAULT_PAGE_BYTES,
             hierarchy_levels: 0,
+            vertex_encoding: VertexEncoding::Float32,
         }
     }
 }
@@ -71,20 +74,49 @@ pub fn cook_geometry_command(
     if options.hierarchy_levels != 0 {
         order_for_streaming(&mut meshlets)?;
     }
-    let bytes = encode_geometry(
+    let bytes = encode_geometry_with_vertex_encoding(
         &meshlets,
         &source.compatibility,
         source.source_sha256,
         options.page_bytes,
+        options.vertex_encoding,
     )?;
     write_atomically(output, &bytes)?;
     let archive = decode_geometry(&bytes)?;
+    let quantization = measure_vertex_error(&meshlets, &bytes)?;
+    let float32_archive = if options.vertex_encoding == VertexEncoding::Quantized {
+        Some(decode_geometry(&encode_geometry(
+            &meshlets,
+            &source.compatibility,
+            source.source_sha256,
+            options.page_bytes,
+        )?)?)
+    } else {
+        None
+    };
+    let baseline_payload_bytes = float32_archive
+        .as_ref()
+        .map_or_else(|| archive.payload_bytes(), |value| value.payload_bytes());
+    let baseline_root_page_bytes = float32_archive.as_ref().map_or_else(
+        || archive.coarse_root_page_bytes(),
+        |value| value.coarse_root_page_bytes(),
+    );
+    let payload_reduction_bytes = baseline_payload_bytes.saturating_sub(archive.payload_bytes());
+    let root_reduction_bytes =
+        baseline_root_page_bytes.saturating_sub(archive.coarse_root_page_bytes());
+    let reduction_percent = |reduction: u64, baseline: u64| {
+        if baseline == 0 {
+            0.0
+        } else {
+            reduction as f64 * 100.0 / baseline as f64
+        }
+    };
 
     serde_json::to_string_pretty(&json!({
         "schema": "bloom-geometry-cook-report-v1",
         "input": input.display().to_string(),
         "output": output.display().to_string(),
-        "format_version": crate::geometry_format::VERSION,
+        "format_version": archive.format_version,
         "source_sha256": hex_hash(archive.source_sha256),
         "payload_sha256": hex_hash(archive.payload_sha256),
         "source": {
@@ -99,6 +131,29 @@ pub fn cook_geometry_command(
             "payload_bytes": archive.payload_bytes(),
             "page_budget_bytes": archive.page_budget_bytes,
             "maximum_page_bytes": archive.maximum_page_bytes(),
+            "vertex_encoding": {
+                "name": archive.vertex_encoding.label(),
+                "stride_bytes": archive.vertex_encoding.stride(),
+                "float32_baseline_payload_bytes": baseline_payload_bytes,
+                "payload_reduction_bytes": payload_reduction_bytes,
+                "payload_reduction_percent":
+                    reduction_percent(payload_reduction_bytes, baseline_payload_bytes),
+                "float32_baseline_root_page_bytes": baseline_root_page_bytes,
+                "root_page_reduction_bytes": root_reduction_bytes,
+                "root_page_reduction_percent":
+                    reduction_percent(root_reduction_bytes, baseline_root_page_bytes),
+                "max_position_absolute_error": quantization.max_position_absolute_error,
+                "max_position_cluster_relative_error":
+                    quantization.max_position_cluster_relative_error,
+                "max_normal_angular_error_degrees":
+                    quantization.max_normal_angular_error_degrees,
+                "max_tangent_angular_error_degrees":
+                    quantization.max_tangent_angular_error_degrees,
+                "max_uv_absolute_error": quantization.max_uv_absolute_error,
+                "max_color_absolute_error": quantization.max_color_absolute_error,
+                "max_tangent_handedness_error":
+                    quantization.max_tangent_handedness_error,
+            },
             "max_vertices_per_meshlet": options.meshlet_limits.max_vertices,
             "max_triangles_per_meshlet": options.meshlet_limits.max_triangles,
             "leaf_hierarchy_only": options.hierarchy_levels == 0,
@@ -136,7 +191,9 @@ pub fn inspect_geometry_command(input: &Path) -> Result<String, String> {
     serde_json::to_string_pretty(&json!({
         "schema": "bloom-geometry-inspect-report-v1",
         "input": input.display().to_string(),
-        "format_version": crate::geometry_format::VERSION,
+        "format_version": archive.format_version,
+        "vertex_encoding": archive.vertex_encoding.label(),
+        "vertex_stride_bytes": archive.vertex_encoding.stride(),
         "file_bytes": bytes.len(),
         "source_sha256": hex_hash(archive.source_sha256),
         "payload_sha256": hex_hash(archive.payload_sha256),
@@ -177,7 +234,20 @@ fn parse_options(flags: &[String]) -> Result<CookOptions, String> {
         let flag = &flags[index];
         let value = flags
             .get(index + 1)
-            .ok_or_else(|| format!("{flag} requires an integer value"))?;
+            .ok_or_else(|| format!("{flag} requires a value"))?;
+        if flag == "--vertex-format" {
+            options.vertex_encoding = match value.as_str() {
+                "float32" => VertexEncoding::Float32,
+                "quantized32" => VertexEncoding::Quantized,
+                _ => {
+                    return Err(format!(
+                        "--vertex-format must be float32 or quantized32, got {value:?}"
+                    ))
+                }
+            };
+            index += 2;
+            continue;
+        }
         let parsed = value
             .parse::<u32>()
             .map_err(|_| format!("{flag} requires an unsigned integer, got {value:?}"))?;
@@ -569,6 +639,15 @@ mod tests {
         assert_eq!(options.meshlet_limits.max_triangles, 48);
         assert_eq!(options.page_bytes, 32768);
         assert_eq!(options.hierarchy_levels, 6);
+        assert_eq!(options.vertex_encoding, VertexEncoding::Float32);
+        let quantized =
+            parse_options(&["--vertex-format".to_string(), "quantized32".to_string()]).unwrap();
+        assert_eq!(quantized.vertex_encoding, VertexEncoding::Quantized);
+        assert!(
+            parse_options(&["--vertex-format".to_string(), "packed-magic".to_string(),])
+                .unwrap_err()
+                .contains("float32 or quantized32")
+        );
         assert!(parse_options(&["--surprise".to_string(), "1".to_string()])
             .unwrap_err()
             .contains("unknown"));

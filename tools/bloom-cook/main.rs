@@ -26,6 +26,7 @@ use std::process::ExitCode;
 
 mod geometry_cook;
 mod geometry_format;
+mod geometry_quantization;
 mod hierarchy;
 mod meshlet;
 
@@ -92,7 +93,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "       bloom-cook geometry <in.glb|gltf> <out.bgeo> \
                  [--max-vertices N] [--max-triangles N] [--page-bytes N] \
-                 [--hierarchy-levels N]"
+                 [--hierarchy-levels N] [--vertex-format float32|quantized32]"
             );
             eprintln!("       bloom-cook geometry-inspect <in.bgeo>");
             ExitCode::FAILURE
