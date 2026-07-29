@@ -14,6 +14,12 @@ cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
 
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   asset-inspect world/sponza out/assets
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  asset-index out/assets
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  asset-index-inspect out/assets
 ```
 
 Logical IDs are relative slash-separated ASCII identifiers. Empty components,
@@ -27,6 +33,7 @@ The store layout is:
 out/assets/
   manifests/world/sponza.json
   chunks/sha256/<artifact-sha256>.bgeo
+  index.json
 ```
 
 Manifests are installed only after their chunk is flushed and strictly
@@ -81,6 +88,30 @@ Malformed manifests and corrupt referenced chunks fail closed. They are not
 silently treated as cache misses, because doing so would hide damage to an
 installed database. `asset-inspect` runs the same self-consistency and chunk
 validation without requiring source assets.
+
+## Canonical store index
+
+`asset-index` recursively discovers the manifest tree, rejects symlinks and
+unexpected files, derives each logical ID from its canonical manifest path,
+and runs the complete manifest/chunk inspection above. It then writes
+`bloom-asset-index-v1` with entries sorted by logical ID.
+
+Each entry contains the logical ID and kind, recipe build key, source-closure
+hash, manifest path/hash, and immutable artifact path/hash/size/format. The
+index contains no timestamps or output-root paths, so two clean stores with
+the same logical manifests produce byte-identical indexes. Duplicate logical
+IDs cannot be represented by the canonical path mapping; path/content
+disagreement fails validation.
+
+An unchanged index writes nothing. `asset-index-inspect` rebuilds the expected
+index in memory from the live manifest tree and requires the installed bytes
+to match exactly. It therefore detects a stale index after one manifest
+changes, as well as corrupt manifests or chunks, before future runtime lookup
+could observe them.
+
+The index build report distinguishes total referenced bytes from unique chunk
+bytes. Several logical IDs may share one immutable chunk without hiding their
+individual references.
 
 ## Current boundary
 

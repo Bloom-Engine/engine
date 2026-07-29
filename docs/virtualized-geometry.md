@@ -251,4 +251,6 @@ The hierarchy, page-placement, and packed-payload records are
 `docs/evidence/issue-131-coarse-page-prefix-v1.{md,json}`, and
 `docs/evidence/issue-131-quantized-vertices-v2.{md,json}`.
 The content-addressed manifest handoff to #136 is recorded in
-`docs/evidence/issue-136-geometry-store-v1.{md,json}`.
+`docs/evidence/issue-136-geometry-store-v1.{md,json}`; its deterministic
+single-table lookup handoff is in
+`docs/evidence/issue-136-asset-index-v1.{md,json}`.

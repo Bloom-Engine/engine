@@ -20,6 +20,8 @@
 //!   bloom-cook geometry-inspect <in.bgeo>
 //!   bloom-cook geometry-store <logical-id> <in.(glb|gltf)> <store> [limits]
 //!   bloom-cook asset-inspect <logical-id> <store>
+//!   bloom-cook asset-index <store>
+//!   bloom-cook asset-index-inspect <store>
 //!
 //! --normal  treat as a normal map (linear color, BC7)
 //! --linear  non-color data (masks, LUTs): skip the sRGB transfer
