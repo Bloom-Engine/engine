@@ -291,7 +291,7 @@ unshadowed direct contribution. Fixtures, exact compatibility gates, bounded
 `docs/evidence/issue-132-local-lights-v1.md` and
 `docs/evidence/issue-132-spot-lights-v1.md`.
 
-## Work that remains on issue #132
+## Optional follow-up work beyond issue #132 acceptance
 
 - Compact requests and schedule page residency entirely on the GPU so the
   current bounded dense asynchronous readback can be removed.
