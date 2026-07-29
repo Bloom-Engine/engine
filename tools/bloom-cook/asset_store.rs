@@ -142,6 +142,35 @@ pub fn inspect_asset_command(logical_id: &str, store: &Path) -> Result<String, S
     .map_err(|error| format!("serialize asset inspection report: {error}"))
 }
 
+pub(crate) fn indexed_manifest_entry(logical_id: &str, store: &Path) -> Result<Value, String> {
+    validate_logical_id(logical_id)?;
+    let path = manifest_path(store, logical_id);
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("read manifest {}: {error}", path.display()))?;
+    let manifest: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse manifest {}: {error}", path.display()))?;
+    validate_manifest_identity(&manifest, logical_id)?;
+    let contract = validate_manifest_contract(&manifest)?;
+    let artifact = verify_manifest_artifact(&manifest, store, None)?;
+    Ok(json!({
+        "artifact": {
+            "bytes": artifact.bytes,
+            "format_version": artifact.format_version,
+            "path": artifact.relative_path,
+            "payload_sha256": artifact.payload_sha256,
+            "sha256": artifact.sha256,
+        },
+        "build_key_sha256": contract.build_key_sha256,
+        "kind": "geometry",
+        "logical_id": logical_id,
+        "manifest": {
+            "path": format!("manifests/{logical_id}.json"),
+            "sha256": hex_hash(sha256(&bytes)),
+        },
+        "source_sha256": hex_hash(contract.source_sha256),
+    }))
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct ArtifactSummary {
     relative_path: String,
@@ -463,7 +492,7 @@ fn manifest_path(store: &Path, logical_id: &str) -> PathBuf {
     store.join("manifests").join(format!("{logical_id}.json"))
 }
 
-fn validate_logical_id(logical_id: &str) -> Result<(), String> {
+pub(crate) fn validate_logical_id(logical_id: &str) -> Result<(), String> {
     if logical_id.is_empty()
         || logical_id.starts_with('/')
         || logical_id.ends_with('/')
@@ -563,6 +592,22 @@ mod tests {
         assert_eq!(other["writes"]["manifests"], 1);
         let other_manifest_path = root.join("manifests/tests/triangle-copy.json");
         let other_manifest_before = std::fs::read(&other_manifest_path).unwrap();
+        let index = crate::asset_index::build_asset_index_command(&root).unwrap();
+        let index: Value = serde_json::from_str(&index).unwrap();
+        assert_eq!(index["entries"], 2);
+        assert_eq!(index["unique_chunks"], 1);
+        assert_eq!(index["writes"]["indexes"], 1);
+        let index_before = std::fs::read(root.join("index.json")).unwrap();
+        let unchanged_index = crate::asset_index::build_asset_index_command(&root).unwrap();
+        let unchanged_index: Value = serde_json::from_str(&unchanged_index).unwrap();
+        assert_eq!(unchanged_index["writes"]["indexes"], 0);
+        assert_eq!(
+            std::fs::read(root.join("index.json")).unwrap(),
+            index_before
+        );
+        let inspected_index = crate::asset_index::inspect_asset_index_command(&root).unwrap();
+        let inspected_index: Value = serde_json::from_str(&inspected_index).unwrap();
+        assert_eq!(inspected_index["validation"], "pass");
 
         let changed = store_geometry_command("tests/triangle", &input, &root, &[]).unwrap();
         let changed: Value = serde_json::from_str(&changed).unwrap();
@@ -573,6 +618,14 @@ mod tests {
             std::fs::read(&other_manifest_path).unwrap(),
             other_manifest_before
         );
+        assert!(crate::asset_index::inspect_asset_index_command(&root)
+            .unwrap_err()
+            .contains("stale"));
+        let rebuilt_index = crate::asset_index::build_asset_index_command(&root).unwrap();
+        let rebuilt_index: Value = serde_json::from_str(&rebuilt_index).unwrap();
+        assert_eq!(rebuilt_index["entries"], 2);
+        assert_eq!(rebuilt_index["unique_chunks"], 2);
+        assert_eq!(rebuilt_index["writes"]["indexes"], 1);
 
         let changed_manifest = read_manifest(&manifest_path).unwrap();
         let chunk = root.join(manifest_string(&changed_manifest, "/artifact/path").unwrap());
@@ -581,6 +634,9 @@ mod tests {
         bytes[last] ^= 0x80;
         std::fs::write(&chunk, bytes).unwrap();
         assert!(store_geometry_command("tests/triangle", &input, &root, &[])
+            .unwrap_err()
+            .contains("hash mismatch"));
+        assert!(crate::asset_index::inspect_asset_index_command(&root)
             .unwrap_err()
             .contains("hash mismatch"));
 

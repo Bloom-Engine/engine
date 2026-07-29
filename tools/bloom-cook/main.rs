@@ -26,6 +26,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod asset_index;
 mod asset_store;
 mod geometry_cook;
 mod geometry_format;
@@ -119,6 +120,30 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("asset-index") if args.len() == 2 => {
+            match asset_index::build_asset_index_command(Path::new(&args[1])) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("asset-index-inspect") if args.len() == 2 => {
+            match asset_index::inspect_asset_index_command(Path::new(&args[1])) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!("usage: bloom-cook texture <in> <out.dds> [--normal] [--linear]");
             eprintln!("       bloom-cook texture-dir <in-dir> <out-dir> [--linear]");
@@ -133,6 +158,8 @@ fn main() -> ExitCode {
                  [geometry limits]"
             );
             eprintln!("       bloom-cook asset-inspect <logical-id> <store-dir>");
+            eprintln!("       bloom-cook asset-index <store-dir>");
+            eprintln!("       bloom-cook asset-index-inspect <store-dir>");
             ExitCode::FAILURE
         }
     }
