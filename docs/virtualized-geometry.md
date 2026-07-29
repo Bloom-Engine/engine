@@ -25,6 +25,10 @@ bloom-cook geometry scene.glb scene.bgeo \
 
 # Opt in to the offline coarse hierarchy (up to 16 levels).
 bloom-cook geometry scene.glb scene.bgeo --hierarchy-levels 8
+
+# Opt in to the version 2 packed static-vertex payload.
+bloom-cook geometry scene.glb scene.bgeo \
+  --hierarchy-levels 8 --vertex-format quantized32
 ```
 
 Vertex limits must be 3–255. Page size must be a power of two between 4 KiB
@@ -33,10 +37,13 @@ the cook instead of silently exceeding the residency budget.
 
 Both commands write machine-readable JSON. `geometry` reports source and
 payload hashes, eligible triangle/meshlet/page counts, limits, maximum page
-size, and every compatibility-routed primitive. `geometry-inspect` validates
-the complete artifact before reporting it.
+size, vertex encoding and measured reconstruction error, and every
+compatibility-routed primitive. For a packed cook it also constructs the
+equivalent float32 artifact in memory and reports exact payload/root-page byte
+reductions. `geometry-inspect` validates the complete artifact before
+reporting it.
 
-## Version 1 contract
+## Versioned payload contract
 
 `.bgeo` version 1 is little-endian and uses these fixed tables:
 
@@ -52,11 +59,41 @@ tangent, UV0, UV1, and color—followed by three local `u8` indices per
 triangle. Clusters do not cross pages. Material boundaries cannot cross
 clusters because each glTF primitive is partitioned independently.
 
+Version 2 is an explicit `--vertex-format quantized32` opt-in. It keeps the
+same endian-defined tables, hierarchy, page limits, hashes, and local indices,
+but uses this fixed 32-byte vertex layout:
+
+| Byte range | Encoding |
+|---|---|
+| 0–5 | Cluster-AABB-local position, three `UNORM16` components |
+| 6–9 | Unit normal, octahedral `SNORM16x2` |
+| 10–13 | Unit tangent direction, octahedral `SNORM16x2` |
+| 14–21 | UV0 and UV1, four finite IEEE 754 binary16 values |
+| 22–25 | Vertex color, `UNORM8x4` |
+| 26–27 | Tangent handedness, `SNORM16` |
+| 28–29 | Tangent-valid flags |
+| 30–31 | Reserved zero padding |
+
+The tangent-valid bit preserves an imported all-zero missing-tangent sentinel;
+the decoder does not manufacture a direction that could silently enable
+normal mapping. Values outside the representable safety contract—non-finite
+components, UVs outside finite binary16, colors outside 0–1, invalid
+directions or handedness—fail the packed cook. Unknown flags, non-zero
+padding, non-finite half values, or a malformed sentinel fail strict
+inspection.
+
+Packed payloads are not selected automatically. The lossless version 1 path
+remains the default and is byte-identical to the previously qualified output.
+This allows the future asset policy to enforce measured error limits per
+asset; in particular, large tiled UV ranges must be evaluated from the
+reported absolute error instead of assuming binary16 is always invisible.
+
 The source hash covers the glTF/GLB bytes and the complete resolved buffer
 contents, including external buffers. The payload and every page have separate
 SHA-256 hashes. Regenerating the same source and settings is byte-identical.
-The hierarchy level count is a cook setting and must therefore be captured by
-the future #136 artifact key alongside the source hash and meshlet/page limits.
+The hierarchy level count and vertex format are cook settings and must
+therefore be captured by the future #136 artifact key alongside the source
+hash and meshlet/page limits.
 
 The reader rejects before payload access when it sees:
 
@@ -158,19 +195,22 @@ Runtime integration remains gated on the #131 dependencies:
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts
-zero, level/error zero). Opt-in artifacts populate those formerly reserved
-fields without changing the 128-byte cluster record or format version.
-Runtime streaming remains disabled until residency, traversal, occlusion, and
-fallback milestones are independently qualified.
+zero, level/error zero). Opt-in hierarchy artifacts populate those formerly
+reserved fields without changing the 128-byte cluster record. Opt-in packed
+vertices use format version 2 so a version 1 reader can never reinterpret the
+32-byte stride as float32. Runtime streaming remains disabled until residency,
+traversal, occlusion, and fallback milestones are independently qualified.
 
 ## Qualification
 
 The quick CI quality contract runs release tests and strict Clippy for
 `bloom-cook`. The focused tests cover deterministic partitioning, hierarchy
 construction and encoding, atomic reciprocal relations, monotonic
-error/bounds, locked outer boundaries, limits, normal generation, conservative
-bounds/cones, real GLB import, metadata-only compatibility artifacts, repeated
-output replacement, and the corruption/range/hash cases above.
+error/bounds, locked outer boundaries, packed reconstruction/error limits,
+missing-tangent preservation, non-canonical packed-bit rejection, limits,
+normal generation, conservative bounds/cones, real GLB import, metadata-only
+compatibility artifacts, repeated output replacement, and the
+corruption/range/hash cases above.
 
 The canonical static smoke asset is
 `examples/renderer-test/assets/DamagedHelmet.glb`. With default limits it
@@ -186,6 +226,15 @@ Those roots occupy the first eight pages and require exactly 469,360 resident
 payload bytes, only 790 bytes of packing overhead beyond their raw cluster
 payload. This is structural hierarchy/page qualification, not yet a measured
 runtime residency budget.
-The hierarchy and page-placement records are
+The quantized version 2 hierarchy reduces the same payload from 2,937,040 to
+1,363,968 bytes (53.56%) and the root-page prefix from 469,360 to 216,544
+bytes (53.86%). Its two independent artifacts are byte-identical; maximum
+Damaged Helmet reconstruction errors are 0.00001532 object units for position,
+0.00342 degrees for normals, and 0.0004883 for UVs. Sponza separately
+qualifies non-zero tangents at 0.00361 degrees and exposes its 0.01381
+large-range UV error in the cook report.
+
+The hierarchy, page-placement, and packed-payload records are
 `docs/evidence/issue-131-atomic-hierarchy-v1.{md,json}` and
-`docs/evidence/issue-131-coarse-page-prefix-v1.{md,json}`.
+`docs/evidence/issue-131-coarse-page-prefix-v1.{md,json}`, and
+`docs/evidence/issue-131-quantized-vertices-v2.{md,json}`.
