@@ -254,3 +254,6 @@ The content-addressed manifest handoff to #136 is recorded in
 `docs/evidence/issue-136-geometry-store-v1.{md,json}`; its deterministic
 single-table lookup handoff is in
 `docs/evidence/issue-136-asset-index-v1.{md,json}`.
+Explicit platform/quality variants, ordered fallback, and the Bistro
+loose-store qualification are recorded in
+`docs/evidence/issue-136-asset-variants-v2.{md,json}`.

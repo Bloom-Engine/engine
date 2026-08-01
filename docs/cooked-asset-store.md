@@ -161,3 +161,6 @@ This checkpoint is geometry-only and loose-store-only. It does not yet add:
 
 It changes no production renderer path, buffers, shaders, passes, draws,
 pixels, or frame-time behavior.
+
+The canonical variant, fallback, deduplication, and Bistro qualification is
+recorded in `docs/evidence/issue-136-asset-variants-v2.{md,json}`.
