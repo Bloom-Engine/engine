@@ -18,10 +18,11 @@
 //!   bloom-cook texture-dir <in-dir> <out-dir> [--linear]
 //!   bloom-cook geometry <in.(glb|gltf)> <out.bgeo> [geometry limits]
 //!   bloom-cook geometry-inspect <in.bgeo>
-//!   bloom-cook geometry-store <logical-id> <in.(glb|gltf)> <store> [limits]
-//!   bloom-cook asset-inspect <logical-id> <store>
+//!   bloom-cook geometry-store <logical-id> <in.(glb|gltf)> <store> [profile] [limits]
+//!   bloom-cook asset-inspect <logical-id> <store> [profile]
 //!   bloom-cook asset-index <store>
 //!   bloom-cook asset-index-inspect <store>
+//!   bloom-cook asset-resolve <logical-id> <store> --platform ID --quality ID [fallbacks]
 //!
 //! --normal  treat as a normal map (linear color, BC7)
 //! --linear  non-color data (masks, LUTs): skip the sRGB transfer
@@ -29,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod asset_index;
+mod asset_profile;
+mod asset_resolver;
 mod asset_store;
 mod geometry_cook;
 mod geometry_format;
@@ -110,8 +113,8 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some("asset-inspect") if args.len() == 3 => {
-            match asset_store::inspect_asset_command(&args[1], Path::new(&args[2])) {
+        Some("asset-inspect") if args.len() >= 3 => {
+            match asset_store::inspect_asset_command(&args[1], Path::new(&args[2]), &args[3..]) {
                 Ok(report) => {
                     println!("{report}");
                     ExitCode::SUCCESS
@@ -146,6 +149,18 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("asset-resolve") if args.len() >= 3 => {
+            match asset_resolver::resolve_asset_command(&args[1], Path::new(&args[2]), &args[3..]) {
+                Ok(report) => {
+                    println!("{report}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bloom-cook: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!("usage: bloom-cook texture <in> <out.dds> [--normal] [--linear]");
             eprintln!("       bloom-cook texture-dir <in-dir> <out-dir> [--linear]");
@@ -157,11 +172,19 @@ fn main() -> ExitCode {
             eprintln!("       bloom-cook geometry-inspect <in.bgeo>");
             eprintln!(
                 "       bloom-cook geometry-store <logical-id> <in.glb|gltf> <store-dir> \
-                 [geometry limits]"
+                 [--platform ID --quality ID] [geometry limits]"
             );
-            eprintln!("       bloom-cook asset-inspect <logical-id> <store-dir>");
+            eprintln!(
+                "       bloom-cook asset-inspect <logical-id> <store-dir> \
+                 [--platform ID --quality ID]"
+            );
             eprintln!("       bloom-cook asset-index <store-dir>");
             eprintln!("       bloom-cook asset-index-inspect <store-dir>");
+            eprintln!(
+                "       bloom-cook asset-resolve <logical-id> <store-dir> \
+                 --platform ID --quality ID [--fallback PLATFORM/QUALITY] \
+                 [--allow-unprofiled]"
+            );
             ExitCode::FAILURE
         }
     }

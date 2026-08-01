@@ -1,25 +1,31 @@
 # Cooked asset store
 
-Bloom's first #136 asset-database checkpoint stores virtual-geometry artifacts
-under deterministic recipe keys and immutable content hashes. It is an
-offline-only building block: the shipping runtime does not select or load this
-store yet.
+Bloom's #136 asset-database foundation stores virtual-geometry artifacts under
+deterministic recipe keys and immutable content hashes. Optional platform and
+quality profiles provide an explicit variant contract while preserving the
+byte-identical unprofiled v1 format. This remains an offline/runtime-contract
+building block: the shipping renderer does not load the store yet.
 
 ## Build and inspect
 
 ```shell
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   geometry-store world/sponza examples/sponza/assets/Sponza.glb out/assets \
+  --platform macos --quality high \
   --hierarchy-levels 8 --vertex-format quantized32
 
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
-  asset-inspect world/sponza out/assets
+  asset-inspect world/sponza out/assets --platform macos --quality high
 
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   asset-index out/assets
 
 cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
   asset-index-inspect out/assets
+
+cargo run --release --manifest-path tools/bloom-cook/Cargo.toml -- \
+  asset-resolve world/sponza out/assets --platform windows --quality ultra \
+  --fallback portable/high
 ```
 
 Logical IDs are relative slash-separated ASCII identifiers. Empty components,
@@ -32,6 +38,7 @@ The store layout is:
 ```text
 out/assets/
   manifests/world/sponza.json
+  variants/macos/high/world/sponza.json
   chunks/sha256/<artifact-sha256>.bgeo
   index.json
 ```
@@ -41,6 +48,11 @@ validated. Chunks are immutable: if a file already exists at a content-hash
 path but its bytes or hash differ, the command fails instead of overwriting
 it. Manifest replacement uses the same rollback-safe atomic writer as direct
 geometry cooking.
+
+The `manifests/` tree is the byte-compatible unprofiled v1 layout. Profiled
+manifests live under `variants/<platform>/<quality>/`; a store may contain
+both during migration. Profile identifiers are bounded lowercase ASCII tokens
+and cannot escape the store.
 
 ## Recipe and manifest contract
 
@@ -57,11 +69,18 @@ geometry cooking.
 - relative immutable chunk path, file/payload hashes, byte length, and
   `.bgeo` format version.
 
+`bloom-asset-manifest-v2` adds a canonical `{ platform, quality }` profile.
+The profile is part of the recipe build key even when two profiles currently
+produce identical geometry bytes. Those artifacts still deduplicate to one
+immutable chunk, while future platform-specific settings cannot collide in
+the cache. `--platform` and `--quality` must be supplied together; omitting
+both retains v1 behavior and bytes.
+
 The manifest intentionally omits local source and store paths so an identical
 logical ID, source closure, and recipe produces byte-identical manifests in a
 different clean output directory. The build report includes the local input
-and manifest paths for diagnostics. Source path/license provenance, platform
-and quality variants, and a package index remain later #136 work.
+and manifest paths for diagnostics. Source path/license provenance remains
+later #136 work.
 
 Recipe version changes are explicit. A future cooker behavior change that can
 change output bytes must increment the geometry recipe version even if the
@@ -91,17 +110,20 @@ validation without requiring source assets.
 
 ## Canonical store index
 
-`asset-index` recursively discovers the manifest tree, rejects symlinks and
-unexpected files, derives each logical ID from its canonical manifest path,
-and runs the complete manifest/chunk inspection above. It then writes
-`bloom-asset-index-v1` with entries sorted by logical ID.
+`asset-index` recursively discovers the legacy and profiled manifest trees,
+rejects symlinks and unexpected files, derives each logical ID/profile from
+its canonical path, and runs the complete manifest/chunk inspection above.
+An unprofiled-only store retains byte-identical `bloom-asset-index-v1` output.
+A store with any profiled entry writes `bloom-asset-index-v2`, sorted by
+logical ID and then platform/quality, with each profiled entry carrying its
+canonical profile.
 
 Each entry contains the logical ID and kind, recipe build key, source-closure
 hash, manifest path/hash, and immutable artifact path/hash/size/format. The
 index contains no timestamps or output-root paths, so two clean stores with
 the same logical manifests produce byte-identical indexes. Duplicate logical
-IDs cannot be represented by the canonical path mapping; path/content
-disagreement fails validation.
+ID/profile pairs cannot be represented by the canonical path mapping;
+path/content disagreement fails validation.
 
 An unchanged index writes nothing. `asset-index-inspect` rebuilds the expected
 index in memory from the live manifest tree and requires the installed bytes
@@ -111,7 +133,21 @@ could observe them.
 
 The index build report distinguishes total referenced bytes from unique chunk
 bytes. Several logical IDs may share one immutable chunk without hiding their
-individual references.
+individual references; the same is true of several platform/quality variants.
+
+## Explicit variant resolution
+
+`asset-resolve` validates the installed index against every live manifest and
+chunk before selecting an entry. The requested platform/quality pair is tried
+first. Each `--fallback PLATFORM/QUALITY` is then considered in command-line
+order. An unprofiled v1 entry is considered only with
+`--allow-unprofiled`.
+
+The machine-readable result labels the selection `exact`, `fallback`, or
+`unprofiled-fallback`, includes the selected profile and fallback rank, and
+returns the validated manifest/artifact identity. If nothing allowed exists,
+the command fails and lists the available profiles. There is deliberately no
+implicit cross-platform, lower-quality, or legacy fallback.
 
 ## Current boundary
 
@@ -119,10 +155,9 @@ This checkpoint is geometry-only and loose-store-only. It does not yet add:
 
 - texture, material, animation, environment, or world recipes;
 - source path/license provenance;
-- platform/quality variant selection;
 - dependency-graph invalidation beyond one geometry source closure;
 - garbage collection or packed shipping archives;
-- runtime lookup, asynchronous IO, residency, or fallback.
+- production runtime index loading, asynchronous IO, or residency.
 
 It changes no production renderer path, buffers, shaders, passes, draws,
 pixels, or frame-time behavior.

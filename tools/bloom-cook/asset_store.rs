@@ -4,6 +4,7 @@
 //! fully written and validated. Matching manifests are strict cache entries:
 //! corrupt metadata or chunks fail closed instead of being treated as a miss.
 
+use crate::asset_profile::AssetProfile;
 use crate::geometry_cook::{
     cook_prepared_geometry, geometry_build_key_sha256, prepare_geometry, write_atomically,
     PreparedGeometry, GEOMETRY_RECIPE_VERSION,
@@ -17,8 +18,11 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 const MANIFEST_SCHEMA: &str = "bloom-asset-manifest-v1";
+const PROFILED_MANIFEST_SCHEMA: &str = "bloom-asset-manifest-v2";
 const REPORT_SCHEMA: &str = "bloom-asset-build-report-v1";
+const PROFILED_REPORT_SCHEMA: &str = "bloom-asset-build-report-v2";
 const INSPECT_SCHEMA: &str = "bloom-asset-inspect-report-v1";
+const PROFILED_INSPECT_SCHEMA: &str = "bloom-asset-inspect-report-v2";
 const CHUNK_DIRECTORY: &str = "chunks/sha256";
 
 pub fn store_geometry_command(
@@ -28,13 +32,17 @@ pub fn store_geometry_command(
     flags: &[String],
 ) -> Result<String, String> {
     validate_logical_id(logical_id)?;
-    let prepared = prepare_geometry(input, flags)?;
-    let build_key = hex_hash(prepared.build_key_sha256());
-    let manifest_path = manifest_path(store, logical_id);
+    let (profile, geometry_flags) = AssetProfile::split_optional_flags(flags)?;
+    let prepared = prepare_geometry(input, &geometry_flags)?;
+    let build_key = hex_hash(build_key_for_profile(
+        prepared.build_key_sha256(),
+        profile.as_ref(),
+    ));
+    let manifest_path = manifest_path_for_profile(store, logical_id, profile.as_ref());
 
     if manifest_path.exists() {
         let manifest = read_manifest(&manifest_path)?;
-        validate_manifest_identity(&manifest, logical_id)?;
+        validate_manifest_identity(&manifest, logical_id, profile.as_ref())?;
         let stored_key = manifest_string(&manifest, "/build_key_sha256")?;
         validate_hex_hash(stored_key, "manifest build key")?;
         if stored_key == build_key {
@@ -44,6 +52,7 @@ pub fn store_geometry_command(
                 input,
                 &manifest_path,
                 &build_key,
+                profile.as_ref(),
                 BuildOutcome::cache_hit(),
                 &artifact,
             );
@@ -73,7 +82,7 @@ pub fn store_geometry_command(
         bytes: cooked.bytes.len() as u64,
         format_version: archive.format_version,
     };
-    let manifest = json!({
+    let mut manifest = json!({
         "artifact": {
             "bytes": artifact.bytes,
             "format_version": artifact.format_version,
@@ -100,6 +109,10 @@ pub fn store_geometry_command(
             "sha256": source_sha256,
         },
     });
+    if let Some(profile) = &profile {
+        manifest["schema"] = json!(PROFILED_MANIFEST_SCHEMA);
+        manifest["profile"] = profile.as_json();
+    }
     let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| format!("serialize asset manifest: {error}"))?;
     manifest_bytes.push(b'\n');
@@ -110,20 +123,32 @@ pub fn store_geometry_command(
         input,
         &manifest_path,
         &build_key,
+        profile.as_ref(),
         BuildOutcome::cache_miss(chunk_written),
         &artifact,
     )
 }
 
-pub fn inspect_asset_command(logical_id: &str, store: &Path) -> Result<String, String> {
+pub fn inspect_asset_command(
+    logical_id: &str,
+    store: &Path,
+    flags: &[String],
+) -> Result<String, String> {
     validate_logical_id(logical_id)?;
-    let manifest_path = manifest_path(store, logical_id);
+    let (profile, remaining) = AssetProfile::split_optional_flags(flags)?;
+    if !remaining.is_empty() {
+        return Err(format!(
+            "unknown asset inspection option {:?}",
+            remaining[0]
+        ));
+    }
+    let manifest_path = manifest_path_for_profile(store, logical_id, profile.as_ref());
     let manifest = read_manifest(&manifest_path)?;
-    validate_manifest_identity(&manifest, logical_id)?;
+    validate_manifest_identity(&manifest, logical_id, profile.as_ref())?;
     let contract = validate_manifest_contract(&manifest)?;
     let artifact = verify_manifest_artifact(&manifest, store, None)?;
 
-    serde_json::to_string_pretty(&json!({
+    let mut report = json!({
         "artifact": {
             "bytes": artifact.bytes,
             "format_version": artifact.format_version,
@@ -135,24 +160,36 @@ pub fn inspect_asset_command(logical_id: &str, store: &Path) -> Result<String, S
         "kind": "geometry",
         "logical_id": logical_id,
         "manifest": manifest_path.display().to_string(),
-        "schema": INSPECT_SCHEMA,
+        "schema": if profile.is_some() { PROFILED_INSPECT_SCHEMA } else { INSPECT_SCHEMA },
         "source_sha256": hex_hash(contract.source_sha256),
         "validation": "pass",
-    }))
-    .map_err(|error| format!("serialize asset inspection report: {error}"))
+    });
+    if let Some(profile) = profile {
+        report["profile"] = profile.as_json();
+    }
+    serde_json::to_string_pretty(&report)
+        .map_err(|error| format!("serialize asset inspection report: {error}"))
 }
 
 pub(crate) fn indexed_manifest_entry(logical_id: &str, store: &Path) -> Result<Value, String> {
+    indexed_manifest_entry_for_profile(logical_id, store, None)
+}
+
+pub(crate) fn indexed_manifest_entry_for_profile(
+    logical_id: &str,
+    store: &Path,
+    profile: Option<&AssetProfile>,
+) -> Result<Value, String> {
     validate_logical_id(logical_id)?;
-    let path = manifest_path(store, logical_id);
+    let path = manifest_path_for_profile(store, logical_id, profile);
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("read manifest {}: {error}", path.display()))?;
     let manifest: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse manifest {}: {error}", path.display()))?;
-    validate_manifest_identity(&manifest, logical_id)?;
+    validate_manifest_identity(&manifest, logical_id, profile)?;
     let contract = validate_manifest_contract(&manifest)?;
     let artifact = verify_manifest_artifact(&manifest, store, None)?;
-    Ok(json!({
+    let mut entry = json!({
         "artifact": {
             "bytes": artifact.bytes,
             "format_version": artifact.format_version,
@@ -168,7 +205,16 @@ pub(crate) fn indexed_manifest_entry(logical_id: &str, store: &Path) -> Result<V
             "sha256": hex_hash(sha256(&bytes)),
         },
         "source_sha256": hex_hash(contract.source_sha256),
-    }))
+    });
+    if let Some(profile) = profile {
+        entry["profile"] = profile.as_json();
+        entry["manifest"]["path"] = json!(format!(
+            "variants/{}/{}/{logical_id}.json",
+            profile.platform(),
+            profile.quality()
+        ));
+    }
+    Ok(entry)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -215,10 +261,11 @@ fn build_report(
     input: &Path,
     manifest_path: &Path,
     build_key: &str,
+    profile: Option<&AssetProfile>,
     outcome: BuildOutcome,
     artifact: &ArtifactSummary,
 ) -> Result<String, String> {
-    serde_json::to_string_pretty(&json!({
+    let mut report = json!({
         "artifact": {
             "bytes": artifact.bytes,
             "format_version": artifact.format_version,
@@ -231,13 +278,17 @@ fn build_report(
         "input": input.display().to_string(),
         "logical_id": logical_id,
         "manifest": manifest_path.display().to_string(),
-        "schema": REPORT_SCHEMA,
+        "schema": if profile.is_some() { PROFILED_REPORT_SCHEMA } else { REPORT_SCHEMA },
         "writes": {
             "chunks": u8::from(outcome.chunk_written),
             "manifests": u8::from(outcome.manifest_written),
         },
-    }))
-    .map_err(|error| format!("serialize asset build report: {error}"))
+    });
+    if let Some(profile) = profile {
+        report["profile"] = profile.as_json();
+    }
+    serde_json::to_string_pretty(&report)
+        .map_err(|error| format!("serialize asset build report: {error}"))
 }
 
 fn install_chunk(
@@ -405,14 +456,16 @@ fn validate_manifest_contract(manifest: &Value) -> Result<ManifestContract, Stri
     };
     let build_key_sha256 = manifest_string(manifest, "/build_key_sha256")?;
     validate_hex_hash(build_key_sha256, "manifest build key")?;
-    let actual_key = hex_hash(geometry_build_key_sha256(
+    let base_key = geometry_build_key_sha256(
         source_sha256,
         max_vertices,
         max_triangles,
         page_bytes,
         hierarchy_levels,
         vertex_encoding,
-    ));
+    );
+    let profile = manifest_profile(manifest)?;
+    let actual_key = hex_hash(build_key_for_profile(base_key, profile.as_ref()));
     if actual_key != build_key_sha256 {
         return Err(format!(
             "asset manifest build key mismatch: declared {build_key_sha256}, actual {actual_key}"
@@ -435,9 +488,14 @@ fn read_manifest(path: &Path) -> Result<Value, String> {
         .map_err(|error| format!("parse manifest {}: {error}", path.display()))
 }
 
-fn validate_manifest_identity(manifest: &Value, logical_id: &str) -> Result<(), String> {
-    if manifest_string(manifest, "/schema")? != MANIFEST_SCHEMA {
-        return Err("unsupported asset manifest schema".to_string());
+fn validate_manifest_identity(
+    manifest: &Value,
+    logical_id: &str,
+    expected_profile: Option<&AssetProfile>,
+) -> Result<(), String> {
+    let actual_profile = manifest_profile(manifest)?;
+    if actual_profile.as_ref() != expected_profile {
+        return Err("asset manifest profile does not match its path".to_string());
     }
     if manifest_string(manifest, "/kind")? != "geometry" {
         return Err("asset manifest kind is not geometry".to_string());
@@ -446,6 +504,38 @@ fn validate_manifest_identity(manifest: &Value, logical_id: &str) -> Result<(), 
         return Err("asset manifest logical ID does not match its path".to_string());
     }
     Ok(())
+}
+
+fn manifest_profile(manifest: &Value) -> Result<Option<AssetProfile>, String> {
+    match manifest_string(manifest, "/schema")? {
+        MANIFEST_SCHEMA => {
+            if manifest.get("profile").is_some() {
+                return Err("v1 asset manifest may not declare a profile".to_string());
+            }
+            Ok(None)
+        }
+        PROFILED_MANIFEST_SCHEMA => manifest
+            .get("profile")
+            .ok_or_else(|| "profiled asset manifest is missing its profile".to_string())
+            .and_then(AssetProfile::from_json)
+            .map(Some),
+        _ => Err("unsupported asset manifest schema".to_string()),
+    }
+}
+
+fn build_key_for_profile(base_key_sha256: [u8; 32], profile: Option<&AssetProfile>) -> [u8; 32] {
+    let Some(profile) = profile else {
+        return base_key_sha256;
+    };
+    let mut bytes = Vec::with_capacity(96);
+    bytes.extend_from_slice(b"bloom-profiled-geometry-recipe\0");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&base_key_sha256);
+    bytes.extend_from_slice(&(profile.platform().len() as u32).to_le_bytes());
+    bytes.extend_from_slice(profile.platform().as_bytes());
+    bytes.extend_from_slice(&(profile.quality().len() as u32).to_le_bytes());
+    bytes.extend_from_slice(profile.quality().as_bytes());
+    sha256(&bytes)
 }
 
 fn manifest_string<'a>(manifest: &'a Value, pointer: &str) -> Result<&'a str, String> {
@@ -490,6 +580,21 @@ fn parse_hex_hash(value: &str, label: &str) -> Result<[u8; 32], String> {
 
 fn manifest_path(store: &Path, logical_id: &str) -> PathBuf {
     store.join("manifests").join(format!("{logical_id}.json"))
+}
+
+fn manifest_path_for_profile(
+    store: &Path,
+    logical_id: &str,
+    profile: Option<&AssetProfile>,
+) -> PathBuf {
+    match profile {
+        None => manifest_path(store, logical_id),
+        Some(profile) => store
+            .join("variants")
+            .join(profile.platform())
+            .join(profile.quality())
+            .join(format!("{logical_id}.json")),
+    }
 }
 
 pub(crate) fn validate_logical_id(logical_id: &str) -> Result<(), String> {
@@ -560,7 +665,7 @@ mod tests {
         assert_eq!(first["writes"]["manifests"], 1);
         let manifest_path = root.join("manifests/tests/triangle.json");
         let manifest_before = std::fs::read(&manifest_path).unwrap();
-        let inspection = inspect_asset_command("tests/triangle", &root).unwrap();
+        let inspection = inspect_asset_command("tests/triangle", &root, &[]).unwrap();
         let inspection: Value = serde_json::from_str(&inspection).unwrap();
         assert_eq!(inspection["validation"], "pass");
 
@@ -571,7 +676,7 @@ mod tests {
             serde_json::to_vec_pretty(&tampered_manifest).unwrap(),
         )
         .unwrap();
-        assert!(inspect_asset_command("tests/triangle", &root)
+        assert!(inspect_asset_command("tests/triangle", &root, &[])
             .unwrap_err()
             .contains("build key mismatch"));
         std::fs::write(&manifest_path, &manifest_before).unwrap();
@@ -598,6 +703,9 @@ mod tests {
         assert_eq!(index["unique_chunks"], 1);
         assert_eq!(index["writes"]["indexes"], 1);
         let index_before = std::fs::read(root.join("index.json")).unwrap();
+        let index_document: Value = serde_json::from_slice(&index_before).unwrap();
+        assert_eq!(index_document["schema"], "bloom-asset-index-v1");
+        assert!(index_document.get("profiled_entry_count").is_none());
         let unchanged_index = crate::asset_index::build_asset_index_command(&root).unwrap();
         let unchanged_index: Value = serde_json::from_str(&unchanged_index).unwrap();
         assert_eq!(unchanged_index["writes"]["indexes"], 0);
@@ -641,6 +749,205 @@ mod tests {
             .contains("hash mismatch"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profiled_store_is_deterministic_deduplicated_and_explicitly_resolved() {
+        let first_root = temporary_root("profiled-store-a");
+        let second_root = temporary_root("profiled-store-b");
+        std::fs::create_dir_all(&first_root).unwrap();
+        std::fs::create_dir_all(&second_root).unwrap();
+        let first_input = first_root.join("triangle.glb");
+        let second_input = second_root.join("triangle.glb");
+        let source = minimal_triangle_glb();
+        std::fs::write(&first_input, &source).unwrap();
+        std::fs::write(&second_input, &source).unwrap();
+
+        let macos_high = profile_flags("macos", "high");
+        let portable_medium = profile_flags("portable", "medium");
+        let geometry_flags = vec![
+            "--hierarchy-levels".to_string(),
+            "2".to_string(),
+            "--vertex-format".to_string(),
+            "quantized32".to_string(),
+        ];
+        let macos = store_geometry_command(
+            "tests/profiled-triangle",
+            &first_input,
+            &first_root,
+            &macos_high,
+        )
+        .unwrap();
+        let portable = store_geometry_command(
+            "tests/profiled-triangle",
+            &first_input,
+            &first_root,
+            &portable_medium,
+        )
+        .unwrap();
+        let legacy = store_geometry_command(
+            "tests/legacy-triangle",
+            &first_input,
+            &first_root,
+            &geometry_flags,
+        )
+        .unwrap();
+        let macos: Value = serde_json::from_str(&macos).unwrap();
+        let portable: Value = serde_json::from_str(&portable).unwrap();
+        let legacy: Value = serde_json::from_str(&legacy).unwrap();
+        assert_ne!(macos["build_key_sha256"], portable["build_key_sha256"]);
+        assert_ne!(macos["build_key_sha256"], legacy["build_key_sha256"]);
+        assert_eq!(macos["artifact"]["sha256"], portable["artifact"]["sha256"]);
+        assert_eq!(macos["artifact"]["sha256"], legacy["artifact"]["sha256"]);
+        assert_eq!(portable["writes"]["chunks"], 0);
+        assert_eq!(legacy["writes"]["chunks"], 0);
+
+        let unchanged = store_geometry_command(
+            "tests/profiled-triangle",
+            &first_input,
+            &first_root,
+            &macos_high,
+        )
+        .unwrap();
+        let unchanged: Value = serde_json::from_str(&unchanged).unwrap();
+        assert_eq!(unchanged["cache"], "hit");
+        assert_eq!(unchanged["writes"]["chunks"], 0);
+        assert_eq!(unchanged["writes"]["manifests"], 0);
+
+        let inspection =
+            inspect_asset_command("tests/profiled-triangle", &first_root, &macos_high[..4])
+                .unwrap();
+        let inspection: Value = serde_json::from_str(&inspection).unwrap();
+        assert_eq!(inspection["validation"], "pass");
+        assert_eq!(inspection["profile"]["platform"], "macos");
+
+        store_geometry_command(
+            "tests/profiled-triangle",
+            &second_input,
+            &second_root,
+            &portable_medium,
+        )
+        .unwrap();
+        store_geometry_command(
+            "tests/legacy-triangle",
+            &second_input,
+            &second_root,
+            &geometry_flags,
+        )
+        .unwrap();
+        store_geometry_command(
+            "tests/profiled-triangle",
+            &second_input,
+            &second_root,
+            &macos_high,
+        )
+        .unwrap();
+
+        let first_index = crate::asset_index::build_asset_index_command(&first_root).unwrap();
+        let first_index_report: Value = serde_json::from_str(&first_index).unwrap();
+        assert_eq!(first_index_report["entries"], 3);
+        assert_eq!(first_index_report["profiled_entries"], 2);
+        assert_eq!(first_index_report["unique_chunks"], 1);
+        assert_eq!(first_index_report["index_schema"], "bloom-asset-index-v2");
+        crate::asset_index::build_asset_index_command(&second_root).unwrap();
+        assert_eq!(
+            std::fs::read(first_root.join("index.json")).unwrap(),
+            std::fs::read(second_root.join("index.json")).unwrap()
+        );
+
+        let exact_flags = vec![
+            "--platform".to_string(),
+            "macos".to_string(),
+            "--quality".to_string(),
+            "high".to_string(),
+        ];
+        let exact = crate::asset_resolver::resolve_asset_command(
+            "tests/profiled-triangle",
+            &first_root,
+            &exact_flags,
+        )
+        .unwrap();
+        let exact: Value = serde_json::from_str(&exact).unwrap();
+        assert_eq!(exact["selection"]["kind"], "exact");
+        assert_eq!(exact["selection"]["profile"]["platform"], "macos");
+
+        let missing_flags = vec![
+            "--platform".to_string(),
+            "windows".to_string(),
+            "--quality".to_string(),
+            "ultra".to_string(),
+        ];
+        assert!(crate::asset_resolver::resolve_asset_command(
+            "tests/profiled-triangle",
+            &first_root,
+            &missing_flags,
+        )
+        .unwrap_err()
+        .contains("no allowed variant"));
+        let mut fallback_flags = missing_flags.clone();
+        fallback_flags.extend(["--fallback".to_string(), "portable/medium".to_string()]);
+        let fallback = crate::asset_resolver::resolve_asset_command(
+            "tests/profiled-triangle",
+            &first_root,
+            &fallback_flags,
+        )
+        .unwrap();
+        let fallback: Value = serde_json::from_str(&fallback).unwrap();
+        assert_eq!(fallback["selection"]["kind"], "fallback");
+        assert_eq!(fallback["selection"]["fallback_rank"], 0);
+        assert_eq!(fallback["selection"]["profile"]["platform"], "portable");
+
+        assert!(crate::asset_resolver::resolve_asset_command(
+            "tests/legacy-triangle",
+            &first_root,
+            &missing_flags,
+        )
+        .unwrap_err()
+        .contains("unprofiled available: true"));
+        let mut legacy_flags = missing_flags;
+        legacy_flags.push("--allow-unprofiled".to_string());
+        let legacy_resolution = crate::asset_resolver::resolve_asset_command(
+            "tests/legacy-triangle",
+            &first_root,
+            &legacy_flags,
+        )
+        .unwrap();
+        let legacy_resolution: Value = serde_json::from_str(&legacy_resolution).unwrap();
+        assert_eq!(
+            legacy_resolution["selection"]["kind"],
+            "unprofiled-fallback"
+        );
+
+        let variant_manifest = first_root.join("variants/macos/high/tests/profiled-triangle.json");
+        let original = std::fs::read(&variant_manifest).unwrap();
+        let mut tampered: Value = serde_json::from_slice(&original).unwrap();
+        tampered["profile"]["quality"] = json!("medium");
+        std::fs::write(
+            &variant_manifest,
+            serde_json::to_vec_pretty(&tampered).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            inspect_asset_command("tests/profiled-triangle", &first_root, &macos_high[..4],)
+                .unwrap_err()
+                .contains("profile does not match its path")
+        );
+
+        let _ = std::fs::remove_dir_all(first_root);
+        let _ = std::fs::remove_dir_all(second_root);
+    }
+
+    fn profile_flags(platform: &str, quality: &str) -> Vec<String> {
+        vec![
+            "--platform".to_string(),
+            platform.to_string(),
+            "--quality".to_string(),
+            quality.to_string(),
+            "--hierarchy-levels".to_string(),
+            "2".to_string(),
+            "--vertex-format".to_string(),
+            "quantized32".to_string(),
+        ]
     }
 
     fn temporary_root(label: &str) -> PathBuf {
