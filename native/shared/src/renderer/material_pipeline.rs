@@ -1142,6 +1142,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn material_shadow_cascades_match_the_fitted_view_frustum_depth() {
+        let source = include_str!("../../../shared/shaders/common/shadows.wgsl");
+        assert!(source.contains(
+            "let view_pos = view.shadow_view * vec4<f32>(world_pos, 1.0);"
+        ));
+        assert!(source.contains("return max(-view_pos.z, 0.0);"));
+        assert!(source.contains("split_far - view_depth"));
+        assert!(!source.contains("length(world_pos - cam)"));
+    }
+
     /// End-to-end validation: resolve the minimal test material's
     /// includes and parse the result through naga (wgpu's WGSL
     /// front-end). If the ABI header has a syntax error, or if a
