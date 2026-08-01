@@ -27,7 +27,8 @@ import {
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
-  setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
+  setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
+  setSsgiEnabled, setSsrEnabled,
   getCommandLineArgs, resize,
 } from "bloom/core";
 import { parseQualityRun, QualityRun } from "bloom/quality";
@@ -57,6 +58,11 @@ let frameCount = 0;
 let initYaw = 0.0;
 let scenePath = "assets/bistro.gltf";
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
+let bloomOverride = -1;
+let fogOverride = -1;
+let sunShaftOverride = -1;
+let ssgiOverride = -1;
+let ssrOverride = -1;
 let vsmMotionPath = false;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
@@ -68,6 +74,21 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--bloom" && i + 1 < argv.length) {
+    bloomOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--fog" && i + 1 < argv.length) {
+    fogOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--sun-shafts" && i + 1 < argv.length) {
+    sunShaftOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--ssgi" && i + 1 < argv.length) {
+    ssgiOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--ssr" && i + 1 < argv.length) {
+    ssrOverride = parseInt(argv[i + 1]);
   }
   if (argv[i] === "--scene" && i + 1 < argv.length) {
     scenePath = argv[i + 1];
@@ -93,14 +114,20 @@ setAutoExposure(false);
 setManualExposure(1.0);
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
+if (bloomOverride === 0) { setBloomEnabled(false); }
+if (bloomOverride === 1) { setBloomEnabled(true); }
+if (ssgiOverride === 0) { setSsgiEnabled(false); }
+if (ssgiOverride === 1) { setSsgiEnabled(true); }
+if (ssrOverride === 0) { setSsrEnabled(false); }
+if (ssrOverride === 1) { setSsrEnabled(true); }
 
 // Warm Parisian haze — cream-white with a slight yellow shift.
 // Lower density than the first attempt so distant buildings still
 // register texture and colour rather than fading into flat blue fog.
-setFog(0.92, 0.90, 0.84, 0.006, 0.0, 0.05);
+setFog(0.92, 0.90, 0.84, fogOverride === 0 ? 0.0 : 0.006, 0.0, 0.05);
 // Subtle shafts — exterior scene so the sun is usually off-frame or
 // clipped by buildings. Lower strength than Sponza's atrium.
-setSunShafts(0.25, 0.96, 1.0, 0.94, 0.82);
+setSunShafts(sunShaftOverride === 0 ? 0.0 : 0.25, 0.96, 1.0, 0.94, 0.82);
 setVignette(0.10, 0.30);
 setChromaticAberration(0.0005);
 

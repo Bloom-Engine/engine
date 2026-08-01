@@ -98,6 +98,15 @@ mod ray_query_variant_tests {
         wgpu::naga::front::wgsl::parse_str(&hardware)
             .unwrap_or_else(|error| panic!("hardware WSRC WGSL failed: {error:?}"));
     }
+
+    #[test]
+    fn ssr_derivative_normal_faces_the_camera() {
+        wgpu::naga::front::wgsl::parse_str(SSR_SHADER_WGSL)
+            .unwrap_or_else(|error| panic!("SSR WGSL failed: {error:?}"));
+        assert!(SSR_SHADER_WGSL.contains("let n_raw = normalize(cross(dy, dx));"));
+        assert!(!SSR_SHADER_WGSL.contains("let n = normalize(cross(dx, dy));"));
+        assert!(SSR_SHADER_WGSL.contains("dot(n_raw, v) >= 0.0"));
+    }
 }
 mod post;
 pub(super) use post::{

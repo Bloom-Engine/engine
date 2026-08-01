@@ -1745,8 +1745,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let roughness_fade = 1.0 - smoothstep(0.5, 0.85, roughness);
     if (roughness_fade <= 0.001) { return vec4<f32>(0.0); }
 
-    let n = normalize(cross(dx, dy));
     let v = normalize(-view_pos);
+    // Fragment coordinates increase downward, so `dpdy(view_pos)` points
+    // opposite the view-space +Y direction. `cross(dx, dy)` therefore
+    // reconstructs the back face of every camera-visible surface and drives
+    // NdotV to zero. Schlick Fresnel then becomes 1.0 across the frame,
+    // turning SSR into a full-strength pale environment overlay. Reverse the
+    // operands and defensively face the derivative normal toward the camera
+    // at depth discontinuities.
+    let n_raw = normalize(cross(dy, dx));
+    let n = select(-n_raw, n_raw, dot(n_raw, v) >= 0.0);
 
     // Stochastic SSR — cast one GGX-importance-sampled ray per pixel
     // per frame. Different frames draw from different points on the
