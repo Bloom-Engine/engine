@@ -629,16 +629,19 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
     if (lighting.dir_light_count.y < 0.5) {
         return 1.0;
     }
-    // Select cascade by world-space DISTANCE from camera (not
-    // view-space Z). Distance is rotation-independent — spinning
-    // the camera doesn't change which cascade a surface falls in.
-    let cam = lighting.camera_pos.xyz;
-    let dist = length(world_pos - cam);
+    // Select by the same positive view-space depth used to fit the
+    // camera-frustum slices in ShadowMap::compute_cascade_vps. Using
+    // spherical camera distance here is not equivalent: a receiver near
+    // the side of the camera can select a tight near cascade whose fitted
+    // XY footprint does not contain it. The bounds check below then returns
+    // fully lit, making a static shadow disappear when the camera turns.
+    let view_pos = lighting.shadow_view_matrix * vec4<f32>(world_pos, 1.0);
+    let view_depth = max(-view_pos.z, 0.0);
 
     var cascade = 2;
-    if (dist <= lighting.shadow_cascade_splits.x) {
+    if (view_depth <= lighting.shadow_cascade_splits.x) {
         cascade = 0;
-    } else if (dist <= lighting.shadow_cascade_splits.y) {
+    } else if (view_depth <= lighting.shadow_cascade_splits.y) {
         cascade = 1;
     }
 
@@ -689,7 +692,7 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
         split_far = lighting.shadow_cascade_splits.z;
     }
     let blend_zone = (split_far - split_near) * 0.1;
-    let dist_to_edge = split_far - dist;
+    let dist_to_edge = split_far - view_depth;
 
     if (dist_to_edge < blend_zone && cascade < 2) {
         // In the blend zone: sample the next cascade too and lerp.
