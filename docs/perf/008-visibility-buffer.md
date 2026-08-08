@@ -66,6 +66,15 @@ frame recorded work. Validate/debug own 16 bytes/pixel for IDs plus diagnostic
 normals; shade owns the 8-byte ID target plus two bounded 20-byte-per-capacity
 slot indirect streams. Off/validate/debug allocate neither routed stream.
 
+Default activation is guarded by a process-isolated native MRT oracle. Its
+terminal, request-only compute pass uses `textureLoad` to pack the production
+HDR (`rgba16float`), material (`rg8unorm`), velocity (`rg16float`), and albedo
+(`rgba8unorm`) attachments into raw files plus a versioned manifest. Ordinary
+frames do not create its pipeline, layout, bind group, buffers, graph accesses,
+or commands, and the production MRTs do not gain `COPY_SRC` usage. The parity
+scene contains moving eligible geometry and a moving layered compatibility
+draw, so the velocity comparison cannot pass through an all-zero attachment.
+
 ## Original problem statement (historical)
 
 The `main_hdr_pass` writes four MRTs at the full physical resolution:

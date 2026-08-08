@@ -1389,7 +1389,6 @@ pub struct Renderer {
 
     // Shadow mapping
     pub shadow_map: crate::shadows::ShadowMap,
-
     // Screenshot capture (set flag, captured during end_frame)
     pub screenshot_requested: bool,
     pub screenshot_data: Option<(u32, u32, Vec<u8>)>,
@@ -1400,7 +1399,8 @@ pub struct Renderer {
     pub pending_screenshot_path: Option<String>,
     /// Opt-in qualification-only directory for named graph outputs.
     pub pending_quality_capture_dir: Option<String>,
-
+    /// One-shot native-encoding HDR/material/velocity/albedo capture directory.
+    pub pending_mrt_capture_dir: Option<String>,
     // Q1: Render-to-texture override. When set, end_frame renders to this
     // texture view instead of the surface. Set by begin_texture_mode,
     // cleared by end_texture_mode.
@@ -8042,6 +8042,7 @@ impl Renderer {
             screenshot_data: None,
             pending_screenshot_path: None,
             pending_quality_capture_dir: None,
+            pending_mrt_capture_dir: None,
             rt_color_view: None,
             rt_depth_view: None,
             rt_depth_texture: None,

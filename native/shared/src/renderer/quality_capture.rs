@@ -26,6 +26,18 @@ pub(super) struct QualityReadback {
     buffer: wgpu::Buffer,
 }
 
+const PACKED_MRT_PIXEL_BYTES: u64 = 20;
+
+pub(super) struct MrtReadback {
+    // Keep the compute destination alive through queue submission. The copy
+    // command references it, but retaining it here also makes ownership and
+    // qualification-only memory explicit.
+    _packed: wgpu::Buffer,
+    staging: wgpu::Buffer,
+    width: u32,
+    height: u32,
+}
+
 pub(super) struct FrameReadback {
     staging: wgpu::Buffer,
     width: u32,
@@ -33,7 +45,45 @@ pub(super) struct FrameReadback {
     padded_bytes_per_row: u32,
     quality_capture_dir: Option<String>,
     quality_readbacks: Vec<QualityReadback>,
+    mrt_capture_dir: Option<String>,
+    mrt_readback: Option<MrtReadback>,
 }
+
+const MRT_READBACK_SHADER: &str = r#"
+struct PackedMrtPixel {
+    hdr_xy: u32,
+    hdr_zw: u32,
+    material: u32,
+    velocity: u32,
+    albedo: u32,
+};
+struct PackedMrtPixels { values: array<PackedMrtPixel>, };
+
+@group(0) @binding(0) var hdr_scene: texture_2d<f32>;
+@group(0) @binding(1) var material_properties: texture_2d<f32>;
+@group(0) @binding(2) var motion_vectors: texture_2d<f32>;
+@group(0) @binding(3) var scene_albedo: texture_2d<f32>;
+@group(0) @binding(4) var<storage, read_write> packed: PackedMrtPixels;
+
+@compute @workgroup_size(8, 8)
+fn cs_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dimensions = textureDimensions(hdr_scene);
+    if (gid.x >= dimensions.x || gid.y >= dimensions.y) { return; }
+    let pixel = vec2<i32>(gid.xy);
+    let hdr = textureLoad(hdr_scene, pixel, 0);
+    let material = textureLoad(material_properties, pixel, 0);
+    let velocity = textureLoad(motion_vectors, pixel, 0);
+    let albedo = textureLoad(scene_albedo, pixel, 0);
+    let index = gid.y * dimensions.x + gid.x;
+    packed.values[index] = PackedMrtPixel(
+        pack2x16float(hdr.xy),
+        pack2x16float(hdr.zw),
+        pack4x8unorm(vec4<f32>(material.xy, 0.0, 0.0)),
+        pack2x16float(velocity.xy),
+        pack4x8unorm(albedo)
+    );
+}
+"#;
 
 fn json_string(out: &mut String, value: &str) {
     out.push('"');
@@ -351,6 +401,124 @@ impl Renderer {
         Ok(readbacks)
     }
 
+    fn record_mrt_readback(&self, encoder: &mut wgpu::CommandEncoder) -> MrtReadback {
+        let size = self.hdr_rt_texture.size();
+        debug_assert_eq!(self.material_rt_texture.size(), size);
+        debug_assert_eq!(self.velocity_rt_texture.size(), size);
+        debug_assert_eq!(self.albedo_rt_texture.size(), size);
+        let byte_count = u64::from(size.width)
+            .saturating_mul(u64::from(size.height))
+            .saturating_mul(PACKED_MRT_PIXEL_BYTES);
+        let packed = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bloom_mrt_capture_packed"),
+            size: byte_count,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bloom_mrt_capture_staging"),
+            size: byte_count,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let layout = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bloom_mrt_capture_layout"),
+                entries: &[
+                    texture_entry(0),
+                    texture_entry(1),
+                    texture_entry(2),
+                    texture_entry(3),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bloom_mrt_capture_bind_group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.hdr_rt_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.material_rt_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.albedo_rt_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: packed.as_entire_binding(),
+                },
+            ],
+        });
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("bloom_mrt_capture_shader"),
+                source: wgpu::ShaderSource::Wgsl(MRT_READBACK_SHADER.into()),
+            });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bloom_mrt_capture_pipeline_layout"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("bloom_mrt_capture_pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("cs_pack"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bloom_mrt_capture_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+        }
+        encoder.copy_buffer_to_buffer(&packed, 0, &staging, 0, byte_count);
+        MrtReadback {
+            _packed: packed,
+            staging,
+            width: size.width,
+            height: size.height,
+        }
+    }
+
     pub(super) fn record_frame_readback(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -478,6 +646,10 @@ impl Renderer {
                 }
             }
         }
+        let mrt_capture_dir = self.pending_mrt_capture_dir.clone();
+        let mrt_readback = mrt_capture_dir
+            .as_ref()
+            .map(|_| self.record_mrt_readback(encoder));
         FrameReadback {
             staging,
             width,
@@ -485,6 +657,92 @@ impl Renderer {
             padded_bytes_per_row,
             quality_capture_dir,
             quality_readbacks,
+            mrt_capture_dir,
+            mrt_readback,
+        }
+    }
+
+    fn begin_mrt_map(readback: &MrtReadback) -> mpsc::Receiver<Result<(), wgpu::BufferAsyncError>> {
+        let (tx, rx) = mpsc::channel();
+        readback
+            .staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+        rx
+    }
+
+    fn finish_mrt_readback(
+        &self,
+        directory: &str,
+        readback: &MrtReadback,
+        receiver: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    ) {
+        if !matches!(receiver.recv(), Ok(Ok(()))) {
+            eprintln!("bloom: MRT qualification readback failed");
+            return;
+        }
+        let directory = std::path::Path::new(directory);
+        if let Err(error) = std::fs::create_dir_all(directory) {
+            eprintln!("bloom: cannot create MRT capture directory '{directory:?}': {error}");
+            return;
+        }
+        let mapped = readback.staging.slice(..).get_mapped_range();
+        let pixel_count = u64::from(readback.width) * u64::from(readback.height);
+        let expected_bytes = pixel_count.saturating_mul(PACKED_MRT_PIXEL_BYTES) as usize;
+        if mapped.len() != expected_bytes {
+            eprintln!(
+                "bloom: MRT capture byte count mismatch: expected {expected_bytes}, got {}",
+                mapped.len()
+            );
+            drop(mapped);
+            readback.staging.unmap();
+            return;
+        }
+        let mut hdr = Vec::with_capacity(pixel_count as usize * 8);
+        let mut material = Vec::with_capacity(pixel_count as usize * 2);
+        let mut velocity = Vec::with_capacity(pixel_count as usize * 4);
+        let mut albedo = Vec::with_capacity(pixel_count as usize * 4);
+        for pixel in mapped.chunks_exact(PACKED_MRT_PIXEL_BYTES as usize) {
+            hdr.extend_from_slice(&pixel[0..8]);
+            material.extend_from_slice(&pixel[8..10]);
+            velocity.extend_from_slice(&pixel[12..16]);
+            albedo.extend_from_slice(&pixel[16..20]);
+        }
+        drop(mapped);
+        readback.staging.unmap();
+
+        let attachments = [
+            ("hdr-scene", "rgba16float", 8u32, &hdr),
+            ("material-properties", "rg8unorm", 2u32, &material),
+            ("motion-vectors", "rg16float", 4u32, &velocity),
+            ("albedo", "rgba8unorm", 4u32, &albedo),
+        ];
+        let mut manifest_entries = Vec::with_capacity(attachments.len());
+        for (name, format, bytes_per_pixel, bytes) in attachments {
+            let path = directory.join(format!("{name}.raw"));
+            if let Err(error) = std::fs::write(&path, bytes) {
+                eprintln!("bloom: MRT attachment write '{path:?}' failed: {error}");
+                continue;
+            }
+            let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+            manifest_entries.push(format!(
+                "    {{\"name\":\"{name}\",\"format\":\"{format}\",\"bytes_per_pixel\":{bytes_per_pixel},\"byte_count\":{},\"fnv1a64\":\"{hash:016x}\"}}",
+                bytes.len()
+            ));
+        }
+        let manifest = format!(
+            "{{\n  \"schema\":\"bloom-mrt-capture-v1\",\n  \"width\":{},\n  \"height\":{},\n  \"row_order\":\"top-to-bottom\",\n  \"endianness\":\"little\",\n  \"attachments\":[\n{}\n  ]\n}}\n",
+            readback.width,
+            readback.height,
+            manifest_entries.join(",\n")
+        );
+        let manifest_path = directory.join("scene-mrt.json");
+        if let Err(error) = std::fs::write(&manifest_path, manifest) {
+            eprintln!("bloom: MRT manifest write '{manifest_path:?}' failed: {error}");
         }
     }
 
@@ -495,6 +753,7 @@ impl Renderer {
             let _ = tx.send(result);
         });
         let quality_receivers = Self::begin_quality_intermediate_maps(&readback.quality_readbacks);
+        let mrt_receiver = readback.mrt_readback.as_ref().map(Self::begin_mrt_map);
         let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
@@ -541,7 +800,15 @@ impl Renderer {
                 quality_receivers,
             );
         }
+        if let (Some(directory), Some(mrt), Some(receiver)) = (
+            readback.mrt_capture_dir.as_deref(),
+            readback.mrt_readback.as_ref(),
+            mrt_receiver,
+        ) {
+            self.finish_mrt_readback(directory, mrt, receiver);
+        }
         self.pending_quality_capture_dir.take();
+        self.pending_mrt_capture_dir.take();
         self.release_temporal_diagnostics();
         self.release_ssr_temporal_diagnostics();
         self.release_ssgi_temporal_diagnostics();
@@ -1532,7 +1799,16 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::hdr_metrics_json;
+    use super::{hdr_metrics_json, MRT_READBACK_SHADER, PACKED_MRT_PIXEL_BYTES};
+
+    #[test]
+    fn mrt_readback_shader_parses_and_keeps_twenty_byte_pixel_abi() {
+        wgpu::naga::front::wgsl::parse_str(MRT_READBACK_SHADER)
+            .unwrap_or_else(|error| panic!("MRT readback WGSL failed: {error:?}"));
+        assert_eq!(PACKED_MRT_PIXEL_BYTES, 20);
+        assert_eq!(MRT_READBACK_SHADER.matches("pack2x16float").count(), 3);
+        assert_eq!(MRT_READBACK_SHADER.matches("pack4x8unorm").count(), 2);
+    }
 
     #[test]
     fn hdr_metrics_detect_a_single_local_firefly() {

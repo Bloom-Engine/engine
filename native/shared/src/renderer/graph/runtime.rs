@@ -42,6 +42,11 @@ pub const FRAME_FEATURE_TEMPORAL_REACTIVE: u64 = 1 << 21;
 /// Physical transmission contributes a lazy persistent light-space
 /// transmittance/depth cascade and an additive post-opaque sun correction.
 pub const FRAME_FEATURE_TRANSMITTED_SHADOWS: u64 = 1 << 22;
+/// Qualification-only native MRT readback samples the renderer-owned HDR,
+/// material, velocity, and albedo textures in a terminal compute pass. The
+/// bit is absent from ordinary plans, so normal frames gain no resource
+/// transitions or execution nodes.
+pub const FRAME_FEATURE_CAPTURE_MRT: u64 = 1 << 23;
 
 /// Coarse output class used in topology keys. Exact dimensions belong to the
 /// allocation/resize generation; topology does not rebuild for every resize.

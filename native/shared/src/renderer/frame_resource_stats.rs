@@ -170,7 +170,9 @@ impl super::Renderer {
         self.frame_resource_stats
             .finish_pipeline_creations(self.total_pipeline_creation_count());
         if cfg!(not(target_arch = "wasm32"))
-            && (self.screenshot_requested || self.pending_quality_capture_dir.is_some())
+            && (self.screenshot_requested
+                || self.pending_quality_capture_dir.is_some()
+                || self.pending_mrt_capture_dir.is_some())
         {
             return;
         }

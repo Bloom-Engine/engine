@@ -6,8 +6,8 @@
 
 use super::{
     AliasClass, BufferDesc, BufferUsage, Extent, FramePlanKey, GraphBuilder, Ownership,
-    ResourceOrigin, TextureDesc, TextureUsage, Usage, FRAME_FEATURE_CAPTURE_OUTPUT,
-    FRAME_FEATURE_CAPTURE_QUALITY, FRAME_FEATURE_IMPORTED_REFRACTION,
+    ResourceOrigin, TextureDesc, TextureUsage, Usage, FRAME_FEATURE_CAPTURE_MRT,
+    FRAME_FEATURE_CAPTURE_OUTPUT, FRAME_FEATURE_CAPTURE_QUALITY, FRAME_FEATURE_IMPORTED_REFRACTION,
     FRAME_FEATURE_SCENE_SNAPSHOTS, FRAME_FEATURE_TEMPORAL_REACTIVE,
     FRAME_FEATURE_TRANSMITTED_SHADOWS, FRAME_FEATURE_WEIGHTED_TRANSPARENCY,
 };
@@ -638,6 +638,14 @@ pub fn build_renderer_frame_plan(
                 graph.read_texture(capture, cascade, TextureUsage::COPY_SRC);
             }
         }
+        if key.feature_mask & FRAME_FEATURE_CAPTURE_MRT != 0 {
+            // The readback compute shader uses textureLoad and packs the
+            // native attachment encodings into one staging buffer. Sampling
+            // avoids permanently adding COPY_SRC to production MRTs.
+            for attachment in [hdr, material, velocity, albedo] {
+                graph.read_texture(capture, attachment, TextureUsage::SAMPLED);
+            }
+        }
     }
 
     graph
@@ -810,7 +818,9 @@ mod tests {
     #[test]
     fn capture_is_a_terminal_copy_pass_over_named_logical_resources() {
         let plan = build_renderer_frame_plan(
-            key(FRAME_FEATURE_CAPTURE_OUTPUT | FRAME_FEATURE_CAPTURE_QUALITY),
+            key(FRAME_FEATURE_CAPTURE_OUTPUT
+                | FRAME_FEATURE_CAPTURE_QUALITY
+                | FRAME_FEATURE_CAPTURE_MRT),
             wgpu::TextureFormat::Bgra8UnormSrgb,
         )
         .compile(CompileOptions::NO_ALIASING)
@@ -827,6 +837,9 @@ mod tests {
             "shadow-cascade-0",
             "shadow-cascade-1",
             "shadow-cascade-2",
+            "material-properties",
+            "motion-vectors",
+            "albedo",
         ] {
             let resource = plan.resource(name).unwrap();
             assert!(

@@ -71,11 +71,16 @@ impl Renderer {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if !render_target_output
-            && (self.screenshot_requested || self.pending_quality_capture_dir.is_some())
+            && (self.screenshot_requested
+                || self.pending_quality_capture_dir.is_some()
+                || self.pending_mrt_capture_dir.is_some())
         {
             feature_mask |= graph::FRAME_FEATURE_CAPTURE_OUTPUT;
             if self.pending_quality_capture_dir.is_some() {
                 feature_mask |= graph::FRAME_FEATURE_CAPTURE_QUALITY;
+            }
+            if self.pending_mrt_capture_dir.is_some() {
+                feature_mask |= graph::FRAME_FEATURE_CAPTURE_MRT;
             }
         }
 
