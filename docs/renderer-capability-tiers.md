@@ -38,6 +38,15 @@ raises the storage-buffer requirement to 9. Tier A requests only Bloom's
 bounded 4,096-texture/64-sampler working set, including fallback entries,
 rather than the adapter's maximum descriptor budget.
 
+Layered-PBR scene specialization is deliberately outside the 19-texture core
+contract. A high-end preferred request asks for the adapter's bounded optional
+budget from 22 through 30 sampled textures per fragment stage: 22 covers the
+ordinary layered material, 24 covers it with virtual-shadow textures, and up
+to 30 covers combined layered refraction. The featureless fallback remains at
+19. At runtime each lazy specialization checks its exact active pipeline layout
+before creation; a device below that optional limit keeps the base PBR or
+physical-refraction path instead of producing a validation error.
+
 Startup first requests supported optional features for the selected tier. If
 the backend rejects that request, Bloom retries the same active shader-layout
 contract without optional features, selecting the resulting modern/baseline

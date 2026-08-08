@@ -984,6 +984,36 @@ impl Renderer {
                 .active_layered_material_count()
                 .to_string(),
         );
+        let granted_sampled_textures = self.device.limits().max_sampled_textures_per_shader_stage;
+        out.push_str(",\"granted_sampled_textures_per_stage\":");
+        out.push_str(&granted_sampled_textures.to_string());
+        out.push_str(",\"scene_specialization_required_sampled_textures\":");
+        out.push_str(
+            &self
+                .scene_layered_pbr_sampled_texture_requirement()
+                .to_string(),
+        );
+        out.push_str(",\"scene_specialization_available\":");
+        out.push_str(if self.scene_layered_pbr_available() {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"combined_refraction_max_sampled_textures\":");
+        out.push_str(
+            &super::layered_pbr_refraction::SCENE_LAYERED_REFRACTIVE_MAX_SAMPLED_TEXTURES
+                .to_string(),
+        );
+        out.push_str(",\"combined_refraction_full_layout_available\":");
+        out.push_str(
+            if granted_sampled_textures
+                >= super::layered_pbr_refraction::SCENE_LAYERED_REFRACTIVE_MAX_SAMPLED_TEXTURES
+            {
+                "true"
+            } else {
+                "false"
+            },
+        );
         out.push_str(",\"bound_material_uniform_bytes\":");
         out.push_str(
             &std::mem::size_of::<super::material_system::MaterialFactorsUniforms>().to_string(),

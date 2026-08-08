@@ -5,6 +5,28 @@ use super::*;
 
 const FIRST_LAYERED_BINDING: u32 = 16;
 
+// Combined transmission + layered PBR owns eighteen sampled material
+// textures. The complete fragment-stage layout also carries six lighting
+// textures (eight with VSM) and three native reflection inputs. When the
+// reflection hierarchy is disabled, or SceneInputs are folded into group 0,
+// that last contribution is four instead. Keep the maximum in the device
+// request, while the runtime gate below uses the exact active layout.
+pub(super) const SCENE_LAYERED_REFRACTIVE_MAX_SAMPLED_TEXTURES: u32 = 30;
+
+const fn scene_layered_refractive_sampled_texture_requirement(
+    virtual_shadows: bool,
+    folded_scene_inputs: bool,
+    screen_space_reflections: bool,
+) -> u32 {
+    let lighting = if virtual_shadows { 8 } else { 6 };
+    let scene_inputs = if !folded_scene_inputs && screen_space_reflections {
+        3
+    } else {
+        4
+    };
+    18 + lighting + scene_inputs
+}
+
 pub(super) fn scene_layered_refractive_shader_source(
     base_scene_shader: &str,
     folded_scene_inputs: bool,
@@ -361,11 +383,36 @@ impl Renderer {
         )
     }
 
-    fn ensure_scene_layered_refraction_resources(&mut self) {
+    fn scene_layered_refractive_sampled_texture_requirement(&self) -> u32 {
+        #[cfg(fold_scene_inputs)]
+        let screen_space_reflections = false;
+        #[cfg(not(fold_scene_inputs))]
+        let screen_space_reflections = self.scene_refractive_inputs_layout.is_some();
+        scene_layered_refractive_sampled_texture_requirement(
+            self.shadow_map.virtual_map.requested(),
+            cfg!(fold_scene_inputs),
+            screen_space_reflections,
+        )
+    }
+
+    fn ensure_scene_layered_refraction_resources(&mut self) -> bool {
         if self.scene_layered_refractive_resources.is_some() {
-            return;
+            return true;
         }
         self.ensure_scene_refraction_resources();
+        let required = self.scene_layered_refractive_sampled_texture_requirement();
+        let granted = self.device.limits().max_sampled_textures_per_shader_stage;
+        if granted < required {
+            static WARN_UNAVAILABLE: std::sync::Once = std::sync::Once::new();
+            WARN_UNAVAILABLE.call_once(|| {
+                log::warn!(
+                    "bloom materials: combined layered-PBR refraction requires {required} \
+                     sampled textures per fragment stage, but the negotiated device grants \
+                     {granted}; retaining physical refraction without layered lobes"
+                );
+            });
+            return false;
+        }
         let material_layout = create_material_layout(&self.device);
         let layout = pipeline_layout(
             self,
@@ -410,10 +457,13 @@ impl Renderer {
             reactive_uv1_double_sided: None,
         });
         self.created_pipelines(2);
+        true
     }
 
     fn ensure_scene_layered_refraction_uv1_resources(&mut self) {
-        self.ensure_scene_layered_refraction_resources();
+        if !self.ensure_scene_layered_refraction_resources() {
+            return;
+        }
         if self
             .scene_layered_refractive_resources
             .as_ref()
@@ -583,7 +633,9 @@ impl Renderer {
         if !self.imported_refraction_enabled || !transmission.is_active() || !layered.is_active() {
             return None;
         }
-        self.ensure_scene_layered_refraction_resources();
+        if !self.ensure_scene_layered_refraction_resources() {
+            return None;
+        }
 
         let usable_texture = |binding: Option<crate::models::MaterialTextureBinding>,
                               contributes: bool|
@@ -872,6 +924,26 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampled_texture_contract_covers_reflection_and_vsm_layouts() {
+        assert_eq!(
+            scene_layered_refractive_sampled_texture_requirement(false, false, true),
+            27
+        );
+        assert_eq!(
+            scene_layered_refractive_sampled_texture_requirement(true, false, true),
+            29
+        );
+        assert_eq!(
+            scene_layered_refractive_sampled_texture_requirement(false, false, false),
+            28
+        );
+        assert_eq!(
+            scene_layered_refractive_sampled_texture_requirement(true, true, false),
+            SCENE_LAYERED_REFRACTIVE_MAX_SAMPLED_TEXTURES
+        );
+    }
 
     #[test]
     fn combined_refractive_variants_parse_without_touching_base_shader() {

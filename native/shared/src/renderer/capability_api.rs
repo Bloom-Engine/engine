@@ -169,6 +169,32 @@ impl Renderer {
         out.push_str(&self.vsm_gpu_casters.report_json());
         out.push_str(",\"imported_refraction\":");
         json_string(&mut out, imported_refraction);
+        let granted_sampled_textures = self.device.limits().max_sampled_textures_per_shader_stage;
+        out.push_str(",\"layered_pbr\":{\"granted_sampled_textures_per_stage\":");
+        out.push_str(&granted_sampled_textures.to_string());
+        out.push_str(",\"scene_required_sampled_textures\":");
+        out.push_str(
+            &self
+                .scene_layered_pbr_sampled_texture_requirement()
+                .to_string(),
+        );
+        out.push_str(",\"scene_available\":");
+        out.push_str(if self.scene_layered_pbr_available() {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"combined_refraction_full_layout_available\":");
+        out.push_str(
+            if granted_sampled_textures
+                >= super::layered_pbr_refraction::SCENE_LAYERED_REFRACTIVE_MAX_SAMPLED_TEXTURES
+            {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        out.push('}');
         out.push_str(",\"transparency_modes\":[\"sorted\",\"auto\",\"weighted\"]}}");
         out
     }

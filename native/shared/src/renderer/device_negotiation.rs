@@ -9,6 +9,10 @@ const CORE_SAMPLED_TEXTURES: u32 = 19;
 const CORE_SAMPLERS: u32 = 16;
 const CORE_STORAGE_BUFFERS: u32 = 8;
 const CORE_UNIFORM_BUFFER_BINDING_SIZE: u64 = 64 * 1024;
+const OPTIONAL_LAYERED_PBR_SAMPLED_TEXTURES_MIN: u32 =
+    super::layered_pbr_scene::SCENE_LAYERED_PBR_SAMPLED_TEXTURES;
+const OPTIONAL_LAYERED_PBR_SAMPLED_TEXTURES_MAX: u32 =
+    super::layered_pbr_refraction::SCENE_LAYERED_REFRACTIVE_MAX_SAMPLED_TEXTURES;
 const PATH_TRACING_STORAGE_BUFFERS: u32 = 9;
 const FOLDED_MOBILE_BIND_GROUPS: u32 = 4;
 const FOLDED_MOBILE_STORAGE_BUFFERS: u32 = 4;
@@ -220,6 +224,20 @@ fn build_device_request_plans_with_override(
             &mut preferred_limits,
         );
         super::gpu_driven::request_features_if_supported(supported, &mut preferred_features);
+    }
+    // Layered scene materials are optional because the complete pipeline
+    // layout exceeds Bloom's 19-texture core contract. Request only the
+    // bounded amount the adapter can actually grant: 22 unlocks the ordinary
+    // specialization, while up to 30 covers VSM and combined refraction. A
+    // forced lower tier and the featureless fallback retain the core limit.
+    if high_paths_allowed
+        && capability.selected_tier == RendererCapabilityTier::HighEnd
+        && adapter_limits.max_sampled_textures_per_shader_stage
+            >= OPTIONAL_LAYERED_PBR_SAMPLED_TEXTURES_MIN
+    {
+        preferred_limits.max_sampled_textures_per_shader_stage = adapter_limits
+            .max_sampled_textures_per_shader_stage
+            .min(OPTIONAL_LAYERED_PBR_SAMPLED_TEXTURES_MAX);
     }
 
     let ray_query = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
@@ -451,6 +469,18 @@ mod tests {
         assert_eq!(plans[1].tier, RendererCapabilityTier::Modern);
         assert!(plans[1].required_features.is_empty());
         assert_eq!(plans[1].required_limits.max_color_attachments, 4);
+        assert_eq!(
+            plans[0]
+                .required_limits
+                .max_sampled_textures_per_shader_stage,
+            OPTIONAL_LAYERED_PBR_SAMPLED_TEXTURES_MAX
+        );
+        assert_eq!(
+            plans[1]
+                .required_limits
+                .max_sampled_textures_per_shader_stage,
+            CORE_SAMPLED_TEXTURES
+        );
 
         #[cfg(feature = "models3d")]
         serde_json::from_str::<serde_json::Value>(
@@ -486,6 +516,95 @@ mod tests {
         assert!(!plans[0]
             .required_features
             .intersects(wgpu::Features::INDIRECT_FIRST_INSTANCE));
+        assert_eq!(
+            plans[0]
+                .required_limits
+                .max_sampled_textures_per_shader_stage,
+            CORE_SAMPLED_TEXTURES
+        );
+    }
+
+    #[test]
+    fn forced_modern_keeps_optional_layered_limit_out_of_the_request() {
+        let supported = wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+        let mut limits = linux_asahi_limits();
+        limits.max_binding_array_elements_per_shader_stage = 64;
+        limits.max_binding_array_sampler_elements_per_shader_stage = 16;
+        let plans = build_device_request_plans_with_override(
+            supported,
+            &limits,
+            DeviceRequestOptions::default(),
+            Some(RendererCapabilityTier::Modern),
+        )
+        .unwrap();
+        assert_eq!(plans[0].tier, RendererCapabilityTier::Modern);
+        assert_eq!(
+            plans[0]
+                .required_limits
+                .max_sampled_textures_per_shader_stage,
+            CORE_SAMPLED_TEXTURES
+        );
+    }
+
+    #[test]
+    fn high_end_request_uses_only_the_available_layered_texture_budget() {
+        let supported = wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+        let mut limits = linux_asahi_limits();
+        limits.max_sampled_textures_per_shader_stage = 24;
+        limits.max_binding_array_elements_per_shader_stage = 64;
+        limits.max_binding_array_sampler_elements_per_shader_stage = 16;
+        let plans = build_device_request_plans_with_override(
+            supported,
+            &limits,
+            DeviceRequestOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plans[0].tier, RendererCapabilityTier::HighEnd);
+        assert_eq!(
+            plans[0]
+                .required_limits
+                .max_sampled_textures_per_shader_stage,
+            24
+        );
+        assert_eq!(
+            plans[1]
+                .required_limits
+                .max_sampled_textures_per_shader_stage,
+            CORE_SAMPLED_TEXTURES
+        );
+    }
+
+    #[test]
+    fn high_end_adapter_at_core_limit_keeps_layered_specialization_optional() {
+        let supported = wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+        let mut limits = linux_asahi_limits();
+        limits.max_sampled_textures_per_shader_stage = CORE_SAMPLED_TEXTURES;
+        limits.max_binding_array_elements_per_shader_stage = 64;
+        limits.max_binding_array_sampler_elements_per_shader_stage = 16;
+        let plans = build_device_request_plans_with_override(
+            supported,
+            &limits,
+            DeviceRequestOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plans[0].tier, RendererCapabilityTier::HighEnd);
+        assert_eq!(
+            plans[0]
+                .required_limits
+                .max_sampled_textures_per_shader_stage,
+            CORE_SAMPLED_TEXTURES
+        );
+        assert_eq!(
+            plans[1]
+                .required_limits
+                .max_sampled_textures_per_shader_stage,
+            CORE_SAMPLED_TEXTURES
+        );
     }
 
     #[test]

@@ -282,7 +282,9 @@ impl Renderer {
         if self.scene_iridescence_ssr_resources.is_some() {
             return;
         }
-        self.ensure_scene_layered_pbr_resources();
+        if !self.ensure_scene_layered_pbr_resources() {
+            return;
+        }
         let material_layout = &self
             .scene_layered_pbr_resources
             .as_ref()

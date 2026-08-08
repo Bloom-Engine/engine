@@ -24,6 +24,22 @@ const IRIDESCENCE_FACTOR_TEXTURE: usize = 8;
 const IRIDESCENCE_THICKNESS_TEXTURE: usize = 9;
 pub(super) const LAYERED_TEXTURE_COUNT: usize = 10;
 
+// The ordinary layered layout contributes sixteen sampled textures (the five
+// base PBR maps, ten optional lobe maps, and the sheen energy LUT). The shared
+// lighting layout contributes six more, or eight when virtual-shadow textures
+// are present. wgpu validates this limit across the complete pipeline layout,
+// rather than one bind group at a time.
+pub(super) const SCENE_LAYERED_PBR_SAMPLED_TEXTURES: u32 = 22;
+pub(super) const SCENE_LAYERED_PBR_VSM_SAMPLED_TEXTURES: u32 = 24;
+
+pub(super) const fn scene_layered_pbr_sampled_texture_requirement(virtual_shadows: bool) -> u32 {
+    if virtual_shadows {
+        SCENE_LAYERED_PBR_VSM_SAMPLED_TEXTURES
+    } else {
+        SCENE_LAYERED_PBR_SAMPLED_TEXTURES
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct SceneLayeredPbrUniforms {
@@ -997,9 +1013,31 @@ fn create_layered_transparent_pipeline(
 }
 
 impl Renderer {
-    pub(crate) fn ensure_scene_layered_pbr_resources(&mut self) {
+    pub(super) fn scene_layered_pbr_sampled_texture_requirement(&self) -> u32 {
+        scene_layered_pbr_sampled_texture_requirement(self.shadow_map.virtual_map.requested())
+    }
+
+    pub(super) fn scene_layered_pbr_available(&self) -> bool {
+        self.device.limits().max_sampled_textures_per_shader_stage
+            >= self.scene_layered_pbr_sampled_texture_requirement()
+    }
+
+    pub(crate) fn ensure_scene_layered_pbr_resources(&mut self) -> bool {
         if self.scene_layered_pbr_resources.is_some() {
-            return;
+            return true;
+        }
+        if !self.scene_layered_pbr_available() {
+            static WARN_UNAVAILABLE: std::sync::Once = std::sync::Once::new();
+            WARN_UNAVAILABLE.call_once(|| {
+                log::warn!(
+                    "bloom materials: layered-PBR scene specialization requires {} sampled \
+                     textures per fragment stage, but the negotiated device grants {}; \
+                     retaining the base PBR material path",
+                    self.scene_layered_pbr_sampled_texture_requirement(),
+                    self.device.limits().max_sampled_textures_per_shader_stage,
+                );
+            });
+            return false;
         }
         let material_layout = create_layered_material_layout(&self.device);
         let pipeline_layout = self
@@ -1161,6 +1199,7 @@ impl Renderer {
             "bloom materials: lazy layered-PBR v4 scene specialization enabled \
              (base-only scene pipelines remain unchanged)"
         );
+        true
     }
 }
 
@@ -1249,7 +1288,9 @@ impl Renderer {
             usable[slot] && binding.is_some_and(|binding| binding.transform.tex_coord == 1)
         });
 
-        self.ensure_scene_layered_pbr_resources();
+        if !self.ensure_scene_layered_pbr_resources() {
+            return None;
+        }
         if material.has_sheen() {
             self.ensure_scene_sheen_albedo_lut();
         }
@@ -1644,6 +1685,12 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampled_texture_contract_counts_complete_pipeline_layout() {
+        assert_eq!(scene_layered_pbr_sampled_texture_requirement(false), 22);
+        assert_eq!(scene_layered_pbr_sampled_texture_requirement(true), 24);
+    }
 
     #[test]
     fn ordinary_shader_remains_free_of_layered_bindings_and_calls() {
