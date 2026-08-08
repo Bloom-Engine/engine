@@ -1,6 +1,37 @@
 # 008 — Visibility buffer replaces 4-MRT G-buffer
 
-**Effort:** ~2 weeks · **Expected gain:** 75% less G-buffer bandwidth · **Status:** deferred
+**Effort:** staged · **Expected gain:** workload-dependent · **Status:** active qualification
+
+## 2026 design correction and safety gate
+
+The original proposal below incorrectly called `Rgba32Uint` an ~8-byte
+target; it is 16 bytes/pixel. Bloom also now has an alpha-aware depth prepass
+and Equal-tested main pass, so opaque PBR already shades only the winning
+surface. A visibility path therefore cannot claim an overdraw or bandwidth
+win from the old estimate.
+
+The implementation contract is now:
+
+- `Rg32Uint` (8 bytes/pixel): full 32-bit draw ID plus a 31-bit primitive ID
+  and one front-face bit;
+- reconstruct perspective-correct barycentrics from the referenced
+  triangle's clip positions rather than storing them or expanding shared
+  vertices;
+- admit only static opaque/masked shared-arena geometry with Tier-A global
+  materials; blend, transmission, layered/custom, skinned, deforming, and
+  unsupported content stays on the forward compatibility path;
+- keep the forward MRT authoritative and the visibility path opt-in until an
+  identical-camera A/B proves total depth/visibility/shading GPU time is no
+  worse, image parity passes, and memory is bounded;
+- never enable it merely because the visibility raster writes fewer bytes
+  than the MRT. The comparison must include every added pass, storage fetch,
+  reconstructed output, and transient allocation.
+
+The shared CPU/WGSL ABI and perspective reconstruction live in
+`renderer/visibility_buffer.rs` and
+`shaders/visibility_buffer/reconstruct.wgsl`. The first runtime milestone is
+a diagnostic raster/readback oracle; production composition follows only
+after that oracle catches ID, winding, clipping, and interpolation faults.
 
 ## Problem
 
@@ -26,9 +57,9 @@ depth prepass, every visible pixel shades exactly once.
 
 This is a significant refactor — do ticket 005 (depth prepass) first. Then:
 
-1. **Replace main_hdr_pass output** with a single **visibility buffer**: a
-   Rgba32Uint texture storing `(triangle_id, u, v, mesh_id)` per pixel.
-   Material and normal are *not* written.
+1. **Rasterize eligible geometry** into one `Rg32Uint` visibility target,
+   storing `(draw_id, primitive_id + front-face bit)`. Material and normal are
+   not written; barycentrics are reconstructed in the shading pass.
 2. **New shading pass** reads the visibility buffer, fetches the vertex data
    for the referenced triangle, interpolates attributes from barycentrics,
    and evaluates the full PBR shader once per pixel.
@@ -60,11 +91,14 @@ modes. This is a ~2-day win instead of 2 weeks.
 
 ## Acceptance
 
-- Sponza fragment bandwidth (measurable via Xcode Metal capture) drops by
-  ≥ 50%.
+- Total uncapped depth + visibility + shading time is no worse than forward
+  MRT on the admitted workload, and improves materially on the target stress
+  scene. Record pass timings rather than inferring a win from format size.
 - Same PBR output (SSIM ≥ 0.99 vs baseline).
 - Post-FX that consume G-buffer content still work.
 - Doesn't regress perf on non-overdraw-heavy scenes.
+- Unsupported/skinned/translucent/layered/custom content composes through an
+  explicit inspectable compatibility route without holes or ordering changes.
 
 ## Notes for the implementer
 

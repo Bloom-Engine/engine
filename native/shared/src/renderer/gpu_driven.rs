@@ -646,7 +646,8 @@ impl GpuDrivenRenderer {
                 "\"submitted\":{},\"compatibility\":{},\"indirect_calls\":{},",
                 "\"frustum_visible_oracle\":{},\"frustum_culled_oracle\":{},",
                 "\"frustum_culled_ratio\":{:.6},",
-                "\"classification_source\":\"retained-scene conservative CPU oracle\"}}"
+                "\"classification_source\":\"retained-scene conservative CPU oracle\",",
+                "\"visibility_buffer_contract\":{}}}"
             ),
             self.enabled,
             self.count_supported,
@@ -656,6 +657,7 @@ impl GpuDrivenRenderer {
             self.stats.frustum_visible_oracle,
             self.stats.frustum_culled_oracle,
             culled_ratio,
+            super::visibility_buffer::contract_json(),
         )
     }
 
