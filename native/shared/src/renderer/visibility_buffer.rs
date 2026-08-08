@@ -78,19 +78,25 @@ pub(crate) fn contract_json() -> String {
             "{{\"format\":\"{}\",\"bytes_per_pixel\":{},",
             "\"invalid_draw_id\":{},\"primitive_bits\":31,",
             "\"front_face_bits\":1,\"shipping_enabled\":false,",
-            "\"native_1080p_bytes\":{},\"reconstruction_wgsl_bytes\":{},",
+            "\"required_feature\":\"primitive-index\",",
+            "\"vertex_stride_bytes\":{},\"native_1080p_bytes\":{},",
+            "\"reconstruction_wgsl_bytes\":{},\"geometry_wgsl_bytes\":{},",
             "\"activation\":\"opt-in A/B qualification required\"}}"
         ),
         format_name,
         VISIBILITY_BYTES_PER_PIXEL,
         INVALID_DRAW_ID,
+        std::mem::size_of::<super::Vertex3D>(),
         target_bytes(1_920, 1_080).expect("1080p visibility allocation is bounded"),
         RECONSTRUCTION_WGSL.len(),
+        GEOMETRY_WGSL.len(),
     )
 }
 
 pub(crate) const RECONSTRUCTION_WGSL: &str =
     include_str!("../../shaders/visibility_buffer/reconstruct.wgsl");
+pub(crate) const GEOMETRY_WGSL: &str =
+    include_str!("../../shaders/visibility_buffer/geometry.wgsl");
 
 #[cfg(test)]
 fn screen_barycentrics(point: [f32; 2], triangle: [[f32; 2]; 3]) -> Option<[f32; 3]> {
@@ -133,7 +139,9 @@ fn perspective_barycentrics(point: [f32; 2], clip: [[f32; 4]; 3]) -> Option<[f32
 
 #[cfg(test)]
 mod tests {
+    use super::super::{gpu_driven::GpuDrawRecord, Uniforms3D, Vertex3D};
     use super::*;
+    use wgpu::util::DeviceExt;
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
@@ -154,6 +162,8 @@ mod tests {
         let report = contract_json();
         assert!(report.starts_with("{\"format\":\"rg32uint\""));
         assert!(report.contains("\"native_1080p_bytes\":16588800"));
+        assert!(report.contains("\"required_feature\":\"primitive-index\""));
+        assert!(report.contains("\"vertex_stride_bytes\":96"));
         assert!(report.contains("\"shipping_enabled\":false"));
     }
 
@@ -201,13 +211,17 @@ mod tests {
     fn shared_reconstruction_header_parses_and_keeps_the_cpu_abi_constants() {
         wgpu::naga::front::wgsl::parse_str(RECONSTRUCTION_WGSL)
             .unwrap_or_else(|error| panic!("visibility reconstruction WGSL failed: {error:?}"));
+        wgpu::naga::front::wgsl::parse_str(GEOMETRY_WGSL)
+            .unwrap_or_else(|error| panic!("visibility geometry WGSL failed: {error:?}"));
         assert!(RECONSTRUCTION_WGSL
             .contains("const BLOOM_VISIBILITY_FRONT_FACE_BIT: u32 = 0x80000000u"));
         assert!(RECONSTRUCTION_WGSL.contains("fn bloom_perspective_barycentrics("));
+        assert!(GEOMETRY_WGSL.contains("const BLOOM_VERTEX3D_WORDS: u32 = 24u"));
+        assert_eq!(std::mem::size_of::<Vertex3D>(), 96);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    fn try_device(required_features: wgpu::Features) -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -215,13 +229,13 @@ mod tests {
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .ok()?;
-        if !adapter.features().contains(wgpu::Features::PRIMITIVE_INDEX) {
-            eprintln!("adapter lacks PRIMITIVE_INDEX — skipping visibility raster oracle");
+        if !adapter.features().contains(required_features) {
+            eprintln!("adapter lacks required visibility-oracle features");
             return None;
         }
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("visibility_buffer_oracle_device"),
-            required_features: wgpu::Features::PRIMITIVE_INDEX,
+            required_features,
             required_limits: wgpu::Limits::downlevel_defaults(),
             ..Default::default()
         }))
@@ -257,7 +271,7 @@ mod tests {
         const HEIGHT: u32 = 16;
         const VISIBILITY_ROW_BYTES: u32 = 256;
         const BARYCENTRIC_ROW_BYTES: u32 = WIDTH * 16;
-        let Some((device, queue)) = try_device() else {
+        let Some((device, queue)) = try_device(wgpu::Features::PRIMITIVE_INDEX) else {
             eprintln!("no GPU adapter — skipping visibility raster oracle");
             return;
         };
@@ -523,5 +537,342 @@ mod tests {
             primitive_faces[0], primitive_faces[1],
             "opposite winding must preserve distinct front-face bits"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn gpu_pulls_shared_geometry_and_reconstructs_every_vertex_lane() {
+        const OUTPUT_WORDS: usize = 100;
+        let Some((device, queue)) = try_device(wgpu::Features::empty()) else {
+            eprintln!("no GPU adapter — skipping shared-geometry oracle");
+            return;
+        };
+
+        let padding = Vertex3D {
+            position: [-99.0; 3],
+            normal: [-98.0; 3],
+            color: [-97.0; 4],
+            uv: [-96.0; 2],
+            joints: [-95.0; 4],
+            weights: [-94.0; 4],
+            tangent: [-93.0; 4],
+        };
+        let vertices = [
+            padding,
+            Vertex3D {
+                position: [-0.9, -0.8, 1.0],
+                normal: [0.1, 0.2, 0.3],
+                color: [0.4, 0.5, 0.6, 0.7],
+                uv: [0.8, 0.9],
+                joints: [1.0, 2.0, 3.0, 4.0],
+                weights: [0.1, 0.2, 0.3, 0.4],
+                tangent: [0.7, 0.2, 0.1, -1.0],
+            },
+            Vertex3D {
+                position: [-0.2, -1.6, 2.0],
+                normal: [1.1, 1.2, 1.3],
+                color: [1.4, 1.5, 1.6, 1.7],
+                uv: [1.8, 1.9],
+                joints: [5.0, 6.0, 7.0, 8.0],
+                weights: [0.4, 0.3, 0.2, 0.1],
+                tangent: [0.1, 0.6, 0.3, 1.0],
+            },
+            Vertex3D {
+                position: [-2.0, 3.2, 4.0],
+                normal: [2.1, 2.2, 2.3],
+                color: [2.4, 2.5, 2.6, 2.7],
+                uv: [2.8, 2.9],
+                joints: [9.0, 10.0, 11.0, 12.0],
+                weights: [0.25, 0.25, 0.25, 0.25],
+                tangent: [0.4, 0.2, 0.8, -1.0],
+            },
+        ];
+        let mvp = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.5, 0.0],
+        ];
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let draw = GpuDrawRecord {
+            uniforms: Uniforms3D {
+                mvp,
+                model: identity,
+                prev_mvp: identity,
+                model_tint: [1.0; 4],
+                misc: [0.0; 4],
+            },
+            bounds_min: [-2.0, -1.6, 1.0, 0.0],
+            bounds_max: [-0.2, 3.2, 4.0, 0.0],
+            draw: [3, 3, 1_i32 as u32, 1_234],
+        };
+        let indices = [91u32, 92, 93, 0, 1, 2];
+        let point_ndc = [-0.45f32, -0.1, 0.0, 0.0];
+        let visibility_record = VisibilityRecord::encode(0, 0, true).unwrap();
+
+        let shader_source = [
+            RECONSTRUCTION_WGSL,
+            GEOMETRY_WGSL,
+            r#"
+struct Uniforms3D {
+    mvp: mat4x4<f32>,
+    model: mat4x4<f32>,
+    prev_mvp: mat4x4<f32>,
+    model_tint: vec4<f32>,
+    misc: vec4<f32>,
+};
+struct GpuDrawRecord {
+    uniforms: Uniforms3D,
+    bounds_min: vec4<f32>,
+    bounds_max: vec4<f32>,
+    draw: vec4<u32>,
+};
+struct VertexTable { records: array<BloomPackedVertex3D>, };
+struct IndexTable { values: array<u32>, };
+struct DrawTable { records: array<GpuDrawRecord>, };
+struct OutputTable { words: array<u32>, };
+
+@group(0) @binding(0) var visibility_texture: texture_2d<u32>;
+@group(0) @binding(1) var<storage, read> vertices: VertexTable;
+@group(0) @binding(2) var<storage, read> indices: IndexTable;
+@group(0) @binding(3) var<storage, read> draws: DrawTable;
+@group(0) @binding(4) var<uniform> point_ndc: vec4<f32>;
+@group(0) @binding(5) var<storage, read_write> output: OutputTable;
+
+fn write_vertex(offset: u32, vertex: BloomVertex3D) {
+    output.words[offset + 0u] = bitcast<u32>(vertex.position.x);
+    output.words[offset + 1u] = bitcast<u32>(vertex.position.y);
+    output.words[offset + 2u] = bitcast<u32>(vertex.position.z);
+    output.words[offset + 3u] = bitcast<u32>(vertex.normal.x);
+    output.words[offset + 4u] = bitcast<u32>(vertex.normal.y);
+    output.words[offset + 5u] = bitcast<u32>(vertex.normal.z);
+    output.words[offset + 6u] = bitcast<u32>(vertex.color.x);
+    output.words[offset + 7u] = bitcast<u32>(vertex.color.y);
+    output.words[offset + 8u] = bitcast<u32>(vertex.color.z);
+    output.words[offset + 9u] = bitcast<u32>(vertex.color.w);
+    output.words[offset + 10u] = bitcast<u32>(vertex.uv.x);
+    output.words[offset + 11u] = bitcast<u32>(vertex.uv.y);
+    output.words[offset + 12u] = bitcast<u32>(vertex.joints.x);
+    output.words[offset + 13u] = bitcast<u32>(vertex.joints.y);
+    output.words[offset + 14u] = bitcast<u32>(vertex.joints.z);
+    output.words[offset + 15u] = bitcast<u32>(vertex.joints.w);
+    output.words[offset + 16u] = bitcast<u32>(vertex.weights.x);
+    output.words[offset + 17u] = bitcast<u32>(vertex.weights.y);
+    output.words[offset + 18u] = bitcast<u32>(vertex.weights.z);
+    output.words[offset + 19u] = bitcast<u32>(vertex.weights.w);
+    output.words[offset + 20u] = bitcast<u32>(vertex.tangent.x);
+    output.words[offset + 21u] = bitcast<u32>(vertex.tangent.y);
+    output.words[offset + 22u] = bitcast<u32>(vertex.tangent.z);
+    output.words[offset + 23u] = bitcast<u32>(vertex.tangent.w);
+}
+
+@compute @workgroup_size(1)
+fn cs_main() {
+    let raw_visibility = textureLoad(visibility_texture, vec2<i32>(0, 0), 0).xy;
+    if (!bloom_visibility_valid(raw_visibility)) {
+        output.words[96] = BLOOM_VISIBILITY_INVALID_DRAW_ID;
+        return;
+    }
+    let visibility = bloom_decode_visibility(raw_visibility);
+    let draw = draws.records[visibility.draw_id];
+    let first_index = draw.draw.y + visibility.primitive_id * 3u;
+    let base_vertex = bitcast<i32>(draw.draw.z);
+    let index0 = u32(i32(indices.values[first_index]) + base_vertex);
+    let index1 = u32(i32(indices.values[first_index + 1u]) + base_vertex);
+    let index2 = u32(i32(indices.values[first_index + 2u]) + base_vertex);
+    let vertex0 = bloom_decode_vertex3d(vertices.records[index0]);
+    let vertex1 = bloom_decode_vertex3d(vertices.records[index1]);
+    let vertex2 = bloom_decode_vertex3d(vertices.records[index2]);
+    write_vertex(0u, vertex0);
+    write_vertex(24u, vertex1);
+    write_vertex(48u, vertex2);
+
+    let clip0 = draw.uniforms.mvp * vec4<f32>(vertex0.position, 1.0);
+    let clip1 = draw.uniforms.mvp * vec4<f32>(vertex1.position, 1.0);
+    let clip2 = draw.uniforms.mvp * vec4<f32>(vertex2.position, 1.0);
+    let bary = bloom_perspective_barycentrics(point_ndc.xy, clip0, clip1, clip2);
+    let interpolated = BloomVertex3D(
+        bloom_interpolate3(vertex0.position, vertex1.position, vertex2.position, bary),
+        bloom_interpolate3(vertex0.normal, vertex1.normal, vertex2.normal, bary),
+        bloom_interpolate4(vertex0.color, vertex1.color, vertex2.color, bary),
+        bloom_interpolate2(vertex0.uv, vertex1.uv, vertex2.uv, bary),
+        bloom_interpolate4(vertex0.joints, vertex1.joints, vertex2.joints, bary),
+        bloom_interpolate4(vertex0.weights, vertex1.weights, vertex2.weights, bary),
+        bloom_interpolate4(vertex0.tangent, vertex1.tangent, vertex2.tangent, bary),
+    );
+    write_vertex(72u, interpolated);
+    output.words[96] = visibility.draw_id;
+    output.words[97] = visibility.primitive_id;
+    output.words[98] = select(0u, 1u, visibility.front_facing);
+    output.words[99] = draw.draw.w;
+}
+"#,
+        ]
+        .concat();
+        wgpu::naga::front::wgsl::parse_str(&shader_source)
+            .unwrap_or_else(|error| panic!("shared-geometry oracle WGSL failed: {error:?}"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("visibility_shared_geometry_oracle_shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("visibility_shared_geometry_oracle_pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let visibility = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("visibility_shared_geometry_oracle_ids"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: VISIBILITY_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &visibility,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::bytes_of(&visibility_record),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(VISIBILITY_BYTES_PER_PIXEL as u32),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let make_storage = |label, contents: &[u8]| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+        };
+        let vertex_buffer = make_storage(
+            "visibility_shared_geometry_oracle_vertices",
+            bytemuck::cast_slice(&vertices),
+        );
+        let index_buffer = make_storage(
+            "visibility_shared_geometry_oracle_indices",
+            bytemuck::cast_slice(&indices),
+        );
+        let draw_buffer = make_storage(
+            "visibility_shared_geometry_oracle_draws",
+            bytemuck::bytes_of(&draw),
+        );
+        let point_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("visibility_shared_geometry_oracle_point"),
+            contents: bytemuck::cast_slice(&point_ndc),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("visibility_shared_geometry_oracle_output"),
+            size: (OUTPUT_WORDS * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("visibility_shared_geometry_oracle_readback"),
+            size: (OUTPUT_WORDS * 4) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let visibility_view = visibility.create_view(&Default::default());
+        let layout = pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("visibility_shared_geometry_oracle_bind_group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&visibility_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: index_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: draw_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: point_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("visibility_shared_geometry_oracle_encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("visibility_shared_geometry_oracle_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(
+            &output_buffer,
+            0,
+            &readback_buffer,
+            0,
+            (OUTPUT_WORDS * 4) as u64,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let output_bytes = readback(&device, &readback_buffer);
+        let output: &[u32] = bytemuck::cast_slice(&output_bytes);
+        let expected_raw: &[u32] = bytemuck::cast_slice(&vertices[1..]);
+        assert_eq!(&output[..72], expected_raw);
+
+        let clip = [
+            [-0.9, -0.8, 0.5, 1.0],
+            [-0.2, -1.6, 0.5, 2.0],
+            [-2.0, 3.2, 0.5, 4.0],
+        ];
+        let bary = perspective_barycentrics([point_ndc[0], point_ndc[1]], clip).unwrap();
+        let source: &[f32] = bytemuck::cast_slice(&vertices[1..]);
+        for lane in 0..24 {
+            let expected =
+                source[lane] * bary[0] + source[24 + lane] * bary[1] + source[48 + lane] * bary[2];
+            let actual = f32::from_bits(output[72 + lane]);
+            assert!(
+                (actual - expected).abs() <= 2.0e-5,
+                "interpolated Vertex3D lane {lane}: GPU {actual}, CPU {expected}"
+            );
+        }
+        assert_eq!(&output[96..100], &[0, 0, 1, 1_234]);
     }
 }

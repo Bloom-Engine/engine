@@ -17,6 +17,8 @@ The implementation contract is now:
 - reconstruct perspective-correct barycentrics from the referenced
   triangle's clip positions rather than storing them or expanding shared
   vertices;
+- require the optional WebGPU `primitive-index` capability and preserve the
+  existing 96-byte `Vertex3D` storage layout as six packed `vec4<u32>` lanes;
 - admit only static opaque/masked shared-arena geometry with Tier-A global
   materials; blend, transmission, layered/custom, skinned, deforming, and
   unsupported content stays on the forward compatibility path;
@@ -28,12 +30,15 @@ The implementation contract is now:
   reconstructed output, and transient allocation.
 
 The shared CPU/WGSL ABI and perspective reconstruction live in
-`renderer/visibility_buffer.rs` and
-`shaders/visibility_buffer/reconstruct.wgsl`. The first runtime milestone is
-a diagnostic raster/readback oracle; production composition follows only
-after that oracle catches ID, winding, clipping, and interpolation faults.
+`renderer/visibility_buffer.rs`,
+`shaders/visibility_buffer/reconstruct.wgsl`, and
+`shaders/visibility_buffer/geometry.wgsl`. Hardware readback oracles now prove
+ID/winding rasterization, perspective reconstruction, non-zero first-index and
+base-vertex addressing, the exact packed `Vertex3D` byte layout, and all 24
+reconstructed vertex lanes. The next milestone is an opt-in runtime A/B pass;
+production composition follows only after it passes the no-regression gate.
 
-## Problem
+## Original problem statement (historical)
 
 The `main_hdr_pass` writes four MRTs at the full physical resolution:
 
@@ -44,9 +49,10 @@ The `main_hdr_pass` writes four MRTs at the full physical resolution:
 | `velocity_rt`  | Rg16Float   | 4 |
 | `albedo_rt`    | Rgba8Unorm  | 4 |
 
-Total: **18 bytes per pixel written** by every fragment. At 1600×900 that's
-26 MB per pass per frame, with overdraw multiplying the real write count.
-Bandwidth-bound on integrated GPUs.
+Total: **18 bytes per winning pixel written** by the current main pass. At
+1600×900 that is 26 MB per full-surface pass before attachment compression or
+backend effects. The old claim that overdraw multiplies all four writes is no
+longer valid because the alpha-aware depth prepass rejects hidden fragments.
 
 UE5's Nanite uses a **visibility buffer** instead: store only `(triangle_id,
 barycentrics)` (~8 bytes) in the G-buffer, defer material evaluation to the
@@ -66,20 +72,22 @@ This is a significant refactor — do ticket 005 (depth prepass) first. Then:
 3. **MRTs that post-FX consumes** (normal, albedo, material, velocity) can
    either be rebuilt per-pixel in the shading pass OR kept as separate passes.
    Simplest path: the shading pass writes them alongside the final HDR
-   colour — still one write per pixel, vs 4 writes per overdrawn pixel today.
+   colour. That preserves the winning-pixel attachment footprint, so any gain
+   must come from the cheaper visibility raster or improved scheduling and
+   must be demonstrated by the total-pass A/B.
 
-## Simpler intermediate step
+## Simpler intermediate step (landed)
 
-If full visibility buffer is too much, consider **dropping unused MRTs when
-features are off**:
+Bloom already **drops unused MRTs when features are off** on the constrained
+`lean_mrt` route:
 
 - `velocity_rt` is only needed when TAA or motion-blur is on.
 - `albedo_rt` is only needed when SSGI or SSR is on.
 - `material_rt` is needed for SSR and the shadow map sampler stuff.
 
-Rebuild the `scene_pipeline` with 2 or 3 MRT targets when the user has
-disabled the dependent post-FX. Cut 30-50% of the MRT bandwidth in low-quality
-modes. This is a ~2-day win instead of 2 weeks.
+The constrained scene pipeline uses fewer MRT targets when dependent post-FX
+is disabled, reducing its attachment bandwidth without changing the full
+quality path.
 
 ## References
 
@@ -102,9 +110,11 @@ modes. This is a ~2-day win instead of 2 weeks.
 
 ## Notes for the implementer
 
-- wgpu needs a storage buffer of per-mesh vertex data (triangle index buffer
-  + vertex attribute buffer, GPU-indexed by mesh_id). That aligns with
-  ticket 009 (GPU-driven rendering).
+- Reuse #28's STORAGE-capable shared vertex/index arenas and `GpuDrawRecord`.
+  `draw.y` is the first index, `bitcast<i32>(draw.z)` is the base vertex, and
+  `draw.w` is the material ID. Do not declare `Vertex3D` with native WGSL
+  `vec3` fields: storage alignment would not match Rust's tightly packed
+  offsets. Use the checked six-`vec4<u32>` decoder.
 - Animated meshes (skinned) need special handling — triangle positions change
   per frame. Either compute-skin to a fixed buffer first, or keep animated
   meshes on the traditional path and use visibility buffer for static only.
@@ -116,40 +126,15 @@ modes. This is a ~2-day win instead of 2 weeks.
   pass, SSR/SSGI/SSAO inputs.
 - `native/shared/src/scene.rs` — mesh_id assignment, vertex buffer layout.
 
-## Deferred — reopen criteria
+## Activation state
 
-Real GPU bandwidth win (~14 MB/frame at 1600×900 × overdraw factor, on
-a benchmark that currently writes 26 MB/pass) but **invisible behind
-the vsync cap on Sponza**. The main perf target landed at 60 fps vsync
-on full quality, so any further pass-cost reduction just gives headroom
-we can't measure here.
+The ticket is under active qualification, but the shipping path remains off.
+The old percentage and MB/frame estimates are not activation evidence because
+they predate the alpha-aware depth prepass and omit the visibility shading
+pass. Enablement requires uncapped captures on at least the representative
+discrete and integrated/mobile tiers, with per-pass GPU timestamps, total
+transient bytes, full compatibility composition, and governed image diffs.
 
-Reopen when one of these triggers:
-
-- **A target scene pushes past the 16.7 ms vsync ceiling on the
-  benchmark machine.** The 50%+ fragment-bandwidth reduction from a
-  visibility buffer is the remaining GPU-side lever for Sponza-class
-  bandwidth-bound scenes.
-- **Integrated / mobile GPUs become a priority.** Bandwidth matters
-  disproportionately more on tile-based and integrated hardware; this
-  ticket is the single biggest available reduction.
-- **Overdraw-heavy scenes** (foliage, hair, transparent-dense
-  particles) become the target. The "every visible pixel shades
-  exactly once" property of a visibility buffer + depth-prepass combo
-  is essentially the only way to keep overdraw from eating bandwidth.
-
-Effort when reopening is a 2+ week redesign: main_hdr_pass output
-becomes `Rgba32Uint (tri_id, u, v, mesh_id)` only, a new shading pass
-fetches vertex data from per-mesh storage buffers and evaluates PBR,
-downstream MRT consumers (SSR / SSGI / SSAO / post-FX) need to read
-from the rebuilt material channels rather than the current 4-MRT
-layout. Ticket 005's depth-prepass is a natural prerequisite (it was
-deprioritized but would become useful again here). Ticket 009's
-unified vertex/index buffers are a hard prerequisite (the shading
-pass needs a single bindless-style fetch across all meshes).
-
-The "simpler intermediate step" in the approach section above — drop
-unused MRTs when features are off — is a legitimate ~2-day quick win
-for low-quality modes (`--quality 1` / `--quality 0` users on
-integrated hardware). That's the most-likely first concrete follow-up
-when this ticket reopens.
+The low-quality `lean_mrt` intermediate already drops unused material/albedo
+attachments on constrained profiles. That remains the safe bandwidth path
+for adapters which lack `primitive-index` or do not win the runtime A/B.
