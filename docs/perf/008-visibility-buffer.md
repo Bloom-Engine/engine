@@ -51,7 +51,11 @@ Runtime qualification is explicitly requested before engine attachment:
 - `BLOOM_VISIBILITY_BUFFER=shade` suppresses eligible forward fragments and
   composes their full PBR/MRT results from the packed visibility target;
   compatibility content remains forward-rendered and later opaque/custom
-  passes preserve their established ordering;
+  passes preserve their established ordering. The cull pass writes
+  slot-preserving eligible and compatibility indirect streams: the visibility
+  raster receives only eligible instances, while the main forward pass receives
+  only compatibility instances. The all-draw stream remains authoritative for
+  the shared depth prepass;
 - unset/off requests no `primitive-index` device feature, creates no pipeline,
   texture, or bind group, and records no visibility work.
 
@@ -59,7 +63,8 @@ All modes expose `visibility_buffer_runtime` in the public renderer capability
 report, including admitted/compatibility draw counts, composition ownership,
 current extent, exact owned bytes, activation reason, and whether the current
 frame recorded work. Validate/debug own 16 bytes/pixel for IDs plus diagnostic
-normals; shade owns only the 8-byte ID target.
+normals; shade owns the 8-byte ID target plus two bounded 20-byte-per-capacity
+slot indirect streams. Off/validate/debug allocate neither routed stream.
 
 ## Original problem statement (historical)
 

@@ -124,11 +124,15 @@ fn opt_in_visibility_shading_replaces_eligible_forward_pixels() {
         green_pixels > 256,
         "eligible forward pixels were suppressed but visibility PBR produced no coverage"
     );
-
     let report: serde_json::Value =
         serde_json::from_str(&engine.renderer.renderer_capability_report_json())
             .expect("post-frame capability report is JSON");
-    let runtime = &report["runtime_support"]["gpu_driven"]["visibility_buffer_runtime"];
+    let gpu_driven = &report["runtime_support"]["gpu_driven"];
+    assert_eq!(gpu_driven["visibility_routed_indirect_streams"], true);
+    assert!(gpu_driven["visibility_routed_indirect_bytes"]
+        .as_u64()
+        .is_some_and(|bytes| bytes > 0));
+    let runtime = &gpu_driven["visibility_buffer_runtime"];
     assert_eq!(runtime["requested_mode"], "shade");
     assert_eq!(runtime["pbr_shading"], true);
     assert_eq!(runtime["forward_authoritative"], false);
