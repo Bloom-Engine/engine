@@ -16,16 +16,19 @@
 // softens the edge a touch and hides per-texel crawl without the cost of a
 // full Poisson disk.
 fn sample_shadow_cascade(
-  cascade_idx: u32, world_pos: vec3<f32>,
+  cascade_idx: u32, world_pos: vec3<f32>, outside_value: f32,
 ) -> f32 {
   let light_clip = view.shadow_cascades[cascade_idx]
                  * vec4<f32>(world_pos, 1.0);
   let light_ndc = light_clip.xyz / light_clip.w;
 
-  // Outside the cascade's frustum → treat as lit.
+  // A selected cascade miss is lit. During cross-cascade blending the
+  // caller instead supplies the valid current-cascade value: the next
+  // fitted slice is not required to cover the inner part of the blend
+  // zone, especially while a translation-slack fit is retained.
   if (abs(light_ndc.x) > 1.0 || abs(light_ndc.y) > 1.0
       || light_ndc.z < 0.0  || light_ndc.z > 1.0) {
-    return 1.0;
+    return outside_value;
   }
 
   let uv = vec2<f32>(
@@ -88,7 +91,7 @@ fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
     cascade = 1u;
   }
 
-  let shadow_val = sample_shadow_cascade(cascade, world_pos);
+  let shadow_val = sample_shadow_cascade(cascade, world_pos, 1.0);
 
   // Blend into the next cascade over the last 10% of this cascade's range so
   // the transition is a soft gradient rather than a hard line that the camera
@@ -105,7 +108,7 @@ fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
   let blend_zone = (split_far - split_near) * 0.1;
   let dist_to_edge = split_far - view_depth;
   if (cascade < 2u && dist_to_edge < blend_zone) {
-    let next_val = sample_shadow_cascade(cascade + 1u, world_pos);
+    let next_val = sample_shadow_cascade(cascade + 1u, world_pos, shadow_val);
     let t = clamp(dist_to_edge / blend_zone, 0.0, 1.0);
     return mix(next_val, shadow_val, t);
   }

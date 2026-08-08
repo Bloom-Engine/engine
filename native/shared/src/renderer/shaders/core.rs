@@ -641,15 +641,11 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
         cascade = 1;
     }
 
-    // Normal-offset receiver bias: push the receiver position off the
-    // surface along its geometric normal by ~1.5 shadow texels of the
-    // selected cascade before projecting. The fixed depth bias alone
-    // (0.001 ≈ 8 cm across cascade 2's depth range) is SMALLER than the
-    // per-texel depth slope of steep receivers — a vertical wall under a
-    // 40°-elevation sun changes ~12 cm of light-space depth per shadow
-    // texel — so entire sun-facing faces used to self-shadow into a
-    // uniform ~50% PCF dimming (measured 68 vs 127 luma on the shooter's
-    // stone house). Offsetting the receiver sidesteps the slope entirely;
+    // Push the receiver off its surface by ~1.5 shadow texels. The fixed
+    // depth bias is smaller than the per-texel depth slope of steep
+    // receivers, so sun-facing walls otherwise self-shadow uniformly
+    // (measured 68 vs 127 luma on the shooter's stone house). This offset
+    // sidesteps that slope;
     // the offset is texel-proportional (≈2 cm near, ≈23 cm at cascade 2),
     // far below visible peter-panning at each cascade's viewing distance.
     // The cascade fit radius ≈ its split distance (compute_cascade_vps
@@ -702,6 +698,11 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
         let next_pos = world_pos + geo_n * (2.0 * next_fit / map_dim) * 1.5;
         let next_clip = lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(next_pos, 1.0);
         let next_ndc = next_clip.xyz / next_clip.w;
+        // The next fitted slice may not cover the inner blend zone. Never
+        // turn its clamped edge texel into a moving, falsely-lit shadow gap.
+        if (any(abs(next_ndc.xy) > vec2<f32>(1.0)) || next_ndc.z < 0.0 || next_ndc.z > 1.0) {
+            return shadow_val;
+        }
         let next_uv = vec2<f32>(next_ndc.x * 0.5 + 0.5, 1.0 - (next_ndc.y * 0.5 + 0.5));
         let next_depth_ref = next_ndc.z - bias;
         let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);

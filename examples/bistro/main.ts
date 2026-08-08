@@ -28,7 +28,7 @@ import {
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
-  setSsgiEnabled, setSsrEnabled,
+  setSsgiEnabled, setSsrEnabled, setShadowsAlwaysFresh,
   getCommandLineArgs, resize,
 } from "bloom/core";
 import { parseQualityRun, QualityRun } from "bloom/quality";
@@ -56,6 +56,9 @@ let captureFrames = 0;
 let capturePath = "";
 let frameCount = 0;
 let initYaw = 0.0;
+let initCamX = -26.43;
+let initCamY = 3.16;
+let initCamZ = 11.17;
 let scenePath = "assets/bistro.gltf";
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
 let bloomOverride = -1;
@@ -64,6 +67,7 @@ let sunShaftOverride = -1;
 let ssgiOverride = -1;
 let ssrOverride = -1;
 let vsmMotionPath = false;
+let shadowsAlwaysFresh = false;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -71,6 +75,15 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--yaw" && i + 1 < argv.length) {
     initYaw = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--camera-x" && i + 1 < argv.length) {
+    initCamX = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--camera-y" && i + 1 < argv.length) {
+    initCamY = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--camera-z" && i + 1 < argv.length) {
+    initCamZ = parseFloat(argv[i + 1]);
   }
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
@@ -96,6 +109,9 @@ for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--vsm-motion-path") {
     vsmMotionPath = true;
   }
+  if (argv[i] === "--shadows-always-fresh") {
+    shadowsAlwaysFresh = true;
+  }
 }
 
 // ---- Init ----
@@ -105,6 +121,7 @@ setTargetFPS(60);
 let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qualityConfig) : null;
 setEnvClearFromHdr("assets/outdoor.hdr");
 enableShadows();
+setShadowsAlwaysFresh(shadowsAlwaysFresh);
 
 // Open-air street scene: the sky is the dominant IBL source. 1.2×
 // env intensity gives colourful ambient reflection without washing
@@ -148,9 +165,9 @@ for (let i = 0; i < bistro.meshCount; i = i + 1) {
 // -26.43, 3.16, 11.17 aimed toward the bistro façade near the world
 // origin). Gives a clean opening frame showing the signature corner
 // with the lantern, awning, and cobble street.
-let camX = -26.43;
-let camY = 3.16;
-let camZ = 11.17;
+let camX = initCamX;
+let camY = initCamY;
+let camZ = initCamZ;
 let camYaw = initYaw !== 0.0 ? initYaw : -1.17; // ≈ 67° left of -Z
 let camPitch = 0.0;
 let cursorLocked = false;

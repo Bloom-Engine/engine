@@ -1149,6 +1149,8 @@ mod tests {
         assert!(source.contains("return max(-view_pos.z, 0.0);"));
         assert!(source.contains("split_far - view_depth"));
         assert!(!source.contains("length(world_pos - cam)"));
+        assert!(source.contains("cascade_idx: u32, world_pos: vec3<f32>, outside_value: f32"));
+        assert!(source.contains("sample_shadow_cascade(cascade + 1u, world_pos, shadow_val)"));
     }
 
     /// End-to-end validation: resolve the minimal test material's

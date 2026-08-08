@@ -19,6 +19,12 @@ fn shadow_cascade_selection_matches_the_fitted_view_frustum_depth() {
 }
 
 #[test]
+fn shadow_cascade_blend_never_samples_outside_the_next_fit() {
+    assert!(SCENE_SHADER.contains("if (any(abs(next_ndc.xy) > vec2<f32>(1.0)) || next_ndc.z < 0.0"));
+    assert!(SCENE_SHADER.contains("return shadow_val;"));
+}
+
+#[test]
 fn native_and_folded_refractive_variants_parse_without_touching_ordinary_shader() {
     assert!(!SCENE_SHADER.contains("fs_refractive_scene"));
     for (folded, screen_space_reflections) in [(false, false), (false, true), (true, false)] {
