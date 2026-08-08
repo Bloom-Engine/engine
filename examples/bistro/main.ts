@@ -67,6 +67,8 @@ let sunShaftOverride = -1;
 let ssgiOverride = -1;
 let ssrOverride = -1;
 let vsmMotionPath = false;
+let motionYaw = 0.0;
+let motionFrames = 0;
 let shadowsAlwaysFresh = false;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
@@ -108,6 +110,12 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--vsm-motion-path") {
     vsmMotionPath = true;
+  }
+  if (argv[i] === "--motion-yaw" && i + 1 < argv.length) {
+    motionYaw = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--motion-frames" && i + 1 < argv.length) {
+    motionFrames = Math.max(0, Math.floor(parseFloat(argv[i + 1])));
   }
   if (argv[i] === "--shadows-always-fresh") {
     shadowsAlwaysFresh = true;
@@ -207,15 +215,25 @@ while (!windowShouldClose()) {
   // Bistro camera on frame 240 for a matched static/transition comparison.
   let renderCamX = camX;
   let renderCamZ = camZ;
+  let renderYaw = camYaw;
   if (vsmMotionPath) {
     fixtureFrame = fixtureFrame + 1;
-    const pathStep = Math.floor(fixtureFrame / 30) % 2;
+    // With --motion-frames, interpolate once from the launch pose to the
+    // endpoint so the fixture crosses the same refit/cache boundaries as
+    // interactive walking.  The default keeps the established 30-frame
+    // square wave used by the original translation-only oracle.
+    const pathStep = motionFrames > 0
+      ? Math.min(fixtureFrame / motionFrames, 1.0)
+      : Math.floor(fixtureFrame / 30) % 2;
     renderCamX = camX + pathStep * 3.748170285;
     renderCamZ = camZ + pathStep * 4.685212856;
+    renderYaw = camYaw + pathStep * motionYaw;
   }
-  const lookX = renderCamX + Math.cos(camPitch) * fwdX * 100;
+  const renderFwdX = -Math.sin(renderYaw);
+  const renderFwdZ = -Math.cos(renderYaw);
+  const lookX = renderCamX + Math.cos(camPitch) * renderFwdX * 100;
   const lookY = camY + Math.sin(camPitch) * 100;
-  const lookZ = renderCamZ + Math.cos(camPitch) * fwdZ * 100;
+  const lookZ = renderCamZ + Math.cos(camPitch) * renderFwdZ * 100;
 
   beginDrawing();
 

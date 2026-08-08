@@ -792,6 +792,14 @@ impl ShadowMap {
         far: f32,
         scene_bounds: Option<([f32; 3], [f32; 3])>,
     ) {
+        // The diagnostic "always fresh" mode must isolate the complete
+        // shadow state, not just depth-texture reuse.  Recomputing an exact
+        // fit here lets visual A/B captures distinguish accepted-fit history
+        // from cached shadow contents without changing the default path.
+        if self.always_fresh {
+            self.accepted_fit = [None; NUM_CASCADES];
+        }
+
         let len = (light_dir[0] * light_dir[0]
             + light_dir[1] * light_dir[1]
             + light_dir[2] * light_dir[2])
