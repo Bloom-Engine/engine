@@ -629,12 +629,8 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
     if (lighting.dir_light_count.y < 0.5) {
         return 1.0;
     }
-    // Select by the same positive view-space depth used to fit the
-    // camera-frustum slices in ShadowMap::compute_cascade_vps. Using
-    // spherical camera distance here is not equivalent: a receiver near
-    // the side of the camera can select a tight near cascade whose fitted
-    // XY footprint does not contain it. The bounds check below then returns
-    // fully lit, making a static shadow disappear when the camera turns.
+    // Match the positive view depth used to fit the camera-frustum slices.
+    // Spherical distance can select an undersized cascade for side receivers.
     let view_pos = lighting.shadow_view_matrix * vec4<f32>(world_pos, 1.0);
     let view_depth = max(-view_pos.z, 0.0);
 

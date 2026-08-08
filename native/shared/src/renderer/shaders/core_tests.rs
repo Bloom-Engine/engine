@@ -11,9 +11,8 @@ fn scene_vertex_shader_preserves_the_missing_tangent_sentinel() {
 
 #[test]
 fn shadow_cascade_selection_matches_the_fitted_view_frustum_depth() {
-    assert!(SCENE_SHADER.contains(
-        "let view_pos = lighting.shadow_view_matrix * vec4<f32>(world_pos, 1.0);"
-    ));
+    assert!(SCENE_SHADER
+        .contains("let view_pos = lighting.shadow_view_matrix * vec4<f32>(world_pos, 1.0);"));
     assert!(SCENE_SHADER.contains("let view_depth = max(-view_pos.z, 0.0);"));
     assert!(SCENE_SHADER.contains("split_far - view_depth"));
     assert!(!SCENE_SHADER.contains("length(world_pos - cam)"));
