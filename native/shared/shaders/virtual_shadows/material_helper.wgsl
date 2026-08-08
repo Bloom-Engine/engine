@@ -1,16 +1,17 @@
 fn sample_shadow_cascade(
     cascade_idx: u32,
     world_pos: vec3<f32>,
+    outside_value: f32,
 ) -> f32 {
     if (vsm_params.words.x == 0u) {
-        return sample_shadow_cascade_csm(cascade_idx, world_pos);
+        return sample_shadow_cascade_csm(cascade_idx, world_pos, outside_value);
     }
     let light_clip = vsm_params.level_vps[cascade_idx]
                    * vec4<f32>(world_pos, 1.0);
     let light_ndc = light_clip.xyz / light_clip.w;
     if (abs(light_ndc.x) > 1.0 || abs(light_ndc.y) > 1.0
         || light_ndc.z < 0.0 || light_ndc.z > 1.0) {
-        return sample_shadow_cascade_csm(cascade_idx, world_pos);
+        return sample_shadow_cascade_csm(cascade_idx, world_pos, outside_value);
     }
     let shadow_uv = vec2<f32>(
         light_ndc.x * 0.5 + 0.5,
@@ -27,7 +28,7 @@ fn sample_shadow_cascade(
         0,
     ).x;
     if (encoded == 0u) {
-        return sample_shadow_cascade_csm(cascade_idx, world_pos);
+        return sample_shadow_cascade_csm(cascade_idx, world_pos, outside_value);
     }
     let physical_layer = i32((encoded & 0xffffu) - 1u);
     let interior = f32(vsm_params.words.z);
@@ -60,7 +61,7 @@ fn sample_shadow_cascade(
     let residency_age = f32(encoded >> 16u);
     if (residency_age < 8.0) {
         return mix(
-            sample_shadow_cascade_csm(cascade_idx, world_pos),
+            sample_shadow_cascade_csm(cascade_idx, world_pos, outside_value),
             virtual_value,
             residency_age / 8.0,
         );

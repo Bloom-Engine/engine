@@ -25,6 +25,13 @@ fn shadow_cascade_blend_never_samples_outside_the_next_fit() {
 }
 
 #[test]
+fn selected_shadow_cascade_miss_hands_off_instead_of_punching_a_lit_hole() {
+    assert!(SCENE_SHADER.contains("for (var handoff = 0; handoff < 2; handoff = handoff + 1)"));
+    assert!(SCENE_SHADER.contains("cascade = cascade + 1;"));
+    assert!(SCENE_SHADER.contains("the next valid cascade"));
+}
+
+#[test]
 fn native_and_folded_refractive_variants_parse_without_touching_ordinary_shader() {
     assert!(!SCENE_SHADER.contains("fs_refractive_scene"));
     for (folded, screen_space_reflections) in [(false, false), (false, true), (true, false)] {

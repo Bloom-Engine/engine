@@ -91,7 +91,21 @@ fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
     cascade = 1u;
   }
 
-  let shadow_val = sample_shadow_cascade(cascade, world_pos, 1.0);
+  // A retained fit can leave the selected cascade just short of an offset
+  // receiver while the next, wider cascade still covers it. Use a negative
+  // sentinel for an out-of-fit sample and hand off only in that rare case;
+  // valid receivers keep the same single PCF sample as before.
+  var shadow_val = sample_shadow_cascade(cascade, world_pos, -1.0);
+  for (var handoff = 0; handoff < 2 && shadow_val < 0.0; handoff = handoff + 1) {
+    if (cascade >= 2u) {
+      return 1.0;
+    }
+    cascade = cascade + 1u;
+    shadow_val = sample_shadow_cascade(cascade, world_pos, -1.0);
+  }
+  if (shadow_val < 0.0) {
+    return 1.0;
+  }
 
   // Blend into the next cascade over the last 10% of this cascade's range so
   // the transition is a soft gradient rather than a hard line that the camera

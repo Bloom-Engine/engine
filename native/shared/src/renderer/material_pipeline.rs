@@ -1150,6 +1150,8 @@ mod tests {
         assert!(source.contains("split_far - view_depth"));
         assert!(!source.contains("length(world_pos - cam)"));
         assert!(source.contains("cascade_idx: u32, world_pos: vec3<f32>, outside_value: f32"));
+        assert!(source.contains("sample_shadow_cascade(cascade, world_pos, -1.0)"));
+        assert!(source.contains("shadow_val < 0.0"));
         assert!(source.contains("sample_shadow_cascade(cascade + 1u, world_pos, shadow_val)"));
     }
 

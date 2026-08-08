@@ -463,19 +463,19 @@ let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);
 fn material_shader_variant_wraps_the_canonical_cascade_sampler() {
     let source = r#"
 fn sample_shadow_cascade(
-  cascade_idx: u32, world_pos: vec3<f32>,
+  cascade_idx: u32, world_pos: vec3<f32>, outside_value: f32,
 ) -> f32 {
   return 1.0;
 }
 fn sample_sun_shadow(world_pos: vec3<f32>) -> f32 {
-  return sample_shadow_cascade(0u, world_pos);
+  return sample_shadow_cascade(0u, world_pos, -1.0);
 }
 "#;
     let variant = directional_material_shader(source.to_owned());
     assert!(variant.contains("@binding(10) var vsm_page_table"));
     assert!(variant.contains("fn sample_shadow_cascade_csm("));
     assert_eq!(variant.matches("fn sample_shadow_cascade(").count(), 1);
-    assert!(variant.contains("sample_shadow_cascade_csm(cascade_idx, world_pos)"));
+    assert!(variant.contains("sample_shadow_cascade_csm(cascade_idx, world_pos, outside_value)"));
     assert!(variant.contains("level_vps: array<mat4x4<f32>, 3>"));
 }
 

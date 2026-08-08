@@ -657,11 +657,36 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
     } else if (cascade == 1) {
         fit_r = lighting.shadow_cascade_splits.y;
     }
-    let recv_pos = world_pos + geo_n * (2.0 * fit_r / map_dim) * 1.5;
+    var recv_pos = world_pos + geo_n * (2.0 * fit_r / map_dim) * 1.5;
 
-    // Project through the selected cascade's VP
-    let light_clip = lighting.shadow_cascade_vps[cascade] * vec4<f32>(recv_pos, 1.0);
-    let light_ndc = light_clip.xyz / light_clip.w;
+    // Project through the selected cascade's VP. A retained translation-slack
+    // fit can put a receiver (especially after its normal offset) just outside
+    // the selected cascade even though the next, wider cascade covers it. The
+    // old path returned fully lit here, cutting view-dependent holes into an
+    // otherwise continuous shadow as the camera moved or turned. Fall through
+    // to the next valid cascade; the normal in-fit path still performs exactly
+    // one depth sample.
+    var light_clip = lighting.shadow_cascade_vps[cascade] * vec4<f32>(recv_pos, 1.0);
+    var light_ndc = light_clip.xyz / light_clip.w;
+    for (var handoff = 0; handoff < 2; handoff = handoff + 1) {
+        let outside = light_ndc.x < -1.0 || light_ndc.x > 1.0 ||
+            light_ndc.y < -1.0 || light_ndc.y > 1.0 ||
+            light_ndc.z < 0.0 || light_ndc.z > 1.0;
+        if (!outside) {
+            break;
+        }
+        if (cascade >= 2) {
+            return 1.0;
+        }
+        cascade = cascade + 1;
+        fit_r = lighting.shadow_cascade_splits.z;
+        if (cascade == 1) {
+            fit_r = lighting.shadow_cascade_splits.y;
+        }
+        recv_pos = world_pos + geo_n * (2.0 * fit_r / map_dim) * 1.5;
+        light_clip = lighting.shadow_cascade_vps[cascade] * vec4<f32>(recv_pos, 1.0);
+        light_ndc = light_clip.xyz / light_clip.w;
+    }
     if (light_ndc.x < -1.0 || light_ndc.x > 1.0 ||
         light_ndc.y < -1.0 || light_ndc.y > 1.0 ||
         light_ndc.z < 0.0 || light_ndc.z > 1.0) {
