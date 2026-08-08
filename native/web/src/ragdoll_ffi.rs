@@ -207,11 +207,10 @@ pub fn bloom_ragdoll_update(rag: f64, anim: f64, dt: f64) -> f64 {
     let age = eng.ragdolls.get(rag as u32).map(|r| r.age).unwrap_or(0.0);
 
     // Split borrow: apply() needs &mut ModelAnimation and &Ragdoll.
-    let ragdoll_ptr: *const bloom_shared::ragdoll::Ragdoll =
-        match eng.ragdolls.get(rag as u32) {
-            Some(r) => r,
-            None => return 0.0,
-        };
+    let ragdoll_ptr: *const bloom_shared::ragdoll::Ragdoll = match eng.ragdolls.get(rag as u32) {
+        Some(r) => r,
+        None => return 0.0,
+    };
     if let Some(a) = eng.models.get_animation_mut(anim) {
         unsafe { (*ragdoll_ptr).apply(a, &world) };
     }
@@ -220,8 +219,14 @@ pub fn bloom_ragdoll_update(rag: f64, anim: f64, dt: f64) -> f64 {
         if !a.joint_matrices.is_empty() {
             let (s, c) = (rot.sin(), rot.cos());
             // PT-7: anim handle = prev-palette pairing key.
-            eng.renderer
-                .set_joint_matrices_scaled(anim.to_bits(), &a.joint_matrices, scale, pos, s, c);
+            eng.renderer.set_joint_matrices_scaled(
+                anim.to_bits(),
+                &a.joint_matrices,
+                scale,
+                pos,
+                s,
+                c,
+            );
         }
     }
     age as f64

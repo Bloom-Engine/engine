@@ -44,6 +44,94 @@ const NOT_IN_MANIFEST_ALLOWLIST = new Set([
 // name presence is checked but a thinner hand-written set is expected.
 const STUB_PLATFORMS = new Set(['watchos']);
 
+// Renderer controls are status-bearing by contract (#138): 1.0 means the
+// active backend applied the request, 0.0 means unsupported/rejected. Keeping
+// the policy here prevents a future platform mirror from quietly reverting a
+// setter to a void no-op.
+const RENDERER_STATUS_FUNCTIONS = new Set([
+  'bloom_set_env_clear_from_hdr',
+  'bloom_set_material_params_scratch',
+  'bloom_set_material_reflection_probe',
+  'bloom_set_material_texture_array',
+  'bloom_set_material_shading_model',
+  'bloom_set_material_probe_visible',
+  'bloom_set_material_foliage',
+  'bloom_clear_post_pass',
+  'bloom_clear_all_post_passes',
+  'bloom_set_joint_test',
+  'bloom_set_ambient_light',
+  'bloom_set_directional_light',
+  'bloom_set_procedural_sky',
+  'bloom_set_sun_direction',
+  'bloom_set_fog',
+  'bloom_set_chromatic_aberration',
+  'bloom_set_vignette',
+  'bloom_set_film_grain',
+  'bloom_set_sharpen_strength',
+  'bloom_set_present_mode',
+  'bloom_set_transparency_composition_mode',
+  'bloom_set_sun_shafts',
+  'bloom_set_auto_exposure',
+  'bloom_set_taa_enabled',
+  'bloom_set_occlusion_culling',
+  'bloom_set_render_scale',
+  'bloom_set_upscale_mode',
+  'bloom_set_cas_strength',
+  'bloom_set_auto_resolution',
+  'bloom_set_manual_exposure',
+  'bloom_set_env_intensity',
+  'bloom_set_ssgi_enabled',
+  'bloom_set_path_tracing',
+  'bloom_reset_temporal_history',
+  'bloom_set_ssgi_intensity',
+  'bloom_set_ssgi_radius',
+  'bloom_set_dof',
+  'bloom_set_quality_preset',
+  'bloom_set_shadows_enabled',
+  'bloom_set_shadows_always_fresh',
+  'bloom_set_bloom_enabled',
+  'bloom_set_bloom_intensity',
+  'bloom_set_tonemap',
+  'bloom_set_auto_exposure_key',
+  'bloom_set_auto_exposure_rate',
+  'bloom_set_ssao_enabled',
+  'bloom_set_ssao_intensity',
+  'bloom_set_ssao_radius',
+  'bloom_set_wind',
+  'bloom_set_output_scale',
+  'bloom_set_model_foliage_wind',
+  'bloom_set_foliage_shadow_motion',
+  'bloom_set_cloud_shadows',
+  'bloom_add_shadowed_point_light',
+  'bloom_add_shadowed_spot_light',
+  'bloom_set_ssr_enabled',
+  'bloom_set_motion_blur_enabled',
+  'bloom_set_sss_enabled',
+  'bloom_scene_set_visible',
+  'bloom_scene_set_cast_shadow',
+  'bloom_scene_set_gi_only',
+  'bloom_scene_set_receive_shadow',
+  'bloom_scene_set_parent',
+  'bloom_scene_set_transform',
+  'bloom_scene_set_trs',
+  'bloom_scene_set_transform16',
+  'bloom_scene_set_lod',
+  'bloom_scene_attach_model_lod',
+  'bloom_scene_set_material_color',
+  'bloom_scene_set_material_pbr',
+  'bloom_scene_set_material_emissive',
+  'bloom_scene_set_material_layered_pbr',
+  'bloom_scene_set_material_texture',
+  'bloom_scene_set_material_water',
+  'bloom_scene_set_user_data',
+  'bloom_enable_shadows',
+  'bloom_disable_shadows',
+  'bloom_postfx_set_selected',
+  'bloom_postfx_set_hovered',
+  'bloom_postfx_set_outline_color',
+  'bloom_postfx_set_outline_thickness',
+]);
+
 // ---------------------------------------------------------------------------
 // parsing helpers
 
@@ -82,6 +170,26 @@ function extractRustFns(src) {
   return fns;
 }
 
+/** Return every declared Rust return type for a named exported function. */
+function extractRustReturnTypes(src, name) {
+  const returns = [];
+  const re = new RegExp(`pub (?:async )?(?:extern "C" )?fn ${name}\\s*\\(`, 'g');
+  let match;
+  while ((match = re.exec(src)) !== null) {
+    let depth = 1, i = re.lastIndex;
+    while (i < src.length && depth > 0) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')') depth--;
+      i++;
+    }
+    const bodyStart = src.indexOf('{', i);
+    const headerTail = bodyStart < 0 ? src.slice(i) : src.slice(i, bodyStart);
+    const returnMatch = headerTail.match(/->\s*([A-Za-z0-9_*:<>]+)/);
+    returns.push(returnMatch ? returnMatch[1] : '()');
+  }
+  return returns;
+}
+
 function readDirRust(dir) {
   let all = '';
   for (const f of fs.readdirSync(dir)) {
@@ -90,11 +198,25 @@ function readDirRust(dir) {
   return all;
 }
 
+function readTreeTypeScript(dir) {
+  let all = '';
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const item = path.join(dir, entry.name);
+    if (entry.isDirectory()) all += readTreeTypeScript(item);
+    else if (entry.name.endsWith('.ts')) all += fs.readFileSync(item, 'utf8') + '\n';
+  }
+  return all;
+}
+
 // ---------------------------------------------------------------------------
 // 1. manifest
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const manifest = new Map(); // name -> param count
-for (const f of pkg.perry.nativeLibrary.functions) manifest.set(f.name, f.params.length);
+const manifestReturns = new Map();
+for (const f of pkg.perry.nativeLibrary.functions) {
+  manifest.set(f.name, f.params.length);
+  manifestReturns.set(f.name, f.returns);
+}
 
 // 2. shared macros
 const coreSrc = readDirRust(path.join(ROOT, 'native/shared/src/ffi_core'));
@@ -102,11 +224,47 @@ const coreFns = extractRustFns(coreSrc);
 const physSrc = fs.readFileSync(path.join(ROOT, 'native/shared/src/physics_jolt.rs'), 'utf8');
 const physFns = extractRustFns(physSrc);
 
-// 3. platforms
 let failures = 0, warnings = 0;
 const fail = (msg) => { console.error(`FAIL  ${msg}`); failures++; };
 const warn = (msg) => { console.warn(`warn  ${msg}`); warnings++; };
 
+const watchSrc = readDirRust(path.join(ROOT, 'native/watchos/src'));
+const webSrcForStatus = readDirRust(path.join(ROOT, 'native/web/src'));
+const typeScriptApiSrc = readTreeTypeScript(path.join(ROOT, 'src'));
+for (const name of RENDERER_STATUS_FUNCTIONS) {
+  if (manifestReturns.get(name) !== 'f64') {
+    fail(`${name}: renderer-control manifest return must be f64 status`);
+  }
+  for (const [surface, src] of [
+    ['shared', coreSrc],
+    ['watchos', watchSrc],
+    ['web', webSrcForStatus],
+  ]) {
+    const returns = extractRustReturnTypes(src, name);
+    if (returns.length === 0) {
+      fail(`${surface}: status-bearing renderer control ${name} is not exported`);
+    } else if (returns.some((value) => value !== 'f64')) {
+      fail(`${surface}: ${name} must return f64 status (found ${returns.join(', ')})`);
+    }
+  }
+  let declarationCount = 0;
+  const marker = `declare function ${name}(`;
+  for (let start = typeScriptApiSrc.indexOf(marker);
+       start >= 0;
+       start = typeScriptApiSrc.indexOf(marker, start + marker.length)) {
+    declarationCount++;
+    const end = typeScriptApiSrc.indexOf(';', start);
+    const declaration = typeScriptApiSrc.slice(start, end + 1);
+    if (!declaration.endsWith(': number;')) {
+      fail(`TypeScript declaration for ${name} must expose numeric status`);
+    }
+  }
+  if (declarationCount === 0) {
+    fail(`TypeScript API does not declare status-bearing renderer control ${name}`);
+  }
+}
+
+// 3. platforms
 for (const platform of PLATFORMS) {
   const dir = path.join(ROOT, 'native', platform, 'src');
   if (!fs.existsSync(dir)) continue;
@@ -203,20 +361,11 @@ for (const platform of PLATFORMS) {
     'bloom_attach_hwnd',
     // Pointer-taking mesh scratch buffers (#69) — same cross-module WASM
     // linear-memory bridge TODO as bloom_scene_set_lod.
-    // Art-direction post-FX controls (#69) not yet wired in the web crate.
-    'bloom_set_bloom_intensity',
-    'bloom_set_tonemap',
-    'bloom_set_auto_exposure_key',
-    'bloom_set_auto_exposure_rate',
-    'bloom_set_sharpen_strength',    // same post-FX group; web port TODO
     // Profiler ABI (round-2 EN-011 / EN-020) — GPU-timestamp profiling
     // needs TIMESTAMP_QUERY, which WebGPU does not expose, so neither the
     // numeric row/history accessors nor the text overlay have a web port.
     // Present mode (round-2 #80) — the browser owns swap/vsync; the
     // Fifo/Mailbox/Immediate selector is a no-op on web.
-    // Scene-node setters (round-2) — same Perry-WASM linear-memory bridge
-    // TODO as bloom_scene_set_lod above.
-    'bloom_scene_set_trs',
     // Pointer-taking scratch buffers (round-2) — same cross-module WASM
     // linear-memory bridge TODO as the mesh scratch group above.
     // Water-ripple impulse (round-2 splat compute) — not yet wired on web.
@@ -227,11 +376,6 @@ for (const platform of PLATFORMS) {
     'bloom_scene_update_geometry_scratch',
     // Scene-node transform setter — same group as bloom_scene_set_trs above;
     // web's scene-node setters are only partially ported.
-    // Path tracing (PT-1..8) — the PT backend requires wgpu's
-    // Features::EXPERIMENTAL_RAY_QUERY, which WebGPU does not expose. Same
-    // class of hard platform gap as the profiler's TIMESTAMP_QUERY entries.
-    'bloom_set_path_tracing',
-    'bloom_path_tracing_supported',
   ]);
   const missing = [];
   for (const name of manifest.keys()) {

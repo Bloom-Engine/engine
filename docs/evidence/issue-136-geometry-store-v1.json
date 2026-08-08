@@ -1,0 +1,75 @@
+{
+  "schema": "bloom-asset-store-evidence-v1",
+  "issue": 136,
+  "qualified_revision": "289ba31ab6ff3853b474063af4dcc6df5ac7515f",
+  "contract": {
+    "manifest_schema": "bloom-asset-manifest-v1",
+    "geometry_recipe_version": 1,
+    "content_addressed_chunks": true,
+    "logical_manifests": true,
+    "atomic_manifest_install_after_chunk": true,
+    "matching_cache_hit_is_zero_write": true,
+    "duplicate_content_is_deduplicated": true,
+    "manifest_recomputes_its_build_key": true,
+    "corrupt_manifest_or_chunk_fails_closed": true,
+    "runtime_enabled": false
+  },
+  "canonical_asset": {
+    "logical_id": "quality/damaged-helmet",
+    "path": "examples/renderer-test/assets/DamagedHelmet.glb",
+    "settings": {
+      "hierarchy_levels": 8,
+      "max_vertices_per_meshlet": 64,
+      "max_triangles_per_meshlet": 124,
+      "page_budget_bytes": 65536,
+      "vertex_format": "quantized32"
+    },
+    "source_sha256": "3de5114323cba08aaef85757a90ed9685f1597b5ea0e7d7913f9fa45eeacaae7",
+    "build_key_sha256": "a5d53b58ff3275de76058602a8b2e699fdecdcaecacb417360583a6633e69273",
+    "artifact_sha256": "6c8f924e8dad74a5acd8e9acfb21795b153559cedb880862eb0a7f23eee5bc62",
+    "payload_sha256": "3450ff9074ddee3adda5d1373ddbe17d9a492c7130f8cae41a965dc4a2486169",
+    "artifact_bytes": 1446496,
+    "manifest_sha256": "efe37c5a986935ea3dfda9c08a8b8b53632b1c8152a08399a3577ae0f405fef6",
+    "manifest_bytes": 1041,
+    "clean_store_manifest_byte_identical": true,
+    "clean_store_chunk_byte_identical": true,
+    "strict_inspection": "pass"
+  },
+  "incremental_measurement": {
+    "tool": "/usr/bin/time -p",
+    "first_build_wall_seconds": 0.88,
+    "verified_cache_hit_wall_seconds": 0.05,
+    "cache_hit_speedup": 17.6,
+    "cache_hit_chunk_writes": 0,
+    "cache_hit_manifest_writes": 0,
+    "second_logical_id_chunk_writes": 0,
+    "chunk_files_after_two_logical_ids": 1,
+    "unrelated_manifest_changed": false
+  },
+  "qualification": {
+    "release_tests_passed": 23,
+    "strict_clippy": "pass",
+    "format": "pass",
+    "file_line_gate": "pass",
+    "strict_inspection": "pass"
+  },
+  "shipping_runtime_delta": {
+    "passes": 0,
+    "draws": 0,
+    "buffers": 0,
+    "images": 0,
+    "allocations": 0,
+    "bindings": 0,
+    "shader_branches": 0,
+    "engine_dependencies": 0,
+    "pixels_changed": false
+  },
+  "remaining": [
+    "source path and license provenance",
+    "texture, material, animation, environment, and world recipes",
+    "platform and quality variants",
+    "multi-asset dependency graph and incremental package index",
+    "garbage collection and packed shipping archives",
+    "runtime lookup and asynchronous streaming"
+  ]
+}

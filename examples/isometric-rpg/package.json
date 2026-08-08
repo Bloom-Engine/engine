@@ -2,6 +2,11 @@
   "name": "isometric-rpg",
   "version": "1.0.0",
   "main": "main.ts",
+  "perry": {
+    "allow": {
+      "nativeLibrary": ["bloom", "bloom/*"]
+    }
+  },
   "dependencies": {
     "bloom": "file:../../"
   }

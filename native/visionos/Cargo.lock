@@ -100,8 +100,11 @@ dependencies = [
  "image_dds",
  "lewton",
  "libc",
+ "log",
  "minimp3",
  "raw-window-handle",
+ "serde_json",
+ "web-sys",
  "wgpu",
 ]
 

@@ -1,7 +1,6 @@
 //! Screen-space GI probes and SSR (placement, trace SW/HW/SDF,
 //! temporal, resolve). Split from renderer/shaders.rs.
 
-
 // ============================================================================
 // Ticket 007a — Lumen-style screen-probe SSGI (software Hi-Z trace)
 //
@@ -27,6 +26,8 @@ struct ProbeHeader {
     world_pos: vec4<f32>,
     // xyz = world-space normal at the probe surface; w = linear |view-z|
     normal: vec4<f32>,
+    // xyz = cosine-convolved diffuse radiance, w = reserved.
+    diffuse: vec4<f32>,
 };
 
 fn oct_wrap(v: vec2<f32>) -> vec2<f32> {
@@ -55,6 +56,34 @@ fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
 fn octel_direction(octel: vec2<u32>) -> vec3<f32> {
     let uv = (vec2<f32>(octel) + vec2<f32>(0.5)) / f32(PROBE_OCT_SIZE);
     return oct_decode(uv);
+}
+
+// Map a 10x10 WSRC slab texel to its wrapped 8x8 octahedral texel. The
+// double fold at each padded corner crosses both silhouette edges:
+// (0,0)->(7,7), (0,9)->(7,0), (9,0)->(0,7), (9,9)->(0,0).
+fn wsrc_real_octel(padded: vec2<i32>) -> vec2<u32> {
+    let oct_size = i32(PROBE_OCT_SIZE);
+    let padded_max = oct_size + 1;
+    let is_edge_x = padded.x == 0 || padded.x == padded_max;
+    let is_edge_y = padded.y == 0 || padded.y == padded_max;
+    var real = padded - vec2<i32>(1);
+    if (is_edge_x && is_edge_y) {
+        real = vec2<i32>(
+            select(oct_size - 1, 0, padded.x == padded_max),
+            select(oct_size - 1, 0, padded.y == padded_max),
+        );
+    } else if (is_edge_y) {
+        real = vec2<i32>(
+            oct_size - padded.x,
+            clamp(padded.y - 1, 0, oct_size - 1),
+        );
+    } else if (is_edge_x) {
+        real = vec2<i32>(
+            clamp(padded.x - 1, 0, oct_size - 1),
+            oct_size - padded.y,
+        );
+    }
+    return vec2<u32>(real);
 }
 
 // Ticket 016 V1/V2 — temporal octahedral direction jitter with
@@ -101,6 +130,25 @@ fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32,
 
 fn ign(p: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+
+fn bounded_probe_history(value: vec3<f32>) -> vec3<f32> {
+    // Rgba16Float can retain undefined Inf/NaN bytes across allocation reuse.
+    // Componentwise comparison rejects both without changing finite radiance.
+    return select(
+        vec3<f32>(0.0),
+        value,
+        abs(value) <= vec3<f32>(65504.0),
+    );
+}
+
+fn safe_probe_direction(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let clean = bounded_probe_history(value);
+    let len2 = dot(clean, clean);
+    if (len2 <= 0.000001) {
+        return fallback;
+    }
+    return clean * inverseSqrt(len2);
 }
 ";
 
@@ -174,10 +222,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let zu = textureSampleLevel(hiz0, hiz_samp, uv_u, 0.0).r;
     let P_r = view_pos_from_linear(uv_r, zr, p00, p11, p20, p21);
     let P_u = view_pos_from_linear(uv_u, zu, p00, p11, p20, p21);
-    let N_vs = normalize(cross(P_r - P, P_u - P));
+    let N_vs = safe_probe_direction(
+        cross(P_r - P, P_u - P),
+        vec3<f32>(0.0, 0.0, 1.0),
+    );
 
     let P_world = (u.inv_view * vec4<f32>(P, 1.0)).xyz;
-    let N_world = normalize((u.inv_view * vec4<f32>(N_vs, 0.0)).xyz);
+    let N_world = safe_probe_direction(
+        (u.inv_view * vec4<f32>(N_vs, 0.0)).xyz,
+        vec3<f32>(0.0, 1.0, 0.0),
+    );
 
     probes[probe_idx].world_pos = vec4<f32>(P_world, 1.0);
     probes[probe_idx].normal = vec4<f32>(N_world, linear_z);
@@ -268,7 +322,9 @@ fn cs_main(
     // light). Luma is read from the prev-frame temporal-filtered
     // history texture; `dst_coord` indexes the probe × octel slab
     // identically between trace output and history.
-    let prev_slice = textureLoad(prev_history, dst_coord, 0).rgb;
+    let prev_slice = bounded_probe_history(
+        textureLoad(prev_history, dst_coord, 0).rgb,
+    );
     let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
     let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
     let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
@@ -329,20 +385,24 @@ fn cs_main(
         // lets coarse steps accept wider thickness, which matches the
         // existing SSGI behaviour closely enough for V1.
         if (ray_abs_z >= scene_z && scene_z < HIZ_SKY_Z * 0.5) {
-            // Refine against mip 0 to reject far-off misses.
+            // Refine against mip 0 to reject coarse-footprint false
+            // positives. Exponential stepping can cross a real surface by
+            // much more than the old thickness window, so a confirmed
+            // front-depth crossing is the hit instead of being dropped.
             let refined_z = hiz_sample(ray_uv, 0);
-            let thickness = abs(ray_abs_z - refined_z);
-            if (thickness < step_size * 2.0 + 0.1) {
+            if (ray_abs_z >= refined_z && refined_z < HIZ_SKY_Z * 0.5) {
                 let tn = t / max_t;
                 let falloff = 1.0 - tn * tn;
-                var raw = textureSampleLevel(hdr_tex, hdr_samp, ray_uv, 0.0).rgb * max(falloff, 0.0);
+                var raw = bounded_probe_history(
+                    textureSampleLevel(hdr_tex, hdr_samp, ray_uv, 0.0).rgb,
+                ) * max(falloff, 0.0);
                 // Firefly clamp (cap per-sample luma).
                 let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
                 let cap = u.params.w;
                 if (luma > cap) { raw = raw * (cap / luma); }
                 hit_color = raw;
+                break;
             }
-            break;
         }
 
         prev_t = t;
@@ -350,7 +410,8 @@ fn cs_main(
     }
 
     let intensity = u.params.y;
-    textureStore(radiance_out, dst_coord, vec4<f32>(hit_color * intensity * ndotd, 1.0));
+    let output = bounded_probe_history(hit_color * intensity * ndotd);
+    textureStore(radiance_out, dst_coord, vec4<f32>(output, 1.0));
 }
 ";
 
@@ -413,6 +474,7 @@ struct InstanceGiData {
 
 const CARD_SLOTS_PER_ROW: f32 = 64.0;
 const HW_WSRC_GRID_RES: i32 = 16;
+const BLOOM_TRANSPARENT_GI: bool = false;
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
 @group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
@@ -488,6 +550,116 @@ fn hw_wsrc_sample(pos_ws: vec3<f32>, dir_ws: vec3<f32>) -> vec3<f32> {
          + c01 * (ix * fy) + c11 * (fx * fy);
 }
 
+fn hw_gi_cap(raw_in: vec3<f32>) -> vec3<f32> {
+    var raw = raw_in;
+    let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let cap = u.params.w;
+    if (luma > cap) { raw = raw * (cap / luma); }
+    return raw;
+}
+
+fn hw_gi_miss(origin_ws: vec3<f32>, dir_ws: vec3<f32>, max_t: f32) -> vec3<f32> {
+    return hw_gi_cap(hw_wsrc_sample(origin_ws + dir_ws * max_t, dir_ws));
+}
+
+fn hw_gi_card_uv(
+    inst: InstanceGiData,
+    hit_os: vec3<f32>,
+    dir_ws: vec3<f32>,
+) -> vec2<f32> {
+    let abs_d = abs(dir_ws);
+    var axis_idx: u32 = 0u;
+    if (abs_d.y >= abs_d.x && abs_d.y >= abs_d.z) {
+        axis_idx = 2u;
+    } else if (abs_d.z >= abs_d.x) {
+        axis_idx = 4u;
+    }
+    var signed_axis: u32 = axis_idx;
+    if (axis_idx == 0u && dir_ws.x > 0.0) { signed_axis = 1u; }
+    else if (axis_idx == 2u && dir_ws.y > 0.0) { signed_axis = 3u; }
+    else if (axis_idx == 4u && dir_ws.z > 0.0) { signed_axis = 5u; }
+
+    let slot = u32(inst.card_slot.x) + signed_axis;
+    let slot_x = slot % 64u;
+    let slot_y = slot / 64u;
+    let bmin = inst.card_aabb_min.xyz;
+    let bmax = inst.card_aabb_max.xyz;
+    var u_os: f32;
+    var v_os: f32;
+    var u_lo: f32;
+    var u_hi: f32;
+    var v_lo: f32;
+    var v_hi: f32;
+    var u_flip: f32 = 1.0;
+    if (signed_axis == 0u || signed_axis == 1u) {
+        u_os = hit_os.y; v_os = hit_os.z;
+        u_lo = bmin.y; u_hi = bmax.y; v_lo = bmin.z; v_hi = bmax.z;
+        if (signed_axis == 1u) { u_flip = -1.0; }
+    } else if (signed_axis == 2u || signed_axis == 3u) {
+        u_os = hit_os.x; v_os = hit_os.z;
+        u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.z; v_hi = bmax.z;
+        if (signed_axis == 3u) { u_flip = -1.0; }
+    } else {
+        u_os = hit_os.x; v_os = hit_os.y;
+        u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.y; v_hi = bmax.y;
+        if (signed_axis == 5u) { u_flip = -1.0; }
+    }
+    var u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
+    let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
+    if (u_flip < 0.0) { u_norm = 1.0 - u_norm; }
+
+    let slot_size_uv = 1.0 / CARD_SLOTS_PER_ROW;
+    let texel_in_slot = slot_size_uv / f32(64);
+    let slot_u0 = f32(slot_x) * slot_size_uv + texel_in_slot;
+    let slot_v0 = f32(slot_y) * slot_size_uv + texel_in_slot;
+    let slot_span = slot_size_uv - 2.0 * texel_in_slot;
+    return vec2<f32>(
+        slot_u0 + u_norm * slot_span,
+        slot_v0 + v_norm * slot_span,
+    );
+}
+
+fn hw_gi_shade_hit(
+    inst: InstanceGiData,
+    hit_world: vec3<f32>,
+    hit_os: vec3<f32>,
+    dir_ws: vec3<f32>,
+    hit_t: f32,
+    max_t: f32,
+) -> vec3<f32> {
+    let tn = hit_t / max_t;
+    let falloff = max(1.0 - tn * tn, 0.0);
+    if (inst.card_slot.w > 0.5) {
+        let atlas_uv = hw_gi_card_uv(inst, hit_os, dir_ws);
+        let pre_lit = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
+        return hw_gi_cap(pre_lit * falloff);
+    }
+
+    let hit_n = inst.normal_ws;
+    let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
+    let direct = u.sun_color.xyz * ndotl;
+    let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+    let sky = u.sky_color.xyz * ndotup;
+    return hw_gi_cap(
+        inst.albedo * (direct + sky) * falloff
+        + inst.albedo * inst.emissive_luma
+    );
+}
+
+fn hw_gi_transmittance(inst: InstanceGiData) -> vec3<f32> {
+    let absorption = vec3<f32>(
+        inst.card_aabb_min.w,
+        inst.card_aabb_max.w,
+        inst.world_aabb_min.w,
+    );
+    let physical = clamp(
+        inst.albedo * absorption * inst.mat_params.z * inst.mat_params.w,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    return mix(vec3<f32>(1.0), physical, clamp(inst.world_aabb_max.w, 0.0, 1.0));
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
@@ -518,7 +690,9 @@ fn cs_main(
     // light). Luma is read from the prev-frame temporal-filtered
     // history texture; `dst_coord` indexes the probe × octel slab
     // identically between trace output and history.
-    let prev_slice = textureLoad(prev_history, dst_coord, 0).rgb;
+    let prev_slice = bounded_probe_history(
+        textureLoad(prev_history, dst_coord, 0).rgb,
+    );
     let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
     let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
     let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
@@ -544,113 +718,60 @@ fn cs_main(
         origin_ws,
         dir_ws,
     ));
-    loop {
-        if (!rayQueryProceed(&rq)) { break; }
+    if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+        loop {
+            if (!rayQueryProceed(&rq)) { break; }
+        }
     }
     let hit = rayQueryGetCommittedIntersection(&rq);
 
     var radiance = vec3<f32>(0.0);
     if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
         let inst = instance_data[hit.instance_custom_data];
+        let hit_world = origin_ws + dir_ws * hit.t;
+        let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
+        let front = hw_gi_shade_hit(inst, hit_world, hit_os, dir_ws, hit.t, max_t);
+        radiance = front;
 
-        // Ticket 013 V2 — pick the axis facing the incoming ray and
-        // sample the pre-lit radiance atlas. Each mesh has 6
-        // consecutive slots laid out by signed axis (see host-side
-        // capture loop). The card's world-space normal was baked at
-        // capture into `card_slot_meta`; lighting was applied once
-        // per frame by `card_light_pass`, so the sample IS the
-        // bounce contribution — no hit-time shading math.
-        if (inst.card_slot.w > 0.5) {
-            let hit_world = origin_ws + dir_ws * hit.t;
-            let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
-            // Dominant component of the world-space ray direction
-            // picks the major axis; its sign selects the front/back
-            // face of that axis.
-            let abs_d = abs(dir_ws);
-            var axis_idx: u32 = 0u;
-            if (abs_d.y >= abs_d.x && abs_d.y >= abs_d.z) {
-                axis_idx = 2u;
-            } else if (abs_d.z >= abs_d.x) {
-                axis_idx = 4u;
+        if (BLOOM_TRANSPARENT_GI && inst.mat_params.z > 0.0) {
+            // Transmission instances use TLAS mask bit 1 only. A second
+            // query against bit 0 therefore skips the entire glass volume,
+            // including its back face, and returns the nearest opaque
+            // receiver. This is one bounded continuation, never a layer loop.
+            var opaque_rq: ray_query;
+            rayQueryInitialize(&opaque_rq, accel, RayDesc(
+                0u,
+                0x01u,
+                0.001,
+                max_t,
+                origin_ws,
+                dir_ws,
+            ));
+            if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+                loop {
+                    if (!rayQueryProceed(&opaque_rq)) { break; }
+                }
             }
-            // Sign: ray going -X (dir.x < 0) lands on +X face → axis + 0.
-            // ray going +X lands on -X face → axis + 1.
-            var signed_axis: u32 = axis_idx;
-            if (axis_idx == 0u && dir_ws.x > 0.0) { signed_axis = 1u; }
-            else if (axis_idx == 2u && dir_ws.y > 0.0) { signed_axis = 3u; }
-            else if (axis_idx == 4u && dir_ws.z > 0.0) { signed_axis = 5u; }
-
-            let first_slot = u32(inst.card_slot.x);
-            let slot = first_slot + signed_axis;
-            let slot_x = slot % 64u;
-            let slot_y = slot / 64u;
-
-            // Project hit_os onto the card plane — same math as V1 but
-            // with signed-axis-aware u sign flips so the ±pair cards
-            // pick up opposite views of the mesh.
-            let bmin = inst.card_aabb_min.xyz;
-            let bmax = inst.card_aabb_max.xyz;
-            var u_os: f32;
-            var v_os: f32;
-            var u_lo: f32;
-            var u_hi: f32;
-            var v_lo: f32;
-            var v_hi: f32;
-            var u_flip: f32 = 1.0;
-            if (signed_axis == 0u || signed_axis == 1u) {
-                u_os = hit_os.y; v_os = hit_os.z;
-                u_lo = bmin.y; u_hi = bmax.y; v_lo = bmin.z; v_hi = bmax.z;
-                if (signed_axis == 1u) { u_flip = -1.0; }
-            } else if (signed_axis == 2u || signed_axis == 3u) {
-                u_os = hit_os.x; v_os = hit_os.z;
-                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.z; v_hi = bmax.z;
-                if (signed_axis == 3u) { u_flip = -1.0; }
-            } else {
-                u_os = hit_os.x; v_os = hit_os.y;
-                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.y; v_hi = bmax.y;
-                if (signed_axis == 5u) { u_flip = -1.0; }
+            let opaque_hit = rayQueryGetCommittedIntersection(&opaque_rq);
+            var behind = hw_gi_miss(origin_ws, dir_ws, max_t);
+            if (opaque_hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+                let opaque_inst = instance_data[opaque_hit.instance_custom_data];
+                let opaque_world = origin_ws + dir_ws * opaque_hit.t;
+                let opaque_os = (
+                    opaque_hit.world_to_object * vec4<f32>(opaque_world, 1.0)
+                ).xyz;
+                behind = hw_gi_shade_hit(
+                    opaque_inst,
+                    opaque_world,
+                    opaque_os,
+                    dir_ws,
+                    opaque_hit.t,
+                    max_t,
+                );
             }
-            var u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
-            let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
-            if (u_flip < 0.0) { u_norm = 1.0 - u_norm; }
-
-            let slot_size_uv = 1.0 / CARD_SLOTS_PER_ROW;
-            let texel_in_slot = slot_size_uv / f32(64);  // 64×64 card
-            let slot_u0 = f32(slot_x) * slot_size_uv + texel_in_slot;
-            let slot_v0 = f32(slot_y) * slot_size_uv + texel_in_slot;
-            let slot_span = slot_size_uv - 2.0 * texel_in_slot;
-            let atlas_uv = vec2<f32>(
-                slot_u0 + u_norm * slot_span,
-                slot_v0 + v_norm * slot_span,
-            );
-            let pre_lit = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
-
-            // V3 — emissive is pre-added into the radiance atlas by the
-            // card-lighting pass, so the hit simply picks up the full
-            // pre-lit texel and applies distance falloff + firefly cap.
-            let tn = hit.t / max_t;
-            let falloff = max(1.0 - tn * tn, 0.0);
-            var raw = pre_lit * falloff;
-            let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-            let cap = u.params.w;
-            if (luma > cap) { raw = raw * (cap / luma); }
-            radiance = raw;
-        } else {
-            // Fallback path — no card captured, use the flat
-            // instance albedo × hit-time lighting same as 007b.
-            let hit_n = inst.normal_ws;
-            let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
-            let direct = u.sun_color.xyz * ndotl;
-            let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
-            let sky = u.sky_color.xyz * ndotup;
-            let tn = hit.t / max_t;
-            let falloff = max(1.0 - tn * tn, 0.0);
-            var raw = inst.albedo * (direct + sky) * falloff
-                    + inst.albedo * inst.emissive_luma;
-            let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-            let cap = u.params.w;
-            if (luma > cap) { raw = raw * (cap / luma); }
-            radiance = raw;
+            let surface_weight = clamp(inst.world_aabb_max.w, 0.0, 1.0)
+                * (1.0 - clamp(inst.mat_params.z, 0.0, 1.0));
+            radiance = front * surface_weight + behind * hw_gi_transmittance(inst);
         }
     } else {
         // Ticket 014 V7 — miss path samples the WSRC envelope so HW
@@ -658,16 +779,12 @@ fn cs_main(
         // sun-visibility signal. Terminal position is the ray's full
         // march distance; direction picks the octel on the nearest
         // probe.
-        let terminal = origin_ws + dir_ws * max_t;
-        var raw = hw_wsrc_sample(terminal, dir_ws);
-        let luma = dot(raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-        let cap = u.params.w;
-        if (luma > cap) { raw = raw * (cap / luma); }
-        radiance = raw;
+        radiance = hw_gi_miss(origin_ws, dir_ws, max_t);
     }
 
     let intensity = u.params.y;
-    textureStore(radiance_out, dst_coord, vec4<f32>(radiance * intensity * ndotd, 1.0));
+    let output = bounded_probe_history(radiance * intensity * ndotd);
+    textureStore(radiance_out, dst_coord, vec4<f32>(output, 1.0));
 }
 ";
 
@@ -728,11 +845,17 @@ struct SdfInstanceGiData {
     // transform assets (Sponza).
     world_aabb_min: vec4<f32>,
     world_aabb_max: vec4<f32>,
+    // Layout mirror with the CPU/HW/PT record. The SDF path ignores
+    // geometry windows but consumes mat_params.zw in the lazy
+    // physical-transmission specialization.
+    geo: vec4<u32>,
+    mat_params: vec4<f32>,
 };
 
 const SDF_CARD_SLOTS_PER_ROW: f32 = 64.0;
 const SDF_CARD_SLOT_PX: u32 = 64u;
 const WSRC_GRID_RES: i32 = 16;
+const BLOOM_TRANSPARENT_GI: bool = false;
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
 @group(0) @binding(1) var<storage, read> probes: array<ProbeHeader>;
@@ -759,6 +882,46 @@ fn clipmap_sample(pos_ws: vec3<f32>) -> f32 {
         return 1e4;
     }
     return textureSampleLevel(clipmap_tex, clipmap_samp, uv, 0.0).r;
+}
+
+fn sdf_ray_aabb(
+    origin: vec3<f32>,
+    dir: vec3<f32>,
+    bmin: vec3<f32>,
+    bmax: vec3<f32>,
+) -> vec2<f32> {
+    let tiny_dir = select(
+        vec3<f32>(-0.000001),
+        vec3<f32>(0.000001),
+        dir >= vec3<f32>(0.0),
+    );
+    let safe_dir = select(
+        tiny_dir,
+        dir,
+        abs(dir) > vec3<f32>(0.000001),
+    );
+    let t0 = (bmin - origin) / safe_dir;
+    let t1 = (bmax - origin) / safe_dir;
+    let near3 = min(t0, t1);
+    let far3 = max(t0, t1);
+    return vec2<f32>(
+        max(near3.x, max(near3.y, near3.z)),
+        min(far3.x, min(far3.y, far3.z)),
+    );
+}
+
+fn sdf_gi_transmittance(inst: SdfInstanceGiData) -> vec3<f32> {
+    let absorption = vec3<f32>(
+        inst.card_aabb_min.w,
+        inst.card_aabb_max.w,
+        inst.world_aabb_min.w,
+    );
+    let physical = clamp(
+        inst.albedo * absorption * inst.mat_params.z * inst.mat_params.w,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    return mix(vec3<f32>(1.0), physical, clamp(inst.world_aabb_max.w, 0.0, 1.0));
 }
 
 // Ticket 014 V10/V13 — WSRC lookup via the hardware linear-filtering
@@ -865,7 +1028,9 @@ fn cs_main(
     // light). Luma is read from the prev-frame temporal-filtered
     // history texture; `dst_coord` indexes the probe × octel slab
     // identically between trace output and history.
-    let prev_slice = textureLoad(prev_history, dst_coord, 0).rgb;
+    let prev_slice = bounded_probe_history(
+        textureLoad(prev_history, dst_coord, 0).rgb,
+    );
     let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
     let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
     let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
@@ -881,6 +1046,31 @@ fn cs_main(
     // keeps primary hits from self-intersecting the probe surface.
     let origin_ws = header.world_pos.xyz + n_ws * 0.02;
     let max_t = u.params.z;
+
+    // The transparent specialization bakes these instances out of the scene
+    // SDF. Find one nearest conservative world-AABB crossing up front, then
+    // combine it with the unchanged opaque SDF result below. The loop is
+    // compile-time absent from the ordinary shader variant.
+    var transparent_idx: i32 = -1;
+    var transparent_t: f32 = max_t + 1.0;
+    if (BLOOM_TRANSPARENT_GI) {
+        let instance_count = arrayLength(&instance_data);
+        for (var i: u32 = 0u; i < instance_count; i = i + 1u) {
+            let candidate = instance_data[i];
+            if (candidate.mat_params.z <= 0.0) { continue; }
+            let interval = sdf_ray_aabb(
+                origin_ws,
+                dir_ws,
+                candidate.world_aabb_min.xyz,
+                candidate.world_aabb_max.xyz,
+            );
+            let entry = max(interval.x, 0.001);
+            if (interval.y >= entry && entry < transparent_t && entry < max_t) {
+                transparent_idx = i32(i);
+                transparent_t = entry;
+            }
+        }
+    }
 
     // Sphere-trace. Step is the UDF value; convergence when within a
     // voxel's worth of the surface or when we exhaust the budget.
@@ -930,6 +1120,7 @@ fn cs_main(
         for (var i: u32 = 0u; i < count; i = i + 1u) {
             let ad = instance_data[i];
             if (ad.card_slot.w < 0.5) { continue; }
+            if (BLOOM_TRANSPARENT_GI && ad.mat_params.z > 0.0) { continue; }
             // EN-023 — compare the WORLD hit against the WORLD AABB.
             // The old object-space comparison only matched assets whose
             // vertices were already in world space; every transformed
@@ -1048,8 +1239,35 @@ fn cs_main(
         radiance = raw;
     }
 
+    if (BLOOM_TRANSPARENT_GI && transparent_idx >= 0) {
+        let opaque_t = select(max_t, t, hit);
+        if (transparent_t < opaque_t) {
+            let glass = instance_data[u32(transparent_idx)];
+            // The SW representation knows the conservative AABB crossing but
+            // not an exact triangle normal. Reuse the instance's established
+            // flat hit-lighting fallback for the non-transmitted fraction.
+            let hit_n = glass.normal_ws;
+            let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
+            let direct = u.sun_color.xyz * ndotl;
+            let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+            let sky = u.sky_color.xyz * ndotup;
+            let tn = transparent_t / max_t;
+            let falloff = max(1.0 - tn * tn, 0.0);
+            var front = glass.albedo * (direct + sky) * falloff
+                      + glass.albedo * glass.emissive_luma;
+            let front_luma = dot(front, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let cap = u.params.w;
+            if (front_luma > cap) { front = front * (cap / front_luma); }
+            let surface_weight = clamp(glass.world_aabb_max.w, 0.0, 1.0)
+                * (1.0 - clamp(glass.mat_params.z, 0.0, 1.0));
+            radiance = front * surface_weight
+                     + radiance * sdf_gi_transmittance(glass);
+        }
+    }
+
     let intensity = u.params.y;
-    textureStore(radiance_out, dst_coord, vec4<f32>(radiance * intensity * ndotd, 1.0));
+    let output = bounded_probe_history(radiance * intensity * ndotd);
+    textureStore(radiance_out, dst_coord, vec4<f32>(output, 1.0));
 }
 ";
 
@@ -1073,6 +1291,13 @@ struct TemporalParams {
 @group(0) @binding(1) var radiance_in: texture_3d<f32>;
 @group(0) @binding(2) var history_in: texture_3d<f32>;
 @group(0) @binding(3) var history_out: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(4) var<storage, read_write> probes: array<ProbeHeader>;
+
+// The trace stores cosine-weighted incident radiance in 64 directional
+// octels. Reserve octel zero in the filtered history for the diffuse
+// convolution that resolve actually needs. Keeping the reduction in this
+// existing workgroup avoids another texture, pass, or per-pixel 64-tap loop.
+var<workgroup> diffuse_radiance: array<vec3<f32>, 64>;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(
@@ -1084,11 +1309,18 @@ fn cs_main(
     if (wg.x >= grid_w || wg.y >= grid_h) { return; }
 
     let coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
-    let curr = textureLoad(radiance_in, coord, 0).rgb;
-    let hist = textureLoad(history_in, coord, 0).rgb;
+    let curr = bounded_probe_history(textureLoad(radiance_in, coord, 0).rgb);
+    var hist = bounded_probe_history(textureLoad(history_in, coord, 0).rgb);
+    let lane = lid.y * PROBE_OCT_SIZE + lid.x;
+    // Octel zero held the previous frame's integrated irradiance rather than
+    // directional history. Seed that one directional sample from current.
+    if (lane == 0u) {
+        hist = curr;
+    }
 
     var alpha = u.params.x;
-    if (u.params.y > 0.5) {
+    let force_refresh = u.params.y > 0.5;
+    if (force_refresh) {
         alpha = 1.0;
     } else {
         // Ticket 016 V4 — variance-adaptive alpha. Scale the base
@@ -1108,7 +1340,42 @@ fn cs_main(
         let delta = abs(curr_luma - hist_luma);
         alpha = min(1.0, alpha + delta * 0.6);
     }
-    let blended = mix(hist, curr, alpha);
+    var blended = mix(hist, curr, alpha);
+    if (force_refresh) {
+        // `mix(undefined, current, 1)` may still evaluate undefined * zero.
+        // Direct assignment guarantees invalid history is never observed.
+        blended = curr;
+    }
+
+    diffuse_radiance[lane] = blended;
+    workgroupBarrier();
+    if (lane < 32u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 32u];
+    }
+    workgroupBarrier();
+    if (lane < 16u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 16u];
+    }
+    workgroupBarrier();
+    if (lane < 8u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 8u];
+    }
+    workgroupBarrier();
+    if (lane < 4u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 4u];
+    }
+    workgroupBarrier();
+    if (lane < 2u) {
+        diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 2u];
+    }
+    workgroupBarrier();
+    if (lane == 0u) {
+        diffuse_radiance[0] = diffuse_radiance[0] + diffuse_radiance[1];
+        // Uniform sphere samples need 4x their mean cosine-weighted
+        // radiance to reproduce constant diffuse incident radiance.
+        blended = bounded_probe_history(diffuse_radiance[0] * (4.0 / 64.0));
+        probes[wg.y * grid_w + wg.x].diffuse = vec4<f32>(blended, 1.0);
+    }
 
     textureStore(history_out, coord, vec4<f32>(blended, 1.0));
 }
@@ -1156,20 +1423,11 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
-// Sample a probe's octahedral atlas in a given world-space direction.
-// Uses trilinear sampling on the 3D texture so neighbouring octels
-// softly blend — some visible smear on the 8×8 atlas, at the cost of
-// a cheap reconstruction.
-fn sample_probe(probe_xy: vec2<i32>, dir_ws: vec3<f32>) -> vec3<f32> {
-    let oct_uv = oct_encode(dir_ws);
-    let u_tex = (f32(probe_xy.x) + 0.5) / f32(u.size.z);
-    let v_tex = (f32(probe_xy.y) + 0.5) / f32(u.size.w);
-    // z coordinate: octahedral texel index in [0, 64) normalized to [0, 1)
-    let oct_x = clamp(oct_uv.x * f32(PROBE_OCT_SIZE), 0.0, f32(PROBE_OCT_SIZE) - 1.0);
-    let oct_y = clamp(oct_uv.y * f32(PROBE_OCT_SIZE), 0.0, f32(PROBE_OCT_SIZE) - 1.0);
-    let z_idx = floor(oct_y) * f32(PROBE_OCT_SIZE) + floor(oct_x);
-    let z = (z_idx + 0.5) / f32(PROBE_OCT_TEXELS);
-    return textureSampleLevel(radiance_tex, radiance_samp, vec3<f32>(u_tex, v_tex, z), 0.0).rgb;
+// Temporal stores the cosine-convolved diffuse result alongside the probe
+// header. Resolve already loads that header for its bilateral weights, so
+// this adds no texture lookup.
+fn sample_probe(probe: ProbeHeader) -> vec3<f32> {
+    return probe.diffuse.rgb;
 }
 
 @fragment
@@ -1197,8 +1455,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let zu = textureSampleLevel(hiz0, hiz_samp, in.uv + vec2<f32>(0.0, -texel.y), 0.0).r;
     let Pr = view_pos_from_linear(in.uv + vec2<f32>(texel.x, 0.0), zr, p00, p11, p20, p21);
     let Pu = view_pos_from_linear(in.uv + vec2<f32>(0.0, -texel.y), zu, p00, p11, p20, p21);
-    let N_vs = normalize(cross(Pr - P_vs, Pu - P_vs));
-    let N_ws = normalize((u.inv_view * vec4<f32>(N_vs, 0.0)).xyz);
+    let N_vs = safe_probe_direction(
+        cross(Pr - P_vs, Pu - P_vs),
+        vec3<f32>(0.0, 0.0, 1.0),
+    );
+    let N_ws = safe_probe_direction(
+        (u.inv_view * vec4<f32>(N_vs, 0.0)).xyz,
+        vec3<f32>(0.0, 1.0, 0.0),
+    );
 
     // Pixel's grid-space fractional position (which probes surround it?).
     let px_x = in.uv.x * half_w;
@@ -1236,7 +1500,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let w = w_corner * w_depth * w_normal;
             if (w <= 0.0001) { continue; }
 
-            let radiance = sample_probe(vec2<i32>(gx, gy), N_ws);
+            let radiance = sample_probe(probe);
             accum = accum + radiance * w;
             wsum = wsum + w;
         }
@@ -1481,8 +1745,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let roughness_fade = 1.0 - smoothstep(0.5, 0.85, roughness);
     if (roughness_fade <= 0.001) { return vec4<f32>(0.0); }
 
-    let n = normalize(cross(dx, dy));
     let v = normalize(-view_pos);
+    // Fragment coordinates increase downward, so `dpdy(view_pos)` points
+    // opposite the view-space +Y direction. `cross(dx, dy)` therefore
+    // reconstructs the back face of every camera-visible surface and drives
+    // NdotV to zero. Schlick Fresnel then becomes 1.0 across the frame,
+    // turning SSR into a full-strength pale environment overlay. Reverse the
+    // operands and defensively face the derivative normal toward the camera
+    // at depth discontinuities.
+    let n_raw = normalize(cross(dy, dx));
+    let n = select(-n_raw, n_raw, dot(n_raw, v) >= 0.0);
 
     // Stochastic SSR — cast one GGX-importance-sampled ray per pixel
     // per frame. Different frames draw from different points on the
@@ -1578,9 +1850,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let raw = textureSampleLevel(hdr_tex, hdr_samp, hit_uv, 0.0).rgb;
     let reflected = select(vec3<f32>(0.0), raw, raw == raw);
     let out = reflected * fresnel * roughness_fade * u.params.x * fade;
-    let out_safe = select(vec3<f32>(0.0), out, out == out);
+    // EN-061: bound a rare bright hit before it can poison the temporal
+    // history and become a quarter-resolution block after TSR. Eight linear
+    // luminance units remain far above display white and preserve bloom from
+    // valid polished-metal reflections; ordinary hits are byte-for-byte
+    // unchanged.
+    let out_luma = dot(out, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let firefly_cap = 8.0;
+    let firefly_scale = select(
+        1.0,
+        firefly_cap / max(out_luma, 0.0001),
+        out_luma > firefly_cap,
+    );
+    let out_bounded = out * firefly_scale;
+    let out_safe = select(vec3<f32>(0.0), out_bounded, out_bounded == out_bounded);
     return vec4<f32>(out_safe, fade);
 }
 ";
-
-

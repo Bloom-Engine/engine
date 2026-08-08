@@ -83,18 +83,18 @@ pub fn bloom_create_instance_buffer_scratch(instance_count: f64) -> f64 {
 /// TS `setMaterialParams` wrapper uses everywhere (Perry 0.5.x rejects JS
 /// arrays in pointer params). Forwards to the existing floats path.
 #[wasm_bindgen]
-pub fn bloom_set_material_params_scratch(handle: f64, param_count: f64) {
+pub fn bloom_set_material_params_scratch(handle: f64, param_count: f64) -> f64 {
     let count = param_count as usize;
     let params: Vec<f32> = {
         let eng = engine();
         if eng.models.scratch_f32.len() < count {
-            return;
+            return 0.0;
         }
         let p = eng.models.scratch_f32[..count].to_vec();
         eng.models.mesh_scratch_reset();
         p
     };
-    crate::material_ffi::bloom_set_material_params_floats(handle, &params);
+    crate::material_ffi::bloom_set_material_params_floats(handle, &params)
 }
 
 // ============================================================
@@ -114,8 +114,8 @@ pub fn bloom_create_texture_array_scratch(
     if w == 0 || h == 0 {
         return 0.0;
     }
-    let layers_count = (layer_count as u32)
-        .min(bloom_shared::renderer::material_system::MAX_TEXTURE_ARRAY_LAYERS);
+    let layers_count =
+        (layer_count as u32).min(bloom_shared::renderer::material_system::MAX_TEXTURE_ARRAY_LAYERS);
     if layers_count == 0 {
         return 0.0;
     }
@@ -231,8 +231,72 @@ pub fn bloom_splat_impulse(x: f64, z: f64, radius: f64, strength: f64) {
 }
 
 #[wasm_bindgen]
-pub fn bloom_scene_set_gi_only(handle: f64, gi_only: f64) {
+pub fn bloom_scene_set_gi_only(handle: f64, gi_only: f64) -> f64 {
     engine().scene.set_gi_only(handle, gi_only != 0.0);
+    1.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_scene_set_material_emissive(handle: f64, r: f64, g: f64, b: f64) -> f64 {
+    let finite_non_negative = |value: f64| {
+        if value.is_finite() {
+            (value as f32).max(0.0)
+        } else {
+            0.0
+        }
+    };
+    engine().scene.set_material_emissive_factor(
+        handle,
+        finite_non_negative(r),
+        finite_non_negative(g),
+        finite_non_negative(b),
+    );
+    1.0
+}
+
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn bloom_scene_set_material_layered_pbr(
+    handle: f64,
+    lobe_mask: f64,
+    clearcoat_factor: f64,
+    clearcoat_roughness: f64,
+    clearcoat_normal_scale: f64,
+    specular_factor: f64,
+    specular_r: f64,
+    specular_g: f64,
+    specular_b: f64,
+    ior: f64,
+    sheen_r: f64,
+    sheen_g: f64,
+    sheen_b: f64,
+    sheen_roughness: f64,
+    anisotropy_strength: f64,
+    anisotropy_rotation: f64,
+    iridescence_factor: f64,
+    iridescence_ior: f64,
+    iridescence_thickness_minimum: f64,
+    iridescence_thickness_maximum: f64,
+) -> f64 {
+    let layered = bloom_shared::models::MaterialLayeredPbr::from_authoring_factors(
+        lobe_mask as u32,
+        clearcoat_factor as f32,
+        clearcoat_roughness as f32,
+        clearcoat_normal_scale as f32,
+        specular_factor as f32,
+        [specular_r as f32, specular_g as f32, specular_b as f32],
+        ior as f32,
+        [sheen_r as f32, sheen_g as f32, sheen_b as f32],
+        sheen_roughness as f32,
+        anisotropy_strength as f32,
+        anisotropy_rotation as f32,
+        iridescence_factor as f32,
+        iridescence_ior as f32,
+        iridescence_thickness_minimum as f32,
+        iridescence_thickness_maximum as f32,
+    );
+    engine().scene.set_material_layered_pbr(handle, layered);
+    1.0
 }
 
 // ============================================================
@@ -331,13 +395,116 @@ pub fn bloom_profiler_hist_gpu_us(i: f64) -> f64 {
 // the calls stay cheap typed no-ops
 // ============================================================
 
+/// Browser builds cannot resolve a native filesystem path for HDR input.
+/// Call the byte-oriented web loader instead.
+#[wasm_bindgen]
+pub fn bloom_set_env_clear_from_hdr(_path: f64) -> f64 {
+    0.0
+}
+
 /// The browser owns presentation (rAF + compositor); Fifo-equivalent
 /// behaviour is all a canvas surface can do, so the mode is fixed.
 #[wasm_bindgen]
-pub fn bloom_set_present_mode(_mode: f64) {}
+pub fn bloom_set_present_mode(mode: f64) -> f64 {
+    if mode == 0.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_present_mode() -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_path_tracing(mode: f64) -> f64 {
+    if mode == 0.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_path_tracing_supported() -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_material_binding_capabilities() -> String {
+    engine().renderer.material_binding_report_json()
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_renderer_capabilities() -> String {
+    engine().renderer.renderer_capability_report_json()
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_imported_refraction_mode() -> f64 {
+    engine().renderer.imported_refraction_mode_code() as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_transparency_composition_mode(mode: f64) -> f64 {
+    engine()
+        .renderer
+        .set_transparency_composition_mode(mode as u32);
+    1.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_transparency_composition_mode() -> f64 {
+    engine().renderer.transparency_composition_mode_code() as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_get_active_transparency_composition_mode() -> f64 {
+    engine()
+        .renderer
+        .active_transparency_composition_mode_code() as f64
+}
+
+#[wasm_bindgen]
+pub fn bloom_set_material_binding_tier_override(tier: f64) -> f64 {
+    engine()
+        .renderer
+        .set_material_binding_tier_override(tier as u32) as u8 as f64
+}
 
 /// Screenshot readback needs a blocking `device.poll(Wait)`, which a
 /// single-threaded wasm host cannot do. Right-click-save or the DOM
 /// `canvas.toBlob` path (from JS) are the web equivalents.
 #[wasm_bindgen]
 pub fn bloom_take_screenshot(_path: f64) {}
+
+#[wasm_bindgen]
+pub fn bloom_capture_frame_to_png(_path: f64) -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_capture_debug_intermediates(_path: f64) -> f64 {
+    0.0
+}
+
+#[wasm_bindgen]
+pub fn bloom_capture_frame_ready() -> f64 {
+    0.0
+}
+
+/// Browser builds have no direct filesystem path for qualification output.
+#[wasm_bindgen]
+pub fn bloom_write_quality_telemetry(
+    _path: f64,
+    _warmup_frames: f64,
+    _measured_frames: f64,
+    _fixed_timestep: f64,
+    _quality_preset: f64,
+    _render_scale: f64,
+    _measurement_wall_ms: f64,
+) -> f64 {
+    0.0
+}

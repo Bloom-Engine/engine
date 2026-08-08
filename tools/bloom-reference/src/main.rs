@@ -76,7 +76,8 @@ struct ReferenceDefaults {
 /// as a unit.
 fn load_spec(path: &Path) -> Result<(ViewSpec, PathBuf), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {:?}: {e}", path))?;
-    let spec: ViewSpec = serde_json::from_str(&text).map_err(|e| format!("parse {:?}: {e}", path))?;
+    let spec: ViewSpec =
+        serde_json::from_str(&text).map_err(|e| format!("parse {:?}: {e}", path))?;
     let base_dir = path
         .parent()
         .map(|p| p.to_path_buf())
@@ -285,9 +286,8 @@ impl Scene {
         let w = tex.width as i32;
         let h = tex.height as i32;
         let fetch = |x: i32, y: i32| -> (f32, f32, f32) {
-            let idx = ((y.rem_euclid(h) as usize) * tex.width as usize
-                + (x.rem_euclid(w) as usize))
-                * 4;
+            let idx =
+                ((y.rem_euclid(h) as usize) * tex.width as usize + (x.rem_euclid(w) as usize)) * 4;
             (
                 srgb_u8_to_linear(tex.pixels[idx]),
                 srgb_u8_to_linear(tex.pixels[idx + 1]),
@@ -350,9 +350,8 @@ impl Scene {
         let w = tex.width as i32;
         let h = tex.height as i32;
         let fetch = |x: i32, y: i32| -> (f32, f32, f32) {
-            let idx = ((y.rem_euclid(h) as usize) * tex.width as usize
-                + (x.rem_euclid(w) as usize))
-                * 4;
+            let idx =
+                ((y.rem_euclid(h) as usize) * tex.width as usize + (x.rem_euclid(w) as usize)) * 4;
             let r = tex.pixels[idx] as f32 / 255.0;
             let g = tex.pixels[idx + 1] as f32 / 255.0;
             let b = tex.pixels[idx + 2] as f32 / 255.0;
@@ -457,11 +456,10 @@ fn load_scene(path: &Path) -> Result<Scene, String> {
                 let tex_idx = info.texture().index();
                 texture_to_image.get(tex_idx).copied()
             });
-            let metallic_roughness_texture =
-                pbr.metallic_roughness_texture().and_then(|info| {
-                    let tex_idx = info.texture().index();
-                    texture_to_image.get(tex_idx).copied()
-                });
+            let metallic_roughness_texture = pbr.metallic_roughness_texture().and_then(|info| {
+                let tex_idx = info.texture().index();
+                texture_to_image.get(tex_idx).copied()
+            });
             let emissive_texture = m.emissive_texture().and_then(|info| {
                 let tex_idx = info.texture().index();
                 texture_to_image.get(tex_idx).copied()
@@ -531,6 +529,144 @@ fn load_scene(path: &Path) -> Result<Scene, String> {
         bbox_min,
         bbox_max,
     })
+}
+
+fn push_reference_quad(
+    triangles: &mut Vec<Triangle>,
+    points: [Vec3; 4],
+    normal: Vec3,
+    material_index: u32,
+) {
+    let tangent_dir = (points[1] - points[0]).normalize_or_zero();
+    let tangent = tangent_dir.extend(1.0);
+    let uv = [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y];
+    for [a, b, c] in [[0usize, 1, 2], [0, 2, 3]] {
+        triangles.push(Triangle {
+            v0: points[a],
+            v1: points[b],
+            v2: points[c],
+            n0: normal,
+            n1: normal,
+            n2: normal,
+            t0: tangent,
+            t1: tangent,
+            t2: tangent,
+            uv0: uv[a],
+            uv1: uv[b],
+            uv2: uv[c],
+            material_index,
+        });
+    }
+}
+
+fn push_reference_box(triangles: &mut Vec<Triangle>, min: Vec3, max: Vec3, material_index: u32) {
+    push_reference_quad(
+        triangles,
+        [
+            Vec3::new(max.x, min.y, min.z),
+            Vec3::new(max.x, max.y, min.z),
+            Vec3::new(max.x, max.y, max.z),
+            Vec3::new(max.x, min.y, max.z),
+        ],
+        Vec3::X,
+        material_index,
+    );
+    push_reference_quad(
+        triangles,
+        [
+            Vec3::new(min.x, min.y, max.z),
+            Vec3::new(min.x, max.y, max.z),
+            Vec3::new(min.x, max.y, min.z),
+            Vec3::new(min.x, min.y, min.z),
+        ],
+        Vec3::NEG_X,
+        material_index,
+    );
+    push_reference_quad(
+        triangles,
+        [
+            Vec3::new(min.x, max.y, min.z),
+            Vec3::new(min.x, max.y, max.z),
+            Vec3::new(max.x, max.y, max.z),
+            Vec3::new(max.x, max.y, min.z),
+        ],
+        Vec3::Y,
+        material_index,
+    );
+    push_reference_quad(
+        triangles,
+        [
+            Vec3::new(min.x, min.y, max.z),
+            Vec3::new(min.x, min.y, min.z),
+            Vec3::new(max.x, min.y, min.z),
+            Vec3::new(max.x, min.y, max.z),
+        ],
+        Vec3::NEG_Y,
+        material_index,
+    );
+    push_reference_quad(
+        triangles,
+        [
+            Vec3::new(max.x, min.y, max.z),
+            Vec3::new(max.x, max.y, max.z),
+            Vec3::new(min.x, max.y, max.z),
+            Vec3::new(min.x, min.y, max.z),
+        ],
+        Vec3::Z,
+        material_index,
+    );
+    push_reference_quad(
+        triangles,
+        [
+            Vec3::new(min.x, min.y, min.z),
+            Vec3::new(min.x, max.y, min.z),
+            Vec3::new(max.x, max.y, min.z),
+            Vec3::new(max.x, min.y, min.z),
+        ],
+        Vec3::NEG_Z,
+        material_index,
+    );
+}
+
+/// Procedural mirror of native/shared/tests/golden_render.rs::build_pt_scene.
+/// Keeping this scene asset-free makes the GPU oracle independently
+/// sanity-checkable on any machine that can run the CPU reference tracer.
+fn load_pt_golden_scene() -> Scene {
+    let colors = [
+        [0.55, 0.50, 0.45, 1.0],
+        [0.85, 0.20, 0.15, 1.0],
+        [0.20, 0.65, 0.90, 1.0],
+        [0.90, 0.80, 0.20, 1.0],
+    ];
+    let materials = colors
+        .into_iter()
+        .map(|base_color_factor| Material {
+            base_color_factor,
+            metallic: 0.0,
+            roughness: 0.8,
+            ..Material::default_material()
+        })
+        .collect();
+    let mut triangles = Vec::with_capacity(7 * 12);
+    push_reference_box(
+        &mut triangles,
+        Vec3::new(-8.0, -0.2, -8.0),
+        Vec3::new(8.0, 0.0, 8.0),
+        0,
+    );
+    for i in 0..6u32 {
+        let angle = i as f32 / 6.0 * std::f32::consts::TAU;
+        let center = Vec3::new(angle.cos() * 2.4, 0.5, angle.sin() * 2.4);
+        let half = Vec3::new(0.5, if i % 2 == 0 { 0.5 } else { 1.0 }, 0.5);
+        push_reference_box(&mut triangles, center - half, center + half, 1 + i % 3);
+    }
+    Scene {
+        triangles,
+        materials,
+        textures: Vec::new(),
+        bbox_min: Vec3::new(-8.0, -0.2, -8.0),
+        bbox_max: Vec3::new(8.0, 1.5, 8.0),
+    }
 }
 
 fn walk_node(
@@ -649,6 +785,10 @@ fn walk_node(
 
 // Path-tracing core (ray/BVH/camera/RNG/BRDF/environment/lights/
 // integrator) lives in tracer.rs (2000-line file policy).
+#[allow(dead_code)]
+mod layered_pbr;
+#[allow(dead_code)]
+mod sheen_lut;
 mod tracer;
 use tracer::*;
 
@@ -740,7 +880,9 @@ fn render(
 
 struct Args {
     scene_path: String,
+    builtin_scene: Option<String>,
     out_path: String,
+    metadata_path: Option<String>,
     env_path: Option<String>,
     env_intensity: f32,
     sun_direction: Option<Vec3>,
@@ -756,7 +898,9 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut scene_path: Option<String> = None;
+    let mut builtin_scene: Option<String> = None;
     let mut out_path: Option<String> = None;
+    let mut metadata_path: Option<String> = None;
     let mut env_path: Option<String> = None;
     let mut env_intensity: f32 = 1.0;
     let mut sun_direction: Option<Vec3> = Some(Vec3::new(0.4, 0.8, 0.3).normalize());
@@ -776,7 +920,9 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--spec" => spec_path = iter.next(),
             "--scene" => scene_path = iter.next(),
+            "--builtin" => builtin_scene = iter.next(),
             "--out" => out_path = iter.next(),
+            "--metadata" => metadata_path = iter.next(),
             "--env" => env_path = iter.next(),
             "--env-intensity" => {
                 env_intensity = iter
@@ -874,7 +1020,9 @@ fn parse_args() -> Result<Args, String> {
                 println!("                       camera, env, sun, resolution. CLI flags below");
                 println!("                       override individual spec fields.");
                 println!("  --scene PATH         glTF/GLB file to render");
+                println!("  --builtin NAME       built-in scene (pt-golden)");
                 println!("  --out PATH           output PNG path (required)");
+                println!("  --metadata PATH      write reproducibility metadata JSON");
                 println!("  --env PATH           HDR (.hdr) environment map");
                 println!("  --env-intensity F    env map multiplier (default 1.0)");
                 println!("  --sun-dir X Y Z      sun direction toward light");
@@ -954,8 +1102,18 @@ fn parse_args() -> Result<Args, String> {
     }
 
     Ok(Args {
-        scene_path: scene_path.ok_or("--scene or --spec is required")?,
+        scene_path: match (&scene_path, &builtin_scene) {
+            (Some(path), None) => path.clone(),
+            (None, Some(name)) if name == "pt-golden" => format!("<builtin:{name}>"),
+            (None, Some(name)) => return Err(format!("unknown built-in scene: {name}")),
+            (Some(_), Some(_)) => {
+                return Err("use either --scene or --builtin, not both".to_owned())
+            }
+            (None, None) => return Err("--scene, --spec, or --builtin is required".to_owned()),
+        },
+        builtin_scene,
         out_path: out_path.ok_or("--out is required")?,
+        metadata_path,
         env_path,
         env_intensity,
         sun_direction,
@@ -980,7 +1138,12 @@ fn main() -> ExitCode {
     };
 
     let load_start = Instant::now();
-    let scene = match load_scene(Path::new(&args.scene_path)) {
+    let scene_result = if args.builtin_scene.as_deref() == Some("pt-golden") {
+        Ok(load_pt_golden_scene())
+    } else {
+        load_scene(Path::new(&args.scene_path))
+    };
+    let scene = match scene_result {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error loading {}: {}", args.scene_path, e);
@@ -997,11 +1160,7 @@ fn main() -> ExitCode {
 
     let bvh_start = Instant::now();
     let bvh = build_bvh(&scene.triangles);
-    println!(
-        "bvh: {} nodes ({:?})",
-        bvh.nodes.len(),
-        bvh_start.elapsed()
-    );
+    println!("bvh: {} nodes ({:?})", bvh.nodes.len(), bvh_start.elapsed());
 
     let environment = match &args.env_path {
         Some(p) => {
@@ -1018,8 +1177,13 @@ fn main() -> ExitCode {
             }
         }
         None => {
-            println!("env: procedural (no --env supplied)");
-            Environment::procedural()
+            if args.builtin_scene.as_deref() == Some("pt-golden") {
+                println!("env: Bloom PT golden analytic sky");
+                Environment::bloom_pt_golden()
+            } else {
+                println!("env: procedural (no --env supplied)");
+                Environment::procedural()
+            }
         }
     };
 
@@ -1068,13 +1232,10 @@ fn main() -> ExitCode {
             seed: args.seed,
         },
     );
+    let render_elapsed = render_start.elapsed();
     println!(
         "render: {}x{} @ {}spp, {} bounces, {:?}",
-        args.width,
-        args.height,
-        args.spp,
-        args.max_bounces,
-        render_start.elapsed()
+        args.width, args.height, args.spp, args.max_bounces, render_elapsed
     );
 
     let img = image::RgbImage::from_raw(args.width, args.height, pixels)
@@ -1084,5 +1245,90 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     println!("wrote {}", args.out_path);
+    if let Some(path) = &args.metadata_path {
+        let camera = args.camera_override.as_ref().map(|camera| {
+            serde_json::json!({
+                "position": camera.position,
+                "target": camera.target,
+                "up": camera.up,
+                "fov_y_deg": camera.fov_y_deg,
+            })
+        });
+        let metadata = serde_json::json!({
+            "renderer": "bloom-reference",
+            "scene": args.scene_path,
+            "width": args.width,
+            "height": args.height,
+            "spp": args.spp,
+            "max_bounces": args.max_bounces,
+            "seed": args.seed,
+            "triangles": scene.triangles.len(),
+            "camera": camera,
+            "sun": args.sun_direction.map(|direction| serde_json::json!({
+                "direction_to_light": direction.to_array(),
+                "color": args.sun_color.to_array(),
+                "intensity": args.sun_intensity,
+            })),
+            "environment": if args.builtin_scene.as_deref() == Some("pt-golden")
+                && args.env_path.is_none()
+            {
+                "bloom-pt-golden-analytic"
+            } else {
+                args.env_path.as_deref().unwrap_or("procedural")
+            },
+            "render_seconds": render_elapsed.as_secs_f64(),
+            "output": args.out_path,
+        });
+        let encoded = serde_json::to_vec_pretty(&metadata).expect("serialize reference metadata");
+        if let Err(e) = std::fs::write(path, encoded) {
+            eprintln!("error writing metadata {}: {}", path, e);
+            return ExitCode::from(1);
+        }
+        println!("wrote {path}");
+    }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod pt_golden_scene_tests {
+    use super::*;
+
+    #[test]
+    fn built_in_scene_matches_gpu_golden_topology_and_materials() {
+        let scene = load_pt_golden_scene();
+        assert_eq!(scene.triangles.len(), 84); // seven boxes, twelve triangles each
+        assert_eq!(scene.materials.len(), 4);
+        assert_eq!(scene.bbox_min, Vec3::new(-8.0, -0.2, -8.0));
+        assert_eq!(scene.bbox_max, Vec3::new(8.0, 1.5, 8.0));
+
+        let mut triangles_by_material = [0usize; 4];
+        for triangle in &scene.triangles {
+            triangles_by_material[triangle.material_index as usize] += 1;
+        }
+        assert_eq!(triangles_by_material, [12, 24, 24, 24]);
+        assert!(scene.materials.iter().all(|material| {
+            material.metallic == 0.0 && (material.roughness - 0.8).abs() < f32::EPSILON
+        }));
+    }
+
+    #[test]
+    fn built_in_sky_matches_gpu_gradient() {
+        let sky = Environment::bloom_pt_golden();
+        for direction in [Vec3::Y, Vec3::X, Vec3::NEG_Y] {
+            let expected = 0.3 * (0.45 + (1.35 - 0.45) * (direction.y * 0.5 + 0.5));
+            let sampled = sky.sample(direction);
+            assert!(
+                (sampled.x - expected).abs() < 0.002,
+                "{direction:?}: {sampled:?}"
+            );
+            assert!(
+                (sampled.y - expected).abs() < 0.002,
+                "{direction:?}: {sampled:?}"
+            );
+            assert!(
+                (sampled.z - expected).abs() < 0.002,
+                "{direction:?}: {sampled:?}"
+            );
+        }
+    }
 }

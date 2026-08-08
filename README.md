@@ -75,6 +75,9 @@ cd dist/web && python3 -m http.server 8080
 - **True native** — Compiles to Metal, DirectX 12, Vulkan, OpenGL, and WebGPU via wgpu.
 - **Ship everywhere** — macOS, Windows, Linux, iOS, tvOS, Android, and Web from one codebase.
 - **Unified 2D/3D** — Shapes, textures, text, 3D models, and audio in one engine.
+- **Coherent quality tiers** — Resolution, TAA, upscale filtering, sharpening,
+  and effects move together from 0.50-scale Off to native-resolution Ultra.
+  ([quality preset guide](docs/quality-presets.md))
 - **Zero magic** — Explicit game loops, no hidden framework overhead.
 
 ## How Bloom relates to raylib
@@ -149,6 +152,46 @@ native/               Rust implementations
 examples/
   pong/               Complete working example (~170 lines)
 ```
+
+## Contributing checks
+
+Install Node.js, Python 3.11 or newer, the stable Rust toolchain with
+`rustfmt`, `clippy`, and the `wasm32-unknown-unknown` target. The full and web
+lanes also require
+[wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Chrome or
+Chromium for the real-browser WebGPU smoke. Native builds need the platform
+dependencies listed in `.github/workflows/test.yml` (CMake and a C++ compiler
+everywhere, X11/audio development packages on Linux, and the MSVC developer
+environment on Windows).
+
+Run the platform-independent PR gates while iterating:
+
+```bash
+./scripts/ci-check.sh --quick
+```
+
+Before handing off a change, run the complete suite for the current host,
+including its native crate and the packaged WebAssembly build:
+
+```bash
+./scripts/ci-check.sh --full
+```
+
+Mobile jobs use the same entry point through the `cross` lane. Select one
+declared crate/target with `BLOOM_CROSS_CRATE`, `BLOOM_CROSS_TARGET`, and
+optionally `BLOOM_CROSS_FEATURES`; Android additionally requires
+`ANDROID_NDK_HOME` or `ANDROID_NDK_LATEST_HOME`. For example:
+
+```bash
+BLOOM_CROSS_CRATE=ios \
+BLOOM_CROSS_TARGET=aarch64-apple-ios-sim \
+BLOOM_CROSS_FEATURES=models3d,image-extras \
+./scripts/ci-check.sh --cross --component target-check
+```
+
+Every invocation writes a machine-readable `bloom-ci-summary-v1` result under
+`target/ci/`. GitHub Actions selects components of these same lanes so its
+command inventory cannot silently differ from local development.
 
 ## Types
 

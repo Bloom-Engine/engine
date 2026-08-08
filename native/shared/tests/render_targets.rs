@@ -5,9 +5,9 @@
 //! depth/HDR/G-buffer targets. Those two must agree from the very first
 //! frame.
 //!
-//! The golden suite cannot cover this: its harness calls
-//! `set_taa_enabled(false)` immediately after construction, which
-//! internally resizes and so always repairs the invariant before
+//! The golden suite cannot cover this: its harness explicitly selects native
+//! render scale immediately after construction, which resizes and repairs the
+//! invariant before
 //! anything renders. A real host does not — every `attach_engine`
 //! platform (macOS/iOS/tvOS/Linux/Android) boots and then only resizes
 //! when the OS-reported window size *changes*, which is false on frame
@@ -16,9 +16,9 @@
 //! dropped out, and the depth-snapshot copy failed validation outright
 //! whenever a scene-reading translucent material was in view.
 
+use bloom_shared::profiler::Profiler;
 use bloom_shared::renderer::Renderer;
 use bloom_shared::scene::SceneGraph;
-use bloom_shared::profiler::Profiler;
 
 fn try_renderer() -> Option<Renderer> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -65,16 +65,60 @@ fn render_targets_track_render_extent_through_changes() {
     };
 
     r.set_render_scale(1.0);
-    assert_eq!(r.render_target_extent(), r.render_extent(), "after set_render_scale(1.0)");
+    assert_eq!(
+        r.render_target_extent(),
+        r.render_extent(),
+        "after set_render_scale(1.0)"
+    );
 
     r.set_render_scale(0.5);
-    assert_eq!(r.render_target_extent(), r.render_extent(), "after set_render_scale(0.5)");
+    assert_eq!(
+        r.render_target_extent(),
+        r.render_extent(),
+        "after set_render_scale(0.5)"
+    );
 
     r.resize(640, 480, 640, 480);
     assert_eq!(r.render_target_extent(), r.render_extent(), "after resize");
 
     r.set_taa_enabled(false);
-    assert_eq!(r.render_target_extent(), r.render_extent(), "after set_taa_enabled(false)");
+    assert_eq!(
+        r.render_target_extent(),
+        r.render_extent(),
+        "after set_taa_enabled(false)"
+    );
+    assert_eq!(
+        r.render_scale(),
+        0.5,
+        "TAA toggles must not silently change render resolution"
+    );
+}
+
+#[test]
+fn quality_presets_own_resolution_reconstruction_and_sharpening() {
+    let Some(mut r) = try_renderer() else {
+        eprintln!("no GPU adapter — skipping");
+        return;
+    };
+
+    let expected = [
+        (0, (128, 128), false, 0, 0.0),
+        (1, (172, 172), false, 1, 0.25),
+        (2, (192, 192), true, 1, 0.40),
+        (3, (218, 218), true, 1, 0.45),
+        (4, (256, 256), true, 1, 0.50),
+    ];
+    for (preset, extent, taa, upscale, sharpen) in expected {
+        r.apply_quality_preset(preset);
+        assert_eq!(r.render_extent(), extent, "preset {preset} extent");
+        assert_eq!(r.taa_enabled, taa, "preset {preset} TAA");
+        assert_eq!(r.upscale_mode, upscale, "preset {preset} upscale");
+        assert_eq!(
+            r.sharpen_strength, sharpen,
+            "preset {preset} composite sharpen"
+        );
+        assert_eq!(r.cas_strength, 0.0, "preset {preset} extra CAS pass");
+    }
 }
 
 /// The deferred frame path must honor the render-target override — the
@@ -105,7 +149,11 @@ fn deferred_frame_writes_render_target_override() {
         .create_view(&wgpu::TextureViewDescriptor::default());
     let depth_tex = r.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("test_rt_depth"),
-        size: wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -131,7 +179,9 @@ fn deferred_frame_writes_render_target_override() {
     r.end_texture_mode();
 
     // Read the RT back and look at the center pixel.
-    let tex = r.get_texture_ref(tex_idx).expect("render texture registered");
+    let tex = r
+        .get_texture_ref(tex_idx)
+        .expect("render texture registered");
     let bpr = (W * 4 + 255) & !255;
     let buf = r.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("test_rt_readback"),
@@ -157,7 +207,11 @@ fn deferred_frame_writes_render_target_override() {
                 rows_per_image: Some(H),
             },
         },
-        wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
     );
     r.queue.submit(std::iter::once(enc.finish()));
 
@@ -166,12 +220,20 @@ fn deferred_frame_writes_render_target_override() {
     slice.map_async(wgpu::MapMode::Read, move |res| {
         let _ = tx.send(res);
     });
-    let _ = r.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+    let _ = r.device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
     rx.recv().expect("map callback").expect("map ok");
 
     let data = slice.get_mapped_range();
     let center = ((H / 2) * bpr + (W / 2) * 4) as usize;
-    let px = [data[center], data[center + 1], data[center + 2], data[center + 3]];
+    let px = [
+        data[center],
+        data[center + 1],
+        data[center + 2],
+        data[center + 3],
+    ];
     drop(data);
 
     // Channel order differs by surface format (RGBA vs BGRA) and the clear

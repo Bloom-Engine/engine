@@ -1,0 +1,126 @@
+{
+  "schema": "bloom-directional-vsm-contact-detail-evidence-v1",
+  "issue": 132,
+  "validated_revision": "c1131d02dd788982b7580dd0e8e53539130f706d",
+  "adapter": {
+    "name": "Apple M1 Max",
+    "backend": "Metal",
+    "profile": "native-full",
+    "selected_tier": "high-end",
+    "os": "macOS 26.5"
+  },
+  "fixture": {
+    "example": "examples/quality-motion/main.ts",
+    "flag": "--vsm-contact-detail",
+    "logical_resolution": [1280, 720],
+    "capture_resolution": [2560, 1440],
+    "post_columns": 19,
+    "post_rows": 14,
+    "post_count": 266,
+    "post_width_metres": 0.055,
+    "warmup_frames": 120,
+    "measured_frames": 120,
+    "fixed_timestep": 0.016666667
+  },
+  "settled_vsm": {
+    "demand_count": 224,
+    "resident": 224,
+    "dirty": 0,
+    "pending_render": 0,
+    "cache_hits": 224,
+    "cache_misses": 0,
+    "denied": 0,
+    "evictions": 0,
+    "dynamic_fallback": false
+  },
+  "semantic_gate": {
+    "tool": "tools/quality/shadow_detail.py",
+    "roi_normalized": [0.1484375, 0.416666667, 0.8515625, 0.777777778],
+    "neutral_chroma_max_code_value": 7,
+    "neutral_pixels": 398641,
+    "edge_samples": 349133,
+    "strong_edge_threshold": 0.1,
+    "requirements": {
+      "strong_edge_ratio_minimum": 5.0,
+      "edge_p99_ratio_minimum": 1.35,
+      "shadow_contrast_gain_minimum": 0.004
+    },
+    "csm": {
+      "strong_edge_pixels": 161,
+      "edge_p99": 0.071697255,
+      "shadow_contrast_p95_p05": 0.284004706
+    },
+    "vsm": {
+      "strong_edge_pixels": 8110,
+      "edge_p99": 0.116095294,
+      "shadow_contrast_p95_p05": 0.291564706
+    },
+    "result": {
+      "strong_edge_ratio": 50.372671,
+      "edge_p99_ratio": 1.619243,
+      "shadow_contrast_gain": 0.00756,
+      "passed": true
+    },
+    "negative_controls": [
+      "reversed-sharp-and-blurred-candidate-fails",
+      "colored-geometry-excluded-from-mask"
+    ]
+  },
+  "determinism": {
+    "runs_per_mode": 5,
+    "vsm_sha256": "81c6d840a275ee4fe3ff9fbeb87a5a1e21b23bb1c087a4e24c024c2f778b0bde",
+    "csm_sha256": "a5367b679f8ae11f42b6b28faf750290afecbef39fd0f065296f440da6e2c79c"
+  },
+  "incremental_memory_bytes": {
+    "vsm_pool_and_metadata": 19951824,
+    "caster_indirect": 51200,
+    "total": 20003024
+  },
+  "performance_medians_ms": {
+    "csm": {
+      "wall_frame_mean": 13.79175,
+      "cpu_frame_mean": 8.454446,
+      "cpu_frame_p50": 3.758875,
+      "gpu_frame_mean": 50.589569,
+      "gpu_frame_p50": 49.070917,
+      "main_hdr_gpu": 2.497231,
+      "shadow_cpu": 0.105116,
+      "render_total_cpu": 4.264043
+    },
+    "vsm": {
+      "wall_frame_mean": 13.418323,
+      "cpu_frame_mean": 7.962276,
+      "cpu_frame_p50": 3.635167,
+      "gpu_frame_mean": 50.603689,
+      "gpu_frame_p50": 47.649169,
+      "main_hdr_gpu": 2.72828,
+      "shadow_cpu": 0.154535,
+      "render_total_cpu": 4.031751
+    },
+    "percent_delta": {
+      "wall_frame_mean": -2.707611,
+      "cpu_frame_mean": -5.821434,
+      "cpu_frame_p50": -3.291091,
+      "gpu_frame_mean": 0.027911,
+      "gpu_frame_p50": -2.897333,
+      "main_hdr_gpu": 9.252208,
+      "shadow_cpu": 47.013775,
+      "render_total_cpu": -5.447694
+    },
+    "verdict": "quality-gain-with-measured-incremental-cost",
+    "note": "Production renderer is unchanged by this qualification checkpoint; lower whole-frame totals are not claimed as an optimization"
+  },
+  "qualification": {
+    "quick_lane": "pass",
+    "contact_detail_tests_passed": 3,
+    "ffi_schema_parity": "pass",
+    "file_size_ratchet": "pass",
+    "wasm32_web_feature_check": "pass",
+    "shared_unit_tests_passed": 347,
+    "shared_unit_tests_ignored": 1,
+    "gpu_goldens_passed": 59,
+    "gpu_goldens_ignored": 2,
+    "render_target_tests_passed": 4,
+    "canonical_examples": 20
+  }
+}

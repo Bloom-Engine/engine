@@ -1,7 +1,7 @@
+use bloom_shared::audio::{parse_mp3, parse_ogg, parse_wav};
 use bloom_shared::engine::EngineState;
 use bloom_shared::renderer::Renderer;
 use bloom_shared::string_header::{alloc_perry_string, str_from_header};
-use bloom_shared::audio::{parse_wav, parse_ogg, parse_mp3};
 
 use std::sync::OnceLock;
 
@@ -27,36 +27,35 @@ fn bloom_resolve_asset_path(path: &str) -> std::borrow::Cow<'_, str> {
 // docs for the contract; tools/validate-ffi.js checks parity in CI.
 bloom_shared::define_core_ffi!();
 
-
 /// Map Win32 virtual key code to Bloom key code.
 fn map_keycode(vk: u32) -> usize {
     match vk {
-        0x41..=0x5A => vk as usize,        // A-Z map directly (65-90)
-        0x30..=0x39 => vk as usize,        // 0-9 map directly (48-57)
+        0x41..=0x5A => vk as usize,                // A-Z map directly (65-90)
+        0x30..=0x39 => vk as usize,                // 0-9 map directly (48-57)
         0x70..=0x7B => (vk - 0x70 + 112) as usize, // F1-F12
-        0x26 => 256,  // VK_UP
-        0x28 => 257,  // VK_DOWN
-        0x25 => 258,  // VK_LEFT
-        0x27 => 259,  // VK_RIGHT
-        0x20 => 32,   // VK_SPACE
-        0x0D => 265,  // VK_RETURN → Bloom ENTER
-        0x1B => 27,   // VK_ESCAPE
-        0x09 => 9,    // VK_TAB
-        0x08 => 8,    // VK_BACK
-        0x2E => 127,  // VK_DELETE
-        0x2D => 260,  // VK_INSERT
-        0x24 => 261,  // VK_HOME
-        0x23 => 262,  // VK_END
-        0x21 => 263,  // VK_PRIOR (Page Up)
-        0x22 => 264,  // VK_NEXT (Page Down)
-        0xA0 => 280,  // VK_LSHIFT
-        0xA1 => 281,  // VK_RSHIFT
-        0xA2 => 282,  // VK_LCONTROL
-        0xA3 => 283,  // VK_RCONTROL
-        0xA4 => 284,  // VK_LMENU (Left Alt)
-        0xA5 => 285,  // VK_RMENU (Right Alt)
-        0x5B => 286,  // VK_LWIN
-        0x5C => 287,  // VK_RWIN
+        0x26 => 256,                               // VK_UP
+        0x28 => 257,                               // VK_DOWN
+        0x25 => 258,                               // VK_LEFT
+        0x27 => 259,                               // VK_RIGHT
+        0x20 => 32,                                // VK_SPACE
+        0x0D => 265,                               // VK_RETURN → Bloom ENTER
+        0x1B => 27,                                // VK_ESCAPE
+        0x09 => 9,                                 // VK_TAB
+        0x08 => 8,                                 // VK_BACK
+        0x2E => 127,                               // VK_DELETE
+        0x2D => 260,                               // VK_INSERT
+        0x24 => 261,                               // VK_HOME
+        0x23 => 262,                               // VK_END
+        0x21 => 263,                               // VK_PRIOR (Page Up)
+        0x22 => 264,                               // VK_NEXT (Page Down)
+        0xA0 => 280,                               // VK_LSHIFT
+        0xA1 => 281,                               // VK_RSHIFT
+        0xA2 => 282,                               // VK_LCONTROL
+        0xA3 => 283,                               // VK_RCONTROL
+        0xA4 => 284,                               // VK_LMENU (Left Alt)
+        0xA5 => 285,                               // VK_RMENU (Right Alt)
+        0x5B => 286,                               // VK_LWIN
+        0x5C => 287,                               // VK_RWIN
         _ => 0,
     }
 }
@@ -74,9 +73,27 @@ fn resolve_modifier_vk(vk: u32, lparam: isize) -> u32 {
     let scancode = ((lparam >> 16) & 0xFF) as u32;
     let extended = (lparam >> 24) & 1 != 0;
     match vk {
-        0x10 => if scancode == 0x36 { 0xA1 } else { 0xA0 }, // VK_SHIFT   -> R/L
-        0x11 => if extended { 0xA3 } else { 0xA2 },          // VK_CONTROL -> R/L
-        0x12 => if extended { 0xA5 } else { 0xA4 },          // VK_MENU    -> R/L
+        0x10 => {
+            if scancode == 0x36 {
+                0xA1
+            } else {
+                0xA0
+            }
+        } // VK_SHIFT   -> R/L
+        0x11 => {
+            if extended {
+                0xA3
+            } else {
+                0xA2
+            }
+        } // VK_CONTROL -> R/L
+        0x12 => {
+            if extended {
+                0xA5
+            } else {
+                0xA4
+            }
+        } // VK_MENU    -> R/L
         _ => vk,
     }
 }
@@ -193,13 +210,15 @@ mod crash_report {
 #[cfg(windows)]
 mod win32 {
     use super::*;
-    use windows::Win32::UI::WindowsAndMessaging::*;
-    use windows::Win32::UI::HiDpi::*;
-    use windows::Win32::Foundation::*;
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::Graphics::Gdi::*;
+    use raw_window_handle::{
+        RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
+    };
     use windows::core::*;
-    use raw_window_handle::{RawWindowHandle, Win32WindowHandle, RawDisplayHandle, WindowsDisplayHandle};
+    use windows::Win32::Foundation::*;
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::HiDpi::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
 
     static mut HWND_GLOBAL: Option<HWND> = None;
 
@@ -210,7 +229,12 @@ mod win32 {
     }
     static mut IS_FULLSCREEN: bool = false;
     static mut WINDOWED_STYLE: u32 = 0;
-    static mut WINDOWED_RECT: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    static mut WINDOWED_RECT: RECT = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
 
     pub fn set_fullscreen(fullscreen: bool) {
         unsafe {
@@ -230,8 +254,10 @@ mod win32 {
                 // Set borderless fullscreen
                 SetWindowLongW(hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE).0 as i32);
                 let _ = SetWindowPos(
-                    hwnd, HWND_TOP,
-                    mi.rcMonitor.left, mi.rcMonitor.top,
+                    hwnd,
+                    HWND_TOP,
+                    mi.rcMonitor.left,
+                    mi.rcMonitor.top,
                     mi.rcMonitor.right - mi.rcMonitor.left,
                     mi.rcMonitor.bottom - mi.rcMonitor.top,
                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER,
@@ -241,8 +267,10 @@ mod win32 {
                 // Restore windowed mode
                 SetWindowLongW(hwnd, GWL_STYLE, WINDOWED_STYLE as i32);
                 let _ = SetWindowPos(
-                    hwnd, None,
-                    WINDOWED_RECT.left, WINDOWED_RECT.top,
+                    hwnd,
+                    None,
+                    WINDOWED_RECT.left,
+                    WINDOWED_RECT.top,
                     WINDOWED_RECT.right - WINDOWED_RECT.left,
                     WINDOWED_RECT.bottom - WINDOWED_RECT.top,
                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_NOZORDER,
@@ -253,10 +281,17 @@ mod win32 {
     }
 
     pub fn toggle_fullscreen() {
-        unsafe { set_fullscreen(!IS_FULLSCREEN); }
+        unsafe {
+            set_fullscreen(!IS_FULLSCREEN);
+        }
     }
 
-    unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe extern "system" fn wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
         match msg {
             WM_CLOSE => {
                 // Diagnostic (title-freeze investigation): who closes us?
@@ -466,10 +501,16 @@ mod win32 {
                 class_name,
                 PCWSTR(title_wide.as_ptr()),
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                CW_USEDEFAULT, CW_USEDEFAULT,
-                phys_w, phys_h,
-                None, None, Some(&hinstance), None,
-            ).unwrap();
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                phys_w,
+                phys_h,
+                None,
+                None,
+                Some(&hinstance),
+                None,
+            )
+            .unwrap();
 
             ShowWindow(hwnd, SW_SHOW);
             HWND_GLOBAL = Some(hwnd);
@@ -491,7 +532,11 @@ mod win32 {
     pub fn dpi_scale(hwnd: HWND) -> f64 {
         unsafe {
             let dpi = GetDpiForWindow(hwnd);
-            if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
+            if dpi == 0 {
+                1.0
+            } else {
+                dpi as f64 / 96.0
+            }
         }
     }
 
@@ -576,14 +621,21 @@ mod win32 {
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8, fullscreen: f64) {
+pub extern "C" fn bloom_init_window(
+    width: f64,
+    height: f64,
+    title_ptr: *const u8,
+    fullscreen: f64,
+) {
     let title = str_from_header(title_ptr);
 
     #[cfg(windows)]
     {
         crash_report::install();
         let (hwnd, phys_w, phys_h) = win32::create_window(width, height, title);
-        unsafe { init_engine_for_hwnd(hwnd, width as u32, height as u32, phys_w, phys_h); }
+        unsafe {
+            init_engine_for_hwnd(hwnd, width as u32, height as u32, phys_w, phys_h);
+        }
         if fullscreen != 0.0 {
             win32::set_fullscreen(true);
         }
@@ -608,237 +660,183 @@ unsafe fn init_engine_for_hwnd(
     phys_w: u32,
     phys_h: u32,
 ) {
-        // Compile shaders with DXC, not FXC.
-        //
-        // This is not a nicety. wgpu's DX12 backend reports the adapter's
-        // shader model as min(device, compiler), and FXC — its default — caps
-        // that at 5.1. Hardware ray query requires 6.5 (wgpu-hal
-        // dx12/adapter.rs: `supports_ray_tracing`), so with FXC,
-        // EXPERIMENTAL_RAY_QUERY is never exposed on DX12 on *any* GPU, no
-        // matter how capable. Lumen then silently takes its software path and
-        // the frame quietly loses its hardware-traced GI. That is what the
-        // `ray_query=false` in the boot line has been telling us.
-        //
-        // DXC is loaded at runtime from `dxcompiler.dll` + `dxil.dll`. wgpu's
-        // `static-dxc` feature would avoid the DLLs but needs MSVC's ATL,
-        // which is not part of a default toolchain install. Both DLLs ship
-        // with the Windows SDK; `tools/fetch-dxc.ps1` copies them next to the
-        // binary. If they are missing, wgpu falls back to FXC on its own — we
-        // lose HW ray query, exactly as before, and nothing else breaks.
-        let mut backend_options = wgpu::BackendOptions::default();
-        backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::DynamicDxc {
-            dxc_path: String::from("dxcompiler.dll"),
-        };
+    // Compile shaders with DXC, not FXC.
+    //
+    // This is not a nicety. wgpu's DX12 backend reports the adapter's
+    // shader model as min(device, compiler), and FXC — its default — caps
+    // that at 5.1. Hardware ray query requires 6.5 (wgpu-hal
+    // dx12/adapter.rs: `supports_ray_tracing`), so with FXC,
+    // EXPERIMENTAL_RAY_QUERY is never exposed on DX12 on *any* GPU, no
+    // matter how capable. Lumen then silently takes its software path and
+    // the frame quietly loses its hardware-traced GI. That is what the
+    // `ray_query=false` in the boot line has been telling us.
+    //
+    // DXC is loaded at runtime from `dxcompiler.dll` + `dxil.dll`. wgpu's
+    // `static-dxc` feature would avoid the DLLs but needs MSVC's ATL,
+    // which is not part of a default toolchain install. Both DLLs ship
+    // with the Windows SDK; `tools/fetch-dxc.ps1` copies them next to the
+    // binary. If they are missing, wgpu falls back to FXC on its own — we
+    // lose HW ray query, exactly as before, and nothing else breaks.
+    let mut backend_options = wgpu::BackendOptions::default();
+    backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::DynamicDxc {
+        dxc_path: String::from("dxcompiler.dll"),
+    };
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
-            backend_options,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+        backend_options,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
 
-        let surface = unsafe {
-            let mut handle = raw_window_handle::Win32WindowHandle::new(
-                std::num::NonZeroIsize::new(hwnd.0 as isize).unwrap()
-            );
-            let raw = raw_window_handle::RawWindowHandle::Win32(handle);
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+    let surface = unsafe {
+        let mut handle = raw_window_handle::Win32WindowHandle::new(
+            std::num::NonZeroIsize::new(hwnd.0 as isize).unwrap(),
+        );
+        let raw = raw_window_handle::RawWindowHandle::Win32(handle);
+        instance
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Windows(
-                    raw_window_handle::WindowsDisplayHandle::new()
+                    raw_window_handle::WindowsDisplayHandle::new(),
                 )),
                 raw_window_handle: raw,
-            }).expect("Failed to create surface")
-        };
+            })
+            .expect("Failed to create surface")
+    };
 
-        // Pick the adapter that can actually trace rays.
-        //
-        // We used to take whatever `request_adapter` handed back, which on
-        // Windows means DX12 — and wgpu's DX12 backend only reports
-        // EXPERIMENTAL_RAY_QUERY when the driver advertises D3D12 raytracing
-        // tier 1.1. The same GPU under Vulkan can expose VK_KHR_ray_query
-        // when DX12 does not. The result was silent: Lumen's hardware trace
-        // was never selected, the software SDF path ran instead, and nobody
-        // saw a reason why. So enumerate the candidates, say out loud what
-        // each one offers, and prefer one that supports ray query.
-        //
-        // BLOOM_FORCE_SW_GI keeps its meaning: it also stops us from picking
-        // a backend *for* ray tracing, so the software path can be tested on
-        // hardware that would otherwise take the fast route.
-        let want_rt = !std::env::var("BLOOM_FORCE_SW_GI")
+    // Pick the adapter that can actually trace rays.
+    //
+    // We used to take whatever `request_adapter` handed back, which on
+    // Windows means DX12 — and wgpu's DX12 backend only reports
+    // EXPERIMENTAL_RAY_QUERY when the driver advertises D3D12 raytracing
+    // tier 1.1. The same GPU under Vulkan can expose VK_KHR_ray_query
+    // when DX12 does not. The result was silent: Lumen's hardware trace
+    // was never selected, the software SDF path ran instead, and nobody
+    // saw a reason why. So enumerate the candidates, say out loud what
+    // each one offers, and prefer one that supports ray query.
+    //
+    // BLOOM_FORCE_SW_GI keeps its meaning: it also stops us from picking
+    // a backend *for* ray tracing, so the software path can be tested on
+    // hardware that would otherwise take the fast route.
+    let want_rt = !std::env::var("BLOOM_FORCE_SW_GI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let candidates = pollster_block_on(
+        instance.enumerate_adapters(wgpu::Backends::DX12 | wgpu::Backends::VULKAN),
+    );
+    let mut rt_adapter: Option<wgpu::Adapter> = None;
+    for cand in candidates {
+        let info = cand.get_info();
+        let surf_ok = cand.is_surface_supported(&surface);
+        let has_rt = cand
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        eprintln!(
+            "bloom: candidate '{}' ({:?}), ray_query={}, surface={}",
+            info.name, info.backend, has_rt, surf_ok,
+        );
+        if want_rt && has_rt && surf_ok && rt_adapter.is_none() {
+            rt_adapter = Some(cand);
+        }
+    }
+
+    let adapter = match rt_adapter {
+        Some(a) => a,
+        None => pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }))
+        .expect("No adapter found"),
+    };
+
+    {
+        // One line of boot truth: which GPU we got and whether the
+        // features that silently reshape the frame (HW ray query for
+        // GI, timestamps for the profiler) are available on it.
+        let info = adapter.get_info();
+        eprintln!(
+            "bloom: adapter '{}' ({:?}), ray_query={}, timestamps={}, tex_arrays={}",
+            info.name,
+            info.backend,
+            adapter
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
+            adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY),
+            adapter.features().contains(
+                wgpu::Features::TEXTURE_BINDING_ARRAY
+                    | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+            ),
+        );
+    }
+
+    // 2026-07-16: HW ray query is OPT-IN now, not granted-by-default.
+    // Measured on the shooter (760M, PT off): merely granting the
+    // feature flips SSGI/WSRC to the HW trace and registers every
+    // skinned draw for per-frame pre-skin + BLAS builds — costing
+    // +20 ms/frame (14.4 vs 20.3 fps) AND losing the sun's cast
+    // shadows (screenshot-confirmed twice). Until the HW path is
+    // both cheaper and visually correct, nobody should get it by
+    // accident just because dxcompiler.dll sits beside the exe.
+    // Opt in with BLOOM_HW_GI=1; --pt / BLOOM_PT keep working (the
+    // path tracer needs the feature at device creation).
+    let want_hw = std::env::var("BLOOM_HW_GI")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || std::env::var("BLOOM_PT").is_ok()
+        || std::env::args().any(|a| a == "--pt");
+    let force_sw_gi = !want_hw
+        || std::env::var("BLOOM_FORCE_SW_GI")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-
-        let candidates = pollster_block_on(
-            instance.enumerate_adapters(wgpu::Backends::DX12 | wgpu::Backends::VULKAN),
-        );
-        let mut rt_adapter: Option<wgpu::Adapter> = None;
-        for cand in candidates {
-            let info = cand.get_info();
-            let surf_ok = cand.is_surface_supported(&surface);
-            let has_rt = cand
-                .features()
-                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-            eprintln!(
-                "bloom: candidate '{}' ({:?}), ray_query={}, surface={}",
-                info.name, info.backend, has_rt, surf_ok,
-            );
-            if want_rt && has_rt && surf_ok && rt_adapter.is_none() {
-                rt_adapter = Some(cand);
-            }
-        }
-
-        let adapter = match rt_adapter {
-            Some(a) => a,
-            None => pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: Some(&surface),
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                ..Default::default()
-            }))
-            .expect("No adapter found"),
-        };
-
-        {
-            // One line of boot truth: which GPU we got and whether the
-            // features that silently reshape the frame (HW ray query for
-            // GI, timestamps for the profiler) are available on it.
-            let info = adapter.get_info();
-            eprintln!(
-                "bloom: adapter '{}' ({:?}), ray_query={}, timestamps={}, tex_arrays={}",
-                info.name,
-                info.backend,
-                adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
-                adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY),
-                adapter.features().contains(
-                    wgpu::Features::TEXTURE_BINDING_ARRAY
-                        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
-                ),
-            );
-        }
-
-        // Ticket 007b: HW ray-query via DXR 1.1 / VK_KHR_ray_query.
-        let supported = adapter.features();
-        // 2026-07-16: HW ray query is OPT-IN now, not granted-by-default.
-        // Measured on the shooter (760M, PT off): merely granting the
-        // feature flips SSGI/WSRC to the HW trace and registers every
-        // skinned draw for per-frame pre-skin + BLAS builds — costing
-        // +20 ms/frame (14.4 vs 20.3 fps) AND losing the sun's cast
-        // shadows (screenshot-confirmed twice). Until the HW path is
-        // both cheaper and visually correct, nobody should get it by
-        // accident just because dxcompiler.dll sits beside the exe.
-        // Opt in with BLOOM_HW_GI=1; --pt / BLOOM_PT keep working (the
-        // path tracer needs the feature at device creation).
-        let want_hw = std::env::var("BLOOM_HW_GI")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-            || std::env::var("BLOOM_PT").is_ok()
-            || std::env::args().any(|a| a == "--pt");
-        let force_sw_gi = !want_hw
-            || std::env::var("BLOOM_FORCE_SW_GI")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-        let rt_mask = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-        eprintln!("bloom: hw-gi opt-in: want_hw={want_hw} force_sw_gi={force_sw_gi}");
-        let mut required_features = wgpu::Features::empty();
-        // Ticket 011: request TIMESTAMP_QUERY when supported so the profiler
-        // can record GPU timings. Optional — profiler falls back to CPU-only
-        // when the adapter doesn't grant it.
-        if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
-            required_features |= wgpu::Features::TIMESTAMP_QUERY;
-        }
-        // Cooked BC7 textures (bloom-cook) upload compressed when the
-        // adapter has BC support; without it they CPU-decode at load.
-        if supported.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
-            required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
-        }
-        if !force_sw_gi && supported.contains(rt_mask) {
-            required_features |= rt_mask;
-        }
-        // PT-2: texture binding array + non-uniform indexing for textured
-        // path-trace hit shading. Both or neither (the kernel indexes the
-        // array with a per-thread material id).
-        let pt_tex_mask = wgpu::Features::TEXTURE_BINDING_ARRAY
-            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
-        if supported.contains(pt_tex_mask) {
-            required_features |= pt_tex_mask;
-        }
-        let experimental_features = if required_features.intersects(rt_mask) {
-            unsafe { wgpu::ExperimentalFeatures::enabled() }
-        } else {
-            wgpu::ExperimentalFeatures::disabled()
-        };
-        let mut required_limits = wgpu::Limits::default();
-        // Phase 1c: the material ABI declares 5 bind groups (PerFrame,
-        // PerView, PerMaterial, PerDraw, SceneInputs). wgpu's default
-        // limit is 4. Metal / Vulkan / D3D12 support at least 7, so 5 is
-        // safely within every real backend's capabilities.
-        required_limits.max_bind_groups = 5;
-        // The refractive/translucent material profile binds up to 19
-        // sampled textures in the fragment stage (5 material maps + env/
-        // BRDF/3 shadow cascades/env-diffuse + planar reflection + 3 texture
-        // arrays + the group-4 scene_color/scene_depth/impulse/motion inputs).
-        // wgpu's default is 16. Raise to whatever the adapter actually
-        // supports — every real D3D12/Vulkan/Metal GPU exposes ≥128 — so
-        // opaque/transparent materials are unaffected and refractive ones link.
-        let adapter_limits = adapter.limits();
-        required_limits.max_sampled_textures_per_shader_stage =
-            adapter_limits.max_sampled_textures_per_shader_stage;
-        required_limits.max_samplers_per_shader_stage =
-            adapter_limits.max_samplers_per_shader_stage;
-        // PT-2: binding arrays have their own element budget, default 0.
-        // Take whatever the adapter offers; the renderer checks the
-        // granted value against its fixed array size before compiling
-        // the textured kernel variant.
-        if required_features.contains(pt_tex_mask) {
-            required_limits.max_binding_array_elements_per_shader_stage =
-                adapter_limits.max_binding_array_elements_per_shader_stage;
-        }
-        // PT-4: the path-trace kernel binds 9 storage buffers (accum +
-        // moments + reservoir ping-pongs on top of instance/geo data);
-        // the wgpu default limit is 8.
-        required_limits.max_storage_buffers_per_shader_stage = required_limits
-            .max_storage_buffers_per_shader_stage
-            .max(adapter_limits.max_storage_buffers_per_shader_stage.min(16));
-        if required_features.intersects(rt_mask) {
-            required_limits = required_limits
-                .using_minimum_supported_acceleration_structure_values();
-        }
-        let (device, queue) = pollster_block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("bloom_device"),
-                required_features,
-                required_limits,
-                experimental_features,
-                ..Default::default()
+    eprintln!("bloom: hw-gi opt-in: want_hw={want_hw} force_sw_gi={force_sw_gi}");
+    let negotiated = pollster_block_on(
+        bloom_shared::renderer::device_negotiation::request_device_with_fallback(
+            &adapter,
+            bloom_shared::renderer::device_negotiation::DeviceRequestOptions {
+                allow_ray_query: !force_sw_gi,
+                profile:
+                    bloom_shared::renderer::device_negotiation::DeviceRequestProfile::NativeFull,
             },
-        )).expect("Failed to create device");
+        ),
+    )
+    .unwrap_or_else(|error| panic!("Failed to create renderer device: {error}"));
+    eprintln!(
+        "bloom: renderer device negotiation = {}",
+        negotiated.report.report_json()
+    );
+    let negotiation_report = negotiated.report.report_json();
+    let device = negotiated.device;
+    let queue = negotiated.queue;
 
-        let surface_caps = surface.get_capabilities(&adapter);
-        let format = surface_caps.formats[0];
-        // Surface is configured at the *physical* client-area size we
-        // got back from create_window; Renderer::new takes the
-        // caller's logical size separately so screenWidth() etc. keep
-        // returning DPI-independent numbers.
-        let surface_config = wgpu::SurfaceConfiguration {
-            // COPY_SRC: bloom_take_screenshot reads the swapchain back;
-            // without it the readback copy is a swallowed validation
-            // error and screenshots silently produce nothing on Windows.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC,
-            format,
-            width: phys_w,
-            height: phys_h,
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &surface_config);
+    let surface_caps = surface.get_capabilities(&adapter);
+    let format = surface_caps.formats[0];
+    // Surface is configured at the *physical* client-area size we
+    // got back from create_window; Renderer::new takes the
+    // caller's logical size separately so screenWidth() etc. keep
+    // returning DPI-independent numbers.
+    let surface_config = wgpu::SurfaceConfiguration {
+        // COPY_SRC: bloom_take_screenshot reads the swapchain back;
+        // without it the readback copy is a swallowed validation
+        // error and screenshots silently produce nothing on Windows.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        format,
+        width: phys_w,
+        height: phys_h,
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: surface_caps.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(&device, &surface_config);
 
-        // `Renderer::new` routes initial target creation through `resize`
-        // itself, so the construction-time targets already honour
-        // render_scale — no explicit resize needed here (it used to live
-        // here, which left every non-Windows host with the bug).
-        let renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
-        let _ = ENGINE.set(EngineState::new(renderer));
+    // `Renderer::new` routes initial target creation through `resize`
+    // itself, so the construction-time targets already honour
+    // render_scale — no explicit resize needed here (it used to live
+    // here, which left every non-Windows host with the bug).
+    let mut renderer = Renderer::new(device, queue, surface, surface_config, logical_w, logical_h);
+    renderer.set_device_negotiation_report(negotiation_report);
+    let _ = ENGINE.set(EngineState::new(renderer));
 }
 
 /// Attach the engine to a host-owned `HWND` instead of creating its own
@@ -932,7 +930,9 @@ pub extern "C" fn bloom_attach_hwnd(hwnd_bits: f64, width: f64, height: f64) {
         win32::attach_subclass(hwnd);
     }
     #[cfg(not(windows))]
-    { let _ = (hwnd_bits, width, height); }
+    {
+        let _ = (hwnd_bits, width, height);
+    }
 }
 
 /// Resize the engine's surface. `phys_*` are physical pixels, `log_*` logical.
@@ -943,18 +943,29 @@ pub extern "C" fn bloom_resize(phys_w: f64, phys_h: f64, log_w: f64, log_h: f64)
     #[cfg(windows)]
     unsafe {
         if let Some(eng) = ENGINE.get_mut() {
-            eng.renderer.resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
+            eng.renderer
+                .resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
         }
     }
     #[cfg(not(windows))]
-    { let _ = (phys_w, phys_h, log_w, log_h); }
+    {
+        let _ = (phys_w, phys_h, log_w, log_h);
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn bloom_window_should_close() -> f64 {
     #[cfg(windows)]
-    unsafe { if EMBEDDED { return 0.0; } }
-    if engine().should_close { 1.0 } else { 0.0 }
+    unsafe {
+        if EMBEDDED {
+            return 0.0;
+        }
+    }
+    if engine().should_close {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[cfg(windows)]
@@ -970,14 +981,20 @@ fn poll_xinput_gamepad() {
 
         // Axes: left stick X/Y, right stick X/Y, triggers
         let normalize = |v: i16| -> f32 {
-            if v > 0 { v as f32 / 32767.0 } else { v as f32 / 32768.0 }
+            if v > 0 {
+                v as f32 / 32767.0
+            } else {
+                v as f32 / 32768.0
+            }
         };
         eng.input.set_gamepad_axis(0, normalize(gp.sThumbLX));
         eng.input.set_gamepad_axis(1, -normalize(gp.sThumbLY)); // invert Y
         eng.input.set_gamepad_axis(2, normalize(gp.sThumbRX));
         eng.input.set_gamepad_axis(3, -normalize(gp.sThumbRY));
-        eng.input.set_gamepad_axis(4, gp.bLeftTrigger as f32 / 255.0);
-        eng.input.set_gamepad_axis(5, gp.bRightTrigger as f32 / 255.0);
+        eng.input
+            .set_gamepad_axis(4, gp.bLeftTrigger as f32 / 255.0);
+        eng.input
+            .set_gamepad_axis(5, gp.bRightTrigger as f32 / 255.0);
         eng.input.gamepad_axis_count = 6;
 
         // Buttons
@@ -1011,7 +1028,11 @@ fn poll_xinput_gamepad() {
         // XInputSetState when the commanded level actually changes, since the
         // call goes out over USB/BT and doing it every frame is wasteful.
         let dt = eng.delta_time as f32;
-        let (lo, hi, mut left) = (eng.input.rumble[0], eng.input.rumble[1], eng.input.rumble[2]);
+        let (lo, hi, mut left) = (
+            eng.input.rumble[0],
+            eng.input.rumble[1],
+            eng.input.rumble[2],
+        );
         let (want_lo, want_hi) = if left > 0.0 { (lo, hi) } else { (0.0, 0.0) };
         unsafe {
             if (want_lo, want_hi) != LAST_RUMBLE {
@@ -1031,7 +1052,9 @@ fn poll_xinput_gamepad() {
         eng.input.gamepad_available = false;
         // Pad unplugged mid-rumble: forget the commanded level so a
         // reconnecting pad doesn't inherit a stale "still buzzing" state.
-        unsafe { LAST_RUMBLE = (0.0, 0.0); }
+        unsafe {
+            LAST_RUMBLE = (0.0, 0.0);
+        }
     }
 }
 
@@ -1047,14 +1070,20 @@ pub extern "C" fn bloom_begin_drawing() {
         // In embedded mode the host (Perry UI) owns the message loop and
         // dispatches our subclassed window's messages — pumping here would
         // steal messages from the host. Only poll when Bloom owns the window.
-        unsafe { if !EMBEDDED { win32::poll_events(); } }
+        unsafe {
+            if !EMBEDDED {
+                win32::poll_events();
+            }
+        }
         poll_xinput_gamepad();
     }
     engine().begin_frame();
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_end_drawing() { engine().end_frame(); }
+pub extern "C" fn bloom_end_drawing() {
+    engine().end_frame();
+}
 
 static AUDIO_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1068,8 +1097,8 @@ pub extern "C" fn bloom_init_audio() {
         // Move the render half into the audio thread; the engine keeps
         // only the command-producing control half.
         let renderer = engine().audio.take_renderer();
-        std::thread::spawn(move || {
-            unsafe { wasapi_audio_thread(renderer); }
+        std::thread::spawn(move || unsafe {
+            wasapi_audio_thread(renderer);
         });
     }
 }
@@ -1082,23 +1111,20 @@ pub extern "C" fn bloom_close_audio() {
 
 #[cfg(windows)]
 unsafe fn wasapi_audio_thread(mut renderer: Option<bloom_shared::audio::AudioRenderer>) {
+    use std::sync::atomic::Ordering;
+    use windows::core::*;
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
-    use windows::core::*;
-    use std::sync::atomic::Ordering;
 
     // Initialize COM on this thread
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
     // Create device enumerator and get default output device
-    let enumerator: IMMDeviceEnumerator = match CoCreateInstance(
-        &MMDeviceEnumerator,
-        None,
-        CLSCTX_ALL,
-    ) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let enumerator: IMMDeviceEnumerator =
+        match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
 
     let device = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
         Ok(d) => d,
@@ -1121,14 +1147,17 @@ unsafe fn wasapi_audio_thread(mut renderer: Option<bloom_shared::audio::AudioRen
 
     // Initialize in shared mode with 20ms buffer
     let buffer_duration = 200_000; // 20ms in 100-nanosecond units
-    if audio_client.Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        0,
-        buffer_duration,
-        0,
-        mix_format_ptr,
-        None,
-    ).is_err() {
+    if audio_client
+        .Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            0,
+            buffer_duration,
+            0,
+            mix_format_ptr,
+            None,
+        )
+        .is_err()
+    {
         return;
     }
 
@@ -1164,12 +1193,17 @@ unsafe fn wasapi_audio_thread(mut renderer: Option<bloom_shared::audio::AudioRen
 
         let buffer_ptr = match render_client.GetBuffer(available as u32) {
             Ok(p) => p,
-            Err(_) => { std::thread::sleep(std::time::Duration::from_millis(2)); continue; }
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                continue;
+            }
         };
 
         // Mix audio
         let mix_samples = available * 2; // stereo
-        for i in 0..mix_samples { mix_buf[i] = 0.0; }
+        for i in 0..mix_samples {
+            mix_buf[i] = 0.0;
+        }
         // Renderer is moved into this thread at spawn — no shared
         // engine state is touched from here (see audio/mod.rs contract).
         if let Some(r) = renderer.as_mut() {
@@ -1180,27 +1214,41 @@ unsafe fn wasapi_audio_thread(mut renderer: Option<bloom_shared::audio::AudioRen
         let bits = mix_format.wBitsPerSample;
         let out_channels = channels;
         if bits == 32 {
-            let out = std::slice::from_raw_parts_mut(buffer_ptr as *mut f32, available * out_channels);
+            let out =
+                std::slice::from_raw_parts_mut(buffer_ptr as *mut f32, available * out_channels);
             for i in 0..available {
                 let l = mix_buf[i * 2];
-                let r = if i * 2 + 1 < mix_samples { mix_buf[i * 2 + 1] } else { l };
+                let r = if i * 2 + 1 < mix_samples {
+                    mix_buf[i * 2 + 1]
+                } else {
+                    l
+                };
                 if out_channels >= 2 {
                     out[i * out_channels] = l;
                     out[i * out_channels + 1] = r;
-                    for c in 2..out_channels { out[i * out_channels + c] = 0.0; }
+                    for c in 2..out_channels {
+                        out[i * out_channels + c] = 0.0;
+                    }
                 } else {
                     out[i] = (l + r) * 0.5;
                 }
             }
         } else if bits == 16 {
-            let out = std::slice::from_raw_parts_mut(buffer_ptr as *mut i16, available * out_channels);
+            let out =
+                std::slice::from_raw_parts_mut(buffer_ptr as *mut i16, available * out_channels);
             for i in 0..available {
                 let l = mix_buf[i * 2];
-                let r = if i * 2 + 1 < mix_samples { mix_buf[i * 2 + 1] } else { l };
+                let r = if i * 2 + 1 < mix_samples {
+                    mix_buf[i * 2 + 1]
+                } else {
+                    l
+                };
                 if out_channels >= 2 {
                     out[i * out_channels] = (l * 32767.0) as i16;
                     out[i * out_channels + 1] = (r * 32767.0) as i16;
-                    for c in 2..out_channels { out[i * out_channels + c] = 0; }
+                    for c in 2..out_channels {
+                        out[i * out_channels + c] = 0;
+                    }
                 } else {
                     out[i] = ((l + r) * 0.5 * 32767.0) as i16;
                 }
@@ -1245,16 +1293,20 @@ pub extern "C" fn bloom_toggle_fullscreen() {
 #[no_mangle]
 pub extern "C" fn bloom_set_window_title(title_ptr: *const u8) {
     // Real since 2026-07-17 — the stub read the string and discarded it.
-    use windows::Win32::UI::WindowsAndMessaging::SetWindowTextW;
     use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::SetWindowTextW;
     let title = str_from_header(title_ptr);
     if let Some(hwnd) = win32::main_hwnd() {
         let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-        unsafe { let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr())); }
+        unsafe {
+            let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
+        }
     }
 }
 #[no_mangle]
-pub extern "C" fn bloom_set_window_icon(path_ptr: *const u8) { let _ = str_from_header(path_ptr); }
+pub extern "C" fn bloom_set_window_icon(path_ptr: *const u8) {
+    let _ = str_from_header(path_ptr);
+}
 
 #[no_mangle]
 pub extern "C" fn bloom_disable_cursor() {
@@ -1273,12 +1325,12 @@ pub extern "C" fn bloom_enable_cursor() {
 // so paste in the editor's text fields silently never worked on Windows).
 #[no_mangle]
 pub extern "C" fn bloom_set_clipboard_text(text_ptr: *const u8) {
+    use windows::Win32::Foundation::{HANDLE, HWND};
     use windows::Win32::System::DataExchange::{
-        OpenClipboard, CloseClipboard, EmptyClipboard, SetClipboardData,
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::System::Ole::CF_UNICODETEXT;
-    use windows::Win32::Foundation::{HANDLE, HWND};
 
     let text = str_from_header(text_ptr);
     unsafe {
@@ -1304,10 +1356,10 @@ pub extern "C" fn bloom_set_clipboard_text(text_ptr: *const u8) {
 
 #[no_mangle]
 pub extern "C" fn bloom_get_clipboard_text() -> *const u8 {
-    use windows::Win32::System::DataExchange::{OpenClipboard, CloseClipboard, GetClipboardData};
+    use windows::Win32::Foundation::{HGLOBAL, HWND};
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
     use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
     use windows::Win32::System::Ole::CF_UNICODETEXT;
-    use windows::Win32::Foundation::{HGLOBAL, HWND};
 
     unsafe {
         let owner = win32::main_hwnd().unwrap_or(HWND(std::ptr::null_mut()));
@@ -1339,11 +1391,11 @@ pub extern "C" fn bloom_get_clipboard_text() -> *const u8 {
 // by default, which would break every relative asset path afterward.
 #[cfg(windows)]
 fn run_file_dialog(filter: &str, title: &str, save: bool, default_name: &str) -> String {
-    use windows::Win32::UI::Controls::Dialogs::{
-        GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW,
-        OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT,
-    };
     use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
+        OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
 
     // Filter block: "Matching files\0<pattern>\0All files\0*.*\0\0".
     let pattern = if filter.is_empty() { "*.*" } else { filter };
@@ -1383,7 +1435,11 @@ fn run_file_dialog(filter: &str, title: &str, save: bool, default_name: &str) ->
     };
 
     let ok = unsafe {
-        if save { GetSaveFileNameW(&mut ofn) } else { GetOpenFileNameW(&mut ofn) }
+        if save {
+            GetSaveFileNameW(&mut ofn)
+        } else {
+            GetOpenFileNameW(&mut ofn)
+        }
     };
     if !ok.as_bool() {
         return String::new();
@@ -1401,14 +1457,19 @@ pub extern "C" fn bloom_open_file_dialog(filter_ptr: *const u8, title_ptr: *cons
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_save_file_dialog(default_name_ptr: *const u8, title_ptr: *const u8) -> *const u8 {
+pub extern "C" fn bloom_save_file_dialog(
+    default_name_ptr: *const u8,
+    title_ptr: *const u8,
+) -> *const u8 {
     let default_name = str_from_header(default_name_ptr);
     let title = str_from_header(title_ptr);
     let path = run_file_dialog("", &title, true, &default_name);
     alloc_perry_string(&path)
 }
 #[no_mangle]
-pub extern "C" fn bloom_get_platform() -> f64 { 3.0 }
+pub extern "C" fn bloom_get_platform() -> f64 {
+    3.0
+}
 
 /// Preferred OS language packed as `c0*256+c1` (ISO-639 primary subtag), from
 /// `GetUserDefaultLocaleName` (e.g. "en-US" -> "en"). Falls back to "en".
@@ -1418,7 +1479,14 @@ pub extern "C" fn bloom_get_language() -> f64 {
     let mut buf = [0u16; 85]; // LOCALE_NAME_MAX_LENGTH
     let n = unsafe { GetUserDefaultLocaleName(&mut buf) };
     if n >= 2 {
-        let lc = |c: u16| -> u8 { let b = c as u8; if b.is_ascii_uppercase() { b + 32 } else { b } };
+        let lc = |c: u16| -> u8 {
+            let b = c as u8;
+            if b.is_ascii_uppercase() {
+                b + 32
+            } else {
+                b
+            }
+        };
         let (c0, c1) = (lc(buf[0]), lc(buf[1]));
         if c0.is_ascii_alphabetic() && c1.is_ascii_alphabetic() {
             return (c0 as f64) * 256.0 + (c1 as f64);
@@ -1432,11 +1500,13 @@ pub extern "C" fn bloom_get_language() -> f64 {
 // ============================================================
 
 fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
-    use std::task::{Context, Poll, Wake, Waker};
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
     struct NoopWaker;
-    impl Wake for NoopWaker { fn wake(self: Arc<Self>) {} }
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
     let waker = Waker::from(Arc::new(NoopWaker));
     let mut cx = Context::from_waker(&waker);
     let mut future = unsafe { Pin::new_unchecked(Box::new(future)) };
@@ -1447,7 +1517,6 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
         }
     }
 }
-
 
 // Q6: Multi-hit picking
 // ============================================================

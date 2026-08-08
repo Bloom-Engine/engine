@@ -7,7 +7,7 @@
 // auto-exposure in bright courtyard vs shadowed corridors.
 
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
+  initWindow, closeWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
   setEnvClearFromHdr, setTargetFPS, getDeltaTime, getFPS,
   isKeyDown, isKeyPressed,
   getMouseDeltaX, getMouseDeltaY,
@@ -15,7 +15,9 @@ import {
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
+  getCommandLineArgs, resize,
 } from "bloom/core";
+import { parseQualityRun, QualityRun } from "bloom/quality";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
 import {
@@ -35,14 +37,15 @@ const MOVE_SPEED = 5.0;
 const SPRINT_MULT = 2.5;
 
 // Auto-capture args
-declare const process: { argv: string[] };
-const argv: string[] = process.argv;
+const argv: string[] = getCommandLineArgs();
+const qualityConfig = parseQualityRun(argv);
 let captureFrames = 0;
 let capturePath = "";
 let frameCount = 0;
 let initYaw = 0.0;
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
-for (let i = 2; i < argv.length; i = i + 1) {
+let vsmMotionPath = false;
+for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
     capturePath = argv[i + 2];
@@ -53,11 +56,16 @@ for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
   }
+  if (argv[i] === "--vsm-motion-path") {
+    vsmMotionPath = true;
+  }
 }
 
 // ---- Init ----
 initWindow(SCREEN_W, SCREEN_H, "Bloom Sponza", 0);
+if (qualityConfig !== null) resize(SCREEN_W, SCREEN_H, SCREEN_W, SCREEN_H);
 setTargetFPS(60);
+let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qualityConfig) : null;
 setEnvClearFromHdr("assets/outdoor.hdr");
 enableShadows();
 
@@ -91,10 +99,12 @@ let camZ = 0.0;
 let camYaw = initYaw;
 let camPitch = 0.0;
 let cursorLocked = false;
+let fixtureFrame = 0;
 
 // ---- Main loop ----
 while (!windowShouldClose()) {
-  const dt = getDeltaTime();
+  const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
+  const dt = qualityRun !== null ? qualityRun.deltaTime() : getDeltaTime();
 
   // Camera controls
   if (cursorLocked) {
@@ -121,9 +131,21 @@ while (!windowShouldClose()) {
     if (cursorLocked) { disableCursor(); } else { enableCursor(); }
   }
 
-  const lookX = camX + Math.cos(camPitch) * fwdX * 100;
+  // Opt-in VSM transition oracle. The exact light-plane move alternates every
+  // 30 frames and returns to the ordinary camera on frame 240. The captured
+  // frame therefore has identical camera geometry to the static control while
+  // cache telemetry observes the preceding snapped-origin transition.
+  let renderCamX = camX;
+  let renderCamZ = camZ;
+  if (vsmMotionPath) {
+    fixtureFrame = fixtureFrame + 1;
+    const pathStep = Math.floor(fixtureFrame / 30) % 2;
+    renderCamX = camX + pathStep * 1.118033989;
+    renderCamZ = camZ - pathStep * 2.236067978;
+  }
+  const lookX = renderCamX + Math.cos(camPitch) * fwdX * 100;
   const lookY = camY + Math.sin(camPitch) * 100;
-  const lookZ = camZ + Math.cos(camPitch) * fwdZ * 100;
+  const lookZ = renderCamZ + Math.cos(camPitch) * fwdZ * 100;
 
   // ---- Rendering ----
   beginDrawing();
@@ -141,7 +163,7 @@ while (!windowShouldClose()) {
   addDirectionalLight(0.0, -1.0, 0.0, 0.5, 0.55, 0.65, 0.5);
 
   beginMode3D({
-    position: { x: camX, y: camY, z: camZ },
+    position: { x: renderCamX, y: camY, z: renderCamZ },
     target: { x: lookX, y: lookY, z: lookZ },
     up: { x: 0, y: 1, z: 0 },
     fovy: 60,
@@ -153,27 +175,32 @@ while (!windowShouldClose()) {
 
   endMode3D();
 
-  // HUD
-  drawText("Bloom Sponza", 10, 10, 20, { r: 255, g: 255, b: 255, a: 255 });
-  const fps = getFPS();
-  const ms = fps > 0.0 ? 1000.0 / fps : 0.0;
-  // Color the FPS line based on perf bucket so glances give
-  // instant feedback during stress tests.
-  const fpsColor = fps >= 55.0
-    ? { r: 120, g: 230, b: 120, a: 255 }
-    : fps >= 30.0
-      ? { r: 230, g: 220, b: 120, a: 255 }
-      : { r: 230, g: 120, b: 120, a: 255 };
-  const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
-  drawText(fpsText, 10, 35, 16, fpsColor);
-  drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 30, 14, { r: 180, g: 180, b: 180, a: 255 });
+  // Never bake a wall-clock FPS counter into a deterministic baseline.
+  if (qualityRun === null) {
+    drawText("Bloom Sponza", 10, 10, 20, { r: 255, g: 255, b: 255, a: 255 });
+    const fps = getFPS();
+    const ms = fps > 0.0 ? 1000.0 / fps : 0.0;
+    const fpsColor = fps >= 55.0
+      ? { r: 120, g: 230, b: 120, a: 255 }
+      : fps >= 30.0
+        ? { r: 230, g: 220, b: 120, a: 255 }
+        : { r: 230, g: 120, b: 120, a: 255 };
+    const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
+    drawText(fpsText, 10, 35, 16, fpsColor);
+    drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 30, 14, { r: 180, g: 180, b: 180, a: 255 });
+  }
 
   // Auto-capture for automated testing
-  if (captureFrames > 0) {
+  if (qualityCapture && qualityRun !== null) {
+    qualityRun.requestCapture();
+  } else if (qualityRun === null && captureFrames > 0) {
     frameCount = frameCount + 1;
     if (frameCount === captureFrames) { takeScreenshot(capturePath); }
     if (frameCount > captureFrames) { endDrawing(); break; }
   }
 
   endDrawing();
+  if (qualityRun !== null && qualityRun.endFrame()) break;
 }
+
+closeWindow();

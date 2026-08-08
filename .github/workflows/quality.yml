@@ -1,0 +1,184 @@
+name: Renderer quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Qualification suite
+        type: choice
+        options: [full, quick]
+        default: full
+      machine:
+        description: Hardware runner
+        type: choice
+        options: [all, apple-m1-max-metal, nvidia-rtx4080-vulkan]
+        default: all
+
+concurrency:
+  group: renderer-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  contract:
+    name: Quality contract
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: quick / quality-contract
+        run: ./scripts/ci-check.sh --quick --component quality-contract
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: ./.github/actions/upload-ci-failure
+        with:
+          name: quality-contract
+
+  metal:
+    name: Full quality — Apple M1 Max / Metal
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.machine == 'all' || inputs.machine == 'apple-m1-max-metal'))
+    runs-on: [self-hosted, bloom-quality, macos, apple-m1-max]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Runner preflight
+        run: |
+          python3 --version
+          cargo --version
+          command -v perry
+
+      - name: Compile every canonical TypeScript example
+        run: ./scripts/ci-check.sh --hardware --component example-compile
+
+      - name: Validate manifest, assets, and approved baselines
+        run: ./scripts/ci-check.sh --hardware --component quality-check
+
+      - name: Prove seeded regressions are detected
+        env:
+          BLOOM_QUALITY_FAULTS_OUT: tools/quality/out/ci-faults
+          BLOOM_QUALITY_TIMEOUT: "900"
+        run: ./scripts/ci-check.sh --hardware --component quality-faults
+
+      - name: Run selected high-end suite
+        if: always()
+        env:
+          BLOOM_QUALITY_SUITE: ${{ inputs.suite || 'full' }}
+          BLOOM_QUALITY_MACHINE_CLASS: apple-m1-max-metal
+          BLOOM_QUALITY_OUT: tools/quality/out/ci-metal
+          BLOOM_QUALITY_TIMEOUT: "1800"
+        run: ./scripts/ci-check.sh --hardware --component quality-run
+
+      - name: Hard-gate the constrained tier
+        if: always()
+        env:
+          BLOOM_QUALITY_SUITE: full
+          BLOOM_QUALITY_CASE: pbr-spheres-constrained
+          BLOOM_QUALITY_MACHINE_CLASS: apple-m1-metal-constrained
+          BLOOM_QUALITY_OUT: tools/quality/out/ci-metal-constrained
+          BLOOM_QUALITY_TIMEOUT: "1800"
+        run: ./scripts/ci-check.sh --hardware --component quality-run
+
+      - name: Publish compact job summary
+        if: always()
+        run: |
+          if [[ -f tools/quality/out/ci-metal/summary.md ]]; then
+            cat tools/quality/out/ci-metal/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f tools/quality/out/ci-metal-constrained/summary.md ]]; then
+            cat tools/quality/out/ci-metal-constrained/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload all success/failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-apple-m1-max-metal-${{ github.run_attempt }}
+          path: |
+            target/ci/examples
+            tools/quality/out/ci-metal
+            tools/quality/out/ci-metal-constrained
+            tools/quality/out/ci-faults
+          if-no-files-found: warn
+          retention-days: 30
+
+  vulkan:
+    name: Full quality — RTX 4080 / Vulkan
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.machine == 'all' || inputs.machine == 'nvidia-rtx4080-vulkan'))
+    runs-on: [self-hosted, bloom-quality, linux, nvidia-rtx4080]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Runner preflight
+        run: |
+          python3 --version
+          cargo --version
+          command -v perry
+          nvidia-smi
+
+      - name: Validate manifest, assets, and approved baselines
+        run: ./scripts/ci-check.sh --hardware --component quality-check
+
+      - name: Prove seeded regressions are detected
+        env:
+          BLOOM_QUALITY_FAULTS_OUT: tools/quality/out/ci-faults
+          BLOOM_QUALITY_TIMEOUT: "900"
+        run: ./scripts/ci-check.sh --hardware --component quality-faults
+
+      - name: Run selected high-end suite
+        if: always()
+        env:
+          BLOOM_QUALITY_SUITE: ${{ inputs.suite || 'full' }}
+          BLOOM_QUALITY_MACHINE_CLASS: nvidia-rtx4080-vulkan
+          BLOOM_QUALITY_OUT: tools/quality/out/ci-vulkan
+          BLOOM_QUALITY_TIMEOUT: "1800"
+        run: ./scripts/ci-check.sh --hardware --component quality-run
+
+      - name: Publish compact job summary
+        if: always()
+        run: |
+          if [[ -f tools/quality/out/ci-vulkan/summary.md ]]; then
+            cat tools/quality/out/ci-vulkan/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload all success/failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-nvidia-rtx4080-vulkan-${{ github.run_attempt }}
+          path: |
+            tools/quality/out/ci-vulkan
+            tools/quality/out/ci-faults
+          if-no-files-found: warn
+          retention-days: 30

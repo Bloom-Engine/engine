@@ -20,15 +20,18 @@
 // below to open that one instead.
 
 import {
-  initWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
+  initWindow, closeWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
   setEnvClearFromHdr, setTargetFPS, getDeltaTime, getFPS,
   isKeyDown, isKeyPressed,
   getMouseDeltaX, getMouseDeltaY,
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
-  setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled,
+  setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
+  setSsgiEnabled, setSsrEnabled, setShadowsAlwaysFresh,
+  getCommandLineArgs, resize,
 } from "bloom/core";
+import { parseQualityRun, QualityRun } from "bloom/quality";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
 import {
@@ -47,14 +50,27 @@ const MOVE_SPEED = 5.0;
 const SPRINT_MULT = 2.5;
 
 // Auto-capture args (matches the sponza examples' CLI)
-declare const process: { argv: string[] };
-const argv: string[] = process.argv;
+const argv: string[] = getCommandLineArgs();
+const qualityConfig = parseQualityRun(argv);
 let captureFrames = 0;
 let capturePath = "";
 let frameCount = 0;
 let initYaw = 0.0;
+let initCamX = -26.43;
+let initCamY = 3.16;
+let initCamZ = 11.17;
+let scenePath = "assets/bistro.gltf";
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
-for (let i = 2; i < argv.length; i = i + 1) {
+let bloomOverride = -1;
+let fogOverride = -1;
+let sunShaftOverride = -1;
+let ssgiOverride = -1;
+let ssrOverride = -1;
+let vsmMotionPath = false;
+let motionYaw = 0.0;
+let motionFrames = 0;
+let shadowsAlwaysFresh = false;
+for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
     capturePath = argv[i + 2];
@@ -62,16 +78,58 @@ for (let i = 2; i < argv.length; i = i + 1) {
   if (argv[i] === "--yaw" && i + 1 < argv.length) {
     initYaw = parseFloat(argv[i + 1]);
   }
+  if (argv[i] === "--camera-x" && i + 1 < argv.length) {
+    initCamX = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--camera-y" && i + 1 < argv.length) {
+    initCamY = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--camera-z" && i + 1 < argv.length) {
+    initCamZ = parseFloat(argv[i + 1]);
+  }
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--bloom" && i + 1 < argv.length) {
+    bloomOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--fog" && i + 1 < argv.length) {
+    fogOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--sun-shafts" && i + 1 < argv.length) {
+    sunShaftOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--ssgi" && i + 1 < argv.length) {
+    ssgiOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--ssr" && i + 1 < argv.length) {
+    ssrOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--scene" && i + 1 < argv.length) {
+    scenePath = argv[i + 1];
+  }
+  if (argv[i] === "--vsm-motion-path") {
+    vsmMotionPath = true;
+  }
+  if (argv[i] === "--motion-yaw" && i + 1 < argv.length) {
+    motionYaw = parseFloat(argv[i + 1]);
+  }
+  if (argv[i] === "--motion-frames" && i + 1 < argv.length) {
+    motionFrames = Math.max(0, Math.floor(parseFloat(argv[i + 1])));
+  }
+  if (argv[i] === "--shadows-always-fresh") {
+    shadowsAlwaysFresh = true;
   }
 }
 
 // ---- Init ----
 initWindow(SCREEN_W, SCREEN_H, "Bloom Bistro", 0);
+if (qualityConfig !== null) resize(SCREEN_W, SCREEN_H, SCREEN_W, SCREEN_H);
 setTargetFPS(60);
+let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qualityConfig) : null;
 setEnvClearFromHdr("assets/outdoor.hdr");
 enableShadows();
+setShadowsAlwaysFresh(shadowsAlwaysFresh);
 
 // Open-air street scene: the sky is the dominant IBL source. 1.2×
 // env intensity gives colourful ambient reflection without washing
@@ -81,21 +139,28 @@ setAutoExposure(false);
 setManualExposure(1.0);
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
+if (bloomOverride === 0) { setBloomEnabled(false); }
+if (bloomOverride === 1) { setBloomEnabled(true); }
+if (ssgiOverride === 0) { setSsgiEnabled(false); }
+if (ssgiOverride === 1) { setSsgiEnabled(true); }
+if (ssrOverride === 0) { setSsrEnabled(false); }
+if (ssrOverride === 1) { setSsrEnabled(true); }
 
 // Warm Parisian haze — cream-white with a slight yellow shift.
 // Lower density than the first attempt so distant buildings still
 // register texture and colour rather than fading into flat blue fog.
-setFog(0.92, 0.90, 0.84, 0.006, 0.0, 0.05);
+setFog(0.92, 0.90, 0.84, fogOverride === 0 ? 0.0 : 0.006, 0.0, 0.05);
 // Subtle shafts — exterior scene so the sun is usually off-frame or
 // clipped by buildings. Lower strength than Sponza's atrium.
-setSunShafts(0.25, 0.96, 1.0, 0.94, 0.82);
+setSunShafts(sunShaftOverride === 0 ? 0.0 : 0.25, 0.96, 1.0, 0.94, 0.82);
 setVignette(0.10, 0.30);
 setChromaticAberration(0.0005);
 
 // ---- Load Bistro into scene graph ----
 // `bistro.gltf` = exterior street corner. Swap to `bistrox.gltf`
 // for the interior wine-bar variant.
-const bistro = loadModel("assets/bistro.gltf");
+const bistro = loadModel(scenePath);
+console.error("BLOOM_QUALITY_SCENE bistro_meshes=" + bistro.meshCount);
 const identity = mat4Identity();
 for (let i = 0; i < bistro.meshCount; i = i + 1) {
   const node = createSceneNode();
@@ -108,16 +173,18 @@ for (let i = 0; i < bistro.meshCount; i = i + 1) {
 // -26.43, 3.16, 11.17 aimed toward the bistro façade near the world
 // origin). Gives a clean opening frame showing the signature corner
 // with the lantern, awning, and cobble street.
-let camX = -26.43;
-let camY = 3.16;
-let camZ = 11.17;
+let camX = initCamX;
+let camY = initCamY;
+let camZ = initCamZ;
 let camYaw = initYaw !== 0.0 ? initYaw : -1.17; // ≈ 67° left of -Z
 let camPitch = 0.0;
 let cursorLocked = false;
+let fixtureFrame = 0;
 
 // ---- Main loop ----
 while (!windowShouldClose()) {
-  const dt = getDeltaTime();
+  const qualityCapture = qualityRun !== null ? qualityRun.beginFrame() : false;
+  const dt = qualityRun !== null ? qualityRun.deltaTime() : getDeltaTime();
 
   if (cursorLocked) {
     camYaw = camYaw - getMouseDeltaX() * MOUSE_SENS;
@@ -143,9 +210,30 @@ while (!windowShouldClose()) {
     if (cursorLocked) { disableCursor(); } else { enableCursor(); }
   }
 
-  const lookX = camX + Math.cos(camPitch) * fwdX * 100;
+  // Opt-in VSM transition oracle. Move six metres along the exact sun
+  // light-plane right vector every 30 frames, returning to the established
+  // Bistro camera on frame 240 for a matched static/transition comparison.
+  let renderCamX = camX;
+  let renderCamZ = camZ;
+  let renderYaw = camYaw;
+  if (vsmMotionPath) {
+    fixtureFrame = fixtureFrame + 1;
+    // With --motion-frames, interpolate once from the launch pose to the
+    // endpoint so the fixture crosses the same refit/cache boundaries as
+    // interactive walking.  The default keeps the established 30-frame
+    // square wave used by the original translation-only oracle.
+    const pathStep = motionFrames > 0
+      ? Math.min(fixtureFrame / motionFrames, 1.0)
+      : Math.floor(fixtureFrame / 30) % 2;
+    renderCamX = camX + pathStep * 3.748170285;
+    renderCamZ = camZ + pathStep * 4.685212856;
+    renderYaw = camYaw + pathStep * motionYaw;
+  }
+  const renderFwdX = -Math.sin(renderYaw);
+  const renderFwdZ = -Math.cos(renderYaw);
+  const lookX = renderCamX + Math.cos(camPitch) * renderFwdX * 100;
   const lookY = camY + Math.sin(camPitch) * 100;
-  const lookZ = camZ + Math.cos(camPitch) * fwdZ * 100;
+  const lookZ = renderCamZ + Math.cos(camPitch) * renderFwdZ * 100;
 
   beginDrawing();
 
@@ -165,7 +253,7 @@ while (!windowShouldClose()) {
   addDirectionalLight(0.0, -1.0, 0.0, 0.5, 0.55, 0.7, 0.4);
 
   beginMode3D({
-    position: { x: camX, y: camY, z: camZ },
+    position: { x: renderCamX, y: camY, z: renderCamZ },
     target: { x: lookX, y: lookY, z: lookZ },
     up: { x: 0, y: 1, z: 0 },
     fovy: 60,
@@ -174,24 +262,30 @@ while (!windowShouldClose()) {
 
   endMode3D();
 
-  // HUD
-  drawText("Bloom Bistro", 10, 10, 20, { r: 255, g: 255, b: 255, a: 255 });
-  const fps = getFPS();
-  const ms = fps > 0.0 ? 1000.0 / fps : 0.0;
-  const fpsColor = fps >= 55.0
-    ? { r: 120, g: 230, b: 120, a: 255 }
-    : fps >= 30.0
-      ? { r: 230, g: 220, b: 120, a: 255 }
-      : { r: 230, g: 120, b: 120, a: 255 };
-  const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
-  drawText(fpsText, 10, 35, 16, fpsColor);
-  drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 30, 14, { r: 180, g: 180, b: 180, a: 255 });
+  if (qualityRun === null) {
+    drawText("Bloom Bistro", 10, 10, 20, { r: 255, g: 255, b: 255, a: 255 });
+    const fps = getFPS();
+    const ms = fps > 0.0 ? 1000.0 / fps : 0.0;
+    const fpsColor = fps >= 55.0
+      ? { r: 120, g: 230, b: 120, a: 255 }
+      : fps >= 30.0
+        ? { r: 230, g: 220, b: 120, a: 255 }
+        : { r: 230, g: 120, b: 120, a: 255 };
+    const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
+    drawText(fpsText, 10, 35, 16, fpsColor);
+    drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 30, 14, { r: 180, g: 180, b: 180, a: 255 });
+  }
 
-  if (captureFrames > 0) {
+  if (qualityCapture && qualityRun !== null) {
+    qualityRun.requestCapture();
+  } else if (qualityRun === null && captureFrames > 0) {
     frameCount = frameCount + 1;
     if (frameCount === captureFrames) { takeScreenshot(capturePath); }
     if (frameCount > captureFrames) { endDrawing(); break; }
   }
 
   endDrawing();
+  if (qualityRun !== null && qualityRun.endFrame()) break;
 }
+
+closeWindow();

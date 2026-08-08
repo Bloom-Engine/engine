@@ -9,10 +9,10 @@ use crate::scene::SceneGraph;
 #[derive(Clone, Debug)]
 pub struct PickResult {
     pub hit: bool,
-    pub handle: f64,       // scene node handle that was hit
+    pub handle: f64, // scene node handle that was hit
     pub distance: f32,
-    pub point: [f32; 3],   // world-space hit point
-    pub normal: [f32; 3],  // face normal at hit point
+    pub point: [f32; 3],  // world-space hit point
+    pub normal: [f32; 3], // face normal at hit point
 }
 
 impl PickResult {
@@ -33,8 +33,10 @@ impl PickResult {
 /// inv_vp: inverse view-projection matrix
 /// camera_pos: camera world position
 pub fn screen_to_ray(
-    screen_x: f32, screen_y: f32,
-    width: f32, height: f32,
+    screen_x: f32,
+    screen_y: f32,
+    width: f32,
+    height: f32,
     inv_vp: &[[f32; 4]; 4],
     _camera_pos: &[f32; 3],
 ) -> ([f32; 3], [f32; 3]) {
@@ -77,11 +79,7 @@ pub fn screen_to_ray(
 }
 
 /// Raycast against all visible scene nodes. Returns the closest hit.
-pub fn raycast_scene(
-    scene: &SceneGraph,
-    origin: &[f32; 3],
-    direction: &[f32; 3],
-) -> PickResult {
+pub fn raycast_scene(scene: &SceneGraph, origin: &[f32; 3], direction: &[f32; 3]) -> PickResult {
     let mut best = PickResult::miss();
     let mut best_dist = f32::MAX;
 
@@ -97,14 +95,19 @@ pub fn raycast_scene(
 
         // Test against all triangles
         for tri in node.indices.chunks(3) {
-            if tri.len() < 3 { continue; }
+            if tri.len() < 3 {
+                continue;
+            }
             let v0 = &node.vertices[tri[0] as usize];
             let v1 = &node.vertices[tri[1] as usize];
             let v2 = &node.vertices[tri[2] as usize];
 
             if let Some((t, u, v)) = ray_triangle_intersection(
-                &local_origin, &local_dir,
-                &v0.position, &v1.position, &v2.position,
+                &local_origin,
+                &local_dir,
+                &v0.position,
+                &v1.position,
+                &v2.position,
             ) {
                 if t > 0.0 && t < best_dist {
                     best_dist = t;
@@ -124,9 +127,11 @@ pub fn raycast_scene(
                         v0.normal[1] * w + v1.normal[1] * u + v2.normal[1] * v,
                         v0.normal[2] * w + v1.normal[2] * u + v2.normal[2] * v,
                     ];
-                    let nl = (normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]).sqrt();
+                    let nl =
+                        (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2])
+                            .sqrt();
                     let normal = if nl > 1e-6 {
-                        [normal[0]/nl, normal[1]/nl, normal[2]/nl]
+                        [normal[0] / nl, normal[1] / nl, normal[2] / nl]
                     } else {
                         [0.0, 1.0, 0.0]
                     };
@@ -169,14 +174,19 @@ pub fn raycast_scene_all(
         let mut node_best: Option<PickResult> = None;
 
         for tri in node.indices.chunks(3) {
-            if tri.len() < 3 { continue; }
+            if tri.len() < 3 {
+                continue;
+            }
             let v0 = &node.vertices[tri[0] as usize];
             let v1 = &node.vertices[tri[1] as usize];
             let v2 = &node.vertices[tri[2] as usize];
 
             if let Some((t, u, v)) = ray_triangle_intersection(
-                &local_origin, &local_dir,
-                &v0.position, &v1.position, &v2.position,
+                &local_origin,
+                &local_dir,
+                &v0.position,
+                &v1.position,
+                &v2.position,
             ) {
                 if t > 0.0 && t < node_best_dist {
                     node_best_dist = t;
@@ -192,9 +202,11 @@ pub fn raycast_scene_all(
                         v0.normal[1] * w + v1.normal[1] * u + v2.normal[1] * v,
                         v0.normal[2] * w + v1.normal[2] * u + v2.normal[2] * v,
                     ];
-                    let nl = (normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]).sqrt();
+                    let nl =
+                        (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2])
+                            .sqrt();
                     let normal = if nl > 1e-6 {
-                        [normal[0]/nl, normal[1]/nl, normal[2]/nl]
+                        [normal[0] / nl, normal[1] / nl, normal[2] / nl]
                     } else {
                         [0.0, 1.0, 0.0]
                     };
@@ -215,7 +227,11 @@ pub fn raycast_scene_all(
     }
 
     // Sort by distance (closest first).
-    results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(max_results);
     results
 }
@@ -225,26 +241,35 @@ pub fn raycast_scene_all(
 // ============================================================
 
 fn ray_triangle_intersection(
-    origin: &[f32; 3], dir: &[f32; 3],
-    v0: &[f32; 3], v1: &[f32; 3], v2: &[f32; 3],
+    origin: &[f32; 3],
+    dir: &[f32; 3],
+    v0: &[f32; 3],
+    v1: &[f32; 3],
+    v2: &[f32; 3],
 ) -> Option<(f32, f32, f32)> {
     const EPSILON: f32 = 1e-7;
 
-    let e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
-    let e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
+    let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+    let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
 
     let h = cross(dir, &e2);
     let a = dot(&e1, &h);
-    if a.abs() < EPSILON { return None; }
+    if a.abs() < EPSILON {
+        return None;
+    }
 
     let f = 1.0 / a;
-    let s = [origin[0]-v0[0], origin[1]-v0[1], origin[2]-v0[2]];
+    let s = [origin[0] - v0[0], origin[1] - v0[1], origin[2] - v0[2]];
     let u = f * dot(&s, &h);
-    if u < 0.0 || u > 1.0 { return None; }
+    if u < 0.0 || u > 1.0 {
+        return None;
+    }
 
     let q = cross(&s, &e1);
     let v = f * dot(dir, &q);
-    if v < 0.0 || u + v > 1.0 { return None; }
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
 
     let t = f * dot(&e2, &q);
     if t > EPSILON {
@@ -256,29 +281,29 @@ fn ray_triangle_intersection(
 
 fn cross(a: &[f32; 3], b: &[f32; 3]) -> [f32; 3] {
     [
-        a[1]*b[2] - a[2]*b[1],
-        a[2]*b[0] - a[0]*b[2],
-        a[0]*b[1] - a[1]*b[0],
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
     ]
 }
 
 fn dot(a: &[f32; 3], b: &[f32; 3]) -> f32 {
-    a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 fn mat4_mul_vec4(m: &[[f32; 4]; 4], v: &[f32; 4]) -> [f32; 4] {
     [
-        m[0][0]*v[0] + m[1][0]*v[1] + m[2][0]*v[2] + m[3][0]*v[3],
-        m[0][1]*v[0] + m[1][1]*v[1] + m[2][1]*v[2] + m[3][1]*v[3],
-        m[0][2]*v[0] + m[1][2]*v[1] + m[2][2]*v[2] + m[3][2]*v[3],
-        m[0][3]*v[0] + m[1][3]*v[1] + m[2][3]*v[2] + m[3][3]*v[3],
+        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2] + m[3][0] * v[3],
+        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2] + m[3][1] * v[3],
+        m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2] + m[3][2] * v[3],
+        m[0][3] * v[0] + m[1][3] * v[1] + m[2][3] * v[2] + m[3][3] * v[3],
     ]
 }
 
 fn mat4_transform_point(m: &[[f32; 4]; 4], p: &[f32; 3]) -> [f32; 3] {
     let v = mat4_mul_vec4(m, &[p[0], p[1], p[2], 1.0]);
     if v[3].abs() > 1e-8 {
-        [v[0]/v[3], v[1]/v[3], v[2]/v[3]]
+        [v[0] / v[3], v[1] / v[3], v[2] / v[3]]
     } else {
         [v[0], v[1], v[2]]
     }
@@ -287,9 +312,9 @@ fn mat4_transform_point(m: &[[f32; 4]; 4], p: &[f32; 3]) -> [f32; 3] {
 fn mat4_transform_dir(m: &[[f32; 4]; 4], d: &[f32; 3]) -> [f32; 3] {
     // Transform direction (no translation, no perspective divide)
     [
-        m[0][0]*d[0] + m[1][0]*d[1] + m[2][0]*d[2],
-        m[0][1]*d[0] + m[1][1]*d[1] + m[2][1]*d[2],
-        m[0][2]*d[0] + m[1][2]*d[1] + m[2][2]*d[2],
+        m[0][0] * d[0] + m[1][0] * d[1] + m[2][0] * d[2],
+        m[0][1] * d[0] + m[1][1] * d[1] + m[2][1] * d[2],
+        m[0][2] * d[0] + m[1][2] * d[1] + m[2][2] * d[2],
     ]
 }
 

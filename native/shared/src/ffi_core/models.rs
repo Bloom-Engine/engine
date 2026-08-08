@@ -16,12 +16,21 @@ macro_rules! __bloom_ffi_models {
         pub extern "C" fn bloom_load_model(path_ptr: *const u8) -> f64 {
             $crate::ffi::guard("bloom_load_model", move || {
                 let path = $crate::string_header::str_from_header(path_ptr);
-                let path: &str = &bloom_resolve_asset_path(path);
-                match std::fs::read(path) {
+                let resolved =bloom_resolve_asset_path(path);
+                let resolved_path = std::path::Path::new(resolved.as_ref());
+                match std::fs::read(resolved_path) {
                     Ok(data) => {
                         let eng = engine();
                         let $crate::engine::EngineState { ref mut models, ref mut renderer, .. } = *eng;
-                        models.load_model_with_textures(&data, renderer)
+                        // Passing the source directory is harmless for GLB
+                        // and required for loose glTF buffers/images. The old
+                        // FFI path always passed None, so valid external
+                        // scenes such as Bistro silently loaded zero meshes.
+                        models.load_model_with_textures_from_source_path(
+                            &data,
+                            resolved_path,
+                            renderer,
+                        )
                     }
                     Err(_) => 0.0,
                 }
@@ -834,8 +843,15 @@ macro_rules! __bloom_ffi_models {
                 // visibly flatter than the same GLB through loadModel.
                 let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
                 for tex in &staged.textures {
-                    tex_map.push(eng.renderer.register_texture_kind(
-                        tex.width, tex.height, &tex.data, tex.is_normal));
+                    tex_map.push(
+                        eng.renderer.register_texture_kind_with_alpha_coverage(
+                            tex.width,
+                            tex.height,
+                            &tex.data,
+                            tex.is_normal,
+                            tex.alpha_coverage_reference,
+                        ),
+                    );
                 }
                 let mut model = staged.model;
                 // Remap EVERY texture slot, not just the base colour — this
@@ -859,6 +875,12 @@ macro_rules! __bloom_ffi_models {
                     remap(&mut mesh.metallic_roughness_texture_idx);
                     remap(&mut mesh.emissive_texture_idx);
                     remap(&mut mesh.occlusion_texture_idx);
+                    if let Some(binding) = &mut mesh.transmission.texture {
+                        remap(&mut binding.runtime_texture_idx);
+                    }
+                    if let Some(binding) = &mut mesh.transmission.thickness_texture {
+                        remap(&mut binding.runtime_texture_idx);
+                    }
                 }
                 eng.models.models.alloc(model)
         })
@@ -912,15 +934,15 @@ macro_rules! __bloom_ffi_models {
         // Same idiom as bloom_create_instance_buffer_scratch. ≤ 64 floats.
         #[cfg(feature = "models3d")]
         #[no_mangle]
-        pub extern "C" fn bloom_set_material_params_scratch(handle: f64, param_count: f64) {
+        pub extern "C" fn bloom_set_material_params_scratch(handle: f64, param_count: f64) -> f64 {
             $crate::ffi::guard("bloom_set_material_params_scratch", move || {
                 let eng = engine();
                 let count = param_count as usize;
                 if count > 64 {
                     eprintln!("[material] set_material_params_scratch: param_count {} > 64 (256-byte UBO cap)", count);
-                    return;
+                    return 0.0;
                 }
-                if eng.models.scratch_f32.len() < count { return; }
+                if eng.models.scratch_f32.len() < count { return 0.0; }
                 let mut bytes = vec![0u8; count * 4];
                 for i in 0..count {
                     bytes[i*4..i*4+4].copy_from_slice(&eng.models.scratch_f32[i].to_le_bytes());
@@ -931,13 +953,16 @@ macro_rules! __bloom_ffi_models {
                     handle as u32, &bytes,
                 ) {
                     eprintln!("[material] set_material_params_scratch failed: {}", e);
+                    return 0.0;
                 }
+                1.0
         })
         }
         #[cfg(not(feature = "models3d"))]
         #[no_mangle]
-        pub extern "C" fn bloom_set_material_params_scratch(_handle: f64, _param_count: f64) {
+        pub extern "C" fn bloom_set_material_params_scratch(_handle: f64, _param_count: f64) -> f64 {
             $crate::ffi::feature_off_warn_once("bloom_set_material_params_scratch", "models3d");
+            0.0
         }
 
         // bloom_set_material_params  [source: linux; gated: models3d]

@@ -33,6 +33,10 @@ export {
   runGame,
   setProfilerEnabled, getProfilerFrameCpuUs, getProfilerFrameGpuUs,
   printProfilerSummary, getProfilerOverlay, getProfilerFrameHistory,
+  getMaterialBindingCapabilities, getRendererCapabilities, getImportedRefractionMode,
+  setTransparencyCompositionMode, getTransparencyCompositionMode,
+  getActiveTransparencyCompositionMode,
+  setMaterialBindingTierOverride,
   splatImpulse, setMaterialParams,
 } from './core/index';
 
@@ -40,6 +44,10 @@ export type {
   Rect, Camera2D, Camera3D,
   Texture, Font, Sound, Music, Quat, Ray, BoundingBox, Model, Mat4,
   RayHit, FrustumPlanes,
+  MaterialBindingTier, MaterialBindingCapabilityReport,
+  RendererCapabilityTier, RendererSystemPaths, RendererCapabilityReport,
+  ImportedRefractionMode,
+  TransparencyCompositionMode, ActiveTransparencyCompositionMode,
 } from './core/index';
 
 // Vec2, Vec3, Vec4 as types come from core, as values (constructors) from math
@@ -130,12 +138,13 @@ export {
   setSceneNodeGiOnly,
   setSceneNodeParent, setSceneNodeTransform,
   updateSceneNodeGeometry,
-  setSceneNodeColor, setSceneNodePbr, setSceneNodeTexture, setSceneNodeWaterMaterial, pickSceneAll,
+  setSceneNodeColor, setSceneNodePbr, setSceneNodeMaterial, setSceneNodeTexture,
+  setSceneNodeWaterMaterial, pickSceneAll,
   getSceneNodeTransform, getSceneNodeBounds,
   setSceneNodeUserData, getSceneNodeUserData,
   getSceneNodeCount,
   registerFrameCallback, unregisterFrameCallback,
-  addDirectionalLight, addPointLight,
+  addDirectionalLight, addPointLight, addShadowedPointLight, addShadowedSpotLight,
   extrudePolygon, subtractBox,
   pickScene,
   enableShadows, disableShadows, dumpShadowMap,
@@ -146,7 +155,11 @@ export {
   projectToScreen,
 } from './scene/index';
 
-export type { SceneNodeHandle, PbrMaterial, PickHit } from './scene/index';
+export type {
+  SceneNodeHandle, PbrMaterial, LayeredPbrMaterial,
+  ClearcoatMaterial, SpecularMaterial, SheenMaterial,
+  AnisotropyMaterial, IridescenceMaterial, PickHit,
+} from './scene/index';
 
 export {
   createPhysicsWorld, setGravity, setPhysicsTimestep,

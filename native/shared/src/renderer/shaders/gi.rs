@@ -483,11 +483,10 @@ fn wsrc_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
     }
 }
 
-// V10 — workgroup writes the 10×10 padded slab per probe. Thread
+// V10/V11/#23 — workgroup writes the 10×10 padded slab per probe. Thread
 // (lid.x, lid.y) writes texel (wg.*10 + lid) in the atlas; border
-// threads (lid on 0 or 9) shade for the nearest INSIDE octel
-// direction so the sampler's edge-extend behaviour is baked into
-// the data. The 1-texel border is what lets the hardware bilinear
+// threads (lid on 0 or 9) shade the octahedrally wrapped interior
+// direction. The 1-texel border is what lets the hardware bilinear
 // sampler do octel smoothing without leaking into adjacent probes.
 const WSRC_OCT_PADDED_SIZE: u32 = 10u;
 
@@ -507,37 +506,10 @@ fn cs_main(
         - vec3<f32>(extent * 0.5)
         + (vec3<f32>(f32(wg.x), f32(wg.y), f32(wg.z)) + vec3<f32>(0.5)) * cell;
 
-    // V11 — map padded octel → real octel with true octahedral
-    // silhouette wrap on the 4 edges. Beyond v<0 or v>1 in octel uv
-    // space the octahedron folds onto itself with u ↔ 1-u; likewise
-    // u<0 or u>1 folds with v ↔ 1-v. Corners (both axes out) keep
-    // the V10 edge-extend fill since the double-fold has two valid
-    // representations and the exact corner only matters when the
-    // sampler bilinear-weights it near zero anyway.
-    let px = i32(lid.x);
-    let py = i32(lid.y);
-    let is_edge_x = px == 0 || px == 9;
-    let is_edge_y = py == 0 || py == 9;
-    var real_ox: i32;
-    var real_oy: i32;
-    if (is_edge_x && is_edge_y) {
-        // Corner — nearest-inside (edge-extend).
-        real_ox = clamp(px - 1, 0, 7);
-        real_oy = clamp(py - 1, 0, 7);
-    } else if (is_edge_y) {
-        // Top/bottom border: mirror x across the edge, same row.
-        real_ox = 8 - px;
-        real_oy = clamp(py - 1, 0, 7);
-    } else if (is_edge_x) {
-        // Left/right border: same column, mirror y across the edge.
-        real_ox = clamp(px - 1, 0, 7);
-        real_oy = 8 - py;
-    } else {
-        // Interior — direct mapping.
-        real_ox = px - 1;
-        real_oy = py - 1;
-    }
-    let dir = octel_direction(vec2<u32>(u32(real_ox), u32(real_oy)));
+    // V11/#23 — shared edge and double-fold corner wrap. Both software
+    // and hardware bakes must write identical padded octahedral slabs.
+    let real_octel = wsrc_real_octel(vec2<i32>(lid.xy));
+    let dir = octel_direction(real_octel);
 
     // Shadow at the probe position (cascade 2 — widest, covers the
     // full 120 m cube without per-probe cascade selection).
@@ -628,6 +600,7 @@ struct HwBakeInstanceGiData {
 
 const HW_BAKE_CARD_SLOTS_PER_ROW: f32 = 64.0;
 const HW_BAKE_OCT_PADDED: u32 = 10u;
+const BLOOM_TRANSPARENT_GI: bool = false;
 
 @group(0) @binding(0) var<uniform> u: WsrcBakeParams;
 @group(0) @binding(1) var shadow_atlas_0: texture_depth_2d;
@@ -656,6 +629,109 @@ fn hw_bake_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
     else { return textureSampleCompareLevel(shadow_atlas_2, shadow_samp, shadow_uv, ref_depth); }
 }
 
+fn hw_bake_card_uv(
+    inst: HwBakeInstanceGiData,
+    hit_os: vec3<f32>,
+    dir: vec3<f32>,
+) -> vec2<f32> {
+    let abs_d = abs(dir);
+    var axis_idx: u32 = 0u;
+    if (abs_d.y >= abs_d.x && abs_d.y >= abs_d.z) {
+        axis_idx = 2u;
+    } else if (abs_d.z >= abs_d.x) {
+        axis_idx = 4u;
+    }
+    var signed_axis: u32 = axis_idx;
+    if (axis_idx == 0u && dir.x > 0.0) { signed_axis = 1u; }
+    else if (axis_idx == 2u && dir.y > 0.0) { signed_axis = 3u; }
+    else if (axis_idx == 4u && dir.z > 0.0) { signed_axis = 5u; }
+
+    let slot = u32(inst.card_slot.x) + signed_axis;
+    let slot_x = slot % 64u;
+    let slot_y = slot / 64u;
+    let bmin = inst.card_aabb_min.xyz;
+    let bmax = inst.card_aabb_max.xyz;
+    var u_os: f32;
+    var v_os: f32;
+    var u_lo: f32; var u_hi: f32;
+    var v_lo: f32; var v_hi: f32;
+    var u_flip: f32 = 1.0;
+    if (signed_axis == 0u || signed_axis == 1u) {
+        u_os = hit_os.y; v_os = hit_os.z;
+        u_lo = bmin.y; u_hi = bmax.y; v_lo = bmin.z; v_hi = bmax.z;
+        if (signed_axis == 1u) { u_flip = -1.0; }
+    } else if (signed_axis == 2u || signed_axis == 3u) {
+        u_os = hit_os.x; v_os = hit_os.z;
+        u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.z; v_hi = bmax.z;
+        if (signed_axis == 3u) { u_flip = -1.0; }
+    } else {
+        u_os = hit_os.x; v_os = hit_os.y;
+        u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.y; v_hi = bmax.y;
+        if (signed_axis == 5u) { u_flip = -1.0; }
+    }
+    var u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
+    let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
+    if (u_flip < 0.0) { u_norm = 1.0 - u_norm; }
+
+    let slot_size_uv = 1.0 / HW_BAKE_CARD_SLOTS_PER_ROW;
+    let texel_in_slot = slot_size_uv / f32(64);
+    let slot_u0 = f32(slot_x) * slot_size_uv + texel_in_slot;
+    let slot_v0 = f32(slot_y) * slot_size_uv + texel_in_slot;
+    let slot_span = slot_size_uv - 2.0 * texel_in_slot;
+    return vec2<f32>(
+        slot_u0 + u_norm * slot_span,
+        slot_v0 + v_norm * slot_span,
+    );
+}
+
+fn hw_bake_shade_hit(
+    inst: HwBakeInstanceGiData,
+    hit_os: vec3<f32>,
+    dir: vec3<f32>,
+) -> vec3<f32> {
+    if (inst.card_slot.w > 0.5) {
+        return textureSampleLevel(
+            card_atlas,
+            card_samp,
+            hw_bake_card_uv(inst, hit_os, dir),
+            0.0,
+        ).rgb;
+    }
+    let hit_n = inst.normal_ws;
+    let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
+    let direct = u.sun_color.xyz * ndotl;
+    let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+    let sky = u.sky_color.xyz * ndotup;
+    return inst.albedo * (direct + sky)
+         + inst.albedo * inst.emissive_luma;
+}
+
+fn hw_bake_miss(probe_pos: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    var shadow: f32 = 1.0;
+    if (u.flags.y > 0.5) {
+        shadow = hw_bake_sample_cascade(2, probe_pos, u.flags.x);
+    }
+    let ndotl = max(dot(dir, u.sun_dir.xyz), 0.0);
+    let sun = u.sun_color.xyz * ndotl * shadow;
+    let up = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    let sky = u.sky_color.xyz * up * up;
+    return sun + sky;
+}
+
+fn hw_bake_transmittance(inst: HwBakeInstanceGiData) -> vec3<f32> {
+    let absorption = vec3<f32>(
+        inst.card_aabb_min.w,
+        inst.card_aabb_max.w,
+        inst.world_aabb_min.w,
+    );
+    let physical = clamp(
+        inst.albedo * absorption * inst.mat_params.z * inst.mat_params.w,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    return mix(vec3<f32>(1.0), physical, clamp(inst.world_aabb_max.w, 0.0, 1.0));
+}
+
 @compute @workgroup_size(10, 10, 1)
 fn cs_main(
     @builtin(workgroup_id) wg: vec3<u32>,
@@ -671,27 +747,9 @@ fn cs_main(
         - vec3<f32>(extent * 0.5)
         + (vec3<f32>(f32(wg.x), f32(wg.y), f32(wg.z)) + vec3<f32>(0.5)) * cell;
 
-    // V11 octahedral wrap for the padded borders.
-    let px = i32(lid.x);
-    let py = i32(lid.y);
-    let is_edge_x = px == 0 || px == 9;
-    let is_edge_y = py == 0 || py == 9;
-    var real_ox: i32;
-    var real_oy: i32;
-    if (is_edge_x && is_edge_y) {
-        real_ox = clamp(px - 1, 0, 7);
-        real_oy = clamp(py - 1, 0, 7);
-    } else if (is_edge_y) {
-        real_ox = 8 - px;
-        real_oy = clamp(py - 1, 0, 7);
-    } else if (is_edge_x) {
-        real_ox = clamp(px - 1, 0, 7);
-        real_oy = 8 - py;
-    } else {
-        real_ox = px - 1;
-        real_oy = py - 1;
-    }
-    let dir = octel_direction(vec2<u32>(u32(real_ox), u32(real_oy)));
+    // V11/#23 — shared edge and double-fold corner wrap.
+    let real_octel = wsrc_real_octel(vec2<i32>(lid.xy));
+    let dir = octel_direction(real_octel);
 
     // V14 — fire a short ray from the probe centre. Ray length
     // scales with the cascade extent so each cascade's rays stay
@@ -707,96 +765,57 @@ fn cs_main(
         probe_pos,
         dir,
     ));
-    loop {
-        if (!rayQueryProceed(&rq)) { break; }
+    if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+        loop {
+            if (!rayQueryProceed(&rq)) { break; }
+        }
     }
     let hit = rayQueryGetCommittedIntersection(&rq);
 
     var radiance = vec3<f32>(0.0);
     if (hit.kind != RAY_QUERY_INTERSECTION_NONE) {
         let inst = instance_data[hit.instance_custom_data];
-        if (inst.card_slot.w > 0.5) {
-            // Sample Mesh Cards pre-lit radiance at hit. Same
-            // projection math as SSGI_PROBE_TRACE_HW_WGSL's hit
-            // branch.
-            let hit_world = probe_pos + dir * hit.t;
-            let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
-            let abs_d = abs(dir);
-            var axis_idx: u32 = 0u;
-            if (abs_d.y >= abs_d.x && abs_d.y >= abs_d.z) {
-                axis_idx = 2u;
-            } else if (abs_d.z >= abs_d.x) {
-                axis_idx = 4u;
+        let hit_world = probe_pos + dir * hit.t;
+        let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
+        let front = hw_bake_shade_hit(inst, hit_os, dir);
+        radiance = front;
+
+        if (BLOOM_TRANSPARENT_GI && inst.mat_params.z > 0.0) {
+            var opaque_rq: ray_query;
+            rayQueryInitialize(&opaque_rq, accel, RayDesc(
+                0u,
+                0x01u,
+                0.01,
+                ray_length,
+                probe_pos,
+                dir,
+            ));
+            if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+                loop {
+                    if (!rayQueryProceed(&opaque_rq)) { break; }
+                }
             }
-            var signed_axis: u32 = axis_idx;
-            if (axis_idx == 0u && dir.x > 0.0) { signed_axis = 1u; }
-            else if (axis_idx == 2u && dir.y > 0.0) { signed_axis = 3u; }
-            else if (axis_idx == 4u && dir.z > 0.0) { signed_axis = 5u; }
-
-            let first_slot = u32(inst.card_slot.x);
-            let slot = first_slot + signed_axis;
-            let slot_x = slot % 64u;
-            let slot_y = slot / 64u;
-
-            let bmin = inst.card_aabb_min.xyz;
-            let bmax = inst.card_aabb_max.xyz;
-            var u_os: f32;
-            var v_os: f32;
-            var u_lo: f32; var u_hi: f32;
-            var v_lo: f32; var v_hi: f32;
-            var u_flip: f32 = 1.0;
-            if (signed_axis == 0u || signed_axis == 1u) {
-                u_os = hit_os.y; v_os = hit_os.z;
-                u_lo = bmin.y; u_hi = bmax.y; v_lo = bmin.z; v_hi = bmax.z;
-                if (signed_axis == 1u) { u_flip = -1.0; }
-            } else if (signed_axis == 2u || signed_axis == 3u) {
-                u_os = hit_os.x; v_os = hit_os.z;
-                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.z; v_hi = bmax.z;
-                if (signed_axis == 3u) { u_flip = -1.0; }
-            } else {
-                u_os = hit_os.x; v_os = hit_os.y;
-                u_lo = bmin.x; u_hi = bmax.x; v_lo = bmin.y; v_hi = bmax.y;
-                if (signed_axis == 5u) { u_flip = -1.0; }
+            let opaque_hit = rayQueryGetCommittedIntersection(&opaque_rq);
+            var behind = hw_bake_miss(probe_pos, dir);
+            if (opaque_hit.kind != RAY_QUERY_INTERSECTION_NONE) {
+                let opaque_inst = instance_data[opaque_hit.instance_custom_data];
+                let opaque_world = probe_pos + dir * opaque_hit.t;
+                let opaque_os = (
+                    opaque_hit.world_to_object * vec4<f32>(opaque_world, 1.0)
+                ).xyz;
+                behind = hw_bake_shade_hit(opaque_inst, opaque_os, dir);
             }
-            var u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
-            let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
-            if (u_flip < 0.0) { u_norm = 1.0 - u_norm; }
-
-            let slot_size_uv = 1.0 / HW_BAKE_CARD_SLOTS_PER_ROW;
-            let texel_in_slot = slot_size_uv / f32(64);
-            let slot_u0 = f32(slot_x) * slot_size_uv + texel_in_slot;
-            let slot_v0 = f32(slot_y) * slot_size_uv + texel_in_slot;
-            let slot_span = slot_size_uv - 2.0 * texel_in_slot;
-            let atlas_uv = vec2<f32>(
-                slot_u0 + u_norm * slot_span,
-                slot_v0 + v_norm * slot_span,
-            );
-            radiance = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
-        } else {
-            // Instance without a card — shade analytically using
-            // its flat normal + albedo.
-            let hit_n = inst.normal_ws;
-            let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
-            let direct = u.sun_color.xyz * ndotl;
-            let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
-            let sky = u.sky_color.xyz * ndotup;
-            radiance = inst.albedo * (direct + sky)
-                     + inst.albedo * inst.emissive_luma;
+            let surface_weight = clamp(inst.world_aabb_max.w, 0.0, 1.0)
+                * (1.0 - clamp(inst.mat_params.z, 0.0, 1.0));
+            radiance = front * surface_weight
+                     + behind * hw_bake_transmittance(inst);
         }
     } else {
         // Miss — V13 analytic fallback (shadow-sampled sun +
         // hemisphere sky). The ray went past `extent * 0.5` without
         // hitting anything, so this is the open-sky direction at
         // probe scale.
-        var shadow: f32 = 1.0;
-        if (u.flags.y > 0.5) {
-            shadow = hw_bake_sample_cascade(2, probe_pos, u.flags.x);
-        }
-        let ndotl = max(dot(dir, u.sun_dir.xyz), 0.0);
-        let sun = u.sun_color.xyz * ndotl * shadow;
-        let up = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-        let sky = u.sky_color.xyz * up * up;
-        radiance = sun + sky;
+        radiance = hw_bake_miss(probe_pos, dir);
     }
 
     let cascade_idx = u32(u.flags.z);

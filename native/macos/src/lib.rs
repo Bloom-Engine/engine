@@ -7,14 +7,17 @@
 #![allow(static_mut_refs)]
 
 use bloom_shared::engine::EngineState;
-use bloom_shared::string_header::{str_from_header, alloc_perry_string};
+use bloom_shared::string_header::{alloc_perry_string, str_from_header};
 
 use objc2::rc::Retained;
 use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask, NSEventType, NSWindow, NSWindowStyleMask};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSEventMask, NSEventType, NSWindow,
+    NSWindowStyleMask,
+};
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 
-use raw_window_handle::{RawWindowHandle, AppKitWindowHandle};
+use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
 use std::sync::OnceLock;
 
 static mut ENGINE: OnceLock<EngineState> = OnceLock::new();
@@ -24,6 +27,10 @@ static mut WINDOW: Option<Retained<NSWindow>> = None;
 // 'closed', just invisible) so headless --capture can run to
 // completion.
 static mut HEADLESS: bool = false;
+// Qualification captures name exact physical pixel dimensions. Retina's
+// backing scale must not silently turn a 512x512 case into a 1024x1024
+// render (and a 4x fill-rate benchmark) when this opt-in is enabled.
+static mut HEADLESS_PIXEL_EXACT: bool = false;
 static mut AUDIO_UNIT: Option<AudioUnitInstance> = None;
 // Render half of the audio system. Moved here from EngineState by
 // bloom_init_audio (AudioMixer::take_renderer) BEFORE the CoreAudio
@@ -44,7 +51,6 @@ fn bloom_resolve_asset_path(path: &str) -> std::borrow::Cow<'_, str> {
 // The full shared (non-physics) FFI surface. See bloom_shared::ffi_core
 // docs for the contract; tools/validate-ffi.js checks parity in CI.
 bloom_shared::define_core_ffi!();
-
 
 /// Map macOS virtual key code to Bloom key code.
 fn map_keycode(keycode: u16) -> usize {
@@ -120,14 +126,14 @@ fn map_keycode(keycode: u16) -> usize {
         103 => 122, // F11
         111 => 123, // F12
         // Modifiers
-        56 => 280,  // Left Shift
-        60 => 281,  // Right Shift
-        59 => 282,  // Left Control
-        62 => 283,  // Right Control
-        58 => 284,  // Left Alt/Option
-        61 => 285,  // Right Alt/Option
-        55 => 286,  // Left Command
-        54 => 287,  // Right Command
+        56 => 280, // Left Shift
+        60 => 281, // Right Shift
+        59 => 282, // Left Control
+        62 => 283, // Right Control
+        58 => 284, // Left Alt/Option
+        61 => 285, // Right Alt/Option
+        55 => 286, // Left Command
+        54 => 287, // Right Command
         _ => 0,
     }
 }
@@ -198,7 +204,10 @@ type AudioComponent = *mut std::ffi::c_void;
 
 #[link(name = "AudioToolbox", kind = "framework")]
 extern "C" {
-    fn AudioComponentFindNext(component: AudioComponent, desc: *const AudioComponentDescription) -> AudioComponent;
+    fn AudioComponentFindNext(
+        component: AudioComponent,
+        desc: *const AudioComponentDescription,
+    ) -> AudioComponent;
     fn AudioComponentInstanceNew(component: AudioComponent, out: *mut AudioUnit) -> OSStatus;
     fn AudioUnitSetProperty(
         unit: AudioUnit,
@@ -245,10 +254,7 @@ unsafe extern "C" fn audio_render_callback(
     let buffer_list = &mut *io_data;
     let buffer = &mut buffer_list.buffers[0];
     let num_samples = in_number_frames as usize * 2; // stereo
-    let output = std::slice::from_raw_parts_mut(
-        buffer.data as *mut f32,
-        num_samples,
-    );
+    let output = std::slice::from_raw_parts_mut(buffer.data as *mut f32, num_samples);
 
     match AUDIO_RENDERER.as_mut() {
         Some(r) => r.mix(output),
@@ -263,7 +269,12 @@ unsafe extern "C" fn audio_render_callback(
 // ============================================================
 
 #[no_mangle]
-pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u8, fullscreen: f64) {
+pub extern "C" fn bloom_init_window(
+    width: f64,
+    height: f64,
+    title_ptr: *const u8,
+    fullscreen: f64,
+) {
     let title = str_from_header(title_ptr);
     let mtm = MainThreadMarker::from(unsafe { MainThreadMarker::new_unchecked() });
 
@@ -275,7 +286,14 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     let headless = std::env::var("BLOOM_HEADLESS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    unsafe { HEADLESS = headless; }
+    let headless_pixel_exact = headless
+        && std::env::var("BLOOM_HEADLESS_PIXEL_EXACT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    unsafe {
+        HEADLESS = headless;
+        HEADLESS_PIXEL_EXACT = headless_pixel_exact;
+    }
 
     let app = NSApplication::sharedApplication(mtm);
     if headless {
@@ -311,7 +329,9 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     // NSWindow restoration was resurrecting a prior fullscreen toggle on
     // the 4K display, which silently rendered benchmarks at 4× the
     // requested pixel count.
-    unsafe { let _: () = msg_send![&window, setRestorable: false]; }
+    unsafe {
+        let _: () = msg_send![&window, setRestorable: false];
+    }
 
     // BLOOM_NO_FULLSCREEN=1 hard-disables fullscreen capability: the
     // window cannot be entered into fullscreen via the green button,
@@ -359,7 +379,13 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
     // upscales a low-res image. `backingScaleFactor` is 2.0 on Retina,
     // 1.0 otherwise (tracks the window's current screen).
     let scale: f64 = unsafe { msg_send![&*window, backingScaleFactor] };
-    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let scale = if headless_pixel_exact {
+        1.0
+    } else if scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
 
     let target = {
         let view_ptr = Retained::as_ptr(&content_view) as *mut std::ffi::c_void;
@@ -371,19 +397,28 @@ pub extern "C" fn bloom_init_window(width: f64, height: f64, title_ptr: *const u
             raw_window_handle: RawWindowHandle::AppKit(handle),
         }
     };
-    let engine_state = unsafe {
-        bloom_shared::attach::attach_engine(
-            target,
-            bloom_shared::attach::AttachParams {
-                backends: wgpu::Backends::METAL,
-                logical_w: width as u32,
-                logical_h: height as u32,
-                physical_w: ((width * scale) as u32).max(1),
-                physical_h: ((height * scale) as u32).max(1),
-                format: bloom_shared::attach::FormatPreference::Srgb,
-            },
+    let engine_state = if headless_pixel_exact {
+        bloom_shared::attach::attach_headless_engine(
+            wgpu::Backends::METAL,
+            width as u32,
+            height as u32,
         )
-        .expect("Failed to attach engine")
+        .expect("Failed to attach headless engine")
+    } else {
+        unsafe {
+            bloom_shared::attach::attach_engine(
+                target,
+                bloom_shared::attach::AttachParams {
+                    backends: wgpu::Backends::METAL,
+                    logical_w: width as u32,
+                    logical_h: height as u32,
+                    physical_w: ((width * scale) as u32).max(1),
+                    physical_h: ((height * scale) as u32).max(1),
+                    format: bloom_shared::attach::FormatPreference::Srgb,
+                },
+            )
+            .expect("Failed to attach engine")
+        }
     };
 
     unsafe {
@@ -445,7 +480,11 @@ pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f
                 1.0
             }
         };
-        if s > 0.0 { s } else { 1.0 }
+        if s > 0.0 {
+            s
+        } else {
+            1.0
+        }
     };
 
     let target = {
@@ -488,7 +527,8 @@ pub extern "C" fn bloom_attach_native(handle: i64, width: f64, height: f64) -> f
 #[no_mangle]
 pub extern "C" fn bloom_resize(phys_w: f64, phys_h: f64, log_w: f64, log_h: f64) {
     if let Some(eng) = unsafe { ENGINE.get_mut() } {
-        eng.renderer.resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
+        eng.renderer
+            .resize(phys_w as u32, phys_h as u32, log_w as u32, log_h as u32);
     }
 }
 
@@ -509,7 +549,11 @@ pub extern "C" fn bloom_close_window() {
 
 #[no_mangle]
 pub extern "C" fn bloom_window_should_close() -> f64 {
-    if engine().should_close { 1.0 } else { 0.0 }
+    if engine().should_close {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// Poll the first connected game controller (MFi / Xbox / PlayStation) through
@@ -533,7 +577,9 @@ fn poll_game_controllers() {
         ($btn:expr, $eng:expr, $idx:expr) => {{
             let b: Retained<AnyObject> = $btn;
             let pressed: Bool = msg_send![&*b, isPressed];
-            if pressed.as_bool() { $eng.input.set_gamepad_button_down($idx); }
+            if pressed.as_bool() {
+                $eng.input.set_gamepad_button_down($idx);
+            }
         }};
     }
     unsafe {
@@ -646,7 +692,9 @@ pub extern "C" fn bloom_begin_drawing() {
                             engine().input.set_key_up(bloom_key);
                         }
                     }
-                    NSEventType::MouseMoved | NSEventType::LeftMouseDragged | NSEventType::RightMouseDragged => {
+                    NSEventType::MouseMoved
+                    | NSEventType::LeftMouseDragged
+                    | NSEventType::RightMouseDragged => {
                         if engine().input.cursor_disabled {
                             // In disabled-cursor mode, use raw deltas from NSEvent
                             let dx: f64 = unsafe { msg_send![&*event, deltaX] };
@@ -654,8 +702,13 @@ pub extern "C" fn bloom_begin_drawing() {
                             engine().input.accumulate_mouse_delta(dx, dy);
                         } else if let Some(window) = unsafe { &WINDOW } {
                             let loc = event.locationInWindow();
-                            let frame = window.contentView().map(|v| v.frame()).unwrap_or(NSRect::ZERO);
-                            engine().input.set_mouse_position(loc.x, frame.size.height - loc.y);
+                            let frame = window
+                                .contentView()
+                                .map(|v| v.frame())
+                                .unwrap_or(NSRect::ZERO);
+                            engine()
+                                .input
+                                .set_mouse_position(loc.x, frame.size.height - loc.y);
                         }
                     }
                     NSEventType::LeftMouseDown => {
@@ -695,23 +748,27 @@ pub extern "C" fn bloom_begin_drawing() {
 
     // Handle window resize — track physical (backing) size for the
     // swapchain while keeping the logical (points) size for user code.
-    if let Some(window) = unsafe { &WINDOW } {
-        if let Some(content_view) = window.contentView() {
-            let frame = content_view.frame();
-            let logical_w = frame.size.width as u32;
-            let logical_h = frame.size.height as u32;
-            let scale: f64 = unsafe { msg_send![&*window, backingScaleFactor] };
-            let scale = if scale > 0.0 { scale } else { 1.0 };
-            let physical_w = ((frame.size.width * scale) as u32).max(1);
-            let physical_h = ((frame.size.height * scale) as u32).max(1);
-            let eng = engine();
-            if logical_w > 0 && logical_h > 0
-                && (physical_w != eng.renderer.physical_width()
-                    || physical_h != eng.renderer.physical_height()
-                    || logical_w != eng.renderer.width()
-                    || logical_h != eng.renderer.height())
-            {
-                eng.renderer.resize(physical_w, physical_h, logical_w, logical_h);
+    if !unsafe { HEADLESS_PIXEL_EXACT } {
+        if let Some(window) = unsafe { &WINDOW } {
+            if let Some(content_view) = window.contentView() {
+                let frame = content_view.frame();
+                let logical_w = frame.size.width as u32;
+                let logical_h = frame.size.height as u32;
+                let scale: f64 = unsafe { msg_send![&*window, backingScaleFactor] };
+                let scale = if scale > 0.0 { scale } else { 1.0 };
+                let physical_w = ((frame.size.width * scale) as u32).max(1);
+                let physical_h = ((frame.size.height * scale) as u32).max(1);
+                let eng = engine();
+                if logical_w > 0
+                    && logical_h > 0
+                    && (physical_w != eng.renderer.physical_width()
+                        || physical_h != eng.renderer.physical_height()
+                        || logical_w != eng.renderer.width()
+                        || logical_h != eng.renderer.height())
+                {
+                    eng.renderer
+                        .resize(physical_w, physical_h, logical_w, logical_h);
+                }
             }
         }
     }
@@ -729,7 +786,7 @@ pub extern "C" fn bloom_begin_drawing() {
         4 => objc2_app_kit::NSCursor::resizeLeftRightCursor().set(),
         5 => objc2_app_kit::NSCursor::resizeUpDownCursor().set(),
         6 => objc2_app_kit::NSCursor::crosshairCursor().set(),
-        _ => {},
+        _ => {}
     }
 
     // Poll a connected game controller (no-op if none) before begin_frame
@@ -743,8 +800,12 @@ pub extern "C" fn bloom_begin_drawing() {
 pub extern "C" fn bloom_end_drawing() {
     // Pump geisterhand BEFORE end_frame.
     // Screenshot function re-renders inline with captured VP + vertices.
-    extern "C" { fn perry_geisterhand_pump(); }
-    unsafe { perry_geisterhand_pump(); }
+    extern "C" {
+        fn perry_geisterhand_pump();
+    }
+    unsafe {
+        perry_geisterhand_pump();
+    }
 
     engine().end_frame();
 }
@@ -935,12 +996,15 @@ pub extern "C" fn bloom_set_window_icon(path_ptr: *const u8) {
     unsafe {
         let ns_path = NSString::from_str(path);
         let image_cls = objc2::runtime::AnyClass::get(c"NSImage").unwrap();
-        let image: *mut objc2::runtime::AnyObject =
-            msg_send![image_cls, alloc];
-        if image.is_null() { return; }
+        let image: *mut objc2::runtime::AnyObject = msg_send![image_cls, alloc];
+        if image.is_null() {
+            return;
+        }
         let image: *mut objc2::runtime::AnyObject =
             msg_send![image, initWithContentsOfFile: &*ns_path];
-        if image.is_null() { return; }
+        if image.is_null() {
+            return;
+        }
         let app = NSApplication::sharedApplication(MainThreadMarker::new_unchecked());
         let _: () = msg_send![&*app, setApplicationIconImage: image];
     }
@@ -1008,7 +1072,10 @@ pub extern "C" fn bloom_open_file_dialog(filter_ptr: *const u8, title_ptr: *cons
 }
 
 #[no_mangle]
-pub extern "C" fn bloom_save_file_dialog(default_name_ptr: *const u8, title_ptr: *const u8) -> *const u8 {
+pub extern "C" fn bloom_save_file_dialog(
+    default_name_ptr: *const u8,
+    title_ptr: *const u8,
+) -> *const u8 {
     let default_name = str_from_header(default_name_ptr);
     let title = str_from_header(title_ptr);
     let dialog = rfd::FileDialog::new()
@@ -1024,7 +1091,9 @@ pub extern "C" fn bloom_save_file_dialog(default_name_ptr: *const u8, title_ptr:
 // Input injection + platform detection
 // ============================================================
 #[no_mangle]
-pub extern "C" fn bloom_get_platform() -> f64 { 1.0 }
+pub extern "C" fn bloom_get_platform() -> f64 {
+    1.0
+}
 
 /// Return the user's preferred OS language as a packed 2-letter code:
 /// `c0 * 256 + c1`, where c0/c1 are the ASCII bytes of the lowercased
@@ -1036,7 +1105,11 @@ pub extern "C" fn bloom_get_language() -> f64 {
     fn pack(code: &str) -> f64 {
         let lower = code.to_ascii_lowercase();
         let b = lower.as_bytes();
-        if b.len() >= 2 { (b[0] as f64) * 256.0 + (b[1] as f64) } else { 101.0 * 256.0 + 110.0 }
+        if b.len() >= 2 {
+            (b[0] as f64) * 256.0 + (b[1] as f64)
+        } else {
+            101.0 * 256.0 + 110.0
+        }
     }
     let langs = objc2_foundation::NSLocale::preferredLanguages();
     match langs.firstObject() {
@@ -1098,9 +1171,7 @@ pub extern "C" fn bloom_get_language() -> f64 {
 fn bloom_register_geisterhand_screenshot() {
     // Try to register with geisterhand if it's linked (weak symbol)
     extern "C" {
-        fn perry_geisterhand_register_screenshot_capture(
-            f: extern "C" fn(*mut usize) -> *mut u8,
-        );
+        fn perry_geisterhand_register_screenshot_capture(f: extern "C" fn(*mut usize) -> *mut u8);
     }
     unsafe {
         perry_geisterhand_register_screenshot_capture(bloom_screenshot_capture);
@@ -1117,17 +1188,9 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
 
     // Set capture flag and render inline
     eng.renderer.screenshot_requested = true;
-    eng.scene.prepare(
-        &eng.renderer.device,
-        &eng.renderer.queue,
-        &eng.renderer.vp_matrix(),
-        &eng.renderer.prev_vp_matrix,
-        eng.renderer.uniform_3d_layout(),
-        // Screenshot capture renders everything the camera might see —
-        // never occlusion-cull a one-shot capture.
-        None,
-    );
-    eng.scene.prepare_materials(&eng.renderer);
+    // Screenshot capture renders everything the camera might see —
+    // never occlusion-cull a one-shot capture.
+    eng.renderer.prepare_scene_graph(&mut eng.scene, false);
     // Phase 1c: sync material PerFrame + PerView UBOs with the
     // current engine clock before the main HDR pass dispatches any
     // material draws that were submitted during this frame.
@@ -1136,7 +1199,8 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
         let dt = eng.delta_time as f32;
         eng.renderer.material_system_begin_frame(t, dt);
     }
-    eng.renderer.end_frame_with_scene(&mut eng.scene, &mut eng.profiler);
+    eng.renderer
+        .end_frame_with_scene(&mut eng.scene, &mut eng.profiler);
 
     match eng.renderer.screenshot_data.take() {
         Some((width, height, rgba)) => {
@@ -1147,7 +1211,9 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
                     // Allocate with libc::malloc (caller will free with libc::free)
                     let ptr = unsafe { libc::malloc(len) as *mut u8 };
                     if ptr.is_null() {
-                        unsafe { *out_len = 0; }
+                        unsafe {
+                            *out_len = 0;
+                        }
                         return std::ptr::null_mut();
                     }
                     unsafe {
@@ -1157,13 +1223,17 @@ extern "C" fn bloom_screenshot_capture(out_len: *mut usize) -> *mut u8 {
                     ptr
                 }
                 None => {
-                    unsafe { *out_len = 0; }
+                    unsafe {
+                        *out_len = 0;
+                    }
                     std::ptr::null_mut()
                 }
             }
         }
         None => {
-            unsafe { *out_len = 0; }
+            unsafe {
+                *out_len = 0;
+            }
             std::ptr::null_mut()
         }
     }
@@ -1202,7 +1272,7 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
             raw.push(rgba[idx + 2]); // R (was at offset 2 in BGRA)
             raw.push(rgba[idx + 1]); // G (same position)
             raw.push(rgba[idx + 0]); // B (was at offset 0 in BGRA)
-            raw.push(255);           // A (force opaque — alpha from sRGB surface is unreliable)
+            raw.push(255); // A (force opaque — alpha from sRGB surface is unreliable)
         }
     }
 
@@ -1284,7 +1354,6 @@ fn adler32(data: &[u8]) -> u32 {
 // Scene picking (raycasting)
 // ============================================================
 
-
 // Q6: Multi-hit picking — returns all hits sorted by distance.
 
 // ============================================================
@@ -1299,4 +1368,3 @@ fn bloom_jolt_ffi_physics() -> &'static mut bloom_shared::physics_jolt::JoltPhys
 
 #[cfg(feature = "jolt")]
 bloom_shared::define_physics_ffi!();
-

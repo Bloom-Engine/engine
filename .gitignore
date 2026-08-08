@@ -12,6 +12,10 @@ node_modules/
 *_ts.o
 package-lock.json
 
+# Python tooling cache
+__pycache__/
+*.py[cod]
+
 # macOS junk
 .DS_Store
 

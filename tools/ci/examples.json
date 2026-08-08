@@ -1,0 +1,25 @@
+{
+  "schema": "bloom-canonical-examples-v1",
+  "examples": [
+    "examples/bistro",
+    "examples/dungeon-crawl",
+    "examples/intel-sponza",
+    "examples/isometric-rpg",
+    "examples/kart-racer",
+    "examples/pbr-spheres",
+    "examples/perry-embed",
+    "examples/pong",
+    "examples/quality-masked",
+    "examples/quality-motion",
+    "examples/quality-stress",
+    "examples/quality-transparency",
+    "examples/renderer-test",
+    "examples/space-blaster",
+    "examples/sponza",
+    "examples/test-gltf-watch",
+    "examples/test-scene-watch",
+    "examples/test3d",
+    "examples/voxel-sandbox",
+    "examples/world-viewer"
+  ]
+}

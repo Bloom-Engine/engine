@@ -1,4 +1,4 @@
-﻿//! Input FFI surface for web: keyboard/mouse/gamepad/touch getters plus
+//! Input FFI surface for web: keyboard/mouse/gamepad/touch getters plus
 //! the injection entry points the JS glue calls from DOM event
 //! listeners. Split from lib.rs (2000-line file policy).
 
@@ -11,22 +11,38 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub fn bloom_is_key_pressed(key: f64) -> f64 {
-    if engine().input.is_key_pressed(key as usize) { 1.0 } else { 0.0 }
-}
-
-#[wasm_bindgen]
-pub fn bloom_is_key_down(key: f64) -> f64 {
-    if engine().input.is_key_down(key as usize) { 1.0 } else { 0.0 }
-}
-
-#[wasm_bindgen]
-pub fn bloom_is_key_released(key: f64) -> f64 {
-    if engine().input.is_key_released(key as usize) { 1.0 } else { 0.0 }
+    if engine().input.is_key_pressed(key as usize) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
 pub fn bloom_is_key_repeated(key: f64) -> f64 {
-    if engine().input.is_key_repeated(key as usize) { 1.0 } else { 0.0 }
+    if engine().input.is_key_repeated(key as usize) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_is_key_down(key: f64) -> f64 {
+    if engine().input.is_key_down(key as usize) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+#[wasm_bindgen]
+pub fn bloom_is_key_released(key: f64) -> f64 {
+    if engine().input.is_key_released(key as usize) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 // ============================================================
@@ -45,17 +61,29 @@ pub fn bloom_get_mouse_y() -> f64 {
 
 #[wasm_bindgen]
 pub fn bloom_is_mouse_button_pressed(btn: f64) -> f64 {
-    if engine().input.is_mouse_button_pressed(btn as usize) { 1.0 } else { 0.0 }
+    if engine().input.is_mouse_button_pressed(btn as usize) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
 pub fn bloom_is_mouse_button_down(btn: f64) -> f64 {
-    if engine().input.is_mouse_button_down(btn as usize) { 1.0 } else { 0.0 }
+    if engine().input.is_mouse_button_down(btn as usize) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
 pub fn bloom_is_mouse_button_released(btn: f64) -> f64 {
-    if engine().input.is_mouse_button_released(btn as usize) { 1.0 } else { 0.0 }
+    if engine().input.is_mouse_button_released(btn as usize) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
@@ -120,7 +148,11 @@ pub fn bloom_get_model_bounds_max_z(model_handle: f64) -> f64 {
 // prevent; the web crate hand-mirrors it and drifted.
 #[wasm_bindgen]
 pub fn bloom_is_gamepad_available() -> f64 {
-    if engine().input.is_gamepad_available() { 1.0 } else { 0.0 }
+    if engine().input.is_gamepad_available() {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
@@ -130,17 +162,29 @@ pub fn bloom_get_gamepad_axis(axis: f64) -> f64 {
 
 #[wasm_bindgen]
 pub fn bloom_is_gamepad_button_pressed(button: f64) -> f64 {
-    if engine().input.is_gamepad_button_pressed(button as usize) { 1.0 } else { 0.0 }
+    if engine().input.is_gamepad_button_pressed(button as usize) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
 pub fn bloom_is_gamepad_button_down(button: f64) -> f64 {
-    if engine().input.is_gamepad_button_down(button as usize) { 1.0 } else { 0.0 }
+    if engine().input.is_gamepad_button_down(button as usize) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
 pub fn bloom_is_gamepad_button_released(button: f64) -> f64 {
-    if engine().input.is_gamepad_button_released(button as usize) { 1.0 } else { 0.0 }
+    if engine().input.is_gamepad_button_released(button as usize) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
@@ -173,7 +217,11 @@ pub fn bloom_get_touch_count() -> f64 {
 
 #[wasm_bindgen]
 pub fn bloom_is_touch_active(index: f64) -> f64 {
-    if engine().input.is_touch_active(index as usize) { 1.0 } else { 0.0 }
+    if engine().input.is_touch_active(index as usize) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[wasm_bindgen]
@@ -237,7 +285,9 @@ pub fn bloom_inject_mouse_wheel(dy: f64) {
 
 #[wasm_bindgen]
 pub fn bloom_inject_touch(index: f64, x: f64, y: f64, active: f64) {
-    engine().input.set_touch(index as usize, x, y, active != 0.0);
+    engine()
+        .input
+        .set_touch(index as usize, x, y, active != 0.0);
 }
 
 /// Deferred release: keeps the slot active for the current frame and clears
@@ -268,7 +318,6 @@ pub fn bloom_inject_gamepad_button_up(button: f64) {
     engine().input.set_gamepad_button_up(button as usize);
 }
 
-
 /// EN-031 â€” gamepad rumble. The Gamepad API exposes vibrationActuator, but
 /// only behind a user-gesture requirement and with patchy support, so the web
 /// port records the request (keeping the symbol and the state consistent with
@@ -283,4 +332,3 @@ pub fn bloom_gamepad_rumble(low: f64, high: f64, seconds: f64) {
         (seconds as f32).clamp(0.0, 10.0),
     ];
 }
-

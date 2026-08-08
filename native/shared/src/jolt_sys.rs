@@ -11,12 +11,12 @@ use std::os::raw::c_char;
 // Handles
 // ---------------------------------------------------------------------------
 
-pub type bj_world      = u64;
-pub type bj_shape      = u64;
-pub type bj_body       = u64;
+pub type bj_world = u64;
+pub type bj_shape = u64;
+pub type bj_body = u64;
 pub type bj_constraint = u64;
-pub type bj_character  = u64;
-pub type bj_vehicle    = u64;
+pub type bj_character = u64;
+pub type bj_vehicle = u64;
 
 pub const BJ_INVALID: u64 = 0;
 pub const BJ_MAX_OBJECT_LAYERS: u32 = 16;
@@ -28,51 +28,51 @@ pub const BJ_MAX_OBJECT_LAYERS: u32 = 16;
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BjMotionType {
-    Static    = 0,
+    Static = 0,
     Kinematic = 1,
-    Dynamic   = 2,
+    Dynamic = 2,
 }
 
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BjDefaultLayer {
     NonMoving = 0,
-    Moving    = 1,
-    Sensor    = 2,
+    Moving = 1,
+    Sensor = 2,
 }
 
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BjActivation {
-    Activate     = 0,
+    Activate = 0,
     DontActivate = 1,
 }
 
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BjContactEvent {
-    Added     = 0,
+    Added = 0,
     Persisted = 1,
-    Removed   = 2,
+    Removed = 2,
 }
 
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BjResult {
-    Ok                = 0,
-    ErrUninitialized  = 1,
-    ErrInvalidHandle  = 2,
-    ErrOutOfMemory    = 3,
-    ErrInvalidArg     = 4,
+    Ok = 0,
+    ErrUninitialized = 1,
+    ErrInvalidHandle = 2,
+    ErrOutOfMemory = 3,
+    ErrInvalidArg = 4,
 }
 
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BjGroundState {
-    OnGround     = 0,
-    OnSteep      = 1,
+    OnGround = 0,
+    OnSteep = 1,
     NotSupported = 2,
-    InAir        = 3,
+    InAir = 3,
 }
 
 // ---------------------------------------------------------------------------
@@ -81,18 +81,37 @@ pub enum BjGroundState {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
-pub struct BjVec3 { pub x: f32, pub y: f32, pub z: f32 }
+pub struct BjVec3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-pub struct BjQuat { pub x: f32, pub y: f32, pub z: f32, pub w: f32 }
+pub struct BjQuat {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
 impl Default for BjQuat {
-    fn default() -> Self { Self { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        }
+    }
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
-pub struct BjTransform { pub position: BjVec3, pub rotation: BjQuat }
+pub struct BjTransform {
+    pub position: BjVec3,
+    pub rotation: BjQuat,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -111,7 +130,11 @@ impl Default for BjWorldDesc {
             max_body_pairs: 65_536,
             max_contact_constraints: 10_240,
             num_threads: 0,
-            gravity: BjVec3 { x: 0.0, y: -9.81, z: 0.0 },
+            gravity: BjVec3 {
+                x: 0.0,
+                y: -9.81,
+                z: 0.0,
+            },
             temp_allocator_bytes: 0,
         }
     }
@@ -203,7 +226,7 @@ pub struct BjConstraintAnchors {
 pub struct BjVehicleDesc {
     pub up: BjVec3,
     pub forward: BjVec3,
-    pub wheel_positions: [BjVec3; 4],  // front-left, front-right, rear-left, rear-right
+    pub wheel_positions: [BjVec3; 4], // front-left, front-right, rear-left, rear-right
     pub wheel_radius: f32,
     pub wheel_width: f32,
     pub suspension_min_length: f32,
@@ -220,16 +243,40 @@ impl Default for BjVehicleDesc {
         // Sensible defaults for a typical compact car. Wheel positions
         // are for a ~3.8m × 1.6m wheelbase/track.
         Self {
-            up:      BjVec3 { x: 0.0, y: 1.0, z: 0.0 },
-            forward: BjVec3 { x: 0.0, y: 0.0, z: 1.0 },
+            up: BjVec3 {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
+            forward: BjVec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
             wheel_positions: [
-                BjVec3 { x: -0.8, y: -0.4, z:  1.3 },  // FL
-                BjVec3 { x:  0.8, y: -0.4, z:  1.3 },  // FR
-                BjVec3 { x: -0.8, y: -0.4, z: -1.3 },  // RL
-                BjVec3 { x:  0.8, y: -0.4, z: -1.3 },  // RR
+                BjVec3 {
+                    x: -0.8,
+                    y: -0.4,
+                    z: 1.3,
+                }, // FL
+                BjVec3 {
+                    x: 0.8,
+                    y: -0.4,
+                    z: 1.3,
+                }, // FR
+                BjVec3 {
+                    x: -0.8,
+                    y: -0.4,
+                    z: -1.3,
+                }, // RL
+                BjVec3 {
+                    x: 0.8,
+                    y: -0.4,
+                    z: -1.3,
+                }, // RR
             ],
             wheel_radius: 0.35,
-            wheel_width:  0.2,
+            wheel_width: 0.2,
             suspension_min_length: 0.3,
             suspension_max_length: 0.5,
             max_steer_angle: 35.0_f32.to_radians(),
@@ -257,7 +304,11 @@ pub struct BjCharacterDesc {
 impl Default for BjCharacterDesc {
     fn default() -> Self {
         Self {
-            up: BjVec3 { x: 0.0, y: 1.0, z: 0.0 },
+            up: BjVec3 {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
             max_slope_angle: 50.0_f32.to_radians(),
             character_padding: 0.02,
             penetration_recovery_speed: 1.0,
@@ -298,15 +349,22 @@ extern "C" {
     pub fn bj_shape_cylinder(half_height: f32, radius: f32, convex_radius: f32) -> bj_shape;
     pub fn bj_shape_convex_hull(points: *const BjVec3, count: u32, convex_radius: f32) -> bj_shape;
     pub fn bj_shape_mesh(
-        vertices: *const BjVec3, vertex_count: u32,
-        indices: *const u32, triangle_count: u32,
+        vertices: *const BjVec3,
+        vertex_count: u32,
+        indices: *const u32,
+        triangle_count: u32,
     ) -> bj_shape;
     pub fn bj_shape_heightfield(
-        samples: *const f32, sample_count: u32,
-        offset: BjVec3, scale: BjVec3, block_size: u32,
+        samples: *const f32,
+        sample_count: u32,
+        offset: BjVec3,
+        scale: BjVec3,
+        block_size: u32,
     ) -> bj_shape;
     pub fn bj_shape_compound_static(
-        shapes: *const bj_shape, local_transforms: *const BjTransform, count: u32,
+        shapes: *const bj_shape,
+        local_transforms: *const BjTransform,
+        count: u32,
     ) -> bj_shape;
     pub fn bj_shape_scaled(base: bj_shape, scale: BjVec3) -> bj_shape;
     pub fn bj_shape_offset_com(base: bj_shape, offset: BjVec3) -> bj_shape;
@@ -323,36 +381,79 @@ extern "C" {
     pub fn bj_body_is_active(world: bj_world, body: bj_body) -> u8;
     pub fn bj_body_is_valid(world: bj_world, body: bj_body) -> u8;
     pub fn bj_body_get_transform(world: bj_world, body: bj_body, out: *mut BjTransform);
-    pub fn bj_body_set_transform(world: bj_world, body: bj_body, xform: *const BjTransform, act: BjActivation);
+    pub fn bj_body_set_transform(
+        world: bj_world,
+        body: bj_body,
+        xform: *const BjTransform,
+        act: BjActivation,
+    );
     pub fn bj_body_get_position(world: bj_world, body: bj_body, out: *mut BjVec3);
     pub fn bj_body_get_rotation(world: bj_world, body: bj_body, out: *mut BjQuat);
     pub fn bj_body_set_position(world: bj_world, body: bj_body, pos: BjVec3, act: BjActivation);
     pub fn bj_body_set_rotation(world: bj_world, body: bj_body, rot: BjQuat, act: BjActivation);
-    pub fn bj_body_move_kinematic(world: bj_world, body: bj_body, target: *const BjTransform, delta_time: f32);
+    pub fn bj_body_move_kinematic(
+        world: bj_world,
+        body: bj_body,
+        target: *const BjTransform,
+        delta_time: f32,
+    );
     pub fn bj_body_get_linear_velocity(world: bj_world, body: bj_body, out: *mut BjVec3);
     pub fn bj_body_get_angular_velocity(world: bj_world, body: bj_body, out: *mut BjVec3);
     pub fn bj_body_set_linear_velocity(world: bj_world, body: bj_body, v: BjVec3);
     pub fn bj_body_set_angular_velocity(world: bj_world, body: bj_body, v: BjVec3);
-    pub fn bj_body_get_point_velocity(world: bj_world, body: bj_body, world_point: BjVec3, out: *mut BjVec3);
+    pub fn bj_body_get_point_velocity(
+        world: bj_world,
+        body: bj_body,
+        world_point: BjVec3,
+        out: *mut BjVec3,
+    );
     pub fn bj_body_add_force(world: bj_world, body: bj_body, force: BjVec3);
     pub fn bj_body_add_impulse(world: bj_world, body: bj_body, impulse: BjVec3);
     pub fn bj_body_add_torque(world: bj_world, body: bj_body, torque: BjVec3);
     pub fn bj_body_add_angular_impulse(world: bj_world, body: bj_body, impulse: BjVec3);
     pub fn bj_body_add_force_at(world: bj_world, body: bj_body, force: BjVec3, world_point: BjVec3);
-    pub fn bj_body_add_impulse_at(world: bj_world, body: bj_body, impulse: BjVec3, world_point: BjVec3);
+    pub fn bj_body_add_impulse_at(
+        world: bj_world,
+        body: bj_body,
+        impulse: BjVec3,
+        world_point: BjVec3,
+    );
     pub fn bj_body_set_friction(world: bj_world, body: bj_body, friction: f32);
     pub fn bj_body_set_restitution(world: bj_world, body: bj_body, restitution: f32);
     pub fn bj_body_set_linear_damping(world: bj_world, body: bj_body, damping: f32);
     pub fn bj_body_set_angular_damping(world: bj_world, body: bj_body, damping: f32);
     pub fn bj_body_set_gravity_factor(world: bj_world, body: bj_body, factor: f32);
     pub fn bj_body_set_ccd(world: bj_world, body: bj_body, enabled: u8);
-    pub fn bj_body_set_motion_type(world: bj_world, body: bj_body, mtype: BjMotionType, act: BjActivation);
+    pub fn bj_body_set_motion_type(
+        world: bj_world,
+        body: bj_body,
+        mtype: BjMotionType,
+        act: BjActivation,
+    );
     pub fn bj_body_set_object_layer(world: bj_world, body: bj_body, layer: u32);
     pub fn bj_body_set_is_sensor(world: bj_world, body: bj_body, enabled: u8);
     pub fn bj_body_set_allow_sleeping(world: bj_world, body: bj_body, enabled: u8);
-    pub fn bj_body_set_shape(world: bj_world, body: bj_body, shape: bj_shape, update_mass: u8, act: BjActivation);
-    pub fn bj_body_lock_rotation_axes(world: bj_world, body: bj_body, lock_x: u8, lock_y: u8, lock_z: u8);
-    pub fn bj_body_lock_translation_axes(world: bj_world, body: bj_body, lock_x: u8, lock_y: u8, lock_z: u8);
+    pub fn bj_body_set_shape(
+        world: bj_world,
+        body: bj_body,
+        shape: bj_shape,
+        update_mass: u8,
+        act: BjActivation,
+    );
+    pub fn bj_body_lock_rotation_axes(
+        world: bj_world,
+        body: bj_body,
+        lock_x: u8,
+        lock_y: u8,
+        lock_z: u8,
+    );
+    pub fn bj_body_lock_translation_axes(
+        world: bj_world,
+        body: bj_body,
+        lock_x: u8,
+        lock_y: u8,
+        lock_z: u8,
+    );
     pub fn bj_body_get_mass(world: bj_world, body: bj_body) -> f32;
     pub fn bj_body_get_friction(world: bj_world, body: bj_body) -> f32;
     pub fn bj_body_get_restitution(world: bj_world, body: bj_body) -> f32;
@@ -360,53 +461,88 @@ extern "C" {
     pub fn bj_body_set_user_data(world: bj_world, body: bj_body, user_data: u64);
     pub fn bj_body_get_user_data(world: bj_world, body: bj_body) -> u64;
     pub fn bj_world_sync_transforms(
-        world: bj_world, bodies: *const bj_body, count: u32,
+        world: bj_world,
+        bodies: *const bj_body,
+        count: u32,
         out_transforms: *mut BjTransform,
     ) -> u32;
 
     // Queries
     pub fn bj_query_raycast_closest(
-        world: bj_world, origin: BjVec3, direction: BjVec3, max_distance: f32,
-        layer_mask: u32, out_hit: *mut BjRayHit,
+        world: bj_world,
+        origin: BjVec3,
+        direction: BjVec3,
+        max_distance: f32,
+        layer_mask: u32,
+        out_hit: *mut BjRayHit,
     ) -> u8;
     pub fn bj_query_raycast_all(
-        world: bj_world, origin: BjVec3, direction: BjVec3, max_distance: f32,
-        layer_mask: u32, out_hits: *mut BjRayHit, max_hits: u32,
+        world: bj_world,
+        origin: BjVec3,
+        direction: BjVec3,
+        max_distance: f32,
+        layer_mask: u32,
+        out_hits: *mut BjRayHit,
+        max_hits: u32,
     ) -> u32;
     pub fn bj_query_shape_cast_closest(
-        world: bj_world, shape: bj_shape, start: *const BjTransform, direction: BjVec3,
-        layer_mask: u32, out_hit: *mut BjRayHit,
+        world: bj_world,
+        shape: bj_shape,
+        start: *const BjTransform,
+        direction: BjVec3,
+        layer_mask: u32,
+        out_hit: *mut BjRayHit,
     ) -> u8;
     pub fn bj_query_overlap_sphere(
-        world: bj_world, center: BjVec3, radius: f32,
-        layer_mask: u32, out_bodies: *mut bj_body, max_results: u32,
+        world: bj_world,
+        center: BjVec3,
+        radius: f32,
+        layer_mask: u32,
+        out_bodies: *mut bj_body,
+        max_results: u32,
     ) -> u32;
     pub fn bj_query_overlap_box(
-        world: bj_world, box_transform: *const BjTransform, half_extents: BjVec3,
-        layer_mask: u32, out_bodies: *mut bj_body, max_results: u32,
+        world: bj_world,
+        box_transform: *const BjTransform,
+        half_extents: BjVec3,
+        layer_mask: u32,
+        out_bodies: *mut bj_body,
+        max_results: u32,
     ) -> u32;
     pub fn bj_query_overlap_point(
-        world: bj_world, point: BjVec3,
-        layer_mask: u32, out_bodies: *mut bj_body, max_results: u32,
+        world: bj_world,
+        point: BjVec3,
+        layer_mask: u32,
+        out_bodies: *mut bj_body,
+        max_results: u32,
     ) -> u32;
 
     // Constraints
     pub fn bj_constraint_fixed(world: bj_world, a: *const BjConstraintAnchors) -> bj_constraint;
     pub fn bj_constraint_point(world: bj_world, a: *const BjConstraintAnchors) -> bj_constraint;
     pub fn bj_constraint_hinge(
-        world: bj_world, a: *const BjConstraintAnchors, axis: BjVec3,
-        limit_min: f32, limit_max: f32,
+        world: bj_world,
+        a: *const BjConstraintAnchors,
+        axis: BjVec3,
+        limit_min: f32,
+        limit_max: f32,
     ) -> bj_constraint;
     pub fn bj_constraint_slider(
-        world: bj_world, a: *const BjConstraintAnchors, axis: BjVec3,
-        limit_min: f32, limit_max: f32,
+        world: bj_world,
+        a: *const BjConstraintAnchors,
+        axis: BjVec3,
+        limit_min: f32,
+        limit_max: f32,
     ) -> bj_constraint;
     pub fn bj_constraint_distance(
-        world: bj_world, a: *const BjConstraintAnchors,
-        min_distance: f32, max_distance: f32,
+        world: bj_world,
+        a: *const BjConstraintAnchors,
+        min_distance: f32,
+        max_distance: f32,
     ) -> bj_constraint;
     pub fn bj_constraint_six_dof(
-        world: bj_world, a: *const BjConstraintAnchors,
+        world: bj_world,
+        a: *const BjConstraintAnchors,
         translation_limits_xyz_minmax: *const f32,
         rotation_limits_xyz_minmax: *const f32,
     ) -> bj_constraint;
@@ -420,55 +556,103 @@ extern "C" {
 
     // Character controller
     pub fn bj_character_create(
-        world: bj_world, shape: bj_shape, desc: *const BjCharacterDesc,
-        position: BjVec3, rotation: BjQuat,
+        world: bj_world,
+        shape: bj_shape,
+        desc: *const BjCharacterDesc,
+        position: BjVec3,
+        rotation: BjQuat,
     ) -> bj_character;
     pub fn bj_character_destroy(world: bj_world, character: bj_character);
-    pub fn bj_character_update(world: bj_world, character: bj_character,
-                               delta_time: f32, gravity: BjVec3);
+    pub fn bj_character_update(
+        world: bj_world,
+        character: bj_character,
+        delta_time: f32,
+        gravity: BjVec3,
+    );
     pub fn bj_character_get_position(world: bj_world, character: bj_character, out: *mut BjVec3);
     pub fn bj_character_get_rotation(world: bj_world, character: bj_character, out: *mut BjQuat);
     pub fn bj_character_set_position(world: bj_world, character: bj_character, position: BjVec3);
     pub fn bj_character_set_rotation(world: bj_world, character: bj_character, rotation: BjQuat);
-    pub fn bj_character_get_linear_velocity(world: bj_world, character: bj_character, out: *mut BjVec3);
-    pub fn bj_character_set_linear_velocity(world: bj_world, character: bj_character, velocity: BjVec3);
-    pub fn bj_character_get_ground_state(world: bj_world, character: bj_character) -> BjGroundState;
-    pub fn bj_character_get_ground_normal  (world: bj_world, character: bj_character, out: *mut BjVec3);
-    pub fn bj_character_get_ground_position(world: bj_world, character: bj_character, out: *mut BjVec3);
-    pub fn bj_character_get_ground_body    (world: bj_world, character: bj_character) -> bj_body;
-    pub fn bj_character_set_shape          (world: bj_world, character: bj_character, shape: bj_shape);
+    pub fn bj_character_get_linear_velocity(
+        world: bj_world,
+        character: bj_character,
+        out: *mut BjVec3,
+    );
+    pub fn bj_character_set_linear_velocity(
+        world: bj_world,
+        character: bj_character,
+        velocity: BjVec3,
+    );
+    pub fn bj_character_get_ground_state(world: bj_world, character: bj_character)
+        -> BjGroundState;
+    pub fn bj_character_get_ground_normal(
+        world: bj_world,
+        character: bj_character,
+        out: *mut BjVec3,
+    );
+    pub fn bj_character_get_ground_position(
+        world: bj_world,
+        character: bj_character,
+        out: *mut BjVec3,
+    );
+    pub fn bj_character_get_ground_body(world: bj_world, character: bj_character) -> bj_body;
+    pub fn bj_character_set_shape(world: bj_world, character: bj_character, shape: bj_shape);
 
     // Soft bodies
     pub fn bj_soft_body_create(
         world: bj_world,
-        vertex_data: *const f32, vertex_count: u32,
-        indices:     *const u32, triangle_count: u32,
-        position: BjVec3, rotation: BjQuat,
+        vertex_data: *const f32,
+        vertex_count: u32,
+        indices: *const u32,
+        triangle_count: u32,
+        position: BjVec3,
+        rotation: BjQuat,
         object_layer: u32,
-        edge_compliance: f32, gravity_factor: f32, linear_damping: f32, pressure: f32,
+        edge_compliance: f32,
+        gravity_factor: f32,
+        linear_damping: f32,
+        pressure: f32,
     ) -> bj_body;
     pub fn bj_soft_body_vertex_count(world: bj_world, body: bj_body) -> u32;
     pub fn bj_soft_body_get_vertex(world: bj_world, body: bj_body, idx: u32, out: *mut BjVec3);
     pub fn bj_soft_body_set_vertex(world: bj_world, body: bj_body, idx: u32, position: BjVec3);
-    pub fn bj_soft_body_set_vertex_inv_mass(world: bj_world, body: bj_body, idx: u32, inv_mass: f32);
+    pub fn bj_soft_body_set_vertex_inv_mass(
+        world: bj_world,
+        body: bj_body,
+        idx: u32,
+        inv_mass: f32,
+    );
 
     // Wheeled vehicles
     pub fn bj_vehicle_create(
-        world: bj_world, chassis_shape: bj_shape,
+        world: bj_world,
+        chassis_shape: bj_shape,
         desc: *const BjVehicleDesc,
-        position: BjVec3, rotation: BjQuat,
+        position: BjVec3,
+        rotation: BjQuat,
     ) -> bj_vehicle;
     pub fn bj_vehicle_destroy(world: bj_world, vehicle: bj_vehicle);
     pub fn bj_vehicle_get_chassis(world: bj_world, vehicle: bj_vehicle) -> bj_body;
     pub fn bj_vehicle_set_input(
-        world: bj_world, vehicle: bj_vehicle,
-        forward: f32, right: f32, brake: f32, handbrake: f32,
+        world: bj_world,
+        vehicle: bj_vehicle,
+        forward: f32,
+        right: f32,
+        brake: f32,
+        handbrake: f32,
     );
     pub fn bj_vehicle_get_wheel_transform(
-        world: bj_world, vehicle: bj_vehicle, wheel_index: u32, axis: u32,
+        world: bj_world,
+        vehicle: bj_vehicle,
+        wheel_index: u32,
+        axis: u32,
     ) -> f32;
     pub fn bj_vehicle_get_engine_rpm(world: bj_world, vehicle: bj_vehicle) -> f32;
-    pub fn bj_vehicle_get_wheel_angular_velocity(world: bj_world, vehicle: bj_vehicle, wheel_index: u32) -> f32;
+    pub fn bj_vehicle_get_wheel_angular_velocity(
+        world: bj_world,
+        vehicle: bj_vehicle,
+        wheel_index: u32,
+    ) -> f32;
 }
 
 // ---------------------------------------------------------------------------
@@ -534,11 +718,22 @@ mod tests {
             assert_ne!(world, BJ_INVALID);
 
             // Ground: static box, top surface at y=0 (half-height 0.5, centred y=-0.5).
-            let ground_shape = bj_shape_box(BjVec3 { x: 50.0, y: 0.5, z: 50.0 }, 0.05);
+            let ground_shape = bj_shape_box(
+                BjVec3 {
+                    x: 50.0,
+                    y: 0.5,
+                    z: 50.0,
+                },
+                0.05,
+            );
             assert_ne!(ground_shape, BJ_INVALID);
             let ground_desc = BjBodyDesc {
                 motion_type: BjMotionType::Static,
-                position: BjVec3 { x: 0.0, y: -0.5, z: 0.0 },
+                position: BjVec3 {
+                    x: 0.0,
+                    y: -0.5,
+                    z: 0.0,
+                },
                 object_layer: BjDefaultLayer::NonMoving as u32,
                 ..Default::default()
             };
@@ -550,7 +745,11 @@ mod tests {
             assert_ne!(sphere_shape, BJ_INVALID);
             let sphere_desc = BjBodyDesc {
                 motion_type: BjMotionType::Dynamic,
-                position: BjVec3 { x: 0.0, y: 10.0, z: 0.0 },
+                position: BjVec3 {
+                    x: 0.0,
+                    y: 10.0,
+                    z: 0.0,
+                },
                 object_layer: BjDefaultLayer::Moving as u32,
                 restitution: 0.0,
                 friction: 0.5,
@@ -614,21 +813,43 @@ mod tests {
 
             // Triangle-mesh floor: two triangles forming a 20×20 quad at y=0.
             let verts = [
-                BjVec3 { x: -10.0, y: 0.0, z: -10.0 },
-                BjVec3 { x:  10.0, y: 0.0, z: -10.0 },
-                BjVec3 { x:  10.0, y: 0.0, z:  10.0 },
-                BjVec3 { x: -10.0, y: 0.0, z:  10.0 },
+                BjVec3 {
+                    x: -10.0,
+                    y: 0.0,
+                    z: -10.0,
+                },
+                BjVec3 {
+                    x: 10.0,
+                    y: 0.0,
+                    z: -10.0,
+                },
+                BjVec3 {
+                    x: 10.0,
+                    y: 0.0,
+                    z: 10.0,
+                },
+                BjVec3 {
+                    x: -10.0,
+                    y: 0.0,
+                    z: 10.0,
+                },
             ];
-            let indices: [u32; 6] = [0, 2, 1,   0, 3, 2];
+            let indices: [u32; 6] = [0, 2, 1, 0, 3, 2];
             let ground_shape = bj_shape_mesh(
-                verts.as_ptr(), verts.len() as u32,
-                indices.as_ptr(), (indices.len() / 3) as u32,
+                verts.as_ptr(),
+                verts.len() as u32,
+                indices.as_ptr(),
+                (indices.len() / 3) as u32,
             );
             assert_ne!(ground_shape, BJ_INVALID, "mesh shape creation failed");
 
             let ground_desc = BjBodyDesc {
                 motion_type: BjMotionType::Static,
-                position: BjVec3 { x: 0.0, y: 0.0, z: 0.0 },
+                position: BjVec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
                 object_layer: BjDefaultLayer::NonMoving as u32,
                 ..Default::default()
             };
@@ -639,15 +860,25 @@ mod tests {
             let char_shape = bj_shape_capsule(0.5, 0.3);
             let desc = BjCharacterDesc::default();
             let character = bj_character_create(
-                world, char_shape, &desc,
-                BjVec3 { x: 0.0, y: 5.0, z: 0.0 },
+                world,
+                char_shape,
+                &desc,
+                BjVec3 {
+                    x: 0.0,
+                    y: 5.0,
+                    z: 0.0,
+                },
                 BjQuat::default(),
             );
             assert_ne!(character, BJ_INVALID);
 
             bj_world_optimize_broadphase(world);
 
-            let gravity = BjVec3 { x: 0.0, y: -9.81, z: 0.0 };
+            let gravity = BjVec3 {
+                x: 0.0,
+                y: -9.81,
+                z: 0.0,
+            };
             for _ in 0..240 {
                 bj_character_update(world, character, 1.0 / 120.0, gravity);
                 bj_world_step(world, 1.0 / 120.0, 1);
@@ -657,13 +888,16 @@ mod tests {
             bj_character_get_position(world, character, &mut pos);
             assert!(
                 pos.y < 5.0 && pos.y > -0.1,
-                "character didn't land correctly: y={}", pos.y
+                "character didn't land correctly: y={}",
+                pos.y
             );
 
             let state = bj_character_get_ground_state(world, character);
             assert_eq!(
-                state, BjGroundState::OnGround,
-                "expected OnGround, got {:?}", state
+                state,
+                BjGroundState::OnGround,
+                "expected OnGround, got {:?}",
+                state
             );
 
             bj_character_destroy(world, character);
@@ -712,11 +946,17 @@ mod tests {
             // Compliance 1e-3 = realistically soft cloth (stiff cloth = 1e-5).
             let body = bj_soft_body_create(
                 world,
-                vertex_data.as_ptr(), 9,
-                indices.as_ptr(), (indices.len() / 3) as u32,
-                BjVec3::default(), BjQuat::default(),
+                vertex_data.as_ptr(),
+                9,
+                indices.as_ptr(),
+                (indices.len() / 3) as u32,
+                BjVec3::default(),
+                BjQuat::default(),
                 BjDefaultLayer::Moving as u32,
-                1e-3, 1.0, 0.01, 0.0,
+                1e-3,
+                1.0,
+                0.01,
+                0.0,
             );
             assert_ne!(body, BJ_INVALID, "soft body creation failed");
 
@@ -739,7 +979,8 @@ mod tests {
             assert!(
                 end_center.y < start_y - 0.1,
                 "cloth center should sag below starting y={}; ended at y={}",
-                start_y, end_center.y
+                start_y,
+                end_center.y
             );
 
             // Corners (index 0, 2, 6, 8) should stay pinned near y=5.
@@ -747,7 +988,8 @@ mod tests {
             bj_soft_body_get_vertex(world, body, 0, &mut corner);
             assert!(
                 (corner.y - 5.0).abs() < 0.01,
-                "corner should be pinned at y=5, got {}", corner.y
+                "corner should be pinned at y=5, got {}",
+                corner.y
             );
 
             bj_body_destroy(world, body);
@@ -772,22 +1014,53 @@ mod tests {
             let world = bj_world_create(&BjWorldDesc::default());
             assert_ne!(world, BJ_INVALID);
 
-            let ground_shape = bj_shape_box(BjVec3 { x: 100.0, y: 0.5, z: 100.0 }, 0.05);
+            let ground_shape = bj_shape_box(
+                BjVec3 {
+                    x: 100.0,
+                    y: 0.5,
+                    z: 100.0,
+                },
+                0.05,
+            );
             let ground_desc = BjBodyDesc {
                 motion_type: BjMotionType::Static,
-                position: BjVec3 { x: 0.0, y: -0.5, z: 0.0 },
+                position: BjVec3 {
+                    x: 0.0,
+                    y: -0.5,
+                    z: 0.0,
+                },
                 object_layer: BjDefaultLayer::NonMoving as u32,
                 friction: 0.8,
                 ..Default::default()
             };
             let ground = bj_body_create(world, ground_shape, &ground_desc);
 
-            let inner_box = bj_shape_box(BjVec3 { x: 1.0, y: 0.2, z: 1.9 }, 0.05);
-            let chassis_shape = bj_shape_offset_com(inner_box, BjVec3 { x: 0.0, y: -0.6, z: 0.0 });
+            let inner_box = bj_shape_box(
+                BjVec3 {
+                    x: 1.0,
+                    y: 0.2,
+                    z: 1.9,
+                },
+                0.05,
+            );
+            let chassis_shape = bj_shape_offset_com(
+                inner_box,
+                BjVec3 {
+                    x: 0.0,
+                    y: -0.6,
+                    z: 0.0,
+                },
+            );
             let desc = BjVehicleDesc::default();
             let vehicle = bj_vehicle_create(
-                world, chassis_shape, &desc,
-                BjVec3 { x: 0.0, y: 2.0, z: 0.0 },
+                world,
+                chassis_shape,
+                &desc,
+                BjVec3 {
+                    x: 0.0,
+                    y: 2.0,
+                    z: 0.0,
+                },
                 BjQuat::default(),
             );
             assert_ne!(vehicle, BJ_INVALID, "vehicle creation failed");
@@ -801,15 +1074,27 @@ mod tests {
                 bj_world_step(world, 1.0 / 120.0, 1);
             }
             let rpm = bj_vehicle_get_engine_rpm(world, vehicle);
-            assert!(rpm > 500.0, "engine RPM should rise under throttle; got {}", rpm);
+            assert!(
+                rpm > 500.0,
+                "engine RPM should rise under throttle; got {}",
+                rpm
+            );
 
             // Rear wheel should have non-zero angular velocity.
             let rear_omega = bj_vehicle_get_wheel_angular_velocity(world, vehicle, 2);
-            assert!(rear_omega.abs() > 0.5, "rear wheel should be spinning; ω={}", rear_omega);
+            assert!(
+                rear_omega.abs() > 0.5,
+                "rear wheel should be spinning; ω={}",
+                rear_omega
+            );
 
             // Wheel transform query returns non-zero position.
             let wheel_y = bj_vehicle_get_wheel_transform(world, vehicle, 0, 1);
-            assert!(wheel_y.abs() > 0.01, "wheel 0 world Y should be non-zero; got {}", wheel_y);
+            assert!(
+                wheel_y.abs() > 0.01,
+                "wheel 0 world Y should be non-zero; got {}",
+                wheel_y
+            );
 
             bj_vehicle_destroy(world, vehicle);
             bj_body_destroy(world, ground);

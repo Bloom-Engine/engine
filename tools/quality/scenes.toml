@@ -1,0 +1,834 @@
+schema_version = 1
+
+[workflow]
+quick = ["pbr-spheres-high", "damaged-helmet", "sponza-interior"]
+full = [
+  "pbr-spheres-high",
+  "pbr-spheres-constrained",
+  "damaged-helmet",
+  "sponza-interior",
+  "bistro-exterior",
+  "skinned-alpha-motion",
+  "draw-light-stress",
+  "weighted-transparency",
+  "masked-alpha-coverage",
+]
+
+[reproducibility]
+# Pixel bounds are deliberately much tighter than the regression thresholds:
+# deterministic raster cases are byte-identical, while the hardware ray-query
+# cases may differ by a handful of sub-LSB temporal samples.
+pixel_tolerance = 0.002
+min_ssim = 0.999
+max_rmse = 0.002
+max_oklab_delta = 0.001
+max_edge_delta = 0.001
+# Mean timings are the stable throughput signal. P95 remains the hard budget
+# signal, but receives a wider same-machine noise envelope because OS/GPU
+# scheduling can move a few frames into or out of the 95th percentile.
+max_cpu_mean_relative_delta = 0.15
+max_cpu_mean_absolute_delta_ms = 0.35
+max_gpu_mean_relative_delta = 0.15
+max_gpu_mean_absolute_delta_ms = 1.0
+max_cpu_p95_relative_delta = 0.25
+max_cpu_p95_absolute_delta_ms = 1.0
+max_gpu_p95_relative_delta = 0.50
+max_gpu_p95_absolute_delta_ms = 12.0
+
+[[machine_class]]
+id = "apple-m1-max-metal"
+description = "High-end Apple Silicon desktop/laptop baseline, Metal"
+hard_gate = true
+hard_metrics = ["cpu", "gpu"]
+os = "macos"
+backend = "metal"
+gpu = "Apple M1 Max"
+
+[[machine_class]]
+id = "nvidia-rtx4080-vulkan"
+description = "High-end discrete desktop baseline, Vulkan"
+hard_gate = true
+hard_metrics = ["cpu", "gpu", "vram"]
+os = "linux"
+backend = "vulkan"
+gpu = "NVIDIA GeForce RTX 4080"
+
+[[machine_class]]
+id = "apple-m1-metal-constrained"
+description = "Constrained quality tier executed on Apple M1-class Metal"
+hard_gate = true
+hard_metrics = ["cpu", "gpu"]
+os = "macos"
+backend = "metal"
+gpu = "Apple M1"
+
+[[case]]
+id = "pbr-spheres-high"
+description = "BRDF energy, Fresnel, metallic/roughness lobes, and IBL orientation"
+resolution = [512, 512]
+warmup_frames = 120
+measured_frames = 300
+seed = 0
+fixed_timestep = 0.016666666667
+render_scale = 1.0
+quality_tier = "high"
+required_intermediates = [
+  "hdr-scene",
+  "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
+  "shadow-cascade-0",
+  "shadow-cascade-1",
+  "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
+]
+
+[case.camera]
+position = [0.0, 0.0, 7.0]
+target = [0.0, 0.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y_degrees = 45.0
+animation = "still"
+
+[case.settings]
+quality_preset = 3
+taa = true
+auto_exposure = false
+present_mode = "auto-no-vsync"
+
+[case.capture]
+working_dir = "examples/pbr-spheres"
+build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
+command = [
+  "./main",
+  "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
+  "{camera_tx}", "{camera_ty}", "{camera_tz}", "{camera_fov}",
+  "--res", "{width}", "{height}",
+  "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
+  "{candidate}", "{telemetry}", "{intermediates}",
+]
+
+[case.reference]
+path = "tools/quality/baselines/portable/pbr-spheres-high.png"
+kind = "approved-realtime"
+generation = "tools/quality/run.py baseline-review"
+
+[case.thresholds]
+pixel_tolerance = 0.02
+min_ssim = 0.985
+max_rmse = 0.025
+max_oklab_delta = 0.025
+max_edge_delta = 0.025
+
+[case.budgets]
+machine_class = "apple-m1-max-metal"
+max_cpu_frame_p95_ms = 5.0
+max_gpu_frame_p95_ms = 20.0
+max_vram_peak_mb = 1600
+
+[[case.assets]]
+path = "examples/renderer-test/assets/outdoor.hdr"
+sha256 = "fd94c84997b8a3c353b62c2125a9b44e19509956986a126e472684432a02d798"
+source = "https://polyhaven.com/a/venice_sunset"
+license = "CC0 1.0"
+
+[[case]]
+id = "pbr-spheres-constrained"
+description = "Same BRDF contract at the constrained preset and 0.75 render scale"
+resolution = [512, 512]
+warmup_frames = 120
+measured_frames = 300
+seed = 0
+fixed_timestep = 0.016666666667
+render_scale = 0.75
+quality_tier = "constrained"
+required_intermediates = [
+  "hdr-scene",
+  "scene-depth",
+  "shadow-cascade-0",
+  "shadow-cascade-1",
+  "shadow-cascade-2",
+]
+
+[case.camera]
+position = [0.0, 0.0, 7.0]
+target = [0.0, 0.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y_degrees = 45.0
+animation = "still"
+
+[case.settings]
+quality_preset = 1
+taa = false
+auto_exposure = false
+present_mode = "auto-no-vsync"
+
+[case.capture]
+working_dir = "examples/pbr-spheres"
+build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/pbr-spheres"]
+command = [
+  "./main",
+  "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
+  "{camera_tx}", "{camera_ty}", "{camera_tz}", "{camera_fov}",
+  "--res", "{width}", "{height}",
+  "--quality-preset", "1", "--render-scale", "{render_scale}",
+  "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
+  "{candidate}", "{telemetry}", "{intermediates}",
+]
+
+[case.reference]
+path = "tools/quality/baselines/portable/pbr-spheres-constrained.png"
+kind = "approved-realtime"
+generation = "tools/quality/run.py baseline-review"
+
+[case.thresholds]
+pixel_tolerance = 0.025
+min_ssim = 0.975
+max_rmse = 0.035
+max_oklab_delta = 0.035
+max_edge_delta = 0.035
+
+[case.budgets]
+machine_class = "apple-m1-metal-constrained"
+max_cpu_frame_p95_ms = 5.0
+max_gpu_frame_p95_ms = 8.0
+max_vram_peak_mb = 1000
+
+[[case.assets]]
+path = "examples/renderer-test/assets/outdoor.hdr"
+sha256 = "fd94c84997b8a3c353b62c2125a9b44e19509956986a126e472684432a02d798"
+source = "https://polyhaven.com/a/venice_sunset"
+license = "CC0 1.0"
+
+[[case]]
+id = "damaged-helmet"
+description = "Canonical glTF UV orientation, tangent normal map, MR/occlusion/emissive fidelity"
+resolution = [512, 512]
+warmup_frames = 120
+measured_frames = 300
+seed = 0
+fixed_timestep = 0.016666666667
+render_scale = 1.0
+quality_tier = "high"
+required_intermediates = [
+  "hdr-scene",
+  "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
+  "shadow-cascade-0",
+  "shadow-cascade-1",
+  "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
+]
+
+[case.camera]
+position = [1.8, 1.2, 2.4]
+target = [0.0, 0.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y_degrees = 45.0
+animation = "still"
+
+[case.settings]
+quality_preset = 3
+taa = true
+auto_exposure = false
+present_mode = "auto-no-vsync"
+
+[case.capture]
+working_dir = "examples/renderer-test"
+build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/renderer-test"]
+command = [
+  "./main",
+  "--camera", "{camera_px}", "{camera_py}", "{camera_pz}",
+  "{camera_tx}", "{camera_ty}", "{camera_tz}", "{camera_fov}",
+  "--res", "{width}", "{height}",
+  "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
+  "{candidate}", "{telemetry}", "{intermediates}",
+]
+
+[case.reference]
+path = "tools/quality/baselines/portable/damaged-helmet.png"
+kind = "approved-realtime"
+generation = "tools/bloom-reference --spec examples/renderer-test/specs/helmet.json"
+
+[case.thresholds]
+pixel_tolerance = 0.02
+min_ssim = 0.985
+max_rmse = 0.025
+max_oklab_delta = 0.025
+max_edge_delta = 0.025
+
+[case.budgets]
+machine_class = "apple-m1-max-metal"
+max_cpu_frame_p95_ms = 6.0
+max_gpu_frame_p95_ms = 12.0
+max_vram_peak_mb = 1800
+
+[[case.assets]]
+path = "examples/renderer-test/assets/DamagedHelmet.glb"
+sha256 = "a1e3b04de97b11de564ce6e53b95f02954a297f0008183ac63a4f5974f6b32d8"
+source = "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/DamagedHelmet"
+license = "CC BY-NC 4.0 original; CC BY 4.0 glTF rebuild"
+
+[[case.assets]]
+path = "examples/renderer-test/assets/outdoor.hdr"
+sha256 = "fd94c84997b8a3c353b62c2125a9b44e19509956986a126e472684432a02d798"
+source = "https://polyhaven.com/a/venice_sunset"
+license = "CC0 1.0"
+
+[[case]]
+id = "sponza-interior"
+description = "Interior GI, shadow placement, cutout leakage, and temporal stability"
+resolution = [800, 450]
+warmup_frames = 180
+measured_frames = 300
+seed = 0
+fixed_timestep = 0.016666666667
+render_scale = 1.0
+quality_tier = "high"
+required_features = ["ray-query"]
+required_intermediates = [
+  "hdr-scene",
+  "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
+  "shadow-cascade-0",
+  "shadow-cascade-1",
+  "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
+]
+
+[case.fallback]
+name = "software-wsrc"
+reason = "hardware ray query unavailable"
+settings = ["screen-space GI", "software world-space radiance cache"]
+
+[case.camera]
+position = [0.0, 2.0, 0.0]
+target = [0.0, 2.0, -100.0]
+up = [0.0, 1.0, 0.0]
+fov_y_degrees = 60.0
+animation = "still"
+
+[case.settings]
+quality_preset = 3
+taa = true
+auto_exposure = true
+present_mode = "auto-no-vsync"
+
+[case.capture]
+working_dir = "examples/sponza"
+build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/sponza"]
+command = [
+  "./main", "--yaw", "0", "--taa", "1",
+  "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
+  "{candidate}", "{telemetry}", "{intermediates}",
+]
+
+[case.reference]
+path = "tools/quality/baselines/portable/sponza-interior.png"
+kind = "approved-realtime-plus-cycles-review"
+generation = "tools/cycles_reference/render.sh"
+
+[case.thresholds]
+pixel_tolerance = 0.025
+min_ssim = 0.975
+max_rmse = 0.035
+max_oklab_delta = 0.035
+max_edge_delta = 0.035
+
+[case.budgets]
+machine_class = "apple-m1-max-metal"
+max_cpu_frame_p95_ms = 10.0
+max_gpu_frame_p95_ms = 55.0
+max_vram_peak_mb = 3200
+
+[[case.assets]]
+path = "examples/sponza/assets/Sponza.glb"
+sha256 = "a72339e2b02bf597cdf72d3147014eb60df947d88b7b48e1f2ebf0cb111405bc"
+source = "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza"
+license = "Cryengine Limited License Agreement"
+
+[[case.assets]]
+path = "examples/sponza/assets/outdoor.hdr"
+sha256 = "fd94c84997b8a3c353b62c2125a9b44e19509956986a126e472684432a02d798"
+source = "https://polyhaven.com/a/venice_sunset"
+license = "CC0 1.0"
+
+[[case]]
+id = "bistro-exterior"
+description = "World scale, sun/sky, exterior materials, texture residency, and streaming pressure"
+resolution = [800, 450]
+warmup_frames = 180
+measured_frames = 240
+seed = 0
+fixed_timestep = 0.016666666667
+render_scale = 1.0
+quality_tier = "high"
+required_features = ["ray-query"]
+required_intermediates = [
+  "hdr-scene",
+  "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
+  "shadow-cascade-0",
+  "shadow-cascade-1",
+  "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
+]
+
+[case.fallback]
+name = "software-wsrc"
+reason = "hardware ray query unavailable"
+settings = ["screen-space GI", "software world-space radiance cache"]
+
+[case.camera]
+position = [-26.43, 3.16, 11.17]
+target = [69.34, -0.04, 39.75]
+up = [0.0, 1.0, 0.0]
+fov_y_degrees = 60.0
+animation = "still"
+
+[case.settings]
+quality_preset = 3
+taa = true
+auto_exposure = false
+present_mode = "auto-no-vsync"
+
+[case.capture]
+working_dir = "examples/bistro"
+prepare = [
+  "python3", "{repo}/tools/quality/prepare_bistro.py",
+  "{repo}/examples/bistro/assets/bistro.gltf",
+  "{case_dir}/bistro-quality.gltf",
+  "--metadata", "{case_dir}/bistro-quality.json",
+  "--revision", "7c9f9f9ac0915024ccf3dddbccd8bfc643a42607",
+]
+build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/bistro"]
+command = [
+  "./main", "--scene", "{case_dir}/bistro-quality.gltf",
+  "--yaw", "-1.8608027466", "--taa", "1",
+  "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
+  "{candidate}", "{telemetry}", "{intermediates}",
+]
+
+[case.reference]
+path = "tools/quality/baselines/portable/bistro-exterior.png"
+kind = "approved-realtime-plus-cycles-review"
+generation = "tools/cycles_reference/render.sh"
+
+[case.thresholds]
+pixel_tolerance = 0.025
+min_ssim = 0.97
+max_rmse = 0.04
+max_oklab_delta = 0.04
+max_edge_delta = 0.04
+
+[case.budgets]
+machine_class = "nvidia-rtx4080-vulkan"
+max_cpu_frame_p95_ms = 12.0
+max_gpu_frame_p95_ms = 24.0
+max_vram_peak_mb = 7000
+
+[[case.assets]]
+path = "examples/bistro/assets"
+revision = "7c9f9f9ac0915024ccf3dddbccd8bfc643a42607"
+allow_dirty = true
+source = "https://github.com/zeux/niagara_bistro"
+license = "MIT"
+
+[[case.assets]]
+path = "examples/bistro/assets/bistro.gltf"
+sha256 = "96138eb738a85631802f03e8755157bc7661d53a2ea60f2f960fb04957ef2529"
+source = "https://github.com/zeux/niagara_bistro"
+license = "MIT"
+
+[[case.assets]]
+path = "examples/bistro/assets/outdoor.hdr"
+sha256 = "fd94c84997b8a3c353b62c2125a9b44e19509956986a126e472684432a02d798"
+source = "https://polyhaven.com/a/venice_sunset"
+license = "CC0 1.0"
+
+[[case]]
+id = "skinned-alpha-motion"
+description = "Moving skinned Fox in front of a textured alpha-tested Sponza foliage backdrop"
+resolution = [800, 450]
+warmup_frames = 120
+measured_frames = 240
+seed = 0
+fixed_timestep = 0.016666666667
+render_scale = 1.0
+quality_tier = "high"
+required_intermediates = [
+  "hdr-scene",
+  "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
+  "shadow-cascade-0",
+  "shadow-cascade-1",
+  "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
+]
+
+[case.camera]
+position = [4.86, 1.45, 2.2]
+target = [4.86, 1.2, -1.6]
+up = [0.0, 1.0, 0.0]
+fov_y_degrees = 48.0
+animation = "Fox Walk clip at fixed 1/60 s"
+
+[case.settings]
+quality_preset = 3
+taa = true
+auto_exposure = false
+present_mode = "auto-no-vsync"
+
+[case.capture]
+working_dir = "examples/quality-motion"
+build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-motion"]
+command = [
+  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
+  "{candidate}", "{telemetry}", "{intermediates}",
+]
+
+[case.reference]
+path = "tools/quality/baselines/portable/skinned-alpha-motion.png"
+kind = "approved-realtime-motion"
+generation = "tools/quality/run.py baseline-review"
+
+[case.thresholds]
+pixel_tolerance = 0.025
+min_ssim = 0.97
+max_rmse = 0.04
+max_oklab_delta = 0.04
+max_edge_delta = 0.04
+
+[case.budgets]
+machine_class = "apple-m1-max-metal"
+max_cpu_frame_p95_ms = 10.0
+max_gpu_frame_p95_ms = 30.0
+max_vram_peak_mb = 3200
+
+[[case.assets]]
+path = "examples/test-gltf-watch/assets/Fox.glb"
+sha256 = "d97044e701822bac5a62696459b27d7b375aada5de8574ed4362edbba94771f7"
+source = "https://github.com/KhronosGroup/glTF-Sample-Models/tree/master/2.0/Fox"
+license = "CC0 geometry; CC BY 4.0 rigging and animation"
+
+[[case.assets]]
+path = "examples/sponza/assets/Sponza.glb"
+sha256 = "a72339e2b02bf597cdf72d3147014eb60df947d88b7b48e1f2ebf0cb111405bc"
+source = "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza"
+license = "Cryengine Limited License Agreement"
+
+[[case.assets]]
+path = "examples/renderer-test/assets/outdoor.hdr"
+sha256 = "fd94c84997b8a3c353b62c2125a9b44e19509956986a126e472684432a02d798"
+source = "https://polyhaven.com/a/venice_sunset"
+license = "CC0 1.0"
+
+[[case]]
+id = "draw-light-stress"
+description = "10,240 independently submitted meshes and 192 clustered point lights"
+resolution = [1280, 720]
+warmup_frames = 180
+measured_frames = 240
+seed = 0
+fixed_timestep = 0.016666666667
+render_scale = 1.0
+quality_tier = "stress"
+required_intermediates = [
+  "hdr-scene",
+  "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
+  "shadow-cascade-0",
+  "shadow-cascade-1",
+  "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
+]
+
+[case.camera]
+position = [0.0, 38.0, 52.0]
+target = [0.0, 0.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y_degrees = 58.0
+animation = "still"
+
+[case.settings]
+quality_preset = 3
+taa = true
+draw_count = 10240
+point_light_count = 192
+present_mode = "auto-no-vsync"
+
+[case.capture]
+working_dir = "examples/quality-stress"
+build = ["python3", "{repo}/tools/quality/build_example.py", "{repo}/examples/quality-stress"]
+command = [
+  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
+  "{candidate}", "{telemetry}", "{intermediates}",
+]
+
+[case.reference]
+path = "tools/quality/baselines/portable/draw-light-stress.png"
+kind = "approved-realtime-stress"
+generation = "tools/quality/run.py baseline-review"
+
+[case.thresholds]
+pixel_tolerance = 0.025
+min_ssim = 0.97
+max_rmse = 0.04
+max_oklab_delta = 0.04
+max_edge_delta = 0.04
+
+[case.budgets]
+machine_class = "nvidia-rtx4080-vulkan"
+max_cpu_frame_p95_ms = 20.0
+max_gpu_frame_p95_ms = 33.0
+max_vram_peak_mb = 7000
+
+[[case.assets]]
+path = "examples/renderer-test/assets/outdoor.hdr"
+sha256 = "fd94c84997b8a3c353b62c2125a9b44e19509956986a126e472684432a02d798"
+source = "https://polyhaven.com/a/venice_sunset"
+license = "CC0 1.0"
+
+[[case]]
+id = "weighted-transparency"
+description = "96 imported BLEND layers in 12 animated intersecting cells using weighted OIT"
+resolution = [960, 540]
+warmup_frames = 120
+measured_frames = 240
+seed = 0
+fixed_timestep = 0.016666666667
+render_scale = 1.0
+quality_tier = "high"
+required_intermediates = [
+  "hdr-scene",
+  "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
+  "shadow-cascade-0",
+  "shadow-cascade-1",
+  "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
+]
+
+[case.camera]
+position = [0.0, 0.0, 9.0]
+target = [0.0, 0.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y_degrees = 48.0
+animation = "96 layers rotate deterministically at fixed 1/60 s"
+
+[case.settings]
+quality_preset = 3
+taa = true
+auto_exposure = false
+transparency_composition = "weighted"
+transparent_draw_count = 96
+present_mode = "auto-no-vsync"
+
+[case.capture]
+working_dir = "examples/quality-transparency"
+build = [
+  "python3",
+  "{repo}/tools/quality/build_example.py",
+  "{repo}/examples/quality-transparency",
+]
+command = [
+  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
+  "{candidate}", "{telemetry}", "{intermediates}",
+]
+
+[case.reference]
+path = "tools/quality/baselines/portable/weighted-transparency.png"
+kind = "approved-realtime-motion"
+generation = "tools/quality/run.py baseline-review"
+
+[case.thresholds]
+pixel_tolerance = 0.025
+min_ssim = 0.97
+max_rmse = 0.04
+max_oklab_delta = 0.04
+max_edge_delta = 0.04
+
+[case.budgets]
+machine_class = "apple-m1-max-metal"
+max_cpu_frame_p95_ms = 12.0
+max_gpu_frame_p95_ms = 30.0
+max_vram_peak_mb = 3400
+
+[[case.assets]]
+path = "examples/quality-transparency/assets/transparent-quad.gltf"
+sha256 = "80c559c0a8a100f55fb5a26b331fa239751e0a1e66cc3b369d86bdff1d00acae"
+source = "Bloom Engine generated qualification fixture"
+license = "CC0 1.0"
+
+[[case]]
+id = "masked-alpha-coverage"
+description = "48 moving imported MASK cards spanning six projected mip ranges with cutout shadows"
+resolution = [960, 540]
+warmup_frames = 120
+measured_frames = 240
+seed = 0
+fixed_timestep = 0.016666666667
+render_scale = 1.0
+quality_tier = "high"
+required_intermediates = [
+  "hdr-scene",
+  "scene-depth",
+  "ssr",
+  "ssr-raw",
+  "ssr-rejection-reason",
+  "ssr-temporal-confidence",
+  "ssgi",
+  "ssgi-rejection-reason",
+  "ssgi-temporal-confidence",
+  "shadow-cascade-0",
+  "shadow-cascade-1",
+  "shadow-cascade-2",
+  "taa-rejection-reason",
+  "taa-motion",
+  "taa-reprojected-uv",
+  "taa-temporal-confidence",
+]
+
+[case.camera]
+position = [0.0, 5.0, 10.0]
+target = [0.0, -0.3, -4.0]
+up = [0.0, 1.0, 0.0]
+fov_y_degrees = 52.0
+animation = "six separated LOD bands of cutout cards sway deterministically at fixed 1/60 s"
+
+[case.settings]
+quality_preset = 3
+taa = true
+auto_exposure = false
+shadows = true
+masked_draw_count = 48
+masked_alpha_minification = "coverage-mips-bayer-4x4"
+sample_count = 1
+alpha_to_coverage = false
+present_mode = "auto-no-vsync"
+
+[case.capture]
+working_dir = "examples/quality-masked"
+build = [
+  "python3",
+  "{repo}/tools/quality/build_example.py",
+  "{repo}/examples/quality-masked",
+]
+command = [
+  "./main", "--quality-preset", "3", "--render-scale", "{render_scale}",
+  "--quality-run", "{warmup_frames}", "{measured_frames}", "{fixed_timestep}",
+  "{candidate}", "{telemetry}", "{intermediates}",
+]
+
+[case.reference]
+path = "tools/quality/baselines/portable/masked-alpha-coverage.png"
+kind = "approved-realtime-motion"
+generation = "tools/quality/run.py baseline-review"
+
+[case.thresholds]
+pixel_tolerance = 0.025
+min_ssim = 0.97
+max_rmse = 0.04
+max_oklab_delta = 0.04
+max_edge_delta = 0.04
+
+[case.budgets]
+machine_class = "apple-m1-max-metal"
+max_cpu_frame_p95_ms = 12.0
+max_gpu_frame_p95_ms = 30.0
+max_vram_peak_mb = 3400
+
+[[case.assets]]
+path = "examples/quality-masked/assets/masked-card.gltf"
+sha256 = "6e442fa8754905ec25d82f42d6180aef31bbd111ef08a4e1f91dd642fad8a110"
+source = "Bloom Engine generated qualification fixture"
+license = "CC0 1.0"
+
+[[negative_control]]
+fault = "brdf-energy"
+case = "pbr-spheres-high"
+
+[[negative_control]]
+fault = "shadow-placement"
+case = "sponza-interior"
+
+[[negative_control]]
+fault = "gi-leakage"
+case = "sponza-interior"
+
+[[negative_control]]
+fault = "motion-history"
+case = "skinned-alpha-motion"
+
+[[negative_control]]
+fault = "texture-orientation"
+case = "damaged-helmet"

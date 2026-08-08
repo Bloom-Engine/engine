@@ -26,59 +26,82 @@ declare function bloom_window_should_close(): number;
 declare function bloom_begin_drawing(): void;
 declare function bloom_end_drawing(): void;
 declare function bloom_take_screenshot(path: number): void;
+declare function bloom_capture_frame_to_png(path: string): number;
+declare function bloom_capture_debug_intermediates(path: string): number;
+declare function bloom_capture_frame_ready(): number;
 declare function bloom_clear_background(r: number, g: number, b: number, a: number): void;
-declare function bloom_set_env_clear_from_hdr(path: number): void;
-declare function bloom_set_fog(r: number, g: number, b: number, density: number, height_ref: number, height_falloff: number): void;
-declare function bloom_set_chromatic_aberration(strength: number): void;
-declare function bloom_set_vignette(strength: number, softness: number): void;
-declare function bloom_set_film_grain(strength: number): void;
-declare function bloom_set_sharpen_strength(strength: number): void;
-declare function bloom_set_present_mode(mode: number): void;
-declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): void;
-declare function bloom_set_auto_exposure(on: number): void;
-declare function bloom_set_taa_enabled(on: number): void;
-declare function bloom_set_occlusion_culling(on: number): void;
-declare function bloom_set_render_scale(scale: number): void;
-declare function bloom_set_output_scale(scale: number): void;
+declare function bloom_set_env_clear_from_hdr(path: number): number;
+declare function bloom_set_fog(r: number, g: number, b: number, density: number, height_ref: number, height_falloff: number): number;
+declare function bloom_set_chromatic_aberration(strength: number): number;
+declare function bloom_set_vignette(strength: number, softness: number): number;
+declare function bloom_set_film_grain(strength: number): number;
+declare function bloom_set_sharpen_strength(strength: number): number;
+declare function bloom_set_present_mode(mode: number): number;
+declare function bloom_get_present_mode(): number;
+declare function bloom_get_material_binding_capabilities(): string;
+declare function bloom_get_renderer_capabilities(): string;
+declare function bloom_get_imported_refraction_mode(): number;
+declare function bloom_set_transparency_composition_mode(mode: number): number;
+declare function bloom_get_transparency_composition_mode(): number;
+declare function bloom_get_active_transparency_composition_mode(): number;
+declare function bloom_set_material_binding_tier_override(tier: number): number;
+declare function bloom_set_sun_shafts(strength: number, decay: number, r: number, g: number, b: number): number;
+declare function bloom_set_auto_exposure(on: number): number;
+declare function bloom_set_taa_enabled(on: number): number;
+declare function bloom_set_occlusion_culling(on: number): number;
+declare function bloom_set_render_scale(scale: number): number;
+declare function bloom_set_output_scale(scale: number): number;
 declare function bloom_launch_process(cmd: string, args: string, cwd: string): number;
+declare function bloom_command_line_arg_count(): number;
+declare function bloom_command_line_arg(index: number): string;
 declare function bloom_get_output_scale(): number;
 declare function bloom_get_render_scale(): number;
-declare function bloom_set_upscale_mode(mode: number): void;
-declare function bloom_set_cas_strength(strength: number): void;
+declare function bloom_set_upscale_mode(mode: number): number;
+declare function bloom_set_cas_strength(strength: number): number;
 declare function bloom_get_physical_width(): number;
 declare function bloom_get_physical_height(): number;
-declare function bloom_set_auto_resolution(targetHz: number, enabled: number): void;
-declare function bloom_set_manual_exposure(value: number): void;
-declare function bloom_set_env_intensity(intensity: number): void;
-declare function bloom_set_ssgi_enabled(on: number): void;
-declare function bloom_set_path_tracing(mode: number): void;
+declare function bloom_set_auto_resolution(targetHz: number, enabled: number): number;
+declare function bloom_set_manual_exposure(value: number): number;
+declare function bloom_set_env_intensity(intensity: number): number;
+declare function bloom_set_ssgi_enabled(on: number): number;
+declare function bloom_set_path_tracing(mode: number): number;
+declare function bloom_reset_temporal_history(): number;
 declare function bloom_path_tracing_supported(): number;
-declare function bloom_set_ssgi_intensity(intensity: number): void;
-declare function bloom_set_ssgi_radius(radius: number): void;
-declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): void;
-declare function bloom_set_quality_preset(preset: number): void;
-declare function bloom_set_shadows_enabled(on: number): void;
-declare function bloom_set_shadows_always_fresh(on: number): void;
-declare function bloom_set_bloom_enabled(on: number): void;
-declare function bloom_set_bloom_intensity(value: number): void;
-declare function bloom_set_tonemap(kind: number): void;
-declare function bloom_set_auto_exposure_key(key: number): void;
-declare function bloom_set_auto_exposure_rate(rate: number): void;
-declare function bloom_set_ssao_enabled(on: number): void;
+declare function bloom_set_ssgi_intensity(intensity: number): number;
+declare function bloom_set_ssgi_radius(radius: number): number;
+declare function bloom_set_dof(enabled: number, focusDistance: number, aperture: number): number;
+declare function bloom_set_quality_preset(preset: number): number;
+declare function bloom_set_shadows_enabled(on: number): number;
+declare function bloom_set_shadows_always_fresh(on: number): number;
+declare function bloom_set_bloom_enabled(on: number): number;
+declare function bloom_set_bloom_intensity(value: number): number;
+declare function bloom_set_tonemap(kind: number): number;
+declare function bloom_set_auto_exposure_key(key: number): number;
+declare function bloom_set_auto_exposure_rate(rate: number): number;
+declare function bloom_set_ssao_enabled(on: number): number;
 declare function bloom_set_post_pass(source: number): number;
-declare function bloom_clear_post_pass(): void;
+declare function bloom_clear_post_pass(): number;
 declare function bloom_add_post_pass(source: number): number;
-declare function bloom_clear_all_post_passes(): void;
-declare function bloom_set_ssao_intensity(intensity: number): void;
-declare function bloom_set_ssao_radius(worldRadius: number): void;
-declare function bloom_set_wind(dirX: number, dirZ: number, amplitude: number, frequency: number): void;
-declare function bloom_set_cloud_shadows(strength: number, deckHeight: number, featureScale: number, driftSpeed: number): void;
-declare function bloom_set_ssr_enabled(on: number): void;
-declare function bloom_set_motion_blur_enabled(on: number): void;
-declare function bloom_set_sss_enabled(on: number): void;
+declare function bloom_clear_all_post_passes(): number;
+declare function bloom_set_ssao_intensity(intensity: number): number;
+declare function bloom_set_ssao_radius(worldRadius: number): number;
+declare function bloom_set_wind(dirX: number, dirZ: number, amplitude: number, frequency: number): number;
+declare function bloom_set_cloud_shadows(strength: number, deckHeight: number, featureScale: number, driftSpeed: number): number;
+declare function bloom_set_ssr_enabled(on: number): number;
+declare function bloom_set_motion_blur_enabled(on: number): number;
+declare function bloom_set_sss_enabled(on: number): number;
 declare function bloom_set_profiler_enabled(on: number): void;
 declare function bloom_get_profiler_frame_cpu_us(): number;
 declare function bloom_get_profiler_frame_gpu_us(): number;
+declare function bloom_write_quality_telemetry(
+  path: string,
+  warmupFrames: number,
+  measuredFrames: number,
+  fixedTimestep: number,
+  qualityPreset: number,
+  renderScale: number,
+  measurementWallMs: number,
+): number;
 declare function bloom_print_profiler_summary(): void;
 declare function bloom_profiler_overlay_text(): string;
 declare function bloom_profiler_frame_history(): string;
@@ -95,7 +118,7 @@ declare function bloom_profiler_hist_count(): number;
 declare function bloom_profiler_hist_cpu_us(i: number): number;
 declare function bloom_profiler_hist_gpu_us(i: number): number;
 declare function bloom_splat_impulse(x: number, z: number, radius: number, strength: number): void;
-declare function bloom_set_material_params_scratch(handle: number, paramCount: number): void;
+declare function bloom_set_material_params_scratch(handle: number, paramCount: number): number;
 declare function bloom_mesh_scratch_reset(): void;
 declare function bloom_mesh_scratch_push_f32(v: number): void;
 declare function bloom_set_target_fps(fps: number): void;
@@ -266,6 +289,21 @@ export function takeScreenshot(path: string): void {
   bloom_take_screenshot(path as any);
 }
 
+/** Queue a PNG readback and report whether the native renderer accepted it. */
+export function captureFrameToPng(path: string): boolean {
+  return bloom_capture_frame_to_png(path) !== 0.0;
+}
+
+/** Queue HDR/depth/shadow and per-pixel TAA diagnostics for the next frame. */
+export function captureDebugIntermediates(directory: string): boolean {
+  return bloom_capture_debug_intermediates(directory) !== 0.0;
+}
+
+/** True after the most recently accepted PNG readback has completed. */
+export function isFrameCaptureReady(): boolean {
+  return bloom_capture_frame_ready() !== 0.0;
+}
+
 export function clearBackground(color: Color): void {
   bloom_clear_background(color.r, color.g, color.b, color.a);
 }
@@ -277,8 +315,8 @@ export function clearBackground(color: Color): void {
  * immediately close most of the background-color gap between Bloom's
  * realtime output and the path-traced reference.
  */
-export function setEnvClearFromHdr(path: string): void {
-  bloom_set_env_clear_from_hdr(path as any);
+export function setEnvClearFromHdr(path: string): boolean {
+  return bloom_set_env_clear_from_hdr(path as any) !== 0;
 }
 
 // ---- Post-FX knobs ----
@@ -287,52 +325,266 @@ export function setEnvClearFromHdr(path: string): void {
 // (or until called again with 0 / disabled values).
 
 /** Height-based exponential fog. Density 0 = off. */
-export function setFog(r: number, g: number, b: number, density: number, heightRef: number, heightFalloff: number): void {
-  bloom_set_fog(r, g, b, density, heightRef, heightFalloff);
+export function setFog(r: number, g: number, b: number, density: number, heightRef: number, heightFalloff: number): boolean {
+  return bloom_set_fog(r, g, b, density, heightRef, heightFalloff) !== 0;
 }
 
 /** Radial RGB-channel split at the screen edges. 0 = off. */
-export function setChromaticAberration(strength: number): void {
-  bloom_set_chromatic_aberration(strength);
+export function setChromaticAberration(strength: number): boolean {
+  return bloom_set_chromatic_aberration(strength) !== 0;
 }
 
 /** Smooth radial darkening of the corners. strength 0..1, softness 0..1. */
-export function setVignette(strength: number, softness: number): void {
-  bloom_set_vignette(strength, softness);
+export function setVignette(strength: number, softness: number): boolean {
+  return bloom_set_vignette(strength, softness) !== 0;
 }
 
 /** Animated film grain post-tonemap. 0 = off. */
-export function setFilmGrain(strength: number): void {
-  bloom_set_film_grain(strength);
+export function setFilmGrain(strength: number): boolean {
+  return bloom_set_film_grain(strength) !== 0;
 }
 
 /**
- * Composite unsharp-mask strength. Engine default 0.8; 0 disables the
+ * Composite unsharp-mask strength. Engine default 0.5; 0 disables the
  * sharpen taps entirely. At high output resolutions the default visibly
  * halos high-contrast silhouettes — tune per game.
  */
-export function setSharpenStrength(strength: number): void {
-  bloom_set_sharpen_strength(strength);
+export function setSharpenStrength(strength: number): boolean {
+  return bloom_set_sharpen_strength(strength) !== 0;
 }
 
 /**
  * Swapchain present mode: 0 = Fifo (vsync, default), 1 = Mailbox
- * (uncapped, no tearing), 2 = Immediate (uncapped, tearing allowed).
+ * (uncapped, no tearing), 2 = Immediate (uncapped, tearing allowed),
+ * 3 = AutoNoVsync (portable uncapped preference).
  * With a non-vsync mode active, `setTargetFPS`'s sleep-based cap
  * becomes effective — under Fifo it is inert by design.
  */
-export function setPresentMode(mode: number): void {
-  bloom_set_present_mode(mode);
+export function setPresentMode(mode: number): boolean {
+  return bloom_set_present_mode(mode) !== 0;
+}
+
+/** Configured present-mode request, using the numeric values from setPresentMode(). */
+export function getPresentMode(): number {
+  return bloom_get_present_mode();
+}
+
+export type MaterialBindingTier = "A" | "B" | "C";
+
+export interface MaterialBindingCapabilityReport {
+  readonly version: number;
+  readonly detected_tier: MaterialBindingTier;
+  readonly selected_tier: MaterialBindingTier;
+  readonly override_tier: MaterialBindingTier | null;
+  readonly features: Readonly<{
+    texture_binding_array: boolean;
+    non_uniform_indexing: boolean;
+  }>;
+  readonly limits: Readonly<{
+    max_binding_array_elements: number;
+    max_binding_array_samplers: number;
+    max_texture_array_layers: number;
+    max_sampled_textures: number;
+    max_samplers: number;
+    max_material_records: number;
+  }>;
+  readonly capacities: Readonly<{
+    tier_a_textures: number;
+    tier_a_samplers: number;
+    tier_b_page_layers: number;
+  }>;
+  readonly diagnostic: string | null;
+  readonly residency: Readonly<{
+    materials: number;
+    textures: number;
+    samplers: number;
+    meshes: number;
+    buffer_views: number;
+    stale_fallbacks: number;
+    limit_fallbacks: number;
+  }>;
+  readonly dispatch: Readonly<{
+    tier_a_per_material_bind_group_switches: 0;
+    tier_b_last_page_count: number;
+    tier_b_last_page_switches: number;
+    tier_b_last_fallback_materials: number;
+  }>;
+}
+
+/** Adapter-derived material/texture tier and hard limits. This is read-only. */
+export function getMaterialBindingCapabilities(): MaterialBindingCapabilityReport {
+  return JSON.parse(
+    bloom_get_material_binding_capabilities(),
+  ) as MaterialBindingCapabilityReport;
+}
+
+export type RendererCapabilityTier = "baseline" | "modern" | "high-end";
+
+export interface RendererSystemPaths {
+  readonly materials: string;
+  readonly geometry: string;
+  readonly shadows: string;
+  readonly gi: string;
+  readonly reflections: string;
+  readonly anti_aliasing: string;
+  readonly textures: string;
+  readonly path_tracing: string;
+}
+
+export interface RendererCapabilityReport {
+  readonly version: 1;
+  readonly availability: "available" | "unavailable";
+  readonly reason: string | null;
+  readonly adapter: Readonly<{
+    availability: "reported";
+    name: string;
+    vendor_id: number;
+    device_id: number;
+    device_type: string;
+    driver: string;
+    driver_info: string;
+    backend: string;
+    capability_tier: RendererCapabilityTier;
+    renderer_capabilities: Readonly<{
+      detected: RendererCapabilityTier;
+      selected: RendererCapabilityTier;
+      requested: RendererCapabilityTier | null;
+      forced: RendererCapabilityTier | null;
+      diagnostic: string | null;
+      available: Readonly<{
+        features: Readonly<{
+          texture_binding_array: boolean;
+          non_uniform_indexing: boolean;
+          indirect_first_instance: boolean;
+          ray_query: boolean;
+        }>;
+        limits: Readonly<{
+          max_binding_array_elements_per_shader_stage: number;
+          max_binding_array_sampler_elements_per_shader_stage: number;
+          max_texture_array_layers: number;
+          max_sampled_textures_per_shader_stage: number;
+          max_samplers_per_shader_stage: number;
+          max_bind_groups: number;
+          max_color_attachments: number;
+        }>;
+      }>;
+      paths: Readonly<RendererSystemPaths>;
+    }>;
+    device_negotiation: Readonly<{
+      preferred_tier: RendererCapabilityTier;
+      selected_tier: RendererCapabilityTier;
+      profile: "native-full" | "folded-mobile";
+      selected_request: string;
+      fallback_cause: string | null;
+      required_features: string;
+      required_limits: Readonly<{
+        max_bind_groups: number;
+        max_color_attachments: number;
+        max_sampled_textures_per_shader_stage: number;
+        max_samplers_per_shader_stage: number;
+        max_storage_buffers_per_shader_stage: number;
+        max_uniform_buffer_binding_size: number;
+        max_binding_array_elements_per_shader_stage: number;
+        max_binding_array_sampler_elements_per_shader_stage: number;
+      }>;
+    }> | null;
+    features: readonly string[];
+  }> | null;
+  readonly material_binding: Readonly<MaterialBindingCapabilityReport> | null;
+  readonly runtime_support: Readonly<{
+    hardware_ray_query: boolean;
+    path_tracing: boolean;
+    gpu_driven: Readonly<{
+      enabled: boolean;
+      indirect_count_supported: boolean;
+      submitted: number;
+      compatibility: number;
+      indirect_calls: number;
+      frustum_visible_oracle: number;
+      frustum_culled_oracle: number;
+      frustum_culled_ratio: number;
+      classification_source: string;
+    }>;
+    imported_refraction: ImportedRefractionMode;
+    transparency_modes: readonly ("sorted" | "auto" | "weighted")[];
+  }>;
+}
+
+/**
+ * Adapter, tier, renderer-path, material-capacity, and fallback information.
+ * Read this to choose content/settings; do not infer capabilities from GPU
+ * names or startup logs.
+ */
+export function getRendererCapabilities(): RendererCapabilityReport {
+  return JSON.parse(
+    bloom_get_renderer_capabilities(),
+  ) as RendererCapabilityReport;
+}
+
+export type ImportedRefractionMode =
+  | "disabled-legacy"
+  | "scene-snapshot"
+  | "environment-fallback";
+
+/** Capability-selected route used by imported glTF transmission materials. */
+export function getImportedRefractionMode(): ImportedRefractionMode {
+  const mode = bloom_get_imported_refraction_mode();
+  return mode === 1
+    ? "scene-snapshot"
+    : mode === 2
+      ? "environment-fallback"
+      : "disabled-legacy";
+}
+
+export type TransparencyCompositionMode = "sorted" | "auto" | "weighted";
+export type ActiveTransparencyCompositionMode = "sorted" | "weighted";
+
+/**
+ * Select conventional imported glTF transparency composition.
+ * "auto" preserves sorted alpha for ordinary scenes and enables weighted OIT
+ * only for high-count sets; "weighted" is useful for intersecting surfaces.
+ */
+export function setTransparencyCompositionMode(
+  mode: TransparencyCompositionMode,
+): boolean {
+  return bloom_set_transparency_composition_mode(
+    mode === "sorted" ? 0 : mode === "weighted" ? 2 : 1,
+  ) !== 0;
+}
+
+/** Configured transparency policy. */
+export function getTransparencyCompositionMode(): TransparencyCompositionMode {
+  const mode = bloom_get_transparency_composition_mode();
+  return mode === 0 ? "sorted" : mode === 2 ? "weighted" : "auto";
+}
+
+/** Route selected for the most recently prepared frame. */
+export function getActiveTransparencyCompositionMode():
+  ActiveTransparencyCompositionMode {
+  return bloom_get_active_transparency_composition_mode() === 1
+    ? "weighted"
+    : "sorted";
+}
+
+/**
+ * Qualification-only lower-tier override. "auto" restores adapter selection.
+ * Returns false for an unsupported upward override or an invalid value.
+ */
+export function setMaterialBindingTierOverride(
+  tier: "auto" | MaterialBindingTier,
+): boolean {
+  const code = tier === "auto" ? 0 : tier === "C" ? 1 : tier === "B" ? 2 : 3;
+  return bloom_set_material_binding_tier_override(code) !== 0;
 }
 
 /** Screen-space sun shafts (god rays). strength 0 = off. */
-export function setSunShafts(strength: number, decay: number, r: number, g: number, b: number): void {
-  bloom_set_sun_shafts(strength, decay, r, g, b);
+export function setSunShafts(strength: number, decay: number, r: number, g: number, b: number): boolean {
+  return bloom_set_sun_shafts(strength, decay, r, g, b) !== 0;
 }
 
 /** Toggle physically-based auto-exposure. 18% gray target, log-average metered. */
-export function setAutoExposure(on: boolean): void {
-  bloom_set_auto_exposure(on ? 1 : 0);
+export function setAutoExposure(on: boolean): boolean {
+  return bloom_set_auto_exposure(on ? 1 : 0) !== 0;
 }
 
 /** Toggle temporal anti-aliasing (sub-pixel jitter + reprojected history blend). */
@@ -343,25 +595,28 @@ export function setAutoExposure(on: boolean): void {
  * the kill switch for debugging or for scenes that pathologically
  * defeat it (e.g. every object visible every frame).
  */
-export function setOcclusionCulling(on: boolean): void {
-  bloom_set_occlusion_culling(on ? 1 : 0);
+export function setOcclusionCulling(on: boolean): boolean {
+  return bloom_set_occlusion_culling(on ? 1 : 0) !== 0;
 }
 
-export function setTaaEnabled(on: boolean): void {
-  bloom_set_taa_enabled(on ? 1 : 0);
+/** Toggle temporal anti-aliasing without changing render resolution. */
+export function setTaaEnabled(on: boolean): boolean {
+  return bloom_set_taa_enabled(on ? 1 : 0) !== 0;
 }
 
 /**
  * Render-resolution multiplier. 0.5 = quarter-pixel shading (cheap, soft);
- * 1.0 = native (sharp, expensive). Clamped to [0.5, 1.0]. Once called
- * explicitly, the choice sticks across `setTaaEnabled` toggles instead of
- * being overridden by the legacy 0.5↔1.0 coupling.
+ * 1.0 = native (sharp, expensive). Clamped to [0.15, 1.0]. Resolution and
+ * TAA are independent: `setTaaEnabled` never changes this value.
  *
  * On a 4K display: 0.75 hits a quality/perf sweet spot for 3D scenes.
  * Catmull-Rom is the default upscale filter (see `setUpscaleMode`).
  */
-export function setRenderScale(scale: number): void {
-  bloom_set_render_scale(Math.min(1.0, Math.max(0.5, scale)));
+export function setRenderScale(scale: number): boolean {
+  // SH-055 — floor lowered from 0.5 to 0.15 alongside the matching Rust-side
+  // clamp in renderer::render_extent()/set_render_scale(). A weak mobile GPU
+  // (Adreno 618) needs to go lower than 0.5 to hit a playable frame time.
+  return bloom_set_render_scale(Math.min(1.0, Math.max(0.15, scale))) !== 0;
 }
 
 /// OUTPUT scale — configure the swapchain at this fraction of the window's real
@@ -376,16 +631,16 @@ export function setRenderScale(scale: number): void {
 ///
 /// 1.0 = native. Expose it to players: at 4K it is the difference between a locked
 /// frame rate and a pretty one, and which of those they want is not the game's call.
-export function setOutputScale(scale: number): void {
-  bloom_set_output_scale(Math.min(1.0, Math.max(0.25, scale)));
+export function setOutputScale(scale: number): boolean {
+  return bloom_set_output_scale(Math.min(1.0, Math.max(0.25, scale))) !== 0;
 }
 export function getOutputScale(): number { return bloom_get_output_scale(); }
 export function getRenderScale(): number { return bloom_get_render_scale(); }
 
 /** Upscale filter when render_scale < 1 and TAA is off. "bilinear" = cheap/soft, "catmull-rom" = sharper (default). */
 export type UpscaleMode = "bilinear" | "catmull-rom";
-export function setUpscaleMode(mode: UpscaleMode): void {
-  bloom_set_upscale_mode(mode === "catmull-rom" ? 1 : 0);
+export function setUpscaleMode(mode: UpscaleMode): boolean {
+  return bloom_set_upscale_mode(mode === "catmull-rom" ? 1 : 0) !== 0;
 }
 
 /**
@@ -393,8 +648,8 @@ export function setUpscaleMode(mode: UpscaleMode): void {
  * 0.3 subtle; 0.6 punchy; 1.0 max. Useful at any render_scale — pairs
  * particularly well with TAA-softened native or Catmull-Rom upscale.
  */
-export function setCasStrength(strength: number): void {
-  bloom_set_cas_strength(strength);
+export function setCasStrength(strength: number): boolean {
+  return bloom_set_cas_strength(strength) !== 0;
 }
 
 /** Physical-pixel size of the GPU surface (HiDPI-aware on macOS today). */
@@ -411,23 +666,23 @@ export function getPhysicalHeight(): number { return bloom_get_physical_height()
  * still works while DRS is on (DRS will simply step away from the
  * value on its next eligible frame).
  */
-export function setAutoResolution(targetHz: number, enabled: boolean = true): void {
-  bloom_set_auto_resolution(targetHz, enabled ? 1 : 0);
+export function setAutoResolution(targetHz: number, enabled: boolean = true): boolean {
+  return bloom_set_auto_resolution(targetHz, enabled ? 1 : 0) !== 0;
 }
 
 /** Manual exposure multiplier (ignored when auto-exposure is on). 1.0 = default. */
-export function setManualExposure(value: number): void {
-  bloom_set_manual_exposure(value);
+export function setManualExposure(value: number): boolean {
+  return bloom_set_manual_exposure(value) !== 0;
 }
 
 /** Env-map intensity multiplier for IBL + sky pass. 1.0 = reference, 0.2–0.5 typical for bright outdoor HDRs. */
-export function setEnvIntensity(intensity: number): void {
-  bloom_set_env_intensity(intensity);
+export function setEnvIntensity(intensity: number): boolean {
+  return bloom_set_env_intensity(intensity) !== 0;
 }
 
 /** Toggle screen-space global illumination (single-bounce indirect diffuse). Default on. */
-export function setSsgiEnabled(on: boolean): void {
-  bloom_set_ssgi_enabled(on ? 1 : 0);
+export function setSsgiEnabled(on: boolean): boolean {
+  return bloom_set_ssgi_enabled(on ? 1 : 0) !== 0;
 }
 
 /**
@@ -437,11 +692,19 @@ export function setSsgiEnabled(on: boolean): void {
  *       resets on movement. Converges to ground truth — the "final quality"
  *       view for the editor and for stills.
  *   2 — realtime: denoised 1-sample path tracing for gameplay.
- * Requires hardware ray query (see isPathTracingSupported); on devices
- * without it the request is a no-op and the engine stays on Lumen.
+ * Returns false when the requested mode needs unavailable hardware ray query;
+ * the engine stays on Lumen and no renderer state is changed.
  */
-export function setPathTracing(mode: number): void {
-  bloom_set_path_tracing(mode);
+export function setPathTracing(mode: number): boolean {
+  return bloom_set_path_tracing(mode) !== 0;
+}
+
+/**
+ * Reset every temporal rendering history after a camera cut, teleport,
+ * discontinuous FOV change, or world load. Call before the next beginMode3D.
+ */
+export function resetTemporalHistory(): boolean {
+  return bloom_reset_temporal_history() !== 0;
 }
 
 /** True when the device can hardware-path-trace (ray query + TLAS). */
@@ -450,18 +713,18 @@ export function isPathTracingSupported(): boolean {
 }
 
 /** SSGI intensity multiplier. 0 = off, 0.5 = default, 1+ = strong. */
-export function setSsgiIntensity(intensity: number): void {
-  bloom_set_ssgi_intensity(intensity);
+export function setSsgiIntensity(intensity: number): boolean {
+  return bloom_set_ssgi_intensity(intensity) !== 0;
 }
 
 /** SSGI max view-space march distance in meters. Default 20. Tune to scene scale. */
-export function setSsgiRadius(radius: number): void {
-  bloom_set_ssgi_radius(radius);
+export function setSsgiRadius(radius: number): boolean {
+  return bloom_set_ssgi_radius(radius) !== 0;
 }
 
 /** Depth of field. focusDistance = view-space distance in world units. aperture = blur strength (0 = off, 0.03 = subtle, 0.1 = heavy). */
-export function setDepthOfField(focusDistance: number, aperture: number): void {
-  bloom_set_dof(aperture > 0 ? 1 : 0, focusDistance, aperture);
+export function setDepthOfField(focusDistance: number, aperture: number): boolean {
+  return bloom_set_dof(aperture > 0 ? 1 : 0, focusDistance, aperture) !== 0;
 }
 
 // ============================================================
@@ -471,26 +734,29 @@ export function setDepthOfField(focusDistance: number, aperture: number): void {
 // ============================================================
 
 export enum QualityPreset {
-  /** Bare minimum — no shadows, no SSAO, no bloom, no TAA, no SSR/SSGI/DoF/MB/SSS. */
+  /** 0.50 scale, bilinear upscale, no TAA/sharpening or optional effects. */
   Off = 0,
-  /** Base pipeline only: HDR tonemap + bloom. No shadows/SSAO/TAA. */
+  /** 0.67 scale, Catmull-Rom + light sharpen, bloom; no TAA/shadows/GI. */
   Low = 1,
-  /** Balanced default: shadows + SSAO + bloom + TAA. No SSR/SSGI/cinematic FX. */
+  /** 0.75 scale, TAA + balanced sharpen, shadows/SSAO/bloom. */
   Medium = 2,
-  /** + SSR, SSGI, subtle chromatic aberration. */
+  /** 0.85 scale, TAA + stronger sharpen, SSR/SSGI and subtle CA. */
   High = 3,
-  /** Everything on (plus DoF if aperture > 0). */
+  /** Native 1.0 scale and the full effect stack. */
   Ultra = 4,
 }
 
-/** Apply a quality preset in one call. Call individual setters after for fine-tuning. */
-export function setQualityPreset(preset: QualityPreset): void {
-  bloom_set_quality_preset(preset);
+/**
+ * Apply a coherent resolution, reconstruction, sharpening, and effect tier.
+ * Call individual setters afterward for fine-tuning.
+ */
+export function setQualityPreset(preset: QualityPreset): boolean {
+  return bloom_set_quality_preset(preset) !== 0;
 }
 
 /** Toggle cascaded shadow maps. Default on. Disable on low-end GPUs — biggest single win. */
-export function setShadowsEnabled(on: boolean): void {
-  bloom_set_shadows_enabled(on ? 1 : 0);
+export function setShadowsEnabled(on: boolean): boolean {
+  return bloom_set_shadows_enabled(on ? 1 : 0) !== 0;
 }
 
 /**
@@ -500,21 +766,21 @@ export function setShadowsEnabled(on: boolean): void {
  * native code, heavily-deformable casters) where the cache hit rate
  * would be ~zero anyway, so skipping the check saves a few µs.
  */
-export function setShadowsAlwaysFresh(on: boolean): void {
-  bloom_set_shadows_always_fresh(on ? 1 : 0);
+export function setShadowsAlwaysFresh(on: boolean): boolean {
+  return bloom_set_shadows_always_fresh(on ? 1 : 0) !== 0;
 }
 
 /** Toggle the bloom down/upsample chain (~10 passes). Default on. */
-export function setBloomEnabled(on: boolean): void {
-  bloom_set_bloom_enabled(on ? 1 : 0);
+export function setBloomEnabled(on: boolean): boolean {
+  return bloom_set_bloom_enabled(on ? 1 : 0) !== 0;
 }
 
 /**
  * Bloom contribution strength added to the HDR scene before tonemap.
  * 0 = none, ~0.04 subtle default, higher = stronger glow around bright pixels.
  */
-export function setBloomIntensity(intensity: number): void {
-  bloom_set_bloom_intensity(intensity);
+export function setBloomIntensity(intensity: number): boolean {
+  return bloom_set_bloom_intensity(intensity) !== 0;
 }
 
 /** Tonemap operator selection. */
@@ -526,8 +792,8 @@ export enum Tonemap {
 }
 
 /** Choose the tonemap operator applied in the composite pass. */
-export function setTonemap(kind: Tonemap): void {
-  bloom_set_tonemap(kind);
+export function setTonemap(kind: Tonemap): boolean {
+  return bloom_set_tonemap(kind) !== 0;
 }
 
 /**
@@ -535,28 +801,28 @@ export function setTonemap(kind: Tonemap): void {
  * more saturated midpoint (counteracts wash-out from very bright skies);
  * higher aims brighter. Only affects frames where auto-exposure is on.
  */
-export function setAutoExposureKey(key: number): void {
-  bloom_set_auto_exposure_key(key);
+export function setAutoExposureKey(key: number): boolean {
+  return bloom_set_auto_exposure_key(key) !== 0;
 }
 
 /** Auto-exposure adaptation rate per frame (0 = frozen, ~0.05 smooth, 1 = instant). */
-export function setAutoExposureRate(rate: number): void {
-  bloom_set_auto_exposure_rate(rate);
+export function setAutoExposureRate(rate: number): boolean {
+  return bloom_set_auto_exposure_rate(rate) !== 0;
 }
 
 /** Toggle screen-space ambient occlusion + its bilateral blur. Default on. */
-export function setSsaoEnabled(on: boolean): void {
-  bloom_set_ssao_enabled(on ? 1 : 0);
+export function setSsaoEnabled(on: boolean): boolean {
+  return bloom_set_ssao_enabled(on ? 1 : 0) !== 0;
 }
 
 /** SSAO strength. 0 disables corner darkening, 1 is default, 2 is heavy. */
-export function setSsaoIntensity(intensity: number): void {
-  bloom_set_ssao_intensity(intensity);
+export function setSsaoIntensity(intensity: number): boolean {
+  return bloom_set_ssao_intensity(intensity) !== 0;
 }
 
 /** SSAO sampling radius in world units. 0.1..2.0 m is the sane range. */
-export function setSsaoRadius(worldRadius: number): void {
-  bloom_set_ssao_radius(worldRadius);
+export function setSsaoRadius(worldRadius: number): boolean {
+  return bloom_set_ssao_radius(worldRadius) !== 0;
 }
 
 /// EN-017 — install a game-supplied fullscreen WGSL post-pass.
@@ -583,8 +849,8 @@ export function setPostPass(wgslSource: string): boolean {
 /// EN-017 — uninstall the active post-pass. The composite output
 /// goes directly to the swapchain again (zero post-pass cost).
 /// V2 alias for `clearAllPostPasses()`.
-export function clearPostPass(): void {
-  bloom_clear_post_pass();
+export function clearPostPass(): boolean {
+  return bloom_clear_post_pass() !== 0;
 }
 
 /// EN-017 V2 — append a fullscreen WGSL post-pass to the stack.
@@ -606,8 +872,8 @@ export function addPostPass(wgslSource: string): number {
 
 /// EN-017 V2 — wipe the entire post-pass stack. The composite
 /// output goes directly to the swapchain again (zero post-pass cost).
-export function clearAllPostPasses(): void {
-  bloom_clear_all_post_passes();
+export function clearAllPostPasses(): boolean {
+  return bloom_clear_all_post_passes() !== 0;
 }
 
 /// Set the global wind field used by foliage materials.
@@ -615,8 +881,8 @@ export function clearAllPostPasses(): void {
 /// normalised; magnitude scales effective amplitude).
 /// amplitude is the displacement scale (~0.1 m typical for grass).
 /// frequency is in Hz (~1.0 typical).
-export function setWind(dirX: number, dirZ: number, amplitude: number, frequency: number): void {
-  bloom_set_wind(dirX, dirZ, amplitude, frequency);
+export function setWind(dirX: number, dirZ: number, amplitude: number, frequency: number): boolean {
+  return bloom_set_wind(dirX, dirZ, amplitude, frequency) !== 0;
 }
 
 /// Cloud deck — the clouds the sky draws and the shadows they cast, from ONE
@@ -642,23 +908,23 @@ export function setCloudShadows(
   deckHeight: number,
   featureScale: number,
   driftSpeed: number,
-): void {
-  bloom_set_cloud_shadows(strength, deckHeight, featureScale, driftSpeed);
+): boolean {
+  return bloom_set_cloud_shadows(strength, deckHeight, featureScale, driftSpeed) !== 0;
 }
 
 /** Toggle screen-space reflections. Default on. */
-export function setSsrEnabled(on: boolean): void {
-  bloom_set_ssr_enabled(on ? 1 : 0);
+export function setSsrEnabled(on: boolean): boolean {
+  return bloom_set_ssr_enabled(on ? 1 : 0) !== 0;
 }
 
 /** Toggle per-object motion blur. Default off. */
-export function setMotionBlurEnabled(on: boolean): void {
-  bloom_set_motion_blur_enabled(on ? 1 : 0);
+export function setMotionBlurEnabled(on: boolean): boolean {
+  return bloom_set_motion_blur_enabled(on ? 1 : 0) !== 0;
 }
 
 /** Toggle subsurface scattering (for skin/wax materials). Default off. */
-export function setSssEnabled(on: boolean): void {
-  bloom_set_sss_enabled(on ? 1 : 0);
+export function setSssEnabled(on: boolean): boolean {
+  return bloom_set_sss_enabled(on ? 1 : 0) !== 0;
 }
 
 // ============================================================
@@ -679,6 +945,27 @@ export function getProfilerFrameCpuUs(): number {
 /** Average total GPU frame time over the rolling window, in microseconds. 0 if GPU timing unavailable. */
 export function getProfilerFrameGpuUs(): number {
   return bloom_get_profiler_frame_gpu_us();
+}
+
+/** Write a native, allocation-safe snapshot for the deterministic quality harness. */
+export function writeQualityTelemetry(
+  path: string,
+  warmupFrames: number,
+  measuredFrames: number,
+  fixedTimestep: number,
+  qualityPreset: number,
+  renderScale: number,
+  measurementWallMs: number,
+): boolean {
+  return bloom_write_quality_telemetry(
+    path,
+    warmupFrames,
+    measuredFrames,
+    fixedTimestep,
+    qualityPreset,
+    renderScale,
+    measurementWallMs,
+  ) !== 0.0;
 }
 
 /** Print a per-phase CPU/GPU timing table to stdout. Useful for quick diagnostics. */
@@ -712,14 +999,14 @@ export function splatImpulse(x: number, z: number, radius: number, strength: num
  *   `setMaterialParams(matWater, [0.10, 0.30, 0.40, 1.0,  0.20])`
  * lets game code change colour per-zone without recompiling WGSL.
  */
-export function setMaterialParams(handle: number, params: number[]): void {
+export function setMaterialParams(handle: number, params: number[]): boolean {
   // Perry 0.5.x rejects JS arrays passed into pointer params, so the floats
   // go through the all-f64 mesh scratch (same fix as createMesh /
   // createInstanceBuffer). ≤ 64 floats per the 256-byte UBO cap, so the
   // per-float FFI cost is negligible.
   bloom_mesh_scratch_reset();
   for (let i = 0; i < params.length; i++) bloom_mesh_scratch_push_f32(params[i]);
-  bloom_set_material_params_scratch(handle, params.length);
+  return bloom_set_material_params_scratch(handle, params.length) !== 0;
 }
 
 /**
@@ -732,14 +1019,16 @@ export function setMaterialParams(handle: number, params: number[]): void {
 export function getProfilerOverlay(): { label: string, cpuUs: number, gpuUs: number }[] {
   // EN-020: per-row numeric FFI — do NOT reintroduce a packed-text +
   // split()/parseFloat() path here (Perry runtime overread, crashes).
-  const out: { label: string, cpuUs: number, gpuUs: number }[] = [];
   const n = bloom_profiler_row_count();
+  // Perry's native `.push()` lowering can leave array length/capacity out
+  // of sync for FFI-derived rows. Pre-size and assign by index.
+  const out: { label: string, cpuUs: number, gpuUs: number }[] = new Array(n);
   for (let i = 0; i < n; i++) {
-    out.push({
+    out[i] = {
       label: bloom_profiler_row_label(i),
       cpuUs: bloom_profiler_row_cpu_us(i),
       gpuUs: bloom_profiler_row_gpu_us(i),
-    });
+    };
   }
   return out;
 }
@@ -751,13 +1040,13 @@ export function getProfilerOverlay(): { label: string, cpuUs: number, gpuUs: num
  */
 export function getProfilerFrameHistory(): { cpuUs: number, gpuUs: number }[] {
   // EN-020: numeric FFI — see getProfilerOverlay.
-  const out: { cpuUs: number, gpuUs: number }[] = [];
   const n = bloom_profiler_hist_count();
+  const out: { cpuUs: number, gpuUs: number }[] = new Array(n);
   for (let i = 0; i < n; i++) {
-    out.push({
+    out[i] = {
       cpuUs: bloom_profiler_hist_cpu_us(i),
       gpuUs: bloom_profiler_hist_gpu_us(i),
-    });
+    };
   }
   return out;
 }
@@ -1203,4 +1492,12 @@ export function launchProcess(cmd: string, args: string[], cwd: string): number 
     joined = joined + args[i];
   }
   return bloom_launch_process(cmd, joined, cwd);
+}
+
+/** Return the native process argv. Index 0 is the executable path. */
+export function getCommandLineArgs(): string[] {
+  const count = Math.max(0, Math.floor(bloom_command_line_arg_count()));
+  const args: string[] = new Array(count);
+  for (let i = 0; i < count; i++) args[i] = bloom_command_line_arg(i);
+  return args;
 }
