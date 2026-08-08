@@ -7,7 +7,7 @@
 use crate::handles::HandleRegistry;
 use crate::models::{MaterialAlphaMode, MaterialLayeredPbr, MaterialTransmission};
 use crate::renderer::{
-    gpu_driven::{GeometrySlice, GpuDrawRecord},
+    gpu_driven::{self, GeometrySlice, GpuDrawRecord},
     material_indirection::MaterialId,
     ImportedIridescenceDrawRef, ImportedRefractiveDrawRef, ImportedTransparentDrawRef, MeshDrawRef,
     Uniforms3D, Vertex3D,
@@ -2432,7 +2432,7 @@ impl SceneGraph {
                     node.world_bounds_min[0],
                     node.world_bounds_min[1],
                     node.world_bounds_min[2],
-                    0.0,
+                    f32::from_bits(gpu_driven::draw_flags(node.material.double_sided, true)),
                 ],
                 bounds_max: [
                     node.world_bounds_max[0],

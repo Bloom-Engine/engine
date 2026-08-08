@@ -20,10 +20,11 @@ pub(super) enum BindGroupCreationSite {
     AutoExposure,
     FinalComposite,
     CustomPostPass,
+    VisibilityBuffer,
 }
 
 impl BindGroupCreationSite {
-    const COUNT: usize = 12;
+    const COUNT: usize = 13;
     #[cfg(not(target_arch = "wasm32"))]
     const ALL: [Self; Self::COUNT] = [
         Self::SceneCompose,
@@ -38,6 +39,7 @@ impl BindGroupCreationSite {
         Self::AutoExposure,
         Self::FinalComposite,
         Self::CustomPostPass,
+        Self::VisibilityBuffer,
     ];
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -55,6 +57,7 @@ impl BindGroupCreationSite {
             Self::AutoExposure => "auto_exposure",
             Self::FinalComposite => "final_composite",
             Self::CustomPostPass => "custom_post_pass",
+            Self::VisibilityBuffer => "visibility_buffer",
         }
     }
 }

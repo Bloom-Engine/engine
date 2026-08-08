@@ -14,6 +14,20 @@ use super::{
 use std::sync::OnceLock;
 
 pub const GPU_DRIVEN_FEATURES: wgpu::Features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
+pub(crate) const DRAW_FLAG_DOUBLE_SIDED: u32 = 1 << 0;
+pub(crate) const DRAW_FLAG_VISIBILITY_ELIGIBLE: u32 = 1 << 1;
+
+pub(crate) const fn draw_flags(double_sided: bool, visibility_eligible: bool) -> u32 {
+    (if double_sided {
+        DRAW_FLAG_DOUBLE_SIDED
+    } else {
+        0
+    }) | if visibility_eligible {
+        DRAW_FLAG_VISIBILITY_ELIGIBLE
+    } else {
+        0
+    }
+}
 /// Below this count, compute/indirect setup costs more than the CPU loop on
 /// current Metal hardware. Keep small scenes on the lower-overhead oracle.
 pub const GPU_DRIVEN_MIN_DRAWS: usize = 32;
@@ -29,6 +43,7 @@ pub fn request_features_if_supported(supported: wgpu::Features, required: &mut w
     if supported.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT) {
         *required |= wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
     }
+    super::visibility_buffer::request_feature_if_supported(supported, required);
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -71,6 +86,7 @@ struct GeometryArena {
     free_indices: Vec<FreeRange>,
     retired: Vec<RetiredGeometry>,
     completion: GpuCompletionTracker,
+    generation: u64,
 }
 
 impl GeometryArena {
@@ -88,6 +104,7 @@ impl GeometryArena {
             free_indices: Vec::new(),
             retired: Vec::new(),
             completion: GpuCompletionTracker::default(),
+            generation: 0,
         }
     }
 
@@ -212,6 +229,7 @@ impl GeometryArena {
             self.index = next;
             self.index_capacity = new_index_capacity;
         }
+        self.generation = self.generation.wrapping_add(1);
         queue.submit(std::iter::once(encoder.finish()));
     }
 }
@@ -347,6 +365,7 @@ pub struct GpuDrivenRenderer {
     depth_pipeline: Option<wgpu::RenderPipeline>,
     main_pipeline: Option<wgpu::RenderPipeline>,
     main_prepassed_pipeline: Option<wgpu::RenderPipeline>,
+    visibility: super::visibility_buffer::VisibilityBufferRuntime,
     pub(super) draw_scratch: Vec<GpuDrawRecord>,
     pub stats: SubmissionStats,
 }
@@ -464,6 +483,18 @@ impl GpuDrivenRenderer {
                 (None, None, None, None)
             };
 
+        let visibility_source = (super::visibility_buffer::requested_mode().requested() && enabled)
+            .then(|| make_gpu_scene_shader(scene_source));
+        let visibility = super::visibility_buffer::VisibilityBufferRuntime::new(
+            device,
+            enabled,
+            &draw_layout,
+            lighting_layout,
+            global_material_layout,
+            joint_layout,
+            visibility_source.as_deref(),
+        );
+
         let renderer = Self {
             arena: GeometryArena::new(device),
             enabled,
@@ -481,6 +512,7 @@ impl GpuDrivenRenderer {
             depth_pipeline,
             main_pipeline,
             main_prepassed_pipeline,
+            visibility,
             draw_scratch: Vec::with_capacity(draw_capacity),
             stats: SubmissionStats::default(),
         };
@@ -592,6 +624,7 @@ impl GpuDrivenRenderer {
         frustum_visible_oracle: u32,
         frustum_culled_oracle: u32,
     ) {
+        self.visibility.begin_frame();
         self.stats = SubmissionStats {
             submitted: self.draw_scratch.len() as u32,
             compatibility: compatibility_count,
@@ -647,7 +680,8 @@ impl GpuDrivenRenderer {
                 "\"frustum_visible_oracle\":{},\"frustum_culled_oracle\":{},",
                 "\"frustum_culled_ratio\":{:.6},",
                 "\"classification_source\":\"retained-scene conservative CPU oracle\",",
-                "\"visibility_buffer_contract\":{}}}"
+                "\"visibility_buffer_contract\":{},",
+                "\"visibility_buffer_runtime\":{}}}"
             ),
             self.enabled,
             self.count_supported,
@@ -658,6 +692,7 @@ impl GpuDrivenRenderer {
             self.stats.frustum_culled_oracle,
             culled_ratio,
             super::visibility_buffer::contract_json(),
+            self.visibility.report_json(),
         )
     }
 
@@ -699,6 +734,100 @@ impl GpuDrivenRenderer {
         }
         pass.set_pipeline(pipeline);
         self.bind_and_draw(pass, lighting, global_materials, joints);
+    }
+
+    pub(crate) fn visibility_diagnostic_enabled(&self) -> bool {
+        self.visibility.enabled()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_visibility_diagnostic(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+        depth_view: &wgpu::TextureView,
+        lighting: &wgpu::BindGroup,
+        global_materials: &wgpu::BindGroup,
+        joints: &wgpu::BindGroup,
+        extent: (u32, u32),
+    ) -> super::visibility_buffer::ResourceCreations {
+        if !self.visibility.enabled() {
+            return super::visibility_buffer::ResourceCreations::default();
+        }
+        if self.draw_scratch.is_empty() {
+            self.visibility.set_draw_counts(0, self.stats.compatibility);
+            return super::visibility_buffer::ResourceCreations::default();
+        }
+        let eligible = self
+            .draw_scratch
+            .iter()
+            .filter(|draw| {
+                bitcast_draw_flags(draw.bounds_min[3]) & DRAW_FLAG_VISIBILITY_ELIGIBLE != 0
+            })
+            .count() as u32;
+        let compatibility = self
+            .stats
+            .compatibility
+            .saturating_add(self.draw_scratch.len() as u32 - eligible);
+        self.visibility.set_draw_counts(eligible, compatibility);
+        if eligible == 0 {
+            return super::visibility_buffer::ResourceCreations::default();
+        }
+        let creations = self.visibility.ensure_resources(
+            device,
+            extent,
+            &self.arena.vertex,
+            &self.arena.index,
+            &self.draw_buffer,
+            self.draw_capacity,
+            self.arena.generation,
+        );
+        profiler.begin("visibility_raster_pass");
+        {
+            let timestamps = profiler.pass_timestamp_writes("visibility_raster_pass");
+            self.visibility.record_raster(
+                encoder,
+                depth_view,
+                &self.draw_bind_group,
+                lighting,
+                global_materials,
+                joints,
+                &self.arena.vertex,
+                &self.arena.index,
+                &self.indirect_buffer,
+                &self.counter_buffer,
+                self.draw_scratch.len() as u32,
+                self.count_supported,
+                timestamps,
+            );
+        }
+        profiler.end("visibility_raster_pass");
+        profiler.begin("visibility_reconstruct_pass");
+        {
+            let timestamps = profiler.compute_pass_timestamp_writes("visibility_reconstruct_pass");
+            self.visibility.record_reconstruct(encoder, timestamps);
+        }
+        profiler.end("visibility_reconstruct_pass");
+        creations
+    }
+
+    pub(crate) fn record_visibility_debug_overlay(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+        hdr_view: &wgpu::TextureView,
+    ) {
+        if !self.visibility.debug_overlay_enabled() {
+            return;
+        }
+        profiler.begin("visibility_debug_overlay");
+        {
+            let timestamps = profiler.pass_timestamp_writes("visibility_debug_overlay");
+            self.visibility
+                .record_debug_overlay(encoder, hdr_view, timestamps);
+        }
+        profiler.end("visibility_debug_overlay");
     }
 
     fn bind_and_draw<'a>(
@@ -749,6 +878,10 @@ impl GpuDrivenRenderer {
                 .saturating_sub(self.draw_scratch.capacity()),
         );
     }
+}
+
+fn bitcast_draw_flags(value: f32) -> u32 {
+    value.to_bits()
 }
 
 impl Renderer {
@@ -1102,7 +1235,7 @@ fn create_main_pipeline(
     })
 }
 
-fn make_gpu_scene_shader(source: &str) -> String {
+pub(super) fn make_gpu_scene_shader(source: &str) -> String {
     const LEGACY_MATERIALS: &str = r#"@group(2) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(2) @binding(1) var base_color_samp: sampler;
 @group(2) @binding(2) var normal_tex: texture_2d<f32>;
@@ -1331,6 +1464,12 @@ mod tests {
         assert_eq!(
             std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>(),
             20
+        );
+        assert_eq!(draw_flags(false, false), 0);
+        assert_eq!(draw_flags(true, false), DRAW_FLAG_DOUBLE_SIDED);
+        assert_eq!(
+            draw_flags(true, true),
+            DRAW_FLAG_DOUBLE_SIDED | DRAW_FLAG_VISIBILITY_ELIGIBLE
         );
     }
 

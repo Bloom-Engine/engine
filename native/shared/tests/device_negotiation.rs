@@ -34,6 +34,15 @@ fn negotiated_headless_device_constructs_the_complete_renderer() {
     assert!(public["material_binding"]["selected_tier"].is_string());
     assert!(public["runtime_support"]["path_tracing"].is_boolean());
     assert!(public["runtime_support"]["gpu_driven"]["enabled"].is_boolean());
+    let visibility = &public["runtime_support"]["gpu_driven"]["visibility_buffer_runtime"];
+    assert_eq!(visibility["requested_mode"], "off");
+    assert_eq!(visibility["enabled"], false);
+    assert_eq!(visibility["allocated_bytes"], 0);
+    assert_eq!(visibility["frame_recorded"], false);
+    assert!(!json["device_negotiation"]["required_features"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("PRIMITIVE_INDEX"));
     assert!(public["runtime_support"]["virtual_shadows"]["requested"].is_boolean());
     assert!(public["runtime_support"]["virtual_shadows"]["capability_eligible"].is_boolean());
     assert!(public["runtime_support"]["virtual_shadows"]["enabled"].is_boolean());

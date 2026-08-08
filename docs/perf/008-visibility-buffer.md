@@ -35,8 +35,24 @@ The shared CPU/WGSL ABI and perspective reconstruction live in
 `shaders/visibility_buffer/geometry.wgsl`. Hardware readback oracles now prove
 ID/winding rasterization, perspective reconstruction, non-zero first-index and
 base-vertex addressing, the exact packed `Vertex3D` byte layout, and all 24
-reconstructed vertex lanes. The next milestone is an opt-in runtime A/B pass;
-production composition follows only after it passes the no-regression gate.
+reconstructed vertex lanes. The opt-in runtime diagnostic now executes the
+depth-equal ID raster and full-screen attribute reconstruction against the
+real GPU-driven draw/index/vertex buffers. Production composition follows
+only after the completed PBR A/B passes the no-regression gate.
+
+Runtime qualification is explicitly requested before engine attachment:
+
+- `BLOOM_VISIBILITY_BUFFER=validate` runs the private visibility and
+  reconstructed-normal passes while the forward image remains unchanged;
+- `BLOOM_VISIBILITY_BUFFER=debug` additionally overlays reconstructed normals
+  on admitted pixels, leaving compatibility-rendered content intact so holes
+  and routing mistakes are visible;
+- unset/off requests no `primitive-index` device feature, creates no pipeline,
+  texture, or bind group, and records no visibility work.
+
+Both modes expose `visibility_buffer_runtime` in the public renderer capability
+report, including admitted/compatibility draw counts, current extent, exact
+owned bytes, activation reason, and whether the current frame recorded work.
 
 ## Original problem statement (historical)
 

@@ -149,6 +149,37 @@ impl Renderer {
         }
         profiler.end("depth_prepass");
 
+        // #27 qualification path. This is inert unless explicitly requested
+        // with BLOOM_VISIBILITY_BUFFER and the negotiated device retained the
+        // primitive-index feature. It reads the prepass depth but never writes
+        // it, and forward remains the authoritative scene renderer.
+        if self.gpu_driven.visibility_diagnostic_enabled()
+            && !self.dbg_skip("prepass")
+            && !self.dbg_skip("prepass_draws")
+        {
+            if let Some(global_materials) =
+                self.material_system.indirection.global_bind_group.as_ref()
+            {
+                let creations = self.gpu_driven.record_visibility_diagnostic(
+                    &self.device,
+                    encoder,
+                    profiler,
+                    &self.depth_view,
+                    &self.lighting_bind_group,
+                    global_materials,
+                    &self.joint_bind_group,
+                    self.render_extent(),
+                );
+                self.frame_resource_stats
+                    .created_physical_textures(creations.textures);
+                for _ in 0..creations.bind_groups {
+                    self.frame_resource_stats.created_bind_group(
+                        frame_resource_stats::BindGroupCreationSite::VisibilityBuffer,
+                    );
+                }
+            }
+        }
+
         profiler.begin("main_hdr_pass");
         // SH-055 diag — "hdr_pass" skips the whole main HDR pass (prepass untouched).
         if !self.dbg_skip("hdr_pass") {
@@ -532,6 +563,8 @@ impl Renderer {
         // the later SSR pass; base-only frames return before allocating or
         // recording anything.
         self.record_layered_iridescence_ssr_metadata(encoder, profiler, scene);
+        self.gpu_driven
+            .record_visibility_debug_overlay(encoder, profiler, &self.hdr_rt_view);
     }
 }
 
@@ -735,6 +768,10 @@ impl Renderer {
             };
             let uniforms = bytemuck::pod_read_unaligned::<Uniforms3D>(bytes);
             let (wmin, wmax) = transform_aabb(&cmd.model, mesh.local_min, mesh.local_max);
+            let mut draw_flags = gpu_driven::DRAW_FLAG_DOUBLE_SIDED;
+            if uniforms.misc[2].abs() <= f32::EPSILON {
+                draw_flags |= gpu_driven::DRAW_FLAG_VISIBILITY_ELIGIBLE;
+            }
             self.gpu_driven
                 .draw_scratch
                 .push(gpu_driven::GpuDrawRecord {
@@ -742,7 +779,7 @@ impl Renderer {
                     // Cached-model prepass semantics are two-sided (foliage
                     // and cutout cards rely on it). Bit 0 rides in the unused
                     // bounds lane and is consumed only by the depth shader.
-                    bounds_min: [wmin[0], wmin[1], wmin[2], f32::from_bits(1)],
+                    bounds_min: [wmin[0], wmin[1], wmin[2], f32::from_bits(draw_flags)],
                     bounds_max: [wmax[0], wmax[1], wmax[2], 0.0],
                     draw: [
                         mesh.index_count,
