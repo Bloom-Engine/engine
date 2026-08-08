@@ -107,6 +107,7 @@ pub(crate) enum RuntimeMode {
     Off,
     Validate,
     Debug,
+    Shade,
 }
 
 impl RuntimeMode {
@@ -115,11 +116,16 @@ impl RuntimeMode {
             Self::Off => "off",
             Self::Validate => "validate",
             Self::Debug => "debug",
+            Self::Shade => "shade",
         }
     }
 
     pub(crate) const fn requested(self) -> bool {
         !matches!(self, Self::Off)
+    }
+
+    pub(crate) const fn shades(self) -> bool {
+        matches!(self, Self::Shade)
     }
 }
 
@@ -127,6 +133,7 @@ fn parse_runtime_mode(value: Option<&str>) -> RuntimeMode {
     match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("1" | "on" | "true" | "validate") => RuntimeMode::Validate,
         Some("debug" | "visualize" | "visualise") => RuntimeMode::Debug,
+        Some("shade" | "pbr") => RuntimeMode::Shade,
         _ => RuntimeMode::Off,
     }
 }
@@ -168,10 +175,11 @@ pub(crate) struct ResourceCreations {
 struct RuntimeResources {
     _visibility_texture: wgpu::Texture,
     visibility_view: wgpu::TextureView,
-    _diagnostic_texture: wgpu::Texture,
-    _diagnostic_view: wgpu::TextureView,
-    reconstruct_bind_group: wgpu::BindGroup,
-    overlay_bind_group: wgpu::BindGroup,
+    _diagnostic_texture: Option<wgpu::Texture>,
+    _diagnostic_view: Option<wgpu::TextureView>,
+    reconstruct_bind_group: Option<wgpu::BindGroup>,
+    overlay_bind_group: Option<wgpu::BindGroup>,
+    shade_bind_group: Option<wgpu::BindGroup>,
     extent: (u32, u32),
     draw_capacity: usize,
     geometry_generation: u64,
@@ -186,6 +194,8 @@ pub(crate) struct VisibilityBufferRuntime {
     reconstruct_layout: Option<wgpu::BindGroupLayout>,
     overlay_pipeline: Option<wgpu::RenderPipeline>,
     overlay_layout: Option<wgpu::BindGroupLayout>,
+    shade_pipeline: Option<wgpu::RenderPipeline>,
+    shade_layout: Option<wgpu::BindGroupLayout>,
     resources: Option<RuntimeResources>,
     eligible_draws: u32,
     compatibility_draws: u32,
@@ -273,77 +283,120 @@ impl VisibilityBufferRuntime {
             cache: None,
         });
 
-        let reconstruct_layout = create_reconstruct_layout(device);
-        let reconstruct_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let (reconstruct_layout, reconstruct_pipeline) = if !mode.shades() {
+            let layout = create_reconstruct_layout(device);
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("visibility_buffer_runtime_reconstruct_pipeline_layout"),
-                bind_group_layouts: &[Some(&reconstruct_layout)],
+                bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-        let reconstruct_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("visibility_buffer_runtime_reconstruct_shader"),
-            source: wgpu::ShaderSource::Wgsl(RUNTIME_RECONSTRUCT_WGSL.into()),
-        });
-        let reconstruct_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("visibility_buffer_runtime_reconstruct_shader"),
+                source: wgpu::ShaderSource::Wgsl(RUNTIME_RECONSTRUCT_WGSL.into()),
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("visibility_buffer_runtime_reconstruct_pipeline"),
-                layout: Some(&reconstruct_pipeline_layout),
-                module: &reconstruct_shader,
+                layout: Some(&pipeline_layout),
+                module: &shader,
                 entry_point: Some("cs_visibility_reconstruct"),
                 compilation_options: Default::default(),
                 cache: None,
             });
+            (Some(layout), Some(pipeline))
+        } else {
+            (None, None)
+        };
 
-        let overlay_layout = create_overlay_layout(device);
-        let overlay_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let (overlay_layout, overlay_pipeline) = if matches!(mode, RuntimeMode::Debug) {
+            let layout = create_overlay_layout(device);
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("visibility_buffer_debug_overlay_pipeline_layout"),
-                bind_group_layouts: &[Some(&overlay_layout)],
+                bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-        let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("visibility_buffer_debug_overlay_shader"),
-            source: wgpu::ShaderSource::Wgsl(DEBUG_OVERLAY_WGSL.into()),
-        });
-        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("visibility_buffer_debug_overlay_pipeline"),
-            layout: Some(&overlay_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &overlay_shader,
-                entry_point: Some("vs_debug_overlay"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &overlay_shader,
-                entry_point: Some("fs_debug_overlay"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: super::HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("visibility_buffer_debug_overlay_shader"),
+                source: wgpu::ShaderSource::Wgsl(DEBUG_OVERLAY_WGSL.into()),
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("visibility_buffer_debug_overlay_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_debug_overlay"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_debug_overlay"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: super::HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            (Some(layout), Some(pipeline))
+        } else {
+            (None, None)
+        };
+
+        let (shade_layout, shade_pipeline) = if mode.shades() {
+            let shade_layout = super::visibility_shading::create_layout(device);
+            let shade_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("visibility_buffer_pbr_pipeline_layout"),
+                    bind_group_layouts: &[
+                        Some(draw_layout),
+                        Some(lighting_layout),
+                        Some(global_material_layout),
+                        Some(joint_layout),
+                        Some(&shade_layout),
+                    ],
+                    immediate_size: 0,
+                });
+            let shade_source = super::visibility_shading::make_shader(gpu_scene_source);
+            let shade_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("visibility_buffer_pbr_shader"),
+                source: wgpu::ShaderSource::Wgsl(shade_source.into()),
+            });
+            let shade_pipeline = super::visibility_shading::create_pipeline(
+                device,
+                &shade_pipeline_layout,
+                &shade_shader,
+            );
+            (Some(shade_layout), Some(shade_pipeline))
+        } else {
+            (None, None)
+        };
 
         log::info!(
-            "bloom: visibility-buffer diagnostic enabled mode={} (forward remains authoritative)",
-            mode.name()
+            "bloom: visibility-buffer runtime enabled mode={} composition={}",
+            mode.name(),
+            if mode.shades() {
+                "visibility-eligible+forward-compatibility"
+            } else {
+                "forward-authoritative"
+            }
         );
         Self {
             mode,
             enabled: true,
             disabled_reason: "none",
             raster_pipeline: Some(raster_pipeline),
-            reconstruct_pipeline: Some(reconstruct_pipeline),
-            reconstruct_layout: Some(reconstruct_layout),
-            overlay_pipeline: Some(overlay_pipeline),
-            overlay_layout: Some(overlay_layout),
+            reconstruct_pipeline,
+            reconstruct_layout,
+            overlay_pipeline,
+            overlay_layout,
+            shade_pipeline,
+            shade_layout,
             resources: None,
             eligible_draws: 0,
             compatibility_draws: 0,
@@ -361,6 +414,8 @@ impl VisibilityBufferRuntime {
             reconstruct_layout: None,
             overlay_pipeline: None,
             overlay_layout: None,
+            shade_pipeline: None,
+            shade_layout: None,
             resources: None,
             eligible_draws: 0,
             compatibility_draws: 0,
@@ -374,6 +429,14 @@ impl VisibilityBufferRuntime {
 
     pub(crate) const fn debug_overlay_enabled(&self) -> bool {
         self.enabled && matches!(self.mode, RuntimeMode::Debug)
+    }
+
+    pub(crate) const fn reconstruction_enabled(&self) -> bool {
+        self.enabled && !self.mode.shades()
+    }
+
+    pub(crate) const fn shading_active(&self) -> bool {
+        self.enabled && self.mode.shades() && self.frame_recorded
     }
 
     pub(crate) fn begin_frame(&mut self) {
@@ -421,58 +484,105 @@ impl VisibilityBufferRuntime {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let diagnostic_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("visibility_buffer_runtime_reconstruction"),
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DIAGNOSTIC_OUTPUT_FORMAT,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
         let visibility_view = visibility_texture.create_view(&Default::default());
-        let diagnostic_view = diagnostic_texture.create_view(&Default::default());
-        let reconstruct_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("visibility_buffer_runtime_reconstruct_bind_group"),
-            layout: self
-                .reconstruct_layout
-                .as_ref()
-                .expect("enabled visibility runtime owns reconstruct layout"),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&visibility_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: vertex_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: index_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: draw_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&diagnostic_view),
-                },
-            ],
+        let diagnostic_texture = self.reconstruction_enabled().then(|| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("visibility_buffer_runtime_reconstruction"),
+                size: texture_size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DIAGNOSTIC_OUTPUT_FORMAT,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
         });
-        let overlay_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("visibility_buffer_debug_overlay_bind_group"),
-            layout: self
-                .overlay_layout
-                .as_ref()
-                .expect("enabled visibility runtime owns overlay layout"),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&diagnostic_view),
-            }],
+        let diagnostic_view = diagnostic_texture
+            .as_ref()
+            .map(|texture| texture.create_view(&Default::default()));
+        let reconstruct_bind_group = diagnostic_view.as_ref().map(|diagnostic_view| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("visibility_buffer_runtime_reconstruct_bind_group"),
+                layout: self
+                    .reconstruct_layout
+                    .as_ref()
+                    .expect("enabled visibility runtime owns reconstruct layout"),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&visibility_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: vertex_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: index_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: draw_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(diagnostic_view),
+                    },
+                ],
+            })
         });
+        let overlay_bind_group = if self.debug_overlay_enabled() {
+            diagnostic_view.as_ref().map(|diagnostic_view| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("visibility_buffer_debug_overlay_bind_group"),
+                    layout: self
+                        .overlay_layout
+                        .as_ref()
+                        .expect("enabled visibility runtime owns overlay layout"),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(diagnostic_view),
+                    }],
+                })
+            })
+        } else {
+            None
+        };
+        let shade_bind_group = if self.mode.shades() {
+            Some(
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("visibility_buffer_pbr_bind_group"),
+                    layout: self
+                        .shade_layout
+                        .as_ref()
+                        .expect("visibility shade mode owns its layout"),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&visibility_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: vertex_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: index_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: draw_buffer.as_entire_binding(),
+                        },
+                    ],
+                }),
+            )
+        } else {
+            None
+        };
+        let texture_creations = 1 + u32::from(diagnostic_texture.is_some());
+        let bind_group_creations = u32::from(reconstruct_bind_group.is_some())
+            + u32::from(overlay_bind_group.is_some())
+            + u32::from(shade_bind_group.is_some());
         self.resources = Some(RuntimeResources {
             _visibility_texture: visibility_texture,
             visibility_view,
@@ -480,13 +590,14 @@ impl VisibilityBufferRuntime {
             _diagnostic_view: diagnostic_view,
             reconstruct_bind_group,
             overlay_bind_group,
+            shade_bind_group,
             extent,
             draw_capacity,
             geometry_generation,
         });
         ResourceCreations {
-            textures: 2,
-            bind_groups: 2,
+            textures: texture_creations,
+            bind_groups: bind_group_creations,
         }
     }
 
@@ -497,7 +608,7 @@ impl VisibilityBufferRuntime {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_raster(
-        &self,
+        &mut self,
         encoder: &mut wgpu::CommandEncoder,
         depth_view: &wgpu::TextureView,
         draw_bind_group: &wgpu::BindGroup,
@@ -565,6 +676,8 @@ impl VisibilityBufferRuntime {
         } else {
             pass.multi_draw_indexed_indirect(indirect_buffer, 0, draw_count);
         }
+        drop(pass);
+        self.frame_recorded = true;
     }
 
     pub(crate) fn record_reconstruct(
@@ -572,6 +685,9 @@ impl VisibilityBufferRuntime {
         encoder: &mut wgpu::CommandEncoder,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
+        if !self.reconstruction_enabled() {
+            return;
+        }
         let Some(resources) = self.resources.as_ref() else {
             return;
         };
@@ -584,14 +700,20 @@ impl VisibilityBufferRuntime {
                 .as_ref()
                 .expect("enabled visibility runtime owns reconstruct pipeline"),
         );
-        pass.set_bind_group(0, &resources.reconstruct_bind_group, &[]);
+        pass.set_bind_group(
+            0,
+            resources
+                .reconstruct_bind_group
+                .as_ref()
+                .expect("reconstruction mode owns its bind group"),
+            &[],
+        );
         pass.dispatch_workgroups(
             resources.extent.0.div_ceil(WORKGROUP_SIZE),
             resources.extent.1.div_ceil(WORKGROUP_SIZE),
             1,
         );
         drop(pass);
-        self.frame_recorded = true;
     }
 
     pub(crate) fn record_debug_overlay(
@@ -627,7 +749,76 @@ impl VisibilityBufferRuntime {
                 .as_ref()
                 .expect("enabled visibility runtime owns overlay pipeline"),
         );
-        pass.set_bind_group(0, &resources.overlay_bind_group, &[]);
+        pass.set_bind_group(
+            0,
+            resources
+                .overlay_bind_group
+                .as_ref()
+                .expect("debug mode owns its overlay bind group"),
+            &[],
+        );
+        pass.draw(0..3, 0..1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_shading(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        hdr_view: &wgpu::TextureView,
+        material_view: &wgpu::TextureView,
+        velocity_view: &wgpu::TextureView,
+        albedo_view: &wgpu::TextureView,
+        draw_bind_group: &wgpu::BindGroup,
+        lighting: &wgpu::BindGroup,
+        global_materials: &wgpu::BindGroup,
+        joints: &wgpu::BindGroup,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        if !self.shading_active() {
+            return;
+        }
+        let Some(resources) = self.resources.as_ref() else {
+            return;
+        };
+        #[cfg(lean_mrt)]
+        let color_attachments: &[Option<wgpu::RenderPassColorAttachment<'_>>] = &[
+            Some(super::visibility_shading::load_attachment(hdr_view)),
+            None,
+            Some(super::visibility_shading::load_attachment(velocity_view)),
+            None,
+        ];
+        #[cfg(not(lean_mrt))]
+        let color_attachments: &[Option<wgpu::RenderPassColorAttachment<'_>>] = &[
+            Some(super::visibility_shading::load_attachment(hdr_view)),
+            Some(super::visibility_shading::load_attachment(material_view)),
+            Some(super::visibility_shading::load_attachment(velocity_view)),
+            Some(super::visibility_shading::load_attachment(albedo_view)),
+        ];
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("visibility_buffer_pbr_pass"),
+            color_attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(
+            self.shade_pipeline
+                .as_ref()
+                .expect("active visibility shading owns its pipeline"),
+        );
+        pass.set_bind_group(0, draw_bind_group, &[]);
+        pass.set_bind_group(1, lighting, &[]);
+        pass.set_bind_group(2, global_materials, &[]);
+        pass.set_bind_group(3, joints, &[]);
+        pass.set_bind_group(
+            4,
+            resources
+                .shade_bind_group
+                .as_ref()
+                .expect("active visibility shading owns its bind group"),
+            &[],
+        );
         pass.draw(0..3, 0..1);
     }
 
@@ -639,16 +830,26 @@ impl VisibilityBufferRuntime {
             .unwrap_or((0, 0));
         let bytes = target_bytes(width, height)
             .and_then(|visibility| {
-                (width as u64)
-                    .checked_mul(height as u64)?
-                    .checked_mul(DIAGNOSTIC_BYTES_PER_PIXEL)?
-                    .checked_add(visibility)
+                if self
+                    .resources
+                    .as_ref()
+                    .is_some_and(|resources| resources._diagnostic_texture.is_some())
+                {
+                    (width as u64)
+                        .checked_mul(height as u64)?
+                        .checked_mul(DIAGNOSTIC_BYTES_PER_PIXEL)?
+                        .checked_add(visibility)
+                } else {
+                    Some(visibility)
+                }
             })
             .unwrap_or(0);
+        let shading_active = self.shading_active();
         format!(
             concat!(
                 "{{\"requested_mode\":\"{}\",\"enabled\":{},",
-                "\"disabled_reason\":\"{}\",\"forward_authoritative\":true,",
+                "\"disabled_reason\":\"{}\",\"forward_authoritative\":{},",
+                "\"composition\":\"{}\",\"pbr_shading\":{},",
                 "\"eligible_draws\":{},\"compatibility_draws\":{},",
                 "\"width\":{},\"height\":{},\"allocated_bytes\":{},",
                 "\"debug_overlay\":{},\"frame_recorded\":{}}}"
@@ -656,6 +857,13 @@ impl VisibilityBufferRuntime {
             self.mode.name(),
             self.enabled,
             self.disabled_reason,
+            !shading_active,
+            if shading_active {
+                "visibility-eligible+forward-compatibility"
+            } else {
+                "forward-authoritative"
+            },
+            shading_active,
             self.eligible_draws,
             self.compatibility_draws,
             width,
@@ -1029,12 +1237,16 @@ mod tests {
         assert_eq!(parse_runtime_mode(Some("off")), RuntimeMode::Off);
         assert_eq!(parse_runtime_mode(Some("validate")), RuntimeMode::Validate);
         assert_eq!(parse_runtime_mode(Some("DEBUG")), RuntimeMode::Debug);
+        assert_eq!(parse_runtime_mode(Some("pbr")), RuntimeMode::Shade);
+        assert!(RuntimeMode::Shade.shades());
 
         let supported = wgpu::Features::PRIMITIVE_INDEX | wgpu::Features::TIMESTAMP_QUERY;
         let mut required = wgpu::Features::empty();
         request_feature_for_mode(RuntimeMode::Off, supported, &mut required);
         assert!(required.is_empty());
         request_feature_for_mode(RuntimeMode::Validate, supported, &mut required);
+        assert_eq!(required, wgpu::Features::PRIMITIVE_INDEX);
+        request_feature_for_mode(RuntimeMode::Shade, supported, &mut required);
         assert_eq!(required, wgpu::Features::PRIMITIVE_INDEX);
 
         let mut unsupported = wgpu::Features::empty();

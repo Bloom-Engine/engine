@@ -152,7 +152,8 @@ impl Renderer {
         // #27 qualification path. This is inert unless explicitly requested
         // with BLOOM_VISIBILITY_BUFFER and the negotiated device retained the
         // primitive-index feature. It reads the prepass depth but never writes
-        // it, and forward remains the authoritative scene renderer.
+        // it. Validate/debug keep forward authoritative; explicit shade mode
+        // replaces only admitted pixels after compatibility rendering.
         if self.gpu_driven.visibility_diagnostic_enabled()
             && !self.dbg_skip("prepass")
             && !self.dbg_skip("prepass_draws")
@@ -546,6 +547,21 @@ impl Renderer {
             }
         }
         profiler.end("main_hdr_pass");
+
+        if let Some(global_materials) = self.material_system.indirection.global_bind_group.as_ref()
+        {
+            self.gpu_driven.record_visibility_shading(
+                encoder,
+                profiler,
+                &self.hdr_rt_view,
+                &self.material_rt_view,
+                &self.velocity_rt_view,
+                &self.albedo_rt_view,
+                &self.lighting_bind_group,
+                global_materials,
+                &self.joint_bind_group,
+            );
+        }
 
         // EN-011 — render every registered planar reflection probe
         // BEFORE the main material pass so the probe RTs are

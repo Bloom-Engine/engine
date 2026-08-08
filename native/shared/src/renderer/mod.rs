@@ -69,6 +69,7 @@ mod texture_store;
 mod transmitted_shadows;
 mod transparent_gi;
 pub(crate) mod visibility_buffer;
+mod visibility_shading;
 mod vsm_gpu_casters;
 mod weighted_transparency;
 pub use occlusion::OcclusionCuller;

@@ -19,9 +19,9 @@ The implementation contract is now:
   vertices;
 - require the optional WebGPU `primitive-index` capability and preserve the
   existing 96-byte `Vertex3D` storage layout as six packed `vec4<u32>` lanes;
-- admit only static opaque/masked shared-arena geometry with Tier-A global
-  materials; blend, transmission, layered/custom, skinned, deforming, and
-  unsupported content stays on the forward compatibility path;
+- admit only static fully opaque shared-arena geometry with Tier-A global
+  materials; masked/cutout, blend, transmission, layered/custom, skinned,
+  deforming, and unsupported content stays on the forward compatibility path;
 - keep the forward MRT authoritative and the visibility path opt-in until an
   identical-camera A/B proves total depth/visibility/shading GPU time is no
   worse, image parity passes, and memory is bounded;
@@ -35,10 +35,11 @@ The shared CPU/WGSL ABI and perspective reconstruction live in
 `shaders/visibility_buffer/geometry.wgsl`. Hardware readback oracles now prove
 ID/winding rasterization, perspective reconstruction, non-zero first-index and
 base-vertex addressing, the exact packed `Vertex3D` byte layout, and all 24
-reconstructed vertex lanes. The opt-in runtime diagnostic now executes the
-depth-equal ID raster and full-screen attribute reconstruction against the
-real GPU-driven draw/index/vertex buffers. Production composition follows
-only after the completed PBR A/B passes the no-regression gate.
+reconstructed vertex lanes. The opt-in runtime now executes the depth-equal ID
+raster and full-screen reconstruction against the real GPU-driven
+draw/index/vertex buffers. Its PBR mode reconstructs the production fragment
+inputs and calls the authoritative `shade_main_scene` evaluator, rather than
+forking the material, shadow, clustered-light, IBL, velocity, or MRT logic.
 
 Runtime qualification is explicitly requested before engine attachment:
 
@@ -47,12 +48,18 @@ Runtime qualification is explicitly requested before engine attachment:
 - `BLOOM_VISIBILITY_BUFFER=debug` additionally overlays reconstructed normals
   on admitted pixels, leaving compatibility-rendered content intact so holes
   and routing mistakes are visible;
+- `BLOOM_VISIBILITY_BUFFER=shade` suppresses eligible forward fragments and
+  composes their full PBR/MRT results from the packed visibility target;
+  compatibility content remains forward-rendered and later opaque/custom
+  passes preserve their established ordering;
 - unset/off requests no `primitive-index` device feature, creates no pipeline,
   texture, or bind group, and records no visibility work.
 
-Both modes expose `visibility_buffer_runtime` in the public renderer capability
-report, including admitted/compatibility draw counts, current extent, exact
-owned bytes, activation reason, and whether the current frame recorded work.
+All modes expose `visibility_buffer_runtime` in the public renderer capability
+report, including admitted/compatibility draw counts, composition ownership,
+current extent, exact owned bytes, activation reason, and whether the current
+frame recorded work. Validate/debug own 16 bytes/pixel for IDs plus diagnostic
+normals; shade owns only the 8-byte ID target.
 
 ## Original problem statement (historical)
 

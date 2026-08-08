@@ -365,6 +365,8 @@ pub struct GpuDrivenRenderer {
     depth_pipeline: Option<wgpu::RenderPipeline>,
     main_pipeline: Option<wgpu::RenderPipeline>,
     main_prepassed_pipeline: Option<wgpu::RenderPipeline>,
+    main_visibility_compat_pipeline: Option<wgpu::RenderPipeline>,
+    main_visibility_compat_prepassed_pipeline: Option<wgpu::RenderPipeline>,
     visibility: super::visibility_buffer::VisibilityBufferRuntime,
     pub(super) draw_scratch: Vec<GpuDrawRecord>,
     pub stats: SubmissionStats,
@@ -418,70 +420,104 @@ impl GpuDrivenRenderer {
             .features()
             .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
 
-        let (cull_pipeline, depth_pipeline, main_pipeline, main_prepassed_pipeline) =
-            if let Some(global_layout) = global_material_layout.filter(|_| enabled) {
-                let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("gpu_driven_cull_shader"),
-                    source: wgpu::ShaderSource::Wgsl(CULL_SHADER.into()),
+        let (
+            cull_pipeline,
+            depth_pipeline,
+            main_pipeline,
+            main_prepassed_pipeline,
+            main_visibility_compat_pipeline,
+            main_visibility_compat_prepassed_pipeline,
+        ) = if let Some(global_layout) = global_material_layout.filter(|_| enabled) {
+            let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gpu_driven_cull_shader"),
+                source: wgpu::ShaderSource::Wgsl(CULL_SHADER.into()),
+            });
+            let cull_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("gpu_driven_cull_pipeline_layout"),
+                    bind_group_layouts: &[Some(&cull_layout)],
+                    immediate_size: 0,
                 });
-                let cull_pipeline_layout =
-                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some("gpu_driven_cull_pipeline_layout"),
-                        bind_group_layouts: &[Some(&cull_layout)],
-                        immediate_size: 0,
-                    });
-                let cull_pipeline =
-                    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some("gpu_driven_cull_pipeline"),
-                        layout: Some(&cull_pipeline_layout),
-                        module: &cull_shader,
-                        entry_point: Some("cs_cull"),
-                        compilation_options: Default::default(),
-                        cache: None,
-                    });
+            let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("gpu_driven_cull_pipeline"),
+                layout: Some(&cull_pipeline_layout),
+                module: &cull_shader,
+                entry_point: Some("cs_cull"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
-                let shader_source = make_gpu_scene_shader(scene_source);
-                let prepassed_source = strip_prepass_discard(&shader_source);
-                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("gpu_driven_scene_shader"),
-                    source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            let shader_source = make_gpu_scene_shader(scene_source);
+            let prepassed_source = strip_prepass_discard(&shader_source);
+            let visibility_compat_source = super::visibility_buffer::requested_mode()
+                .shades()
+                .then(|| {
+                    super::visibility_shading::make_forward_compatibility_shader(&shader_source)
                 });
-                let prepassed_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("gpu_driven_scene_prepassed_shader"),
-                    source: wgpu::ShaderSource::Wgsl(prepassed_source.into()),
+            let visibility_compat_prepassed_source = visibility_compat_source
+                .as_deref()
+                .map(strip_prepass_discard);
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gpu_driven_scene_shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
+            let prepassed_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gpu_driven_scene_prepassed_shader"),
+                source: wgpu::ShaderSource::Wgsl(prepassed_source.into()),
+            });
+            let visibility_compat_shader = visibility_compat_source.as_deref().map(|source| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("gpu_driven_visibility_compat_shader"),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                })
+            });
+            let visibility_compat_prepassed_shader =
+                visibility_compat_prepassed_source.as_deref().map(|source| {
+                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("gpu_driven_visibility_compat_prepassed_shader"),
+                        source: wgpu::ShaderSource::Wgsl(source.into()),
+                    })
                 });
-                let render_layout =
-                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some("gpu_driven_scene_pipeline_layout"),
-                        bind_group_layouts: &[
-                            Some(&draw_layout),
-                            Some(lighting_layout),
-                            Some(global_layout),
-                            Some(joint_layout),
-                        ],
-                        immediate_size: 0,
-                    });
-                (
-                    Some(cull_pipeline),
-                    Some(create_depth_pipeline(device, &render_layout, &shader)),
-                    Some(create_main_pipeline(
-                        device,
-                        &render_layout,
-                        &shader,
-                        &shader,
-                        false,
-                    )),
-                    Some(create_main_pipeline(
-                        device,
-                        &render_layout,
-                        &shader,
-                        &prepassed_shader,
-                        true,
-                    )),
-                )
-            } else {
-                (None, None, None, None)
-            };
+            let render_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gpu_driven_scene_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&draw_layout),
+                    Some(lighting_layout),
+                    Some(global_layout),
+                    Some(joint_layout),
+                ],
+                immediate_size: 0,
+            });
+            let visibility_compat_pipeline = visibility_compat_shader.as_ref().map(|fragment| {
+                create_main_pipeline(device, &render_layout, &shader, fragment, false)
+            });
+            let visibility_compat_prepassed_pipeline =
+                visibility_compat_prepassed_shader.as_ref().map(|fragment| {
+                    create_main_pipeline(device, &render_layout, &shader, fragment, true)
+                });
+            (
+                Some(cull_pipeline),
+                Some(create_depth_pipeline(device, &render_layout, &shader)),
+                Some(create_main_pipeline(
+                    device,
+                    &render_layout,
+                    &shader,
+                    &shader,
+                    false,
+                )),
+                Some(create_main_pipeline(
+                    device,
+                    &render_layout,
+                    &shader,
+                    &prepassed_shader,
+                    true,
+                )),
+                visibility_compat_pipeline,
+                visibility_compat_prepassed_pipeline,
+            )
+        } else {
+            (None, None, None, None, None, None)
+        };
 
         let visibility_source = (super::visibility_buffer::requested_mode().requested() && enabled)
             .then(|| make_gpu_scene_shader(scene_source));
@@ -512,6 +548,8 @@ impl GpuDrivenRenderer {
             depth_pipeline,
             main_pipeline,
             main_prepassed_pipeline,
+            main_visibility_compat_pipeline,
+            main_visibility_compat_prepassed_pipeline,
             visibility,
             draw_scratch: Vec::with_capacity(draw_capacity),
             stats: SubmissionStats::default(),
@@ -721,10 +759,11 @@ impl GpuDrivenRenderer {
         joints: &'a wgpu::BindGroup,
         prepassed: bool,
     ) {
-        let pipeline = if prepassed {
-            self.main_prepassed_pipeline.as_ref()
-        } else {
-            self.main_pipeline.as_ref()
+        let pipeline = match (prepassed, self.visibility.shading_active()) {
+            (true, true) => self.main_visibility_compat_prepassed_pipeline.as_ref(),
+            (false, true) => self.main_visibility_compat_pipeline.as_ref(),
+            (true, false) => self.main_prepassed_pipeline.as_ref(),
+            (false, false) => self.main_pipeline.as_ref(),
         };
         let Some(pipeline) = pipeline else {
             return;
@@ -803,13 +842,51 @@ impl GpuDrivenRenderer {
             );
         }
         profiler.end("visibility_raster_pass");
-        profiler.begin("visibility_reconstruct_pass");
-        {
-            let timestamps = profiler.compute_pass_timestamp_writes("visibility_reconstruct_pass");
-            self.visibility.record_reconstruct(encoder, timestamps);
+        if self.visibility.reconstruction_enabled() {
+            profiler.begin("visibility_reconstruct_pass");
+            {
+                let timestamps =
+                    profiler.compute_pass_timestamp_writes("visibility_reconstruct_pass");
+                self.visibility.record_reconstruct(encoder, timestamps);
+            }
+            profiler.end("visibility_reconstruct_pass");
         }
-        profiler.end("visibility_reconstruct_pass");
         creations
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_visibility_shading(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::Profiler,
+        hdr_view: &wgpu::TextureView,
+        material_view: &wgpu::TextureView,
+        velocity_view: &wgpu::TextureView,
+        albedo_view: &wgpu::TextureView,
+        lighting: &wgpu::BindGroup,
+        global_materials: &wgpu::BindGroup,
+        joints: &wgpu::BindGroup,
+    ) {
+        if !self.visibility.shading_active() {
+            return;
+        }
+        profiler.begin("visibility_pbr_pass");
+        {
+            let timestamps = profiler.pass_timestamp_writes("visibility_pbr_pass");
+            self.visibility.record_shading(
+                encoder,
+                hdr_view,
+                material_view,
+                velocity_view,
+                albedo_view,
+                &self.draw_bind_group,
+                lighting,
+                global_materials,
+                joints,
+                timestamps,
+            );
+        }
+        profiler.end("visibility_pbr_pass");
     }
 
     pub(crate) fn record_visibility_debug_overlay(
