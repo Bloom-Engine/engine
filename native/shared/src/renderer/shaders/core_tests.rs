@@ -1,4 +1,10 @@
-use super::core::{scene_refractive_shader_source, SCENE_SHADER};
+use super::core::{scene_refractive_shader_source, SCENE_SHADER, SHADER_2D};
+
+#[test]
+fn extracted_batched_2d_shader_parses() {
+    wgpu::naga::front::wgsl::parse_str(SHADER_2D)
+        .unwrap_or_else(|error| panic!("batched 2D WGSL failed: {error:?}"));
+}
 
 #[test]
 fn scene_vertex_shader_preserves_the_missing_tangent_sentinel() {
