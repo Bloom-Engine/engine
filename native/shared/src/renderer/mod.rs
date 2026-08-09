@@ -1530,6 +1530,10 @@ pub struct Renderer {
     refractive_reflections_active: bool,
     /// EN-044 — depth-only prepass over the same cached-model draws.
     pub scene_depth_pipeline: wgpu::RenderPipeline,
+    /// Shade-mode depth-only variant whose inert color slot makes it
+    /// compatible with the inline packed visibility attachment.
+    #[cfg(not(target_arch = "wasm32"))]
+    scene_depth_visibility_pipeline: Option<wgpu::RenderPipeline>,
     /// EN-044 — cached-model pipeline for the prepassed path (no depth write, Equal).
     pub scene_pipeline_prepassed: wgpu::RenderPipeline,
     pub scene_material_layout: wgpu::BindGroupLayout,
@@ -3817,41 +3821,13 @@ impl Renderer {
         // scene_pipeline (the wind must displace the same way, or the depths would
         // not match); no colour targets, and a fragment stage that only honours the
         // alpha cutout. Cheap: one depth write per fragment, no MRT, no lighting.
-        let scene_depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene_depth_prepass_pipeline"),
-            layout: Some(&scene_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &scene_shader,
-                entry_point: Some("vs_main_scene"),
-                buffers: &[Vertex3D::desc()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &scene_shader,
-                entry_point: Some("fs_depth_prepass"),
-                targets: &[],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let scene_depth_pipeline = scene_pass::create_scene_depth_pipeline(
+            &device,
+            &scene_pipeline_layout,
+            &scene_shader,
+            "scene_depth_prepass_pipeline",
+            false,
+        );
 
         // EN-044 — the cached-model pipeline for the PREPASSED path.
         //
@@ -7515,6 +7491,16 @@ impl Renderer {
             material_system.indirection.global_layout.as_ref(),
             &gpu_scene_shader_source,
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        let scene_depth_visibility_pipeline = gpu_driven.visibility_routing_enabled().then(|| {
+            scene_pass::create_scene_depth_pipeline(
+                &device,
+                &scene_pipeline_layout,
+                &scene_shader,
+                "scene_depth_visibility_prepass_pipeline",
+                true,
+            )
+        });
         let vsm_gpu_casters = vsm_gpu_casters::VsmGpuCasters::new(&device, gpu_driven.enabled());
         let transient_pool = transient::TransientPool::new();
         let frame_plan_cache = graph::PlanCache::new();
@@ -8126,6 +8112,8 @@ impl Renderer {
             scene_refractive_reflection_params_buffer: None,
             refractive_reflections_active: false,
             scene_depth_pipeline,
+            #[cfg(not(target_arch = "wasm32"))]
+            scene_depth_visibility_pipeline,
             scene_pipeline_prepassed,
             froxel,
             scene_material_layout,

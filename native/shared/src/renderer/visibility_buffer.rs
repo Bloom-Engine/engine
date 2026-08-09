@@ -439,6 +439,10 @@ impl VisibilityBufferRuntime {
         self.enabled && self.mode.shades() && self.frame_recorded
     }
 
+    pub(crate) const fn shading_requested(&self) -> bool {
+        self.enabled && self.mode.shades()
+    }
+
     pub(crate) fn begin_frame(&mut self) {
         self.frame_recorded = false;
         self.eligible_draws = 0;
@@ -450,7 +454,6 @@ impl VisibilityBufferRuntime {
         &mut self,
         device: &wgpu::Device,
         extent: (u32, u32),
-        depth_view: &wgpu::TextureView,
         vertex_buffer: &wgpu::Buffer,
         index_buffer: &wgpu::Buffer,
         draw_buffer: &wgpu::Buffer,
@@ -574,10 +577,6 @@ impl VisibilityBufferRuntime {
                             binding: 3,
                             resource: draw_buffer.as_entire_binding(),
                         },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::TextureView(depth_view),
-                        },
                     ],
                 }),
             )
@@ -611,54 +610,39 @@ impl VisibilityBufferRuntime {
         self.compatibility_draws = compatibility;
     }
 
+    pub(crate) fn raster_attachment(&self) -> Option<wgpu::RenderPassColorAttachment<'_>> {
+        let resources = self.resources.as_ref()?;
+        Some(wgpu::RenderPassColorAttachment {
+            view: &resources.visibility_view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: u32::MAX as f64,
+                    g: u32::MAX as f64,
+                    b: 0.0,
+                    a: 0.0,
+                }),
+                store: wgpu::StoreOp::Store,
+            },
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn record_raster(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        depth_view: &wgpu::TextureView,
-        draw_bind_group: &wgpu::BindGroup,
-        lighting: &wgpu::BindGroup,
-        global_materials: &wgpu::BindGroup,
-        joints: &wgpu::BindGroup,
-        vertex_buffer: &wgpu::Buffer,
-        index_buffer: &wgpu::Buffer,
-        indirect_buffer: &wgpu::Buffer,
-        counter_buffer: &wgpu::Buffer,
+    pub(crate) fn draw_raster<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        draw_bind_group: &'a wgpu::BindGroup,
+        lighting: &'a wgpu::BindGroup,
+        global_materials: &'a wgpu::BindGroup,
+        joints: &'a wgpu::BindGroup,
+        vertex_buffer: &'a wgpu::Buffer,
+        index_buffer: &'a wgpu::Buffer,
+        indirect_buffer: &'a wgpu::Buffer,
+        counter_buffer: &'a wgpu::Buffer,
         draw_count: u32,
         count_supported: bool,
-        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
-        let Some(resources) = self.resources.as_ref() else {
-            return;
-        };
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("visibility_buffer_runtime_raster_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &resources.visibility_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: u32::MAX as f64,
-                        g: u32::MAX as f64,
-                        b: 0.0,
-                        a: 0.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
         pass.set_pipeline(
             self.raster_pipeline
                 .as_ref()
@@ -681,8 +665,62 @@ impl VisibilityBufferRuntime {
         } else {
             pass.multi_draw_indexed_indirect(indirect_buffer, 0, draw_count);
         }
-        drop(pass);
+    }
+
+    pub(crate) fn mark_raster_recorded(&mut self) {
         self.frame_recorded = true;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_raster(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        depth_view: &wgpu::TextureView,
+        draw_bind_group: &wgpu::BindGroup,
+        lighting: &wgpu::BindGroup,
+        global_materials: &wgpu::BindGroup,
+        joints: &wgpu::BindGroup,
+        vertex_buffer: &wgpu::Buffer,
+        index_buffer: &wgpu::Buffer,
+        indirect_buffer: &wgpu::Buffer,
+        counter_buffer: &wgpu::Buffer,
+        draw_count: u32,
+        count_supported: bool,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        let Some(attachment) = self.raster_attachment() else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("visibility_buffer_runtime_raster_pass"),
+            color_attachments: &[Some(attachment)],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.draw_raster(
+            &mut pass,
+            draw_bind_group,
+            lighting,
+            global_materials,
+            joints,
+            vertex_buffer,
+            index_buffer,
+            indirect_buffer,
+            counter_buffer,
+            draw_count,
+            count_supported,
+        );
+        drop(pass);
+        self.mark_raster_recorded();
     }
 
     pub(crate) fn record_reconstruct(
@@ -765,19 +803,13 @@ impl VisibilityBufferRuntime {
         pass.draw(0..3, 0..1);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn record_shading(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        hdr_view: &wgpu::TextureView,
-        material_view: &wgpu::TextureView,
-        velocity_view: &wgpu::TextureView,
-        albedo_view: &wgpu::TextureView,
-        draw_bind_group: &wgpu::BindGroup,
-        lighting: &wgpu::BindGroup,
-        global_materials: &wgpu::BindGroup,
-        joints: &wgpu::BindGroup,
-        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    pub(crate) fn draw_shading<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        draw_bind_group: &'a wgpu::BindGroup,
+        lighting: &'a wgpu::BindGroup,
+        global_materials: &'a wgpu::BindGroup,
+        joints: &'a wgpu::BindGroup,
     ) {
         if !self.shading_active() {
             return;
@@ -785,28 +817,6 @@ impl VisibilityBufferRuntime {
         let Some(resources) = self.resources.as_ref() else {
             return;
         };
-        #[cfg(lean_mrt)]
-        let color_attachments: &[Option<wgpu::RenderPassColorAttachment<'_>>] = &[
-            Some(super::visibility_shading::load_attachment(hdr_view)),
-            None,
-            Some(super::visibility_shading::load_attachment(velocity_view)),
-            None,
-        ];
-        #[cfg(not(lean_mrt))]
-        let color_attachments: &[Option<wgpu::RenderPassColorAttachment<'_>>] = &[
-            Some(super::visibility_shading::load_attachment(hdr_view)),
-            Some(super::visibility_shading::load_attachment(material_view)),
-            Some(super::visibility_shading::load_attachment(velocity_view)),
-            Some(super::visibility_shading::load_attachment(albedo_view)),
-        ];
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("visibility_buffer_pbr_pass"),
-            color_attachments,
-            depth_stencil_attachment: None,
-            timestamp_writes,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
         pass.set_pipeline(
             self.shade_pipeline
                 .as_ref()
@@ -880,7 +890,7 @@ impl VisibilityBufferRuntime {
     }
 }
 
-fn make_visibility_raster_shader(gpu_scene_source: &str) -> String {
+pub(super) fn add_visibility_draw_id(gpu_scene_source: &str) -> String {
     const OUTPUT_END: &str = "    @location(8) @interpolate(flat) draw_flags: u32,\n};";
     const OUTPUT_WITH_ID: &str = concat!(
         "    @location(8) @interpolate(flat) draw_flags: u32,\n",
@@ -908,10 +918,14 @@ fn make_visibility_raster_shader(gpu_scene_source: &str) -> String {
     assert_eq!(gpu_scene_source.matches(OUTPUT_END).count(), 1);
     assert_eq!(gpu_scene_source.matches(SKINNED_RETURN).count(), 1);
     assert_eq!(gpu_scene_source.matches(STATIC_RETURN).count(), 1);
-    let source = gpu_scene_source
+    gpu_scene_source
         .replace(OUTPUT_END, OUTPUT_WITH_ID)
         .replace(SKINNED_RETURN, SKINNED_WITH_ID)
-        .replace(STATIC_RETURN, STATIC_WITH_ID);
+        .replace(STATIC_RETURN, STATIC_WITH_ID)
+}
+
+fn make_visibility_raster_shader(gpu_scene_source: &str) -> String {
+    let source = add_visibility_draw_id(gpu_scene_source);
     format!(
         "enable primitive_index;\n{source}\n{}",
         r#"
@@ -1273,8 +1287,11 @@ mod tests {
         let generated =
             super::super::gpu_driven::make_gpu_scene_shader(super::super::shaders::SCENE_SHADER);
         let raster = make_visibility_raster_shader(&generated);
+        let depth = super::super::visibility_shading::make_visibility_depth_shader(&generated);
         wgpu::naga::front::wgsl::parse_str(&raster)
             .unwrap_or_else(|error| panic!("visibility runtime raster WGSL failed: {error:?}"));
+        wgpu::naga::front::wgsl::parse_str(&depth)
+            .unwrap_or_else(|error| panic!("visibility depth WGSL failed: {error:?}"));
         wgpu::naga::front::wgsl::parse_str(RUNTIME_RECONSTRUCT_WGSL).unwrap_or_else(|error| {
             panic!("visibility runtime reconstruction WGSL failed: {error:?}")
         });
@@ -1283,6 +1300,7 @@ mod tests {
         assert!(raster.starts_with("enable primitive_index;"));
         assert!(raster.contains("out.draw_id = draw_index"));
         assert!(raster.contains("(in.draw_flags & 2u) == 0u"));
+        assert!(depth.contains("return vec2<u32>(0xffffffffu, 0xffffffffu)"));
         assert!(RUNTIME_RECONSTRUCT_WGSL.contains("arrayLength(&vertices.records)"));
     }
 

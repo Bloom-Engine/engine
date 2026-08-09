@@ -361,7 +361,6 @@ pub struct GpuDrivenRenderer {
     draw_capacity: usize,
     draw_buffer: wgpu::Buffer,
     indirect_buffer: wgpu::Buffer,
-    visibility_indirect_buffer: Option<wgpu::Buffer>,
     compatibility_indirect_buffer: Option<wgpu::Buffer>,
     cull_params: wgpu::Buffer,
     counter_buffer: wgpu::Buffer,
@@ -403,13 +402,6 @@ impl GpuDrivenRenderer {
         let draw_buffer = create_draw_buffer(device, draw_capacity);
         let indirect_buffer =
             create_indirect_buffer(device, draw_capacity, "gpu_driven_indirect_commands");
-        let visibility_indirect_buffer = routed_visibility.then(|| {
-            create_indirect_buffer(
-                device,
-                draw_capacity,
-                "gpu_driven_visibility_indirect_commands",
-            )
-        });
         let compatibility_indirect_buffer = routed_visibility.then(|| {
             create_indirect_buffer(
                 device,
@@ -438,7 +430,6 @@ impl GpuDrivenRenderer {
             &cull_layout,
             &draw_buffer,
             &indirect_buffer,
-            visibility_indirect_buffer.as_ref(),
             compatibility_indirect_buffer.as_ref(),
             &cull_params,
             &counter_buffer,
@@ -482,6 +473,15 @@ impl GpuDrivenRenderer {
             let visibility_compat_prepassed_source = visibility_compat_source
                 .as_deref()
                 .map(strip_prepass_discard);
+            let visibility_depth_shader = routed_visibility.then(|| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("gpu_driven_visibility_depth_shader"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        super::visibility_shading::make_visibility_depth_shader(&shader_source)
+                            .into(),
+                    ),
+                })
+            });
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("gpu_driven_scene_shader"),
                 source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -522,7 +522,12 @@ impl GpuDrivenRenderer {
                 });
             (
                 Some(cull_pipeline),
-                Some(create_depth_pipeline(device, &render_layout, &shader)),
+                Some(create_depth_pipeline(
+                    device,
+                    &render_layout,
+                    visibility_depth_shader.as_ref().unwrap_or(&shader),
+                    routed_visibility,
+                )),
                 Some(create_main_pipeline(
                     device,
                     &render_layout,
@@ -563,7 +568,6 @@ impl GpuDrivenRenderer {
             draw_capacity,
             draw_buffer,
             indirect_buffer,
-            visibility_indirect_buffer,
             compatibility_indirect_buffer,
             cull_params,
             counter_buffer,
@@ -600,7 +604,7 @@ impl GpuDrivenRenderer {
     }
 
     pub(crate) fn visibility_routing_enabled(&self) -> bool {
-        self.visibility_indirect_buffer.is_some() && self.compatibility_indirect_buffer.is_some()
+        self.compatibility_indirect_buffer.is_some()
     }
 
     pub(super) fn shared_geometry(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
@@ -742,11 +746,9 @@ impl GpuDrivenRenderer {
         } else {
             self.stats.frustum_culled_oracle as f64 / classified as f64
         };
-        let routed_streams = self.visibility_indirect_buffer.is_some()
-            && self.compatibility_indirect_buffer.is_some();
+        let routed_streams = self.compatibility_indirect_buffer.is_some();
         let routed_indirect_bytes = if routed_streams {
-            (self.draw_capacity * std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() * 2)
-                as u64
+            (self.draw_capacity * std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>()) as u64
         } else {
             0
         };
@@ -783,15 +785,16 @@ impl GpuDrivenRenderer {
         lighting: &'a wgpu::BindGroup,
         global_materials: &'a wgpu::BindGroup,
         joints: &'a wgpu::BindGroup,
-    ) {
+    ) -> bool {
         let Some(pipeline) = self.depth_pipeline.as_ref() else {
-            return;
+            return false;
         };
         if self.draw_scratch.is_empty() {
-            return;
+            return false;
         }
         pass.set_pipeline(pipeline);
         self.bind_and_draw(pass, lighting, global_materials, joints, IndirectRoute::All);
+        self.visibility.shading_requested()
     }
 
     pub fn draw_main<'a>(
@@ -832,6 +835,59 @@ impl GpuDrivenRenderer {
         self.visibility.enabled()
     }
 
+    fn update_visibility_draw_counts(&mut self) -> u32 {
+        let eligible = self
+            .draw_scratch
+            .iter()
+            .filter(|draw| {
+                bitcast_draw_flags(draw.bounds_min[3]) & DRAW_FLAG_VISIBILITY_ELIGIBLE != 0
+            })
+            .count() as u32;
+        let compatibility = self
+            .stats
+            .compatibility
+            .saturating_add(self.draw_scratch.len() as u32 - eligible);
+        self.visibility.set_draw_counts(eligible, compatibility);
+        eligible
+    }
+
+    pub(crate) fn prepare_visibility_shading(
+        &mut self,
+        device: &wgpu::Device,
+        extent: (u32, u32),
+    ) -> super::visibility_buffer::ResourceCreations {
+        if !self.visibility.shading_requested() || self.draw_scratch.is_empty() {
+            return super::visibility_buffer::ResourceCreations::default();
+        }
+        if self.update_visibility_draw_counts() == 0 {
+            return super::visibility_buffer::ResourceCreations::default();
+        }
+        self.visibility.ensure_resources(
+            device,
+            extent,
+            &self.arena.vertex,
+            &self.arena.index,
+            &self.draw_buffer,
+            self.draw_capacity,
+            self.arena.generation,
+        )
+    }
+
+    pub(crate) fn visibility_raster_attachment(
+        &self,
+    ) -> Option<wgpu::RenderPassColorAttachment<'_>> {
+        self.visibility
+            .shading_requested()
+            .then(|| self.visibility.raster_attachment())
+            .flatten()
+    }
+
+    pub(crate) fn finish_visibility_raster_inline(&mut self, recorded: bool) {
+        if recorded {
+            self.visibility.mark_raster_recorded();
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_visibility_diagnostic(
         &mut self,
@@ -847,29 +903,20 @@ impl GpuDrivenRenderer {
         if !self.visibility.enabled() {
             return super::visibility_buffer::ResourceCreations::default();
         }
+        if self.visibility.shading_requested() {
+            return super::visibility_buffer::ResourceCreations::default();
+        }
         if self.draw_scratch.is_empty() {
             self.visibility.set_draw_counts(0, self.stats.compatibility);
             return super::visibility_buffer::ResourceCreations::default();
         }
-        let eligible = self
-            .draw_scratch
-            .iter()
-            .filter(|draw| {
-                bitcast_draw_flags(draw.bounds_min[3]) & DRAW_FLAG_VISIBILITY_ELIGIBLE != 0
-            })
-            .count() as u32;
-        let compatibility = self
-            .stats
-            .compatibility
-            .saturating_add(self.draw_scratch.len() as u32 - eligible);
-        self.visibility.set_draw_counts(eligible, compatibility);
+        let eligible = self.update_visibility_draw_counts();
         if eligible == 0 {
             return super::visibility_buffer::ResourceCreations::default();
         }
         let creations = self.visibility.ensure_resources(
             device,
             extent,
-            depth_view,
             &self.arena.vertex,
             &self.arena.index,
             &self.draw_buffer,
@@ -879,10 +926,6 @@ impl GpuDrivenRenderer {
         profiler.begin("visibility_raster_pass");
         {
             let timestamps = profiler.pass_timestamp_writes("visibility_raster_pass");
-            let visibility_indirect = self
-                .visibility_indirect_buffer
-                .as_ref()
-                .unwrap_or(&self.indirect_buffer);
             self.visibility.record_raster(
                 encoder,
                 depth_view,
@@ -892,7 +935,7 @@ impl GpuDrivenRenderer {
                 joints,
                 &self.arena.vertex,
                 &self.arena.index,
-                visibility_indirect,
+                &self.indirect_buffer,
                 &self.counter_buffer,
                 self.draw_scratch.len() as u32,
                 self.count_supported,
@@ -912,39 +955,20 @@ impl GpuDrivenRenderer {
         creations
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn record_visibility_shading(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        profiler: &mut crate::profiler::Profiler,
-        hdr_view: &wgpu::TextureView,
-        material_view: &wgpu::TextureView,
-        velocity_view: &wgpu::TextureView,
-        albedo_view: &wgpu::TextureView,
-        lighting: &wgpu::BindGroup,
-        global_materials: &wgpu::BindGroup,
-        joints: &wgpu::BindGroup,
+    pub(crate) fn draw_visibility_shading<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        lighting: &'a wgpu::BindGroup,
+        global_materials: &'a wgpu::BindGroup,
+        joints: &'a wgpu::BindGroup,
     ) {
-        if !self.visibility.shading_active() {
-            return;
-        }
-        profiler.begin("visibility_pbr_pass");
-        {
-            let timestamps = profiler.pass_timestamp_writes("visibility_pbr_pass");
-            self.visibility.record_shading(
-                encoder,
-                hdr_view,
-                material_view,
-                velocity_view,
-                albedo_view,
-                &self.draw_bind_group,
-                lighting,
-                global_materials,
-                joints,
-                timestamps,
-            );
-        }
-        profiler.end("visibility_pbr_pass");
+        self.visibility.draw_shading(
+            pass,
+            &self.draw_bind_group,
+            lighting,
+            global_materials,
+            joints,
+        );
     }
 
     pub(crate) fn record_visibility_debug_overlay(
@@ -1002,12 +1026,7 @@ impl GpuDrivenRenderer {
         self.draw_buffer = create_draw_buffer(device, self.draw_capacity);
         self.indirect_buffer =
             create_indirect_buffer(device, self.draw_capacity, "gpu_driven_indirect_commands");
-        if self.visibility_indirect_buffer.is_some() {
-            self.visibility_indirect_buffer = Some(create_indirect_buffer(
-                device,
-                self.draw_capacity,
-                "gpu_driven_visibility_indirect_commands",
-            ));
+        if self.compatibility_indirect_buffer.is_some() {
             self.compatibility_indirect_buffer = Some(create_indirect_buffer(
                 device,
                 self.draw_capacity,
@@ -1019,7 +1038,6 @@ impl GpuDrivenRenderer {
             &self.cull_layout,
             &self.draw_buffer,
             &self.indirect_buffer,
-            self.visibility_indirect_buffer.as_ref(),
             self.compatibility_indirect_buffer.as_ref(),
             &self.cull_params,
             &self.counter_buffer,
@@ -1195,10 +1213,7 @@ fn create_cull_layout(device: &wgpu::Device, routed_visibility: bool) -> wgpu::B
         storage(3, false, wgpu::ShaderStages::COMPUTE),
     ];
     if routed_visibility {
-        entries.extend([
-            storage(4, false, wgpu::ShaderStages::COMPUTE),
-            storage(5, false, wgpu::ShaderStages::COMPUTE),
-        ]);
+        entries.push(storage(4, false, wgpu::ShaderStages::COMPUTE));
     }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("gpu_driven_cull_layout"),
@@ -1242,16 +1257,10 @@ fn create_cull_bind_group(
     layout: &wgpu::BindGroupLayout,
     draws: &wgpu::Buffer,
     indirect: &wgpu::Buffer,
-    visibility_indirect: Option<&wgpu::Buffer>,
     compatibility_indirect: Option<&wgpu::Buffer>,
     params: &wgpu::Buffer,
     counters: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
-    assert_eq!(
-        visibility_indirect.is_some(),
-        compatibility_indirect.is_some(),
-        "visibility routing buffers are an atomic pair"
-    );
     let mut entries = vec![
         wgpu::BindGroupEntry {
             binding: 0,
@@ -1270,17 +1279,11 @@ fn create_cull_bind_group(
             resource: counters.as_entire_binding(),
         },
     ];
-    if let (Some(visibility), Some(compatibility)) = (visibility_indirect, compatibility_indirect) {
-        entries.extend([
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: visibility.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: compatibility.as_entire_binding(),
-            },
-        ]);
+    if let Some(compatibility) = compatibility_indirect {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 4,
+            resource: compatibility.as_entire_binding(),
+        });
     }
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("gpu_driven_cull_bind_group"),
@@ -1293,7 +1296,15 @@ fn create_depth_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
+    visibility_target: bool,
 ) -> wgpu::RenderPipeline {
+    let targets = [visibility_target.then_some(wgpu::ColorTargetState {
+        format: super::visibility_buffer::VISIBILITY_FORMAT,
+        blend: None,
+        // Shade mode's specialized depth fragment writes packed IDs while
+        // priming depth; the ordinary path has no color target at all.
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("gpu_driven_depth_pipeline"),
         layout: Some(layout),
@@ -1306,7 +1317,9 @@ fn create_depth_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: shader,
             entry_point: Some("fs_depth_prepass"),
-            targets: &[],
+            // Slot zero is normally unattached. Shade mode declares the
+            // packed-ID target so one traversal owns both depth and IDs.
+            targets: &targets,
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -1620,8 +1633,7 @@ fn cull_shader_source(routed_visibility: bool) -> std::borrow::Cow<'static, str>
         "@group(0) @binding(3) var<storage, read_write> counters: Counters;";
     const ROUTED_BINDINGS: &str = concat!(
         "@group(0) @binding(3) var<storage, read_write> counters: Counters;\n",
-        "@group(0) @binding(4) var<storage, read_write> visibility_indirect: IndirectTable;\n",
-        "@group(0) @binding(5) var<storage, read_write> compatibility_indirect: IndirectTable;"
+        "@group(0) @binding(4) var<storage, read_write> compatibility_indirect: IndirectTable;"
     );
     const COMMAND_ANCHOR: &str = r#"    indirect.commands[draw_index] = DrawIndexedIndirect(
         draw.draw.x,
@@ -1638,13 +1650,6 @@ fn cull_shader_source(routed_visibility: bool) -> std::borrow::Cow<'static, str>
         draw_index
     );
     let visibility_eligible = (bitcast<u32>(draw.bounds_min.w) & 2u) != 0u;
-    visibility_indirect.commands[draw_index] = DrawIndexedIndirect(
-        draw.draw.x,
-        select(0u, 1u, visible && visibility_eligible),
-        draw.draw.y,
-        bitcast<i32>(draw.draw.z),
-        draw_index
-    );
     compatibility_indirect.commands[draw_index] = DrawIndexedIndirect(
         draw.draw.x,
         select(0u, 1u, visible && !visibility_eligible),
@@ -1727,10 +1732,10 @@ mod tests {
             .unwrap_or_else(|error| panic!("routed cull WGSL failed: {error:?}"));
         assert!(!ordinary.contains("visibility_indirect"));
         assert!(!ordinary.contains("compatibility_indirect"));
-        assert!(routed.contains("visible && visibility_eligible"));
+        assert!(!routed.contains("visibility_indirect"));
         assert!(routed.contains("visible && !visibility_eligible"));
         assert_eq!(routed.matches("first_instance: u32").count(), 1);
-        assert_eq!(routed.matches("draw_index\n    );").count(), 3);
+        assert_eq!(routed.matches("draw_index\n    );").count(), 2);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1820,7 +1825,6 @@ mod tests {
             })
         };
         let all = make_commands("routed_cull_oracle_all");
-        let visibility = make_commands("routed_cull_oracle_visibility");
         let compatibility = make_commands("routed_cull_oracle_compatibility");
         let layout = create_cull_layout(&device, true);
         let bind_group = create_cull_bind_group(
@@ -1828,7 +1832,6 @@ mod tests {
             &layout,
             &draws_buffer,
             &all,
-            Some(&visibility),
             Some(&compatibility),
             &params_buffer,
             &counters,
@@ -1850,11 +1853,10 @@ mod tests {
             compilation_options: Default::default(),
             cache: None,
         });
-        let readbacks = std::array::from_fn::<_, 3, _>(|index| {
+        let readbacks = std::array::from_fn::<_, 2, _>(|index| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(match index {
                     0 => "routed_cull_oracle_all_readback",
-                    1 => "routed_cull_oracle_visibility_readback",
                     _ => "routed_cull_oracle_compatibility_readback",
                 }),
                 size: command_bytes,
@@ -1874,11 +1876,7 @@ mod tests {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
-        for (source, target) in [
-            (&all, &readbacks[0]),
-            (&visibility, &readbacks[1]),
-            (&compatibility, &readbacks[2]),
-        ] {
+        for (source, target) in [(&all, &readbacks[0]), (&compatibility, &readbacks[1])] {
             encoder.copy_buffer_to_buffer(source, 0, target, 0, command_bytes);
         }
         queue.submit(std::iter::once(encoder.finish()));
@@ -1904,15 +1902,12 @@ mod tests {
             words
         };
         let all = read(&readbacks[0]);
-        let visibility = read(&readbacks[1]);
-        let compatibility = read(&readbacks[2]);
+        let compatibility = read(&readbacks[1]);
         let instance_counts = |words: &[u32]| [words[1], words[6], words[11]];
         let first_instances = |words: &[u32]| [words[4], words[9], words[14]];
         assert_eq!(instance_counts(&all), [1, 1, 0]);
-        assert_eq!(instance_counts(&visibility), [1, 0, 0]);
         assert_eq!(instance_counts(&compatibility), [0, 1, 0]);
         assert_eq!(first_instances(&all), [0, 1, 2]);
-        assert_eq!(first_instances(&visibility), [0, 1, 2]);
         assert_eq!(first_instances(&compatibility), [0, 1, 2]);
     }
 }

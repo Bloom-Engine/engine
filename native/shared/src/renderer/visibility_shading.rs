@@ -55,16 +55,6 @@ pub(super) fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             storage(1),
             storage(2),
             storage(3),
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
         ],
     })
 }
@@ -104,7 +94,13 @@ pub(super) fn create_pipeline(
             compilation_options: Default::default(),
         }),
         primitive: Default::default(),
-        depth_stencil: None,
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: super::DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
         multisample: Default::default(),
         multiview_mask: None,
         cache: None,
@@ -116,18 +112,6 @@ fn target(format: wgpu::TextureFormat, alpha_blend: bool) -> wgpu::ColorTargetSt
         format,
         blend: alpha_blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
         write_mask: wgpu::ColorWrites::ALL,
-    }
-}
-
-pub(super) fn load_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
-    wgpu::RenderPassColorAttachment {
-        view,
-        resolve_target: None,
-        depth_slice: None,
-        ops: wgpu::Operations {
-            load: wgpu::LoadOp::Load,
-            store: wgpu::StoreOp::Store,
-        },
     }
 }
 
@@ -368,7 +352,6 @@ struct VisibilityIndexTable { values: array<u32>, };
 @group(4) @binding(1) var<storage, read> visibility_shade_vertices: VisibilityVertexTable;
 @group(4) @binding(2) var<storage, read> visibility_shade_indices: VisibilityIndexTable;
 @group(4) @binding(3) var<storage, read> visibility_shade_draws: GpuDrawTable;
-@group(4) @binding(4) var visibility_shade_final_depth: texture_depth_2d;
 
 @vertex
 fn vs_visibility_shade(@builtin(vertex_index) vertex_index: u32) -> VisibilityVertexOut {
@@ -440,16 +423,6 @@ fn fs_visibility_shade(in: VisibilityVertexOut) -> SceneOut {
     );
     let bary = bloom_perspective_barycentrics(point_ndc, clip0, clip1, clip2);
     let current_clip = bloom_interpolate4(clip0, clip1, clip2, bary);
-    let visibility_depth = current_clip.z / current_clip.w;
-    let final_depth = textureLoad(visibility_shade_final_depth, pixel, 0);
-    // The visibility IDs were recorded against the opaque prepass. A later
-    // forward-compatibility draw (MASK, layered/custom, or unsupported
-    // geometry) may replace that surface and update scene depth before this
-    // fullscreen pass. Never shade the now-hidden ID back over that owner.
-    // A one-sided tolerance covers reconstruction roundoff without admitting
-    // a genuinely closer compatibility fragment.
-    let ownership_tolerance = max(2.0e-6, abs(visibility_depth) * 2.0e-6);
-    if (visibility_depth > final_depth + ownership_tolerance) { discard; }
     // Fragment derivatives operate on 2x2 quads. Select the other lane in
     // each axis and extrapolate this same triangle there, exactly as raster
     // helper invocations do even when that lane is outside triangle coverage.
@@ -532,6 +505,48 @@ fn fs_visibility_shade(in: VisibilityVertexOut) -> SceneOut {
     return shade_main_scene(fragment, visibility.front_facing, visibility_gradients);
 }
 "#;
+
+/// Shade mode's depth pipeline writes packed IDs while it primes depth. This
+/// retains the depth prepass alpha test and removes a depth-equal traversal.
+pub(super) fn make_visibility_depth_shader(gpu_scene_source: &str) -> String {
+    const DEPTH_HEADER: &str = concat!(
+        "fn fs_depth_prepass(in: VertexOutputScene, ",
+        "@builtin(front_facing) front_facing: bool) {"
+    );
+    const DEPTH_OUTPUT_HEADER: &str = concat!(
+        "fn fs_depth_prepass(\n",
+        "    in: VertexOutputScene,\n",
+        "    @builtin(primitive_index) primitive_id: u32,\n",
+        "    @builtin(front_facing) front_facing: bool,\n",
+        ") -> @location(0) vec2<u32> {"
+    );
+    const DEPTH_END: &str = concat!(
+        "        if (!survives) { discard; }\n",
+        "    }\n",
+        "}\n\n",
+        "fn shade_main_scene"
+    );
+    const DEPTH_OUTPUT_END: &str = concat!(
+        "        if (!survives) { discard; }\n",
+        "    }\n",
+        "    if ((in.draw_flags & 2u) == 0u) {\n",
+        "        return vec2<u32>(0xffffffffu, 0xffffffffu);\n",
+        "    }\n",
+        "    let face = select(0u, 0x80000000u, front_facing);\n",
+        "    return vec2<u32>(in.draw_id, primitive_id | face);\n",
+        "}\n\n",
+        "fn shade_main_scene"
+    );
+    let source = super::visibility_buffer::add_visibility_draw_id(gpu_scene_source);
+    assert_eq!(source.matches(DEPTH_HEADER).count(), 1);
+    assert_eq!(source.matches(DEPTH_END).count(), 1);
+    format!(
+        "enable primitive_index;\n{}",
+        source
+            .replace(DEPTH_HEADER, DEPTH_OUTPUT_HEADER)
+            .replace(DEPTH_END, DEPTH_OUTPUT_END)
+    )
+}
 
 #[cfg(test)]
 mod tests {

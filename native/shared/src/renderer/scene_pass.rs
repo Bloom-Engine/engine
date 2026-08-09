@@ -7,6 +7,56 @@
 
 use super::*;
 
+pub(super) fn create_scene_depth_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    label: &'static str,
+    visibility_target: bool,
+) -> wgpu::RenderPipeline {
+    let targets = [visibility_target.then_some(wgpu::ColorTargetState {
+        format: visibility_buffer::VISIBILITY_FORMAT,
+        blend: None,
+        // Cached-model depth draws do not own packed visibility IDs.
+        write_mask: wgpu::ColorWrites::empty(),
+    })];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main_scene"),
+            buffers: &[Vertex3D::desc()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_depth_prepass"),
+            targets: &targets,
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 impl Renderer {
     pub(super) fn record_hdr_scene_pass(
         &mut self,
@@ -36,6 +86,16 @@ impl Renderer {
             self.dispatch_aerial_perspective_lut();
         }
         self.prepare_gpu_driven_camera(encoder, scene);
+        let render_extent = self.render_extent();
+        let visibility_creations = self
+            .gpu_driven
+            .prepare_visibility_shading(&self.device, render_extent);
+        self.frame_resource_stats
+            .created_physical_textures(visibility_creations.textures);
+        for _ in 0..visibility_creations.bind_groups {
+            self.frame_resource_stats
+                .created_bind_group(frame_resource_stats::BindGroupCreationSite::VisibilityBuffer);
+        }
 
         // EN-044 — DEPTH PREPASS over the cached-model draws.
         //
@@ -61,11 +121,17 @@ impl Renderer {
         profiler.begin("depth_prepass");
         // SH-055 diag — "prepass" skips this whole pass (clear included; the main
         // pass then loads undefined depth — visually wrong, timing-valid).
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut inline_visibility_recorded = false;
+        #[cfg(target_arch = "wasm32")]
+        let inline_visibility_recorded = false;
         if !self.dbg_skip("prepass") {
             let prepass_ts = profiler.pass_timestamp_writes("depth_prepass");
+            let color_attachments = [self.gpu_driven.visibility_raster_attachment()];
+            #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom_depth_prepass"),
-                color_attachments: &[],
+                color_attachments: &color_attachments,
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -78,6 +144,8 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            #[cfg(target_arch = "wasm32")]
+            let _ = &pass;
             // EN-063 — on wasm the prepass DRAWS are skipped (the pass still
             // owns the depth clear). The prepass/main pairing requires the two
             // pipelines to produce bit-identical depths; Tint (the browser's
@@ -93,14 +161,18 @@ impl Renderer {
                 if let Some(global_materials) =
                     self.material_system.indirection.global_bind_group.as_ref()
                 {
-                    self.gpu_driven.draw_depth(
+                    inline_visibility_recorded = self.gpu_driven.draw_depth(
                         &mut pass,
                         &self.lighting_bind_group,
                         global_materials,
                         &self.joint_bind_group,
                     );
                 }
-                pass.set_pipeline(&self.scene_depth_pipeline);
+                pass.set_pipeline(
+                    self.scene_depth_visibility_pipeline
+                        .as_ref()
+                        .unwrap_or(&self.scene_depth_pipeline),
+                );
                 pass.set_bind_group(1, &self.lighting_bind_group, &[]);
                 pass.set_bind_group(3, &self.joint_bind_group, &[]);
                 let cam_vp = mat4_multiply(
@@ -147,13 +219,15 @@ impl Renderer {
                 }
             }
         }
+        self.gpu_driven
+            .finish_visibility_raster_inline(inline_visibility_recorded);
         profiler.end("depth_prepass");
 
         // #27 qualification path. This is inert unless explicitly requested
         // with BLOOM_VISIBILITY_BUFFER and the negotiated device retained the
-        // primitive-index feature. It reads the prepass depth but never writes
-        // it. Validate/debug keep forward authoritative; explicit shade mode
-        // replaces only admitted pixels after compatibility rendering.
+        // primitive-index feature. Validate/debug keep their separately timed
+        // depth-equal diagnostic pass and forward remains authoritative. Shade
+        // mode recorded the same IDs inside the depth prepass above.
         if self.gpu_driven.visibility_diagnostic_enabled()
             && !self.dbg_skip("prepass")
             && !self.dbg_skip("prepass_draws")
@@ -327,6 +401,22 @@ impl Renderer {
                 } else {
                     self.render_sky_pass(&mut pass, self.lighting_uniforms.camera_pos[3]);
                 }
+            }
+
+            // Visibility-eligible opaque shading is the background layer for
+            // immediate and forward-compatibility geometry. Recording it in
+            // this existing pass preserves normal alpha/depth composition for
+            // MASK, layered/custom, skinned, and unsupported draws while
+            // avoiding a separate render pass and its backend submission cost.
+            if let Some(global_materials) =
+                self.material_system.indirection.global_bind_group.as_ref()
+            {
+                self.gpu_driven.draw_visibility_shading(
+                    &mut pass,
+                    &self.lighting_bind_group,
+                    global_materials,
+                    &self.joint_bind_group,
+                );
             }
 
             if has_3d && !self.dbg_skip("imm3d") {
@@ -547,21 +637,6 @@ impl Renderer {
             }
         }
         profiler.end("main_hdr_pass");
-
-        if let Some(global_materials) = self.material_system.indirection.global_bind_group.as_ref()
-        {
-            self.gpu_driven.record_visibility_shading(
-                encoder,
-                profiler,
-                &self.hdr_rt_view,
-                &self.material_rt_view,
-                &self.velocity_rt_view,
-                &self.albedo_rt_view,
-                &self.lighting_bind_group,
-                global_materials,
-                &self.joint_bind_group,
-            );
-        }
 
         // EN-011 — render every registered planar reflection probe
         // BEFORE the main material pass so the probe RTs are
