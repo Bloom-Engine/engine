@@ -170,7 +170,18 @@ fn render_scene(path: &Path) {
     engine
         .scene
         .update_geometry(compatibility, vertices.clone(), vec![0, 1, 2]);
-    engine.scene.set_trs(compatibility, 0.0, 2.0, 0.0, 0.0, 1.0);
+    // Place a forward-only layered surface just in front of the final
+    // eligible triangle. Shade mode records the triangle's visibility ID in
+    // the prepass, then compatibility rendering replaces its depth. The
+    // fullscreen visibility pass must honor that final owner.
+    engine.scene.set_trs(
+        compatibility,
+        3.5 * COLUMN_SPACING,
+        1.5 * ROW_SPACING,
+        0.05,
+        0.0,
+        1.0,
+    );
     engine
         .scene
         .set_material_color(compatibility, 0.8, 0.15, 0.7, 1.0);
@@ -195,7 +206,17 @@ fn render_scene(path: &Path) {
     engine
         .scene
         .update_geometry(cutout, vertices, vec![0, 1, 2]);
-    engine.scene.set_trs(cutout, -2.7, 2.0, 0.0, 0.0, 1.0);
+    // The MASK triangle overlaps the first eligible triangle in the final
+    // row. Opaque mask texels own final depth; discarded texels must continue
+    // to reveal visibility-shaded geometry underneath.
+    engine.scene.set_trs(
+        cutout,
+        -3.5 * COLUMN_SPACING,
+        1.5 * ROW_SPACING,
+        0.05,
+        0.0,
+        1.0,
+    );
     engine.scene.set_material_texture(cutout, mask_texture);
     engine.scene.set_material_alpha_cutoff(cutout, 0.5);
 
@@ -221,10 +242,23 @@ fn render_scene(path: &Path) {
             1.0,
         );
     }
-    engine
-        .scene
-        .set_trs(compatibility, 0.026, 1.98, 0.0, 0.0, 1.0);
-    engine.scene.set_trs(cutout, -2.67, 1.975, 0.0, 0.0, 1.0);
+    let final_row_x_motion = 0.035 + 3.0 * 0.004;
+    engine.scene.set_trs(
+        compatibility,
+        3.5 * COLUMN_SPACING + final_row_x_motion,
+        1.5 * ROW_SPACING - 0.018,
+        0.05,
+        0.0,
+        1.0,
+    );
+    engine.scene.set_trs(
+        cutout,
+        -3.5 * COLUMN_SPACING + final_row_x_motion,
+        1.5 * ROW_SPACING - 0.018,
+        0.05,
+        0.0,
+        1.0,
+    );
 
     engine.begin_frame();
     engine.renderer.set_clear_color(0.035, 0.02, 0.055, 1.0);

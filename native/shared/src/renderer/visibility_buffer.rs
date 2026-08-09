@@ -450,6 +450,7 @@ impl VisibilityBufferRuntime {
         &mut self,
         device: &wgpu::Device,
         extent: (u32, u32),
+        depth_view: &wgpu::TextureView,
         vertex_buffer: &wgpu::Buffer,
         index_buffer: &wgpu::Buffer,
         draw_buffer: &wgpu::Buffer,
@@ -572,6 +573,10 @@ impl VisibilityBufferRuntime {
                         wgpu::BindGroupEntry {
                             binding: 3,
                             resource: draw_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(depth_view),
                         },
                     ],
                 }),

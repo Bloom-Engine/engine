@@ -1333,9 +1333,12 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
 
     // glTF OPAQUE materials (alpha_cutoff == 0) ignore texture alpha by
     // spec — armor/gloss masks stored in .a must not make the mesh
-    // translucent. MASK keeps sampled alpha after its cutoff; BLEND
-    // keeps fractional alpha for forward compositing.
-    let out_alpha = select(in.color.a, base_alpha, alpha_cutoff != 0.0);
+    // translucent. A surviving MASK texel (positive cutoff) is fully opaque;
+    // retaining its sampled alpha would accidentally blend it with surfaces
+    // behind it and make output depend on submission order. BLEND uses a
+    // negative sentinel and keeps fractional alpha for forward compositing.
+    let non_opaque_alpha = select(base_alpha, 1.0, alpha_cutoff > 0.0);
+    let out_alpha = select(in.color.a, non_opaque_alpha, alpha_cutoff != 0.0);
 
     return SceneOut(
         vec4<f32>(hdr, out_alpha),

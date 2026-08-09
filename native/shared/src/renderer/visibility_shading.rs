@@ -55,6 +55,16 @@ pub(super) fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             storage(1),
             storage(2),
             storage(3),
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ],
     })
 }
@@ -358,6 +368,7 @@ struct VisibilityIndexTable { values: array<u32>, };
 @group(4) @binding(1) var<storage, read> visibility_shade_vertices: VisibilityVertexTable;
 @group(4) @binding(2) var<storage, read> visibility_shade_indices: VisibilityIndexTable;
 @group(4) @binding(3) var<storage, read> visibility_shade_draws: GpuDrawTable;
+@group(4) @binding(4) var visibility_shade_final_depth: texture_depth_2d;
 
 @vertex
 fn vs_visibility_shade(@builtin(vertex_index) vertex_index: u32) -> VisibilityVertexOut {
@@ -428,6 +439,17 @@ fn fs_visibility_shade(in: VisibilityVertexOut) -> SceneOut {
         1.0 - in.position.y / f32(dimensions.y) * 2.0,
     );
     let bary = bloom_perspective_barycentrics(point_ndc, clip0, clip1, clip2);
+    let current_clip = bloom_interpolate4(clip0, clip1, clip2, bary);
+    let visibility_depth = current_clip.z / current_clip.w;
+    let final_depth = textureLoad(visibility_shade_final_depth, pixel, 0);
+    // The visibility IDs were recorded against the opaque prepass. A later
+    // forward-compatibility draw (MASK, layered/custom, or unsupported
+    // geometry) may replace that surface and update scene depth before this
+    // fullscreen pass. Never shade the now-hidden ID back over that owner.
+    // A one-sided tolerance covers reconstruction roundoff without admitting
+    // a genuinely closer compatibility fragment.
+    let ownership_tolerance = max(2.0e-6, abs(visibility_depth) * 2.0e-6);
+    if (visibility_depth > final_depth + ownership_tolerance) { discard; }
     // Fragment derivatives operate on 2x2 quads. Select the other lane in
     // each axis and extrapolate this same triangle there, exactly as raster
     // helper invocations do even when that lane is outside triangle coverage.
@@ -498,7 +520,7 @@ fn fs_visibility_shade(in: VisibilityVertexOut) -> SceneOut {
     fragment.uv = fragment_uv;
     fragment.world_pos = fragment_world;
     fragment.tangent = fragment_tangent;
-    fragment.curr_clip = bloom_interpolate4(clip0, clip1, clip2, bary);
+    fragment.curr_clip = current_clip;
     fragment.prev_clip = bloom_interpolate4(
         draw.uniforms.prev_mvp * local0,
         draw.uniforms.prev_mvp * local1,

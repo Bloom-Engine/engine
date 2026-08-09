@@ -869,6 +869,7 @@ impl GpuDrivenRenderer {
         let creations = self.visibility.ensure_resources(
             device,
             extent,
+            depth_view,
             &self.arena.vertex,
             &self.arena.index,
             &self.draw_buffer,
