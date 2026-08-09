@@ -10,14 +10,18 @@ use super::{ClusterGroup, ResidencyError, ResolvedClusterGroup, VirtualGeometryA
 use crate::renderer::material_indirection::{GpuCompletionTracker, StableResourceId};
 use bloom_geometry_format::{MAX_PAGE_BYTES, MIN_PAGE_BYTES};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 const ID_SLOT_BITS: u32 = 20;
 const ID_SLOT_MASK: u32 = (1 << ID_SLOT_BITS) - 1;
 const ID_GENERATION_MASK: u32 = (1 << (32 - ID_SLOT_BITS)) - 1;
-const GPU_MESH_ENTRY_WORDS: u64 = 8;
+const GPU_MESH_ENTRY_WORDS: u64 = 12;
 const GPU_PAGE_ENTRY_WORDS: u64 = 4;
+const GPU_CLUSTER_ENTRY_WORDS: u64 = 32;
 const GPU_WORD_BYTES: u64 = std::mem::size_of::<u32>() as u64;
+pub(super) const MAX_GPU_HIERARCHY_LEVELS: u32 = 32;
+static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 
 pub const GPU_VIRTUAL_PAGE_RESIDENT: u32 = 1 << 0;
 pub const GPU_VIRTUAL_PAGE_PINNED: u32 = 1 << 1;
@@ -40,6 +44,10 @@ impl VirtualMeshId {
 
     pub const fn generation(self) -> u32 {
         self.0 >> ID_SLOT_BITS
+    }
+
+    pub(super) const fn from_raw(raw: u32) -> Self {
+        Self(raw)
     }
 }
 
@@ -66,18 +74,21 @@ pub struct VirtualPageId {
     pub page_index: u32,
 }
 
-/// GPU ABI for one registered virtual mesh (32 bytes).
+/// GPU ABI for one registered virtual mesh (48 bytes).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuVirtualMeshEntry {
     pub mesh_id: u32,
     pub page_table_base: u32,
     pub page_count: u32,
-    pub page_stride_bytes: u32,
+    pub cluster_table_base: u32,
     pub cluster_count: u32,
+    pub root_cluster_count: u32,
+    pub page_stride_bytes: u32,
     pub vertex_encoding: u32,
     pub format_version: u32,
     pub flags: u32,
+    pub reserved: [u32; 2],
 }
 
 /// GPU ABI for one logical page (16 bytes). A zero `slot_plus_one` is missing.
@@ -90,8 +101,31 @@ pub struct GpuVirtualPageEntry {
     pub flags: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuVirtualMeshEntry>() == 32);
+/// GPU traversal and decode metadata for one cooked cluster (128 bytes).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuVirtualClusterEntry {
+    /// xyz = object AABB minimum, w = accumulated object-space error.
+    pub aabb_min_error: [f32; 4],
+    /// xyz = object AABB maximum, w = conservative sphere radius.
+    pub aabb_max_radius: [f32; 4],
+    /// xyz = object-space sphere center, w reserved.
+    pub sphere: [f32; 4],
+    /// xyz = object-space normal-cone axis, w = minimum axis/normal dot.
+    pub normal_cone: [f32; 4],
+    /// mesh index, primitive index, material index/u32::MAX, flags.
+    pub identity: [u32; 4],
+    /// logical page, LOD level, vertex count, triangle count.
+    pub page_lod_counts: [u32; 4],
+    /// page-local vertex/index byte offsets, vertex stride, reserved.
+    pub payload: [u32; 4],
+    /// parent start/count, child start/count; indices are mesh-local.
+    pub relations: [u32; 4],
+}
+
+const _: () = assert!(std::mem::size_of::<GpuVirtualMeshEntry>() == 48);
 const _: () = assert!(std::mem::size_of::<GpuVirtualPageEntry>() == 16);
+const _: () = assert!(std::mem::size_of::<GpuVirtualClusterEntry>() == 128);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GpuVirtualGeometryConfig {
@@ -99,6 +133,9 @@ pub struct GpuVirtualGeometryConfig {
     pub page_stride_bytes: u32,
     pub max_meshes: u32,
     pub max_page_records: u32,
+    pub max_cluster_records: u32,
+    pub max_clusters_per_group: u32,
+    pub max_hierarchy_levels: u32,
     pub max_upload_bytes_per_frame: u64,
     pub max_upload_pages_per_frame: u32,
     pub max_evictions_per_frame: u32,
@@ -111,6 +148,9 @@ impl Default for GpuVirtualGeometryConfig {
             page_stride_bytes: 64 * 1024,
             max_meshes: 4_096,
             max_page_records: 65_536,
+            max_cluster_records: 262_144,
+            max_clusters_per_group: 256,
+            max_hierarchy_levels: 32,
             max_upload_bytes_per_frame: 8 * 1024 * 1024,
             max_upload_pages_per_frame: 128,
             max_evictions_per_frame: 128,
@@ -132,10 +172,12 @@ pub struct GpuVirtualGeometryTelemetry {
     pub capacity_bytes: u64,
     pub page_table_bytes: u64,
     pub mesh_table_bytes: u64,
+    pub cluster_table_bytes: u64,
     pub total_gpu_bytes: u64,
     pub slot_count: u32,
     pub active_meshes: u32,
     pub live_page_records: u32,
+    pub live_cluster_records: u32,
     pub resident_pages: u32,
     pub resident_slot_bytes: u64,
     pub resident_payload_bytes: u64,
@@ -163,6 +205,7 @@ struct LogicalPageState {
 struct LiveMesh {
     asset: Arc<VirtualGeometryAsset>,
     page_table_base: u32,
+    cluster_table_base: u32,
     pages: Vec<LogicalPageState>,
 }
 
@@ -170,6 +213,8 @@ struct RetiringMesh {
     completion_epoch: u64,
     page_table_base: u32,
     page_count: u32,
+    cluster_table_base: u32,
+    cluster_count: u32,
     physical_slots: Vec<u32>,
 }
 
@@ -217,15 +262,19 @@ struct Counters {
 /// page-table buffers. It is not owned by `Renderer` yet, so the established
 /// compatibility path incurs no allocations, bindings, branches, or pixels.
 pub struct GpuVirtualGeometryPool {
+    id: u64,
     config: GpuVirtualGeometryConfig,
     physical_buffer: wgpu::Buffer,
     mesh_table_buffer: wgpu::Buffer,
     page_table_buffer: wgpu::Buffer,
+    cluster_table_buffer: wgpu::Buffer,
     mesh_entries: Vec<GpuVirtualMeshEntry>,
     page_entries: Vec<GpuVirtualPageEntry>,
+    cluster_entries: Vec<GpuVirtualClusterEntry>,
     mesh_slots: Vec<MeshSlot>,
     free_mesh_slots: Vec<usize>,
     free_page_ranges: Vec<FreeRange>,
+    free_cluster_ranges: Vec<FreeRange>,
     physical_slots: Vec<PhysicalSlot>,
     completion: GpuCompletionTracker,
     clock: u64,
@@ -243,7 +292,10 @@ impl GpuVirtualGeometryPool {
         let mesh_table_bytes = u64::from(config.max_meshes) * GPU_MESH_ENTRY_WORDS * GPU_WORD_BYTES;
         let page_table_bytes =
             u64::from(config.max_page_records) * GPU_PAGE_ENTRY_WORDS * GPU_WORD_BYTES;
+        let cluster_table_bytes =
+            u64::from(config.max_cluster_records) * GPU_CLUSTER_ENTRY_WORDS * GPU_WORD_BYTES;
         Ok(Self {
+            id: NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed),
             config,
             physical_buffer: create_zeroed_buffer(
                 device,
@@ -260,13 +312,26 @@ impl GpuVirtualGeometryPool {
                 "virtual_geometry_page_table",
                 page_table_bytes,
             ),
+            cluster_table_buffer: create_zeroed_buffer(
+                device,
+                "virtual_geometry_cluster_table",
+                cluster_table_bytes,
+            ),
             mesh_entries: vec![GpuVirtualMeshEntry::default(); config.max_meshes as usize],
             page_entries: vec![GpuVirtualPageEntry::default(); config.max_page_records as usize],
+            cluster_entries: vec![
+                GpuVirtualClusterEntry::default();
+                config.max_cluster_records as usize
+            ],
             mesh_slots: Vec::new(),
             free_mesh_slots: Vec::new(),
             free_page_ranges: vec![FreeRange {
                 start: 0,
                 count: config.max_page_records,
+            }],
+            free_cluster_ranges: vec![FreeRange {
+                start: 0,
+                count: config.max_cluster_records,
             }],
             physical_slots: vec![PhysicalSlot::default(); slot_count as usize],
             completion: GpuCompletionTracker::default(),
@@ -302,42 +367,72 @@ impl GpuVirtualGeometryPool {
                 pool_bytes: self.config.page_stride_bytes,
             });
         }
+        if let Some((cluster_index, cluster)) =
+            archive.clusters.iter().enumerate().find(|(_, c)| {
+                c.parent_count > self.config.max_clusters_per_group
+                    || c.child_count > self.config.max_clusters_per_group
+                    || c.lod_level >= self.config.max_hierarchy_levels
+            })
+        {
+            return Err(VirtualGeometryGpuError::TraversalLimitExceeded {
+                cluster: cluster_index as u32,
+                parent_count: cluster.parent_count,
+                child_count: cluster.child_count,
+                lod_level: cluster.lod_level,
+            });
+        }
         let page_count = u32::try_from(archive.pages.len())
             .map_err(|_| VirtualGeometryGpuError::PageTableExhausted)?;
-        let root_count = archive.coarse_root_page_count() as u32;
+        let cluster_count = u32::try_from(archive.clusters.len())
+            .map_err(|_| VirtualGeometryGpuError::ClusterTableExhausted)?;
+        let cluster_entries = encode_cluster_entries(archive)?;
+        let root_page_count = archive.coarse_root_page_count() as u32;
+        let root_cluster_count = archive.pages[..root_page_count as usize]
+            .iter()
+            .map(|page| page.cluster_count)
+            .sum();
         let upload_bytes = archive.coarse_root_page_bytes();
-        self.check_frame_budget(upload_bytes, root_count)?;
-        let root_evictions = self.evictions_needed(root_count, &[])?;
+        self.check_frame_budget(upload_bytes, root_page_count)?;
+        let root_evictions = self.evictions_needed(root_page_count, &[])?;
         if self.counters.frame_evictions + root_evictions > self.config.max_evictions_per_frame {
             self.counters.denied_uploads += 1;
             return Err(VirtualGeometryGpuError::EvictionBudgetExceeded);
         }
-        if self.live_pinned_pages().saturating_add(root_count) > self.physical_slots.len() as u32 {
+        if self.live_pinned_pages().saturating_add(root_page_count)
+            > self.physical_slots.len() as u32
+        {
             return Err(VirtualGeometryGpuError::PinnedCapacityExceeded {
-                required_pages: self.live_pinned_pages().saturating_add(root_count),
+                required_pages: self.live_pinned_pages().saturating_add(root_page_count),
                 capacity_pages: self.physical_slots.len() as u32,
             });
         }
         if self.find_page_range(page_count).is_none() {
             return Err(VirtualGeometryGpuError::PageTableExhausted);
         }
+        if self.find_cluster_range(cluster_count).is_none() {
+            return Err(VirtualGeometryGpuError::ClusterTableExhausted);
+        }
         let mesh_slot_index = self
             .available_mesh_slot()
             .ok_or(VirtualGeometryGpuError::MeshTableExhausted)?;
-        let target_slots = self.plan_physical_slots(root_count, &[])?;
+        let target_slots = self.plan_physical_slots(root_page_count, &[])?;
 
         let table_base = self
             .allocate_page_range(page_count)
             .expect("preflight page-table range disappeared");
+        let cluster_table_base = self
+            .allocate_cluster_range(cluster_count)
+            .expect("preflight cluster-table range disappeared");
         let mesh_slot_index = self.reserve_mesh_slot(mesh_slot_index);
         let mesh_id = self.mesh_id(mesh_slot_index);
         let mut pages = vec![LogicalPageState::default(); archive.pages.len()];
-        for page in pages.iter_mut().take(root_count as usize) {
+        for page in pages.iter_mut().take(root_page_count as usize) {
             page.pinned = true;
         }
         self.mesh_slots[mesh_slot_index].lifecycle = MeshLifecycle::Live(LiveMesh {
             asset,
             page_table_base: table_base,
+            cluster_table_base,
             pages,
         });
         let archive = self.live_mesh(mesh_id)?.asset.archive();
@@ -345,18 +440,21 @@ impl GpuVirtualGeometryPool {
             mesh_id: mesh_id.raw(),
             page_table_base: table_base,
             page_count,
+            cluster_table_base,
+            cluster_count,
+            root_cluster_count,
             page_stride_bytes: self.config.page_stride_bytes,
-            cluster_count: archive.clusters.len() as u32,
             vertex_encoding: match archive.vertex_encoding {
                 bloom_geometry_format::VertexEncoding::Float32 => 1,
                 bloom_geometry_format::VertexEncoding::Quantized => 2,
             },
             format_version: archive.format_version,
             flags: 1,
+            reserved: [0; 2],
         };
-        self.write_mesh_entry(queue, mesh_slot_index, mesh_entry);
+        self.write_cluster_entries(queue, cluster_table_base, &cluster_entries);
 
-        for (page_index, physical_slot) in (0..root_count).zip(target_slots) {
+        for (page_index, physical_slot) in (0..root_page_count).zip(target_slots) {
             self.replace_physical_page(
                 queue,
                 physical_slot,
@@ -367,10 +465,13 @@ impl GpuVirtualGeometryPool {
                 true,
             )?;
         }
-        self.counters.frame_upload_pages += root_count;
+        // Publish the generation only after every table/page write has been
+        // queued. A subsequent submission can never observe a half mesh.
+        self.write_mesh_entry(queue, mesh_slot_index, mesh_entry);
+        self.counters.frame_upload_pages += root_page_count;
         self.counters.frame_upload_bytes += upload_bytes;
         self.counters.frame_evictions += root_evictions;
-        self.counters.uploads += u64::from(root_count);
+        self.counters.uploads += u64::from(root_page_count);
         self.counters.evictions += u64::from(root_evictions);
         Ok(mesh_id)
     }
@@ -510,13 +611,15 @@ impl GpuVirtualGeometryPool {
         mesh_id: VirtualMeshId,
     ) -> Result<u64, VirtualGeometryGpuError> {
         let mesh_slot_index = self.live_mesh_slot_index(mesh_id)?;
-        let (page_table_base, page_count, physical_slots) = {
+        let (page_table_base, page_count, cluster_table_base, cluster_count, physical_slots) = {
             let MeshLifecycle::Live(mesh) = &self.mesh_slots[mesh_slot_index].lifecycle else {
                 unreachable!();
             };
             (
                 mesh.page_table_base,
                 mesh.pages.len() as u32,
+                mesh.cluster_table_base,
+                mesh.asset.archive().clusters.len() as u32,
                 mesh.pages
                     .iter()
                     .filter_map(|page| page.slot)
@@ -544,6 +647,8 @@ impl GpuVirtualGeometryPool {
             completion_epoch,
             page_table_base,
             page_count,
+            cluster_table_base,
+            cluster_count,
             physical_slots,
         });
         Ok(completion_epoch)
@@ -572,6 +677,7 @@ impl GpuVirtualGeometryPool {
                 self.physical_slots[physical_slot as usize] = PhysicalSlot::default();
             }
             self.release_page_range(retired.page_table_base, retired.page_count);
+            self.release_cluster_range(retired.cluster_table_base, retired.cluster_count);
             self.mesh_slots[*index].generation =
                 (self.mesh_slots[*index].generation + 1) & ID_GENERATION_MASK;
             self.free_mesh_slots.push(*index);
@@ -612,11 +718,13 @@ impl GpuVirtualGeometryPool {
             capacity_bytes: self.config.capacity_bytes,
             page_table_bytes: self.page_table_bytes(),
             mesh_table_bytes: self.mesh_table_bytes(),
+            cluster_table_bytes: self.cluster_table_bytes(),
             total_gpu_bytes: self
                 .config
                 .capacity_bytes
                 .saturating_add(self.page_table_bytes())
-                .saturating_add(self.mesh_table_bytes()),
+                .saturating_add(self.mesh_table_bytes())
+                .saturating_add(self.cluster_table_bytes()),
             slot_count: self.physical_slots.len() as u32,
             frame_upload_pages: self.counters.frame_upload_pages,
             frame_upload_bytes: self.counters.frame_upload_bytes,
@@ -634,6 +742,7 @@ impl GpuVirtualGeometryPool {
                 MeshLifecycle::Live(mesh) => {
                     telemetry.active_meshes += 1;
                     telemetry.live_page_records += mesh.pages.len() as u32;
+                    telemetry.live_cluster_records += mesh.asset.archive().clusters.len() as u32;
                     for (page_index, page) in mesh.pages.iter().enumerate() {
                         if page.slot.is_none() {
                             continue;
@@ -669,8 +778,38 @@ impl GpuVirtualGeometryPool {
         &self.page_table_buffer
     }
 
+    pub fn cluster_table_buffer(&self) -> &wgpu::Buffer {
+        &self.cluster_table_buffer
+    }
+
+    pub fn cluster_entry(
+        &self,
+        mesh_id: VirtualMeshId,
+        cluster_index: u32,
+    ) -> Result<GpuVirtualClusterEntry, VirtualGeometryGpuError> {
+        let mesh = self.live_mesh(mesh_id)?;
+        if cluster_index as usize >= mesh.asset.archive().clusters.len() {
+            return Err(VirtualGeometryGpuError::Residency(
+                ResidencyError::MissingCluster(cluster_index),
+            ));
+        }
+        Ok(self.cluster_entries[(mesh.cluster_table_base + cluster_index) as usize])
+    }
+
+    #[cfg(test)]
+    pub(super) fn asset(
+        &self,
+        mesh_id: VirtualMeshId,
+    ) -> Result<&Arc<VirtualGeometryAsset>, VirtualGeometryGpuError> {
+        Ok(&self.live_mesh(mesh_id)?.asset)
+    }
+
     pub const fn config(&self) -> GpuVirtualGeometryConfig {
         self.config
+    }
+
+    pub(super) const fn id(&self) -> u64 {
+        self.id
     }
 
     fn check_frame_budget(
@@ -906,6 +1045,13 @@ impl GpuVirtualGeometryPool {
             .map(|range| range.start)
     }
 
+    fn find_cluster_range(&self, count: u32) -> Option<u32> {
+        self.free_cluster_ranges
+            .iter()
+            .find(|range| range.count >= count)
+            .map(|range| range.start)
+    }
+
     fn allocate_page_range(&mut self, count: u32) -> Option<u32> {
         let index = self
             .free_page_ranges
@@ -920,21 +1066,16 @@ impl GpuVirtualGeometryPool {
         Some(start)
     }
 
+    fn allocate_cluster_range(&mut self, count: u32) -> Option<u32> {
+        allocate_table_range(&mut self.free_cluster_ranges, count)
+    }
+
     fn release_page_range(&mut self, start: u32, count: u32) {
-        self.free_page_ranges.push(FreeRange { start, count });
-        self.free_page_ranges
-            .sort_unstable_by_key(|range| range.start);
-        let mut merged: Vec<FreeRange> = Vec::with_capacity(self.free_page_ranges.len());
-        for range in self.free_page_ranges.drain(..) {
-            if let Some(previous) = merged.last_mut() {
-                if previous.start + previous.count == range.start {
-                    previous.count += range.count;
-                    continue;
-                }
-            }
-            merged.push(range);
-        }
-        self.free_page_ranges = merged;
+        release_table_range(&mut self.free_page_ranges, start, count);
+    }
+
+    fn release_cluster_range(&mut self, start: u32, count: u32) {
+        release_table_range(&mut self.free_cluster_ranges, start, count);
     }
 
     fn write_mesh_entry(&mut self, queue: &wgpu::Queue, index: usize, entry: GpuVirtualMeshEntry) {
@@ -952,6 +1093,21 @@ impl GpuVirtualGeometryPool {
             &self.page_table_buffer,
             u64::from(index) * std::mem::size_of::<GpuVirtualPageEntry>() as u64,
             bytemuck::bytes_of(&entry),
+        );
+    }
+
+    fn write_cluster_entries(
+        &mut self,
+        queue: &wgpu::Queue,
+        first: u32,
+        entries: &[GpuVirtualClusterEntry],
+    ) {
+        let start = first as usize;
+        self.cluster_entries[start..start + entries.len()].copy_from_slice(entries);
+        queue.write_buffer(
+            &self.cluster_table_buffer,
+            u64::from(first) * std::mem::size_of::<GpuVirtualClusterEntry>() as u64,
+            bytemuck::cast_slice(entries),
         );
     }
 
@@ -982,6 +1138,10 @@ impl GpuVirtualGeometryPool {
     fn page_table_bytes(&self) -> u64 {
         u64::from(self.config.max_page_records) * GPU_PAGE_ENTRY_WORDS * GPU_WORD_BYTES
     }
+
+    fn cluster_table_bytes(&self) -> u64 {
+        u64::from(self.config.max_cluster_records) * GPU_CLUSTER_ENTRY_WORDS * GPU_WORD_BYTES
+    }
 }
 
 fn validate_config(
@@ -996,6 +1156,10 @@ fn validate_config(
         || config.max_meshes == 0
         || config.max_meshes > ID_SLOT_MASK
         || config.max_page_records == 0
+        || config.max_cluster_records == 0
+        || config.max_clusters_per_group == 0
+        || config.max_hierarchy_levels == 0
+        || config.max_hierarchy_levels > MAX_GPU_HIERARCHY_LEVELS
         || config.max_upload_bytes_per_frame < u64::from(stride)
         || config.max_upload_pages_per_frame == 0
     {
@@ -1003,11 +1167,14 @@ fn validate_config(
     }
     let mesh_bytes = u64::from(config.max_meshes) * GPU_MESH_ENTRY_WORDS * GPU_WORD_BYTES;
     let page_bytes = u64::from(config.max_page_records) * GPU_PAGE_ENTRY_WORDS * GPU_WORD_BYTES;
+    let cluster_bytes =
+        u64::from(config.max_cluster_records) * GPU_CLUSTER_ENTRY_WORDS * GPU_WORD_BYTES;
     let limits = device.limits();
     for (label, bytes) in [
         ("physical page pool", config.capacity_bytes),
         ("mesh table", mesh_bytes),
         ("page table", page_bytes),
+        ("cluster table", cluster_bytes),
     ] {
         if bytes > limits.max_buffer_size || bytes > limits.max_storage_buffer_binding_size {
             return Err(VirtualGeometryGpuError::DeviceLimitExceeded {
@@ -1020,6 +1187,105 @@ fn validate_config(
         }
     }
     Ok(())
+}
+
+fn encode_cluster_entries(
+    archive: &bloom_geometry_format::GeometryArchive,
+) -> Result<Vec<GpuVirtualClusterEntry>, VirtualGeometryGpuError> {
+    archive
+        .clusters
+        .iter()
+        .enumerate()
+        .map(|(cluster_index, cluster)| {
+            let page = &archive.pages[cluster.page_index as usize];
+            let vertex_offset = cluster
+                .vertex_offset
+                .checked_sub(page.payload_offset)
+                .and_then(|offset| u32::try_from(offset).ok())
+                .ok_or(VirtualGeometryGpuError::InvalidClusterAddress(
+                    cluster_index as u32,
+                ))?;
+            let index_offset = cluster
+                .index_offset
+                .checked_sub(page.payload_offset)
+                .and_then(|offset| u32::try_from(offset).ok())
+                .ok_or(VirtualGeometryGpuError::InvalidClusterAddress(
+                    cluster_index as u32,
+                ))?;
+            Ok(GpuVirtualClusterEntry {
+                aabb_min_error: [
+                    cluster.aabb_min[0],
+                    cluster.aabb_min[1],
+                    cluster.aabb_min[2],
+                    cluster.geometric_error,
+                ],
+                aabb_max_radius: [
+                    cluster.aabb_max[0],
+                    cluster.aabb_max[1],
+                    cluster.aabb_max[2],
+                    cluster.sphere_radius,
+                ],
+                sphere: [
+                    cluster.sphere_center[0],
+                    cluster.sphere_center[1],
+                    cluster.sphere_center[2],
+                    0.0,
+                ],
+                normal_cone: [
+                    cluster.normal_cone_axis[0],
+                    cluster.normal_cone_axis[1],
+                    cluster.normal_cone_axis[2],
+                    cluster.normal_cone_cutoff,
+                ],
+                identity: [
+                    cluster.mesh_index,
+                    cluster.primitive_index,
+                    cluster.material_index.unwrap_or(u32::MAX),
+                    cluster.flags,
+                ],
+                page_lod_counts: [
+                    cluster.page_index,
+                    cluster.lod_level,
+                    cluster.vertex_count,
+                    cluster.triangle_count,
+                ],
+                payload: [vertex_offset, index_offset, cluster.vertex_stride, 0],
+                relations: [
+                    cluster.parent,
+                    cluster.parent_count,
+                    cluster.first_child,
+                    cluster.child_count,
+                ],
+            })
+        })
+        .collect()
+}
+
+fn allocate_table_range(ranges: &mut Vec<FreeRange>, count: u32) -> Option<u32> {
+    let index = ranges.iter().position(|range| range.count >= count)?;
+    let start = ranges[index].start;
+    ranges[index].start += count;
+    ranges[index].count -= count;
+    if ranges[index].count == 0 {
+        ranges.remove(index);
+    }
+    Some(start)
+}
+
+fn release_table_range(ranges: &mut Vec<FreeRange>, start: u32, count: u32) {
+    ranges.push(FreeRange { start, count });
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<FreeRange> = Vec::with_capacity(ranges.len());
+    for range in ranges.drain(..) {
+        if let Some(previous) = merged.last_mut() {
+            if previous.start + previous.count == range.start {
+                previous.count += range.count;
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    *ranges = merged;
 }
 
 fn create_zeroed_buffer(device: &wgpu::Device, label: &'static str, size: u64) -> wgpu::Buffer {
@@ -1059,6 +1325,14 @@ pub enum VirtualGeometryGpuError {
     },
     MeshTableExhausted,
     PageTableExhausted,
+    ClusterTableExhausted,
+    InvalidClusterAddress(u32),
+    TraversalLimitExceeded {
+        cluster: u32,
+        parent_count: u32,
+        child_count: u32,
+        lod_level: u32,
+    },
     PinnedCapacityExceeded {
         required_pages: u32,
         capacity_pages: u32,
@@ -1111,6 +1385,20 @@ impl fmt::Display for VirtualGeometryGpuError {
             ),
             Self::MeshTableExhausted => write!(formatter, "virtual mesh table is full"),
             Self::PageTableExhausted => write!(formatter, "virtual page table is full"),
+            Self::ClusterTableExhausted => write!(formatter, "virtual cluster table is full"),
+            Self::InvalidClusterAddress(cluster) => write!(
+                formatter,
+                "virtual cluster {cluster} has no page-local GPU payload address"
+            ),
+            Self::TraversalLimitExceeded {
+                cluster,
+                parent_count,
+                child_count,
+                lod_level,
+            } => write!(
+                formatter,
+                "virtual cluster {cluster} exceeds traversal limits: parents={parent_count}, children={child_count}, lod={lod_level}"
+            ),
             Self::PinnedCapacityExceeded {
                 required_pages,
                 capacity_pages,

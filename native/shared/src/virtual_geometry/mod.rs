@@ -6,19 +6,25 @@
 mod asset;
 mod gpu_pool;
 mod residency;
+mod traversal;
 
 pub use asset::{ArtifactIdentity, VirtualGeometryAsset, VirtualGeometryLoadError};
 pub use bloom_geometry_format::{
     ClusterRecord, CompatibilityRecord, GeometryArchive, PageRecord, VertexEncoding,
 };
 pub use gpu_pool::{
-    GpuPageTransition, GpuVirtualGeometryConfig, GpuVirtualGeometryPool,
+    GpuPageTransition, GpuVirtualClusterEntry, GpuVirtualGeometryConfig, GpuVirtualGeometryPool,
     GpuVirtualGeometryTelemetry, GpuVirtualMeshEntry, GpuVirtualPageEntry, VirtualGeometryGpuError,
     VirtualMeshId, VirtualPageId, GPU_VIRTUAL_PAGE_PINNED, GPU_VIRTUAL_PAGE_RESIDENT,
 };
 pub use residency::{
     ClusterGroup, PageTransition, ResidencyError, ResidencyTelemetry, ResolvedClusterGroup,
     VirtualGeometryResidency,
+};
+pub use traversal::{
+    GpuSelectedVirtualCluster, GpuVirtualHierarchySelector, GpuVirtualInstance,
+    GpuVirtualPageRequest, GpuVirtualTraversalConfig, GpuVirtualTraversalCounters,
+    VirtualGeometryTraversalDispatch, VirtualGeometryTraversalError, VirtualGeometryView,
 };
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+#[cfg(not(target_arch = "wasm32"))]
+use super::traversal::select_cpu_reference;
 use super::*;
 use bloom_geometry_format::{
     hex_hash, sha256, CompatibilityReason, GeometryArchive, PageRecord, CLUSTER_RECORD_BYTES,
@@ -390,12 +392,34 @@ fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn try_traversal_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .ok()?;
+    let mut limits = wgpu::Limits::downlevel_defaults();
+    limits.max_storage_buffers_per_shader_stage = 7;
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("virtual_geometry_traversal_test_device"),
+        required_limits: limits,
+        ..Default::default()
+    }))
+    .ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn gpu_config(slot_count: u64) -> GpuVirtualGeometryConfig {
     GpuVirtualGeometryConfig {
         capacity_bytes: slot_count * u64::from(MIN_PAGE_BYTES),
         page_stride_bytes: MIN_PAGE_BYTES,
         max_meshes: 2,
         max_page_records: 16,
+        max_cluster_records: 32,
+        max_clusters_per_group: 16,
+        max_hierarchy_levels: 8,
         max_upload_bytes_per_frame: 8 * u64::from(MIN_PAGE_BYTES),
         max_upload_pages_per_frame: 8,
         max_evictions_per_frame: 8,
@@ -441,6 +465,431 @@ fn read_gpu_buffer(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn traversal_config() -> GpuVirtualTraversalConfig {
+    GpuVirtualTraversalConfig {
+        max_instances: 4,
+        max_selected_clusters: 16,
+        max_page_requests: 16,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn traversal_view(target_error_pixels: f32) -> VirtualGeometryView {
+    VirtualGeometryView {
+        frustum_planes: [[0.0, 0.0, 0.0, 1.0]; 6],
+        view_projection: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        camera_position: [0.5, 0.5, 10.0],
+        projection_scale: 100.0,
+        target_error_pixels,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_records<T: bytemuck::Pod>(bytes: &[u8], count: usize) -> Vec<T> {
+    bytes
+        .chunks_exact(std::mem::size_of::<T>())
+        .take(count)
+        .map(bytemuck::pod_read_unaligned)
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_traversal(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pool: &GpuVirtualGeometryPool,
+    selector: &GpuVirtualHierarchySelector,
+    instances: &[GpuVirtualInstance],
+    view: VirtualGeometryView,
+) -> (
+    Vec<GpuSelectedVirtualCluster>,
+    Vec<GpuVirtualPageRequest>,
+    GpuVirtualTraversalCounters,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("virtual_geometry_traversal_test_encoder"),
+    });
+    selector
+        .record(queue, &mut encoder, pool, instances, view)
+        .unwrap();
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let counter_bytes = read_gpu_buffer(
+        device,
+        queue,
+        selector.counter_buffer(),
+        std::mem::size_of::<GpuVirtualTraversalCounters>() as u64,
+    );
+    let counters = bytemuck::pod_read_unaligned::<GpuVirtualTraversalCounters>(&counter_bytes);
+    let selected_bytes = read_gpu_buffer(
+        device,
+        queue,
+        selector.selected_buffer(),
+        selector.selected_buffer().size(),
+    );
+    let request_bytes = read_gpu_buffer(
+        device,
+        queue,
+        selector.page_request_buffer(),
+        selector.page_request_buffer().size(),
+    );
+    let selected = decode_records(
+        &selected_bytes,
+        counters
+            .selected_count
+            .min(selector.config().max_selected_clusters) as usize,
+    );
+    let requests = decode_records(
+        &request_bytes,
+        counters
+            .page_request_count
+            .min(selector.config().max_page_requests) as usize,
+    );
+    (selected, requests, counters)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_traversal_matches_cpu(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pool: &GpuVirtualGeometryPool,
+    selector: &GpuVirtualHierarchySelector,
+    instances: &[GpuVirtualInstance],
+    view: VirtualGeometryView,
+) -> (
+    Vec<GpuSelectedVirtualCluster>,
+    Vec<GpuVirtualPageRequest>,
+    GpuVirtualTraversalCounters,
+) {
+    let (mut selected, mut requests, counters) =
+        run_traversal(device, queue, pool, selector, instances, view);
+    let mut cpu = select_cpu_reference(pool, selector.config(), instances, view).unwrap();
+    selected.sort_unstable();
+    requests.sort_unstable();
+    cpu.selected.sort_unstable();
+    cpu.requests.sort_unstable();
+    assert_eq!(selected, cpu.selected);
+    assert_eq!(requests, cpu.requests);
+    assert_eq!(counters, cpu.counters);
+    (selected, requests, counters)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn make_hierarchy_fully_resident(
+    pool: &mut GpuVirtualGeometryPool,
+    queue: &wgpu::Queue,
+    mesh: VirtualMeshId,
+) {
+    pool.begin_frame(2);
+    for cluster in [2, 3, 4, 6] {
+        pool.make_group_resident(queue, mesh, cluster).unwrap();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_hierarchy_selector_matches_cpu_across_lod_and_frustum_decisions() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy selector oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, mesh);
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let instances = [GpuVirtualInstance::identity(mesh, 17)];
+
+    let (leaf, requests, counters) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &instances,
+        traversal_view(50.0),
+    );
+    assert_eq!(
+        leaf.iter()
+            .map(|record| record.cluster_index)
+            .collect::<Vec<_>>(),
+        [4, 5, 6, 7]
+    );
+    assert!(requests.is_empty());
+    assert_eq!(counters.refined_groups, 4);
+    assert_eq!(counters.fallback_groups, 0);
+
+    let (middle, _, _) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &instances,
+        traversal_view(150.0),
+    );
+    assert_eq!(
+        middle
+            .iter()
+            .map(|record| record.cluster_index)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+
+    let (coarse, _, _) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &instances,
+        traversal_view(250.0),
+    );
+    assert_eq!(
+        coarse
+            .iter()
+            .map(|record| record.cluster_index)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+
+    let mut outside = traversal_view(50.0);
+    outside.frustum_planes[0] = [1.0, 0.0, 0.0, -100.0];
+    let (culled, requests, counters) =
+        assert_traversal_matches_cpu(&device, &queue, &pool, &selector, &instances, outside);
+    assert!(culled.is_empty());
+    assert!(requests.is_empty());
+    assert_eq!(counters.frustum_culled_groups, 2);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_hierarchy_selector_keeps_resident_ancestors_and_requests_missing_pages() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy fallback oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(3)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    pool.begin_frame(2);
+    pool.make_group_resident(&queue, mesh, 2).unwrap();
+    pool.make_group_resident(&queue, mesh, 3).unwrap();
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let instances = [GpuVirtualInstance::identity(mesh, 23)];
+
+    let (selected, requests, counters) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &instances,
+        traversal_view(50.0),
+    );
+    assert_eq!(
+        selected
+            .iter()
+            .map(|record| record.cluster_index)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.page_index)
+            .collect::<Vec<_>>(),
+        [3, 4]
+    );
+    assert_eq!(counters.refined_groups, 2);
+    assert_eq!(counters.fallback_groups, 2);
+    assert_eq!(counters.missing_current_pages, 0);
+    assert_eq!(counters.invalid_records, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_hierarchy_selector_reports_bounded_output_overflow_without_overwriting() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy overflow oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, mesh);
+    let selector = GpuVirtualHierarchySelector::new(
+        &device,
+        &pool,
+        GpuVirtualTraversalConfig {
+            max_instances: 1,
+            max_selected_clusters: 2,
+            max_page_requests: 1,
+        },
+    )
+    .unwrap();
+    let instances = [GpuVirtualInstance::identity(mesh, 29)];
+    let (selected, requests, counters) = run_traversal(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &instances,
+        traversal_view(50.0),
+    );
+    assert_eq!(selected.len(), 2);
+    assert!(selected
+        .iter()
+        .all(|record| (4..=7).contains(&record.cluster_index)));
+    assert!(requests.is_empty());
+    assert_eq!(counters.selected_count, 4);
+    assert_eq!(counters.selected_overflow, 2);
+    assert_eq!(counters.request_overflow, 0);
+
+    let mut partial_pool = GpuVirtualGeometryPool::new(&device, gpu_config(3)).unwrap();
+    let partial_mesh = partial_pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    partial_pool.begin_frame(2);
+    partial_pool
+        .make_group_resident(&queue, partial_mesh, 2)
+        .unwrap();
+    partial_pool
+        .make_group_resident(&queue, partial_mesh, 3)
+        .unwrap();
+    let partial_selector = GpuVirtualHierarchySelector::new(
+        &device,
+        &partial_pool,
+        GpuVirtualTraversalConfig {
+            max_instances: 1,
+            max_selected_clusters: 4,
+            max_page_requests: 1,
+        },
+    )
+    .unwrap();
+    let partial_instances = [GpuVirtualInstance::identity(partial_mesh, 31)];
+    let (_, requests, counters) = run_traversal(
+        &device,
+        &queue,
+        &partial_pool,
+        &partial_selector,
+        &partial_instances,
+        traversal_view(50.0),
+    );
+    assert_eq!(requests.len(), 1);
+    assert!([3, 4].contains(&requests[0].page_index));
+    assert_eq!(counters.page_request_count, 2);
+    assert_eq!(counters.request_overflow, 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_hierarchy_selector_cone_culling_is_conservative_for_transform_class() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy cone oracle");
+        return;
+    };
+    let mut archive = hierarchy_archive();
+    for cluster in &mut archive.clusters {
+        cluster.normal_cone_axis = [0.0, 0.0, 1.0];
+        cluster.normal_cone_cutoff = 1.0;
+    }
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(1)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(archive))
+        .unwrap();
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+
+    let front = [GpuVirtualInstance::identity(mesh, 41)];
+    let mut front_view = traversal_view(1_000.0);
+    front_view.camera_position = [0.5, 0.5, 10.0];
+    let (selected, _, counters) =
+        assert_traversal_matches_cpu(&device, &queue, &pool, &selector, &front, front_view);
+    assert_eq!(selected.len(), 2);
+    assert_eq!(counters.cone_culled_clusters, 0);
+
+    let mut back_view = front_view;
+    back_view.camera_position = [0.5, 0.5, -10.0];
+    let (selected, _, counters) =
+        assert_traversal_matches_cpu(&device, &queue, &pool, &selector, &front, back_view);
+    assert!(selected.is_empty());
+    assert_eq!(counters.cone_culled_clusters, 2);
+
+    let non_uniform = [GpuVirtualInstance::new(
+        mesh,
+        43,
+        [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.5, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    )
+    .unwrap()];
+    assert!(!non_uniform[0].cone_cull_safe());
+    let (selected, _, counters) =
+        assert_traversal_matches_cpu(&device, &queue, &pool, &selector, &non_uniform, back_view);
+    assert_eq!(selected.len(), 2);
+    assert_eq!(counters.cone_culled_clusters, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_hierarchy_selector_is_stateless_across_camera_cuts_and_fast_instance_motion() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping hierarchy motion oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, mesh);
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let translated = |instance_id, x| {
+        GpuVirtualInstance::new(
+            mesh,
+            instance_id,
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [x, 0.0, 0.0, 1.0],
+            ],
+        )
+        .unwrap()
+    };
+
+    let before = [translated(51, 0.0), translated(53, 10.0)];
+    let (_, requests, counters) = assert_traversal_matches_cpu(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &before,
+        traversal_view(50.0),
+    );
+    assert!(requests.is_empty());
+    assert_eq!(counters.selected_count, 8);
+    assert_eq!(counters.selected_overflow, 0);
+
+    let after = [translated(51, -15.0), translated(53, 25.0)];
+    let mut cut_view = traversal_view(50.0);
+    cut_view.camera_position = [-100.0, 80.0, -60.0];
+    let (selected, requests, counters) =
+        assert_traversal_matches_cpu(&device, &queue, &pool, &selector, &after, cut_view);
+    assert_eq!(selected.len(), 8);
+    assert!(requests.is_empty());
+    assert_eq!(counters.selected_count, 8);
+    assert_eq!(counters.missing_current_pages, 0);
+    assert_eq!(counters.invalid_records, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn gpu_pool_uploads_validated_pages_and_matches_its_gpu_tables() {
     let Some((device, queue)) = try_device() else {
@@ -458,6 +907,11 @@ fn gpu_pool_uploads_validated_pages_and_matches_its_gpu_tables() {
     assert_eq!(
         pool.mesh_table_buffer().size(),
         u64::from(pool.config().max_meshes) * std::mem::size_of::<GpuVirtualMeshEntry>() as u64
+    );
+    assert_eq!(
+        pool.cluster_table_buffer().size(),
+        u64::from(pool.config().max_cluster_records)
+            * std::mem::size_of::<GpuVirtualClusterEntry>() as u64
     );
     let mesh = pool.register_mesh(&queue, Arc::clone(&asset)).unwrap();
     assert_eq!(
@@ -526,17 +980,97 @@ fn gpu_pool_uploads_validated_pages_and_matches_its_gpu_tables() {
     );
     let gpu_meshes = bytemuck::cast_slice::<u8, GpuVirtualMeshEntry>(&mesh_table);
     assert_eq!(gpu_meshes[mesh.descriptor_index() as usize - 1], mesh_entry);
+    let cluster_table = read_gpu_buffer(
+        &device,
+        &queue,
+        pool.cluster_table_buffer(),
+        u64::from(pool.config().max_cluster_records)
+            * std::mem::size_of::<GpuVirtualClusterEntry>() as u64,
+    );
+    let gpu_clusters = bytemuck::cast_slice::<u8, GpuVirtualClusterEntry>(&cluster_table);
+    let cluster_entry = pool.cluster_entry(mesh, 4).unwrap();
+    assert_eq!(
+        gpu_clusters[(mesh_entry.cluster_table_base + 4) as usize],
+        cluster_entry
+    );
+    assert_eq!(cluster_entry.page_lod_counts, [3, 0, 3, 1]);
+    assert_eq!(cluster_entry.payload, [0, 216, 72, 0]);
 
     let telemetry = pool.telemetry();
     assert_eq!(telemetry.capacity_bytes, 3 * u64::from(MIN_PAGE_BYTES));
     assert_eq!(telemetry.resident_slot_bytes, telemetry.capacity_bytes);
     assert_eq!(telemetry.resident_payload_bytes, 1_120);
     assert_eq!(telemetry.page_table_bytes, 256);
-    assert_eq!(telemetry.mesh_table_bytes, 64);
-    assert_eq!(telemetry.total_gpu_bytes, 12_608);
+    assert_eq!(telemetry.mesh_table_bytes, 96);
+    assert_eq!(telemetry.cluster_table_bytes, 4_096);
+    assert_eq!(telemetry.total_gpu_bytes, 16_736);
+    assert_eq!(telemetry.live_cluster_records, 8);
     assert_eq!(telemetry.frame_upload_pages, 3);
     assert_eq!(telemetry.frame_upload_bytes, 896);
     assert_eq!(telemetry.frame_evictions, 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_pool_cluster_table_exhaustion_is_preflight_atomic() {
+    let Some((device, queue)) = try_device() else {
+        eprintln!("no GPU adapter — skipping virtual-geometry cluster-capacity oracle");
+        return;
+    };
+    let mut config = gpu_config(1);
+    config.max_cluster_records = 7;
+    let mut pool = GpuVirtualGeometryPool::new(&device, config).unwrap();
+    let before = pool.telemetry();
+    assert_eq!(
+        pool.register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+            .unwrap_err(),
+        VirtualGeometryGpuError::ClusterTableExhausted
+    );
+    assert_eq!(pool.telemetry(), before);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_hierarchy_selector_rejects_other_pools_and_retiring_meshes_before_dispatch() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping selector ownership oracle");
+        return;
+    };
+    let asset = hierarchy_asset(hierarchy_archive());
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(1)).unwrap();
+    let mesh = pool.register_mesh(&queue, Arc::clone(&asset)).unwrap();
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let mut other_pool = GpuVirtualGeometryPool::new(&device, gpu_config(1)).unwrap();
+    let other_mesh = other_pool.register_mesh(&queue, asset).unwrap();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("virtual_geometry_selector_ownership_encoder"),
+    });
+    assert_eq!(
+        selector
+            .record(
+                &queue,
+                &mut encoder,
+                &other_pool,
+                &[GpuVirtualInstance::identity(other_mesh, 61)],
+                traversal_view(50.0),
+            )
+            .unwrap_err(),
+        VirtualGeometryTraversalError::PoolMismatch
+    );
+
+    pool.retire_mesh(&queue, mesh).unwrap();
+    assert!(matches!(
+        selector.record(
+            &queue,
+            &mut encoder,
+            &pool,
+            &[GpuVirtualInstance::identity(mesh, 63)],
+            traversal_view(50.0),
+        ),
+        Err(VirtualGeometryTraversalError::Pool(
+            VirtualGeometryGpuError::RetiringMesh(id)
+        )) if id == mesh
+    ));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
