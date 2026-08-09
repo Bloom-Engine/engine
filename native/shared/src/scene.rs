@@ -5,14 +5,17 @@
 //! transforms; the renderer draws all visible nodes each frame automatically.
 
 use crate::handles::HandleRegistry;
-use crate::models::{MaterialAlphaMode, MaterialLayeredPbr, MaterialTransmission};
+use crate::models::{MaterialAlphaMode, MaterialLayeredPbr, MaterialTransmission, MeshData};
 use crate::renderer::{
     gpu_driven::{self, GeometrySlice, GpuDrawRecord},
     material_indirection::MaterialId,
     ImportedIridescenceDrawRef, ImportedRefractiveDrawRef, ImportedTransparentDrawRef, MeshDrawRef,
     Uniforms3D, Vertex3D,
 };
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use wgpu::util::DeviceExt;
 
 // ============================================================
@@ -112,10 +115,17 @@ pub struct SceneNode {
     pub vertices: Vec<Vertex3D>,
     pub(crate) secondary_tex_coords: Option<Vec<[f32; 2]>>,
     pub indices: Vec<u32>,
+    /// Immutable imported primitive shared by every glTF placement. Owned /
+    /// procedural nodes leave this empty and continue using the Vec fields.
+    shared_model_mesh: Option<Arc<MeshData>>,
     // Material
     pub material: PbrMaterial,
     // Transform
     pub transform: [[f32; 4]; 4],
+    /// Authored primitive-local → model transform. Public node transforms are
+    /// composed on top, preserving attach-then-move simplicity without baking
+    /// or duplicating imported vertices.
+    source_transform: [[f32; 4]; 4],
     /// Previous frame's world transform — used to compute per-mesh
     /// screen-space velocity for motion blur and TAA reprojection.
     pub prev_transform: [[f32; 4]; 4],
@@ -158,6 +168,10 @@ pub struct SceneNode {
     /// reflections, GI, LODs and ray tracing remain byte-for-byte unchanged.
     pub(crate) gpu_geometry: Option<GeometrySlice>,
     gpu_geometry_key: Option<SceneGeometryKey>,
+    /// Shared compatibility resources (VB/IB, BLAS, local SDF). Separate from
+    /// the GPU-driven arena key because fallback passes need these on every
+    /// backend, including adapters where GPU-driven submission is disabled.
+    gpu_resource_key: Option<SceneGeometryKey>,
     /// Stable global material-table entry used by GPU-driven draws.
     pub(crate) gpu_material_id: MaterialId,
     gpu_material_key: Option<SceneMaterialKey>,
@@ -171,6 +185,10 @@ pub struct SceneNode {
     /// by `prepare()`, committed to the GPU by the renderer's main
     /// encoder in `build_acceleration_structures`.
     pub blas: Option<wgpu::Blas>,
+    /// True only after the BLAS has been encoded in a submitted build batch.
+    /// Large imports create handles eagerly but amortize builds so raster
+    /// output starts without one unbounded acceleration-structure job.
+    pub(crate) blas_ready: bool,
     /// Ticket 013 — first of 6 consecutive card-atlas slots assigned
     /// at BLAS creation. Slots are laid out per axis:
     ///   first_slot + 0 → +X, +1 → -X, +2 → +Y,
@@ -273,8 +291,10 @@ impl SceneNode {
             vertices: Vec::new(),
             secondary_tex_coords: None,
             indices: Vec::new(),
+            shared_model_mesh: None,
             material: PbrMaterial::default(),
             transform: crate::renderer::IDENTITY_MAT4,
+            source_transform: crate::renderer::IDENTITY_MAT4,
             prev_transform: crate::renderer::IDENTITY_MAT4,
             visible: true,
             cast_shadow: true,
@@ -291,11 +311,13 @@ impl SceneNode {
             gpu_ib: None,
             gpu_geometry: None,
             gpu_geometry_key: None,
+            gpu_resource_key: None,
             gpu_material_id: MaterialId::FALLBACK,
             gpu_material_key: None,
             gpu_index_count: 0,
             gpu_vertex_count: 0,
             blas: None,
+            blas_ready: false,
             card_first_slot: None,
             card_dynamic: false,
             mesh_sdf: None,
@@ -324,6 +346,47 @@ impl SceneNode {
             active_lod: -1,
         }
     }
+
+    /// Read the node's effective local vertex payload. Imported geometry may
+    /// be backed by an immutable shared model primitive.
+    pub fn vertices(&self) -> &[Vertex3D] {
+        self.shared_model_mesh
+            .as_ref()
+            .map_or(self.vertices.as_slice(), |mesh| mesh.vertices.as_slice())
+    }
+
+    /// Read the node's effective local index payload. Imported geometry may
+    /// be backed by an immutable shared model primitive.
+    pub fn indices(&self) -> &[u32] {
+        self.shared_model_mesh
+            .as_ref()
+            .map_or(self.indices.as_slice(), |mesh| mesh.indices.as_slice())
+    }
+
+    pub(crate) fn secondary_tex_coords(&self) -> Option<&[[f32; 2]]> {
+        self.shared_model_mesh
+            .as_ref()
+            .and_then(|mesh| mesh.secondary_tex_coords.as_deref())
+            .or(self.secondary_tex_coords.as_deref())
+    }
+
+    pub(crate) fn shared_geometry_identity(&self) -> Option<usize> {
+        self.shared_model_mesh
+            .as_ref()
+            .map(|mesh| Arc::as_ptr(mesh) as usize)
+    }
+
+    pub(crate) fn blas_geometry_key(&self) -> Option<SceneGeometryKey> {
+        self.gpu_resource_key
+    }
+
+    pub(crate) fn world_transform(&self) -> [[f32; 4]; 4] {
+        mat4_mul(&self.transform, &self.source_transform)
+    }
+
+    pub(crate) fn previous_world_transform(&self) -> [[f32; 4]; 4] {
+        mat4_mul(&self.prev_transform, &self.source_transform)
+    }
 }
 
 // ============================================================
@@ -336,7 +399,7 @@ impl SceneNode {
 const NODE_UNIFORM_STRIDE: u64 = 256;
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-struct SceneGeometryKey {
+pub(crate) struct SceneGeometryKey {
     hash_a: u64,
     hash_b: u64,
     vertex_count: u32,
@@ -346,6 +409,18 @@ struct SceneGeometryKey {
 #[derive(Copy, Clone)]
 struct SharedSceneGeometry {
     slice: GeometrySlice,
+    references: u32,
+}
+
+#[derive(Clone)]
+struct SharedSceneGpuResources {
+    vertex: wgpu::Buffer,
+    index: wgpu::Buffer,
+    blas: Option<wgpu::Blas>,
+    blas_ready: bool,
+    mesh_sdf: Option<wgpu::Texture>,
+    mesh_sdf_view: Option<wgpu::TextureView>,
+    mesh_hash: Option<crate::sdf_cache::MeshHash>,
     references: u32,
 }
 
@@ -424,6 +499,7 @@ pub struct SceneGraph {
     /// in a per-frame budget via a compute pass. Static meshes
     /// never re-bake once their SDF lands.
     pub pending_sdf_bakes: Vec<f64>,
+    shared_gpu_resources: HashMap<SceneGeometryKey, SharedSceneGpuResources>,
     shared_gpu_geometry: HashMap<SceneGeometryKey, SharedSceneGeometry>,
     retired_gpu_geometry: Vec<GeometrySlice>,
     shared_gpu_materials: HashMap<SceneMaterialKey, SharedSceneMaterial>,
@@ -462,6 +538,7 @@ impl SceneGraph {
             next_card_slot: 0,
             free_card_blocks: Vec::new(),
             pending_sdf_bakes: Vec::new(),
+            shared_gpu_resources: HashMap::new(),
             shared_gpu_geometry: HashMap::new(),
             retired_gpu_geometry: Vec::new(),
             shared_gpu_materials: HashMap::new(),
@@ -481,6 +558,22 @@ impl SceneGraph {
             .for_each(|(_, n)| n.prev_transform = n.transform);
     }
 
+    /// Publish one completed BLAS batch to every instance sharing those
+    /// compatibility resources. GPU queue ordering makes the matching TLAS
+    /// build in the same submission safe before the next frame observes this.
+    pub(crate) fn mark_blas_ready(&mut self, keys: &HashSet<SceneGeometryKey>) {
+        for key in keys {
+            if let Some(resources) = self.shared_gpu_resources.get_mut(key) {
+                resources.blas_ready = true;
+            }
+        }
+        for (_, node) in self.nodes.iter_mut() {
+            if node.gpu_resource_key.is_some_and(|key| keys.contains(&key)) {
+                node.blas_ready = true;
+            }
+        }
+    }
+
     pub fn create_node(&mut self) -> f64 {
         self.shadow_version = self.shadow_version.wrapping_add(1);
         self.tlas_version = self.tlas_version.wrapping_add(1);
@@ -489,6 +582,7 @@ impl SceneGraph {
 
     pub fn destroy_node(&mut self, handle: f64) {
         let mut geometry_key = None;
+        let mut resource_key = None;
         let mut material_key = None;
         if let Some(node) = self.nodes.get(handle) {
             if node.visible && node.cast_shadow {
@@ -502,6 +596,7 @@ impl SceneGraph {
                 self.free_card_blocks.push(first);
             }
             geometry_key = node.gpu_geometry_key;
+            resource_key = node.gpu_resource_key;
             material_key = node.gpu_material_key;
         }
         if let Some(key) = geometry_key {
@@ -510,6 +605,9 @@ impl SceneGraph {
                 &mut self.retired_gpu_geometry,
                 key,
             );
+        }
+        if let Some(key) = resource_key {
+            release_scene_gpu_resources(&mut self.shared_gpu_resources, key);
         }
         if let Some(key) = material_key {
             release_scene_material(
@@ -631,15 +729,16 @@ impl SceneGraph {
         let mut tri_count: u32 = 0;
         for (_, node) in self.nodes.iter() {
             if !node.visible
-                || node.vertices.is_empty()
-                || node.indices.is_empty()
+                || node.vertices().is_empty()
+                || node.indices().is_empty()
                 || (exclude_physical_transmission && node.material.has_gi_transmission())
             {
                 continue;
             }
             let base = (vbuf.len() / STRIDE) as u32;
-            let t = &node.transform;
-            for v in &node.vertices {
+            let world_transform = node.world_transform();
+            let t = &world_transform;
+            for v in node.vertices() {
                 let px = v.position[0];
                 let py = v.position[1];
                 let pz = v.position[2];
@@ -650,10 +749,10 @@ impl SceneGraph {
                 // read by `SDF_BAKE_WGSL`.
                 vbuf.extend_from_slice(&[wx, wy, wz, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
             }
-            for &idx in &node.indices {
+            for &idx in node.indices() {
                 ibuf.push(base + idx);
             }
-            tri_count += (node.indices.len() / 3) as u32;
+            tri_count += (node.indices().len() / 3) as u32;
         }
         (vbuf, ibuf, tri_count)
     }
@@ -775,6 +874,8 @@ impl SceneGraph {
             node.vertices = vertices;
             node.secondary_tex_coords = secondary_tex_coords;
             node.indices = indices;
+            node.shared_model_mesh = None;
+            node.source_transform = crate::renderer::IDENTITY_MAT4;
             node.geo_dirty = true;
             if node.cast_shadow && node.visible {
                 self.shadow_version = self.shadow_version.wrapping_add(1);
@@ -782,6 +883,60 @@ impl SceneGraph {
             if node.visible {
                 self.tlas_version = self.tlas_version.wrapping_add(1);
             }
+        }
+    }
+
+    /// Attach immutable imported geometry without copying its vertex/index
+    /// payload. The source transform remains separate from the public node
+    /// transform, so subsequent `set_transform` calls place the complete
+    /// imported primitive while retaining the source-authored placement.
+    pub fn update_shared_model_geometry(
+        &mut self,
+        handle: f64,
+        mesh: Arc<MeshData>,
+        source_transform: [[f32; 4]; 4],
+    ) {
+        let Some(node) = self.nodes.get_mut(handle) else {
+            return;
+        };
+        let mut bmin = [f32::MAX; 3];
+        let mut bmax = [f32::MIN; 3];
+        for vertex in &mesh.vertices {
+            for axis in 0..3 {
+                bmin[axis] = bmin[axis].min(vertex.position[axis]);
+                bmax[axis] = bmax[axis].max(vertex.position[axis]);
+            }
+        }
+        if mesh.vertices.is_empty() {
+            bmin = [0.0; 3];
+            bmax = [0.0; 3];
+        }
+        let had_secondary = node.secondary_tex_coords().is_some();
+        let has_secondary = mesh.secondary_tex_coords.is_some();
+        if had_secondary != has_secondary {
+            node.mat_dirty = true;
+            node.gpu_refractive_material_bg = None;
+            node.gpu_refractive_uniform_buf = None;
+            node.gpu_refractive_layered_uniform_buf = None;
+            node.gpu_refractive_layered = false;
+            node.gpu_refractive_uses_uv1 = false;
+            node.gpu_layered_material_bg = None;
+            node.gpu_layered_uniform_buf = None;
+            node.gpu_layered_uses_uv1 = false;
+        }
+        node.vertices.clear();
+        node.indices.clear();
+        node.secondary_tex_coords = None;
+        node.shared_model_mesh = Some(mesh);
+        node.source_transform = source_transform;
+        node.bounds_min = bmin;
+        node.bounds_max = bmax;
+        node.geo_dirty = true;
+        if node.cast_shadow && node.visible {
+            self.shadow_version = self.shadow_version.wrapping_add(1);
+        }
+        if node.visible {
+            self.tlas_version = self.tlas_version.wrapping_add(1);
         }
     }
 
@@ -850,7 +1005,8 @@ impl SceneGraph {
             }
             // Transform the 8 local-AABB corners by the node's world matrix
             // and union into the running bounds.
-            let t = &node.transform;
+            let world_transform = node.world_transform();
+            let t = &world_transform;
             for ix in 0..2 {
                 for iy in 0..2 {
                     for iz in 0..2 {
@@ -1125,7 +1281,7 @@ impl SceneGraph {
             .filter(|(_, node)| {
                 node.visible
                     && !node.gi_only
-                    && !node.indices.is_empty()
+                    && !node.indices().is_empty()
                     && node.material.alpha_cutoff <= 0.0
                     && node.material.alpha_mode != MaterialAlphaMode::Blend
                     && !(imported_refraction_enabled && node.material.transmission.is_active())
@@ -1147,6 +1303,7 @@ impl SceneGraph {
         let pending_sdf = &mut self.pending_sdf_bakes;
         let next_card_slot = &mut self.next_card_slot;
         let free_card_blocks = &mut self.free_card_blocks;
+        let shared_gpu_resources = &mut self.shared_gpu_resources;
         let shared_gpu_geometry = &mut self.shared_gpu_geometry;
         let retired_gpu_geometry = &mut self.retired_gpu_geometry;
         let gpu_driven_scene_active = self.gpu_driven_scene_active;
@@ -1162,13 +1319,13 @@ impl SceneGraph {
                 }
                 node.gpu_geometry = None;
             }
-            if node.indices.is_empty() {
+            if node.indices().is_empty() {
                 if let Some(old_key) = node.gpu_geometry_key.take() {
                     release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
                 }
                 node.gpu_geometry = None;
             }
-            if !node.visible || node.indices.is_empty() {
+            if !node.visible || node.indices().is_empty() {
                 continue;
             }
             if !node.gi_only && node.material.alpha_mode == MaterialAlphaMode::Blend {
@@ -1187,7 +1344,8 @@ impl SceneGraph {
             // bounds into world space by applying the node's transform
             // to the 8 corners; use the min/max of the result.
             if node.bounds_min[0] <= node.bounds_max[0] {
-                let t = &node.transform;
+                let world_transform = node.world_transform();
+                let t = &world_transform;
                 let mut wmin = [f32::MAX; 3];
                 let mut wmax = [f32::MIN; 3];
                 for ix in 0..2 {
@@ -1310,6 +1468,43 @@ impl SceneGraph {
 
             let geometry_changed = node.geo_dirty;
             if geometry_changed || node.gpu_vb.is_none() {
+                let resource_key = (!node.vertices().is_empty() && !node.indices().is_empty())
+                    .then(|| scene_geometry_key(node.vertices(), node.indices()));
+                if node.gpu_resource_key != resource_key {
+                    if let Some(old_key) = node.gpu_resource_key.take() {
+                        release_scene_gpu_resources(shared_gpu_resources, old_key);
+                    }
+                    // A queued BLAS belongs to the exact geometry key that
+                    // created it. Never expose it after geometry replacement,
+                    // and make empty geometry release its compatibility
+                    // buffers instead of retaining a stale draw/build input.
+                    node.blas = None;
+                    node.blas_ready = false;
+                    node.mesh_sdf = None;
+                    node.mesh_sdf_view = None;
+                    node.mesh_hash = None;
+                    if resource_key.is_none() {
+                        node.gpu_vb = None;
+                        node.gpu_ib = None;
+                    }
+                }
+                let mut reused_resources = false;
+                if let Some(key) = resource_key {
+                    if let Some(cached) = shared_gpu_resources.get_mut(&key) {
+                        if node.gpu_resource_key != Some(key) {
+                            cached.references = cached.references.saturating_add(1);
+                        }
+                        node.gpu_vb = Some(cached.vertex.clone());
+                        node.gpu_ib = Some(cached.index.clone());
+                        node.blas = cached.blas.clone();
+                        node.blas_ready = cached.blas_ready;
+                        node.mesh_sdf = cached.mesh_sdf.clone();
+                        node.mesh_sdf_view = cached.mesh_sdf_view.clone();
+                        node.mesh_hash = cached.mesh_hash;
+                        node.gpu_resource_key = Some(key);
+                        reused_resources = true;
+                    }
+                }
                 // Ticket 007b: widen buffer usage when HW RT is on so
                 // the same buffer can back both the raster draw and
                 // the BLAS build. Cheap — no measurable cost when RT
@@ -1335,22 +1530,24 @@ impl SceneGraph {
                 } else {
                     wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE
                 };
-                node.gpu_vb = Some(
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("scene_node_vb"),
-                        contents: bytemuck::cast_slice(&node.vertices),
-                        usage: vb_usage,
-                    }),
-                );
-                node.gpu_ib = Some(
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("scene_node_ib"),
-                        contents: bytemuck::cast_slice(&node.indices),
-                        usage: ib_usage,
-                    }),
-                );
-                node.gpu_index_count = node.indices.len() as u32;
-                node.gpu_vertex_count = node.vertices.len() as u32;
+                if !reused_resources && resource_key.is_some() {
+                    node.gpu_vb = Some(device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_shared_vb"),
+                            contents: bytemuck::cast_slice(node.vertices()),
+                            usage: vb_usage,
+                        },
+                    ));
+                    node.gpu_ib = Some(device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_shared_ib"),
+                            contents: bytemuck::cast_slice(node.indices()),
+                            usage: ib_usage,
+                        },
+                    ));
+                }
+                node.gpu_index_count = node.indices().len() as u32;
+                node.gpu_vertex_count = node.vertices().len() as u32;
                 node.geo_dirty = false;
 
                 // Ticket 014 V4 — flat normal/albedo + card-slot
@@ -1361,14 +1558,15 @@ impl SceneGraph {
                 // BLAS / TLAS is built. BLAS + per-mesh SDF bake
                 // remain hw-rt-gated because only the HW trace reads
                 // those (and the per-mesh SDFs are currently dormant).
-                if !node.indices.is_empty() {
+                if !node.indices().is_empty() {
                     let mut n_sum = [0.0_f32; 3];
-                    for v in &node.vertices {
+                    for v in node.vertices() {
                         n_sum[0] += v.normal[0];
                         n_sum[1] += v.normal[1];
                         n_sum[2] += v.normal[2];
                     }
-                    let t = &node.transform;
+                    let world_transform = node.world_transform();
+                    let t = &world_transform;
                     let nx = t[0][0] * n_sum[0] + t[1][0] * n_sum[1] + t[2][0] * n_sum[2];
                     let ny = t[0][1] * n_sum[0] + t[1][1] * n_sum[1] + t[2][1] * n_sum[2];
                     let nz = t[0][2] * n_sum[0] + t[1][2] * n_sum[1] + t[2][2] * n_sum[2];
@@ -1390,15 +1588,19 @@ impl SceneGraph {
                             Some(reused) => reused,
                             None => {
                                 let fresh = *next_card_slot;
-                                *next_card_slot += 6;
+                                *next_card_slot += crate::renderer::CARD_AXES_PER_MESH;
                                 fresh
                             }
                         };
-                        node.card_first_slot = Some(first);
-                        pending_cards.push(handle);
+                        if first + crate::renderer::CARD_AXES_PER_MESH
+                            <= crate::renderer::CARD_MAX_SLOTS
+                        {
+                            node.card_first_slot = Some(first);
+                            pending_cards.push(handle);
+                        }
                     }
 
-                    if hw_rt {
+                    if hw_rt && !reused_resources {
                         // BLAS creation only on HW-RT adapters.
                         let size_desc = wgpu::BlasTriangleGeometrySizeDescriptor {
                             vertex_format: wgpu::VertexFormat::Float32x3,
@@ -1417,12 +1619,16 @@ impl SceneGraph {
                                 descriptors: vec![size_desc],
                             },
                         ));
+                        node.blas_ready = false;
                         pending_blas.push(handle);
 
-                        // Per-mesh SDF texture — currently dormant (V4
-                        // dynamic-scene merge will consume it), but
-                        // cheap to allocate alongside the BLAS.
-                        if node.mesh_sdf.is_none()
+                        // Per-mesh SDF textures are not sampled by any
+                        // shipping trace path. Keep the implementation for
+                        // the future dynamic-scene merge, but do not allocate
+                        // and brute-force bake hundreds of dormant volumes.
+                        let mesh_sdf_consumed = false;
+                        if mesh_sdf_consumed
+                            && node.mesh_sdf.is_none()
                             && node.bounds_min[0] < node.bounds_max[0]
                             && node.bounds_min[1] < node.bounds_max[1]
                             && node.bounds_min[2] < node.bounds_max[2]
@@ -1440,9 +1646,9 @@ impl SceneGraph {
                             // [[f32; 3]] slice so the hash only sees
                             // geometry-relevant bytes.
                             let positions: Vec<[f32; 3]> =
-                                node.vertices.iter().map(|v| v.position).collect();
+                                node.vertices().iter().map(|v| v.position).collect();
                             let hash =
-                                crate::sdf_cache::compute_mesh_hash(&positions, &node.indices);
+                                crate::sdf_cache::compute_mesh_hash(&positions, node.indices());
                             node.mesh_hash = Some(hash);
 
                             if let Some(bytes) = crate::sdf_cache::load(hash) {
@@ -1498,9 +1704,29 @@ impl SceneGraph {
                         }
                     }
                 }
+                if !reused_resources {
+                    if let (Some(key), Some(vertex), Some(index)) =
+                        (resource_key, node.gpu_vb.as_ref(), node.gpu_ib.as_ref())
+                    {
+                        shared_gpu_resources.insert(
+                            key,
+                            SharedSceneGpuResources {
+                                vertex: vertex.clone(),
+                                index: index.clone(),
+                                blas: node.blas.clone(),
+                                blas_ready: node.blas_ready,
+                                mesh_sdf: node.mesh_sdf.clone(),
+                                mesh_sdf_view: node.mesh_sdf_view.clone(),
+                                mesh_hash: node.mesh_hash,
+                                references: 1,
+                            },
+                        );
+                        node.gpu_resource_key = Some(key);
+                    }
+                }
             }
             if needs_secondary_uv && node.gpu_secondary_uv_vb.is_none() {
-                node.gpu_secondary_uv_vb = node.secondary_tex_coords.as_ref().map(|coords| {
+                node.gpu_secondary_uv_vb = node.secondary_tex_coords().map(|coords| {
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("scene_node_refractive_uv1_vb"),
                         contents: bytemuck::cast_slice(coords),
@@ -1513,7 +1739,7 @@ impl SceneGraph {
             // Main/depth GPU submission uses one deduplicated arena slice.
             // The legacy buffers above deliberately stay alive for secondary
             // passes, which makes this an additive and reversible fast path.
-            if geometry_changed && (node.vertices.is_empty() || node.indices.is_empty()) {
+            if geometry_changed && (node.vertices().is_empty() || node.indices().is_empty()) {
                 if let Some(old_key) = node.gpu_geometry_key.take() {
                     release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
                 }
@@ -1522,10 +1748,10 @@ impl SceneGraph {
             if gpu_driven.enabled()
                 && gpu_driven_scene_active
                 && (geometry_changed || node.gpu_geometry.is_none())
-                && !node.vertices.is_empty()
-                && !node.indices.is_empty()
+                && !node.vertices().is_empty()
+                && !node.indices().is_empty()
             {
-                let key = scene_geometry_key(&node.vertices, &node.indices);
+                let key = scene_geometry_key(node.vertices(), node.indices());
                 if node.gpu_geometry_key != Some(key) {
                     if let Some(old_key) = node.gpu_geometry_key.take() {
                         release_scene_geometry(shared_gpu_geometry, retired_gpu_geometry, old_key);
@@ -1534,8 +1760,12 @@ impl SceneGraph {
                         cached.references = cached.references.saturating_add(1);
                         cached.slice
                     } else {
-                        let slice =
-                            gpu_driven.upload_static(device, queue, &node.vertices, &node.indices);
+                        let slice = gpu_driven.upload_static(
+                            device,
+                            queue,
+                            node.vertices(),
+                            node.indices(),
+                        );
                         shared_gpu_geometry.insert(
                             key,
                             SharedSceneGeometry {
@@ -1598,15 +1828,17 @@ impl SceneGraph {
         // the memcpy into scratch.
         let mut max_byte_offset: usize = 0;
         for (_handle, node) in self.nodes.iter_mut() {
-            if !node.visible || node.indices.is_empty() {
+            if !node.visible || node.indices().is_empty() {
                 continue;
             }
             let Some(slot) = node.uniform_slot else {
                 continue;
             };
 
-            let mvp = mat4_mul(vp_matrix, &node.transform);
-            let prev_mvp = mat4_mul(prev_vp_matrix, &node.prev_transform);
+            let world_transform = node.world_transform();
+            let previous_world_transform = node.previous_world_transform();
+            let mvp = mat4_mul(vp_matrix, &world_transform);
+            let prev_mvp = mat4_mul(prev_vp_matrix, &previous_world_transform);
             // Guard against NaN/Inf opacity (Perry TS passes NaN
             // when a default-arg alpha isn't provided) — a single
             // NaN in model_tint.w propagates through every shader
@@ -1624,7 +1856,7 @@ impl SceneGraph {
             ];
             let uniforms = NodeUniforms {
                 mvp,
-                model: node.transform,
+                model: world_transform,
                 prev_mvp,
                 model_tint: tint,
                 misc: [0.0; 4],
@@ -1668,7 +1900,7 @@ impl SceneGraph {
         let shared_gpu_materials = &mut self.shared_gpu_materials;
         let retired_gpu_materials = &mut self.retired_gpu_materials;
         for (_handle, node) in self.nodes.iter_mut() {
-            if !node.visible || node.indices.is_empty() {
+            if !node.visible || node.indices().is_empty() {
                 continue;
             }
             let material_changed = node.mat_dirty;
@@ -1716,7 +1948,7 @@ impl SceneGraph {
                     &uniform,
                     node.material.transmission,
                     node.material.layered_pbr,
-                    node.secondary_tex_coords.is_some(),
+                    node.secondary_tex_coords().is_some(),
                 );
                 let refractive = combined_refractive.is_none().then(|| {
                     renderer.create_scene_refractive_material_bg(
@@ -1727,7 +1959,7 @@ impl SceneGraph {
                         node.material.occlusion_texture_idx,
                         &uniform,
                         node.material.transmission,
-                        node.secondary_tex_coords.is_some(),
+                        node.secondary_tex_coords().is_some(),
                     )
                 });
                 let layered = needs_layered_scene.then(|| {
@@ -1739,7 +1971,7 @@ impl SceneGraph {
                         node.material.occlusion_texture_idx,
                         &uniform,
                         node.material.layered_pbr,
-                        node.secondary_tex_coords.is_some(),
+                        node.secondary_tex_coords().is_some(),
                     )
                 });
                 node.gpu_material_bg = Some(bg);
@@ -1883,7 +2115,7 @@ impl SceneGraph {
         for (_handle, node) in self.nodes.iter() {
             if !node.visible
                 || node.gi_only
-                || node.indices.is_empty()
+                || node.indices().is_empty()
                 || !node.in_view_frustum
                 || node.occluded
             {
@@ -1988,7 +2220,7 @@ impl SceneGraph {
             .filter(|(_handle, node)| {
                 node.visible
                     && node.card_first_slot.is_some()
-                    && !node.indices.is_empty()
+                    && !node.indices().is_empty()
                     && node.material.has_gi_transmission()
             })
             .count()
@@ -2004,7 +2236,7 @@ impl SceneGraph {
                 node.visible
                     && !node.gi_only
                     && node.cast_shadow
-                    && !node.indices.is_empty()
+                    && !node.indices().is_empty()
                     && node.material.transmission.is_active()
                     && node.gpu_refractive_material_bg.is_some()
             })
@@ -2014,7 +2246,7 @@ impl SceneGraph {
         self.nodes.iter().any(|(_handle, node)| {
             node.visible
                 && !node.gi_only
-                && !node.indices.is_empty()
+                && !node.indices().is_empty()
                 && node.in_view_frustum
                 && !node.occluded
                 && node.material.alpha_mode != MaterialAlphaMode::Blend
@@ -2031,7 +2263,7 @@ impl SceneGraph {
         for (_handle, node) in self.nodes.iter() {
             if !node.visible
                 || node.gi_only
-                || node.indices.is_empty()
+                || node.indices().is_empty()
                 || !node.in_view_frustum
                 || node.occluded
                 || node.material.alpha_mode == MaterialAlphaMode::Blend
@@ -2112,7 +2344,7 @@ impl SceneGraph {
             .filter(|(_handle, node)| {
                 node.visible
                     && !node.gi_only
-                    && !node.indices.is_empty()
+                    && !node.indices().is_empty()
                     && node.in_view_frustum
                     && !node.occluded
                     && node.material.alpha_mode == MaterialAlphaMode::Blend
@@ -2130,7 +2362,7 @@ impl SceneGraph {
             .filter(|(_handle, node)| {
                 node.visible
                     && !node.gi_only
-                    && !node.indices.is_empty()
+                    && !node.indices().is_empty()
                     && node.in_view_frustum
                     && !node.occluded
                     && node.material.transmission.is_active()
@@ -2147,7 +2379,7 @@ impl SceneGraph {
         for (node_index, (_handle, node)) in self.nodes.iter().enumerate() {
             if !node.visible
                 || node.gi_only
-                || node.indices.is_empty()
+                || node.indices().is_empty()
                 || !node.in_view_frustum
                 || node.occluded
                 || !node.material.transmission.is_active()
@@ -2204,11 +2436,8 @@ impl SceneGraph {
                     (node.world_bounds_min[2] + node.world_bounds_max[2]) * 0.5,
                 ]
             } else {
-                [
-                    node.transform[3][0],
-                    node.transform[3][1],
-                    node.transform[3][2],
-                ]
+                let transform = node.world_transform();
+                [transform[3][0], transform[3][1], transform[3][2]]
             };
             let pivot = crate::renderer::mat4_mul_vec4(
                 view_projection,
@@ -2297,7 +2526,7 @@ impl SceneGraph {
         for (node_index, (_handle, node)) in self.nodes.iter().enumerate() {
             if !node.visible
                 || node.gi_only
-                || node.indices.is_empty()
+                || node.indices().is_empty()
                 || !node.in_view_frustum
                 || node.occluded
                 || node.material.alpha_mode != MaterialAlphaMode::Blend
@@ -2352,11 +2581,8 @@ impl SceneGraph {
                     (node.world_bounds_min[2] + node.world_bounds_max[2]) * 0.5,
                 ]
             } else {
-                [
-                    node.transform[3][0],
-                    node.transform[3][1],
-                    node.transform[3][2],
-                ]
+                let transform = node.world_transform();
+                [transform[3][0], transform[3][1], transform[3][2]]
             };
             let pivot = crate::renderer::mat4_mul_vec4(
                 view_projection,
@@ -2397,7 +2623,7 @@ impl SceneGraph {
                 .filter(|(_, node)| {
                     node.visible
                         && !node.gi_only
-                        && !node.indices.is_empty()
+                        && !node.indices().is_empty()
                         && node.in_view_frustum
                         && !node.occluded
                 })
@@ -2405,7 +2631,7 @@ impl SceneGraph {
             return [compatibility, visible, culled];
         }
         for (_handle, node) in self.nodes.iter() {
-            if !node.visible || node.gi_only || node.indices.is_empty() || node.occluded {
+            if !node.visible || node.gi_only || node.indices().is_empty() || node.occluded {
                 continue;
             }
             if !scene_node_gpu_driven_ready(node, self.imported_refraction_enabled) {
@@ -2468,7 +2694,7 @@ impl SceneGraph {
     /// different set. Base geometry only (no LOD swap): the probe is
     /// half-res and consumed through a perturbed water lookup, where a
     /// LOD pop would be more visible than the detail it saves.
-    /// (Treats node.transform as world — flat hierarchies.)
+    /// (Treats the composed public × imported transform as world.)
     pub fn reflect_draw_list(
         &self,
     ) -> Vec<(
@@ -2501,7 +2727,7 @@ impl SceneGraph {
                 || node.gi_only
                 || node.material.alpha_mode == MaterialAlphaMode::Blend
                 || (imported_refraction_enabled && node.material.transmission.is_active())
-                || node.indices.is_empty()
+                || node.indices().is_empty()
             {
                 continue;
             }
@@ -2519,7 +2745,7 @@ impl SceneGraph {
                 ib,
                 node.gpu_index_count,
                 mat_bg,
-                node.transform,
+                node.world_transform(),
                 node.world_bounds_min,
                 node.world_bounds_max,
             ));
@@ -2553,7 +2779,7 @@ fn retained_order_is_gpu_safe(
     !nodes.iter().any(|(_, node)| {
         node.visible
             && !node.gi_only
-            && !node.indices.is_empty()
+            && !node.indices().is_empty()
             && ((node.material.alpha_cutoff > 0.0 && !allow_cutout_compatibility)
                 || (node.material.opacity.is_finite() && node.material.opacity < 1.0))
     })
@@ -2619,6 +2845,20 @@ fn release_scene_geometry(
     }
     if let Some(entry) = cache.remove(&key) {
         retired.push(entry.slice);
+    }
+}
+
+fn release_scene_gpu_resources(
+    cache: &mut HashMap<SceneGeometryKey, SharedSceneGpuResources>,
+    key: SceneGeometryKey,
+) {
+    let Some(entry) = cache.get_mut(&key) else {
+        return;
+    };
+    if entry.references > 1 {
+        entry.references -= 1;
+    } else {
+        cache.remove(&key);
     }
 }
 

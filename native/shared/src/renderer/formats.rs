@@ -586,9 +586,9 @@ pub(super) fn create_mesh_sdf_texture(
 pub(super) const CARD_ATLAS_SIZE: u32 = 4096;
 pub(super) const CARD_SLOT_SIZE: u32 = 64;
 pub(super) const CARD_SLOTS_PER_ROW: u32 = CARD_ATLAS_SIZE / CARD_SLOT_SIZE;
-pub(super) const CARD_MAX_SLOTS: u32 = CARD_SLOTS_PER_ROW * CARD_SLOTS_PER_ROW;
+pub(crate) const CARD_MAX_SLOTS: u32 = CARD_SLOTS_PER_ROW * CARD_SLOTS_PER_ROW;
 /// V2: 6 directed axes per mesh (+X, -X, +Y, -Y, +Z, -Z).
-pub(super) const CARD_AXES_PER_MESH: u32 = 6;
+pub(crate) const CARD_AXES_PER_MESH: u32 = 6;
 
 /// Create the mesh-card albedo atlas. `RENDER_ATTACHMENT` for capture,
 /// `TEXTURE_BINDING` for both the card-lighting compute input and a

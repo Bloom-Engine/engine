@@ -15,9 +15,8 @@
 //   cd examples/bistro
 //   git clone https://github.com/zeux/niagara_bistro.git assets
 //
-// The literal source scene currently expands repeated node geometry in
-// ModelData. Use `scripts/run-bistro-rich.sh` for the safe rich exterior
-// profile: all 551 unique meshes, without duplicating 2,909 instances.
+// Use `scripts/run-bistro-rich.sh` to build and launch the complete exterior:
+// all 2,909 authored mesh-node placements backed by shared source geometry.
 // An interior variant `assets/bistrox.gltf` also exists.
 
 import {
@@ -158,8 +157,9 @@ setVignette(0.10, 0.30);
 setChromaticAberration(0.0005);
 
 // ---- Load Bistro into scene graph ----
-// The rich launcher supplies a generated exterior profile here. Direct source
-// paths remain supported for smaller/custom glTF scenes.
+// The rich launcher supplies the complete source exterior here. Each mesh
+// entry represents an authored primitive placement while its immutable vertex
+// and index payload remains shared with every repeated placement.
 const bistro = loadModel(scenePath);
 console.error("BLOOM_QUALITY_SCENE bistro_meshes=" + bistro.meshCount);
 const identity = mat4Identity();
@@ -168,6 +168,7 @@ for (let i = 0; i < bistro.meshCount; i = i + 1) {
   attachModelToNode(node, bistro.handle, i);
   setSceneNodeTransform(node, identity);
 }
+console.error("BLOOM_QUALITY_SCENE bistro_placements_attached=" + bistro.meshCount);
 
 // ---- Camera ----
 // Matches the preset glTF camera in zeux/niagara_bistro (translation

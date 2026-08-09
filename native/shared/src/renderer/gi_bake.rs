@@ -75,6 +75,14 @@ impl Renderer {
         scene: &crate::scene::SceneGraph,
         encoder: &mut wgpu::CommandEncoder,
     ) {
+        // Hardware SSGI and WSRC trace the shared BLAS/TLAS directly. Building
+        // the software fallback's expanded world-triangle bins on this tier
+        // contributes no samples and can transiently consume many gigabytes
+        // in large instanced scenes such as Bistro.
+        if self.hw_rt_enabled {
+            self.sdf_clipmap_job = None;
+            return;
+        }
         let transparent_gi = self.transparent_gi_active;
         if self.scene_sdf_clipmap_built
             && (self.scene_sdf_clipmap_scene_version != scene.tlas_version

@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Build a bounded, deterministic Bistro qualification glTF.
 
-The source asset references 551 unique meshes from 2,909 mesh nodes. Bloom's
-current ModelData ABI owns vertices per mesh entry rather than an instance
-table, so loading the source literally expands repeated geometry to ~19 GB.
-This preparer retains the first authored world transform for every unique
-mesh. It preserves the complete material/texture set and exterior scale while
-bounding geometry to one copy per source mesh until native mesh instancing
-lands.
+The source asset references 551 unique meshes from 2,909 mesh nodes. Bloom can
+load that complete instanced scene directly; this utility intentionally keeps
+only the first authored world transform for selected unique meshes so automated
+image captures can use a small, deterministic qualification subset.
 """
 
 from __future__ import annotations

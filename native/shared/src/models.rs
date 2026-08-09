@@ -420,10 +420,10 @@ pub struct MaterialTransmission {
     pub attenuation_distance: f32,
     pub attenuation_color: [f32; 3],
     pub thickness_source: MaterialThicknessSource,
-    /// Import-only conversion from authored mesh-space thickness to the
-    /// baked static geometry's space. glTF node transforms are folded into
-    /// static vertices before rendering, so their scale cannot be recovered
-    /// from the later draw-model matrix.
+    /// Import-only conversion from authored mesh-space thickness to an
+    /// imported instance's effective scale. The historical field name is
+    /// retained for ABI compatibility; shared static geometry applies the
+    /// node-transform contribution when it is attached or submitted.
     pub baked_thickness_scale: f32,
 }
 
@@ -553,9 +553,26 @@ pub struct MeshData {
 }
 
 pub struct ModelData {
-    pub meshes: Vec<MeshData>,
+    /// Ordered drawable placements. Repeated glTF nodes clone the `Arc`, not
+    /// the immutable primitive payload, so CPU geometry scales with unique
+    /// primitives rather than scene-node count.
+    pub meshes: Vec<Arc<MeshData>>,
+    /// Primitive-local to model-space transform for each `meshes` entry.
+    /// Procedural and legacy one-mesh models use identity. Keeping placement
+    /// separate from geometry is what allows repeated glTF nodes to share the
+    /// same vertices and indices without baking/copying them.
+    pub mesh_transforms: Vec<[[f32; 4]; 4]>,
     pub bbox_min: [f32; 3],
     pub bbox_max: [f32; 3],
+}
+
+impl ModelData {
+    pub fn mesh_transform(&self, index: usize) -> [[f32; 4]; 4] {
+        self.mesh_transforms
+            .get(index)
+            .copied()
+            .unwrap_or(crate::renderer::IDENTITY_MAT4)
+    }
 }
 
 pub struct JointData {
@@ -851,7 +868,7 @@ impl ModelManager {
         }
 
         let model = ModelData {
-            meshes: vec![MeshData {
+            meshes: vec![Arc::new(MeshData {
                 vertices,
                 secondary_tex_coords: None,
                 indices,
@@ -869,7 +886,8 @@ impl ModelManager {
                 double_sided: false,
                 transmission: MaterialTransmission::default(),
                 layered_pbr: MaterialLayeredPbr::default(),
-            }],
+            })],
+            mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             bbox_min: [-hw, -hh, -hd],
             bbox_max: [hw, hh, hd],
         };
@@ -969,7 +987,7 @@ impl ModelManager {
         }
 
         let model = ModelData {
-            meshes: vec![MeshData {
+            meshes: vec![Arc::new(MeshData {
                 vertices,
                 secondary_tex_coords: None,
                 indices,
@@ -987,7 +1005,8 @@ impl ModelManager {
                 double_sided: false,
                 transmission: MaterialTransmission::default(),
                 layered_pbr: MaterialLayeredPbr::default(),
-            }],
+            })],
+            mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             bbox_min: [-size_x * 0.5, 0.0, -size_z * 0.5],
             bbox_max: [size_x * 0.5, size_y, size_z * 0.5],
         };
@@ -1036,7 +1055,7 @@ impl ModelManager {
 
         let indices = index_data.to_vec();
         let model = ModelData {
-            meshes: vec![MeshData {
+            meshes: vec![Arc::new(MeshData {
                 vertices,
                 secondary_tex_coords: None,
                 indices,
@@ -1054,7 +1073,8 @@ impl ModelManager {
                 double_sided: false,
                 transmission: MaterialTransmission::default(),
                 layered_pbr: MaterialLayeredPbr::default(),
-            }],
+            })],
+            mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             bbox_min,
             bbox_max,
         };
@@ -1165,7 +1185,7 @@ impl ModelManager {
         }
 
         let model = ModelData {
-            meshes: vec![MeshData {
+            meshes: vec![Arc::new(MeshData {
                 vertices,
                 secondary_tex_coords: None,
                 indices,
@@ -1183,7 +1203,8 @@ impl ModelManager {
                 double_sided: false,
                 transmission: MaterialTransmission::default(),
                 layered_pbr: MaterialLayeredPbr::default(),
-            }],
+            })],
+            mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
             bbox_min,
             bbox_max,
         };

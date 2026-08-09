@@ -254,7 +254,7 @@ impl Renderer {
                     || !node.cast_shadow
                     || node.material.alpha_mode == MaterialAlphaMode::Blend
                     || (self.imported_refraction_enabled && node.material.transmission.is_active())
-                    || node.indices.is_empty()
+                    || node.indices().is_empty()
                 {
                     continue;
                 }
@@ -276,25 +276,26 @@ impl Renderer {
                 let gpu_shared_draw = node
                     .gpu_geometry
                     .map(|slice| (slice.first_index, slice.base_vertex));
+                let world_transform = node.world_transform();
                 shadow_nodes.push(ShadowDrawEntry {
                     vb_idx,
                     ib_idx: vb_idx,
                     index_start: 0,
                     index_count: node.gpu_index_count,
                     base_vertex: 0,
-                    transform: node.transform,
+                    transform: world_transform,
                     wmin: node.world_bounds_min,
                     wmax: node.world_bounds_max,
                     cutout_idx,
                     skinned: false,
-                    sig: entry_sig(0, i as u64, node.gpu_index_count as u64, &node.transform),
+                    sig: entry_sig(0, i as u64, node.gpu_index_count as u64, &world_transform),
                     dynamic: false,
                     joint_offset: 0.0,
                     foliage: 0.0,
                     gpu_opaque_shared: gpu_shared_draw.is_some() && cutout_idx < 0,
                     gpu_index_start: gpu_shared_draw.map_or(0, |draw| draw.0),
                     gpu_base_vertex: gpu_shared_draw.map_or(0, |draw| draw.1),
-                    key: caster_id(0, i as u64, node.gpu_index_count as u64, &node.transform),
+                    key: caster_id(0, i as u64, node.gpu_index_count as u64, &world_transform),
                 });
             }
 
@@ -580,7 +581,7 @@ impl Renderer {
                     if !node.visible
                         || node.gi_only
                         || !node.receive_shadow
-                        || node.indices.is_empty()
+                        || node.indices().is_empty()
                         || node.gpu_vb.is_none()
                         || node.gpu_ib.is_none()
                     {
@@ -592,13 +593,13 @@ impl Renderer {
                             0,
                             i as u64,
                             node.gpu_index_count as u64,
-                            &node.transform,
+                            &node.world_transform(),
                         ))
                     {
                         continue;
                     }
                     let (wmin, wmax) =
-                        transform_aabb(&node.transform, node.bounds_min, node.bounds_max);
+                        transform_aabb(&node.world_transform(), node.bounds_min, node.bounds_max);
                     push_vsm_receiver(receivers, camera_planes, wmin, wmax);
                 }
                 // Immediate geometry has world-space bounds already.

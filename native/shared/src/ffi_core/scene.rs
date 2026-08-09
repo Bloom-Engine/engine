@@ -442,7 +442,7 @@ macro_rules! __bloom_ffi_scene {
         pub extern "C" fn bloom_scene_node_vertex_count(handle: f64) -> f64 {
             $crate::ffi::guard("bloom_scene_node_vertex_count", move || {
                 match engine().scene.nodes.get(handle) {
-                    Some(node) => node.vertices.len() as f64,
+                    Some(node) => node.vertices().len() as f64,
                     None => -1.0,
                 }
             })
@@ -453,7 +453,7 @@ macro_rules! __bloom_ffi_scene {
         pub extern "C" fn bloom_scene_node_index_count(handle: f64) -> f64 {
             $crate::ffi::guard("bloom_scene_node_index_count", move || {
                 match engine().scene.nodes.get(handle) {
-                    Some(node) => node.indices.len() as f64,
+                    Some(node) => node.indices().len() as f64,
                     None => -1.0,
                 }
             })
@@ -659,8 +659,8 @@ macro_rules! __bloom_ffi_scene {
                 let eng = engine();
                 if let Some(node) = eng.scene.nodes.get(handle) {
                     let current = $crate::geometry::GeometryData {
-                        vertices: node.vertices.clone(),
-                        indices: node.indices.clone(),
+                        vertices: node.vertices().to_vec(),
+                        indices: node.indices().to_vec(),
                     };
                     let result = $crate::geometry::subtract_box(
                         &current,
@@ -692,11 +692,8 @@ macro_rules! __bloom_ffi_scene {
                 if mi >= model_data.meshes.len() {
                     return;
                 }
-                let mesh = &model_data.meshes[mi];
-
-                let vertices = mesh.vertices.clone();
-                let secondary_tex_coords = mesh.secondary_tex_coords.clone();
-                let indices = mesh.indices.clone();
+                let mesh = std::sync::Arc::clone(&model_data.meshes[mi]);
+                let source_transform = model_data.mesh_transform(mi);
                 let base_color_tex = mesh.texture_idx;
                 let normal_tex = mesh.normal_texture_idx;
                 let mr_tex = mesh.metallic_roughness_texture_idx;
@@ -708,14 +705,22 @@ macro_rules! __bloom_ffi_scene {
                 let alpha_cutoff = mesh.alpha_cutoff;
                 let alpha_coverage_mips = mesh.alpha_coverage_mips;
                 let double_sided = mesh.double_sided;
-                let transmission = mesh.transmission;
+                let mut transmission = mesh.transmission;
                 let layered_pbr = mesh.layered_pbr;
-                eng.scene.update_geometry_with_secondary_uv(
-                    node_handle,
-                    vertices,
-                    secondary_tex_coords,
-                    indices,
-                );
+                // KHR_materials_volume thickness is authored in primitive
+                // space. Static glTF node scale now lives in the placement
+                // transform instead of baked vertices, so carry the same
+                // mean-scale conversion into the per-node material copy.
+                let axis_length = |column: usize| {
+                    let x = source_transform[column][0];
+                    let y = source_transform[column][1];
+                    let z = source_transform[column][2];
+                    (x * x + y * y + z * z).sqrt()
+                };
+                transmission.baked_thickness_scale *=
+                    (axis_length(0) + axis_length(1) + axis_length(2)) / 3.0;
+                eng.scene
+                    .update_shared_model_geometry(node_handle, mesh, source_transform);
 
                 if let Some(tex_idx) = base_color_tex {
                     eng.scene.set_material_texture(node_handle, tex_idx);

@@ -127,13 +127,13 @@ use formats::{
     create_scene_sdf_clipmap_staging, create_ssao_blur_rt, create_ssao_history_textures,
     create_ssao_rt, create_ssgi_rt, create_ssr_history_textures, create_ssr_rt, create_sss_rt,
     create_taa_textures, create_velocity_rt, create_wsrc_atlas, halton, probe_grid_dims,
-    BLOOM_MIP_COUNT, CARD_ATLAS_SIZE, CARD_AXES_PER_MESH, CARD_MAX_SLOTS, CARD_SLOTS_PER_ROW,
-    CARD_SLOT_SIZE, HDR_FORMAT, HIZ_FORMAT, HIZ_MIP_COUNT, MATERIAL_FORMAT, MESH_SDF_RES,
-    PROBE_TILE_SIZE, SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT,
-    SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME, SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD, SCENE_SDF_CLIPMAP_RES,
-    SSAO_FORMAT, VELOCITY_FORMAT, WSRC_CASCADE_COUNT, WSRC_CASCADE_EXTENTS, WSRC_GRID_RES,
-    WSRC_REBAKE_THRESHOLD,
+    BLOOM_MIP_COUNT, CARD_ATLAS_SIZE, CARD_SLOTS_PER_ROW, CARD_SLOT_SIZE, HDR_FORMAT, HIZ_FORMAT,
+    HIZ_MIP_COUNT, MATERIAL_FORMAT, MESH_SDF_RES, PROBE_TILE_SIZE, SCENE_SDF_CLIPMAP_BIN_CELLS,
+    SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME,
+    SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD, SCENE_SDF_CLIPMAP_RES, SSAO_FORMAT, VELOCITY_FORMAT,
+    WSRC_CASCADE_COUNT, WSRC_CASCADE_EXTENTS, WSRC_GRID_RES, WSRC_REBAKE_THRESHOLD,
 };
+pub(crate) use formats::{CARD_AXES_PER_MESH, CARD_MAX_SLOTS};
 
 mod types;
 pub(crate) use types::Uniforms3D;
@@ -184,6 +184,9 @@ pub use types::{RenderMode, SceneMaterialUniforms, Vertex2D, Vertex3D};
 struct GpuMesh {
     geometry: gpu_driven::MeshGeometry,
     index_count: u32,
+    /// Primitive-local → model placement imported from glTF. Draw-call object
+    /// transforms compose on top; repeated entries may share `geometry`.
+    source_transform: [[f32; 4]; 4],
     /// Object-space AABB of the mesh, captured at cache time. The shadow /
     /// main / probe passes transform it by the draw's model matrix to get a
     /// world AABB for frustum culling. `local_min[0] > local_max[0]` marks
@@ -8806,7 +8809,7 @@ impl Renderer {
                     first_slot,
                     node.bounds_min,
                     node.bounds_max,
-                    node.transform,
+                    node.world_transform(),
                     has_tex,
                     node.material.color,
                     node.material.texture_idx,
@@ -9268,6 +9271,8 @@ impl Renderer {
         } else {
             0
         };
+        let mut shared_pt_geometry: std::collections::HashMap<usize, (u32, u32, u32)> =
+            std::collections::HashMap::new();
         for &h in instance_handles {
             let n = scene.nodes.get(h).unwrap();
             let e = n.material.emissive;
@@ -9275,16 +9280,24 @@ impl Renderer {
                 Some(s) => (s as f32, 1.0_f32),
                 None => (0.0, 0.0),
             };
-            let (vertex_base, index_base, index_count) =
-                if !n.vertices.is_empty() && !n.indices.is_empty() {
-                    let vb = (geo_vertices.len() / 24) as u32;
-                    let ib = geo_indices.len() as u32;
-                    geo_vertices.extend_from_slice(bytemuck::cast_slice(&n.vertices));
-                    geo_indices.extend_from_slice(&n.indices);
-                    (vb, ib, n.indices.len() as u32)
-                } else {
-                    (0, 0, 0)
-                };
+            let shared_identity = n.shared_geometry_identity();
+            let (vertex_base, index_base, index_count) = if let Some(window) =
+                shared_identity.and_then(|identity| shared_pt_geometry.get(&identity).copied())
+            {
+                window
+            } else if !n.vertices().is_empty() && !n.indices().is_empty() {
+                let vb = (geo_vertices.len() / 24) as u32;
+                let ib = geo_indices.len() as u32;
+                geo_vertices.extend_from_slice(bytemuck::cast_slice(n.vertices()));
+                geo_indices.extend_from_slice(n.indices());
+                let window = (vb, ib, n.indices().len() as u32);
+                if let Some(identity) = shared_identity {
+                    shared_pt_geometry.insert(identity, window);
+                }
+                window
+            } else {
+                (0, 0, 0)
+            };
             // EN-023 — world AABB for the SDF broad-phase. The scene's
             // bounds pass keeps world_bounds fresh; the sentinel
             // (min.x > max.x = not yet computed) falls back to the local
@@ -9296,7 +9309,7 @@ impl Renderer {
             };
             let transport = transparent_gi::instance_transport(
                 &n.material,
-                &n.transform,
+                &n.world_transform(),
                 transparent_transport_enabled,
             );
             if !transport.active() {
@@ -9318,18 +9331,18 @@ impl Renderer {
                 runtime_texture_count,
                 self.pt_texture_arrays_enabled
                     && index_count != 0
-                    && n.secondary_tex_coords.is_some(),
+                    && n.secondary_tex_coords().is_some(),
             );
             pt_geometry::append_pt_secondary_uvs(
                 &mut geo_secondary_uvs,
                 vertex_base as usize,
                 if index_count != 0 {
-                    n.vertices.len()
+                    n.vertices().len()
                 } else {
                     0
                 },
                 if index_count != 0 {
-                    n.secondary_tex_coords.as_deref()
+                    n.secondary_tex_coords()
                 } else {
                     None
                 },
@@ -9515,10 +9528,9 @@ impl Renderer {
         scene: &mut crate::scene::SceneGraph,
         encoder: &mut wgpu::CommandEncoder,
     ) {
-        // V4 — SW path also needs a populated instance_data buffer
-        // for its broad-phase hit lookup. Collect instance handles
-        // (nodes with a card slot, stable scene order) first, then
-        // branch on `hw_rt_enabled` for TLAS/BLAS-specific work.
+        // V4 — SW broad-phase uses card-backed instances. Hardware queries
+        // must include every visible BLAS even when the bounded card atlas has
+        // no slot for that instance.
         let pending_blas = !scene.pending_blas_builds.is_empty();
         let version_changed = scene.tlas_version != self.tlas_built_version;
         // PT-6 — dynamic skinned instances re-pose every frame, so any
@@ -9528,9 +9540,55 @@ impl Renderer {
             return;
         }
 
+        // BLAS scratch memory and build latency scale poorly when a large
+        // imported scene submits every unique primitive at once. Raster output
+        // is already complete, so admit a bounded batch to the ray scene each
+        // frame and let queue ordering make it visible atomically with TLAS.
+        // A single large BLAS can require substantial backend scratch memory.
+        // Count alone cannot predict that cost, so keep this deliberately at
+        // one: the raster scene is already complete and ray features can warm
+        // progressively without ever turning import into a multi-second GPU
+        // submission or a many-gigabyte transient spike.
+        const BLAS_BUILD_MAX_PER_FRAME: usize = 1;
+        let build_count = scene
+            .pending_blas_builds
+            .len()
+            .min(BLAS_BUILD_MAX_PER_FRAME);
+        let pending_handles: Vec<f64> = scene.pending_blas_builds.drain(..build_count).collect();
+        // Nodes can be destroyed or have their geometry replaced between
+        // prepare() queuing a build and this frame consuming it. Keep the
+        // descriptor, buffer and key arrays aligned by admitting only handles
+        // that still have a complete BLAS input set.
+        let build_handles: Vec<f64> = pending_handles
+            .into_iter()
+            .filter(|handle| {
+                scene.nodes.get(*handle).is_some_and(|node| {
+                    node.blas.is_some() && node.gpu_vb.is_some() && node.gpu_ib.is_some()
+                })
+            })
+            .collect();
+        let batch_keys: std::collections::HashSet<crate::scene::SceneGeometryKey> = build_handles
+            .iter()
+            .filter_map(|handle| {
+                scene
+                    .nodes
+                    .get(*handle)
+                    .and_then(crate::scene::SceneNode::blas_geometry_key)
+            })
+            .collect();
+
         let mut instance_handles: Vec<f64> = Vec::new();
         for (h, n) in scene.nodes.iter() {
-            if n.visible && n.card_first_slot.is_some() {
+            if n.visible
+                && if self.hw_rt_enabled {
+                    n.blas.is_some()
+                        && (n.blas_ready
+                            || n.blas_geometry_key()
+                                .is_some_and(|key| batch_keys.contains(&key)))
+                } else {
+                    n.card_first_slot.is_some()
+                }
+            {
                 instance_handles.push(h);
             }
         }
@@ -9587,7 +9645,8 @@ impl Renderer {
             for slot in 0..node_count {
                 let n = scene.nodes.get(instance_handles[slot]).unwrap();
                 let blas = n.blas.as_ref().unwrap();
-                let t = &n.transform;
+                let world_transform = n.world_transform();
+                let t = &world_transform;
                 // TlasInstance expects a row-major 3x4 affine transform
                 // (rows × columns), i.e. [m00, m01, m02, m03, m10, ...].
                 // Bloom stores column-major mat4 with translation in row 3.
@@ -9636,41 +9695,37 @@ impl Renderer {
         // The BLAS size descriptors and geometry entries need to outlive
         // the build call, so we stash them in a pair of Vecs indexed in
         // parallel.
-        let pending_handles: Vec<f64> = scene.pending_blas_builds.drain(..).collect();
-        let size_descs: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = pending_handles
+        let size_descs: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = build_handles
             .iter()
-            .filter_map(|h| {
-                let n = scene.nodes.get(*h)?;
-                if n.blas.is_none() {
-                    return None;
-                }
-                Some(wgpu::BlasTriangleGeometrySizeDescriptor {
+            .map(|h| {
+                let n = scene
+                    .nodes
+                    .get(*h)
+                    .expect("validated BLAS build handle disappeared");
+                wgpu::BlasTriangleGeometrySizeDescriptor {
                     vertex_format: wgpu::VertexFormat::Float32x3,
                     vertex_count: n.gpu_vertex_count,
                     index_format: Some(wgpu::IndexFormat::Uint32),
                     index_count: Some(n.gpu_index_count),
                     flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
-                })
+                }
             })
             .collect();
         let mut build_entries: Vec<wgpu::BlasBuildEntry> = Vec::with_capacity(size_descs.len());
-        for (i, h) in pending_handles.iter().enumerate() {
-            let n = match scene.nodes.get(*h) {
-                Some(n) => n,
-                None => continue,
-            };
-            let blas = match n.blas.as_ref() {
-                Some(b) => b,
-                None => continue,
-            };
-            let vb = match n.gpu_vb.as_ref() {
-                Some(b) => b,
-                None => continue,
-            };
-            let ib = match n.gpu_ib.as_ref() {
-                Some(b) => b,
-                None => continue,
-            };
+        for (i, h) in build_handles.iter().enumerate() {
+            let n = scene
+                .nodes
+                .get(*h)
+                .expect("validated BLAS build handle disappeared");
+            let blas = n.blas.as_ref().expect("validated BLAS missing");
+            let vb = n
+                .gpu_vb
+                .as_ref()
+                .expect("validated BLAS vertex buffer missing");
+            let ib = n
+                .gpu_ib
+                .as_ref()
+                .expect("validated BLAS index buffer missing");
             build_entries.push(wgpu::BlasBuildEntry {
                 blas,
                 geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
@@ -9727,6 +9782,12 @@ impl Renderer {
         let tlas_ref = self.tlas.as_ref().unwrap();
         encoder.build_acceleration_structures(build_entries.iter(), std::iter::once(tlas_ref));
 
+        if !batch_keys.is_empty() {
+            scene.mark_blas_ready(&batch_keys);
+            // Temporal ray consumers must reject history while the admitted
+            // instance set grows across startup batches.
+            scene.tlas_version = scene.tlas_version.wrapping_add(1);
+        }
         self.tlas_built_version = scene.tlas_version;
     }
 
@@ -13185,14 +13246,28 @@ impl Renderer {
     /// stay for the callers; skinned-ness is remembered separately so
     /// the FFI can route to the skinned cached draw in O(1).
     #[cfg(feature = "models3d")]
-    pub fn cache_model_if_static(
+    pub fn cache_model_if_static<M>(&mut self, handle_bits: u64, meshes: &[M]) -> bool
+    where
+        M: std::borrow::Borrow<crate::models::MeshData>,
+    {
+        self.cache_model_if_static_with_transforms(handle_bits, meshes, &[])
+    }
+
+    #[cfg(feature = "models3d")]
+    pub fn cache_model_if_static_with_transforms<M>(
         &mut self,
         handle_bits: u64,
-        meshes: &[crate::models::MeshData],
-    ) -> bool {
+        meshes: &[M],
+        mesh_transforms: &[[[f32; 4]; 4]],
+    ) -> bool
+    where
+        M: std::borrow::Borrow<crate::models::MeshData>,
+    {
         if let Some(entry) = self.model_gpu_cache.get(&handle_bits) {
             return entry.is_some();
         }
+        let meshes: Vec<&crate::models::MeshData> =
+            meshes.iter().map(std::borrow::Borrow::borrow).collect();
 
         // Check if any vertex is skinned — cached alongside the meshes so
         // per-frame draws don't rescan every vertex.
@@ -13220,9 +13295,24 @@ impl Renderer {
             self.model_refractive.insert(handle_bits);
         }
 
+        let mut shared_static_geometry = std::collections::HashMap::new();
         let gpu_meshes: Vec<GpuMesh> = meshes
             .iter()
-            .map(|mesh| {
+            .enumerate()
+            .map(|(mesh_index, mesh)| {
+                let source_transform = mesh_transforms
+                    .get(mesh_index)
+                    .copied()
+                    .unwrap_or(IDENTITY_MAT4);
+                let mut transmission = mesh.transmission;
+                let axis_length = |column: usize| {
+                    let x = source_transform[column][0];
+                    let y = source_transform[column][1];
+                    let z = source_transform[column][2];
+                    (x * x + y * y + z * z).sqrt()
+                };
+                transmission.baked_thickness_scale *=
+                    (axis_length(0) + axis_length(1) + axis_length(2)) / 3.0;
                 // Object-space AABB for per-pass frustum culling. Sentinel
                 // (min > max) when the mesh has no vertices.
                 let mut local_min = [f32::MAX; 3];
@@ -13263,12 +13353,21 @@ impl Renderer {
                             }),
                     }
                 } else {
-                    gpu_driven::MeshGeometry::Shared(self.gpu_driven.upload_static(
-                        &self.device,
-                        &self.queue,
-                        &mesh.vertices,
-                        &mesh.indices,
-                    ))
+                    let geometry_identity = (*mesh as *const crate::models::MeshData) as usize;
+                    let slice = if let Some(slice) = shared_static_geometry.get(&geometry_identity)
+                    {
+                        *slice
+                    } else {
+                        let slice = self.gpu_driven.upload_static(
+                            &self.device,
+                            &self.queue,
+                            &mesh.vertices,
+                            &mesh.indices,
+                        );
+                        shared_static_geometry.insert(geometry_identity, slice);
+                        slice
+                    };
+                    gpu_driven::MeshGeometry::Shared(slice)
                 };
                 let base_color_idx = mesh.texture_idx.unwrap_or(0);
                 let normal_idx = mesh.normal_texture_idx.unwrap_or(0);
@@ -13371,7 +13470,7 @@ impl Renderer {
                     em_idx,
                     occ_idx,
                     &material_uniform,
-                    mesh.transmission,
+                    transmission,
                     mesh.layered_pbr,
                     valid_secondary_tex_coords.is_some(),
                 );
@@ -13397,7 +13496,7 @@ impl Renderer {
                         em_idx,
                         occ_idx,
                         &material_uniform,
-                        mesh.transmission,
+                        transmission,
                         valid_secondary_tex_coords.is_some(),
                     )
                     .map(|(uniform, bind_group, uses_uv1)| {
@@ -13496,11 +13595,12 @@ impl Renderer {
                 GpuMesh {
                     geometry,
                     index_count: mesh.indices.len() as u32,
+                    source_transform,
                     local_min,
                     local_max,
                     alpha_mode: mesh.alpha_mode,
                     double_sided: mesh.double_sided,
-                    transmission: mesh.transmission,
+                    transmission,
                     refractive_material_bg,
                     _refractive_uniform: refractive_uniform,
                     _refractive_layered_uniform: refractive_layered_uniform,

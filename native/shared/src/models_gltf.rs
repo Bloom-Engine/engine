@@ -14,15 +14,11 @@ use layered_pbr_import::{
     layered_pbr_from_material, retain_layered_normal_image_indices, retain_material_tex_coords_1,
     texture_binding_from_info,
 };
-#[path = "models_gltf_transform.rs"]
-mod transform;
-use transform::{
-    mat3_transform_vec, mat4_inverse_transpose_3x3, mat4_mean_scale, mat4_transform_direction,
-    mat4_transform_point,
-};
 #[path = "models_gltf_bake.rs"]
 mod bake;
-use bake::{bake_scene_mesh_instances, model_bounds};
+#[path = "models_gltf_transform.rs"]
+mod transform;
+use bake::{model_bounds, share_scene_mesh_instances, shared_or_owned_instance};
 
 /// Walk the scene graph and collect EVERY world-space transform that
 /// references each mesh. Unlike `walk_scene_for_mesh_transforms` which
@@ -566,6 +562,11 @@ pub(super) fn load_gltf_with_textures(
                 }
             }
         }
+        // Imports complete before Bloom's first frame submission. Flush each
+        // completed image so wgpu can retire its queue-owned upload staging
+        // before the next decoded image is produced. The resident texture is
+        // bit-identical; this only bounds transient CPU memory.
+        renderer.flush_import_uploads();
     }
 
     // Detect armature scale for skinned meshes.
@@ -643,19 +644,18 @@ pub(super) fn load_gltf_with_textures(
         scale
     };
 
-    let mut meshes = Vec::new();
-    let mut bbox_min = [f32::MAX; 3];
-    let mut bbox_max = [f32::MIN; 3];
+    let mut meshes: Vec<Arc<MeshData>> = Vec::new();
+    let mut mesh_transforms = Vec::new();
 
     // Walk the scene node tree to collect world-space transforms for
     // each mesh-referencing node. glTF supports instancing by having
     // multiple nodes reference the same mesh at different transforms
     // — Bistro uses this heavily (5910 nodes, 551 meshes: chairs,
     // bollards, chains, foliage repeated everywhere). We emit one
-    // MeshData PER (mesh, transform) pair so every instance actually
-    // shows up in the scene. Memory cost is linear in node count;
-    // not great for deep instancing but correct. Animated / skinned
-    // meshes are unaffected — the armature transforms apply on top.
+    // placement entry per (mesh, transform) pair so every instance actually
+    // shows up in the scene. Static entries share one immutable primitive
+    // payload; only their compact transforms scale with node count. Animated
+    // / skinned meshes retain their owned compatibility path.
     let mesh_count = gltf.meshes().count();
     let mut mesh_instances: Vec<Vec<[[f32; 4]; 4]>> = vec![Vec::new(); mesh_count];
     let identity = [
@@ -664,7 +664,7 @@ pub(super) fn load_gltf_with_textures(
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ];
-    for scene in gltf.scenes() {
+    if let Some(scene) = gltf.default_scene().or_else(|| gltf.scenes().next()) {
         for node in scene.nodes() {
             walk_scene_collect_instances(&node, &identity, &mut mesh_instances);
         }
@@ -681,11 +681,19 @@ pub(super) fn load_gltf_with_textures(
             instances.into_iter().map(Some).collect()
         };
 
+        let mut primitive_cache: Vec<Option<Arc<MeshData>>> =
+            (0..mesh.primitives().count()).map(|_| None).collect();
         for mesh_world in &instance_transforms {
             let mesh_world = *mesh_world;
-            // Inverse-transpose 3×3 for normals under non-uniform scale.
-            let normal_xform = mesh_world.map(|m| mat4_inverse_transpose_3x3(&m));
-            for primitive in mesh.primitives() {
+            let instance_transform = mesh_world.unwrap_or(identity);
+            for (primitive_index, primitive) in mesh.primitives().enumerate() {
+                if let Some(source) = primitive_cache[primitive_index].as_ref() {
+                    let (instance, transform) =
+                        shared_or_owned_instance(source, instance_transform);
+                    meshes.push(instance);
+                    mesh_transforms.push(transform);
+                    continue;
+                }
                 let reader =
                     primitive.reader(|buf| buffer_data.get(buf.index()).map(|d| d.as_slice()));
                 let positions: Vec<[f32; 3]> = match reader.read_positions() {
@@ -711,12 +719,6 @@ pub(super) fn load_gltf_with_textures(
                     reader.read_joints(0).map(|iter| iter.into_u16().collect());
                 let weight_vals: Option<Vec<[f32; 4]>> =
                     reader.read_weights(0).map(|iter| iter.into_f32().collect());
-                let primitive_has_skinning = weight_vals.as_ref().is_some_and(|weights| {
-                    weights
-                        .iter()
-                        .any(|weights| weights.iter().sum::<f32>() > 0.01)
-                });
-
                 // Get vertex colors if available
                 let vert_colors: Option<Vec<[f32; 4]>> = reader
                     .read_colors(0)
@@ -725,7 +727,7 @@ pub(super) fn load_gltf_with_textures(
                 let mat = primitive.material();
                 let pbr = mat.pbr_metallic_roughness();
                 let emissive_factor = mat.emissive_factor();
-                let mut transmission =
+                let transmission =
                     match transmission_from_material(&mat, Some(texture_indices.as_slice())) {
                         Ok(value) => value,
                         Err(error) => {
@@ -733,11 +735,6 @@ pub(super) fn load_gltf_with_textures(
                             return None;
                         }
                     };
-                if !primitive_has_skinning {
-                    if let Some(world) = mesh_world {
-                        transmission.baked_thickness_scale *= mat4_mean_scale(&world);
-                    }
-                }
                 let layered_pbr = match layered_pbr_from_material(
                     &gltf,
                     &mat,
@@ -860,58 +857,21 @@ pub(super) fn load_gltf_with_textures(
                     } else {
                         p
                     };
-                    // Bake the mesh's scene node transform into world-space
-                    // position/normal. Skinned meshes are NOT world-baked:
-                    // their node transform is expected to be consumed by the
-                    // armature, and the pose is driven by joint matrices at
-                    // draw time. Static (non-skinned) meshes get the baked
-                    // transform so drawModel's position/scale arguments
-                    // apply on top of the correct base pose.
-                    let (final_pos, final_normal, final_tangent) = if is_skinned {
-                        (base_pos, normals[i], tangents[i])
-                    } else if let Some(xform) = mesh_world {
-                        let t_in = [tangents[i][0], tangents[i][1], tangents[i][2]];
-                        // Tangents follow the linear model transform. Normals
-                        // use the inverse transpose below; sharing that matrix
-                        // is only valid for uniform scale and breaks the TBN
-                        // under ordinary non-uniform glTF node transforms.
-                        let t_out = mat4_transform_direction(&xform, &t_in);
-                        (
-                            mat4_transform_point(&xform, &base_pos),
-                            match normal_xform {
-                                Some(ref n) => mat3_transform_vec(n, &normals[i]),
-                                None => normals[i],
-                            },
-                            [t_out[0], t_out[1], t_out[2], tangents[i][3]],
-                        )
-                    } else {
-                        (base_pos, normals[i], tangents[i])
-                    };
-                    // Update bbox to reflect the final (possibly transformed)
-                    // position so the camera auto-framing still works right.
-                    for k in 0..3 {
-                        if final_pos[k] < bbox_min[k] {
-                            bbox_min[k] = final_pos[k];
-                        }
-                        if final_pos[k] > bbox_max[k] {
-                            bbox_max[k] = final_pos[k];
-                        }
-                    }
                     vertices.push(Vertex3D {
-                        position: final_pos,
-                        normal: final_normal,
+                        position: base_pos,
+                        normal: normals[i],
                         color,
                         uv: tex_coords[i],
                         joints: jv,
                         weights: wv,
-                        tangent: final_tangent,
+                        tangent: tangents[i],
                     });
                 }
                 let indices: Vec<u32> = match reader.read_indices() {
                     Some(iter) => iter.into_u32().collect(),
                     None => (0..positions.len() as u32).collect(),
                 };
-                meshes.push(MeshData {
+                let source = Arc::new(MeshData {
                     vertices,
                     secondary_tex_coords,
                     indices,
@@ -930,6 +890,10 @@ pub(super) fn load_gltf_with_textures(
                     transmission,
                     layered_pbr,
                 });
+                primitive_cache[primitive_index] = Some(Arc::clone(&source));
+                let (instance, transform) = shared_or_owned_instance(&source, instance_transform);
+                meshes.push(instance);
+                mesh_transforms.push(transform);
             }
         } // end instance loop
     }
@@ -937,8 +901,10 @@ pub(super) fn load_gltf_with_textures(
     if meshes.is_empty() {
         return None;
     }
+    let (bbox_min, bbox_max) = model_bounds(&meshes, &mesh_transforms);
     Some(ModelData {
         meshes,
+        mesh_transforms,
         bbox_min,
         bbox_max,
     })
@@ -1302,14 +1268,15 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         }
     }
 
-    let meshes = bake_scene_mesh_instances(&gltf, source_meshes);
+    let (meshes, mesh_transforms) = share_scene_mesh_instances(&gltf, source_meshes);
     if meshes.is_empty() {
         return None;
     }
-    let (bbox_min, bbox_max) = model_bounds(&meshes);
+    let (bbox_min, bbox_max) = model_bounds(&meshes, &mesh_transforms);
     Some(StagedModel {
         model: ModelData {
             meshes,
+            mesh_transforms,
             bbox_min,
             bbox_max,
         },
@@ -1457,13 +1424,14 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
         }
     }
 
-    let meshes = bake_scene_mesh_instances(&gltf, source_meshes);
+    let (meshes, mesh_transforms) = share_scene_mesh_instances(&gltf, source_meshes);
     if meshes.is_empty() {
         return None;
     }
-    let (bbox_min, bbox_max) = model_bounds(&meshes);
+    let (bbox_min, bbox_max) = model_bounds(&meshes, &mesh_transforms);
     Some(ModelData {
         meshes,
+        mesh_transforms,
         bbox_min,
         bbox_max,
     })

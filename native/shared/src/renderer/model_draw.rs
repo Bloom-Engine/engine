@@ -223,11 +223,19 @@ impl Renderer {
             mat4_translate(IDENTITY_MAT4, position),
             mat4_scale(IDENTITY_MAT4, [scale, scale, scale]),
         );
-        let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
         let previous_model = self.track_cached_model_motion(handle_bits, model_matrix);
-        let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_model);
 
         for mesh_idx in 0..mesh_count {
+            let source_transform = self
+                .model_gpu_cache
+                .get(&handle_bits)
+                .and_then(Option::as_ref)
+                .map(|meshes| meshes[mesh_idx].source_transform)
+                .unwrap_or(IDENTITY_MAT4);
+            let mesh_model = mat4_multiply(model_matrix, source_transform);
+            let previous_mesh_model = mat4_multiply(previous_model, source_transform);
+            let model_mvp = mat4_multiply(self.current_vp_matrix, mesh_model);
+            let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_mesh_model);
             let slot = self.next_model_uniform_slot;
             self.next_model_uniform_slot += 1;
 
@@ -239,7 +247,7 @@ impl Renderer {
                 slot,
                 &Uniforms3D {
                     mvp: model_mvp,
-                    model: model_matrix,
+                    model: mesh_model,
                     prev_mvp: previous_mvp,
                     model_tint: tint,
                     misc: [0.0, 0.0, foliage, 0.0],
@@ -250,7 +258,7 @@ impl Renderer {
                 uniform_slot: slot,
                 cache_handle: handle_bits,
                 mesh_idx,
-                model: model_matrix,
+                model: mesh_model,
                 tint,
                 skinned: false,
                 joint_offset: 0.0,
@@ -298,10 +306,18 @@ impl Renderer {
             mat4_multiply(rot, mat4_scale(IDENTITY_MAT4, [scale, scale, scale])),
         );
         let previous_model = self.track_cached_model_motion(handle_bits, model_matrix);
-        let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
-        let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_model);
 
         for mesh_idx in 0..mesh_count {
+            let source_transform = self
+                .model_gpu_cache
+                .get(&handle_bits)
+                .and_then(Option::as_ref)
+                .map(|meshes| meshes[mesh_idx].source_transform)
+                .unwrap_or(IDENTITY_MAT4);
+            let mesh_model = mat4_multiply(model_matrix, source_transform);
+            let previous_mesh_model = mat4_multiply(previous_model, source_transform);
+            let model_mvp = mat4_multiply(self.current_vp_matrix, mesh_model);
+            let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_mesh_model);
             let slot = self.next_model_uniform_slot;
             self.next_model_uniform_slot += 1;
             self.ensure_model_uniform_slot(slot);
@@ -310,7 +326,7 @@ impl Renderer {
                 slot,
                 &Uniforms3D {
                     mvp: model_mvp,
-                    model: model_matrix,
+                    model: mesh_model,
                     prev_mvp: previous_mvp,
                     model_tint: tint,
                     misc: [0.0, 0.0, foliage, 0.0],
@@ -321,7 +337,7 @@ impl Renderer {
                 uniform_slot: slot,
                 cache_handle: handle_bits,
                 mesh_idx,
-                model: model_matrix,
+                model: mesh_model,
                 tint,
                 skinned: false,
                 joint_offset: 0.0,
@@ -355,10 +371,18 @@ impl Renderer {
 
         let foliage = self.foliage_wind.get(&handle_bits).copied().unwrap_or(0.0);
         let previous_model = self.track_cached_model_motion(handle_bits, model_matrix);
-        let model_mvp = mat4_multiply(self.current_vp_matrix, model_matrix);
-        let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_model);
 
         for mesh_idx in 0..mesh_count {
+            let source_transform = self
+                .model_gpu_cache
+                .get(&handle_bits)
+                .and_then(Option::as_ref)
+                .map(|meshes| meshes[mesh_idx].source_transform)
+                .unwrap_or(IDENTITY_MAT4);
+            let mesh_model = mat4_multiply(model_matrix, source_transform);
+            let previous_mesh_model = mat4_multiply(previous_model, source_transform);
+            let model_mvp = mat4_multiply(self.current_vp_matrix, mesh_model);
+            let previous_mvp = mat4_multiply(self.velocity_ref_vp, previous_mesh_model);
             let slot = self.next_model_uniform_slot;
             self.next_model_uniform_slot += 1;
             self.ensure_model_uniform_slot(slot);
@@ -367,7 +391,7 @@ impl Renderer {
                 slot,
                 &Uniforms3D {
                     mvp: model_mvp,
-                    model: model_matrix,
+                    model: mesh_model,
                     prev_mvp: previous_mvp,
                     model_tint: tint,
                     misc: [0.0, 0.0, foliage, 0.0],
@@ -378,7 +402,7 @@ impl Renderer {
                 uniform_slot: slot,
                 cache_handle: handle_bits,
                 mesh_idx,
-                model: model_matrix,
+                model: mesh_model,
                 tint,
                 skinned: false,
                 joint_offset: 0.0,

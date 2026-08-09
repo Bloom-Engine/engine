@@ -10,6 +10,21 @@ use super::Renderer;
 use wgpu::util::DeviceExt;
 
 impl Renderer {
+    /// Bound synchronous asset-import staging memory. `Queue::write_texture`
+    /// retains its internal upload allocations until a submission is observed;
+    /// a loose scene with hundreds of large textures can otherwise accumulate
+    /// several gigabytes before the first frame submits anything.
+    pub(crate) fn flush_import_uploads(&self) {
+        let submission = self.queue.submit(std::iter::empty());
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        });
+        #[cfg(target_arch = "wasm32")]
+        let _ = self.device.poll(wgpu::PollType::Poll);
+    }
+
     fn register_global_texture(
         &mut self,
         view: &wgpu::TextureView,
@@ -503,10 +518,16 @@ impl Renderer {
     /// would render the stale cached geometry.
     pub fn evict_model_cache(&mut self, handle_bits: u64) {
         if let Some(Some(meshes)) = self.model_gpu_cache.remove(&handle_bits) {
+            let mut seen_slices = std::collections::HashSet::new();
             let shared_slices: Vec<_> = meshes
                 .iter()
                 .filter_map(|mesh| match &mesh.geometry {
-                    super::gpu_driven::MeshGeometry::Shared(slice) => Some(*slice),
+                    super::gpu_driven::MeshGeometry::Shared(slice)
+                        if seen_slices.insert((slice.vertex_offset, slice.index_offset)) =>
+                    {
+                        Some(*slice)
+                    }
+                    super::gpu_driven::MeshGeometry::Shared(_) => None,
                     super::gpu_driven::MeshGeometry::Dedicated { .. } => None,
                 })
                 .collect();

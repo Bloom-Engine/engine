@@ -1065,7 +1065,7 @@ impl Renderer {
                 || node.gi_only
                 || !node.cast_shadow
                 || !node.material.transmission.is_active()
-                || node.indices.is_empty()
+                || node.indices().is_empty()
             {
                 continue;
             }
@@ -1086,7 +1086,8 @@ impl Renderer {
             };
             let mut signature = fnv1a_bytes(FNV_OFFSET, &[0]);
             signature = fnv1a_bytes(signature, &(index as u64).to_le_bytes());
-            signature = fnv1a_bytes(signature, bytemuck::bytes_of(&node.transform));
+            let world_transform = node.world_transform();
+            signature = fnv1a_bytes(signature, bytemuck::bytes_of(&world_transform));
             signature = transmission_hash(signature, node.material.transmission);
             signature = fnv1a_bytes(signature, &node.material.texture_idx.to_le_bytes());
             for value in [
@@ -1112,7 +1113,7 @@ impl Renderer {
                 first_index: 0,
                 index_count: node.gpu_index_count,
                 base_vertex: 0,
-                model: node.transform,
+                model: world_transform,
                 tint: [
                     node.material.color[0],
                     node.material.color[1],

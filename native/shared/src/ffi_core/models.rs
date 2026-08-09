@@ -53,7 +53,11 @@ macro_rules! __bloom_ffi_models {
                     let tint = [(r / 255.0) as f32, (g / 255.0) as f32, (b / 255.0) as f32, (a / 255.0) as f32];
                     let position = [x as f32, y as f32, z as f32];
                     let handle_bits = handle.to_bits();
-                    if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+                    if eng.renderer.cache_model_if_static_with_transforms(
+                        handle_bits,
+                        &model.meshes,
+                        &model.mesh_transforms,
+                    ) {
                         // Skinned models cache too now (bind-pose VB with raw
                         // joint indices, skinned in the scene VS) — routed to
                         // the skinned cached draw, which pops the staged pose
@@ -104,7 +108,11 @@ macro_rules! __bloom_ffi_models {
                     // models take the skinned cached draw and IGNORE the
                     // rotation — their joint matrices bake orientation,
                     // exactly as the old immediate fallback behaved.
-                    if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+                    if eng.renderer.cache_model_if_static_with_transforms(
+                        handle_bits,
+                        &model.meshes,
+                        &model.mesh_transforms,
+                    ) {
                         if eng.renderer.is_model_skinned(handle_bits) {
                             eng.renderer.draw_model_cached_skinned(
                                 handle_bits, position, scale, tint,
@@ -174,7 +182,11 @@ macro_rules! __bloom_ffi_models {
                 let eng = engine();
                 if let Some(model) = eng.models.get(handle) {
                     let handle_bits = handle.to_bits();
-                    if eng.renderer.cache_model_if_static(handle_bits, &model.meshes) {
+                    if eng.renderer.cache_model_if_static_with_transforms(
+                        handle_bits,
+                        &model.meshes,
+                        &model.mesh_transforms,
+                    ) {
                         if eng.renderer.is_model_skinned(handle_bits) {
                             return;   // see the note above
                         }
@@ -375,7 +387,11 @@ macro_rules! __bloom_ffi_models {
                 let eng = engine();
                 let handle_bits = mesh_handle.to_bits();
                 if let Some(model) = eng.models.get(mesh_handle) {
-                    eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+                    eng.renderer.cache_model_if_static_with_transforms(
+                        handle_bits,
+                        &model.meshes,
+                        &model.mesh_transforms,
+                    );
                 }
                 eng.renderer.submit_material_draw_instanced(
                     material as u32,
@@ -406,7 +422,11 @@ macro_rules! __bloom_ffi_models {
                 let eng = engine();
                 let handle_bits = mesh_handle.to_bits();
                 if let Some(model) = eng.models.get(mesh_handle) {
-                    eng.renderer.cache_model_if_static(handle_bits, &model.meshes);
+                    eng.renderer.cache_model_if_static_with_transforms(
+                        handle_bits,
+                        &model.meshes,
+                        &model.mesh_transforms,
+                    );
                 }
                 eng.renderer.submit_material_draw(
                     material as u32,
@@ -870,6 +890,7 @@ macro_rules! __bloom_ffi_models {
                     }
                 };
                 for mesh in &mut model.meshes {
+                    let mesh = std::sync::Arc::make_mut(mesh);
                     remap(&mut mesh.texture_idx);
                     remap(&mut mesh.normal_texture_idx);
                     remap(&mut mesh.metallic_roughness_texture_idx);

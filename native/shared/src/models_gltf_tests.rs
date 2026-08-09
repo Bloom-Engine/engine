@@ -98,6 +98,37 @@ fn minimal_triangle_glb_with_node_scale(material: &str, node_scale: Option<[f32;
     glb
 }
 
+fn minimal_instanced_triangle_glb() -> Vec<u8> {
+    let source = minimal_triangle_glb(r#"{}"#);
+    let json_len = u32::from_le_bytes(source[12..16].try_into().unwrap()) as usize;
+    let json = String::from_utf8(source[20..20 + json_len].to_vec()).unwrap();
+    let json = json
+        .trim_end()
+        .replace(
+            r#""scenes":[{"nodes":[0]}]"#,
+            r#""scenes":[{"nodes":[0,1]}]"#,
+        )
+        .replace(
+            r#""nodes":[{"mesh":0}]"#,
+            r#""nodes":[{"mesh":0},{"mesh":0,"translation":[10,0,0]}]"#,
+        );
+    let binary_chunk = &source[20 + json_len..];
+    let mut json = json.into_bytes();
+    while json.len() % 4 != 0 {
+        json.push(b' ');
+    }
+    let total_length = 12 + 8 + json.len() + binary_chunk.len();
+    let mut glb = Vec::with_capacity(total_length);
+    glb.extend_from_slice(b"glTF");
+    glb.extend_from_slice(&2_u32.to_le_bytes());
+    glb.extend_from_slice(&(total_length as u32).to_le_bytes());
+    glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    glb.extend_from_slice(&0x4E4F_534A_u32.to_le_bytes());
+    glb.extend_from_slice(&json);
+    glb.extend_from_slice(binary_chunk);
+    glb
+}
+
 fn physical_uv_triangle_glb(texture_tex_coord: u32, include_texcoord_1: bool) -> Vec<u8> {
     let mut binary = Vec::new();
     for value in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
@@ -1016,7 +1047,7 @@ fn physical_metadata_round_trips_through_plain_and_staged_glb_loaders() {
 }
 
 #[test]
-fn baked_static_node_scale_preserves_world_space_volume_thickness() {
+fn shared_static_node_scale_preserves_world_bounds_and_volume_contract() {
     let glb = minimal_triangle_glb_with_node_scale(
         r#"{
             "extensions":{
@@ -1041,17 +1072,46 @@ fn baked_static_node_scale_preserves_world_space_volume_thickness() {
     ] {
         assert_eq!(model.meshes.len(), 1, "{label}");
         let mesh = &model.meshes[0];
-        assert_eq!(mesh.vertices[1].position, [2.0, 0.0, 0.0], "{label}");
-        assert_eq!(mesh.vertices[2].position, [0.0, 2.0, 0.0], "{label}");
+        assert_eq!(mesh.vertices[1].position, [1.0, 0.0, 0.0], "{label}");
+        assert_eq!(mesh.vertices[2].position, [0.0, 1.0, 0.0], "{label}");
+        assert_eq!(model.mesh_transform(0)[0][0], 2.0, "{label}");
+        assert_eq!(model.mesh_transform(0)[1][1], 2.0, "{label}");
+        assert_eq!(model.mesh_transform(0)[2][2], 2.0, "{label}");
         assert_eq!(model.bbox_min, [0.0, 0.0, 0.0], "{label}");
         assert_eq!(model.bbox_max, [2.0, 2.0, 0.0], "{label}");
         assert_eq!(mesh.transmission.thickness_factor, 0.25, "{label}");
-        assert_eq!(mesh.transmission.baked_thickness_scale, 2.0, "{label}");
+        // Import ownership stays canonical; attach/cache specialize the
+        // per-placement material copy with the transform's mean scale.
+        assert_eq!(mesh.transmission.baked_thickness_scale, 1.0, "{label}");
         assert_eq!(
             mesh.transmission.effective_thickness_factor(),
-            0.5,
+            0.25,
             "{label}"
         );
+    }
+}
+
+#[test]
+fn repeated_nodes_share_one_immutable_primitive_payload() {
+    let glb = minimal_instanced_triangle_glb();
+    for (label, model) in [
+        ("plain", load_gltf(&glb).expect("plain instanced GLB load")),
+        (
+            "staged",
+            load_gltf_staged(&glb)
+                .expect("staged instanced GLB load")
+                .model,
+        ),
+    ] {
+        assert_eq!(model.meshes.len(), 2, "{label}");
+        assert!(
+            std::sync::Arc::ptr_eq(&model.meshes[0], &model.meshes[1]),
+            "{label}: repeated placement copied primitive ownership"
+        );
+        assert_eq!(model.mesh_transform(0)[3][0], 0.0, "{label}");
+        assert_eq!(model.mesh_transform(1)[3][0], 10.0, "{label}");
+        assert_eq!(model.bbox_min, [0.0, 0.0, 0.0], "{label}");
+        assert_eq!(model.bbox_max, [11.0, 1.0, 0.0], "{label}");
     }
 }
 

@@ -669,7 +669,9 @@ export function setOutlineThickness(thickness: number): boolean {
 
 /**
  * Attach a loaded GLTF model's mesh to a scene node.
- * Copies vertex/index data from the model into the scene node's geometry.
+ * Attaches a model primitive to a scene node. Immutable imported geometry is
+ * shared between repeated placements; later procedural geometry updates use
+ * copy-on-write storage and do not modify the model payload.
  * This is the native equivalent of R3F's useGLTF + Clone.
  *
  * @param nodeHandle — scene node to receive the geometry

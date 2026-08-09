@@ -84,23 +84,24 @@ pub fn raycast_scene(scene: &SceneGraph, origin: &[f32; 3], direction: &[f32; 3]
     let mut best_dist = f32::MAX;
 
     for (handle, node) in scene.nodes.iter() {
-        if !node.visible || node.indices.is_empty() {
+        if !node.visible || node.indices().is_empty() {
             continue;
         }
 
         // Transform ray into node's local space via inverse transform
-        let inv_transform = mat4_inverse_local(&node.transform);
+        let world_transform = node.world_transform();
+        let inv_transform = mat4_inverse_local(&world_transform);
         let local_origin = mat4_transform_point(&inv_transform, origin);
         let local_dir = mat4_transform_dir(&inv_transform, direction);
 
         // Test against all triangles
-        for tri in node.indices.chunks(3) {
+        for tri in node.indices().chunks(3) {
             if tri.len() < 3 {
                 continue;
             }
-            let v0 = &node.vertices[tri[0] as usize];
-            let v1 = &node.vertices[tri[1] as usize];
-            let v2 = &node.vertices[tri[2] as usize];
+            let v0 = &node.vertices()[tri[0] as usize];
+            let v1 = &node.vertices()[tri[1] as usize];
+            let v2 = &node.vertices()[tri[2] as usize];
 
             if let Some((t, u, v)) = ray_triangle_intersection(
                 &local_origin,
@@ -118,7 +119,7 @@ pub fn raycast_scene(scene: &SceneGraph, origin: &[f32; 3], direction: &[f32; 3]
                         local_origin[1] + local_dir[1] * t,
                         local_origin[2] + local_dir[2] * t,
                     ];
-                    let hit_world = mat4_transform_point(&node.transform, &hit_local);
+                    let hit_world = mat4_transform_point(&world_transform, &hit_local);
 
                     // Interpolate normal
                     let w = 1.0 - u - v;
@@ -162,24 +163,25 @@ pub fn raycast_scene_all(
     let mut results: Vec<PickResult> = Vec::new();
 
     for (handle, node) in scene.nodes.iter() {
-        if !node.visible || node.indices.is_empty() {
+        if !node.visible || node.indices().is_empty() {
             continue;
         }
 
-        let inv_transform = mat4_inverse_local(&node.transform);
+        let world_transform = node.world_transform();
+        let inv_transform = mat4_inverse_local(&world_transform);
         let local_origin = mat4_transform_point(&inv_transform, origin);
         let local_dir = mat4_transform_dir(&inv_transform, direction);
 
         let mut node_best_dist = f32::MAX;
         let mut node_best: Option<PickResult> = None;
 
-        for tri in node.indices.chunks(3) {
+        for tri in node.indices().chunks(3) {
             if tri.len() < 3 {
                 continue;
             }
-            let v0 = &node.vertices[tri[0] as usize];
-            let v1 = &node.vertices[tri[1] as usize];
-            let v2 = &node.vertices[tri[2] as usize];
+            let v0 = &node.vertices()[tri[0] as usize];
+            let v1 = &node.vertices()[tri[1] as usize];
+            let v2 = &node.vertices()[tri[2] as usize];
 
             if let Some((t, u, v)) = ray_triangle_intersection(
                 &local_origin,
@@ -195,7 +197,7 @@ pub fn raycast_scene_all(
                         local_origin[1] + local_dir[1] * t,
                         local_origin[2] + local_dir[2] * t,
                     ];
-                    let hit_world = mat4_transform_point(&node.transform, &hit_local);
+                    let hit_world = mat4_transform_point(&world_transform, &hit_local);
                     let w = 1.0 - u - v;
                     let normal = [
                         v0.normal[0] * w + v1.normal[0] * u + v2.normal[0] * v,
