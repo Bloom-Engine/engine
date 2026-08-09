@@ -68,6 +68,37 @@ fn capture_preset(eng: &mut EngineState, preset: u32, legacy_scale: Option<f32>)
     .2
 }
 
+fn capture_sharpen_scene(eng: &mut EngineState, strength: f32) -> Vec<u8> {
+    eng.renderer.apply_quality_preset(4);
+    configure_reconstruction_scene(&mut eng.renderer);
+    eng.renderer.set_taa_enabled(false);
+    eng.renderer.set_sharpen_strength(strength);
+    eng.renderer.reset_temporal_history();
+    render(eng, 2, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(5.0, 7.0, 12.0, 255.0);
+        r.begin_mode_3d(4.4, 3.5, 6.0, 0.0, 0.45, 0.0, 0.0, 1.0, 0.0, 51.0, 0.0);
+        r.set_ambient_light(255.0, 255.0, 255.0, 0.82);
+        r.draw_grid(48, 0.16);
+        for column in -8..=8 {
+            let bright = column & 1 == 0;
+            r.draw_cube(
+                f64::from(column) * 0.19,
+                0.55,
+                -0.35 + f64::from(column & 3) * 0.08,
+                0.075,
+                1.10,
+                0.075,
+                if bright { 238.0 } else { 35.0 },
+                if bright { 226.0 } else { 55.0 },
+                if bright { 205.0 } else { 85.0 },
+                255.0,
+            );
+        }
+    })
+    .2
+}
+
 #[test]
 fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     let Some(mut eng) = try_engine() else {
@@ -99,5 +130,68 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         default_to_native.mean_rgb < legacy_to_native.mean_rgb * 0.90,
         "0.75 default was not materially closer to native Ultra than legacy 0.5: \
          default={default_to_native:?}, legacy={legacy_to_native:?}"
+    );
+}
+
+#[test]
+fn composite_sharpen_preserves_detail_without_inking_silhouettes() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+
+    let unsharpened = capture_sharpen_scene(&mut eng, 0.0);
+    let sharpened = capture_sharpen_scene(&mut eng, 0.5);
+    let mut silhouette_delta = 0u64;
+    let mut silhouette_samples = 0u64;
+    let mut material_changes = 0u64;
+    let mut material_samples = 0u64;
+    for y in 1..H - 1 {
+        for x in 1..W - 1 {
+            let sample_luma = |rgba: &[u8], x: u32, y: u32| {
+                let index = ((y * W + x) * 4) as usize;
+                luma(&rgba[index..index + 4])
+            };
+            let center = sample_luma(&unsharpened, x, y);
+            let neighbors = [
+                sample_luma(&unsharpened, x - 1, y),
+                sample_luma(&unsharpened, x + 1, y),
+                sample_luma(&unsharpened, x, y - 1),
+                sample_luma(&unsharpened, x, y + 1),
+            ];
+            let minimum = neighbors.iter().copied().fold(center, i32::min);
+            let maximum = neighbors.iter().copied().fold(center, i32::max);
+            let local_span = maximum - minimum;
+            let sharpened_luma = sample_luma(&sharpened, x, y);
+            let delta = center.abs_diff(sharpened_luma);
+            if local_span >= 80 {
+                silhouette_delta += u64::from(delta);
+                silhouette_samples += 1;
+            } else if (8..=48).contains(&local_span) {
+                material_samples += 1;
+                if delta >= 1 {
+                    material_changes += 1;
+                }
+            }
+        }
+    }
+    let silhouette_mean = silhouette_delta as f64 / silhouette_samples.max(1) as f64;
+    let material_change_ratio = material_changes as f64 / material_samples.max(1) as f64;
+    eprintln!(
+        "quality-preset sharpen silhouette_mean_delta={silhouette_mean:.4} \
+         silhouette_samples={silhouette_samples} material_change_ratio={material_change_ratio:.4} \
+         material_samples={material_samples}"
+    );
+    assert!(
+        silhouette_samples >= 100,
+        "fixture exposed too few hard edges"
+    );
+    assert!(
+        silhouette_mean <= 1.0,
+        "composite sharpen drew a visible contour along hard silhouettes"
+    );
+    assert!(
+        material_change_ratio >= 0.02,
+        "edge suppression disabled sharpening on ordinary material detail"
     );
 }

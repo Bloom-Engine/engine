@@ -1369,17 +1369,38 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let h_l = textureSample(hdr_tex, hdr_samp, sample_uv - ox).rgb;
         let h_d = textureSample(hdr_tex, hdr_samp, sample_uv + oy).rgb;
         let h_u = textureSample(hdr_tex, hdr_samp, sample_uv - oy).rgb;
-        let h_avg = (h_r + h_l + h_d + h_u) * 0.25 * ao_weighted * exposure;
+        let sharpen_hdr_scale = ao_weighted * exposure;
+        let h_avg = (h_r + h_l + h_d + h_u) * 0.25 * sharpen_hdr_scale;
         let avg = tonemap_select(h_avg);
-        // Flicker fix: cap the unsharp detail term. On a high-contrast
-        // silhouette (building roofline vs sky) detail is huge, and at
-        // half-res TSR the reconstructed edge wobbles a sub-pixel every
-        // frame — a strong unsharp turns that wobble into a crawling
-        // bright/dark line (the reported gray lines on the building).
-        // Fine texture detail has small local contrast and passes
-        // through untouched; only the extreme edge overshoot is bounded,
-        // which also removes the silhouette halo the 0.8 default caused.
-        let detail = clamp(ldr - avg, vec3<f32>(-0.12), vec3<f32>(0.12));
+        // Treat material detail and object silhouettes differently. A hard
+        // luminance boundary is already resolved by TAA; sharpening it creates
+        // a paired dark/bright contour that reads as an inked, cartoon edge
+        // and crawls when the reconstructed silhouette moves subpixel. Keep
+        // the existing detail clamp, then smoothly suppress it as local luma
+        // contrast enters silhouette territory. Low-contrast stone, wood,
+        // fabric, and normal-map detail retains the authored preset strength.
+        let raw_detail = clamp(ldr - avg, vec3<f32>(-0.12), vec3<f32>(0.12));
+        let luma_axis = vec3<f32>(0.2126, 0.7152, 0.0722);
+        let edge_contrast = abs(dot(ldr, luma_axis) - dot(avg, luma_axis));
+        // Center-vs-average contrast alone misses a one-sided silhouette:
+        // averaging one bright neighbor with three same-surface neighbors
+        // dilutes the boundary by 4x. Reuse the already-fetched HDR taps to
+        // estimate their relative span before tonemapping. This costs ALU but
+        // no sample or extra tonemap and remains exposure-independent.
+        let h_center_luma = max(dot(hdr, luma_axis), 0.0);
+        let h_r_luma = max(dot(h_r * sharpen_hdr_scale, luma_axis), 0.0);
+        let h_l_luma = max(dot(h_l * sharpen_hdr_scale, luma_axis), 0.0);
+        let h_d_luma = max(dot(h_d * sharpen_hdr_scale, luma_axis), 0.0);
+        let h_u_luma = max(dot(h_u * sharpen_hdr_scale, luma_axis), 0.0);
+        let h_min_luma = min(h_center_luma,
+            min(min(h_r_luma, h_l_luma), min(h_d_luma, h_u_luma)));
+        let h_max_luma = max(h_center_luma,
+            max(max(h_r_luma, h_l_luma), max(h_d_luma, h_u_luma)));
+        let relative_hdr_span = (h_max_luma - h_min_luma) / max(h_max_luma, 0.05);
+        let ldr_detail_weight = 1.0 - smoothstep(0.08, 0.24, edge_contrast);
+        let silhouette_weight = 1.0 - smoothstep(0.30, 0.65, relative_hdr_span);
+        let detail_weight = min(ldr_detail_weight, silhouette_weight);
+        let detail = raw_detail * detail_weight;
         ldr = clamp(ldr + detail * sharpen_strength, vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
