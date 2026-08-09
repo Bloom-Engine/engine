@@ -150,13 +150,14 @@ if (ssgiOverride === 1) { setSsgiEnabled(true); }
 if (ssrOverride === 0) { setSsrEnabled(false); }
 if (ssrOverride === 1) { setSsrEnabled(true); }
 
-// Warm Parisian haze — cream-white with a slight yellow shift.
-// Lower density than the first attempt so distant buildings still
-// register texture and colour rather than fading into flat blue fog.
-setFog(0.92, 0.90, 0.84, fogOverride === 0 ? 0.0 : 0.006, 0.0, 0.05);
-// Subtle shafts — exterior scene so the sun is usually off-frame or
-// clipped by buildings. Lower strength than Sponza's atrium.
-setSunShafts(sunShaftOverride === 0 ? 0.0 : 0.25, 0.96, 1.0, 0.94, 0.82);
+// Keep the reference presentation optically clear by default. The Bistro
+// already gets natural distance depth from its atmosphere sky and HDR IBL;
+// layering exponential fog and screen-space shafts over it lifts nearby black
+// levels and hides the material/texture detail this scene is meant to assess.
+// Both effects remain explicit qualification modes via `--fog 1` and
+// `--sun-shafts 1`.
+setFog(0.92, 0.90, 0.84, fogOverride === 1 ? 0.006 : 0.0, 0.0, 0.05);
+setSunShafts(sunShaftOverride === 1 ? 0.25 : 0.0, 0.96, 1.0, 0.94, 0.82);
 setVignette(0.10, 0.30);
 setChromaticAberration(0.0005);
 

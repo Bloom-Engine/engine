@@ -16,5 +16,9 @@ diagnostics. Extra arguments are forwarded to the example.
 Controls: WASD moves, Shift sprints, the mouse looks around, and Tab releases
 or captures the cursor.
 
+The default presentation keeps local contrast clear for material and temporal
+quality inspection. Use `--fog 1` and/or `--sun-shafts 1` to opt into the
+atmospheric-effect qualification modes.
+
 `tools/quality/prepare_bistro.py` remains available for small deterministic
 subsets used by automated captures, but it is no longer the interactive scene.
