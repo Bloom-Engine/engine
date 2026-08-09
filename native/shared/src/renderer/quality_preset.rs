@@ -97,7 +97,12 @@ fn quality_preset_config(preset: u32) -> QualityPresetConfig {
             ssr: true,
             ssgi: true,
             motion_blur: true,
-            sss: true,
+            // The current screen-space SSS pass has no per-pixel material
+            // classification, so enabling it here diffuses every opaque
+            // surface (wood, stone, metal, and glass included). Keep the
+            // explicit SSS API available for authored experiments, but do not
+            // turn a material-specific effect into a full-frame Ultra blur.
+            sss: false,
             chromatic_aberration: 0.003,
         },
     }
@@ -158,6 +163,9 @@ mod tests {
         assert!([off, low, medium, high, ultra]
             .iter()
             .all(|config| config.cas_sharpen == 0.0));
+        assert!([off, low, medium, high, ultra]
+            .iter()
+            .all(|config| !config.sss));
     }
 
     #[test]
