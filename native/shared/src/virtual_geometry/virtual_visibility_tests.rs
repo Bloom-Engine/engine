@@ -54,7 +54,11 @@ fn raw_virtual_clusters_rasterize_namespaced_visibility_ids_on_the_real_gpu() {
         .unwrap();
     make_hierarchy_fully_resident(&mut pool, &queue, mesh);
     let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
-    let emitter = GpuVirtualDrawEmitter::new(&device, &selector).unwrap();
+    let emitter = GpuVirtualDrawEmitter::new_binned_for_test(&device, &selector).unwrap();
+    assert_eq!(
+        emitter.submission_mode(),
+        VirtualGeometrySubmissionMode::BinnedFallback
+    );
     let raster = GpuVirtualVisibilityRaster::new(&device, &pool, &selector, &emitter).unwrap();
     let identity = [
         [1.0, 0.0, 0.0, 0.0],
@@ -214,7 +218,7 @@ fn raw_virtual_clusters_rasterize_namespaced_visibility_ids_on_the_real_gpu() {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        raster.draw_fixed_for_test(&mut pass, &emitter, 4).unwrap();
+        raster.draw(&mut pass, &emitter).unwrap();
     }
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -256,6 +260,47 @@ fn raw_virtual_clusters_rasterize_namespaced_visibility_ids_on_the_real_gpu() {
     );
     let probe_raw = read_gpu_buffer(&device, &queue, &probe_output, probe_bytes);
     let probe: &[VirtualShadingProbeRecord] = bytemuck::cast_slice(&probe_raw);
+    let binned_state_raw = read_gpu_buffer(
+        &device,
+        &queue,
+        emitter.binned_state_buffer().unwrap(),
+        std::mem::size_of::<GpuVirtualBinnedSubmissionState>() as u64,
+    );
+    let binned_state = bytemuck::from_bytes::<GpuVirtualBinnedSubmissionState>(&binned_state_raw);
+    assert_eq!(binned_state.counts[0], 4);
+    assert_eq!(binned_state.offsets[0], 0);
+    assert_eq!(binned_state.cursors[0], 4);
+    assert!(binned_state.counts[1..].iter().all(|count| *count == 0));
+    let (binned_indices, binned_commands) = emitter.binned_buffers().unwrap();
+    let command_raw = read_gpu_buffer(
+        &device,
+        &queue,
+        binned_commands,
+        u64::from(super::draw_emission::BINNED_FALLBACK_DRAW_COUNT)
+            * std::mem::size_of::<GpuVirtualDrawIndirect>() as u64,
+    );
+    let commands: &[GpuVirtualDrawIndirect] = bytemuck::cast_slice(&command_raw);
+    assert_eq!(
+        commands[0],
+        GpuVirtualDrawIndirect {
+            vertex_count: 3,
+            instance_count: 4,
+            first_vertex: 0,
+            first_instance: 0,
+        }
+    );
+    assert!(commands[1..]
+        .iter()
+        .all(|command| command.instance_count == 0));
+    let index_raw = read_gpu_buffer(
+        &device,
+        &queue,
+        binned_indices,
+        u64::from(emitter.draw_capacity()) * std::mem::size_of::<u32>() as u64,
+    );
+    let mut indices = bytemuck::cast_slice::<u8, u32>(&index_raw)[..4].to_vec();
+    indices.sort_unstable();
+    assert_eq!(indices, [0, 1, 2, 3]);
     let mut covered = 0usize;
     let mut background = 0usize;
     for y in 0..HEIGHT {

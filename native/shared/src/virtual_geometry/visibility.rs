@@ -1,4 +1,7 @@
-use super::{GpuVirtualDrawEmitter, GpuVirtualGeometryPool, GpuVirtualHierarchySelector};
+use super::{
+    draw_emission::BINNED_FALLBACK_DRAW_COUNT, GpuVirtualDrawEmitter, GpuVirtualGeometryPool,
+    GpuVirtualHierarchySelector, VirtualGeometrySubmissionMode,
+};
 use std::fmt;
 
 const VIRTUAL_VISIBILITY_RASTER_WGSL: &str =
@@ -6,6 +9,8 @@ const VIRTUAL_VISIBILITY_RASTER_WGSL: &str =
 const VIRTUAL_DECODE_WGSL: &str = include_str!("../../shaders/virtual_geometry/decode.wgsl");
 const VIRTUAL_RENDER_ABI_WGSL: &str =
     include_str!("../../shaders/virtual_geometry/render_abi.wgsl");
+const VIRTUAL_VISIBILITY_RASTER_BINNED_WGSL: &str =
+    include_str!("../../shaders/virtual_geometry/visibility_raster_binned.wgsl");
 
 /// Frame transforms shared by virtual visibility raster and its future exact
 /// PBR reconstruction consumer (128 bytes, column-major).
@@ -72,9 +77,12 @@ impl GpuVirtualVisibilityRaster {
         }
         let features = device.features();
         let limits = device.limits();
+        let binned_fallback =
+            emitter.submission_mode() == VirtualGeometrySubmissionMode::BinnedFallback;
+        let required_storage_buffers = if binned_fallback { 5 } else { 4 };
         if !features
             .contains(wgpu::Features::PRIMITIVE_INDEX | wgpu::Features::INDIRECT_FIRST_INSTANCE)
-            || limits.max_storage_buffers_per_shader_stage < 4
+            || limits.max_storage_buffers_per_shader_stage < required_storage_buffers
         {
             return Err(VirtualGeometryVisibilityError::DeviceUnsupported);
         }
@@ -90,25 +98,36 @@ impl GpuVirtualVisibilityRaster {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let layout = create_layout(device);
+        let layout = create_layout(device, binned_fallback);
+        let mut entries = vec![
+            binding(0, pool.physical_buffer()),
+            binding(1, pool.cluster_table_buffer()),
+            binding(2, selector.selected_buffer()),
+            binding(3, selector.instance_buffer()),
+            binding(4, &frame_buffer),
+        ];
+        if binned_fallback {
+            let (indices, _) = emitter
+                .binned_buffers()
+                .expect("binned emitter owns its selection indirection");
+            entries.push(binding(5, indices));
+        }
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("virtual_geometry_visibility_bind_group"),
             layout: &layout,
-            entries: &[
-                binding(0, pool.physical_buffer()),
-                binding(1, pool.cluster_table_buffer()),
-                binding(2, selector.selected_buffer()),
-                binding(3, selector.instance_buffer()),
-                binding(4, &frame_buffer),
-            ],
+            entries: &entries,
         });
-        let source = format!(
+        let mut source = format!(
             "enable primitive_index;\n{}\n{}\n{}\n{}",
             crate::renderer::visibility_buffer::RECONSTRUCTION_WGSL,
             VIRTUAL_RENDER_ABI_WGSL,
             VIRTUAL_DECODE_WGSL,
             VIRTUAL_VISIBILITY_RASTER_WGSL,
         );
+        if binned_fallback {
+            source.push('\n');
+            source.push_str(VIRTUAL_VISIBILITY_RASTER_BINNED_WGSL);
+        }
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("virtual_geometry_visibility_shader"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -123,7 +142,11 @@ impl GpuVirtualVisibilityRaster {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_virtual_visibility"),
+                entry_point: Some(if binned_fallback {
+                    "vs_virtual_visibility_binned"
+                } else {
+                    "vs_virtual_visibility"
+                }),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
@@ -177,39 +200,33 @@ impl GpuVirtualVisibilityRaster {
         self.count_supported
     }
 
-    pub fn draw_counted<'a>(
+    pub fn draw<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         emitter: &'a GpuVirtualDrawEmitter,
     ) -> Result<(), VirtualGeometryVisibilityError> {
         self.validate_emitter(emitter)?;
-        if !self.count_supported {
-            return Err(VirtualGeometryVisibilityError::IndirectCountUnsupported);
-        }
         self.bind(pass);
-        pass.multi_draw_indirect_count(
-            emitter.command_buffer(),
-            0,
-            emitter.state_buffer(),
-            0,
-            self.draw_capacity,
-        );
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(super) fn draw_fixed_for_test<'a>(
-        &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
-        emitter: &'a GpuVirtualDrawEmitter,
-        exact_draw_count: u32,
-    ) -> Result<(), VirtualGeometryVisibilityError> {
-        self.validate_emitter(emitter)?;
-        if exact_draw_count > self.draw_capacity {
-            return Err(VirtualGeometryVisibilityError::TestDrawCountExceeded);
+        match emitter.submission_mode() {
+            VirtualGeometrySubmissionMode::Counted => {
+                if !self.count_supported {
+                    return Err(VirtualGeometryVisibilityError::IndirectCountUnsupported);
+                }
+                pass.multi_draw_indirect_count(
+                    emitter.command_buffer(),
+                    0,
+                    emitter.state_buffer(),
+                    0,
+                    self.draw_capacity,
+                );
+            }
+            VirtualGeometrySubmissionMode::BinnedFallback => {
+                let (_, commands) = emitter
+                    .binned_buffers()
+                    .expect("binned emitter owns fixed indirect commands");
+                pass.multi_draw_indirect(commands, 0, BINNED_FALLBACK_DRAW_COUNT);
+            }
         }
-        self.bind(pass);
-        pass.multi_draw_indirect(emitter.command_buffer(), 0, exact_draw_count);
         Ok(())
     }
 
@@ -246,7 +263,7 @@ fn binding(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     }
 }
 
-fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+fn create_layout(device: &wgpu::Device, binned_fallback: bool) -> wgpu::BindGroupLayout {
     let storage = |binding| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::VERTEX,
@@ -257,24 +274,28 @@ fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         },
         count: None,
     };
+    let mut entries = vec![
+        storage(0),
+        storage(1),
+        storage(2),
+        storage(3),
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+    ];
+    if binned_fallback {
+        entries.push(storage(5));
+    }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("virtual_geometry_visibility_layout"),
-        entries: &[
-            storage(0),
-            storage(1),
-            storage(2),
-            storage(3),
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
+        entries: &entries,
     })
 }
 
@@ -284,14 +305,10 @@ pub enum VirtualGeometryVisibilityError {
     DeviceUnsupported,
     PoolMismatch,
     SelectorMismatch,
-    NamespaceCapacityExceeded {
-        capacity: u32,
-    },
+    NamespaceCapacityExceeded { capacity: u32 },
     IndirectCountUnsupported,
     PbrDeviceUnsupported,
     InvalidVisibilityTarget,
-    #[cfg(test)]
-    TestDrawCountExceeded,
 }
 
 impl fmt::Display for VirtualGeometryVisibilityError {
@@ -314,7 +331,7 @@ impl fmt::Display for VirtualGeometryVisibilityError {
             ),
             Self::IndirectCountUnsupported => write!(
                 formatter,
-                "device lacks indirect-count submission; use the compatibility renderer"
+                "counted virtual submission requires indirect-count device support"
             ),
             Self::PbrDeviceUnsupported => write!(
                 formatter,
@@ -324,10 +341,6 @@ impl fmt::Display for VirtualGeometryVisibilityError {
                 formatter,
                 "virtual PBR requires an Rg32Uint texture-binding visibility target"
             ),
-            #[cfg(test)]
-            Self::TestDrawCountExceeded => {
-                write!(formatter, "fixed test draw count exceeds capacity")
-            }
         }
     }
 }

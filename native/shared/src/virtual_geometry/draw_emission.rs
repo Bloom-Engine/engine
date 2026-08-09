@@ -2,6 +2,13 @@ use super::GpuVirtualHierarchySelector;
 use std::fmt;
 
 const WORKGROUP_SIZE: u32 = 64;
+pub(crate) const BINNED_FALLBACK_DRAW_COUNT: u32 = 22;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VirtualGeometrySubmissionMode {
+    Counted,
+    BinnedFallback,
+}
 
 /// Non-indexed indirect command for raw-page vertex pulling. `first_instance`
 /// addresses the matching selected-cluster record.
@@ -37,9 +44,31 @@ pub struct GpuVirtualDispatchIndirect {
     pub workgroups_z: u32,
 }
 
+/// GPU scratch for the bounded non-count submission path. Twenty-two
+/// power-of-two triangle bins cover every validated cluster that can fit in a
+/// four-megabyte cooked page.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuVirtualBinnedSubmissionState {
+    pub counts: [u32; BINNED_FALLBACK_DRAW_COUNT as usize],
+    pub offsets: [u32; BINNED_FALLBACK_DRAW_COUNT as usize],
+    pub cursors: [u32; BINNED_FALLBACK_DRAW_COUNT as usize],
+}
+
 const _: () = assert!(std::mem::size_of::<GpuVirtualDrawIndirect>() == 16);
 const _: () = assert!(std::mem::size_of::<GpuVirtualDrawEmissionState>() == 48);
 const _: () = assert!(std::mem::size_of::<GpuVirtualDispatchIndirect>() == 12);
+const _: () = assert!(std::mem::size_of::<GpuVirtualBinnedSubmissionState>() == 264);
+
+struct BinnedFallback {
+    index_buffer: wgpu::Buffer,
+    command_buffer: wgpu::Buffer,
+    state_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    count_pipeline: wgpu::ComputePipeline,
+    finalize_pipeline: wgpu::ComputePipeline,
+    scatter_pipeline: wgpu::ComputePipeline,
+}
 
 /// Converts bounded hierarchy output into a compact non-indexed indirect
 /// stream. If selection overflowed or observed an invalid/missing current
@@ -54,12 +83,30 @@ pub struct GpuVirtualDrawEmitter {
     emit_bind_group: wgpu::BindGroup,
     prepare_pipeline: wgpu::ComputePipeline,
     emit_pipeline: wgpu::ComputePipeline,
+    submission_mode: VirtualGeometrySubmissionMode,
+    binned_fallback: Option<BinnedFallback>,
 }
 
 impl GpuVirtualDrawEmitter {
     pub fn new(
         device: &wgpu::Device,
         selector: &GpuVirtualHierarchySelector,
+    ) -> Result<Self, VirtualGeometryDrawEmissionError> {
+        Self::new_inner(device, selector, false)
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_binned_for_test(
+        device: &wgpu::Device,
+        selector: &GpuVirtualHierarchySelector,
+    ) -> Result<Self, VirtualGeometryDrawEmissionError> {
+        Self::new_inner(device, selector, true)
+    }
+
+    fn new_inner(
+        device: &wgpu::Device,
+        selector: &GpuVirtualHierarchySelector,
+        force_binned_fallback: bool,
     ) -> Result<Self, VirtualGeometryDrawEmissionError> {
         let draw_capacity = selector.config().max_selected_clusters;
         let command_bytes =
@@ -170,6 +217,12 @@ impl GpuVirtualDrawEmitter {
             compilation_options: Default::default(),
             cache: None,
         });
+        let counted = device
+            .features()
+            .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
+            && !force_binned_fallback;
+        let binned_fallback = (!counted)
+            .then(|| create_binned_fallback(device, selector, &state_buffer, draw_capacity));
         Ok(Self {
             selector_id: selector.id(),
             draw_capacity,
@@ -180,6 +233,12 @@ impl GpuVirtualDrawEmitter {
             emit_bind_group,
             prepare_pipeline,
             emit_pipeline,
+            submission_mode: if counted {
+                VirtualGeometrySubmissionMode::Counted
+            } else {
+                VirtualGeometrySubmissionMode::BinnedFallback
+            },
+            binned_fallback,
         })
     }
 
@@ -197,6 +256,13 @@ impl GpuVirtualDrawEmitter {
             0,
             bytemuck::bytes_of(&GpuVirtualDrawEmissionState::default()),
         );
+        if let Some(fallback) = self.binned_fallback.as_ref() {
+            queue.write_buffer(
+                &fallback.state_buffer,
+                0,
+                bytemuck::bytes_of(&GpuVirtualBinnedSubmissionState::default()),
+            );
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("virtual_geometry_draw_prepare"),
@@ -215,7 +281,40 @@ impl GpuVirtualDrawEmitter {
             pass.set_bind_group(0, &self.emit_bind_group, &[]);
             pass.dispatch_workgroups_indirect(&self.dispatch_buffer, 0);
         }
+        if let Some(fallback) = self.binned_fallback.as_ref() {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("virtual_geometry_binned_count"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&fallback.count_pipeline);
+                pass.set_bind_group(0, &fallback.bind_group, &[]);
+                pass.dispatch_workgroups_indirect(&self.dispatch_buffer, 0);
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("virtual_geometry_binned_finalize"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&fallback.finalize_pipeline);
+                pass.set_bind_group(0, &fallback.bind_group, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("virtual_geometry_binned_scatter"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&fallback.scatter_pipeline);
+                pass.set_bind_group(0, &fallback.bind_group, &[]);
+                pass.dispatch_workgroups_indirect(&self.dispatch_buffer, 0);
+            }
+        }
         Ok(())
+    }
+
+    pub const fn submission_mode(&self) -> VirtualGeometrySubmissionMode {
+        self.submission_mode
     }
 
     pub const fn draw_capacity(&self) -> u32 {
@@ -238,6 +337,99 @@ impl GpuVirtualDrawEmitter {
 
     pub fn dispatch_buffer(&self) -> &wgpu::Buffer {
         &self.dispatch_buffer
+    }
+
+    pub(super) fn binned_buffers(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer)> {
+        self.binned_fallback
+            .as_ref()
+            .map(|fallback| (&fallback.index_buffer, &fallback.command_buffer))
+    }
+
+    #[cfg(test)]
+    pub(super) fn binned_state_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.binned_fallback
+            .as_ref()
+            .map(|fallback| &fallback.state_buffer)
+    }
+}
+
+fn create_binned_fallback(
+    device: &wgpu::Device,
+    selector: &GpuVirtualHierarchySelector,
+    emission_state: &wgpu::Buffer,
+    draw_capacity: u32,
+) -> BinnedFallback {
+    let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("virtual_geometry_binned_selection_indices"),
+        size: u64::from(draw_capacity) * std::mem::size_of::<u32>() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let command_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("virtual_geometry_binned_indirect_commands"),
+        size: u64::from(BINNED_FALLBACK_DRAW_COUNT)
+            * std::mem::size_of::<GpuVirtualDrawIndirect>() as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::INDIRECT
+            | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let state_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("virtual_geometry_binned_submission_state"),
+        size: std::mem::size_of::<GpuVirtualBinnedSubmissionState>() as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let layout = create_binned_layout(device);
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("virtual_geometry_binned_submission_bind_group"),
+        layout: &layout,
+        entries: &[
+            binding(0, selector.selected_buffer()),
+            binding(1, emission_state),
+            binding(2, &state_buffer),
+            binding(3, &command_buffer),
+            binding(4, &index_buffer),
+        ],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("virtual_geometry_binned_submission_shader"),
+        source: wgpu::ShaderSource::Wgsl(BINNED_FALLBACK_SHADER.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("virtual_geometry_binned_submission_pipeline_layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = |label, entry_point| {
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some(entry_point),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    };
+    BinnedFallback {
+        index_buffer,
+        command_buffer,
+        state_buffer,
+        bind_group,
+        count_pipeline: pipeline(
+            "virtual_geometry_binned_count_pipeline",
+            "count_binned_draws",
+        ),
+        finalize_pipeline: pipeline(
+            "virtual_geometry_binned_finalize_pipeline",
+            "finalize_binned_draws",
+        ),
+        scatter_pipeline: pipeline(
+            "virtual_geometry_binned_scatter_pipeline",
+            "scatter_binned_draws",
+        ),
     }
 }
 
@@ -281,6 +473,19 @@ fn create_emit_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             storage_layout_entry(0, true),
             storage_layout_entry(1, false),
             storage_layout_entry(2, false),
+        ],
+    })
+}
+
+fn create_binned_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("virtual_geometry_binned_submission_layout"),
+        entries: &[
+            storage_layout_entry(0, true),
+            storage_layout_entry(1, true),
+            storage_layout_entry(2, false),
+            storage_layout_entry(3, false),
+            storage_layout_entry(4, false),
         ],
     })
 }
@@ -468,6 +673,100 @@ fn emit_virtual_draws(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+const BINNED_FALLBACK_SHADER: &str = r#"
+const BIN_COUNT: u32 = 22u;
+
+struct GpuSelectedVirtualCluster {
+    mesh_id: u32,
+    instance_index: u32,
+    cluster_table_index: u32,
+    physical_page_base: u32,
+    lod_level: u32,
+    triangle_count: u32,
+    material_id: u32,
+    flags: u32,
+};
+struct SelectedTable { records: array<GpuSelectedVirtualCluster>, };
+struct DrawEmissionState {
+    draw_count: u32,
+    batch_fallback: u32,
+    selector_selected_count: u32,
+    selector_selected_overflow: u32,
+    selector_invalid_or_missing: u32,
+    emitted_triangles: u32,
+    emitted_draws: u32,
+    reserved_0: u32,
+    reserved_1: u32,
+    reserved_2: u32,
+    reserved_3: u32,
+    reserved_4: u32,
+};
+struct BinnedState {
+    counts: array<atomic<u32>, 22>,
+    offsets: array<u32, 22>,
+    cursors: array<atomic<u32>, 22>,
+};
+struct DrawIndirect {
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+};
+struct DrawTable { records: array<DrawIndirect>, };
+struct IndexTable { records: array<u32>, };
+
+@group(0) @binding(0) var<storage, read> selected: SelectedTable;
+@group(0) @binding(1) var<storage, read> emission: DrawEmissionState;
+@group(0) @binding(2) var<storage, read_write> bins: BinnedState;
+@group(0) @binding(3) var<storage, read_write> commands: DrawTable;
+@group(0) @binding(4) var<storage, read_write> indices: IndexTable;
+
+fn triangle_bin(triangle_count: u32) -> u32 {
+    let rounded_log2 = 32u - countLeadingZeros(max(triangle_count, 1u) - 1u);
+    return min(rounded_log2, BIN_COUNT - 1u);
+}
+
+@compute @workgroup_size(64)
+fn count_binned_draws(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let selected_index = gid.x;
+    if (selected_index >= emission.draw_count) {
+        return;
+    }
+    let bin = triangle_bin(selected.records[selected_index].triangle_count);
+    atomicAdd(&bins.counts[bin], 1u);
+}
+
+@compute @workgroup_size(1)
+fn finalize_binned_draws() {
+    var running = 0u;
+    for (var bin = 0u; bin < BIN_COUNT; bin += 1u) {
+        let count = atomicLoad(&bins.counts[bin]);
+        bins.offsets[bin] = running;
+        atomicStore(&bins.cursors[bin], 0u);
+        commands.records[bin] = DrawIndirect(
+            (1u << bin) * 3u,
+            count,
+            0u,
+            running,
+        );
+        running += count;
+    }
+}
+
+@compute @workgroup_size(64)
+fn scatter_binned_draws(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let selected_index = gid.x;
+    if (selected_index >= emission.draw_count) {
+        return;
+    }
+    let bin = triangle_bin(selected.records[selected_index].triangle_count);
+    let destination = bins.offsets[bin] + atomicAdd(&bins.cursors[bin], 1u);
+    if (destination < arrayLength(&indices.records)) {
+        indices.records[destination] = selected_index;
+    }
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,7 +777,10 @@ mod tests {
             .unwrap_or_else(|error| panic!("virtual draw prepare WGSL failed: {error:?}"));
         wgpu::naga::front::wgsl::parse_str(DRAW_EMIT_SHADER)
             .unwrap_or_else(|error| panic!("virtual draw emit WGSL failed: {error:?}"));
+        wgpu::naga::front::wgsl::parse_str(BINNED_FALLBACK_SHADER)
+            .unwrap_or_else(|error| panic!("virtual binned fallback WGSL failed: {error:?}"));
         assert!(DRAW_PREPARE_SHADER.contains("state.draw_count = draw_count"));
         assert!(DRAW_PREPARE_SHADER.contains("select(bounded_count, 0u, fallback)"));
+        assert!(BINNED_FALLBACK_SHADER.contains("for (var bin = 0u; bin < BIN_COUNT"));
     }
 }

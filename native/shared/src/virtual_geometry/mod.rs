@@ -17,8 +17,9 @@ pub use bloom_geometry_format::{
     ClusterRecord, CompatibilityRecord, GeometryArchive, PageRecord, VertexEncoding,
 };
 pub use draw_emission::{
-    GpuVirtualDispatchIndirect, GpuVirtualDrawEmissionState, GpuVirtualDrawEmitter,
-    GpuVirtualDrawIndirect, VirtualGeometryDrawEmissionError,
+    GpuVirtualBinnedSubmissionState, GpuVirtualDispatchIndirect, GpuVirtualDrawEmissionState,
+    GpuVirtualDrawEmitter, GpuVirtualDrawIndirect, VirtualGeometryDrawEmissionError,
+    VirtualGeometrySubmissionMode,
 };
 pub use gpu_pool::{
     GpuPageTransition, GpuVirtualClusterEntry, GpuVirtualGeometryConfig, GpuVirtualGeometryPool,

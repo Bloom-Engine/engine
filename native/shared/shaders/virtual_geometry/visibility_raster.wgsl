@@ -14,10 +14,9 @@ fn bloom_invalid_virtual_vertex() -> VirtualVisibilityVertexOut {
     return VirtualVisibilityVertexOut(vec4<f32>(2.0, 2.0, 2.0, 1.0), 0u, 0u);
 }
 
-@vertex
-fn vs_virtual_visibility(
-    @builtin(vertex_index) corner: u32,
-    @builtin(instance_index) selected_index: u32,
+fn bloom_virtual_visibility_vertex(
+    selected_index: u32,
+    corner: u32,
 ) -> VirtualVisibilityVertexOut {
     if (selected_index >= arrayLength(&virtual_selected.records)) {
         return bloom_invalid_virtual_vertex();
@@ -59,6 +58,14 @@ fn vs_virtual_visibility(
         selected_index,
         selection.flags,
     );
+}
+
+@vertex
+fn vs_virtual_visibility(
+    @builtin(vertex_index) corner: u32,
+    @builtin(instance_index) selected_index: u32,
+) -> VirtualVisibilityVertexOut {
+    return bloom_virtual_visibility_vertex(selected_index, corner);
 }
 
 @fragment
