@@ -1012,35 +1012,36 @@ fn fs_main(in: VsOut) -> TaaOut {
     // pixels every frame and prevented temporal super-resolution from ever
     // accumulating its sub-pixel samples.
     let history_dist = abs(history_y_clamped - mean.x);
-    let motion_color_change = smoothstep(
-        stddev.x * 0.25,
-        max(stddev.x, 0.0001),
-        history_dist,
-    ) * motion_alpha;
 
     // A stationary scene can still change illumination/emissive state or
     // inherit poisoned chroma, so it is not safe to disable color rejection
-    // outright. Test the UNCLAMPED history against a deliberately broad,
-    // absolute-floored statistical band instead. Coherent lighting/material
-    // changes on a flat surface cross this band immediately; valid jittered
-    // texture samples stay inside it and are variance-clipped before blending.
-    let raw_luma_dist = abs(history_ycocg.x - mean.x);
-    let gross_luma_change = smoothstep(
-        max(stddev.x * 3.0, 0.02),
-        max(stddev.x * 6.0, 0.06),
-        raw_luma_dist,
+    // outright. Collapse luma and half-weighted chroma into one max-norm
+    // distance. This deliberately avoids a chroma vector length (sqrt) and
+    // multiple smoothstep evaluations in the full-output-resolution pass.
+    // Coherent lighting/material changes on a flat surface cross the broad
+    // band immediately; valid jittered texture samples stay inside it and are
+    // variance-clipped before blending.
+    let raw_color_delta = abs(history_ycocg - mean);
+    let gross_color_dist = max(
+        raw_color_delta.x,
+        max(raw_color_delta.y, raw_color_delta.z) * 0.5,
     );
-    let raw_chroma_dist = length(history_ycocg.yz - mean.yz);
-    let chroma_stddev = length(stddev.yz);
-    let gross_chroma_change = smoothstep(
-        max(chroma_stddev * 3.0, 0.04),
-        max(chroma_stddev * 6.0, 0.12),
-        raw_chroma_dist,
+    let gross_color_sigma = max(
+        stddev.x,
+        max(stddev.y, stddev.z) * 0.5,
     );
-    let disocclusion = max(
-        motion_color_change,
-        max(gross_luma_change, gross_chroma_change),
+    let color_dist = mix(gross_color_dist, history_dist, motion_alpha);
+    let reject_lo = mix(
+        max(gross_color_sigma * 3.0, 0.02),
+        stddev.x * 0.25,
+        motion_alpha,
     );
+    let reject_hi = mix(
+        max(gross_color_sigma * 6.0, 0.06),
+        max(stddev.x, 0.0001),
+        motion_alpha,
+    );
+    let disocclusion = smoothstep(reject_lo, reject_hi, color_dist);
 
     // Divergent neighbor motion marks a silhouette/disocclusion footprint.
     // Prefer the current frame there even when both individual vectors are
