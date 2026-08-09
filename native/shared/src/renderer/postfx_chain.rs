@@ -75,6 +75,26 @@ fn taa_current_weight(history_valid: bool, frame_index: u32, render_scale: f32) 
     }
 }
 
+#[inline]
+pub(super) fn taa_camera_moving(
+    current_view: &[[f32; 4]; 4],
+    previous_view: &[[f32; 4]; 4],
+    current_projection: &[[f32; 4]; 4],
+    previous_projection: &[[f32; 4]; 4],
+) -> bool {
+    current_view
+        .iter()
+        .flatten()
+        .zip(previous_view.iter().flatten())
+        .chain(
+            current_projection
+                .iter()
+                .flatten()
+                .zip(previous_projection.iter().flatten()),
+        )
+        .any(|(current, previous)| (current - previous).abs() > 1e-6)
+}
+
 fn reactive_taa_cache_key(plan_id: u64, rebuild_epoch: u64) -> (u64, u64) {
     (plan_id, rebuild_epoch)
 }
@@ -326,7 +346,7 @@ impl Renderer {
 mod tests {
     use super::{
         bloom_mip_extent, bloom_threshold, exposure_update_rate, reactive_taa_cache_key,
-        taa_current_weight, CompositeSource, PostFxSource, SsrCompositeSource,
+        taa_camera_moving, taa_current_weight, CompositeSource, PostFxSource, SsrCompositeSource,
     };
 
     #[test]
@@ -420,6 +440,42 @@ mod tests {
         assert_eq!(taa_current_weight(true, 3, 1.0), 1.0);
         assert_eq!(taa_current_weight(true, 4, 0.5), 0.0625);
         assert_eq!(taa_current_weight(true, 4, 1.0), 0.1);
+    }
+
+    #[test]
+    fn taa_camera_motion_ignores_float_noise_but_detects_view_or_projection_changes() {
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let mut float_noise = identity;
+        float_noise[3][0] = 5e-7;
+        assert!(!taa_camera_moving(
+            &float_noise,
+            &identity,
+            &identity,
+            &identity,
+        ));
+
+        let mut translated = identity;
+        translated[3][0] = 2e-6;
+        assert!(taa_camera_moving(
+            &translated,
+            &identity,
+            &identity,
+            &identity,
+        ));
+
+        let mut changed_projection = identity;
+        changed_projection[0][0] = 0.99;
+        assert!(taa_camera_moving(
+            &identity,
+            &identity,
+            &changed_projection,
+            &identity,
+        ));
     }
 
     #[test]
@@ -770,6 +826,17 @@ impl Renderer {
                 self.taa_frame_index,
                 self.render_scale,
             );
+            // Pack authored camera motion into the otherwise-unused sign of
+            // the positive TAA weight. This lets history reconstruction keep
+            // its exact settled lookup while selecting a sharper fractional
+            // phase during a real camera move. Jitter is deliberately absent:
+            // both matrices below are the unjittered camera transforms.
+            let camera_moving = taa_camera_moving(
+                &self.current_view_matrix,
+                &self.prev_view_matrix,
+                &self.current_proj_matrix_unjittered,
+                &self.prev_proj_matrix_unjittered,
+            );
             // yz = the current jitter as a composed-UV offset. Content shifts by
             // -jitter_ndc through the GL-convention perspective divide (w = -z),
             // so the rendered position of a feature is uv + (-0.5*jx, +0.5*jy)
@@ -777,7 +844,7 @@ impl Renderer {
             // wrong sign DOUBLES the effective jitter and the numbers scream.
             let tp = TaaParams {
                 params: [
-                    alpha,
+                    if camera_moving { -alpha } else { alpha },
                     -0.5 * self.current_jitter_ndc[0],
                     0.5 * self.current_jitter_ndc[1],
                     if self.current_proj_matrix[3][3].abs() < 0.5 {

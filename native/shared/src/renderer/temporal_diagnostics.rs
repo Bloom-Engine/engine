@@ -57,7 +57,7 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#;
     // Categorical dominant reason: gray seed, red off-screen, cyan reactive,
     // magenta disocclusion, yellow neighborhood clamp, blue motion, green keep.
     var reason = vec3<f32>(0.05, 0.65, 0.10);
-    if (u.params.x >= 0.999) {{
+    if (abs(u.params.x) >= 0.999) {{
         reason = vec3<f32>(0.25);
     }} else if (!history_in_bounds) {{
         reason = vec3<f32>(1.0, 0.05, 0.02);

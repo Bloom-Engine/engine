@@ -174,6 +174,12 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         reconstruction["mode"].as_str(),
         Some("source-footprint-temporal")
     );
+    assert_eq!(
+        reconstruction["history_filter"].as_str(),
+        Some("camera-motion-phase-compressed-linear")
+    );
+    assert_eq!(reconstruction["history_filter_samples"].as_u64(), Some(1));
+    assert_eq!(reconstruction["camera_moving"].as_bool(), Some(false));
     assert_eq!(reconstruction["render_scale"].as_f64(), Some(0.75));
     assert_eq!(
         reconstruction["statistics_footprint_input_pixels"].as_f64(),

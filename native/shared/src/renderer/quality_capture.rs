@@ -1164,6 +1164,21 @@ impl Renderer {
         out.push_str("\"enabled\":");
         out.push_str(if self.taa_enabled { "true" } else { "false" });
         out.push_str(",\"mode\":\"source-footprint-temporal\"");
+        out.push_str(",\"history_filter\":\"camera-motion-phase-compressed-linear\"");
+        out.push_str(",\"history_filter_samples\":1");
+        out.push_str(",\"camera_moving\":");
+        out.push_str(
+            if super::postfx_chain::taa_camera_moving(
+                &self.current_view_matrix,
+                &self.prev_view_matrix,
+                &self.current_proj_matrix_unjittered,
+                &self.prev_proj_matrix_unjittered,
+            ) {
+                "true"
+            } else {
+                "false"
+            },
+        );
         out.push_str(",\"input_extent\":[");
         out.push_str(&taa_input_width.to_string());
         out.push(',');

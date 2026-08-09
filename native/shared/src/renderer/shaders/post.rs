@@ -690,7 +690,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 /// to a fully sub-pixel-resolved image.
 pub(in crate::renderer) const TAA_SHADER_WGSL: &str = "
 struct TaaParams {
-    /// x = blend factor (current-frame weight); yz = the CURRENT frame's
+    /// abs(x) = blend factor (current-frame weight); sign(x) = whether the
+    /// unjittered camera transform moved; yz = the CURRENT frame's
     /// jitter as a composed-texture UV offset (see the unjitter note at the
     /// current-frame sample); abs(w) = render scale, with positive sign for
     /// perspective depth and negative sign for orthographic depth.
@@ -799,6 +800,32 @@ fn sample_catmull_rom(
     return clamp(result, max(footprint_min, vec4<f32>(0.0)), footprint_max);
 }
 
+// History lives at output resolution. A bilinear lookup is exact while a
+// reprojected coordinate remains on an output texel centre, but under camera
+// or object motion it averages four already-filtered history pixels. Repeating
+// that every frame progressively removes texture and silhouette detail. Keep
+// one history fetch, but compress its bilinear phase continuously toward the
+// nearest completed output sample. This retains more detail without the hard
+// half-texel transitions of point history sampling. Renderer-known camera
+// motion selects this path; object-only reprojection retains its established
+// behavior until it has an independently qualified phase policy. The
+// stationary path is
+// byte-for-byte the original lookup so settled temporal supersampling is not
+// disturbed. Later variance, depth, and reactive guards still decide whether
+// a moving sample belongs to the current surface.
+fn sample_history_reprojected(uv: vec2<f32>, camera_moving: bool) -> vec4<f32> {
+    if (!camera_moving) {
+        return textureSampleLevel(history_tex, history_samp, uv, 0.0);
+    }
+    let dims = vec2<f32>(textureDimensions(history_tex));
+    let history_pixel = uv * dims - vec2<f32>(0.5);
+    let base = floor(history_pixel);
+    let phase = fract(history_pixel);
+    let compressed_phase = phase * phase * (vec2<f32>(3.0) - 2.0 * phase);
+    let compressed_uv = (base + compressed_phase + vec2<f32>(0.5)) / dims;
+    return textureSampleLevel(history_tex, history_samp, compressed_uv, 0.0);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> TaaOut {
     // composed_tex already carries HDR + SSR + SSGI*albedo + bloom +
@@ -813,6 +840,8 @@ fn fs_main(in: VsOut) -> TaaOut {
     // and reciprocal divisions in both stages.
     let input_size = vec2<f32>(textureDimensions(composed_tex));
     let input_texel = 1.0 / input_size;
+    let current_weight = abs(u.params.x);
+    let camera_moving = u.params.x < 0.0;
 
     // Closest-depth velocity dilation. Sampling the low-resolution velocity
     // buffer linearly mixed foreground motion with zero/background motion at
@@ -910,13 +939,13 @@ fn fs_main(in: VsOut) -> TaaOut {
     // geometry velocity, so include its actual directional reprojection
     // distance in the same motion classification.
     let reconstruction_scale = clamp(abs(u.params.w), 0.5, 1.0);
+    let reprojection_motion = max(vel_len, length(prev_uv - in.uv));
     var jitter_alignment = 1.0;
     // Uniform branch: fractional tiers keep the former shader path (and its
     // cost) exactly. Only near-native tiers pay for the motion classifier.
     if (reconstruction_scale > 0.95) {
         let static_jitter_alignment =
             1.0 - smoothstep(0.95, 1.0, reconstruction_scale);
-        let reprojection_motion = max(vel_len, length(prev_uv - in.uv));
         // The static path is deliberately narrow: even a very slow camera pan
         // must use the established aligned sample rather than intermittently
         // mixing between sharp and aligned phases across the image.
@@ -936,7 +965,7 @@ fn fs_main(in: VsOut) -> TaaOut {
         prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
         prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
     if (history_in_bounds) {
-        let h_sample = textureSampleLevel(history_tex, history_samp, prev_uv, 0.0);
+        let h_sample = sample_history_reprojected(prev_uv, camera_moving);
         history = h_sample.rgb;
         history_w = h_sample.a;
         let history_depth_dims = vec2<i32>(textureDimensions(history_depth_tex));
@@ -1088,7 +1117,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     // Prefer the current frame there even when both individual vectors are
     // small, rather than allowing a long-lived cross-surface history average.
     let divergence_alpha = smoothstep(0.00025, 0.003, velocity_divergence);
-    let motion_ramped = max(mix(u.params.x, 0.85, motion_alpha), divergence_alpha);
+    let motion_ramped = max(mix(current_weight, 0.85, motion_alpha), divergence_alpha);
     // Reactive coverage is injected by the material-aware TAA variant. Keep a
     // concrete zero in the base shader so confidence policy is identical for
     // both variants and diagnostics can report the real persistent lock.
@@ -1108,12 +1137,12 @@ fn fs_main(in: VsOut) -> TaaOut {
     // motion the established motion policy already bounds stale history, so
     // disable bootstrap before 0.04 output pixels/frame rather than turning a
     // safe resolve into visibly noisier current samples during a slow pan.
-    let history_usable = history_in_bounds && u.params.x < 0.999;
+    let history_usable = history_in_bounds && current_weight < 0.999;
     let history_sample_count = history_confidence * 16.0;
     let bootstrap_running_alpha =
         select(1.0, 1.0 / (history_sample_count + 1.0), history_usable);
     let bootstrap_static = 1.0 - smoothstep(0.00001, 0.0001, vel_len);
-    let bootstrap_alpha = mix(u.params.x, bootstrap_running_alpha, bootstrap_static);
+    let bootstrap_alpha = mix(current_weight, bootstrap_running_alpha, bootstrap_static);
     let alpha = max(
         max(max(motion_ramped, disocclusion), max(depth_disocclusion, reactive)),
         bootstrap_alpha,
