@@ -6,6 +6,8 @@
 // a per-corner barycentric vertex stream.
 
 const BLOOM_VISIBILITY_INVALID_DRAW_ID: u32 = 0xffffffffu;
+const BLOOM_VISIBILITY_VIRTUAL_DRAW_BIT: u32 = 0x80000000u;
+const BLOOM_VISIBILITY_DRAW_INDEX_MASK: u32 = 0x7fffffffu;
 const BLOOM_VISIBILITY_FRONT_FACE_BIT: u32 = 0x80000000u;
 const BLOOM_VISIBILITY_PRIMITIVE_MASK: u32 = 0x7fffffffu;
 
@@ -13,6 +15,7 @@ struct BloomVisibilityRecord {
     draw_id: u32,
     primitive_id: u32,
     front_facing: bool,
+    virtual_geometry: bool,
 };
 
 fn bloom_visibility_valid(raw: vec2<u32>) -> bool {
@@ -21,9 +24,22 @@ fn bloom_visibility_valid(raw: vec2<u32>) -> bool {
 
 fn bloom_decode_visibility(raw: vec2<u32>) -> BloomVisibilityRecord {
     return BloomVisibilityRecord(
-        raw.x,
+        raw.x & BLOOM_VISIBILITY_DRAW_INDEX_MASK,
         raw.y & BLOOM_VISIBILITY_PRIMITIVE_MASK,
         (raw.y & BLOOM_VISIBILITY_FRONT_FACE_BIT) != 0u,
+        (raw.x & BLOOM_VISIBILITY_VIRTUAL_DRAW_BIT) != 0u,
+    );
+}
+
+fn bloom_encode_virtual_visibility(
+    draw_index: u32,
+    primitive_id: u32,
+    front_facing: bool,
+) -> vec2<u32> {
+    let face = select(0u, BLOOM_VISIBILITY_FRONT_FACE_BIT, front_facing);
+    return vec2<u32>(
+        BLOOM_VISIBILITY_VIRTUAL_DRAW_BIT | draw_index,
+        primitive_id | face,
     );
 }
 

@@ -69,6 +69,7 @@ mod texture_store;
 mod transmitted_shadows;
 mod transparent_gi;
 pub(crate) mod visibility_buffer;
+mod visibility_ids;
 mod visibility_shading;
 mod vsm_gpu_casters;
 mod weighted_transparency;
@@ -113,6 +114,7 @@ use atmosphere_lut::{
 };
 
 mod formats;
+pub(crate) use formats::DEPTH_FORMAT;
 #[cfg(not(target_arch = "wasm32"))]
 use formats::PROBE_OCT_SIZE;
 use formats::{
@@ -124,8 +126,8 @@ use formats::{
     create_ssao_rt, create_ssgi_rt, create_ssr_history_textures, create_ssr_rt, create_sss_rt,
     create_taa_textures, create_velocity_rt, create_wsrc_atlas, halton, probe_grid_dims,
     BLOOM_MIP_COUNT, CARD_ATLAS_SIZE, CARD_AXES_PER_MESH, CARD_MAX_SLOTS, CARD_SLOTS_PER_ROW,
-    CARD_SLOT_SIZE, DEPTH_FORMAT, HDR_FORMAT, HIZ_FORMAT, HIZ_MIP_COUNT, MATERIAL_FORMAT,
-    MESH_SDF_RES, PROBE_TILE_SIZE, SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT,
+    CARD_SLOT_SIZE, HDR_FORMAT, HIZ_FORMAT, HIZ_MIP_COUNT, MATERIAL_FORMAT, MESH_SDF_RES,
+    PROBE_TILE_SIZE, SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT,
     SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME, SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD, SCENE_SDF_CLIPMAP_RES,
     SSAO_FORMAT, VELOCITY_FORMAT, WSRC_CASCADE_COUNT, WSRC_CASCADE_EXTENTS, WSRC_GRID_RES,
     WSRC_REBAKE_THRESHOLD,

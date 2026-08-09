@@ -5,52 +5,10 @@
 //! use. The existing forward MRT remains authoritative until total frame cost
 //! and image parity pass on every required capability tier.
 
-pub(crate) const VISIBILITY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
-pub(crate) const VISIBILITY_BYTES_PER_PIXEL: u64 = 8;
-pub(crate) const INVALID_DRAW_ID: u32 = u32::MAX;
-pub(crate) const FRONT_FACE_BIT: u32 = 1 << 31;
-pub(crate) const PRIMITIVE_ID_MASK: u32 = FRONT_FACE_BIT - 1;
-
-/// One visibility-buffer texel. The second word reserves its high bit for the
-/// rasterized face orientation and leaves 31 bits for the primitive index.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct VisibilityRecord {
-    pub draw_id: u32,
-    pub primitive_and_face: u32,
-}
-
-impl VisibilityRecord {
-    pub(crate) const BACKGROUND: Self = Self {
-        draw_id: INVALID_DRAW_ID,
-        primitive_and_face: u32::MAX,
-    };
-
-    pub(crate) const fn encode(
-        draw_id: u32,
-        primitive_id: u32,
-        front_facing: bool,
-    ) -> Option<Self> {
-        if draw_id == INVALID_DRAW_ID || primitive_id > PRIMITIVE_ID_MASK {
-            return None;
-        }
-        Some(Self {
-            draw_id,
-            primitive_and_face: primitive_id | if front_facing { FRONT_FACE_BIT } else { 0 },
-        })
-    }
-
-    pub(crate) const fn decode(self) -> Option<(u32, u32, bool)> {
-        if self.draw_id == INVALID_DRAW_ID {
-            return None;
-        }
-        Some((
-            self.draw_id,
-            self.primitive_and_face & PRIMITIVE_ID_MASK,
-            (self.primitive_and_face & FRONT_FACE_BIT) != 0,
-        ))
-    }
-}
+pub(crate) use super::visibility_ids::{
+    VisibilityDraw, VisibilityRecord, DRAW_INDEX_MASK, FRONT_FACE_BIT, INVALID_DRAW_ID,
+    PRIMITIVE_ID_MASK, VIRTUAL_DRAW_BIT, VISIBILITY_BYTES_PER_PIXEL, VISIBILITY_FORMAT,
+};
 
 /// Exact allocation size of the packed visibility target, excluding backend
 /// row/heap alignment that must be reported separately by the runtime A/B.
@@ -77,7 +35,9 @@ pub(crate) fn contract_json() -> String {
         concat!(
             "{{\"format\":\"{}\",\"bytes_per_pixel\":{},",
             "\"invalid_draw_id\":{},\"primitive_bits\":31,",
-            "\"front_face_bits\":1,\"shipping_enabled\":false,",
+            "\"front_face_bits\":1,\"draw_namespace_bits\":1,",
+            "\"virtual_draw_bit\":{},\"draw_index_mask\":{},",
+            "\"shipping_enabled\":false,",
             "\"required_feature\":\"primitive-index\",",
             "\"vertex_stride_bytes\":{},\"native_1080p_bytes\":{},",
             "\"reconstruction_wgsl_bytes\":{},\"geometry_wgsl_bytes\":{},",
@@ -86,6 +46,8 @@ pub(crate) fn contract_json() -> String {
         format_name,
         VISIBILITY_BYTES_PER_PIXEL,
         INVALID_DRAW_ID,
+        VIRTUAL_DRAW_BIT,
+        DRAW_INDEX_MASK,
         std::mem::size_of::<super::Vertex3D>(),
         target_bytes(1_920, 1_080).expect("1080p visibility allocation is bounded"),
         RECONSTRUCTION_WGSL.len(),
@@ -1202,13 +1164,14 @@ mod tests {
         for (draw, primitive, front) in [
             (0, 0, false),
             (17, 42, true),
-            (u32::MAX - 1, PRIMITIVE_ID_MASK, false),
+            (DRAW_INDEX_MASK, PRIMITIVE_ID_MASK, false),
         ] {
             let encoded = VisibilityRecord::encode(draw, primitive, front).unwrap();
             assert_eq!(encoded.decode(), Some((draw, primitive, front)));
         }
         assert_eq!(VisibilityRecord::BACKGROUND.decode(), None);
         assert_eq!(VisibilityRecord::encode(INVALID_DRAW_ID, 0, true), None);
+        assert_eq!(VisibilityRecord::encode(VIRTUAL_DRAW_BIT, 0, true), None);
         assert_eq!(VisibilityRecord::encode(0, FRONT_FACE_BIT, true), None);
     }
 
