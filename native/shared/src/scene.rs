@@ -1117,7 +1117,8 @@ impl SceneGraph {
     ) {
         self.imported_refraction_enabled = imported_refraction_enabled;
         let frustum = extract_frustum_planes(vp_matrix);
-        let order_safe = retained_order_is_gpu_safe(&self.nodes);
+        let order_safe =
+            retained_order_is_gpu_safe(&self.nodes, gpu_driven.visibility_routing_enabled());
         let candidate_count = self
             .nodes
             .iter()
@@ -2545,12 +2546,15 @@ fn scene_node_gpu_driven_ready(node: &SceneNode, imported_refraction_enabled: bo
         && node.uniform_slot.is_some()
 }
 
-fn retained_order_is_gpu_safe(nodes: &HandleRegistry<SceneNode>) -> bool {
+fn retained_order_is_gpu_safe(
+    nodes: &HandleRegistry<SceneNode>,
+    allow_cutout_compatibility: bool,
+) -> bool {
     !nodes.iter().any(|(_, node)| {
         node.visible
             && !node.gi_only
             && !node.indices.is_empty()
-            && (node.material.alpha_cutoff > 0.0
+            && ((node.material.alpha_cutoff > 0.0 && !allow_cutout_compatibility)
                 || (node.material.opacity.is_finite() && node.material.opacity < 1.0))
     })
 }
@@ -2748,6 +2752,10 @@ fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
 }
 
 #[cfg(test)]
+#[path = "scene_visibility_routing_tests.rs"]
+mod visibility_routing_tests;
+
+#[cfg(test)]
 mod gpu_driven_cache_tests {
     use super::*;
 
@@ -2872,31 +2880,5 @@ mod gpu_driven_cache_tests {
         release_scene_geometry(&mut cache, &mut retired, key);
         assert!(!cache.contains_key(&key));
         assert_eq!(retired, vec![test_slice()]);
-    }
-
-    #[test]
-    fn compatibility_alpha_disables_mixed_retained_submission() {
-        let mut scene = SceneGraph::new();
-        let opaque = scene.create_node();
-        scene.nodes.get_mut(opaque).unwrap().indices = vec![0, 1, 2];
-        assert!(retained_order_is_gpu_safe(&scene.nodes));
-
-        let cutout = scene.create_node();
-        let cutout_node = scene.nodes.get_mut(cutout).unwrap();
-        cutout_node.indices = vec![0, 1, 2];
-        cutout_node.material.alpha_cutoff = 0.5;
-        assert!(!retained_order_is_gpu_safe(&scene.nodes));
-
-        scene.nodes.get_mut(cutout).unwrap().visible = false;
-        assert!(retained_order_is_gpu_safe(&scene.nodes));
-
-        let blend = scene.create_node();
-        let blend_node = scene.nodes.get_mut(blend).unwrap();
-        blend_node.indices = vec![0, 1, 2];
-        blend_node.material.alpha_mode = MaterialAlphaMode::Blend;
-        assert!(
-            retained_order_is_gpu_safe(&scene.nodes),
-            "dedicated translucent submission must not disable the opaque GPU-driven subset"
-        );
     }
 }

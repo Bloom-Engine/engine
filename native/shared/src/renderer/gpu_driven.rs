@@ -599,6 +599,10 @@ impl GpuDrivenRenderer {
         self.enabled && !self.draw_scratch.is_empty()
     }
 
+    pub(crate) fn visibility_routing_enabled(&self) -> bool {
+        self.visibility_indirect_buffer.is_some() && self.compatibility_indirect_buffer.is_some()
+    }
+
     pub(super) fn shared_geometry(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
         (&self.arena.vertex, &self.arena.index)
     }
@@ -1706,6 +1710,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("GPU-driven scene WGSL failed to parse: {error:?}"));
         assert!(generated.contains("bloom_sample_raw_bias(material.texture_ids_0.x"));
         assert!(generated.contains("bloom_sample_raw_bias(material.texture_ids_0.w"));
+        assert!(generated.contains("128.0 / 255.0, 128.0 / 255.0, 1.0, 0.0"));
         assert!(!generated.contains("bloom_sample_registered_color_bias(material.texture_ids_0"));
         assert!(generated.contains("@builtin(front_facing) front_facing: bool"));
         assert!(generated.contains("(in.draw_flags & 1u) == 0u"));

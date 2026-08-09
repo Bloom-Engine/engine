@@ -199,9 +199,10 @@ fn bloom_sample_registered_color_bias(
 
 // Slot zero is the white diagnostic texture. For a missing normal map the
 // semantic fallback must reproduce the legacy RGBA8 default-normal texel
-// exactly: (128, 128, 255, 255). The 128/255 quantization and alpha=1 are
-// observable in the existing Toksvig path, so idealized (0.5, 0.5, 1, 0)
-// would subtly change every untextured material.
+// exactly: (128, 128, 255, 0). The 128/255 RGB quantization is observable,
+// while alpha is LEADR/Toksvig filtered variance and must be zero for a flat
+// unfiltered normal. Alpha=1 forces roughness to 1 for every untextured
+// GPU-driven material.
 fn bloom_sample_normal_raw_bias(
   material_record: GlobalMaterialRecord,
   uv: vec2<f32>,
@@ -209,7 +210,7 @@ fn bloom_sample_normal_raw_bias(
 ) -> vec4<f32> {
   let texture_slot = bloom_texture_slot(material_record.texture_ids_0.y);
   if (texture_slot == 0u) {
-    return vec4<f32>(128.0 / 255.0, 128.0 / 255.0, 1.0, 1.0);
+    return vec4<f32>(128.0 / 255.0, 128.0 / 255.0, 1.0, 0.0);
   }
   let sampler_slot = bloom_sampler_slot(material_record.sampler_ids_0.y);
   return textureSampleBias(

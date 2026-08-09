@@ -6,7 +6,7 @@
 //! second deferred copy of Bloom's PBR implementation.
 
 pub(super) fn make_shader(gpu_scene_source: &str) -> String {
-    let source = strip_prepass_discard(gpu_scene_source);
+    let source = specialize_visibility_derivatives(&strip_prepass_discard(gpu_scene_source));
     format!(
         "{source}\n{}\n{}\n{VISIBILITY_SHADE_WGSL}",
         super::visibility_buffer::RECONSTRUCTION_WGSL,
@@ -134,6 +134,218 @@ fn strip_prepass_discard(source: &str) -> String {
     }
 }
 
+/// Replace derivative-dependent operations only inside the visibility copy of
+/// `shade_main_scene`. A fullscreen visibility pass cannot use `dpdx`/`dpdy`
+/// on reconstructed attributes: the adjacent quad lane can belong to another
+/// primitive (or the background), unlike raster helper invocations which
+/// extrapolate the current triangle. The fragment entry point supplies the
+/// equivalent same-triangle quad gradients below.
+fn specialize_visibility_derivatives(source: &str) -> String {
+    const START: &str =
+        "fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {";
+    const END: &str = "\n@fragment\nfn fs_main_scene(";
+    let begin = source
+        .find(START)
+        .expect("GPU scene shader keeps the shared shade_main_scene entry point");
+    let end = source[begin..]
+        .find(END)
+        .map(|offset| begin + offset)
+        .expect("GPU scene shader keeps fs_main_scene after shared shading");
+    let mut body = source[begin..end].to_string();
+
+    replace_once(
+        &mut body,
+        START,
+        "fn shade_main_scene(\n    in: VertexOutputScene,\n    front_facing: bool,\n    visibility_gradients: BloomVisibilityGradients,\n) -> SceneOut {",
+    );
+    replace_once(
+        &mut body,
+        "bloom_sample_normal_raw_bias(material, in.uv, 1.0 + lod_bias)",
+        "bloom_visibility_sample_normal_raw_grad_bias(\n        material, in.uv, visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n        1.0 + lod_bias,\n    )",
+    );
+    replace_once(
+        &mut body,
+        "let tbn_dp1 = dpdx(in.world_pos);",
+        "let tbn_dp1 = visibility_gradients.world_dx;",
+    );
+    replace_once(
+        &mut body,
+        "let tbn_dp2 = dpdy(in.world_pos);",
+        "let tbn_dp2 = visibility_gradients.world_dy;",
+    );
+    replace_once(
+        &mut body,
+        "let tbn_duv1 = dpdx(in.uv);",
+        "let tbn_duv1 = visibility_gradients.uv_dx;",
+    );
+    replace_once(
+        &mut body,
+        "let tbn_duv2 = dpdy(in.uv);",
+        "let tbn_duv2 = visibility_gradients.uv_dy;",
+    );
+    replace_once(
+        &mut body,
+        "bloom_sample_raw_bias(material.texture_ids_0.x, material.sampler_ids_0.x, in.uv, lod_bias)",
+        "bloom_visibility_sample_raw_grad_bias(\n        material.texture_ids_0.x, material.sampler_ids_0.x, in.uv,\n        visibility_gradients.uv_dx, visibility_gradients.uv_dy, lod_bias,\n    )",
+    );
+    replace_once(
+        &mut body,
+        "bloom_sample_raw(material.texture_ids_0.z, material.sampler_ids_0.z, in.uv)",
+        "bloom_visibility_sample_raw_grad(\n        material.texture_ids_0.z, material.sampler_ids_0.z, in.uv,\n        visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n    )",
+    );
+    replace_once(
+        &mut body,
+        "let nm_dx = dpdx(n);\n    let nm_dy = dpdy(n);",
+        "let visibility_normal_x = bloom_visibility_surface_normal(\n        visibility_gradients.normal_x, visibility_gradients.tangent_x,\n        visibility_gradients.uv_x, material, visibility_gradients, 1.0 + lod_bias,\n    );\n    let visibility_normal_y = bloom_visibility_surface_normal(\n        visibility_gradients.normal_y, visibility_gradients.tangent_y,\n        visibility_gradients.uv_y, material, visibility_gradients, 1.0 + lod_bias,\n    );\n    let nm_dx = (visibility_normal_x - n) * visibility_gradients.x_sign;\n    let nm_dy = (visibility_normal_y - n) * visibility_gradients.y_sign;",
+    );
+    replace_once(
+        &mut body,
+        "bloom_sample_raw_bias(material.texture_ids_0.w, material.sampler_ids_0.w, in.uv, 0.0)",
+        "bloom_visibility_sample_raw_grad(\n        material.texture_ids_0.w, material.sampler_ids_0.w, in.uv,\n        visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n    )",
+    );
+    replace_once(
+        &mut body,
+        "bloom_sample_raw(material.texture_ids_1.x, material.sampler_ids_1.x, in.uv)",
+        "bloom_visibility_sample_raw_grad(\n        material.texture_ids_1.x, material.sampler_ids_1.x, in.uv,\n        visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n    )",
+    );
+
+    // The original raster entry points follow `shade_main_scene`; retaining
+    // them would leave invalid two-argument calls to the specialized function.
+    // They are not part of the visibility pipeline, whose fullscreen entry
+    // points are appended below.
+    format!("{}\n{VISIBILITY_GRADIENT_WGSL}\n{}", &source[..begin], body)
+}
+
+fn replace_once(source: &mut String, needle: &str, replacement: &str) {
+    assert_eq!(
+        source.matches(needle).count(),
+        1,
+        "visibility shader specialization anchor changed: {needle}"
+    );
+    *source = source.replacen(needle, replacement, 1);
+}
+
+const VISIBILITY_GRADIENT_WGSL: &str = r#"
+struct BloomVisibilityGradients {
+    world_dx: vec3<f32>,
+    world_dy: vec3<f32>,
+    uv_dx: vec2<f32>,
+    uv_dy: vec2<f32>,
+    normal_x: vec3<f32>,
+    normal_y: vec3<f32>,
+    tangent_x: vec4<f32>,
+    tangent_y: vec4<f32>,
+    uv_x: vec2<f32>,
+    uv_y: vec2<f32>,
+    x_sign: f32,
+    y_sign: f32,
+};
+
+fn bloom_visibility_sample_raw_grad(
+    texture_id: u32,
+    sampler_id: u32,
+    uv: vec2<f32>,
+    uv_dx: vec2<f32>,
+    uv_dy: vec2<f32>,
+) -> vec4<f32> {
+    let texture_slot = bloom_texture_slot(texture_id);
+    let sampler_slot = bloom_sampler_slot(sampler_id);
+    return textureSampleGrad(
+        global_textures[texture_slot],
+        global_samplers[sampler_slot],
+        uv,
+        uv_dx,
+        uv_dy,
+    );
+}
+
+fn bloom_visibility_sample_raw_grad_bias(
+    texture_id: u32,
+    sampler_id: u32,
+    uv: vec2<f32>,
+    uv_dx: vec2<f32>,
+    uv_dy: vec2<f32>,
+    bias: f32,
+) -> vec4<f32> {
+    let gradient_scale = exp2(bias);
+    return bloom_visibility_sample_raw_grad(
+        texture_id,
+        sampler_id,
+        uv,
+        uv_dx * gradient_scale,
+        uv_dy * gradient_scale,
+    );
+}
+
+fn bloom_visibility_sample_normal_raw_grad_bias(
+    material_record: GlobalMaterialRecord,
+    uv: vec2<f32>,
+    uv_dx: vec2<f32>,
+    uv_dy: vec2<f32>,
+    bias: f32,
+) -> vec4<f32> {
+    let texture_slot = bloom_texture_slot(material_record.texture_ids_0.y);
+    if (texture_slot == 0u) {
+        return vec4<f32>(128.0 / 255.0, 128.0 / 255.0, 1.0, 0.0);
+    }
+    let sampler_slot = bloom_sampler_slot(material_record.sampler_ids_0.y);
+    let gradient_scale = exp2(bias);
+    return textureSampleGrad(
+        global_textures[texture_slot],
+        global_samplers[sampler_slot],
+        uv,
+        uv_dx * gradient_scale,
+        uv_dy * gradient_scale,
+    );
+}
+
+// Evaluate the adjacent helper lane from the same triangle. This reproduces
+// raster normal derivatives even when the visible adjacent pixel belongs to a
+// different primitive, and includes normal-map variation in the specular-AA
+// kernel rather than silently reducing it to geometric-normal variation.
+fn bloom_visibility_surface_normal(
+    geometric_normal: vec3<f32>,
+    tangent: vec4<f32>,
+    uv: vec2<f32>,
+    material_record: GlobalMaterialRecord,
+    gradients: BloomVisibilityGradients,
+    normal_lod_bias: f32,
+) -> vec3<f32> {
+    var normal = normalize(geometric_normal);
+    let normal_sample4 = bloom_visibility_sample_normal_raw_grad_bias(
+        material_record,
+        uv,
+        gradients.uv_dx,
+        gradients.uv_dy,
+        normal_lod_bias,
+    );
+    let normal_raw = normal_sample4.xyz * 2.0 - 1.0;
+    let normal_sample = normal_raw * inverseSqrt(clamp(dot(normal_raw, normal_raw), 0.01, 1.0));
+    if (dot(tangent.xyz, tangent.xyz) > 0.0001) {
+        let tangent_normalized = normalize(tangent.xyz);
+        let tangent_ortho = normalize(
+            tangent_normalized - normal * dot(normal, tangent_normalized),
+        );
+        let bitangent = cross(normal, tangent_ortho) * tangent.w;
+        normal = normalize(
+            tangent_ortho * normal_sample.x
+                + bitangent * normal_sample.y
+                + normal * normal_sample.z,
+        );
+    } else {
+        let tbn = compute_tbn(
+            gradients.world_dx,
+            gradients.world_dy,
+            gradients.uv_dx,
+            gradients.uv_dy,
+            normal,
+        );
+        normal = normalize(tbn * normal_sample);
+    }
+    return normal;
+}
+"#;
+
 const VISIBILITY_SHADE_WGSL: &str = r#"
 struct VisibilityVertexOut {
     @builtin(position) position: vec4<f32>,
@@ -216,6 +428,21 @@ fn fs_visibility_shade(in: VisibilityVertexOut) -> SceneOut {
         1.0 - in.position.y / f32(dimensions.y) * 2.0,
     );
     let bary = bloom_perspective_barycentrics(point_ndc, clip0, clip1, clip2);
+    // Fragment derivatives operate on 2x2 quads. Select the other lane in
+    // each axis and extrapolate this same triangle there, exactly as raster
+    // helper invocations do even when that lane is outside triangle coverage.
+    let x_step = select(-1.0, 1.0, (u32(pixel.x) & 1u) == 0u);
+    let y_step = select(-1.0, 1.0, (u32(pixel.y) & 1u) == 0u);
+    let point_x_ndc = vec2<f32>(
+        (in.position.x + x_step) / f32(dimensions.x) * 2.0 - 1.0,
+        point_ndc.y,
+    );
+    let point_y_ndc = vec2<f32>(
+        point_ndc.x,
+        1.0 - (in.position.y + y_step) / f32(dimensions.y) * 2.0,
+    );
+    let bary_x = bloom_perspective_barycentrics(point_x_ndc, clip0, clip1, clip2);
+    let bary_y = bloom_perspective_barycentrics(point_y_ndc, clip0, clip1, clip2);
 
     let world0 = draw.uniforms.model * local0;
     let world1 = draw.uniforms.model * local1;
@@ -236,14 +463,41 @@ fn fs_visibility_shade(in: VisibilityVertexOut) -> SceneOut {
         vertex2.tangent.w,
     );
 
+    let fragment_normal = bloom_interpolate3(normal0, normal1, normal2, bary);
+    let fragment_uv = bloom_interpolate2(vertex0.uv, vertex1.uv, vertex2.uv, bary);
+    let fragment_world = bloom_interpolate3(world0.xyz, world1.xyz, world2.xyz, bary);
+    let fragment_tangent = bloom_interpolate4(tangent0, tangent1, tangent2, bary);
+    let normal_x = bloom_interpolate3(normal0, normal1, normal2, bary_x);
+    let normal_y = bloom_interpolate3(normal0, normal1, normal2, bary_y);
+    let tangent_x = bloom_interpolate4(tangent0, tangent1, tangent2, bary_x);
+    let tangent_y = bloom_interpolate4(tangent0, tangent1, tangent2, bary_y);
+    let uv_x = bloom_interpolate2(vertex0.uv, vertex1.uv, vertex2.uv, bary_x);
+    let uv_y = bloom_interpolate2(vertex0.uv, vertex1.uv, vertex2.uv, bary_y);
+    let world_x = bloom_interpolate3(world0.xyz, world1.xyz, world2.xyz, bary_x);
+    let world_y = bloom_interpolate3(world0.xyz, world1.xyz, world2.xyz, bary_y);
+    let visibility_gradients = BloomVisibilityGradients(
+        (world_x - fragment_world) * x_step,
+        (world_y - fragment_world) * y_step,
+        (uv_x - fragment_uv) * x_step,
+        (uv_y - fragment_uv) * y_step,
+        normal_x,
+        normal_y,
+        tangent_x,
+        tangent_y,
+        uv_x,
+        uv_y,
+        x_step,
+        y_step,
+    );
+
     var fragment: VertexOutputScene;
     fragment.clip_position = in.position;
-    fragment.normal = bloom_interpolate3(normal0, normal1, normal2, bary);
+    fragment.normal = fragment_normal;
     fragment.color = bloom_interpolate4(vertex0.color, vertex1.color, vertex2.color, bary)
         * draw.uniforms.model_tint;
-    fragment.uv = bloom_interpolate2(vertex0.uv, vertex1.uv, vertex2.uv, bary);
-    fragment.world_pos = bloom_interpolate3(world0.xyz, world1.xyz, world2.xyz, bary);
-    fragment.tangent = bloom_interpolate4(tangent0, tangent1, tangent2, bary);
+    fragment.uv = fragment_uv;
+    fragment.world_pos = fragment_world;
+    fragment.tangent = fragment_tangent;
     fragment.curr_clip = bloom_interpolate4(clip0, clip1, clip2, bary);
     fragment.prev_clip = bloom_interpolate4(
         draw.uniforms.prev_mvp * local0,
@@ -253,7 +507,7 @@ fn fs_visibility_shade(in: VisibilityVertexOut) -> SceneOut {
     );
     fragment.material_id = draw.draw.w;
     fragment.draw_flags = bitcast<u32>(draw.bounds_min.w);
-    return shade_main_scene(fragment, visibility.front_facing);
+    return shade_main_scene(fragment, visibility.front_facing, visibility_gradients);
 }
 "#;
 
@@ -271,7 +525,18 @@ mod tests {
         let compatibility = make_forward_compatibility_shader(&gpu);
         wgpu::naga::front::wgsl::parse_str(&compatibility)
             .unwrap_or_else(|error| panic!("visibility compatibility WGSL failed: {error:?}"));
-        assert!(shade.contains("return shade_main_scene(fragment, visibility.front_facing);"));
+        assert!(shade.contains(
+            "return shade_main_scene(fragment, visibility.front_facing, visibility_gradients);"
+        ));
+        assert!(shade.contains("textureSampleGrad("));
+        assert!(!shade[shade
+            .find("fn shade_main_scene(")
+            .expect("specialized shade function")
+            ..shade
+                .find("// Bloom packed visibility-buffer ABI")
+                .expect("reconstruction header after shared shading")]
+            .contains("dpdx("));
+        assert!(!shade.contains("fn fs_main_scene("));
         assert!(compatibility.contains("(in.draw_flags & 2u) != 0u"));
     }
 }

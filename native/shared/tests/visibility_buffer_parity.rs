@@ -10,6 +10,8 @@ use std::path::Path;
 
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 128;
+const COLUMN_SPACING: f32 = 0.55;
+const ROW_SPACING: f32 = 0.8;
 const CHILD_OUTPUT: &str = "BLOOM_VISIBILITY_PARITY_CHILD_OUTPUT";
 const CHILD_MRT_DIR: &str = "BLOOM_VISIBILITY_PARITY_CHILD_MRT_DIR";
 
@@ -33,7 +35,7 @@ fn render_scene(path: &Path) {
 
     let vertices = vec![
         Vertex3D {
-            position: [-0.38, -0.34, 0.0],
+            position: [-0.22, -0.34, 0.0],
             normal: [0.0, 0.0, 1.0],
             color: [0.75, 0.35, 0.12, 1.0],
             uv: [0.0, 1.0],
@@ -41,7 +43,7 @@ fn render_scene(path: &Path) {
             ..Default::default()
         },
         Vertex3D {
-            position: [0.38, -0.34, 0.0],
+            position: [0.22, -0.34, 0.0],
             normal: [0.0, 0.0, 1.0],
             color: [0.12, 0.78, 0.25, 1.0],
             uv: [1.0, 1.0],
@@ -57,18 +59,89 @@ fn render_scene(path: &Path) {
             ..Default::default()
         },
     ];
+    let mut textured_vertices = vertices.clone();
+    for vertex in &mut textured_vertices {
+        vertex.uv[0] *= 6.0;
+        vertex.uv[1] *= 6.0;
+    }
+    let mut textured_no_tangent = textured_vertices.clone();
+    for vertex in &mut textured_no_tangent {
+        vertex.tangent = [0.0; 4];
+    }
+
+    const MATERIAL_TEXTURE_SIZE: u32 = 8;
+    let mut base_texels =
+        Vec::with_capacity((MATERIAL_TEXTURE_SIZE * MATERIAL_TEXTURE_SIZE * 4) as usize);
+    let mut normal_texels = Vec::with_capacity(base_texels.capacity());
+    let mut mr_texels = Vec::with_capacity(base_texels.capacity());
+    let mut emissive_texels = Vec::with_capacity(base_texels.capacity());
+    for y in 0..MATERIAL_TEXTURE_SIZE {
+        for x in 0..MATERIAL_TEXTURE_SIZE {
+            let checker = (x + y) & 1;
+            base_texels.extend_from_slice(&[
+                35 + x as u8 * 24,
+                45 + y as u8 * 22,
+                if checker == 0 { 210 } else { 75 },
+                255,
+            ]);
+            normal_texels.extend_from_slice(&[
+                if checker == 0 { 92 } else { 164 },
+                if (x / 2 + y) & 1 == 0 { 105 } else { 151 },
+                244,
+                255,
+            ]);
+            mr_texels.extend_from_slice(&[255, 40 + y as u8 * 25, 30 + x as u8 * 28, 255]);
+            emissive_texels.extend_from_slice(&[
+                if checker == 0 { 28 } else { 4 },
+                if checker == 0 { 8 } else { 24 },
+                12,
+                255,
+            ]);
+        }
+    }
+    let base_texture = engine.renderer.register_texture_kind(
+        MATERIAL_TEXTURE_SIZE,
+        MATERIAL_TEXTURE_SIZE,
+        &base_texels,
+        false,
+    );
+    let normal_texture = engine.renderer.register_texture_kind(
+        MATERIAL_TEXTURE_SIZE,
+        MATERIAL_TEXTURE_SIZE,
+        &normal_texels,
+        true,
+    );
+    let mr_texture = engine.renderer.register_texture_kind(
+        MATERIAL_TEXTURE_SIZE,
+        MATERIAL_TEXTURE_SIZE,
+        &mr_texels,
+        false,
+    );
+    let emissive_texture = engine.renderer.register_texture_kind(
+        MATERIAL_TEXTURE_SIZE,
+        MATERIAL_TEXTURE_SIZE,
+        &emissive_texels,
+        false,
+    );
     let mut eligible_nodes = Vec::with_capacity(32);
     for index in 0..32 {
         let node = engine.scene.create_node();
+        let node_vertices = if index % 4 == 0 {
+            textured_no_tangent.clone()
+        } else if index % 2 == 0 {
+            textured_vertices.clone()
+        } else {
+            vertices.clone()
+        };
         engine
             .scene
-            .update_geometry(node, vertices.clone(), vec![0, 1, 2]);
+            .update_geometry(node, node_vertices, vec![0, 1, 2]);
         let column = (index % 8) as f32;
         let row = (index / 8) as f32;
         engine.scene.set_trs(
             node,
-            (column - 3.5) * 0.72,
-            (row - 1.5) * 0.72,
+            (column - 3.5) * COLUMN_SPACING,
+            (row - 1.5) * ROW_SPACING,
             0.0,
             0.0,
             1.0,
@@ -76,15 +149,28 @@ fn render_scene(path: &Path) {
         engine
             .scene
             .set_material_pbr(node, 0.12 + row * 0.22, 0.05 + column * 0.12);
+        if index % 2 == 0 {
+            engine.scene.set_material_texture(node, base_texture);
+            engine
+                .scene
+                .set_material_normal_texture(node, normal_texture);
+            engine
+                .scene
+                .set_material_metallic_roughness_texture(node, mr_texture);
+            engine
+                .scene
+                .set_material_emissive_texture(node, emissive_texture);
+            engine
+                .scene
+                .set_material_emissive_factor(node, 0.7, 0.4, 0.55);
+        }
         eligible_nodes.push((node, column, row));
     }
     let compatibility = engine.scene.create_node();
     engine
         .scene
-        .update_geometry(compatibility, vertices, vec![0, 1, 2]);
-    engine
-        .scene
-        .set_trs(compatibility, 0.0, 1.75, 0.0, 0.0, 1.0);
+        .update_geometry(compatibility, vertices.clone(), vec![0, 1, 2]);
+    engine.scene.set_trs(compatibility, 0.0, 2.0, 0.0, 0.0, 1.0);
     engine
         .scene
         .set_material_color(compatibility, 0.8, 0.15, 0.7, 1.0);
@@ -97,6 +183,21 @@ fn render_scene(path: &Path) {
             ..Default::default()
         },
     );
+    let mask_texture = engine.renderer.register_texture_kind(
+        2,
+        2,
+        &[
+            245, 210, 45, 255, 30, 150, 60, 0, 30, 150, 60, 0, 245, 210, 45, 255,
+        ],
+        false,
+    );
+    let cutout = engine.scene.create_node();
+    engine
+        .scene
+        .update_geometry(cutout, vertices, vec![0, 1, 2]);
+    engine.scene.set_trs(cutout, -2.7, 2.0, 0.0, 0.0, 1.0);
+    engine.scene.set_material_texture(cutout, mask_texture);
+    engine.scene.set_material_alpha_cutoff(cutout, 0.5);
 
     // Seed retained transform history. The captured frame moves both the
     // visibility-eligible population and a forward-only layered draw, so the
@@ -113,8 +214,8 @@ fn render_scene(path: &Path) {
     for (node, column, row) in eligible_nodes {
         engine.scene.set_trs(
             node,
-            (column - 3.5) * 0.72 + 0.035 + row * 0.004,
-            (row - 1.5) * 0.72 - 0.018,
+            (column - 3.5) * COLUMN_SPACING + 0.035 + row * 0.004,
+            (row - 1.5) * ROW_SPACING - 0.018,
             0.0,
             0.0,
             1.0,
@@ -122,7 +223,8 @@ fn render_scene(path: &Path) {
     }
     engine
         .scene
-        .set_trs(compatibility, 0.026, 1.73, 0.0, 0.0, 1.0);
+        .set_trs(compatibility, 0.026, 1.98, 0.0, 0.0, 1.0);
+    engine.scene.set_trs(cutout, -2.67, 1.975, 0.0, 0.0, 1.0);
 
     engine.begin_frame();
     engine.renderer.set_clear_color(0.035, 0.02, 0.055, 1.0);
