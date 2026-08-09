@@ -100,6 +100,18 @@ mod ray_query_variant_tests {
     }
 
     #[test]
+    fn indirect_sun_fallbacks_require_proven_visibility() {
+        assert!(SSGI_PROBE_TRACE_HW_WGSL
+            .contains("let direct = u.sun_color.xyz * ndotl * hw_gi_sun_visibility(hit_world);"));
+        assert!(SSGI_PROBE_TRACE_HW_WGSL
+            .contains("@group(0) @binding(13) var shadow_samp: sampler_comparison;"));
+        assert!(CARD_LIGHT_WGSL.contains("never manufacture direct sunlight in the GI feed"));
+        assert!(WSRC_BAKE_HW_WGSL.contains("shadow = 0.0;"));
+        assert!(WSRC_BAKE_HW_WGSL
+            .contains("shadow = hw_bake_sample_cascade(cascade, hit_world, u.flags.x);"));
+    }
+
+    #[test]
     fn ssr_derivative_normal_faces_the_camera() {
         wgpu::naga::front::wgsl::parse_str(SSR_SHADER_WGSL)
             .unwrap_or_else(|error| panic!("SSR WGSL failed: {error:?}"));
