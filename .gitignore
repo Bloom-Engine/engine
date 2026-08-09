@@ -88,6 +88,7 @@ examples/**/*.exe
 examples/**/*.pdb
 examples/**/main
 examples/**/main.app
+examples/bistro/.generated/
 
 # DXC runtime DLLs (local, for the PT golden tests on Windows)
 native/shared/dxcompiler.dll

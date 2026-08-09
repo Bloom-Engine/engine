@@ -238,6 +238,15 @@ def main() -> int:
     parser.add_argument("output")
     parser.add_argument("--metadata")
     parser.add_argument("--max-meshes", type=int, default=96)
+    parser.add_argument(
+        "--selection",
+        choices=("camera", "all-unique"),
+        default="camera",
+        help=(
+            "camera-ranked qualification subset (bounded by --max-meshes) "
+            "or every unique source mesh"
+        ),
+    )
     parser.add_argument("--revision")
     args = parser.parse_args()
     source = Path(args.source).resolve()
@@ -249,8 +258,10 @@ def main() -> int:
         missing = sorted(set(range(source_mesh_count)) - set(transforms))
         raise SystemExit(f"source scene does not reference every mesh: {missing[:16]}")
 
-    selected_meshes = qualification_meshes(
-        document, transforms, max(1, args.max_meshes)
+    selected_meshes = (
+        sorted(transforms)
+        if args.selection == "all-unique"
+        else qualification_meshes(document, transforms, max(1, args.max_meshes))
     )
     source_meshes = document["meshes"]
     document["meshes"] = [source_meshes[index] for index in selected_meshes]
@@ -384,8 +395,11 @@ def main() -> int:
         "derived_materials": len(document["materials"]),
         "derived_textures": len(document["textures"]),
         "derived_images": len(document["images"]),
+        "selection": args.selection,
         "policy": (
-            "largest projected authored meshes in source camera, first world "
+            "all authored unique meshes, first world transform per unique mesh"
+            if args.selection == "all-unique"
+            else "largest projected authored meshes in source camera, first world "
             "transform per unique mesh"
         ),
     }

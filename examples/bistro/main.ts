@@ -15,9 +15,10 @@
 //   cd examples/bistro
 //   git clone https://github.com/zeux/niagara_bistro.git assets
 //
-// The scene loads `assets/bistro.gltf` (exterior). An interior
-// variant `assets/bistrox.gltf` also exists — swap the filename
-// below to open that one instead.
+// The literal source scene currently expands repeated node geometry in
+// ModelData. Use `scripts/run-bistro-rich.sh` for the safe rich exterior
+// profile: all 551 unique meshes, without duplicating 2,909 instances.
+// An interior variant `assets/bistrox.gltf` also exists.
 
 import {
   initWindow, closeWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
@@ -157,8 +158,8 @@ setVignette(0.10, 0.30);
 setChromaticAberration(0.0005);
 
 // ---- Load Bistro into scene graph ----
-// `bistro.gltf` = exterior street corner. Swap to `bistrox.gltf`
-// for the interior wine-bar variant.
+// The rich launcher supplies a generated exterior profile here. Direct source
+// paths remain supported for smaller/custom glTF scenes.
 const bistro = loadModel(scenePath);
 console.error("BLOOM_QUALITY_SCENE bistro_meshes=" + bistro.meshCount);
 const identity = mat4Identity();

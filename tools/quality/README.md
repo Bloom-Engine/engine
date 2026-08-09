@@ -428,6 +428,14 @@ revision into the case output and never edits the working-tree asset. The
 10k-mesh stress case separately covers draw pressure. Do not describe the
 current Bistro case as full 2,909-instance streaming coverage.
 
+For interactive inspection, `scripts/run-bistro-rich.sh` prepares and launches
+a separate non-governed profile containing all 551 unique source meshes at
+their first authored transforms. Generated files stay under
+`examples/bistro/.generated/`; the 96-mesh qualification corpus and its
+baselines remain unchanged. This is substantially richer than the bounded
+qualification view, but it is not a substitute for native instancing of every
+authored node.
+
 ## CI and migration
 
 `.github/workflows/quality.yml` runs contract tests on hosted CI and runs the
