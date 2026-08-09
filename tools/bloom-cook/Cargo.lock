@@ -45,12 +45,21 @@ dependencies = [
 name = "bloom-cook"
 version = "0.1.0"
 dependencies = [
+ "bloom-geometry-format",
  "gltf",
  "half",
  "image",
  "image_dds",
  "meshopt",
  "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "bloom-geometry-format"
+version = "0.1.0"
+dependencies = [
+ "half",
  "sha2",
 ]
 

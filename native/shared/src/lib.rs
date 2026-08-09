@@ -13,6 +13,8 @@ pub mod renderer;
 pub mod string_header;
 pub mod text_renderer;
 pub mod textures;
+#[cfg(feature = "models3d")]
+pub mod virtual_geometry;
 // Not gated on models3d: the mixer is pure per-instance state embedded in
 // ModelAnimation (always compiled); only the gltf/image_dds LOADERS are
 // behind the feature, in models_gltf.rs (EN-063).

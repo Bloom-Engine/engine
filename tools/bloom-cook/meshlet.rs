@@ -8,13 +8,11 @@
 pub const DEFAULT_MAX_VERTICES: u32 = 64;
 pub const DEFAULT_MAX_TRIANGLES: u32 = 124;
 pub const MAX_ENCODED_VERTICES: u32 = u8::MAX as u32;
-pub const NO_RELATION: u32 = u32::MAX;
-
-pub const FLAG_DOUBLE_SIDED: u32 = 1 << 0;
-pub const FLAG_ALPHA_MASKED: u32 = 1 << 1;
+pub use bloom_geometry_format::{
+    FLAG_ALPHA_MASKED, FLAG_COARSE_ROOT, FLAG_DOUBLE_SIDED, NO_RELATION,
+};
 /// The cluster is a root of the cooked hierarchy and must be part of the
 /// coarse always-resident set before runtime traversal can be enabled.
-pub const FLAG_COARSE_ROOT: u32 = 1 << 2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StaticVertex {
@@ -27,7 +25,7 @@ pub struct StaticVertex {
 }
 
 impl StaticVertex {
-    pub const ENCODED_BYTES: u32 = 72;
+    pub const ENCODED_BYTES: u32 = bloom_geometry_format::FLOAT32_VERTEX_BYTES;
 }
 
 #[derive(Clone, Debug)]

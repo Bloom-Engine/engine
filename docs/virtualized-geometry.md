@@ -1,9 +1,11 @@
 # Virtualized geometry
 
-Bloom's virtualized-geometry work is opt-in and staged. The first #131
-milestone establishes a deterministic offline meshlet/page contract. It does
-not enable a new runtime renderer, change ordinary glTF loading, or claim
-Nanite-equivalent hierarchy/streaming.
+Bloom's virtualized-geometry work is opt-in and staged. The offline #131
+milestones establish a deterministic meshlet/page contract; the first runtime
+milestone adds one shared strict reader, immutable archive ownership, and a
+fixed-budget residency plan with deterministic ancestor fallback. It does not
+yet enable a new renderer, change ordinary glTF loading, or claim
+Nanite-equivalent GPU traversal/streaming.
 
 ## Cook and inspect
 
@@ -52,8 +54,9 @@ reporting it.
 its complete SHA-256 and atomically maps a logical ID to it. Its recipe key
 includes the source closure, hierarchy level count, meshlet/page limits,
 vertex format, and explicit recipe version. A valid repeat is a strict
-zero-write cache hit. See `docs/cooked-asset-store.md`; runtime lookup remains
-disabled.
+zero-write cache hit. See `docs/cooked-asset-store.md`. Runtime code can now
+consume the selected artifact bytes plus the identity fields returned by that
+index; asynchronous store lookup remains a later integration milestone.
 
 ## Versioned payload contract
 
@@ -186,24 +189,39 @@ For example, Fox records its skinned primitive and zero pages. This makes the
 fallback decision inspectable instead of silently treating unsupported
 geometry as static.
 
-## Runtime and performance boundary
+## Runtime loading and residency boundary
 
-This milestone is cooker-only:
+The `models3d` feature now exposes `bloom_shared::virtual_geometry` as an
+explicit opt-in. `VirtualGeometryAsset::from_bytes` validates the full archive
+before returning immutable metadata or page slices. The indexed form also
+checks the complete file length/hash, format version, payload hash, and source
+hash against #136's selected artifact identity. The reader lives in the small
+`bloom-geometry-format` crate and is shared by the cooker and runtime, so the
+writer cannot validate against a different interpretation than a backend will
+load.
+
+`VirtualGeometryResidency` models a hard GPU page-cache budget. Construction
+pins the validated coarse-root page prefix and fails if the roots alone exceed
+the budget. Group requests are atomic: every page needed by an atomic cluster
+group fits or residency is unchanged. Streamable pages use deterministic LRU
+eviction with page index as the tie-break. A missing detail group walks only
+validated parent-group links until it finds a completely resident ancestor;
+partially resident groups are never rendered. Telemetry reports pinned,
+resident, upload, eviction, exact-resolution, fallback, and unresolved counts.
+
+This remains a CPU-side ownership/planning milestone:
 
 - zero production render passes, draws, buffers, bindings, allocations, or
-  shader branches;
-- zero changes to existing immediate-mode or glTF pixels;
-- no runtime `.bgeo` selection or silent fallback;
-- no new dependency in the engine/runtime crates.
+  shader branches unless an application explicitly constructs these objects;
+- zero changes to existing immediate-mode or glTF selection and pixels;
+- no silent `.bgeo` replacement of an ordinary model;
+- no asynchronous file/store IO and no GPU page upload yet.
 
-Runtime integration remains gated on the #131 dependencies:
-
-- #136 must own the versioned asset database/provenance and asynchronous
-  artifact lookup;
-- #27 must demonstrate a measured net-positive visibility/material path
-  before virtualized geometry targets it;
-- the existing #28 shared geometry arena and indirect submission remain the
-  compatibility/performance foundation.
+The next #131 runtime milestones are asynchronous #136 index resolution,
+fixed-size GPU page allocation/upload, projected-error hierarchy traversal,
+and integration with #27's visibility/material path and #28's shared geometry
+arena. The compatibility renderer remains responsible for unsupported and
+not-yet-virtualized content throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts

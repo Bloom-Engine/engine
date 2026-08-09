@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bloom-geometry-format = { path = "../../crates/bloom-geometry-format" }
 # encode feature pulls intel_tex_2 for BC7 — the cook tool is the one
 # place that pays that build cost; the engine runtime only decodes.
 image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image", "encode"] }

@@ -264,6 +264,9 @@ run_component() {
       hr "visual metric and fault-engine tests"
       cargo test --release --manifest-path tools/bloom-diff/Cargo.toml
       hr "offline asset cooker format, corruption, and determinism tests"
+      cargo fmt --manifest-path crates/bloom-geometry-format/Cargo.toml -- --check
+      cargo clippy --release --manifest-path crates/bloom-geometry-format/Cargo.toml \
+        --no-deps -- -D warnings
       cargo fmt --manifest-path tools/bloom-cook/Cargo.toml -- --check
       cargo clippy --release --manifest-path tools/bloom-cook/Cargo.toml \
         --no-deps -- -D warnings

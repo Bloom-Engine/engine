@@ -1,0 +1,9 @@
+[package]
+name = "bloom-geometry-format"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+half = "2"
+sha2 = "0.10"
+

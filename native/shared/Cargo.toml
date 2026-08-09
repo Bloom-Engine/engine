@@ -17,7 +17,12 @@ web = ["dep:web-time"]
 # games disable this via Perry's `[native-library."<pkg>"]` feature
 # forwarding to drop gltf/gltf_json/image_dds from the binary entirely.
 # Default-on so existing 3D games are unaffected.
-models3d = ["dep:gltf", "dep:image_dds", "dep:serde_json"]
+models3d = [
+    "dep:bloom-geometry-format",
+    "dep:gltf",
+    "dep:image_dds",
+    "dep:serde_json",
+]
 # EN-014 — image codecs beyond PNG. `image::load_from_memory` is
 # format-agnostic, so disabling this only changes which file formats
 # decode at runtime; PNG always works.
@@ -30,6 +35,7 @@ image-extras = ["image/jpeg", "image/bmp", "image/tga", "image/hdr", "dep:image_
 cmake = "0.1"
 
 [dependencies]
+bloom-geometry-format = { path = "../../crates/bloom-geometry-format", optional = true }
 wgpu = "29"
 log = "0.4"
 raw-window-handle = "0.6"

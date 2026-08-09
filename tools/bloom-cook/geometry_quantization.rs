@@ -10,30 +10,10 @@ use crate::geometry_format::ClusterRecord;
 use crate::meshlet::{Meshlet, StaticVertex};
 use half::f16;
 
-pub const QUANTIZED_VERTEX_BYTES: u32 = 32;
+pub use bloom_geometry_format::VertexEncoding;
+#[cfg(test)]
+pub(crate) use bloom_geometry_format::QUANTIZED_VERTEX_BYTES;
 const QUANTIZED_TANGENT_VALID: u16 = 1;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VertexEncoding {
-    Float32,
-    Quantized,
-}
-
-impl VertexEncoding {
-    pub const fn stride(self) -> u32 {
-        match self {
-            Self::Float32 => StaticVertex::ENCODED_BYTES,
-            Self::Quantized => QUANTIZED_VERTEX_BYTES,
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Float32 => "float32",
-            Self::Quantized => "quantized32",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct QuantizationStats {
@@ -137,33 +117,6 @@ pub fn encode_vertex(
             );
             push_u16(output, 0);
         }
-    }
-    Ok(())
-}
-
-pub fn validate_cluster_vertices(
-    cluster_index: usize,
-    cluster: &ClusterRecord,
-    payload: &[u8],
-    encoding: VertexEncoding,
-) -> Result<(), String> {
-    if cluster.vertex_stride != encoding.stride() {
-        return Err(format!(
-            "cluster {cluster_index} vertex stride {} does not match {} encoding stride {}",
-            cluster.vertex_stride,
-            encoding.label(),
-            encoding.stride()
-        ));
-    }
-    let vertex_start = usize::try_from(cluster.vertex_offset)
-        .map_err(|_| format!("cluster {cluster_index} vertex offset exceeds host space"))?;
-    for vertex_index in 0..cluster.vertex_count as usize {
-        let offset = vertex_start
-            .checked_add(vertex_index * cluster.vertex_stride as usize)
-            .ok_or_else(|| format!("cluster {cluster_index} vertex offset overflow"))?;
-        decode_vertex(payload, offset, cluster, encoding).map_err(|error| {
-            format!("cluster {cluster_index} vertex {vertex_index} is invalid: {error}")
-        })?;
     }
     Ok(())
 }
