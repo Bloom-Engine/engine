@@ -3,9 +3,10 @@
 Bloom's virtualized-geometry work is opt-in and staged. The #131 milestones now
 cover the deterministic meshlet/page contract, strict runtime loading,
 fixed-budget GPU residency, projected-error GPU hierarchy selection, raw-page
-vertex decoding, and bounded indirect draw emission. They still do not enable
-a production renderer, change ordinary glTF loading, or claim complete
-Nanite-equivalent streaming, occlusion, material, or visibility integration.
+vertex decoding, bounded indirect draw emission, and the temporal/material ABI
+needed by a future visibility consumer. They still do not enable a production
+renderer, change ordinary glTF loading, or claim complete Nanite-equivalent
+streaming, occlusion, material, or visibility integration.
 
 ## Cook and inspect
 
@@ -234,13 +235,25 @@ resident state, and pinned state. Telemetry distinguishes allocated GPU bytes,
 resident slot bytes, useful payload bytes, pinned/retiring slots, frame and
 lifetime upload/eviction counts, denials, and exact/ancestor fallback results.
 
-`GpuVirtualHierarchySelector` consumes fixed 128-byte instance records and
-walks each atomic hierarchy group on the GPU. Projected pixel error controls
-LOD. Frustum and transform-safe normal-cone tests reject invisible work;
-non-uniform or sheared transforms conservatively disable only cone rejection.
-Refinement requires the complete child group to be resident. Otherwise the
-selector keeps the resident ancestor and writes bounded page requests. Camera
-cuts and instance motion consume no prior selection state.
+`GpuVirtualHierarchySelector` consumes fixed 208-byte instance records and
+walks each atomic hierarchy group on the GPU. The traversal-hot 128-byte prefix
+holds the current model transform, derived normal rows, mesh/instance identity,
+and cone-safety flag. The appended render state holds the previous model
+transform and current tint. Projected pixel error controls LOD. Frustum and
+transform-safe normal-cone tests reject invisible work; non-uniform or sheared
+transforms conservatively disable only cone rejection. Refinement requires the
+complete child group to be resident. Otherwise the selector keeps the resident
+ancestor and writes bounded page requests. Camera cuts and instance motion
+consume no prior selection state.
+
+Selected-cluster records address instances by their dense dispatch index, not
+the caller's stable instance ID. This keeps vertex pulling exact when stable IDs
+are sparse. Page requests retain the stable ID for asynchronous feedback.
+Before traversal, `bind_mesh_materials` must atomically map every archive
+material slot—including the glTF default slot—to a nonzero generation-safe
+renderer material ID. Duplicate, missing, unused, or zero bindings change no
+CPU or GPU table. Traversal rejects an unbound mesh before dispatch, so streamed
+geometry cannot silently shade through material zero.
 
 `GpuVirtualDrawEmitter` converts the bounded selected table into compact
 16-byte non-indexed indirect commands. `first_instance` addresses the matching
@@ -253,11 +266,15 @@ compute-dispatch limits up front.
 The shared WGSL page decoder reads local `u8` triangle indices directly from
 the fixed physical pool and reconstructs every version 1 Float32 or version 2
 quantized vertex lane. A Metal compute oracle reads the real mesh, cluster,
-selection, and physical-page buffers. A separate Metal render oracle consumes
-the emitted indirect commands and proves the exact `first_instance` values.
-An eventual production consumer must use indirect-count support or provide a
-separately qualified bounded fallback; unsupported adapters remain on the
-compatibility renderer.
+selection, instance, and physical-page buffers. It proves current/previous
+world positions, inverse-transpose world normals, tint, and remapped materials
+for sparse caller IDs and dense GPU instance addresses. A separate Metal render
+oracle consumes the emitted indirect commands and proves the exact
+`first_instance` values. An eventual production consumer must still combine
+the temporal models with the frame's current and previous view-projection
+state, use indirect-count support or provide a separately qualified bounded
+fallback, and reproduce every visibility MRT. Unsupported adapters remain on
+the compatibility renderer.
 
 The renderer integration remains deliberately explicit:
 
