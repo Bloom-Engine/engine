@@ -300,3 +300,6 @@ single-table lookup handoff is in
 Explicit platform/quality variants, ordered fallback, and the Bistro
 loose-store qualification are recorded in
 `docs/evidence/issue-136-asset-variants-v2.{md,json}`.
+The fixed physical GPU pool, stable ID/page-table ABI, bounded frame work, and
+Metal readback proof are recorded in
+`docs/evidence/issue-131-gpu-page-pool-v1.{md,json}`.
