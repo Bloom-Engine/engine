@@ -102,7 +102,7 @@ mod util;
 use util::encode_png_simple;
 pub use util::{
     mat4_invert, mat4_look_at, mat4_mul_vec4, mat4_multiply, mat4_ortho, mat4_perspective,
-    mat4_scale, mat4_translate, IDENTITY_MAT4,
+    mat4_scale, mat4_translate, mat4_transpose, IDENTITY_MAT4,
 };
 
 mod brdf_lut;

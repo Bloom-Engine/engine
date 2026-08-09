@@ -106,6 +106,22 @@ pub fn mat4_mul_vec4(m: &[[f32; 4]; 4], v: &[f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// Transpose a column-major matrix before uploading an inverse produced by
+/// [`mat4_invert`] to a WGSL shader that evaluates `matrix * vector`.
+///
+/// Bloom's CPU matrix convention leaves inverse matrices transposed relative
+/// to WGSL's multiplication convention (see the path-tracing upload path).
+/// Keeping the conversion named prevents world reconstruction users from
+/// silently depending on the homogeneous divide to hide the mismatch.
+pub fn mat4_transpose(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    [
+        [m[0][0], m[1][0], m[2][0], m[3][0]],
+        [m[0][1], m[1][1], m[2][1], m[3][1]],
+        [m[0][2], m[1][2], m[2][2], m[3][2]],
+        [m[0][3], m[1][3], m[2][3], m[3][3]],
+    ]
+}
+
 pub fn mat4_translate(m: [[f32; 4]; 4], v: [f32; 3]) -> [[f32; 4]; 4] {
     let mut out = m;
     for i in 0..4 {

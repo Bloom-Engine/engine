@@ -448,7 +448,10 @@ impl Renderer {
         // TAA-off path (composite consumes this) get the same
         // atmospherics + post-effects.
         // ============================================================
-        let inv_vp_current = self.current_inv_vp_matrix;
+        // `mat4_invert` returns the CPU-side inverse transposed relative to
+        // WGSL's `matrix * vector` convention. Upload the shader-facing form;
+        // otherwise fog reconstructs a projectively distorted world position.
+        let inv_vp_current = mat4_transpose(self.current_inv_vp_matrix);
         // Sun shaft screen-space position. Project a point far along
         // the sun direction through the current VP. If behind the
         // camera (clip.w ≤ 0), the sun is off-screen → disable.
@@ -783,7 +786,12 @@ impl Renderer {
                         0.0
                     },
                 ],
-                inv_vp: self.current_inv_vp_matrix,
+                // Match the already-qualified path-tracing inverse upload.
+                // The raw CPU inverse makes world.xyz survive the homogeneous
+                // divide by accident, but destroys world_h.w and therefore
+                // writes zero into geometric depth history on perspective
+                // cameras, rejecting every history sample on the next frame.
+                inv_vp: mat4_transpose(self.current_inv_vp_matrix),
                 prev_vp: self.prev_vp_matrix,
             };
             self.queue
