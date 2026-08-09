@@ -3,11 +3,8 @@ use super::{
     VirtualGeometryVisibilityError,
 };
 
-/// Existing renderer layouts consumed by the authoritative PBR evaluator.
-/// The source passed to [`GpuVirtualVisibilityShading::new`] must have been
-/// specialized against these exact layouts.
 #[derive(Copy, Clone)]
-pub struct VirtualVisibilityPbrLayouts<'a> {
+pub(crate) struct VirtualVisibilityPbrLayouts<'a> {
     pub draw: &'a wgpu::BindGroupLayout,
     pub lighting: &'a wgpu::BindGroupLayout,
     pub global_materials: &'a wgpu::BindGroupLayout,
@@ -25,7 +22,7 @@ pub struct GpuVirtualVisibilityShading {
 
 impl GpuVirtualVisibilityShading {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         device: &wgpu::Device,
         pool: &GpuVirtualGeometryPool,
         selector: &GpuVirtualHierarchySelector,
@@ -43,7 +40,7 @@ impl GpuVirtualVisibilityShading {
         let limits = device.limits();
         let required_color_attachments = if cfg!(lean_mrt) { 2 } else { 4 };
         if limits.max_bind_groups < 5
-            || limits.max_storage_buffers_per_shader_stage < 7
+            || limits.max_storage_buffers_per_shader_stage < 8
             || limits.max_color_attachments < required_color_attachments
         {
             return Err(VirtualGeometryVisibilityError::PbrDeviceUnsupported);
@@ -67,11 +64,10 @@ impl GpuVirtualVisibilityShading {
                     resource: wgpu::BindingResource::TextureView(&visibility_view),
                 },
                 binding(1, pool.physical_buffer()),
-                binding(2, pool.mesh_table_buffer()),
-                binding(3, pool.cluster_table_buffer()),
-                binding(4, selector.selected_buffer()),
-                binding(5, selector.instance_buffer()),
-                binding(6, raster.frame_buffer()),
+                binding(2, pool.cluster_table_buffer()),
+                binding(3, selector.selected_buffer()),
+                binding(4, selector.instance_buffer()),
+                binding(5, raster.frame_buffer()),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -102,7 +98,7 @@ impl GpuVirtualVisibilityShading {
         })
     }
 
-    pub fn draw<'a>(
+    pub(crate) fn draw<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         selector: &GpuVirtualHierarchySelector,
@@ -160,9 +156,8 @@ fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             storage(2),
             storage(3),
             storage(4),
-            storage(5),
             wgpu::BindGroupLayoutEntry {
-                binding: 6,
+                binding: 5,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,

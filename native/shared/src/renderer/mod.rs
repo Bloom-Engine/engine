@@ -68,6 +68,8 @@ mod temporal_reactive;
 mod texture_store;
 mod transmitted_shadows;
 mod transparent_gi;
+#[cfg(feature = "models3d")]
+mod virtual_geometry_integration;
 pub(crate) mod visibility_buffer;
 mod visibility_ids;
 pub(crate) mod visibility_shading;

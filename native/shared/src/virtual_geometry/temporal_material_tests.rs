@@ -1,5 +1,66 @@
 use super::*;
 
+#[test]
+fn selected_records_are_render_ready_across_multiple_meshes() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping multi-mesh decode oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(10)).unwrap();
+    let first = pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, first);
+
+    let mut quantized = hierarchy_archive();
+    quantized.format_version = QUANTIZED_VERSION;
+    quantized.vertex_encoding = VertexEncoding::Quantized;
+    let second = pool
+        .register_mesh(&queue, hierarchy_asset(quantized))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, second);
+
+    let mesh_entry = pool.mesh_entry(second).unwrap();
+    assert!(mesh_entry.cluster_table_base > 0);
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let (selected, requests, counters) = run_traversal(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &[GpuVirtualInstance::identity(second, 73)],
+        traversal_view(50.0),
+    );
+    assert!(requests.is_empty());
+    assert_eq!(counters.selected_count, 4);
+    assert_eq!(selected.len(), 4);
+    for selection in &selected {
+        assert_eq!(selection.mesh_id, second.raw());
+        assert!(
+            (mesh_entry.cluster_table_base + 4..=mesh_entry.cluster_table_base + 7)
+                .contains(&selection.cluster_table_index)
+        );
+        assert!(selection.physical_page_base < pool.config().capacity_bytes as u32);
+        assert_eq!(
+            selection.physical_page_base % mesh_entry.page_stride_bytes,
+            0
+        );
+        assert_eq!(selection.vertex_encoding(), mesh_entry.vertex_encoding);
+        assert_eq!(
+            pool.cluster_entry(
+                second,
+                selection.cluster_table_index - mesh_entry.cluster_table_base
+            )
+            .unwrap()
+            .payload[3],
+            second.raw()
+        );
+    }
+
+    let decoded = run_virtual_decode_probe(&device, &queue, &pool, &selector, 4, 3);
+    assert_decoded_test_vertices(&decoded, &selected, [1.0, 128.0 / 255.0, 64.0 / 255.0, 1.0]);
+}
+
 fn material_archive() -> GeometryArchive {
     let mut archive = hierarchy_archive();
     for cluster_index in [0, 2, 4, 5] {
@@ -204,7 +265,7 @@ fn material_binding_is_atomic_and_temporal_gpu_decode_uses_dense_instances() {
         4
     );
     for selection in &selected {
-        let expected = if [4, 5].contains(&selection.cluster_index) {
+        let expected = if [4, 5].contains(&selection.cluster_table_index) {
             101
         } else {
             202

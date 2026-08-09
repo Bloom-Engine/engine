@@ -278,14 +278,20 @@ fallback, and reproduce every visibility MRT. Unsupported adapters remain on
 the compatibility renderer.
 
 `GpuVirtualVisibilityRaster` is the first raw visibility consumer. It pulls
-the emitted triangles from the physical page, mesh, cluster, selection, and
-instance buffers and writes Bloom's shared `Rg32Uint` target plus depth. Draw
+the emitted triangles from the physical page, cluster, render-ready selection,
+and instance buffers and writes Bloom's shared `Rg32Uint` target plus depth. Draw
 word bit 31 selects the virtual namespace; the lower 31 bits address the
 selected record. Compatibility IDs keep bit 31 clear, while `0xffffffff`
 remains the unambiguous background sentinel. Primitive word bit 31 continues
 to carry front-face orientation independently.
 
-Construction requires `PRIMITIVE_INDEX`, `INDIRECT_FIRST_INSTANCE`, five
+Each unchanged 32-byte selected record carries an absolute cluster-table index,
+an absolute physical-page byte base, and packed vertex encoding. The cluster's
+formerly reserved payload lane carries its generation-safe owning mesh ID.
+Together those fields reject cross-mesh aliases and remove one mesh-table fetch
+and one storage binding from every raster and reconstruction invocation.
+
+Construction requires `PRIMITIVE_INDEX`, `INDIRECT_FIRST_INSTANCE`, four
 vertex-stage storage buffers, and a draw capacity that fits the namespace.
 The shipping draw method additionally requires
 `MULTI_DRAW_INDIRECT_COUNT`. Its exact fixed-count form exists only in tests,
@@ -305,11 +311,19 @@ The renderer integration remains deliberately explicit:
 - no asynchronous file/store IO, request-feedback scheduling, production
   renderer registration, or virtual-geometry material composition yet.
 
-The next #131 runtime milestones are exact PBR/MRT reconstruction through
-#27's visibility/material path, a bounded non-indirect-count fallback,
-conservative previous-frame Hi-Z, and asynchronous #136 index resolution plus
-request feedback. The compatibility renderer remains responsible for
-unsupported and not-yet-qualified content throughout that work.
+The opt-in virtual PBR consumer reconstructs perspective-correct current and
+previous clip positions, inverse-transpose normals, mirrored tangent
+handedness, UVs, vertex tint, remapped material identity, and face state before
+calling the authoritative scene material evaluator. Its exact production
+pipeline uses the established four MRTs and fits the renderer's eight
+fragment-stage storage-buffer contract. It remains unattached, so ordinary
+frames still construct and draw none of this work.
+
+The next #131 runtime milestones are production visibility/material routing, a
+bounded non-indirect-count fallback, conservative previous-frame Hi-Z, and
+asynchronous #136 index resolution plus request feedback. The compatibility
+renderer remains responsible for unsupported and not-yet-qualified content
+throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts

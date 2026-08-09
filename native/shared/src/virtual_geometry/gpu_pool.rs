@@ -128,7 +128,9 @@ pub struct GpuVirtualClusterEntry {
     pub identity: [u32; 4],
     /// logical page, LOD level, vertex count, triangle count.
     pub page_lod_counts: [u32; 4],
-    /// page-local vertex/index byte offsets, vertex stride, reserved.
+    /// Page-local vertex/index byte offsets, vertex stride, owning mesh ID.
+    /// The owner sentinel prevents an absolute selected-record address from
+    /// aliasing a cluster belonging to another mesh generation.
     pub payload: [u32; 4],
     /// parent start/count, child start/count; indices are mesh-local.
     pub relations: [u32; 4],
@@ -397,7 +399,7 @@ impl GpuVirtualGeometryPool {
             .map_err(|_| VirtualGeometryGpuError::PageTableExhausted)?;
         let cluster_count = u32::try_from(archive.clusters.len())
             .map_err(|_| VirtualGeometryGpuError::ClusterTableExhausted)?;
-        let cluster_entries = encode_cluster_entries(archive)?;
+        let mut cluster_entries = encode_cluster_entries(archive)?;
         let root_page_count = archive.coarse_root_page_count() as u32;
         let root_cluster_count = archive.pages[..root_page_count as usize]
             .iter()
@@ -437,6 +439,9 @@ impl GpuVirtualGeometryPool {
             .expect("preflight cluster-table range disappeared");
         let mesh_slot_index = self.reserve_mesh_slot(mesh_slot_index);
         let mesh_id = self.mesh_id(mesh_slot_index);
+        for cluster in &mut cluster_entries {
+            cluster.payload[3] = mesh_id.raw();
+        }
         let mut pages = vec![LogicalPageState::default(); archive.pages.len()];
         for page in pages.iter_mut().take(root_page_count as usize) {
             page.pinned = true;
@@ -1252,6 +1257,7 @@ fn validate_config(
     if !(MIN_PAGE_BYTES..=MAX_PAGE_BYTES).contains(&stride)
         || !stride.is_power_of_two()
         || config.capacity_bytes == 0
+        || config.capacity_bytes > u64::from(u32::MAX)
         || !config.capacity_bytes.is_multiple_of(u64::from(stride))
         || config.max_meshes == 0
         || config.max_meshes > ID_SLOT_MASK

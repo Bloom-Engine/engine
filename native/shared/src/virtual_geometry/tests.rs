@@ -663,12 +663,11 @@ fn run_virtual_decode_probe(
         layout: &layout,
         entries: &[
             gpu_buffer_binding(0, pool.physical_buffer()),
-            gpu_buffer_binding(1, pool.mesh_table_buffer()),
-            gpu_buffer_binding(2, pool.cluster_table_buffer()),
-            gpu_buffer_binding(3, selector.selected_buffer()),
-            gpu_buffer_binding(4, &output),
-            gpu_buffer_binding(5, &params),
-            gpu_buffer_binding(6, selector.instance_buffer()),
+            gpu_buffer_binding(1, pool.cluster_table_buffer()),
+            gpu_buffer_binding(2, selector.selected_buffer()),
+            gpu_buffer_binding(3, &output),
+            gpu_buffer_binding(4, &params),
+            gpu_buffer_binding(5, selector.instance_buffer()),
         ],
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -740,7 +739,7 @@ fn assert_decoded_test_vertices(
                 vertex.info,
                 [
                     selected_index as u32,
-                    selection.cluster_index,
+                    selection.cluster_table_index,
                     corner as u32,
                     corner as u32,
                 ]
@@ -1347,7 +1346,7 @@ fn gpu_hierarchy_selector_matches_cpu_across_lod_and_frustum_decisions() {
     );
     assert_eq!(
         leaf.iter()
-            .map(|record| record.cluster_index)
+            .map(|record| record.cluster_table_index)
             .collect::<Vec<_>>(),
         [4, 5, 6, 7]
     );
@@ -1366,7 +1365,7 @@ fn gpu_hierarchy_selector_matches_cpu_across_lod_and_frustum_decisions() {
     assert_eq!(
         middle
             .iter()
-            .map(|record| record.cluster_index)
+            .map(|record| record.cluster_table_index)
             .collect::<Vec<_>>(),
         [2, 3]
     );
@@ -1382,7 +1381,7 @@ fn gpu_hierarchy_selector_matches_cpu_across_lod_and_frustum_decisions() {
     assert_eq!(
         coarse
             .iter()
-            .map(|record| record.cluster_index)
+            .map(|record| record.cluster_table_index)
             .collect::<Vec<_>>(),
         [0, 1]
     );
@@ -1425,7 +1424,7 @@ fn gpu_hierarchy_selector_keeps_resident_ancestors_and_requests_missing_pages() 
     assert_eq!(
         selected
             .iter()
-            .map(|record| record.cluster_index)
+            .map(|record| record.cluster_table_index)
             .collect::<Vec<_>>(),
         [2, 3]
     );
@@ -1476,7 +1475,7 @@ fn gpu_hierarchy_selector_reports_bounded_output_overflow_without_overwriting() 
     assert_eq!(selected.len(), 2);
     assert!(selected
         .iter()
-        .all(|record| (4..=7).contains(&record.cluster_index)));
+        .all(|record| (4..=7).contains(&record.cluster_table_index)));
     assert!(requests.is_empty());
     assert_eq!(counters.selected_count, 4);
     assert_eq!(counters.selected_overflow, 2);
@@ -1728,7 +1727,7 @@ fn gpu_pool_uploads_validated_pages_and_matches_its_gpu_tables() {
         cluster_entry
     );
     assert_eq!(cluster_entry.page_lod_counts, [3, 0, 3, 1]);
-    assert_eq!(cluster_entry.payload, [0, 216, 72, 0]);
+    assert_eq!(cluster_entry.payload, [0, 216, 72, mesh_entry.mesh_id]);
 
     let telemetry = pool.telemetry();
     assert_eq!(telemetry.capacity_bytes, 3 * u64::from(MIN_PAGE_BYTES));

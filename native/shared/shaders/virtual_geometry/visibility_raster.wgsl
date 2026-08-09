@@ -5,11 +5,10 @@ struct VirtualVisibilityVertexOut {
 };
 
 @group(0) @binding(0) var<storage, read> virtual_page_words: BloomVirtualRawWords;
-@group(0) @binding(1) var<storage, read> virtual_meshes: VirtualMeshTable;
-@group(0) @binding(2) var<storage, read> virtual_clusters: VirtualClusterTable;
-@group(0) @binding(3) var<storage, read> virtual_selected: VirtualSelectedTable;
-@group(0) @binding(4) var<storage, read> virtual_instances: VirtualInstanceTable;
-@group(0) @binding(5) var<uniform> virtual_frame: GpuVirtualVisibilityFrame;
+@group(0) @binding(1) var<storage, read> virtual_clusters: VirtualClusterTable;
+@group(0) @binding(2) var<storage, read> virtual_selected: VirtualSelectedTable;
+@group(0) @binding(3) var<storage, read> virtual_instances: VirtualInstanceTable;
+@group(0) @binding(4) var<uniform> virtual_frame: GpuVirtualVisibilityFrame;
 
 fn bloom_invalid_virtual_vertex() -> VirtualVisibilityVertexOut {
     return VirtualVisibilityVertexOut(vec4<f32>(2.0, 2.0, 2.0, 1.0), 0u, 0u);
@@ -31,28 +30,17 @@ fn vs_virtual_visibility(
     if (instance.instance_info.x != selection.mesh_id) {
         return bloom_invalid_virtual_vertex();
     }
-    let mesh_slot_plus_one = selection.mesh_id & BLOOM_VIRTUAL_MESH_SLOT_MASK;
-    if (mesh_slot_plus_one == 0u) {
+    if (selection.cluster_table_index >= arrayLength(&virtual_clusters.records)) {
         return bloom_invalid_virtual_vertex();
     }
-    let mesh_index = mesh_slot_plus_one - 1u;
-    if (mesh_index >= arrayLength(&virtual_meshes.records)) {
-        return bloom_invalid_virtual_vertex();
-    }
-    let mesh = virtual_meshes.records[mesh_index];
-    if (mesh.mesh_id != selection.mesh_id || selection.cluster_index >= mesh.cluster_count) {
-        return bloom_invalid_virtual_vertex();
-    }
-    let cluster_index = mesh.cluster_table_base + selection.cluster_index;
-    if (cluster_index >= arrayLength(&virtual_clusters.records)) {
-        return bloom_invalid_virtual_vertex();
-    }
-    let cluster = virtual_clusters.records[cluster_index];
+    let cluster = virtual_clusters.records[selection.cluster_table_index];
     let corner_count = cluster.page_lod_counts.w * 3u;
-    if (corner >= corner_count || selection.triangle_count != cluster.page_lod_counts.w) {
+    if (cluster.payload.w != selection.mesh_id
+        || corner >= corner_count
+        || selection.triangle_count != cluster.page_lod_counts.w) {
         return bloom_invalid_virtual_vertex();
     }
-    let page_base = selection.physical_slot * mesh.page_stride_bytes;
+    let page_base = selection.physical_page_base;
     let local_vertex = bloom_virtual_load_local_index(page_base + cluster.payload.y + corner);
     if (local_vertex >= cluster.page_lod_counts.z) {
         return bloom_invalid_virtual_vertex();
@@ -60,7 +48,8 @@ fn vs_virtual_visibility(
     let vertex_offset = page_base + cluster.payload.x + local_vertex * cluster.payload.z;
     let vertex = bloom_virtual_decode_vertex(
         vertex_offset,
-        mesh.vertex_encoding,
+        (selection.flags >> BLOOM_VIRTUAL_VERTEX_ENCODING_SHIFT)
+            & BLOOM_VIRTUAL_VERTEX_ENCODING_MASK,
         cluster.aabb_min_error.xyz,
         cluster.aabb_max_radius.xyz,
     );

@@ -331,8 +331,8 @@ const DRAW_PREPARE_SHADER: &str = r#"
 struct GpuSelectedVirtualCluster {
     mesh_id: u32,
     instance_index: u32,
-    cluster_index: u32,
-    physical_slot: u32,
+    cluster_table_index: u32,
+    physical_page_base: u32,
     lod_level: u32,
     triangle_count: u32,
     material_id: u32,
@@ -416,8 +416,8 @@ const DRAW_EMIT_SHADER: &str = r#"
 struct GpuSelectedVirtualCluster {
     mesh_id: u32,
     instance_index: u32,
-    cluster_index: u32,
-    physical_slot: u32,
+    cluster_table_index: u32,
+    physical_page_base: u32,
     lod_level: u32,
     triangle_count: u32,
     material_id: u32,

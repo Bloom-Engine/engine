@@ -74,7 +74,7 @@ impl GpuVirtualVisibilityRaster {
         let limits = device.limits();
         if !features
             .contains(wgpu::Features::PRIMITIVE_INDEX | wgpu::Features::INDIRECT_FIRST_INSTANCE)
-            || limits.max_storage_buffers_per_shader_stage < 5
+            || limits.max_storage_buffers_per_shader_stage < 4
         {
             return Err(VirtualGeometryVisibilityError::DeviceUnsupported);
         }
@@ -96,11 +96,10 @@ impl GpuVirtualVisibilityRaster {
             layout: &layout,
             entries: &[
                 binding(0, pool.physical_buffer()),
-                binding(1, pool.mesh_table_buffer()),
-                binding(2, pool.cluster_table_buffer()),
-                binding(3, selector.selected_buffer()),
-                binding(4, selector.instance_buffer()),
-                binding(5, &frame_buffer),
+                binding(1, pool.cluster_table_buffer()),
+                binding(2, selector.selected_buffer()),
+                binding(3, selector.instance_buffer()),
+                binding(4, &frame_buffer),
             ],
         });
         let source = format!(
@@ -265,9 +264,8 @@ fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             storage(1),
             storage(2),
             storage(3),
-            storage(4),
             wgpu::BindGroupLayoutEntry {
-                binding: 5,
+                binding: 4,
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,

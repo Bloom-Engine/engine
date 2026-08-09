@@ -18,11 +18,12 @@ pub(super) fn make_shader(gpu_scene_source: &str) -> String {
 pub(crate) fn make_virtual_shader(gpu_scene_source: &str) -> String {
     let source = specialize_visibility_derivatives(&strip_prepass_discard(gpu_scene_source));
     format!(
-        "{source}\n{}\n{}\n{}\n{}\n{}",
+        "{source}\n{}\n{}\n{}\n{}\n{}\n{}",
         super::visibility_buffer::RECONSTRUCTION_WGSL,
         super::visibility_buffer::GEOMETRY_WGSL,
         VIRTUAL_RENDER_ABI_WGSL,
         VIRTUAL_DECODE_WGSL,
+        VIRTUAL_VISIBILITY_RECONSTRUCT_WGSL,
         VIRTUAL_VISIBILITY_SHADE_WGSL,
     )
 }
@@ -32,6 +33,9 @@ const VIRTUAL_RENDER_ABI_WGSL: &str =
     include_str!("../../shaders/virtual_geometry/render_abi.wgsl");
 #[cfg(feature = "models3d")]
 const VIRTUAL_DECODE_WGSL: &str = include_str!("../../shaders/virtual_geometry/decode.wgsl");
+#[cfg(feature = "models3d")]
+const VIRTUAL_VISIBILITY_RECONSTRUCT_WGSL: &str =
+    include_str!("../../shaders/virtual_geometry/visibility_reconstruct.wgsl");
 #[cfg(feature = "models3d")]
 const VIRTUAL_VISIBILITY_SHADE_WGSL: &str =
     include_str!("../../shaders/virtual_geometry/visibility_shading.wgsl");

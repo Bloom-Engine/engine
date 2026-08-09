@@ -11,6 +11,8 @@ use super::gpu_pool::MAX_GPU_HIERARCHY_LEVELS;
 const WORKGROUP_SIZE: u32 = 64;
 const INSTANCE_CONE_CULL_SAFE: u32 = 1 << 0;
 const INSTANCE_NEGATIVE_DETERMINANT: u32 = 1 << 1;
+const SELECTED_VERTEX_ENCODING_SHIFT: u32 = 28;
+const SELECTED_VERTEX_ENCODING_MASK: u32 = 3;
 const ID_SLOT_MASK: u32 = (1 << 20) - 1;
 static NEXT_SELECTOR_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -143,13 +145,23 @@ pub struct GpuSelectedVirtualCluster {
     pub mesh_id: u32,
     /// Dense index into the exact instance buffer used for this dispatch.
     pub instance_index: u32,
-    pub cluster_index: u32,
-    pub physical_slot: u32,
+    /// Absolute index into the pool's GPU cluster table.
+    pub cluster_table_index: u32,
+    /// Absolute byte base of the selected resident physical page.
+    pub physical_page_base: u32,
     pub lod_level: u32,
     pub triangle_count: u32,
     /// Generation-safe renderer material ID; admitted selections never use zero.
     pub material_id: u32,
+    /// Low bits retain cooked cluster flags; high bits carry vertex encoding.
     pub flags: u32,
+}
+
+impl GpuSelectedVirtualCluster {
+    /// Cooked vertex encoding packed into the render-ready selection record.
+    pub const fn vertex_encoding(self) -> u32 {
+        self.flags >> SELECTED_VERTEX_ENCODING_SHIFT & SELECTED_VERTEX_ENCODING_MASK
+    }
 }
 
 /// A bounded request for a logical page that prevented hierarchy refinement.
@@ -997,15 +1009,16 @@ fn cpu_select_group(
         result.counters.selected_count += 1;
         if output_index < config.max_selected_clusters {
             let material_id = pool.bound_material_id(mesh_id, cluster.material_index)?;
+            let mesh = pool.mesh_entry(mesh_id)?;
             result.selected.push(GpuSelectedVirtualCluster {
                 mesh_id: mesh_id.raw(),
                 instance_index,
-                cluster_index: first + offset as u32,
-                physical_slot: page.slot_plus_one - 1,
+                cluster_table_index: mesh.cluster_table_base + first + offset as u32,
+                physical_page_base: (page.slot_plus_one - 1) * mesh.page_stride_bytes,
                 lod_level: cluster.lod_level,
                 triangle_count: cluster.triangle_count,
                 material_id,
-                flags: cluster.flags,
+                flags: cluster.flags | mesh.vertex_encoding << SELECTED_VERTEX_ENCODING_SHIFT,
             });
         } else {
             result.counters.selected_overflow += 1;
@@ -1200,8 +1213,8 @@ struct GpuVirtualInstance {
 struct GpuSelectedVirtualCluster {
     mesh_id: u32,
     instance_index: u32,
-    cluster_index: u32,
-    physical_slot: u32,
+    cluster_table_index: u32,
+    physical_page_base: u32,
     lod_level: u32,
     triangle_count: u32,
     material_id: u32,
@@ -1456,12 +1469,12 @@ fn select_group(
             selected.records[output_index] = GpuSelectedVirtualCluster(
                 mesh.mesh_id,
                 instance_index,
-                local_cluster,
-                page.slot_plus_one - 1u,
+                mesh.cluster_table_base + local_cluster,
+                (page.slot_plus_one - 1u) * mesh.page_stride_bytes,
                 cluster.page_lod_counts.y,
                 cluster.page_lod_counts.w,
                 cluster.identity.z,
-                cluster.identity.w
+                cluster.identity.w | (mesh.vertex_encoding << 28u)
             );
         } else {
             atomicAdd(&counters.selected_overflow, 1u);

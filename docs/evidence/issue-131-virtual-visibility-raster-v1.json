@@ -44,7 +44,7 @@
     "emitted_draws": 4,
     "covered_pixels_nonzero": true,
     "background_pixels_nonzero": true,
-    "decoded_virtual_draw_indices": [0, 1, 2, 3],
+    "decoded_virtual_draw_index_range": [0, 3],
     "decoded_primitive_ids": [0],
     "compatibility_ids_observed": 0,
     "background_collision_observed": false

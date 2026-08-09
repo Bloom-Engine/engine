@@ -607,6 +607,16 @@ impl GpuDrivenRenderer {
         self.compatibility_indirect_buffer.is_some()
     }
 
+    #[cfg(feature = "models3d")]
+    pub(super) fn draw_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.draw_layout
+    }
+
+    #[cfg(feature = "models3d")]
+    pub(super) fn draw_bind_group(&self) -> &wgpu::BindGroup {
+        &self.draw_bind_group
+    }
+
     pub(super) fn shared_geometry(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
         (&self.arena.vertex, &self.arena.index)
     }

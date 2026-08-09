@@ -8,11 +8,10 @@ struct VirtualVisibilityShadeVertexOut {
 
 @group(4) @binding(0) var virtual_shade_ids: texture_2d<u32>;
 @group(4) @binding(1) var<storage, read> virtual_page_words: BloomVirtualRawWords;
-@group(4) @binding(2) var<storage, read> virtual_meshes: VirtualMeshTable;
-@group(4) @binding(3) var<storage, read> virtual_clusters: VirtualClusterTable;
-@group(4) @binding(4) var<storage, read> virtual_selected: VirtualSelectedTable;
-@group(4) @binding(5) var<storage, read> virtual_instances: VirtualInstanceTable;
-@group(4) @binding(6) var<uniform> virtual_frame: GpuVirtualVisibilityFrame;
+@group(4) @binding(2) var<storage, read> virtual_clusters: VirtualClusterTable;
+@group(4) @binding(3) var<storage, read> virtual_selected: VirtualSelectedTable;
+@group(4) @binding(4) var<storage, read> virtual_instances: VirtualInstanceTable;
+@group(4) @binding(5) var<uniform> virtual_frame: GpuVirtualVisibilityFrame;
 
 @vertex
 fn vs_virtual_visibility_shade(
@@ -37,34 +36,6 @@ fn virtual_visibility_shade_fault() -> SceneOut {
     );
 }
 
-fn bloom_virtual_world_normal(
-    instance: GpuVirtualInstance,
-    local_normal: vec3<f32>,
-) -> vec3<f32> {
-    return normalize(vec3<f32>(
-        dot(instance.normal_rows[0].xyz, local_normal),
-        dot(instance.normal_rows[1].xyz, local_normal),
-        dot(instance.normal_rows[2].xyz, local_normal),
-    ));
-}
-
-fn bloom_virtual_world_tangent(
-    instance: GpuVirtualInstance,
-    local_tangent: vec4<f32>,
-) -> vec4<f32> {
-    let model_handedness = select(
-        1.0,
-        -1.0,
-        (instance.instance_info.z & BLOOM_VIRTUAL_INSTANCE_NEGATIVE_DETERMINANT) != 0u,
-    );
-    return vec4<f32>(
-        safe_scene_tangent(
-            (instance.model * vec4<f32>(local_tangent.xyz, 0.0)).xyz,
-        ),
-        local_tangent.w * model_handedness,
-    );
-}
-
 @fragment
 fn fs_virtual_visibility_shade(
     in: VirtualVisibilityShadeVertexOut,
@@ -74,83 +45,27 @@ fn fs_virtual_visibility_shade(
     if (!bloom_visibility_valid(raw_visibility)) { discard; }
     let visibility = bloom_decode_visibility(raw_visibility);
     if (!visibility.virtual_geometry) { discard; }
-    if (visibility.draw_id >= arrayLength(&virtual_selected.records)) {
-        return virtual_visibility_shade_fault();
-    }
-    let selection = virtual_selected.records[visibility.draw_id];
-    if ((selection.flags & BLOOM_VIRTUAL_FLAG_ALPHA_MASKED) != 0u
-        || selection.material_id == 0u
-        || selection.instance_index >= arrayLength(&virtual_instances.records)) {
-        return virtual_visibility_shade_fault();
-    }
-    let instance = virtual_instances.records[selection.instance_index];
-    if (instance.instance_info.x != selection.mesh_id) {
-        return virtual_visibility_shade_fault();
-    }
-    let mesh_slot_plus_one = selection.mesh_id & BLOOM_VIRTUAL_MESH_SLOT_MASK;
-    if (mesh_slot_plus_one == 0u) {
-        return virtual_visibility_shade_fault();
-    }
-    let mesh_index = mesh_slot_plus_one - 1u;
-    if (mesh_index >= arrayLength(&virtual_meshes.records)) {
-        return virtual_visibility_shade_fault();
-    }
-    let mesh = virtual_meshes.records[mesh_index];
-    if (mesh.mesh_id != selection.mesh_id
-        || selection.cluster_index >= mesh.cluster_count) {
-        return virtual_visibility_shade_fault();
-    }
-    let cluster_index = mesh.cluster_table_base + selection.cluster_index;
-    if (cluster_index >= arrayLength(&virtual_clusters.records)) {
-        return virtual_visibility_shade_fault();
-    }
-    let cluster = virtual_clusters.records[cluster_index];
-    if (selection.triangle_count != cluster.page_lod_counts.w
-        || visibility.primitive_id >= selection.triangle_count) {
-        return virtual_visibility_shade_fault();
-    }
-
-    let page_base = selection.physical_slot * mesh.page_stride_bytes;
-    let corner_base = page_base + cluster.payload.y + visibility.primitive_id * 3u;
-    let local_index0 = bloom_virtual_load_local_index(corner_base);
-    let local_index1 = bloom_virtual_load_local_index(corner_base + 1u);
-    let local_index2 = bloom_virtual_load_local_index(corner_base + 2u);
-    let vertex_count = cluster.page_lod_counts.z;
-    if (local_index0 >= vertex_count
-        || local_index1 >= vertex_count
-        || local_index2 >= vertex_count) {
-        return virtual_visibility_shade_fault();
-    }
-    let vertex_base = page_base + cluster.payload.x;
-    let vertex_stride = cluster.payload.z;
-    let vertex0 = bloom_virtual_decode_vertex(
-        vertex_base + local_index0 * vertex_stride,
-        mesh.vertex_encoding,
-        cluster.aabb_min_error.xyz,
-        cluster.aabb_max_radius.xyz,
+    let triangle = bloom_virtual_visibility_triangle(
+        visibility.draw_id,
+        visibility.primitive_id,
     );
-    let vertex1 = bloom_virtual_decode_vertex(
-        vertex_base + local_index1 * vertex_stride,
-        mesh.vertex_encoding,
-        cluster.aabb_min_error.xyz,
-        cluster.aabb_max_radius.xyz,
-    );
-    let vertex2 = bloom_virtual_decode_vertex(
-        vertex_base + local_index2 * vertex_stride,
-        mesh.vertex_encoding,
-        cluster.aabb_min_error.xyz,
-        cluster.aabb_max_radius.xyz,
-    );
-
-    let local0 = vec4<f32>(vertex0.position, 1.0);
-    let local1 = vec4<f32>(vertex1.position, 1.0);
-    let local2 = vec4<f32>(vertex2.position, 1.0);
-    let world0 = instance.model * local0;
-    let world1 = instance.model * local1;
-    let world2 = instance.model * local2;
-    let clip0 = virtual_frame.view_projection * world0;
-    let clip1 = virtual_frame.view_projection * world1;
-    let clip2 = virtual_frame.view_projection * world2;
+    if (!triangle.valid) {
+        return virtual_visibility_shade_fault();
+    }
+    let selection = triangle.selection;
+    let instance = triangle.instance;
+    let vertex0 = triangle.vertex0;
+    let vertex1 = triangle.vertex1;
+    let vertex2 = triangle.vertex2;
+    let local0 = triangle.local0;
+    let local1 = triangle.local1;
+    let local2 = triangle.local2;
+    let world0 = triangle.world0;
+    let world1 = triangle.world1;
+    let world2 = triangle.world2;
+    let clip0 = triangle.clip0;
+    let clip1 = triangle.clip1;
+    let clip2 = triangle.clip2;
     let dimensions = textureDimensions(virtual_shade_ids);
     let point_ndc = vec2<f32>(
         in.position.x / f32(dimensions.x) * 2.0 - 1.0,

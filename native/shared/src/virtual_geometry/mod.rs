@@ -8,7 +8,7 @@ mod decode;
 mod draw_emission;
 mod gpu_pool;
 mod residency;
-mod shading;
+pub(crate) mod shading;
 mod traversal;
 mod visibility;
 
@@ -30,7 +30,7 @@ pub use residency::{
     ClusterGroup, PageTransition, ResidencyError, ResidencyTelemetry, ResolvedClusterGroup,
     VirtualGeometryResidency,
 };
-pub use shading::{GpuVirtualVisibilityShading, VirtualVisibilityPbrLayouts};
+pub use shading::GpuVirtualVisibilityShading;
 pub use traversal::{
     GpuSelectedVirtualCluster, GpuVirtualHierarchySelector, GpuVirtualInstance,
     GpuVirtualPageRequest, GpuVirtualTraversalConfig, GpuVirtualTraversalCounters,
