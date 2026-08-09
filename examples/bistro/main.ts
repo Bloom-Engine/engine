@@ -29,6 +29,7 @@ import {
   setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
   setSsgiEnabled, setSsrEnabled, setShadowsAlwaysFresh,
+  setQualityPreset, setRenderScale, getRenderScale, getPhysicalWidth, getPhysicalHeight,
   getCommandLineArgs, resize,
 } from "bloom/core";
 import { parseQualityRun, QualityRun } from "bloom/quality";
@@ -74,6 +75,8 @@ let vsmMotionPath = false;
 let motionYaw = 0.0;
 let motionFrames = 0;
 let shadowsAlwaysFresh = false;
+let interactiveQualityPreset = -1;
+let interactiveRenderScale = -1.0;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -124,6 +127,12 @@ for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--shadows-always-fresh") {
     shadowsAlwaysFresh = true;
   }
+  if (argv[i] === "--quality-preset" && i + 1 < argv.length) {
+    interactiveQualityPreset = Math.max(0, Math.min(4, Math.floor(parseFloat(argv[i + 1]))));
+  }
+  if (argv[i] === "--render-scale" && i + 1 < argv.length) {
+    interactiveRenderScale = Math.max(0.15, Math.min(1.0, parseFloat(argv[i + 1])));
+  }
 }
 
 // ---- Init ----
@@ -131,6 +140,19 @@ initWindow(SCREEN_W, SCREEN_H, "Bloom Bistro", 0);
 if (qualityConfig !== null) resize(SCREEN_W, SCREEN_H, SCREEN_W, SCREEN_H);
 setTargetFPS(60);
 let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qualityConfig) : null;
+// QualityRun applies these options for deterministic captures. Interactive
+// launches used to parse the same flags but silently ignore them, leaving a
+// requested Ultra session at the engine's 0.75 balanced default. Apply the
+// preset first, then the explicit scale override, matching QualityRun order.
+if (qualityRun === null) {
+  if (interactiveQualityPreset >= 0) { setQualityPreset(interactiveQualityPreset as any); }
+  if (interactiveRenderScale > 0.0) { setRenderScale(interactiveRenderScale); }
+  console.error(
+    "BLOOM_BISTRO_RENDER output=" + getPhysicalWidth() + "x" + getPhysicalHeight()
+      + " render_scale=" + getRenderScale().toFixed(2)
+      + " quality_preset=" + interactiveQualityPreset,
+  );
+}
 setEnvClearFromHdr("assets/outdoor.hdr");
 enableShadows();
 setShadowsAlwaysFresh(shadowsAlwaysFresh);
