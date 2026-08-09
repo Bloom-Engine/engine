@@ -14,6 +14,28 @@ pub(super) fn make_shader(gpu_scene_source: &str) -> String {
     )
 }
 
+#[cfg(feature = "models3d")]
+pub(crate) fn make_virtual_shader(gpu_scene_source: &str) -> String {
+    let source = specialize_visibility_derivatives(&strip_prepass_discard(gpu_scene_source));
+    format!(
+        "{source}\n{}\n{}\n{}\n{}\n{}",
+        super::visibility_buffer::RECONSTRUCTION_WGSL,
+        super::visibility_buffer::GEOMETRY_WGSL,
+        VIRTUAL_RENDER_ABI_WGSL,
+        VIRTUAL_DECODE_WGSL,
+        VIRTUAL_VISIBILITY_SHADE_WGSL,
+    )
+}
+
+#[cfg(feature = "models3d")]
+const VIRTUAL_RENDER_ABI_WGSL: &str =
+    include_str!("../../shaders/virtual_geometry/render_abi.wgsl");
+#[cfg(feature = "models3d")]
+const VIRTUAL_DECODE_WGSL: &str = include_str!("../../shaders/virtual_geometry/decode.wgsl");
+#[cfg(feature = "models3d")]
+const VIRTUAL_VISIBILITY_SHADE_WGSL: &str =
+    include_str!("../../shaders/virtual_geometry/visibility_shading.wgsl");
+
 pub(super) fn make_forward_compatibility_shader(gpu_scene_source: &str) -> String {
     const ANCHOR: &str = concat!(
         "fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {\n",
@@ -64,6 +86,40 @@ pub(super) fn create_pipeline(
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
 ) -> wgpu::RenderPipeline {
+    create_pipeline_for_entry(
+        device,
+        layout,
+        shader,
+        "visibility_buffer_pbr_pipeline",
+        "vs_visibility_shade",
+        "fs_visibility_shade",
+    )
+}
+
+#[cfg(feature = "models3d")]
+pub(crate) fn create_virtual_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    create_pipeline_for_entry(
+        device,
+        layout,
+        shader,
+        "virtual_geometry_visibility_pbr_pipeline",
+        "vs_virtual_visibility_shade",
+        "fs_virtual_visibility_shade",
+    )
+}
+
+fn create_pipeline_for_entry(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    label: &'static str,
+    vertex_entry: &'static str,
+    fragment_entry: &'static str,
+) -> wgpu::RenderPipeline {
     #[cfg(lean_mrt)]
     let targets = &[
         Some(target(super::HDR_FORMAT, true)),
@@ -79,17 +135,17 @@ pub(super) fn create_pipeline(
         Some(target(wgpu::TextureFormat::Rgba8Unorm, false)),
     ];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("visibility_buffer_pbr_pipeline"),
+        label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_visibility_shade"),
+            entry_point: Some(vertex_entry),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_visibility_shade"),
+            entry_point: Some(fragment_entry),
             targets,
             compilation_options: Default::default(),
         }),
@@ -380,6 +436,9 @@ fn fs_visibility_shade(in: VisibilityVertexOut) -> SceneOut {
     let raw_visibility = textureLoad(visibility_shade_ids, pixel, 0).xy;
     if (!bloom_visibility_valid(raw_visibility)) { discard; }
     let visibility = bloom_decode_visibility(raw_visibility);
+    // Virtual IDs are owned by the disjoint raw-page shading pass. Never
+    // reinterpret their local selected-record index as a compatibility draw.
+    if (visibility.virtual_geometry) { discard; }
     if (visibility.draw_id >= arrayLength(&visibility_shade_draws.records)) {
         return visibility_shade_fault();
     }
@@ -565,6 +624,7 @@ mod tests {
         assert!(shade.contains(
             "return shade_main_scene(fragment, visibility.front_facing, visibility_gradients);"
         ));
+        assert!(shade.contains("if (visibility.virtual_geometry) { discard; }"));
         assert!(shade.contains("textureSampleGrad("));
         assert!(!shade[shade
             .find("fn shade_main_scene(")
@@ -575,5 +635,26 @@ mod tests {
             .contains("dpdx("));
         assert!(!shade.contains("fn fs_main_scene("));
         assert!(compatibility.contains("(in.draw_flags & 2u) != 0u"));
+    }
+
+    #[cfg(feature = "models3d")]
+    #[test]
+    fn virtual_shading_reuses_the_authoritative_pbr_and_all_mrts() {
+        let gpu =
+            super::super::gpu_driven::make_gpu_scene_shader(super::super::shaders::SCENE_SHADER);
+        let shade = make_virtual_shader(&gpu);
+        wgpu::naga::front::wgsl::parse_str(&shade)
+            .unwrap_or_else(|error| panic!("virtual visibility PBR WGSL failed: {error:?}"));
+        assert!(shade.contains("if (!visibility.virtual_geometry) { discard; }"));
+        assert!(shade.contains("instance.normal_rows[0].xyz"));
+        assert!(shade.contains("BLOOM_VIRTUAL_INSTANCE_NEGATIVE_DETERMINANT"));
+        assert!(shade.contains("virtual_frame.previous_view_projection"));
+        assert!(shade.contains("fragment.material_id = selection.material_id;"));
+        assert!(shade.contains("* instance.model_tint;"));
+        assert!(shade.contains(
+            "return shade_main_scene(\n        fragment,\n        visibility.front_facing,"
+        ));
+        assert!(shade.contains("struct SceneOut"));
+        assert!(shade.contains("@location(3) albedo: vec4<f32>"));
     }
 }

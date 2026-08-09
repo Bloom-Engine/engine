@@ -1,9 +1,9 @@
 // Bloom packed visibility-buffer ABI — version 1.
 //
-// Rg32Uint stores one full draw ID plus a 31-bit primitive ID and one face
-// orientation bit. Barycentrics are reconstructed from the triangle's clip
-// positions, avoiding the incorrect 16-byte Rgba32Uint proposal and avoiding
-// a per-corner barycentric vertex stream.
+// Rg32Uint stores a one-bit draw namespace plus 31-bit local draw index, then
+// a 31-bit primitive ID and one face-orientation bit. Barycentrics are
+// reconstructed from the triangle's clip positions, avoiding the incorrect
+// 16-byte Rgba32Uint proposal and a per-corner barycentric vertex stream.
 
 const BLOOM_VISIBILITY_INVALID_DRAW_ID: u32 = 0xffffffffu;
 const BLOOM_VISIBILITY_VIRTUAL_DRAW_BIT: u32 = 0x80000000u;

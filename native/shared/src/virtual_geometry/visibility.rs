@@ -4,6 +4,8 @@ use std::fmt;
 const VIRTUAL_VISIBILITY_RASTER_WGSL: &str =
     include_str!("../../shaders/virtual_geometry/visibility_raster.wgsl");
 const VIRTUAL_DECODE_WGSL: &str = include_str!("../../shaders/virtual_geometry/decode.wgsl");
+const VIRTUAL_RENDER_ABI_WGSL: &str =
+    include_str!("../../shaders/virtual_geometry/render_abi.wgsl");
 
 /// Frame transforms shared by virtual visibility raster and its future exact
 /// PBR reconstruction consumer (128 bytes, column-major).
@@ -102,8 +104,9 @@ impl GpuVirtualVisibilityRaster {
             ],
         });
         let source = format!(
-            "enable primitive_index;\n{}\n{}\n{}",
+            "enable primitive_index;\n{}\n{}\n{}\n{}",
             crate::renderer::visibility_buffer::RECONSTRUCTION_WGSL,
+            VIRTUAL_RENDER_ABI_WGSL,
             VIRTUAL_DECODE_WGSL,
             VIRTUAL_VISIBILITY_RASTER_WGSL,
         );
@@ -227,6 +230,14 @@ impl GpuVirtualVisibilityRaster {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
     }
+
+    pub(super) const fn selector_id(&self) -> u64 {
+        self.selector_id
+    }
+
+    pub(super) fn frame_buffer(&self) -> &wgpu::Buffer {
+        &self.frame_buffer
+    }
 }
 
 fn binding(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -279,6 +290,8 @@ pub enum VirtualGeometryVisibilityError {
         capacity: u32,
     },
     IndirectCountUnsupported,
+    PbrDeviceUnsupported,
+    InvalidVisibilityTarget,
     #[cfg(test)]
     TestDrawCountExceeded,
 }
@@ -304,6 +317,14 @@ impl fmt::Display for VirtualGeometryVisibilityError {
             Self::IndirectCountUnsupported => write!(
                 formatter,
                 "device lacks indirect-count submission; use the compatibility renderer"
+            ),
+            Self::PbrDeviceUnsupported => write!(
+                formatter,
+                "device limits cannot run virtual visibility PBR composition"
+            ),
+            Self::InvalidVisibilityTarget => write!(
+                formatter,
+                "virtual PBR requires an Rg32Uint texture-binding visibility target"
             ),
             #[cfg(test)]
             Self::TestDrawCountExceeded => {
@@ -335,8 +356,9 @@ mod shader_tests {
             Err(VirtualGeometryVisibilityError::InvalidFrame)
         );
         let source = format!(
-            "enable primitive_index;\n{}\n{}\n{}",
+            "enable primitive_index;\n{}\n{}\n{}\n{}",
             crate::renderer::visibility_buffer::RECONSTRUCTION_WGSL,
+            VIRTUAL_RENDER_ABI_WGSL,
             VIRTUAL_DECODE_WGSL,
             VIRTUAL_VISIBILITY_RASTER_WGSL,
         );

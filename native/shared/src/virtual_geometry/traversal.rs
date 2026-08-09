@@ -10,6 +10,7 @@ use super::gpu_pool::MAX_GPU_HIERARCHY_LEVELS;
 
 const WORKGROUP_SIZE: u32 = 64;
 const INSTANCE_CONE_CULL_SAFE: u32 = 1 << 0;
+const INSTANCE_NEGATIVE_DETERMINANT: u32 = 1 << 1;
 const ID_SLOT_MASK: u32 = (1 << 20) - 1;
 static NEXT_SELECTOR_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -46,11 +47,10 @@ impl GpuVirtualInstance {
         previous_model: [[f32; 4]; 4],
         model_tint: [f32; 4],
     ) -> Result<Self, VirtualGeometryTraversalError> {
-        let (normal_rows, cone_safe) = normal_rows_and_cone_safety(model).ok_or(
-            VirtualGeometryTraversalError::InvalidInstanceTransform {
+        let (normal_rows, cone_safe, negative_determinant) = normal_rows_and_cone_safety(model)
+            .ok_or(VirtualGeometryTraversalError::InvalidInstanceTransform {
                 instance: instance_id,
-            },
-        )?;
+            })?;
         if !finite_affine(previous_model) || !model_tint.iter().all(|value| value.is_finite()) {
             return Err(VirtualGeometryTraversalError::InvalidInstanceTransform {
                 instance: instance_id,
@@ -62,7 +62,8 @@ impl GpuVirtualInstance {
             instance_info: [
                 mesh.raw(),
                 instance_id,
-                u32::from(cone_safe) * INSTANCE_CONE_CULL_SAFE,
+                u32::from(cone_safe) * INSTANCE_CONE_CULL_SAFE
+                    | u32::from(negative_determinant) * INSTANCE_NEGATIVE_DETERMINANT,
                 0,
             ],
             previous_model,
@@ -94,6 +95,10 @@ impl GpuVirtualInstance {
 
     pub const fn cone_cull_safe(self) -> bool {
         self.instance_info[2] & INSTANCE_CONE_CULL_SAFE != 0
+    }
+
+    pub const fn negative_determinant(self) -> bool {
+        self.instance_info[2] & INSTANCE_NEGATIVE_DETERMINANT != 0
     }
 
     pub const fn model(self) -> [[f32; 4]; 4] {
@@ -566,14 +571,15 @@ fn validate_instance(instance: GpuVirtualInstance) -> Result<(), VirtualGeometry
         .chain(instance.previous_model.iter().flatten())
         .chain(instance.model_tint.iter())
         .all(|value| value.is_finite());
-    let Some((expected_normal_rows, expected_cone_safe)) =
+    let Some((expected_normal_rows, expected_cone_safe, expected_negative_determinant)) =
         normal_rows_and_cone_safety(instance.model)
     else {
         return Err(VirtualGeometryTraversalError::InvalidInstanceTransform {
             instance: instance.instance_id(),
         });
     };
-    let expected_flags = u32::from(expected_cone_safe) * INSTANCE_CONE_CULL_SAFE;
+    let expected_flags = u32::from(expected_cone_safe) * INSTANCE_CONE_CULL_SAFE
+        | u32::from(expected_negative_determinant) * INSTANCE_NEGATIVE_DETERMINANT;
     if !finite
         || instance.instance_info[0] & ID_SLOT_MASK == 0
         || instance.normal_rows != expected_normal_rows
@@ -596,7 +602,7 @@ fn finite_affine(model: [[f32; 4]; 4]) -> bool {
         && (model[3][3] - 1.0).abs() <= 1.0e-6
 }
 
-fn normal_rows_and_cone_safety(model: [[f32; 4]; 4]) -> Option<([[f32; 4]; 3], bool)> {
+fn normal_rows_and_cone_safety(model: [[f32; 4]; 4]) -> Option<([[f32; 4]; 3], bool, bool)> {
     if !finite_affine(model) {
         return None;
     }
@@ -650,7 +656,7 @@ fn normal_rows_and_cone_safety(model: [[f32; 4]; 4]) -> Option<([[f32; 4]; 3], b
         && dot3(columns[0], columns[1]).abs() <= tolerance
         && dot3(columns[0], columns[2]).abs() <= tolerance
         && dot3(columns[1], columns[2]).abs() <= tolerance;
-    Some((normal_rows, cone_safe))
+    Some((normal_rows, cone_safe, determinant < 0.0))
 }
 
 const fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -1586,8 +1592,22 @@ mod shader_tests {
         ];
         let instance = GpuVirtualInstance::new(VirtualMeshId::from_raw(1), 7, model).unwrap();
         assert!(!instance.cone_cull_safe());
+        assert!(!instance.negative_determinant());
         assert_eq!(instance.normal_rows[0][0], 0.5);
         assert_eq!(instance.normal_rows[1][1], 1.0);
         assert_eq!(instance.normal_rows[2][2], 2.0);
+    }
+
+    #[test]
+    fn mirrored_instances_preserve_tangent_handedness_state() {
+        let model = [
+            [-2.0, 0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let instance = GpuVirtualInstance::new(VirtualMeshId::from_raw(1), 8, model).unwrap();
+        assert!(instance.cone_cull_safe());
+        assert!(instance.negative_determinant());
     }
 }
