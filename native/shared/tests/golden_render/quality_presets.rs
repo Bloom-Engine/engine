@@ -36,14 +36,19 @@ fn configure_reconstruction_scene(renderer: &mut Renderer) {
     renderer.set_shadows_enabled(false);
 }
 
-fn capture_preset(eng: &mut EngineState, preset: u32, legacy_scale: Option<f32>) -> Vec<u8> {
+fn capture_preset_frames(
+    eng: &mut EngineState,
+    preset: u32,
+    legacy_scale: Option<f32>,
+    frames: u32,
+) -> Vec<u8> {
     eng.renderer.apply_quality_preset(preset);
     if let Some(scale) = legacy_scale {
         eng.renderer.set_render_scale(scale);
     }
     configure_reconstruction_scene(&mut eng.renderer);
     eng.renderer.reset_temporal_history();
-    render(eng, 24, |eng| {
+    render(eng, frames, |eng| {
         let r = &mut eng.renderer;
         r.set_clear_color(5.0, 7.0, 12.0, 255.0);
         r.begin_mode_3d(4.4, 3.5, 6.0, 0.0, 0.45, 0.0, 0.0, 1.0, 0.0, 51.0, 0.0);
@@ -66,6 +71,10 @@ fn capture_preset(eng: &mut EngineState, preset: u32, legacy_scale: Option<f32>)
         }
     })
     .2
+}
+
+fn capture_preset(eng: &mut EngineState, preset: u32, legacy_scale: Option<f32>) -> Vec<u8> {
+    capture_preset_frames(eng, preset, legacy_scale, 24)
 }
 
 fn capture_sharpen_scene(eng: &mut EngineState, strength: f32) -> Vec<u8> {
@@ -107,24 +116,35 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     };
 
     let legacy_half = capture_preset(&mut eng, 2, Some(0.5));
+    let default_seed = capture_preset_frames(&mut eng, 2, None, 1);
     let default_medium = capture_preset(&mut eng, 2, None);
     let ultra = capture_preset(&mut eng, 4, None);
     let legacy_energy = detail_energy(&legacy_half);
     let default_energy = detail_energy(&default_medium);
+    let default_seed_energy = detail_energy(&default_seed);
     let ultra_energy = detail_energy(&ultra);
     let legacy_to_native = calculate_diff_metrics(&ultra, &legacy_half, W, H);
     let default_to_native = calculate_diff_metrics(&ultra, &default_medium, W, H);
     eprintln!(
         "quality-preset detail_energy legacy_half={legacy_energy:.4} \
-         default_075={default_energy:.4} ultra_native={ultra_energy:.4} \
+         default_seed={default_seed_energy:.4} default_075={default_energy:.4} \
+         ultra_native={ultra_energy:.4} \
          legacy_native_mean={:.4} default_native_mean={:.4}",
         legacy_to_native.mean_rgb, default_to_native.mean_rgb,
     );
 
     assert!(
-        default_energy >= legacy_energy * 1.02,
-        "0.75 default did not resolve meaningfully more detail than legacy 0.5: \
-         {default_energy:.4} vs {legacy_energy:.4}"
+        default_energy >= ultra_energy * 0.90,
+        "0.75 settled detail fell more than 10% below native: \
+         default={default_energy:.4}, native={ultra_energy:.4}"
+    );
+    // Temporal AA should reduce the seeded frame's aliased Laplacian energy,
+    // but must not keep diffusing a static surface. The zero-velocity
+    // prev-jitter regression measured 72.9%; the corrected resolve is 81.2%.
+    assert!(
+        default_energy >= default_seed_energy * 0.78,
+        "static TAA accumulation lost more detail than the bounded AA window permits: \
+         seed={default_seed_energy:.4}, settled={default_energy:.4}"
     );
     assert!(
         default_to_native.mean_rgb < legacy_to_native.mean_rgb * 0.90,

@@ -875,9 +875,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     }
     let vel_len = length(vel);
     var prev_uv: vec2<f32>;
-    if (vel_len > 0.00001) {
-        prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
-    } else if (depth >= 0.9999) {
+    if (depth >= 0.9999) {
         // Sky / far plane: the positional reconstruction divides by a
         // near-zero w and reprojects sky pixels onto arbitrary scene
         // points — the luma-only history clamp then locks that wrong
@@ -894,9 +892,13 @@ fn fs_main(in: VsOut) -> TaaOut {
         }
         expected_prev_depth = 10000.0;
     } else {
-        let prev_clip = u.prev_vp * vec4<f32>(world, 1.0);
-        let prev_ndc = prev_clip.xyz / prev_clip.w;
-        prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 1.0 - (prev_ndc.y * 0.5 + 0.5));
+        // Geometry always owns a velocity texel, and a zero vector is a
+        // meaningful result for a static surface. Falling back to prev_vp
+        // when velocity was zero reintroduced the previous projection jitter
+        // into an already unjittered full-resolution history surface. Each
+        // static frame then sampled history at a different subpixel offset and
+        // progressively averaged fine texture detail into a broad blur.
+        prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
     }
 
     var history = current;
