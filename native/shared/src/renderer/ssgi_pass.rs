@@ -553,6 +553,7 @@ impl Renderer {
             self.transparent_gi_force_probe_refresh = false;
             let temporal_params = ProbeTemporalParams {
                 params: [0.25, force_refresh, gw as f32, gh as f32],
+                size: [half_w as f32, half_h as f32, PROBE_TILE_SIZE as f32, p00],
             };
             self.queue.write_buffer(
                 &self.probe_temporal_uniform,
@@ -592,6 +593,12 @@ impl Renderer {
                             wgpu::BindGroupEntry {
                                 binding: 4,
                                 resource: self.probe_header_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.velocity_rt_view,
+                                ),
                             },
                         ],
                     }));

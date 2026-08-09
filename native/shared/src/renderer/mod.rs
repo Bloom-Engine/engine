@@ -126,12 +126,13 @@ use formats::{
     create_probe_history_textures, create_probe_trace_tex, create_scene_sdf_clipmap,
     create_scene_sdf_clipmap_staging, create_ssao_blur_rt, create_ssao_history_textures,
     create_ssao_rt, create_ssgi_rt, create_ssr_history_textures, create_ssr_rt, create_sss_rt,
-    create_taa_textures, create_velocity_rt, create_wsrc_atlas, halton, probe_grid_dims,
-    BLOOM_MIP_COUNT, CARD_ATLAS_SIZE, CARD_SLOTS_PER_ROW, CARD_SLOT_SIZE, HDR_FORMAT, HIZ_FORMAT,
-    HIZ_MIP_COUNT, MATERIAL_FORMAT, MESH_SDF_RES, PROBE_TILE_SIZE, SCENE_SDF_CLIPMAP_BIN_CELLS,
-    SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME,
-    SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD, SCENE_SDF_CLIPMAP_RES, SSAO_FORMAT, VELOCITY_FORMAT,
-    WSRC_CASCADE_COUNT, WSRC_CASCADE_EXTENTS, WSRC_GRID_RES, WSRC_REBAKE_THRESHOLD,
+    create_taa_depth_history_textures, create_taa_textures, create_velocity_rt, create_wsrc_atlas,
+    halton, probe_grid_dims, BLOOM_MIP_COUNT, CARD_ATLAS_SIZE, CARD_SLOTS_PER_ROW, CARD_SLOT_SIZE,
+    HDR_FORMAT, HIZ_FORMAT, HIZ_MIP_COUNT, MATERIAL_FORMAT, MESH_SDF_RES, PROBE_TILE_SIZE,
+    SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME,
+    SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD, SCENE_SDF_CLIPMAP_RES, SSAO_FORMAT,
+    TAA_DEPTH_HISTORY_FORMAT, VELOCITY_FORMAT, WSRC_CASCADE_COUNT, WSRC_CASCADE_EXTENTS,
+    WSRC_GRID_RES, WSRC_REBAKE_THRESHOLD,
 };
 pub(crate) use formats::{CARD_AXES_PER_MESH, CARD_MAX_SLOTS};
 
@@ -709,6 +710,12 @@ pub struct Renderer {
     /// history. `taa_current_idx` flips after every frame.
     pub taa_textures: [wgpu::Texture; 2],
     pub taa_views: [wgpu::TextureView; 2],
+    /// Geometric provenance paired one-to-one with `taa_textures`. Perspective
+    /// cameras store positive linear clip-W; orthographic cameras store NDC
+    /// depth. Reprojection rejects color whose previous depth belongs to a
+    /// different surface instead of smearing it across a disocclusion.
+    pub taa_depth_history_textures: [wgpu::Texture; 2],
+    pub taa_depth_history_views: [wgpu::TextureView; 2],
     pub taa_current_idx: usize,
     pub taa_pipeline: wgpu::RenderPipeline,
     pub taa_layout: wgpu::BindGroupLayout,
@@ -2408,6 +2415,8 @@ impl Renderer {
             create_ssao_history_textures(&device, surface_config.width, surface_config.height);
         let (taa_textures, taa_views) =
             create_taa_textures(&device, surface_config.width, surface_config.height);
+        let (taa_depth_history_textures, taa_depth_history_views) =
+            create_taa_depth_history_textures(&device, surface_config.width, surface_config.height);
         let (ssr_rt_texture, ssr_rt_view) =
             create_ssr_rt(&device, surface_config.width, surface_config.height);
         let (ssr_history_textures, ssr_history_views) =
@@ -4620,11 +4629,18 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &taa_shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: TAA_DEPTH_HISTORY_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::RED,
+                    }),
+                ],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -6095,6 +6111,16 @@ impl Renderer {
                         count: None,
                     },
                     PROBE_HEADER_RW_LAYOUT_ENTRY,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let probe_temporal_pl_layout =
@@ -7707,6 +7733,8 @@ impl Renderer {
             ssao_radius: 2.0,
             taa_textures,
             taa_views,
+            taa_depth_history_textures,
+            taa_depth_history_views,
             taa_current_idx: 0,
             taa_pipeline,
             taa_layout,
@@ -8404,6 +8432,10 @@ impl Renderer {
             let (taa_t, taa_v) = create_taa_textures(&self.device, width, height);
             self.taa_textures = taa_t;
             self.taa_views = taa_v;
+            let (taa_depth_t, taa_depth_v) =
+                create_taa_depth_history_textures(&self.device, width, height);
+            self.taa_depth_history_textures = taa_depth_t;
+            self.taa_depth_history_views = taa_depth_v;
             self.taa_current_idx = 0;
             self.taa_frame_index = 0; // reset jitter sequence on resize
             self.taa_history_valid = false;

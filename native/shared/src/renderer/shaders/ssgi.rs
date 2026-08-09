@@ -34,18 +34,17 @@ struct ProbeHeader {
     previous_normal: vec4<f32>,
 };
 
-fn probe_history_geometry_valid(probe: ProbeHeader) -> bool {
-    if (probe.world_pos.w < 0.5 || probe.previous_world_pos.w < 0.5) {
+fn probe_history_geometry_valid(
+    current: ProbeHeader,
+    previous_slot: ProbeHeader,
+    maximum_world_shift: f32,
+) -> bool {
+    if (current.world_pos.w < 0.5 || previous_slot.previous_world_pos.w < 0.5) {
         return false;
     }
-    let normal_similarity = dot(probe.normal.xyz, probe.previous_normal.xyz);
-    let linear_depth = max(min(probe.normal.w, probe.previous_normal.w), 0.1);
-    // A pixel subtends a larger world-space footprint at distance. This bound
-    // retains ordinary camera motion and subpixel dither while rejecting a
-    // different depth layer that entered the same screen-probe slot.
-    let maximum_world_shift = 0.05 + linear_depth * 0.02;
+    let normal_similarity = dot(current.normal.xyz, previous_slot.previous_normal.xyz);
     return normal_similarity >= 0.85
-        && distance(probe.world_pos.xyz, probe.previous_world_pos.xyz)
+        && distance(current.world_pos.xyz, previous_slot.previous_world_pos.xyz)
             <= maximum_world_shift;
 }
 
@@ -1303,6 +1302,8 @@ struct TemporalParams {
     // y = force_refresh (1 → alpha 1.0),
     // z = grid_w, w = grid_h
     params: vec4<f32>,
+    // x = half_w, y = half_h, z = tile_size, w = projection p00
+    size: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TemporalParams;
@@ -1310,12 +1311,15 @@ struct TemporalParams {
 @group(0) @binding(2) var history_in: texture_3d<f32>;
 @group(0) @binding(3) var history_out: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(4) var<storage, read_write> probes: array<ProbeHeader>;
+@group(0) @binding(5) var velocity_tex: texture_2d<f32>;
 
 // The trace stores cosine-weighted incident radiance in 64 directional
 // octels. Reserve octel zero in the filtered history for the diffuse
 // convolution that resolve actually needs. Keeping the reduction in this
 // existing workgroup avoids another texture, pass, or per-pixel 64-tap loop.
 var<workgroup> diffuse_radiance: array<vec3<f32>, 64>;
+var<workgroup> reprojected_history_probe: u32;
+var<workgroup> reprojected_history_valid: u32;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(
@@ -1327,11 +1331,95 @@ fn cs_main(
     if (wg.x >= grid_w || wg.y >= grid_h) { return; }
 
     let probe_index = wg.y * grid_w + wg.x;
-    let geometry_valid = probe_history_geometry_valid(probes[probe_index]);
     let coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
-    let curr = bounded_probe_history(textureLoad(radiance_in, coord, 0).rgb);
-    var hist = bounded_probe_history(textureLoad(history_in, coord, 0).rgb);
     let lane = lid.y * PROBE_OCT_SIZE + lid.x;
+    let curr = bounded_probe_history(textureLoad(radiance_in, coord, 0).rgb);
+
+    if (lane == 0u) {
+        reprojected_history_probe = probe_index;
+        reprojected_history_valid = 0u;
+        let current_probe = probes[probe_index];
+        if (current_probe.world_pos.w >= 0.5) {
+            let current_uv = (
+                vec2<f32>(wg.xy) * u.size.z + vec2<f32>(u.size.z * 0.5)
+            ) / u.size.xy;
+            let velocity_size = vec2<i32>(textureDimensions(velocity_tex));
+            let velocity_coord = clamp(
+                vec2<i32>(current_uv * vec2<f32>(velocity_size)),
+                vec2<i32>(0),
+                velocity_size - vec2<i32>(1),
+            );
+            let velocity = textureLoad(velocity_tex, velocity_coord, 0).xy;
+            // Velocity stores current-minus-previous NDC. UV's Y axis is
+            // flipped, matching the established TAA and SSR reprojection.
+            let previous_uv = vec2<f32>(
+                current_uv.x - velocity.x,
+                current_uv.y + velocity.y,
+            );
+            if (all(previous_uv >= vec2<f32>(0.0)) &&
+                all(previous_uv <= vec2<f32>(1.0))) {
+                let previous_grid_position =
+                    previous_uv * u.size.xy / u.size.z - vec2<f32>(0.5);
+                let previous_grid_center = vec2<i32>(
+                    floor(previous_grid_position + vec2<f32>(0.5)),
+                );
+
+                // The nearest prior grid sample can sit half a tile from
+                // this surface point. Derive a world-space acceptance
+                // radius from that footprint instead of using a fixed
+                // tolerance that collapses as resolution/depth changes.
+                let probe_world_spacing =
+                    2.0 * max(current_probe.normal.w, 0.1) * u.size.z /
+                    max(abs(u.size.w) * u.size.x, 0.0001);
+                let maximum_world_shift = 0.05 + probe_world_spacing * 0.9;
+                var best_score = 1e30;
+                for (var dy = -1; dy <= 1; dy = dy + 1) {
+                    for (var dx = -1; dx <= 1; dx = dx + 1) {
+                        let candidate_xy = previous_grid_center + vec2<i32>(dx, dy);
+                        if (candidate_xy.x < 0 || candidate_xy.y < 0 ||
+                            candidate_xy.x >= i32(grid_w) || candidate_xy.y >= i32(grid_h)) {
+                            continue;
+                        }
+                        let candidate_index =
+                            u32(candidate_xy.y) * grid_w + u32(candidate_xy.x);
+                        let candidate = probes[candidate_index];
+                        if (!probe_history_geometry_valid(
+                            current_probe,
+                            candidate,
+                            maximum_world_shift,
+                        )) {
+                            continue;
+                        }
+                        let world_shift = distance(
+                            current_probe.world_pos.xyz,
+                            candidate.previous_world_pos.xyz,
+                        );
+                        let normal_penalty = 1.0 - clamp(dot(
+                            current_probe.normal.xyz,
+                            candidate.previous_normal.xyz,
+                        ), 0.0, 1.0);
+                        let score = world_shift + normal_penalty * maximum_world_shift;
+                        if (score < best_score) {
+                            best_score = score;
+                            reprojected_history_probe = candidate_index;
+                            reprojected_history_valid = 1u;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    workgroupBarrier();
+
+    let history_x = reprojected_history_probe % grid_w;
+    let history_y = reprojected_history_probe / grid_w;
+    let history_coord = vec3<i32>(
+        i32(history_x),
+        i32(history_y),
+        i32(lane),
+    );
+    let geometry_valid = reprojected_history_valid != 0u;
+    var hist = bounded_probe_history(textureLoad(history_in, history_coord, 0).rgb);
     // Octel zero held the previous frame's integrated irradiance rather than
     // directional history. Seed that one directional sample from current.
     if (lane == 0u) {

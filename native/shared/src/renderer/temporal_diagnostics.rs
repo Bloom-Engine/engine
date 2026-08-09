@@ -29,7 +29,7 @@ fn diagnostic_shader_source(reactive: bool) -> String {
     } else {
         TAA_SHADER_WGSL.to_owned()
     };
-    let signature = "@fragment\nfn fs_main(in: VsOut) -> @location(0) vec4<f32> {";
+    let signature = "@fragment\nfn fs_main(in: VsOut) -> TaaOut {";
     let diagnostic_signature = r#"struct TaaDiagnosticOut {
     @location(0) rejection_reason: vec4<f32>,
     @location(1) motion: vec4<f32>,
@@ -45,13 +45,10 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#;
         "TAA entry point changed; diagnostics must follow it"
     );
 
-    let final_return = "    return vec4<f32>(blended, blended_w);";
+    let final_return = "    return TaaOut(vec4<f32>(blended, blended_w), current_depth_key);";
     let reactive_value = if reactive { "reactive" } else { "0.0" };
     let diagnostic_return = format!(
-        r#"    let history_in_bounds =
-        prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
-        prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
-    let clamped_ycocg = vec3<f32>(history_y_clamped, co_clamped, cg_clamped);
+        r#"    let clamped_ycocg = vec3<f32>(history_y_clamped, co_clamped, cg_clamped);
     let clamp_delta = length(history_ycocg - clamped_ycocg);
     let variance_heat = 1.0 - exp(-stddev.x * 4.0);
     let clamp_heat = 1.0 - exp(-clamp_delta * 4.0);
@@ -69,7 +66,8 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#;
     }} else if (reactive_weight > 0.01 &&
                reactive_weight >= max(disocclusion, motion_ramped)) {{
         reason = vec3<f32>(0.0, 0.9, 1.0);
-    }} else if (disocclusion > 0.01 && disocclusion >= motion_ramped) {{
+    }} else if (max(disocclusion, depth_disocclusion) > 0.01 &&
+               max(disocclusion, depth_disocclusion) >= motion_ramped) {{
         reason = vec3<f32>(1.0, 0.0, 0.8);
     }} else if (clamp_delta > 0.0001) {{
         reason = vec3<f32>(1.0, 0.75, 0.0);

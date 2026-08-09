@@ -777,7 +777,11 @@ impl Renderer {
                     alpha,
                     -0.5 * self.current_jitter_ndc[0],
                     0.5 * self.current_jitter_ndc[1],
-                    0.0,
+                    if self.current_proj_matrix[3][3].abs() < 0.5 {
+                        1.0
+                    } else {
+                        0.0
+                    },
                 ],
                 inv_vp: self.current_inv_vp_matrix,
                 prev_vp: self.prev_vp_matrix,
@@ -870,6 +874,12 @@ impl Renderer {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 9,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.taa_depth_history_views[taa_src_idx],
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 10,
                                     resource: wgpu::BindingResource::TextureView(reactive_view),
                                 },
                             ],
@@ -940,6 +950,12 @@ impl Renderer {
                                         &self.composite_sampler,
                                     ),
                                 },
+                                wgpu::BindGroupEntry {
+                                    binding: 9,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.taa_depth_history_views[taa_src_idx],
+                                    ),
+                                },
                             ],
                         }));
                 }
@@ -951,15 +967,31 @@ impl Renderer {
             let taa_ts = profiler.pass_timestamp_writes("taa_pass");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("taa_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.taa_views[taa_dst_idx],
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.taa_views[taa_dst_idx],
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.taa_depth_history_views[taa_dst_idx],
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 10_000.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: None,
                 timestamp_writes: taa_ts,
                 occlusion_query_set: None,

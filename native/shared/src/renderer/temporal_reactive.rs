@@ -145,6 +145,16 @@ pub(super) fn create_taa_bind_group_layout(
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         },
+        wgpu::BindGroupLayoutEntry {
+            binding: 9,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
     ];
     if !reactive {
         return device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -154,7 +164,7 @@ pub(super) fn create_taa_bind_group_layout(
     }
     let mut reactive_entries = entries.to_vec();
     reactive_entries.push(wgpu::BindGroupLayoutEntry {
-        binding: 9,
+        binding: 10,
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -171,9 +181,9 @@ pub(super) fn create_taa_bind_group_layout(
 
 pub(super) fn taa_reactive_shader_source() -> String {
     let source = TAA_SHADER_WGSL.replacen(
-        "@group(0) @binding(8) var velocity_samp: sampler;",
-        "@group(0) @binding(8) var velocity_samp: sampler;\n\
-         @group(0) @binding(9) var reactive_tex: texture_2d<f32>;",
+        "@group(0) @binding(9) var history_depth_tex: texture_2d<f32>;",
+        "@group(0) @binding(9) var history_depth_tex: texture_2d<f32>;\n\
+         @group(0) @binding(10) var reactive_tex: texture_2d<f32>;",
         1,
     );
     assert_ne!(
@@ -181,7 +191,7 @@ pub(super) fn taa_reactive_shader_source() -> String {
         "TAA binding declarations changed; reactive injection must be updated"
     );
     let source = source.replacen(
-        "    let alpha = max(motion_ramped, disocclusion);",
+        "    let alpha = max(max(motion_ramped, disocclusion), depth_disocclusion);",
         "    // The mask follows the same unjittered current-frame coordinate as\n\
          // the color sample. Coverage is the minimum current-frame weight: a\n\
          // 20% glass layer rejects at least 20% stale history, while fully\n\
@@ -192,7 +202,7 @@ pub(super) fn taa_reactive_shader_source() -> String {
              clamp(src_uv, vec2<f32>(0.0), vec2<f32>(1.0)),\n\
              0.0,\n\
          ).r;\n\
-         let alpha = max(max(motion_ramped, disocclusion), reactive);",
+         let alpha = max(max(max(motion_ramped, disocclusion), depth_disocclusion), reactive);",
         1,
     );
     assert!(
@@ -336,11 +346,18 @@ impl Renderer {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: HDR_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: TAA_DEPTH_HISTORY_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::RED,
+                        }),
+                    ],
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {

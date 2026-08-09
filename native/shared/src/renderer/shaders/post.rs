@@ -692,7 +692,7 @@ pub(in crate::renderer) const TAA_SHADER_WGSL: &str = "
 struct TaaParams {
     /// x = blend factor (current-frame weight); yz = the CURRENT frame's
     /// jitter as a composed-texture UV offset (see the unjitter note at the
-    /// current-frame sample); w padding.
+    /// current-frame sample); w = 1 for perspective depth, 0 for orthographic.
     params: vec4<f32>,
     /// Inverse of the current-frame view-projection matrix —
     /// reconstructs world-space position for history reprojection.
@@ -711,10 +711,16 @@ struct TaaParams {
 @group(0) @binding(6) var depth_samp: sampler;
 @group(0) @binding(7) var velocity_tex: texture_2d<f32>;
 @group(0) @binding(8) var velocity_samp: sampler;
+@group(0) @binding(9) var history_depth_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
+};
+
+struct TaaOut {
+    @location(0) color: vec4<f32>,
+    @location(1) depth_history: f32,
 };
 
 @vertex
@@ -747,14 +753,15 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
-// 5-tap Catmull-Rom upsample (Karis formulation). When the source
-// (composed_tex) is half-res relative to the destination, naive
-// bilinear loses sharpness; Catmull-Rom reconstructs a cubic-Hermite
-// curve through 4 source taps which preserves edges. Costs 5 bilinear
-// fetches vs 1 — worth it for the TSR upscale because the alternative
-// is a perceptibly blurrier image.
+// 5-tap Catmull-Rom upsample (Karis formulation), footprint-clipped.
+// The cubic has negative lobes and can otherwise overshoot the actual 2x2
+// source footprint, drawing dark/bright contours around hard silhouettes and
+// turning high-frequency textures into ink-like edges. Clipping to the hull
+// of the five already-fetched reconstruction taps retains cubic phase detail
+// without inventing radiance that was never shaded or adding texture reads.
 fn sample_catmull_rom(uv: vec2<f32>) -> vec4<f32> {
-    let tex_size = vec2<f32>(textureDimensions(composed_tex));
+    let tex_dims = vec2<i32>(textureDimensions(composed_tex));
+    let tex_size = vec2<f32>(tex_dims);
     let inv_size = 1.0 / tex_size;
     let sample_pos = uv * tex_size;
     let tex_pos1 = floor(sample_pos - 0.5) + 0.5;
@@ -771,17 +778,26 @@ fn sample_catmull_rom(uv: vec2<f32>) -> vec4<f32> {
     let tp3 = (tex_pos1 + 2.0) * inv_size;
     let tp12 = (tex_pos1 + offset12) * inv_size;
 
-    var result = vec4<f32>(0.0);
-    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp0.y), 0.0) * w12.x * w0.y;
-    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp12.y), 0.0) * w0.x * w12.y;
-    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp12.y), 0.0) * w12.x * w12.y;
-    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp12.y), 0.0) * w3.x * w12.y;
-    result += textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp3.y), 0.0) * w12.x * w3.y;
-    return max(result, vec4<f32>(0.0));
+    let tap0 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp0.y), 0.0);
+    let tap1 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp12.y), 0.0);
+    let tap2 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp12.y), 0.0);
+    let tap3 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp12.y), 0.0);
+    let tap4 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp3.y), 0.0);
+    let result =
+        tap0 * w12.x * w0.y +
+        tap1 * w0.x * w12.y +
+        tap2 * w12.x * w12.y +
+        tap3 * w3.x * w12.y +
+        tap4 * w12.x * w3.y;
+    // Reuse the five already-fetched bilinear taps for the radiance hull; no
+    // additional texture work is required for overshoot suppression.
+    let footprint_min = min(min(tap0, tap1), min(min(tap2, tap3), tap4));
+    let footprint_max = max(max(tap0, tap1), max(max(tap2, tap3), tap4));
+    return clamp(result, max(footprint_min, vec4<f32>(0.0)), footprint_max);
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> TaaOut {
     // composed_tex already carries HDR + SSR + SSGI*albedo + bloom +
     // fog + shafts — TAA only needs to reproject history and blend.
     // Alpha carries `indirect_weight` (see scene_compose) which the
@@ -804,12 +820,59 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let current = current_sample.rgb;
     let current_w = current_sample.a;
 
-    let depth = textureSampleLevel(depth_tex, depth_samp, in.uv, 0u);
+    // Closest-depth velocity dilation. Sampling the low-resolution velocity
+    // buffer linearly mixed foreground motion with zero/background motion at
+    // silhouettes. The resulting half-vector reprojected into neither
+    // surface, producing translucent gray trails while turning the camera.
+    // Select the closest sample in a bounded 3x3 input footprint so thin
+    // foreground geometry owns the history lookup around its edge.
+    let depth_dims = vec2<i32>(textureDimensions(depth_tex));
+    let depth_max_coord = depth_dims - vec2<i32>(1);
+    let center_coord = clamp(
+        vec2<i32>(floor(in.uv * vec2<f32>(depth_dims))),
+        vec2<i32>(0),
+        depth_max_coord,
+    );
+    var closest_coord = center_coord;
+    var depth = textureLoad(depth_tex, center_coord, 0);
+    let dilation_offsets = array<vec2<i32>, 4>(
+        vec2<i32>(-1, 0), vec2<i32>(1, 0),
+        vec2<i32>(0, -1), vec2<i32>(0, 1),
+    );
+    for (var i = 0; i < 4; i = i + 1) {
+        let coord = clamp(center_coord + dilation_offsets[i], vec2<i32>(0), depth_max_coord);
+        let candidate_depth = textureLoad(depth_tex, coord, 0);
+        if (candidate_depth < depth) {
+            depth = candidate_depth;
+            closest_coord = coord;
+        }
+    }
     let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
     let world_h = u.inv_vp * ndc;
     let world = world_h.xyz / world_h.w;
 
-    let vel = textureSampleLevel(velocity_tex, velocity_samp, in.uv, 0.0).rg;
+    // Persist a geometric depth key beside color history. Perspective clip-W
+    // is positive linear view distance; orthographic clip-W is constant, so
+    // that projection stores NDC depth instead. Sky gets an explicit far key.
+    let perspective = u.params.w > 0.5;
+    let current_depth_key = select(
+        depth,
+        select(1.0 / max(abs(world_h.w), 0.000001), 10000.0, depth >= 0.9999),
+        perspective,
+    );
+    let prev_world_clip = u.prev_vp * vec4<f32>(world, 1.0);
+    var expected_prev_depth = select(
+        prev_world_clip.z / max(abs(prev_world_clip.w), 0.000001),
+        prev_world_clip.w,
+        perspective,
+    );
+
+    let vel = textureLoad(velocity_tex, closest_coord, 0).rg;
+    var velocity_divergence = 0.0;
+    if (any(closest_coord != center_coord)) {
+        let center_vel = textureLoad(velocity_tex, center_coord, 0).rg;
+        velocity_divergence = length(vel - center_vel);
+    }
     let vel_len = length(vel);
     var prev_uv: vec2<f32>;
     if (vel_len > 0.00001) {
@@ -829,6 +892,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         } else {
             prev_uv = in.uv;
         }
+        expected_prev_depth = 10000.0;
     } else {
         let prev_clip = u.prev_vp * vec4<f32>(world, 1.0);
         let prev_ndc = prev_clip.xyz / prev_clip.w;
@@ -837,11 +901,40 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     var history = current;
     var history_w = current_w;
-    if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 && prev_uv.y >= 0.0 && prev_uv.y <= 1.0) {
+    var history_depth = current_depth_key;
+    let history_in_bounds =
+        prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
+        prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
+    if (history_in_bounds) {
         let h_sample = textureSampleLevel(history_tex, history_samp, prev_uv, 0.0);
         history = h_sample.rgb;
         history_w = h_sample.a;
+        let history_depth_dims = vec2<i32>(textureDimensions(history_depth_tex));
+        let history_depth_coord = clamp(
+            vec2<i32>(floor(prev_uv * vec2<f32>(history_depth_dims))),
+            vec2<i32>(0),
+            history_depth_dims - vec2<i32>(1),
+        );
+        history_depth = textureLoad(history_depth_tex, history_depth_coord, 0).r;
     }
+
+    // Reject history whose geometric provenance no longer matches the world
+    // point reprojected into the previous camera. This is the missing guard
+    // that color variance cannot provide: a pale counter and pale wall can be
+    // statistically similar while belonging to different surfaces, creating
+    // the translucent gray haze seen during camera motion.
+    let depth_base_tolerance = 0.02 + abs(expected_prev_depth) * 0.005;
+    let depth_gradient = abs(dpdx(expected_prev_depth)) + abs(dpdy(expected_prev_depth));
+    let depth_tolerance = max(
+        depth_base_tolerance,
+        min(depth_gradient * 2.0, depth_base_tolerance * 4.0),
+    );
+    let depth_error = abs(history_depth - expected_prev_depth);
+    let depth_disocclusion = select(
+        0.0,
+        smoothstep(depth_tolerance, depth_tolerance * 2.0, depth_error),
+        history_in_bounds,
+    );
 
     // Variance clamp in YCoCg (Karis 2014). Per-channel RGB min/max
     // clamping was producing chromatic sparkle on the stone floor
@@ -928,11 +1021,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dis_lo = stddev.x * mix(0.6, 0.25, motion_alpha);
     let disocclusion = smoothstep(dis_lo, stddev.x * 1.0, history_dist);
 
-    let motion_ramped = mix(u.params.x, 0.85, motion_alpha);
-    let alpha = max(motion_ramped, disocclusion);
+    // Divergent neighbor motion marks a silhouette/disocclusion footprint.
+    // Prefer the current frame there even when both individual vectors are
+    // small, rather than allowing a long-lived cross-surface history average.
+    let divergence_alpha = smoothstep(0.00025, 0.003, velocity_divergence);
+    let motion_ramped = max(mix(u.params.x, 0.85, motion_alpha), divergence_alpha);
+    let alpha = max(max(motion_ramped, disocclusion), depth_disocclusion);
     let blended = mix(clamped_history, current, alpha);
     let blended_w = mix(history_w, current_w, alpha);
-    return vec4<f32>(blended, blended_w);
+    return TaaOut(vec4<f32>(blended, blended_w), current_depth_key);
 }
 ";
 

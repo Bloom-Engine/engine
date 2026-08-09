@@ -799,6 +799,8 @@ pub(super) struct PtParamsCpu {
 pub(super) struct ProbeTemporalParams {
     /// x = alpha (EMA), y = force_refresh (1→alpha=1), z = grid_w (f32), w = grid_h (f32)
     pub(super) params: [f32; 4],
+    /// x = half_w, y = half_h, z = tile_size, w = projection p00.
+    pub(super) size: [f32; 4],
 }
 
 #[repr(C)]

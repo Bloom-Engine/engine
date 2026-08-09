@@ -18,6 +18,12 @@ pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth3
 /// composite pass tonemaps to the sRGB surface format.
 pub(super) const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// Previous-frame geometric depth consumed by TAA history validation.
+/// R32Float preserves enough range for the linear perspective-depth key used
+/// by large outdoor scenes while remaining a universally sampleable color
+/// attachment on native and WebGPU backends.
+pub(super) const TAA_DEPTH_HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+
 /// Number of bloom mip levels. 5 mips gives a long-tail glow that
 /// covers ~32× the source pixel size. More mips = more haloing,
 /// fewer = less coverage. Each mip is half the previous size.
@@ -770,6 +776,37 @@ pub(super) fn create_taa_textures(
     };
     let (a, av) = make("taa_a");
     let (b, bv) = make("taa_b");
+    ([a, b], [av, bv])
+}
+
+/// Create the two full-resolution geometric history surfaces paired with the
+/// TAA color ping-pong. The TAA pass writes both attachments together, so a
+/// color history can never advance without its matching depth provenance.
+pub(super) fn create_taa_depth_history_textures(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+    let make = |label: &str| -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TAA_DEPTH_HISTORY_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    };
+    let (a, av) = make("taa_depth_history_a");
+    let (b, bv) = make("taa_depth_history_b");
     ([a, b], [av, bv])
 }
 

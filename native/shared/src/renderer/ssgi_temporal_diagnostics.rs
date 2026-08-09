@@ -66,6 +66,16 @@ impl SsgiTemporalDiagnosticResources {
             },
             count: None,
         };
+        let texture_2d = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let storage_buffer = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -95,6 +105,7 @@ impl SsgiTemporalDiagnosticResources {
                 storage_buffer(3),
                 storage(4),
                 storage(5),
+                texture_2d(6),
             ],
         });
         let source = format!("{}{}", PROBE_HELPERS_WGSL, SHADER);
@@ -179,6 +190,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(&resources.views[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self.velocity_rt_view),
                 },
             ],
         });
