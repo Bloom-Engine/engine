@@ -1,8 +1,8 @@
 {
   "native/shared/src/physics_jolt.rs": 3858,
   "native/shared/src/renderer/material_system.rs": 2335,
-  "native/shared/src/renderer/mod.rs": 14774,
-  "native/shared/src/scene.rs": 2902,
-  "native/shared/tests/golden_render.rs": 2253,
-  "native/web/src/lib.rs": 2351
+  "native/shared/src/renderer/mod.rs": 14649,
+  "native/shared/src/scene.rs": 2778,
+  "native/shared/tests/golden_render.rs": 2249,
+  "native/web/src/lib.rs": 2349
 }

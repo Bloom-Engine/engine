@@ -1,4 +1,5 @@
-use super::core::{scene_refractive_shader_source, SCENE_SHADER, SHADER_2D};
+use super::core::{scene_refractive_shader_source, SCENE_SHADER};
+use super::legacy::SHADER_2D;
 
 #[test]
 fn extracted_batched_2d_shader_parses() {

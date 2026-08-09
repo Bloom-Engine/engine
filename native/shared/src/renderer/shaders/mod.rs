@@ -2,9 +2,11 @@
 // everything re-exports from here so call sites keep `shaders::NAME`.
 
 mod core;
-pub(super) use core::{scene_refractive_shader_source, SCENE_SHADER, SHADER_2D, SHADER_3D};
+pub(super) use core::{scene_refractive_shader_source, SCENE_SHADER};
 #[cfg(test)]
 mod core_tests;
+mod legacy;
+pub(super) use legacy::{SHADER_2D, SHADER_3D};
 mod weighted;
 pub(super) use weighted::{
     scene_weighted_transparency_shader_source, WEIGHTED_TRANSPARENCY_RESOLVE_SHADER,
@@ -26,9 +28,10 @@ pub(super) use gi::{
 mod ssgi;
 pub(super) use ssgi::{
     PROBE_HELPERS_WGSL, SSGI_PROBE_PLACE_WGSL, SSGI_PROBE_RESOLVE_WGSL, SSGI_PROBE_TEMPORAL_WGSL,
-    SSGI_PROBE_TRACE_HW_WGSL, SSGI_PROBE_TRACE_SDF_WGSL, SSGI_PROBE_TRACE_SW_WGSL, SSR_SHADER_WGSL,
-    SSR_TEMPORAL_SHADER_WGSL,
+    SSGI_PROBE_TRACE_HW_WGSL, SSGI_PROBE_TRACE_SDF_WGSL, SSGI_PROBE_TRACE_SW_WGSL,
 };
+mod ssr;
+pub(super) use ssr::{SSR_SHADER_WGSL, SSR_TEMPORAL_SHADER_WGSL};
 mod pt;
 #[cfg(test)]
 pub(super) use pt::PT_KERNEL_WGSL;
