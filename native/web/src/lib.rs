@@ -2022,11 +2022,12 @@ pub fn bloom_commit_model(staging_handle: f64) -> f64 {
     // bloom_commit_model in ffi_core/models.rs.
     let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
     for tex in &staged.textures {
-        tex_map.push(eng.renderer.register_texture_kind(
+        tex_map.push(eng.renderer.register_texture_kind_with_alpha_coverage(
             tex.width,
             tex.height,
             &tex.data,
             tex.is_normal,
+            tex.alpha_coverage_reference,
         ));
     }
     let mut model = staged.model;
@@ -2045,11 +2046,18 @@ pub fn bloom_commit_model(staging_handle: f64) -> f64 {
         }
     };
     for mesh in &mut model.meshes {
+        let mesh = std::sync::Arc::make_mut(mesh);
         remap(&mut mesh.texture_idx);
         remap(&mut mesh.normal_texture_idx);
         remap(&mut mesh.metallic_roughness_texture_idx);
         remap(&mut mesh.emissive_texture_idx);
         remap(&mut mesh.occlusion_texture_idx);
+        if let Some(binding) = &mut mesh.transmission.texture {
+            remap(&mut binding.runtime_texture_idx);
+        }
+        if let Some(binding) = &mut mesh.transmission.thickness_texture {
+            remap(&mut binding.runtime_texture_idx);
+        }
     }
     eng.models.models.alloc(model)
 }
