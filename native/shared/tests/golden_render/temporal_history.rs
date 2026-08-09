@@ -958,6 +958,33 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
                 counts[4] > 0,
                 "motion capture must exercise history clamping"
             );
+        } else if name == "taa-temporal-confidence" {
+            let pixels = image::open(&path).unwrap().to_rgb8();
+            let growing = pixels
+                .pixels()
+                .filter(|pixel| pixel[1] > pixel[0].saturating_add(2))
+                .count();
+            let reset = pixels
+                .pixels()
+                .filter(|pixel| pixel[0] > 2 && pixel[1].saturating_add(2) < pixel[0])
+                .count();
+            let retaining = pixels.pixels().filter(|pixel| pixel[2] > 2).count();
+            eprintln!(
+                "temporal-corpus confidence_growing={growing} confidence_reset={reset} \
+                 retaining_history={retaining}"
+            );
+            assert!(
+                growing > 0,
+                "compatible pixels must grow persistent confidence"
+            );
+            assert!(
+                reset > 0,
+                "rejected pixels must reset persistent confidence"
+            );
+            assert!(
+                retaining > 0,
+                "accepted pixels must retain temporal history"
+            );
         }
     }
     assert!(eng.renderer.pending_quality_capture_dir.is_none());

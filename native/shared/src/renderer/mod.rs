@@ -4638,7 +4638,7 @@ impl Renderer {
                     Some(wgpu::ColorTargetState {
                         format: TAA_DEPTH_HISTORY_FORMAT,
                         blend: None,
-                        write_mask: wgpu::ColorWrites::RED,
+                        write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
                     }),
                 ],
                 compilation_options: Default::default(),

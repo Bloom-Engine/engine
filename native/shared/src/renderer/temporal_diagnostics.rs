@@ -45,16 +45,14 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#;
         "TAA entry point changed; diagnostics must follow it"
     );
 
-    let final_return = "    return TaaOut(vec4<f32>(blended, blended_w), current_depth_key);";
-    let reactive_value = if reactive { "reactive" } else { "0.0" };
+    let final_return = r#"    return TaaOut(
+        vec4<f32>(blended, blended_w),
+        vec2<f32>(current_depth_key, next_history_confidence),
+    );"#;
     let diagnostic_return = format!(
         r#"    let clamped_ycocg = vec3<f32>(history_y_clamped, co_clamped, cg_clamped);
     let clamp_delta = length(history_ycocg - clamped_ycocg);
-    let variance_heat = 1.0 - exp(-stddev.x * 4.0);
-    let clamp_heat = 1.0 - exp(-clamp_delta * 4.0);
-    let history_confidence = select(
-        0.0, clamp(1.0 - alpha, 0.0, 1.0), history_in_bounds);
-    let reactive_weight = {reactive_value};
+    let reactive_weight = reactive;
 
     // Categorical dominant reason: gray seed, red off-screen, cyan reactive,
     // magenta disocclusion, yellow neighborhood clamp, blue motion, green keep.
@@ -76,8 +74,8 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#;
     }}
 
     // Motion RG is signed around 0.5; B is magnitude. Reprojection RG stores
-    // previous-frame UV and B is its validity. Confidence RGB stores local
-    // luma variance, clamp magnitude, and retained-history contribution.
+    // previous-frame UV and B is its validity. Confidence RGB stores the
+    // persistent incoming lock, outgoing lock, and retained-history weight.
     let motion_debug = vec3<f32>(
         clamp(0.5 + vel.x * 32.0, 0.0, 1.0),
         clamp(0.5 - vel.y * 32.0, 0.0, 1.0),
@@ -88,7 +86,12 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#;
         vec4<f32>(motion_debug, 1.0),
         vec4<f32>(clamp(prev_uv, vec2<f32>(0.0), vec2<f32>(1.0)),
                   select(0.0, 1.0, history_in_bounds), 1.0),
-        vec4<f32>(variance_heat, clamp_heat, history_confidence, 1.0),
+        vec4<f32>(
+            clamp(history_confidence, 0.0, 1.0),
+            clamp(next_history_confidence, 0.0, 1.0),
+            clamp(1.0 - alpha, 0.0, 1.0),
+            1.0,
+        ),
     );"#
     );
     let source = source.replacen(final_return, &diagnostic_return, 1);

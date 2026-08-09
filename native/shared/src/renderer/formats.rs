@@ -18,11 +18,38 @@ pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth3
 /// composite pass tonemaps to the sRGB surface format.
 pub(super) const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Previous-frame geometric depth consumed by TAA history validation.
-/// R32Float preserves enough range for the linear perspective-depth key used
-/// by large outdoor scenes while remaining a universally sampleable color
-/// attachment on native and WebGPU backends.
-pub(super) const TAA_DEPTH_HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+/// Previous-frame TAA provenance: R = geometric depth, G = normalized history
+/// confidence/length. RG16Float has the same 4 B/px footprint as the former
+/// R32Float depth-only target and is a core renderable + sampleable WebGPU
+/// format. Half-float relative precision remains well inside the geometric
+/// rejection tolerance, including the 10 km sky sentinel.
+pub(super) const TAA_DEPTH_HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+
+#[cfg(test)]
+mod taa_history_format_tests {
+    use super::*;
+
+    #[test]
+    fn depth_and_confidence_fit_the_original_webgpu_memory_contract() {
+        assert_eq!(TAA_DEPTH_HISTORY_FORMAT.block_copy_size(None), Some(4));
+        let features = TAA_DEPTH_HISTORY_FORMAT.guaranteed_format_features(wgpu::Features::empty());
+        let required =
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        assert!(features.allowed_usages.contains(required));
+    }
+
+    #[test]
+    fn half_depth_quantization_stays_inside_taa_rejection_tolerance() {
+        for depth in [0.0_f32, 0.01, 0.1, 1.0, 10.0, 100.0, 1_000.0, 10_000.0] {
+            let stored = half::f16::from_f32(depth).to_f32();
+            let tolerance = 0.02 + depth.abs() * 0.005;
+            assert!(
+                (stored - depth).abs() < tolerance,
+                "depth {depth} quantized to {stored} outside tolerance {tolerance}"
+            );
+        }
+    }
+}
 
 /// Number of bloom mip levels. 5 mips gives a long-tail glow that
 /// covers ~32× the source pixel size. More mips = more haloing,
@@ -779,9 +806,9 @@ pub(super) fn create_taa_textures(
     ([a, b], [av, bv])
 }
 
-/// Create the two full-resolution geometric history surfaces paired with the
-/// TAA color ping-pong. The TAA pass writes both attachments together, so a
-/// color history can never advance without its matching depth provenance.
+/// Create the two full-resolution geometric/confidence history surfaces paired
+/// with the TAA color ping-pong. The TAA pass writes both attachments together,
+/// so color can never advance without matching depth and confidence provenance.
 pub(super) fn create_taa_depth_history_textures(
     device: &wgpu::Device,
     width: u32,

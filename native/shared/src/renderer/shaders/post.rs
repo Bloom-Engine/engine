@@ -720,7 +720,8 @@ struct VsOut {
 
 struct TaaOut {
     @location(0) color: vec4<f32>,
-    @location(1) depth_history: f32,
+    /// R = geometric depth, G = normalized persistent history confidence.
+    @location(1) provenance_history: vec2<f32>,
 };
 
 @vertex
@@ -904,6 +905,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     var history = current;
     var history_w = current_w;
     var history_depth = current_depth_key;
+    var history_confidence = 0.0;
     let history_in_bounds =
         prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
         prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
@@ -917,7 +919,9 @@ fn fs_main(in: VsOut) -> TaaOut {
             vec2<i32>(0),
             history_depth_dims - vec2<i32>(1),
         );
-        history_depth = textureLoad(history_depth_tex, history_depth_coord, 0).r;
+        let history_provenance = textureLoad(history_depth_tex, history_depth_coord, 0).rg;
+        history_depth = history_provenance.r;
+        history_confidence = history_provenance.g;
     }
 
     // Reject history whose geometric provenance no longer matches the world
@@ -1028,10 +1032,44 @@ fn fs_main(in: VsOut) -> TaaOut {
     // small, rather than allowing a long-lived cross-surface history average.
     let divergence_alpha = smoothstep(0.00025, 0.003, velocity_divergence);
     let motion_ramped = max(mix(u.params.x, 0.85, motion_alpha), divergence_alpha);
-    let alpha = max(max(motion_ramped, disocclusion), depth_disocclusion);
+    // Reactive coverage is injected by the material-aware TAA variant. Keep a
+    // concrete zero in the base shader so confidence policy is identical for
+    // both variants and diagnostics can report the real persistent lock.
+    let reactive = 0.0;
+    // Confidence represents geometric/material continuity. Do not erase that
+    // persistent fact for a luma-only neighborhood excursion: sub-pixel normal
+    // and texture detail can cross the color-disocclusion threshold at rest,
+    // and repeatedly unlocking those valid pixels turns detail into shimmer.
+    // Color disocclusion still raises alpha below; it simply does not destroy
+    // the longer-lived geometric lock.
+    let temporal_rejection =
+        max(depth_disocclusion, max(divergence_alpha, reactive));
+
+    // A confidence value of 1 represents sixteen compatible samples. At rest,
+    // enforce the unbiased running-average weight 1/(N+1) until lock; after
+    // lock, the authored steady-state alpha takes over. Under even sub-pixel
+    // motion the established motion policy already bounds stale history, so
+    // disable bootstrap before 0.04 output pixels/frame rather than turning a
+    // safe resolve into visibly noisier current samples during a slow pan.
+    let history_usable = history_in_bounds && u.params.x < 0.999;
+    let history_sample_count = history_confidence * 16.0;
+    let bootstrap_running_alpha =
+        select(1.0, 1.0 / (history_sample_count + 1.0), history_usable);
+    let bootstrap_static = 1.0 - smoothstep(0.00001, 0.0001, vel_len);
+    let bootstrap_alpha = mix(u.params.x, bootstrap_running_alpha, bootstrap_static);
+    let alpha = max(
+        max(max(motion_ramped, disocclusion), max(depth_disocclusion, reactive)),
+        bootstrap_alpha,
+    );
+    let accepted_history = select(0.0, 1.0 - temporal_rejection, history_usable);
+    let next_history_confidence =
+        min(history_confidence + 1.0 / 16.0, 1.0) * accepted_history;
     let blended = mix(clamped_history, current, alpha);
     let blended_w = mix(history_w, current_w, alpha);
-    return TaaOut(vec4<f32>(blended, blended_w), current_depth_key);
+    return TaaOut(
+        vec4<f32>(blended, blended_w),
+        vec2<f32>(current_depth_key, next_history_confidence),
+    );
 }
 ";
 

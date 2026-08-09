@@ -191,7 +191,7 @@ pub(super) fn taa_reactive_shader_source() -> String {
         "TAA binding declarations changed; reactive injection must be updated"
     );
     let source = source.replacen(
-        "    let alpha = max(max(motion_ramped, disocclusion), depth_disocclusion);",
+        "    let reactive = 0.0;",
         "    // The mask follows the same unjittered current-frame coordinate as\n\
          // the color sample. Coverage is the minimum current-frame weight: a\n\
          // 20% glass layer rejects at least 20% stale history, while fully\n\
@@ -201,8 +201,7 @@ pub(super) fn taa_reactive_shader_source() -> String {
              composed_samp,\n\
              clamp(src_uv, vec2<f32>(0.0), vec2<f32>(1.0)),\n\
              0.0,\n\
-         ).r;\n\
-         let alpha = max(max(max(motion_ramped, disocclusion), depth_disocclusion), reactive);",
+         ).r;",
         1,
     );
     assert!(
@@ -355,7 +354,7 @@ impl Renderer {
                         Some(wgpu::ColorTargetState {
                             format: TAA_DEPTH_HISTORY_FORMAT,
                             blend: None,
-                            write_mask: wgpu::ColorWrites::RED,
+                            write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
                         }),
                     ],
                     compilation_options: Default::default(),
