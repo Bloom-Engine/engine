@@ -149,7 +149,7 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
          native={ultra_energy:.4}"
     );
     assert!(
-        default_energy >= 2.10,
+        default_energy >= 2.20,
         "0.75 settled detail regressed below its accepted reconstruction floor: \
          default={default_energy:.4}"
     );
@@ -157,9 +157,10 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     // but must not keep diffusing a static surface. The zero-velocity
     // prev-jitter regression measured 72.9%; trusting zero velocity reached
     // 81.2%, and the source-footprint color-change policy reaches at least
-    // 83% without accepting stale geometry history.
+    // 86% without accepting stale geometry history. This also protects the
+    // bounded stationary reconstruction residual from being silently removed.
     assert!(
-        default_energy >= default_seed_energy * 0.83,
+        default_energy >= default_seed_energy * 0.86,
         "static TAA accumulation lost more detail than the bounded AA window permits: \
          seed={default_seed_energy:.4}, settled={default_energy:.4}"
     );
@@ -179,6 +180,22 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         Some("camera-motion-phase-compressed-linear")
     );
     assert_eq!(reconstruction["history_filter_samples"].as_u64(), Some(1));
+    assert_eq!(
+        reconstruction["stationary_reconstruction_detail_strength"].as_f64(),
+        Some(0.2)
+    );
+    assert_eq!(
+        reconstruction["stationary_reconstruction_detail_clamp"].as_f64(),
+        Some(0.08)
+    );
+    assert_eq!(
+        reconstruction["stationary_reconstruction_additional_samples"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        reconstruction["stationary_reconstruction_motion_gated"].as_bool(),
+        Some(true)
+    );
     assert_eq!(reconstruction["camera_moving"].as_bool(), Some(false));
     assert_eq!(reconstruction["render_scale"].as_f64(), Some(0.75));
     assert_eq!(

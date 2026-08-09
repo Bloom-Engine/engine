@@ -1150,7 +1150,27 @@ fn fs_main(in: VsOut) -> TaaOut {
     let accepted_history = select(0.0, 1.0 - temporal_rejection, history_usable);
     let next_history_confidence =
         min(history_confidence + 1.0 / 16.0, 1.0) * accepted_history;
-    let blended = mix(clamped_history, current, alpha);
+    var blended = mix(clamped_history, current, alpha);
+    // The temporal average suppresses some of the cubic reconstruction's
+    // source-phase residual even after a stable surface has reached full
+    // confidence. Reinject a small bounded portion of that already-computed
+    // current-vs-linear residual only on settled, stationary fractional
+    // reconstruction. This is part of reconstruction rather than a second
+    // output sharpen: it adds no samples, is disabled for camera/object
+    // motion, and vanishes at native scale.
+    let settled_static = history_confidence
+        * (1.0 - motion_alpha)
+        * select(1.0, 0.0, camera_moving);
+    let fractional_reconstruction = 1.0 - smoothstep(0.95, 1.0, reconstruction_scale);
+    let reconstruction_detail = clamp(
+        current - center_rgb,
+        vec3<f32>(-0.08),
+        vec3<f32>(0.08),
+    );
+    blended = max(
+        blended + reconstruction_detail * (0.20 * settled_static * fractional_reconstruction),
+        vec3<f32>(0.0),
+    );
     let blended_w = mix(history_w, current_w, alpha);
     return TaaOut(
         vec4<f32>(blended, blended_w),

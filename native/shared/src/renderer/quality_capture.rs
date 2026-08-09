@@ -1166,6 +1166,10 @@ impl Renderer {
         out.push_str(",\"mode\":\"source-footprint-temporal\"");
         out.push_str(",\"history_filter\":\"camera-motion-phase-compressed-linear\"");
         out.push_str(",\"history_filter_samples\":1");
+        out.push_str(",\"stationary_reconstruction_detail_strength\":0.2");
+        out.push_str(",\"stationary_reconstruction_detail_clamp\":0.08");
+        out.push_str(",\"stationary_reconstruction_additional_samples\":0");
+        out.push_str(",\"stationary_reconstruction_motion_gated\":true");
         out.push_str(",\"camera_moving\":");
         out.push_str(
             if super::postfx_chain::taa_camera_moving(
