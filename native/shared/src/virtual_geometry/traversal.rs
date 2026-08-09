@@ -1,5 +1,6 @@
 use super::{GpuVirtualGeometryPool, VirtualGeometryGpuError, VirtualMeshId};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use super::gpu_pool::MAX_GPU_HIERARCHY_LEVELS;
@@ -7,6 +8,7 @@ use super::gpu_pool::MAX_GPU_HIERARCHY_LEVELS;
 const WORKGROUP_SIZE: u32 = 64;
 const INSTANCE_CONE_CULL_SAFE: u32 = 1 << 0;
 const ID_SLOT_MASK: u32 = (1 << 20) - 1;
+static NEXT_SELECTOR_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Fixed GPU input record for one virtual-geometry instance (128 bytes).
 ///
@@ -189,6 +191,7 @@ const _: () = assert!(std::mem::size_of::<TraversalParams>() == 224);
 /// but is not registered with `Renderer`, so constructing the page pool alone
 /// still has no shipping-path cost or pixel effect.
 pub struct GpuVirtualHierarchySelector {
+    id: u64,
     config: GpuVirtualTraversalConfig,
     pool_id: u64,
     instance_buffer: wgpu::Buffer,
@@ -273,6 +276,7 @@ impl GpuVirtualHierarchySelector {
             cache: None,
         });
         Ok(Self {
+            id: NEXT_SELECTOR_ID.fetch_add(1, Ordering::Relaxed),
             config,
             pool_id: pool.id(),
             instance_buffer,
@@ -384,6 +388,10 @@ impl GpuVirtualHierarchySelector {
 
     pub fn counter_buffer(&self) -> &wgpu::Buffer {
         &self.counter_buffer
+    }
+
+    pub(super) const fn id(&self) -> u64 {
+        self.id
     }
 }
 

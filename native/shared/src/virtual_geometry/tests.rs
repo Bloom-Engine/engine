@@ -1,18 +1,32 @@
 #[cfg(not(target_arch = "wasm32"))]
+use super::decode::VIRTUAL_GEOMETRY_DECODE_WGSL;
+#[cfg(not(target_arch = "wasm32"))]
 use super::traversal::select_cpu_reference;
 use super::*;
 use bloom_geometry_format::{
     hex_hash, sha256, CompatibilityReason, GeometryArchive, PageRecord, CLUSTER_RECORD_BYTES,
     COMPATIBILITY_RECORD_BYTES, ENDIAN_TAG, FLAG_COARSE_ROOT, HEADER_BYTES, MAGIC, MIN_PAGE_BYTES,
-    NO_RELATION, PAGE_RECORD_BYTES, VERSION,
+    NO_RELATION, PAGE_RECORD_BYTES, QUANTIZED_VERSION, VERSION,
 };
 use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
+const VIRTUAL_GEOMETRY_DECODE_PROBE_WGSL: &str =
+    include_str!("../../shaders/virtual_geometry/decode_probe.wgsl");
 
 fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i16(bytes: &mut Vec<u8>, value: i16) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -167,10 +181,14 @@ fn encode_archive(mut archive: GeometryArchive) -> Vec<u8> {
         for cluster in &mut archive.clusters[cluster_start..cluster_end] {
             cluster.page_index = page_index as u32;
             cluster.vertex_offset = payload.len() as u64;
-            for _ in 0..cluster.vertex_count {
-                for _ in 0..18 {
-                    push_f32(&mut payload, 0.0);
-                }
+            cluster.vertex_stride = archive.vertex_encoding.stride();
+            for vertex_index in 0..cluster.vertex_count {
+                let position = match vertex_index % 3 {
+                    0 => [0.0, 0.0, 0.0],
+                    1 => [1.0, 0.0, 0.0],
+                    _ => [0.0, 1.0, 0.0],
+                };
+                encode_test_vertex(&mut payload, position, archive.vertex_encoding);
             }
             cluster.index_offset = payload.len() as u64;
             payload.extend_from_slice(&[0, 1, 2]);
@@ -253,6 +271,44 @@ fn encode_archive(mut archive: GeometryArchive) -> Vec<u8> {
     bytes.extend_from_slice(&payload);
     assert_eq!(bytes.len(), file_bytes);
     bytes
+}
+
+fn encode_test_vertex(output: &mut Vec<u8>, position: [f32; 3], encoding: VertexEncoding) {
+    match encoding {
+        VertexEncoding::Float32 => {
+            for value in position
+                .into_iter()
+                .chain([0.0, 0.0, 1.0])
+                .chain([1.0, 0.0, 0.0, 1.0])
+                .chain([position[0], position[1]])
+                .chain([position[0] * 0.5, position[1] * 0.5])
+                .chain([1.0, 0.5, 0.25, 1.0])
+            {
+                push_f32(output, value);
+            }
+        }
+        VertexEncoding::Quantized => {
+            for value in position {
+                push_u16(output, if value == 0.0 { 0 } else { u16::MAX });
+            }
+            push_i16(output, 0);
+            push_i16(output, 0);
+            push_i16(output, i16::MAX);
+            push_i16(output, 0);
+            for value in [
+                position[0],
+                position[1],
+                position[0] * 0.5,
+                position[1] * 0.5,
+            ] {
+                push_u16(output, half::f16::from_f32(value).to_bits());
+            }
+            output.extend_from_slice(&[255, 128, 64, 255]);
+            push_i16(output, i16::MAX);
+            push_u16(output, 1);
+            push_u16(output, 0);
+        }
+    }
 }
 
 #[test]
@@ -402,9 +458,12 @@ fn try_traversal_device() -> Option<(wgpu::Device, wgpu::Queue)> {
             .ok()?;
     let mut limits = wgpu::Limits::downlevel_defaults();
     limits.max_storage_buffers_per_shader_stage = 7;
+    let optional_indirect =
+        wgpu::Features::INDIRECT_FIRST_INSTANCE | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("virtual_geometry_traversal_test_device"),
         required_limits: limits,
+        required_features: adapter.features() & optional_indirect,
         ..Default::default()
     }))
     .ok()
@@ -499,6 +558,176 @@ fn decode_records<T: bytemuck::Pod>(bytes: &[u8], count: usize) -> Vec<T> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuDecodedVirtualVertex {
+    position: [f32; 4],
+    normal: [f32; 4],
+    tangent: [f32; 4],
+    uv0_uv1: [f32; 4],
+    color: [f32; 4],
+    /// Selected record, cluster, corner, and page-local vertex index.
+    info: [u32; 4],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const _: () = assert!(std::mem::size_of::<GpuDecodedVirtualVertex>() == 96);
+
+#[cfg(not(target_arch = "wasm32"))]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuVirtualDecodeProbeParams {
+    selected_count: u32,
+    max_corners: u32,
+    output_capacity: u32,
+    reserved: u32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn gpu_buffer_binding(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_virtual_decode_probe(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pool: &GpuVirtualGeometryPool,
+    selector: &GpuVirtualHierarchySelector,
+    selected_count: u32,
+    max_corners: u32,
+) -> Vec<GpuDecodedVirtualVertex> {
+    let output_count = selected_count
+        .checked_mul(max_corners)
+        .expect("virtual decode probe output count overflow");
+    let output_bytes =
+        u64::from(output_count) * std::mem::size_of::<GpuDecodedVirtualVertex>() as u64;
+    let output = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("virtual_geometry_decode_probe_output"),
+        size: output_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("virtual_geometry_decode_probe_params"),
+        size: std::mem::size_of::<GpuVirtualDecodeProbeParams>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(
+        &params,
+        0,
+        bytemuck::bytes_of(&GpuVirtualDecodeProbeParams {
+            selected_count,
+            max_corners,
+            output_capacity: output_count,
+            reserved: 0,
+        }),
+    );
+
+    let shader_source = [
+        "@group(0) @binding(0) var<storage, read> virtual_page_words: BloomVirtualRawWords;\n",
+        VIRTUAL_GEOMETRY_DECODE_WGSL,
+        VIRTUAL_GEOMETRY_DECODE_PROBE_WGSL,
+    ]
+    .concat();
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("virtual_geometry_decode_probe_shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("virtual_geometry_decode_probe_pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("decode_selected_corners"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("virtual_geometry_decode_probe_bind_group"),
+        layout: &layout,
+        entries: &[
+            gpu_buffer_binding(0, pool.physical_buffer()),
+            gpu_buffer_binding(1, pool.mesh_table_buffer()),
+            gpu_buffer_binding(2, pool.cluster_table_buffer()),
+            gpu_buffer_binding(3, selector.selected_buffer()),
+            gpu_buffer_binding(4, &output),
+            gpu_buffer_binding(5, &params),
+        ],
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("virtual_geometry_decode_probe_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("virtual_geometry_decode_probe"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(max_corners.div_ceil(32), selected_count, 1);
+    }
+    queue.submit(std::iter::once(encoder.finish()));
+    decode_records(
+        &read_gpu_buffer(device, queue, &output, output_bytes),
+        output_count as usize,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_f32x4_close(actual: [f32; 4], expected: [f32; 4]) {
+    for (component, expected) in actual.into_iter().zip(expected) {
+        assert!(
+            (component - expected).abs() <= 1.0e-5,
+            "decoded component {component} did not match {expected}; actual vector was {actual:?}"
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_decoded_test_vertices(
+    decoded: &[GpuDecodedVirtualVertex],
+    selected: &[GpuSelectedVirtualCluster],
+    expected_color: [f32; 4],
+) {
+    let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    for (selected_index, selection) in selected.iter().enumerate() {
+        for (corner, position) in positions.into_iter().enumerate() {
+            let vertex = decoded[selected_index * 3 + corner];
+            assert_f32x4_close(
+                vertex.position,
+                [position[0], position[1], position[2], 1.0],
+            );
+            assert_f32x4_close(vertex.normal, [0.0, 0.0, 1.0, 0.0]);
+            assert_f32x4_close(vertex.tangent, [1.0, 0.0, 0.0, 1.0]);
+            assert_f32x4_close(
+                vertex.uv0_uv1,
+                [
+                    position[0],
+                    position[1],
+                    position[0] * 0.5,
+                    position[1] * 0.5,
+                ],
+            );
+            assert_f32x4_close(vertex.color, expected_color);
+            assert_eq!(
+                vertex.info,
+                [
+                    selected_index as u32,
+                    selection.cluster_index,
+                    corner as u32,
+                    corner as u32,
+                ]
+            );
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn run_traversal(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -589,6 +818,454 @@ fn make_hierarchy_fully_resident(
     for cluster in [2, 3, 4, 6] {
         pool.make_group_resident(queue, mesh, cluster).unwrap();
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_gpu_raw_page_decode(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    archive: GeometryArchive,
+    expected_color: [f32; 4],
+) {
+    let mut pool = GpuVirtualGeometryPool::new(device, gpu_config(5)).unwrap();
+    let mesh = pool.register_mesh(queue, hierarchy_asset(archive)).unwrap();
+    make_hierarchy_fully_resident(&mut pool, queue, mesh);
+    let selector = GpuVirtualHierarchySelector::new(device, &pool, traversal_config()).unwrap();
+    let (selected, requests, counters) = run_traversal(
+        device,
+        queue,
+        &pool,
+        &selector,
+        &[GpuVirtualInstance::identity(mesh, 69)],
+        traversal_view(50.0),
+    );
+    assert_eq!(counters.selected_count, 4);
+    assert_eq!(counters.selected_overflow, 0);
+    assert_eq!(counters.invalid_records, 0);
+    assert_eq!(counters.missing_current_pages, 0);
+    assert!(requests.is_empty());
+    assert_eq!(selected.len(), 4);
+    let decoded = run_virtual_decode_probe(device, queue, &pool, &selector, 4, 3);
+    assert_eq!(decoded.len(), 12);
+    assert_decoded_test_vertices(&decoded, &selected, expected_color);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_raw_page_vertex_decoder_matches_float32_and_quantized_archives() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping raw-page decode oracle");
+        return;
+    };
+    assert_gpu_raw_page_decode(&device, &queue, hierarchy_archive(), [1.0, 0.5, 0.25, 1.0]);
+
+    let mut quantized = hierarchy_archive();
+    quantized.format_version = QUANTIZED_VERSION;
+    quantized.vertex_encoding = VertexEncoding::Quantized;
+    assert_gpu_raw_page_decode(
+        &device,
+        &queue,
+        quantized,
+        [1.0, 128.0 / 255.0, 64.0 / 255.0, 1.0],
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_draw_emission(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pool: &GpuVirtualGeometryPool,
+    selector: &GpuVirtualHierarchySelector,
+    emitter: &GpuVirtualDrawEmitter,
+    instances: &[GpuVirtualInstance],
+    view: VirtualGeometryView,
+) -> (
+    Vec<GpuVirtualDrawIndirect>,
+    GpuVirtualDrawEmissionState,
+    GpuVirtualDispatchIndirect,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("virtual_geometry_draw_emission_test_encoder"),
+    });
+    selector
+        .record(queue, &mut encoder, pool, instances, view)
+        .unwrap();
+    emitter.record(queue, &mut encoder, selector).unwrap();
+    queue.submit(std::iter::once(encoder.finish()));
+    let state_bytes = read_gpu_buffer(
+        device,
+        queue,
+        emitter.state_buffer(),
+        std::mem::size_of::<GpuVirtualDrawEmissionState>() as u64,
+    );
+    let state = bytemuck::pod_read_unaligned::<GpuVirtualDrawEmissionState>(&state_bytes);
+    let dispatch_bytes = read_gpu_buffer(
+        device,
+        queue,
+        emitter.dispatch_buffer(),
+        std::mem::size_of::<GpuVirtualDispatchIndirect>() as u64,
+    );
+    let dispatch = bytemuck::pod_read_unaligned::<GpuVirtualDispatchIndirect>(&dispatch_bytes);
+    let command_bytes = read_gpu_buffer(
+        device,
+        queue,
+        emitter.command_buffer(),
+        emitter.command_buffer().size(),
+    );
+    let commands = decode_records(&command_bytes, state.draw_count as usize);
+    (commands, state, dispatch)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_virtual_draw_emission_compacts_selected_clusters_into_exact_indirect_commands() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping virtual draw emission oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, mesh);
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let emitter = GpuVirtualDrawEmitter::new(&device, &selector).unwrap();
+    let (commands, state, dispatch) = run_draw_emission(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &emitter,
+        &[GpuVirtualInstance::identity(mesh, 71)],
+        traversal_view(50.0),
+    );
+    assert_eq!(
+        dispatch,
+        GpuVirtualDispatchIndirect {
+            workgroups_x: 1,
+            workgroups_y: 1,
+            workgroups_z: 1,
+        }
+    );
+    assert_eq!(state.draw_count, 4);
+    assert_eq!(state.batch_fallback, 0);
+    assert_eq!(state.selector_selected_count, 4);
+    assert_eq!(state.selector_selected_overflow, 0);
+    assert_eq!(state.selector_invalid_or_missing, 0);
+    assert_eq!(state.emitted_triangles, 4);
+    assert_eq!(state.emitted_draws, 4);
+    assert_eq!(
+        commands,
+        (0..4)
+            .map(|draw_index| GpuVirtualDrawIndirect {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: draw_index,
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_virtual_draw_commands_execute_with_exact_first_instance_values() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping virtual indirect draw oracle");
+        return;
+    };
+    if !device
+        .features()
+        .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+    {
+        eprintln!("adapter lacks indirect first-instance — skipping virtual indirect draw oracle");
+        return;
+    }
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, mesh);
+    let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
+    let emitter = GpuVirtualDrawEmitter::new(&device, &selector).unwrap();
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("virtual_geometry_indirect_draw_oracle_shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            r#"
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) draw_id: u32,
+};
+
+@vertex
+fn vs_main(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> VertexOutput {
+    let positions = array<vec2<f32>, 3>(
+        vec2<f32>(-0.24, -1.0),
+        vec2<f32>(0.24, -1.0),
+        vec2<f32>(0.0, 1.0),
+    );
+    let center_x = -0.75 + f32(instance_index) * 0.5;
+    var output: VertexOutput;
+    output.position = vec4<f32>(positions[vertex_index] + vec2<f32>(center_x, 0.0), 0.0, 1.0);
+    output.draw_id = instance_index + 1u;
+    return output;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<u32> {
+    return vec4<u32>(input.draw_id, 0u, 0u, 255u);
+}
+"#
+            .into(),
+        ),
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("virtual_geometry_indirect_draw_oracle_pipeline"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Uint,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("virtual_geometry_indirect_draw_oracle_target"),
+        size: wgpu::Extent3d {
+            width: 4,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Uint,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("virtual_geometry_indirect_draw_oracle_readback"),
+        size: 256,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("virtual_geometry_indirect_draw_oracle_encoder"),
+    });
+    selector
+        .record(
+            &queue,
+            &mut encoder,
+            &pool,
+            &[GpuVirtualInstance::identity(mesh, 77)],
+            traversal_view(50.0),
+        )
+        .unwrap();
+    emitter.record(&queue, &mut encoder, &selector).unwrap();
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("virtual_geometry_indirect_draw_oracle_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        if device
+            .features()
+            .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
+        {
+            pass.multi_draw_indirect_count(
+                emitter.command_buffer(),
+                0,
+                emitter.state_buffer(),
+                0,
+                emitter.draw_capacity(),
+            );
+        } else {
+            pass.multi_draw_indirect(emitter.command_buffer(), 0, 4);
+        }
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: Some(1),
+            },
+        },
+        wgpu::Extent3d {
+            width: 4,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+    let slice = readback.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    receiver
+        .recv()
+        .expect("virtual indirect draw callback dropped")
+        .expect("virtual indirect draw readback failed");
+    let bytes = slice.get_mapped_range();
+    for pixel in 0..4usize {
+        assert_eq!(
+            &bytes[pixel * 4..pixel * 4 + 4],
+            &[(pixel + 1) as u8, 0, 0, 255],
+            "indirect draw {pixel} did not rasterize its first_instance value"
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_virtual_draw_emission_suppresses_the_whole_batch_on_selection_overflow() {
+    let Some((device, queue)) = try_traversal_device() else {
+        eprintln!("no seven-storage-buffer GPU adapter — skipping virtual draw fallback oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(5)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    make_hierarchy_fully_resident(&mut pool, &queue, mesh);
+    let selector = GpuVirtualHierarchySelector::new(
+        &device,
+        &pool,
+        GpuVirtualTraversalConfig {
+            max_instances: 1,
+            max_selected_clusters: 2,
+            max_page_requests: 2,
+        },
+    )
+    .unwrap();
+    let emitter = GpuVirtualDrawEmitter::new(&device, &selector).unwrap();
+    let (commands, state, dispatch) = run_draw_emission(
+        &device,
+        &queue,
+        &pool,
+        &selector,
+        &emitter,
+        &[GpuVirtualInstance::identity(mesh, 73)],
+        traversal_view(50.0),
+    );
+    assert!(commands.is_empty());
+    assert_eq!(
+        dispatch,
+        GpuVirtualDispatchIndirect {
+            workgroups_x: 0,
+            workgroups_y: 1,
+            workgroups_z: 1,
+        }
+    );
+    assert_eq!(state.draw_count, 0);
+    assert_eq!(state.batch_fallback, 1);
+    assert_eq!(state.selector_selected_count, 4);
+    assert_eq!(state.selector_selected_overflow, 2);
+    assert_eq!(state.emitted_triangles, 0);
+    assert_eq!(state.emitted_draws, 0);
+
+    let other_selector = GpuVirtualHierarchySelector::new(
+        &device,
+        &pool,
+        GpuVirtualTraversalConfig {
+            max_instances: 1,
+            max_selected_clusters: 2,
+            max_page_requests: 2,
+        },
+    )
+    .unwrap();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("virtual_geometry_draw_emitter_identity_encoder"),
+    });
+    assert_eq!(
+        emitter
+            .record(&queue, &mut encoder, &other_selector)
+            .unwrap_err(),
+        VirtualGeometryDrawEmissionError::SelectorMismatch
+    );
+
+    // A bounded request overflow does not invalidate the already-resident
+    // ancestor selection. It must keep drawing that complete fallback batch.
+    let mut partial_pool = GpuVirtualGeometryPool::new(&device, gpu_config(3)).unwrap();
+    let partial_mesh = partial_pool
+        .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
+        .unwrap();
+    partial_pool.begin_frame(2);
+    partial_pool
+        .make_group_resident(&queue, partial_mesh, 2)
+        .unwrap();
+    partial_pool
+        .make_group_resident(&queue, partial_mesh, 3)
+        .unwrap();
+    let partial_selector = GpuVirtualHierarchySelector::new(
+        &device,
+        &partial_pool,
+        GpuVirtualTraversalConfig {
+            max_instances: 1,
+            max_selected_clusters: 4,
+            max_page_requests: 1,
+        },
+    )
+    .unwrap();
+    let partial_emitter = GpuVirtualDrawEmitter::new(&device, &partial_selector).unwrap();
+    let (commands, state, _) = run_draw_emission(
+        &device,
+        &queue,
+        &partial_pool,
+        &partial_selector,
+        &partial_emitter,
+        &[GpuVirtualInstance::identity(partial_mesh, 79)],
+        traversal_view(50.0),
+    );
+    assert_eq!(commands.len(), 2);
+    assert_eq!(state.draw_count, 2);
+    assert_eq!(state.batch_fallback, 0);
+    assert_eq!(state.selector_selected_overflow, 0);
+    assert_eq!(state.selector_invalid_or_missing, 0);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
