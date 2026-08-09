@@ -11434,6 +11434,7 @@ impl Renderer {
         roughness: f32,
         emissive: [f32; 3],
         has_mr_texture: bool,
+        specular_glossiness_factor: Option<[f32; 4]>,
         alpha_cutoff: f32,
         alpha_coverage_mips: bool,
     ) -> wgpu::Buffer {
@@ -11443,6 +11444,7 @@ impl Renderer {
             roughness,
             emissive,
             has_mr_texture,
+            specular_glossiness_factor,
             alpha_cutoff,
             alpha_coverage_mips,
         );
@@ -13417,7 +13419,11 @@ impl Renderer {
                 gpu_material.metal_rough = [
                     mesh.metallic_factor,
                     mesh.roughness_factor,
-                    mesh.metallic_roughness_texture_idx.is_some() as u8 as f32,
+                    if mesh.specular_glossiness_factor.is_some() {
+                        2.0
+                    } else {
+                        mesh.metallic_roughness_texture_idx.is_some() as u8 as f32
+                    },
                     shader_alpha,
                 ];
                 gpu_material.emissive = [
@@ -13426,6 +13432,7 @@ impl Renderer {
                     mesh.emissive_factor[2],
                     if mesh.alpha_coverage_mips { 1.0 } else { 0.0 },
                 ];
+                gpu_material.spec_gloss = mesh.specular_glossiness_factor.unwrap_or([1.0; 4]);
                 gpu_material.texture_ids_0 = [
                     texture_id(base_color_idx).raw(),
                     texture_id(normal_idx).raw(),
@@ -13474,6 +13481,7 @@ impl Renderer {
                     mesh.roughness_factor,
                     mesh.emissive_factor,
                     mesh.metallic_roughness_texture_idx.is_some(),
+                    mesh.specular_glossiness_factor,
                     shader_alpha,
                     mesh.alpha_coverage_mips,
                 );

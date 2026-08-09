@@ -529,6 +529,11 @@ pub struct MeshData {
     pub texture_idx: Option<u32>,
     pub normal_texture_idx: Option<u32>,
     pub metallic_roughness_texture_idx: Option<u32>,
+    /// Textured KHR_materials_pbrSpecularGlossiness workflow. When present,
+    /// the metallic-roughness texture slot instead contains sRGB specular RGB
+    /// plus linear glossiness A, and this value carries the authored
+    /// specular/glossiness factors for per-pixel conversion in the shader.
+    pub specular_glossiness_factor: Option<[f32; 4]>,
     pub emissive_texture_idx: Option<u32>,
     pub occlusion_texture_idx: Option<u32>,
     pub metallic_factor: f32,
@@ -875,6 +880,7 @@ impl ModelManager {
                 texture_idx: None,
                 normal_texture_idx: None,
                 metallic_roughness_texture_idx: None,
+                specular_glossiness_factor: None,
                 emissive_texture_idx: None,
                 occlusion_texture_idx: None,
                 metallic_factor: 0.0,
@@ -994,6 +1000,7 @@ impl ModelManager {
                 texture_idx: None,
                 normal_texture_idx: None,
                 metallic_roughness_texture_idx: None,
+                specular_glossiness_factor: None,
                 emissive_texture_idx: None,
                 occlusion_texture_idx: None,
                 metallic_factor: 0.0,
@@ -1062,6 +1069,7 @@ impl ModelManager {
                 texture_idx: None,
                 normal_texture_idx: None,
                 metallic_roughness_texture_idx: None,
+                specular_glossiness_factor: None,
                 emissive_texture_idx: None,
                 occlusion_texture_idx: None,
                 metallic_factor: 0.0,
@@ -1192,6 +1200,7 @@ impl ModelManager {
                 texture_idx: None,
                 normal_texture_idx: None,
                 metallic_roughness_texture_idx: None,
+                specular_glossiness_factor: None,
                 emissive_texture_idx: None,
                 occlusion_texture_idx: None,
                 metallic_factor: 0.0,

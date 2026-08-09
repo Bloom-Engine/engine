@@ -68,6 +68,7 @@ struct DrawUniforms {
 struct MaterialFactors {
     metal_rough: vec4<f32>,
     emissive: vec4<f32>,
+    spec_gloss: vec4<f32>,
 };
 
 struct TransmissionFactors {

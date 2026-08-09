@@ -17,6 +17,7 @@ struct GlobalMaterialRecord {
   base_color:      vec4<f32>,
   metal_rough:     vec4<f32>,
   emissive:        vec4<f32>,
+  spec_gloss:      vec4<f32>,
   shading_model:   vec4<f32>,
   foliage_params:  vec4<f32>,
   texture_ids_0:   vec4<u32>,

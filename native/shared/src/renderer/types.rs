@@ -52,13 +52,16 @@ pub(crate) struct Uniforms3D {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SceneMaterialUniforms {
     /// x = metallic_factor, y = roughness_factor,
-    /// z = has_mr_texture (1.0 = sample mr_tex and multiply, 0.0 = ignore
-    ///     mr_tex and use factors directly),
+    /// z = texture workflow (0.0 = scalar factors, 1.0 = glTF
+    ///     metallic-roughness GB, 2.0 = specular-glossiness RGBA),
     /// w = alpha_cutoff (0.0 = OPAQUE mode, >0 = MASK/BLEND — fragments
     ///     whose base-colour alpha is below this are discarded).
     pub metal_rough: [f32; 4],
     /// rgb = emissive_factor, w = base-color lower mips store MASK coverage.
     pub emissive: [f32; 4],
+    /// rgb = KHR specularFactor, a = glossinessFactor. Only consumed when
+    /// metal_rough.z selects the specular-glossiness texture workflow.
+    pub spec_gloss: [f32; 4],
 }
 
 impl SceneMaterialUniforms {
@@ -67,6 +70,7 @@ impl SceneMaterialUniforms {
         roughness: f32,
         emissive: [f32; 3],
         has_mr_texture: bool,
+        specular_glossiness_factor: Option<[f32; 4]>,
         alpha_cutoff: f32,
         alpha_coverage_mips: bool,
     ) -> Self {
@@ -74,7 +78,13 @@ impl SceneMaterialUniforms {
             metal_rough: [
                 metallic,
                 roughness,
-                if has_mr_texture { 1.0 } else { 0.0 },
+                if specular_glossiness_factor.is_some() {
+                    2.0
+                } else if has_mr_texture {
+                    1.0
+                } else {
+                    0.0
+                },
                 alpha_cutoff,
             ],
             emissive: [
@@ -83,6 +93,7 @@ impl SceneMaterialUniforms {
                 emissive[2],
                 if alpha_coverage_mips { 1.0 } else { 0.0 },
             ],
+            spec_gloss: specular_glossiness_factor.unwrap_or([1.0; 4]),
         }
     }
 }
@@ -1166,6 +1177,18 @@ mod physical_uv_tests {
         assert_eq!(layout.array_stride, 8);
         assert_eq!(layout.attributes.len(), 1);
         assert_eq!(layout.attributes[0].shader_location, 7);
+    }
+
+    #[test]
+    fn scene_material_uniform_selects_specular_glossiness_without_an_extra_sample() {
+        assert_eq!(std::mem::size_of::<SceneMaterialUniforms>(), 48);
+        let factors = [0.2, 0.4, 0.8, 0.65];
+        let uniform =
+            SceneMaterialUniforms::new(0.0, 1.0, [0.0; 3], true, Some(factors), 0.0, false);
+        assert_eq!(uniform.metal_rough[2], 2.0);
+        assert_eq!(uniform.spec_gloss, factors);
+        let ordinary = SceneMaterialUniforms::new(0.3, 0.7, [0.0; 3], true, None, 0.0, false);
+        assert_eq!(ordinary.metal_rough[2], 1.0);
     }
 
     #[test]

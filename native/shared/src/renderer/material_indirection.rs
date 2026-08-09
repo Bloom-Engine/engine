@@ -559,6 +559,7 @@ pub struct GpuMaterialRecord {
     pub base_color: [f32; 4],
     pub metal_rough: [f32; 4],
     pub emissive: [f32; 4],
+    pub spec_gloss: [f32; 4],
     pub shading_model: [f32; 4],
     pub foliage_params: [f32; 4],
     /// base-color, normal, metallic-roughness, emissive.
@@ -585,6 +586,7 @@ impl Default for GpuMaterialRecord {
             base_color: [1.0, 1.0, 1.0, 1.0],
             metal_rough: [0.0, 1.0, 0.0, 0.0],
             emissive: [0.0; 4],
+            spec_gloss: [1.0; 4],
             shading_model: [0.0, 1.0, 1.0, 1.0],
             foliage_params: [0.5, 0.5, 0.0, 0.0],
             texture_ids_0: [0; 4],
@@ -1506,7 +1508,7 @@ mod tests {
     #[test]
     fn gpu_record_layout_is_storage_buffer_safe() {
         assert_eq!(std::mem::align_of::<GpuMaterialRecord>(), 16);
-        assert_eq!(std::mem::size_of::<GpuMaterialRecord>(), 176);
+        assert_eq!(std::mem::size_of::<GpuMaterialRecord>(), 192);
         let record = GpuMaterialRecord::default();
         assert_eq!(record.base_color, [1.0; 4]);
         assert_eq!(

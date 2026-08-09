@@ -1113,7 +1113,11 @@ impl Renderer {
         record.metal_rough = [
             material.metalness,
             material.roughness,
-            (material.metallic_roughness_texture_idx != 0) as u8 as f32,
+            if material.specular_glossiness_factor.is_some() {
+                2.0
+            } else {
+                (material.metallic_roughness_texture_idx != 0) as u8 as f32
+            },
             material
                 .alpha_mode
                 .shader_alpha_value(material.alpha_cutoff),
@@ -1128,6 +1132,7 @@ impl Renderer {
                 0.0
             },
         ];
+        record.spec_gloss = material.specular_glossiness_factor.unwrap_or([1.0; 4]);
         record.texture_ids_0 = [
             texture_id(material.texture_idx).raw(),
             texture_id(material.normal_texture_idx).raw(),

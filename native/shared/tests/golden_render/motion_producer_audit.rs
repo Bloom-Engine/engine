@@ -26,6 +26,7 @@ fn untextured_mesh(vertices: Vec<Vertex3D>, alpha_mode: MaterialAlphaMode) -> Me
         texture_idx: None,
         normal_texture_idx: None,
         metallic_roughness_texture_idx: None,
+        specular_glossiness_factor: None,
         emissive_texture_idx: None,
         occlusion_texture_idx: None,
         metallic_factor: 0.0,

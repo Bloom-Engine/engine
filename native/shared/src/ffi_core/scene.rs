@@ -697,6 +697,7 @@ macro_rules! __bloom_ffi_scene {
                 let base_color_tex = mesh.texture_idx;
                 let normal_tex = mesh.normal_texture_idx;
                 let mr_tex = mesh.metallic_roughness_texture_idx;
+                let specular_glossiness_factor = mesh.specular_glossiness_factor;
                 let emissive_tex = mesh.emissive_texture_idx;
                 let emissive_factor = mesh.emissive_factor;
                 let roughness_factor = mesh.roughness_factor;
@@ -732,6 +733,10 @@ macro_rules! __bloom_ffi_scene {
                     eng.scene
                         .set_material_metallic_roughness_texture(node_handle, tex_idx);
                 }
+                eng.scene.set_material_specular_glossiness_factor(
+                    node_handle,
+                    specular_glossiness_factor,
+                );
                 if let Some(tex_idx) = emissive_tex {
                     eng.scene
                         .set_material_emissive_texture(node_handle, tex_idx);

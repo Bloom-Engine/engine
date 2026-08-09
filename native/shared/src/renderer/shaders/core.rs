@@ -220,6 +220,7 @@ struct Lighting {
 struct MaterialFactors {
     metal_rough: vec4<f32>, // x=metallic, y=roughness
     emissive:    vec4<f32>, // rgb=emissive factor
+    spec_gloss:  vec4<f32>, // rgb=specular factor, a=glossiness factor
 };
 
 struct VertexInputScene {
@@ -494,6 +495,40 @@ fn srgb_to_linear_v(c: vec3<f32>) -> vec3<f32> {
     let lo = c / 12.92;
     let hi = pow(max((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(0.0)), vec3<f32>(2.4));
     return select(hi, lo, c <= cutoff);
+}
+
+// Khronos reference conversion for the legacy
+// KHR_materials_pbrSpecularGlossiness workflow. Keeping this per pixel is
+// essential: reducing a textured specular/glossiness map to scalar factors
+// erases the spatial material response authored by Bistro.
+// xyz = converted linear base color, w = metallic.
+fn specgloss_to_metalrough_pixel(
+    diffuse: vec3<f32>,
+    specular: vec3<f32>,
+) -> vec4<f32> {
+    let dielectric_specular = 0.04;
+    let epsilon = 1e-6;
+    let one_minus_dielectric = 1.0 - dielectric_specular;
+    let diffuse_max = max(diffuse.r, max(diffuse.g, diffuse.b));
+    let specular_max = max(specular.r, max(specular.g, specular.b));
+    let a = dielectric_specular;
+    let b = diffuse_max * one_minus_dielectric /
+        max(dielectric_specular, epsilon) + specular_max -
+        2.0 * dielectric_specular;
+    let c = dielectric_specular - specular_max;
+    let discriminant = max(b * b - 4.0 * a * c, 0.0);
+    var metallic = 0.0;
+    if (specular_max >= dielectric_specular) {
+        metallic = clamp((-b + sqrt(discriminant)) / (2.0 * a), 0.0, 1.0);
+    }
+    let diffuse_scale = one_minus_dielectric /
+        max(1.0 - metallic * dielectric_specular, epsilon);
+    let base_color = mix(
+        diffuse * diffuse_scale,
+        specular,
+        metallic * metallic,
+    );
+    return vec4<f32>(clamp(base_color, vec3<f32>(0.0), vec3<f32>(1.0)), metallic);
 }
 
 fn aces_tone(c: vec3<f32>) -> vec3<f32> {
@@ -899,7 +934,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // was (1,1,1,1), and silently darkened every legitimate tint
     // (Bistro's spec-gloss diffuse factors land in the 0.5–0.9 range
     // where the double-conversion is visibly off).
-    let base_color = srgb_to_linear_v(base_tex.rgb) * in.color.rgb;
+    var base_color = srgb_to_linear_v(base_tex.rgb) * in.color.rgb;
     let base_alpha = base_tex.a * in.color.a;
 
     // glTF alpha mode tag: MASK carries its positive authored cutoff,
@@ -962,13 +997,17 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     }
 
     // glTF metallicRoughnessTexture: G=roughness, B=metallic (linear).
-    // When the material has no MR texture (metal_rough.z == 0), the
+    // KHR specularGlossinessTexture: RGB=specular (sRGB), A=glossiness
+    // (linear). `metal_rough.z` selects the workflow so both imported
+    // material models share this existing texture binding and sample.
+    // When the material has no material-response texture (workflow 0), the
     // binding falls back to an arbitrary scene texture (whatever lives
     // at index 0) — multiplying its random R/G/B into our factors
     // produces incorrect material values. Use the factors directly in
     // that case.
     let mr_tex_sample = textureSample(mr_tex, mr_samp, in.uv);
-    let has_mr = material.metal_rough.z > 0.5;
+    let has_mr = material.metal_rough.z > 0.5 && material.metal_rough.z < 1.5;
+    let has_spec_gloss = material.metal_rough.z > 1.5;
     var roughness_raw = select(
         clamp(material.metal_rough.y, 0.045, 1.0),
         clamp(mr_tex_sample.g * material.metal_rough.y, 0.045, 1.0),
@@ -979,13 +1018,28 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // them to 0.05, we get a mirror-like highlight strip on marble
     // columns that Cycles doesn't produce (Sponza column was the tell).
     // Metals keep the original low floor so chrome / gold stay sharp.
-    let metallic_raw = select(
+    var metallic_raw = select(
         clamp(material.metal_rough.x, 0.0, 1.0),
         clamp(mr_tex_sample.b * material.metal_rough.x, 0.0, 1.0),
         has_mr,
     );
+    if (has_spec_gloss) {
+        let authored_specular = srgb_to_linear_v(mr_tex_sample.rgb) *
+            material.spec_gloss.rgb;
+        let converted = specgloss_to_metalrough_pixel(base_color, authored_specular);
+        base_color = converted.rgb;
+        metallic_raw = converted.a;
+        roughness_raw = clamp(
+            1.0 - mr_tex_sample.a * material.spec_gloss.a,
+            0.045,
+            1.0,
+        );
+    }
     let metallic = metallic_raw;
-    let dielectric_floor = 0.15;
+    // Preserve genuinely smooth authored spec-gloss surfaces. The standard
+    // MR path retains Bloom's conservative dielectric floor; specular AA
+    // below still controls highlight shimmer for this exact workflow.
+    let dielectric_floor = select(0.15, 0.045, has_spec_gloss);
     var roughness = max(roughness_raw,
                         dielectric_floor * (1.0 - metallic));
 
@@ -1878,20 +1932,33 @@ fn fs_refractive_scene(
     let v = normalize(lighting.camera_pos.xyz - in.world_pos);
 
     let base_texel = textureSample(base_color_tex, base_color_samp, in.uv);
-    let base_color = srgb_to_linear_v(base_texel.rgb) * in.color.rgb;
+    var base_color = srgb_to_linear_v(base_texel.rgb) * in.color.rgb;
     let base_alpha = base_texel.a * in.color.a;
     let mr_texel = textureSample(mr_tex, mr_samp, in.uv);
-    let has_mr = material.metal_rough.z > 0.5;
-    let metallic = select(
+    let has_mr = material.metal_rough.z > 0.5 && material.metal_rough.z < 1.5;
+    let has_spec_gloss = material.metal_rough.z > 1.5;
+    var metallic = select(
         clamp(material.metal_rough.x, 0.0, 1.0),
         clamp(mr_texel.b * material.metal_rough.x, 0.0, 1.0),
         has_mr,
     );
-    let roughness = select(
+    var roughness = select(
         clamp(material.metal_rough.y, 0.045, 1.0),
         clamp(mr_texel.g * material.metal_rough.y, 0.045, 1.0),
         has_mr,
     );
+    if (has_spec_gloss) {{
+        let authored_specular = srgb_to_linear_v(mr_texel.rgb) *
+            material.spec_gloss.rgb;
+        let converted = specgloss_to_metalrough_pixel(base_color, authored_specular);
+        base_color = converted.rgb;
+        metallic = converted.a;
+        roughness = clamp(
+            1.0 - mr_texel.a * material.spec_gloss.a,
+            0.045,
+            1.0,
+        );
+    }}
 
     let transmission_uv = physical_texture_uv(
         {transmission_source_uv},

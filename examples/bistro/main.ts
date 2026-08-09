@@ -15,9 +15,9 @@
 //   cd examples/bistro
 //   git clone https://github.com/zeux/niagara_bistro.git assets
 //
-// Use `scripts/run-bistro-rich.sh` to build and launch the complete exterior:
-// all 2,909 authored mesh-node placements backed by shared source geometry.
-// An interior variant `assets/bistrox.gltf` also exists.
+// Use `scripts/run-bistro-rich.sh` to build and launch the complete expanded
+// scene: all 2,909 authored mesh-node placements backed by shared source
+// geometry and the directly supported bistrox material set.
 
 import {
   initWindow, closeWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
@@ -59,7 +59,11 @@ let initYaw = 0.0;
 let initCamX = -26.43;
 let initCamY = 3.16;
 let initCamZ = 11.17;
-let scenePath = "assets/bistro.gltf";
+// Use the complete expanded-material scene by default. The sibling
+// bistro.gltf relies on MSFT_texture_dds indirection and is retained for
+// importer diagnostics; bistrox.gltf carries the same 2,909 placements in
+// the directly supported texture/material form used by the quality demo.
+let scenePath = "assets/bistrox.gltf";
 let taaOverride = -1; // -1 = default, 0 = force off, 1 = force on
 let bloomOverride = -1;
 let fogOverride = -1;

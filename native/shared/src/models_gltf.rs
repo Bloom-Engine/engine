@@ -783,18 +783,46 @@ pub(super) fn load_gltf_with_textures(
                     mut roughness_factor,
                     tex_idx,
                     mr_tex_idx,
+                    specular_glossiness_factor,
                 ) = if pbr.base_color_texture().is_none() {
                     if let Some(sg) = mat.pbr_specular_glossiness() {
                         let diffuse = sg.diffuse_factor();
                         let spec = sg.specular_factor();
-                        let (base_color, metallic) = specgloss_to_metalrough(diffuse, spec);
-                        let roughness = 1.0 - sg.glossiness_factor();
-                        (base_color, metallic, roughness, base_color_tex_idx, None)
+                        let glossiness = sg.glossiness_factor();
+                        if let Some((spec_gloss_tex_idx, factors)) =
+                            specular_glossiness_texture_selection(&sg, &texture_indices)
+                        {
+                            // Preserve the authored RGB specular + A glossiness
+                            // map. The shader converts diffuse/spec-gloss to
+                            // metallic-roughness per pixel; doing that here with
+                            // scalar factors discarded most of Bistro's surface
+                            // variation.
+                            (
+                                diffuse,
+                                0.0,
+                                1.0,
+                                base_color_tex_idx,
+                                Some(spec_gloss_tex_idx),
+                                Some(factors),
+                            )
+                        } else {
+                            let (base_color, metallic) = specgloss_to_metalrough(diffuse, spec);
+                            let roughness = 1.0 - glossiness;
+                            (
+                                base_color,
+                                metallic,
+                                roughness,
+                                base_color_tex_idx,
+                                None,
+                                None,
+                            )
+                        }
                     } else {
                         (
                             pbr.base_color_factor(),
                             pbr.metallic_factor(),
                             pbr.roughness_factor(),
+                            None,
                             None,
                             None,
                         )
@@ -809,6 +837,7 @@ pub(super) fn load_gltf_with_textures(
                         pbr.roughness_factor(),
                         base_color_tex_idx,
                         mr,
+                        None,
                     )
                 };
 
@@ -878,6 +907,7 @@ pub(super) fn load_gltf_with_textures(
                     texture_idx: tex_idx,
                     normal_texture_idx: normal_tex_idx,
                     metallic_roughness_texture_idx: mr_tex_idx,
+                    specular_glossiness_factor,
                     emissive_texture_idx: emissive_tex_idx,
                     occlusion_texture_idx: occlusion_tex_idx,
                     metallic_factor,
@@ -1159,35 +1189,64 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
             // base_color between diffuse and specular weighted by
             // metallic² (metals tint their reflection, dielectrics
             // show their diffuse).
-            let (mut base_color, mut metallic_factor, mut roughness_factor, tex_idx, mr_tex_idx) =
-                if pbr.base_color_texture().is_none() {
-                    if let Some(sg) = mat.pbr_specular_glossiness() {
-                        let diffuse = sg.diffuse_factor();
-                        let spec = sg.specular_factor();
-                        let (base_color, metallic) = specgloss_to_metalrough(diffuse, spec);
-                        let roughness = 1.0 - sg.glossiness_factor();
-                        (base_color, metallic, roughness, base_color_tex_idx, None)
-                    } else {
+            let (
+                mut base_color,
+                mut metallic_factor,
+                mut roughness_factor,
+                tex_idx,
+                mr_tex_idx,
+                specular_glossiness_factor,
+            ) = if pbr.base_color_texture().is_none() {
+                if let Some(sg) = mat.pbr_specular_glossiness() {
+                    let diffuse = sg.diffuse_factor();
+                    let spec = sg.specular_factor();
+                    let glossiness = sg.glossiness_factor();
+                    if let Some((spec_gloss_tex_idx, factors)) =
+                        specular_glossiness_texture_selection(&sg, &texture_indices)
+                    {
                         (
-                            pbr.base_color_factor(),
-                            pbr.metallic_factor(),
-                            pbr.roughness_factor(),
+                            diffuse,
+                            0.0,
+                            1.0,
+                            base_color_tex_idx,
+                            Some(spec_gloss_tex_idx),
+                            Some(factors),
+                        )
+                    } else {
+                        let (base_color, metallic) = specgloss_to_metalrough(diffuse, spec);
+                        let roughness = 1.0 - glossiness;
+                        (
+                            base_color,
+                            metallic,
+                            roughness,
+                            base_color_tex_idx,
                             None,
                             None,
                         )
                     }
                 } else {
-                    let mr = pbr
-                        .metallic_roughness_texture()
-                        .and_then(|info| tex_idx_of(info.texture().source().index()));
                     (
                         pbr.base_color_factor(),
                         pbr.metallic_factor(),
                         pbr.roughness_factor(),
-                        base_color_tex_idx,
-                        mr,
+                        None,
+                        None,
+                        None,
                     )
-                };
+                }
+            } else {
+                let mr = pbr
+                    .metallic_roughness_texture()
+                    .and_then(|info| tex_idx_of(info.texture().source().index()));
+                (
+                    pbr.base_color_factor(),
+                    pbr.metallic_factor(),
+                    pbr.roughness_factor(),
+                    base_color_tex_idx,
+                    mr,
+                    None,
+                )
+            };
 
             if !crate::models::physical_transmission_requested() {
                 if let Some(t) = mat.transmission() {
@@ -1253,6 +1312,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                 texture_idx: tex_idx,
                 normal_texture_idx: normal_tex_idx,
                 metallic_roughness_texture_idx: mr_tex_idx,
+                specular_glossiness_factor,
                 emissive_texture_idx: emissive_tex_idx,
                 occlusion_texture_idx: occlusion_tex_idx,
                 metallic_factor,
@@ -1409,6 +1469,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
                 texture_idx: None,
                 normal_texture_idx: None,
                 metallic_roughness_texture_idx: None,
+                specular_glossiness_factor: None,
                 emissive_texture_idx: None,
                 occlusion_texture_idx: None,
                 metallic_factor: 0.0,
@@ -1665,6 +1726,26 @@ fn base_color_texture_selection(
     (ordinary.get(image_index).copied(), false)
 }
 
+fn specular_glossiness_texture_selection(
+    spec_gloss: &gltf::material::PbrSpecularGlossiness<'_>,
+    runtime_texture_indices: &[u32],
+) -> Option<(u32, [f32; 4])> {
+    let info = spec_gloss.specular_glossiness_texture()?;
+    let runtime_texture_idx = runtime_texture_indices
+        .get(info.texture().source().index())
+        .copied()?;
+    let specular = spec_gloss.specular_factor();
+    Some((
+        runtime_texture_idx,
+        [
+            specular[0],
+            specular[1],
+            specular[2],
+            spec_gloss.glossiness_factor(),
+        ],
+    ))
+}
+
 fn unsupported_material_extension_diagnostics(
     gltf: &gltf::Gltf,
     source_label: &str,
@@ -1680,7 +1761,10 @@ fn unsupported_material_extension_diagnostics(
             for extension in extensions.keys() {
                 if matches!(
                     extension.as_str(),
-                    "KHR_materials_clearcoat" | "KHR_materials_sheen" | "KHR_materials_anisotropy"
+                    "KHR_materials_pbrSpecularGlossiness"
+                        | "KHR_materials_clearcoat"
+                        | "KHR_materials_sheen"
+                        | "KHR_materials_anisotropy"
                 ) {
                     continue;
                 }

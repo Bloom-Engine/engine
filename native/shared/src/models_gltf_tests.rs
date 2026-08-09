@@ -444,6 +444,37 @@ fn mask_textures_select_cutoff_specific_coverage_variants_only() {
 }
 
 #[test]
+fn textured_specular_glossiness_preserves_runtime_map_and_factors() {
+    let source = br#"{
+      "asset":{"version":"2.0"},
+      "extensionsUsed":["KHR_materials_pbrSpecularGlossiness"],
+      "images":[{"uri":"diffuse.png"},{"uri":"spec-gloss.png"}],
+      "textures":[{"source":0},{"source":1}],
+      "materials":[{
+        "extensions":{"KHR_materials_pbrSpecularGlossiness":{
+          "diffuseFactor":[0.8,0.7,0.6,1.0],
+          "diffuseTexture":{"index":0},
+          "specularFactor":[0.2,0.4,0.8],
+          "glossinessFactor":0.65,
+          "specularGlossinessTexture":{"index":1}
+        }}
+      }]
+    }"#;
+    let document = gltf::Gltf::from_slice(source).expect("valid spec-gloss glTF material");
+    let material = document.materials().next().unwrap();
+    let spec_gloss = material.pbr_specular_glossiness().unwrap();
+    assert_eq!(
+        specular_glossiness_texture_selection(&spec_gloss, &[11, 22]),
+        Some((22, [0.2, 0.4, 0.8, 0.65]))
+    );
+    assert_eq!(
+        unsupported_material_extension_diagnostics(&document, "bistro.gltf"),
+        Vec::<String>::new(),
+        "the now-supported workflow must not emit a misleading warning"
+    );
+}
+
+#[test]
 fn vertex_color_multiplies_the_material_factor_per_gltf() {
     assert_eq!(
         multiply_rgba([0.5, 0.25, 0.8, 0.4], [0.2, 0.6, 0.5, 0.75]),

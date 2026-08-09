@@ -47,6 +47,9 @@ pub struct PbrMaterial {
     /// groups lazily without SceneGraph holding GPU references.
     pub normal_texture_idx: u32,
     pub metallic_roughness_texture_idx: u32,
+    /// Some means the texture in `metallic_roughness_texture_idx` uses the
+    /// KHR specular-glossiness RGBA encoding rather than glTF metal-rough GB.
+    pub specular_glossiness_factor: Option<[f32; 4]>,
     pub emissive_texture_idx: u32,
     pub occlusion_texture_idx: u32,
 }
@@ -68,6 +71,7 @@ impl Default for PbrMaterial {
             texture_idx: 0,
             normal_texture_idx: 0,
             metallic_roughness_texture_idx: 0,
+            specular_glossiness_factor: None,
             emissive_texture_idx: 0,
             occlusion_texture_idx: 0,
         }
@@ -428,6 +432,7 @@ struct SharedSceneGpuResources {
 struct SceneMaterialKey {
     metal_rough: [u32; 4],
     emissive: [u32; 4],
+    spec_gloss: [u32; 4],
     textures: [u32; 5],
 }
 
@@ -1215,6 +1220,20 @@ impl SceneGraph {
         }
     }
 
+    pub fn set_material_specular_glossiness_factor(
+        &mut self,
+        handle: f64,
+        factor: Option<[f32; 4]>,
+    ) {
+        if let Some(node) = self.nodes.get_mut(handle) {
+            if node.material.specular_glossiness_factor == factor {
+                return;
+            }
+            node.material.specular_glossiness_factor = factor;
+            node.mat_dirty = true;
+        }
+    }
+
     pub fn set_material_emissive_texture(&mut self, handle: f64, texture_idx: u32) {
         if let Some(node) = self.nodes.get_mut(handle) {
             node.material.emissive_texture_idx = texture_idx;
@@ -1922,6 +1941,7 @@ impl SceneGraph {
                     node.material.roughness,
                     node.material.emissive,
                     node.material.metallic_roughness_texture_idx != 0,
+                    node.material.specular_glossiness_factor,
                     // MASK cutoff from the node material (0 = opaque).
                     // attach_model carries it over from the glTF mesh so
                     // foliage cards keep their cutout + two-sided shading
@@ -2809,7 +2829,11 @@ fn scene_material_key(material: &PbrMaterial) -> SceneMaterialKey {
         metal_rough: [
             material.metalness.to_bits(),
             material.roughness.to_bits(),
-            (material.metallic_roughness_texture_idx != 0) as u32,
+            if material.specular_glossiness_factor.is_some() {
+                2
+            } else {
+                (material.metallic_roughness_texture_idx != 0) as u32
+            },
             material
                 .alpha_mode
                 .shader_alpha_value(material.alpha_cutoff)
@@ -2821,6 +2845,10 @@ fn scene_material_key(material: &PbrMaterial) -> SceneMaterialKey {
             material.emissive[2].to_bits(),
             u32::from(material.alpha_coverage_mips),
         ],
+        spec_gloss: material
+            .specular_glossiness_factor
+            .unwrap_or([1.0; 4])
+            .map(f32::to_bits),
         textures: [
             material.texture_idx,
             material.normal_texture_idx,
@@ -3034,6 +3062,18 @@ mod gpu_driven_cache_tests {
         let mut changed = first.clone();
         changed.roughness = 0.35;
         assert_ne!(scene_material_key(&first), scene_material_key(&changed));
+
+        let mut spec_gloss = first.clone();
+        spec_gloss.specular_glossiness_factor = Some([0.2, 0.4, 0.8, 0.65]);
+        spec_gloss.metallic_roughness_texture_idx = 7;
+        assert_ne!(scene_material_key(&first), scene_material_key(&spec_gloss));
+
+        let mut other_spec_gloss = spec_gloss.clone();
+        other_spec_gloss.specular_glossiness_factor = Some([0.2, 0.4, 0.7, 0.65]);
+        assert_ne!(
+            scene_material_key(&spec_gloss),
+            scene_material_key(&other_spec_gloss)
+        );
     }
 
     #[test]

@@ -1,16 +1,17 @@
 # Bistro example
 
 The interactive rich profile loads the complete authored exterior: all 2,909
-mesh-node placements backed by 551 shared source meshes, with the original
-materials and textures:
+mesh-node placements backed by 551 shared source meshes, with the expanded
+original materials and textures:
 
 ```sh
 ./scripts/run-bistro-rich.sh
 ```
 
 Run that command from the repository root. It builds the example and launches
-the source `assets/bistro.gltf` scene directly. Extra arguments are forwarded
-to the example.
+the complete `assets/bistrox.gltf` scene directly. The sibling `bistro.gltf`
+uses `MSFT_texture_dds` indirection and remains available for importer
+diagnostics. Extra arguments are forwarded to the example.
 
 Controls: WASD moves, Shift sprints, the mouse looks around, and Tab releases
 or captures the cursor.
