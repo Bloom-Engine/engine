@@ -163,6 +163,18 @@ impl Renderer {
                 amb[2] * sky_intensity,
                 0.0,
             ];
+            let shadows_enabled = self.shadow_map.enabled;
+            let shadow_vps = if shadows_enabled {
+                self.shadow_map.light_vps
+            } else {
+                [IDENTITY_MAT4; 3]
+            };
+            let shadow_splits = if shadows_enabled {
+                let splits = self.shadow_map.cascade_splits;
+                [splits[0], splits[1], splits[2], 0.0]
+            } else {
+                [f32::INFINITY, f32::INFINITY, f32::INFINITY, 0.0]
+            };
             let trace_params = ProbeTraceParams {
                 view: self.current_view_matrix,
                 proj: self.current_proj_matrix,
@@ -224,6 +236,9 @@ impl Renderer {
                         },
                     ],
                 ],
+                shadow_vps,
+                shadow_splits,
+                shadow_params: [0.002, if shadows_enabled { 1.0 } else { 0.0 }, 0.0, 0.0],
             };
             self.queue.write_buffer(
                 &self.probe_trace_uniform,
@@ -395,6 +410,30 @@ impl Renderer {
                                     binding: 9,
                                     resource: wgpu::BindingResource::TextureView(
                                         &self.probe_history_views[prev_idx],
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 10,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.shadow_map.depth_views[0],
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 11,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.shadow_map.depth_views[1],
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 12,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.shadow_map.depth_views[2],
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 13,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.shadow_map.sampler,
                                     ),
                                 },
                             ],

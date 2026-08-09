@@ -328,9 +328,10 @@ fn sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
         clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0);
     }
     let ndc = clip.xyz / clip.w;
-    // Outside the cascade frustum → treat as lit (no shadow).
+    // Outside the camera's cascade frustum there is no visibility evidence.
+    // Keep sky/emissive, but never manufacture direct sunlight in the GI feed.
     if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
-        return 1.0;
+        return 0.0;
     }
     let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     let ref_depth = ndc.z - bias;
@@ -470,7 +471,7 @@ fn wsrc_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
     }
     let ndc = clip.xyz / clip.w;
     if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
-        return 1.0;
+        return 0.0;
     }
     let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     let ref_depth = ndc.z - bias;
@@ -620,6 +621,9 @@ fn hw_bake_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
     else { clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0); }
     let ndc = clip.xyz / clip.w;
     if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        // A hardware-cache miss already traced unobstructed to the cache
+        // boundary, so preserve open-sky sun outside camera CSM coverage.
+        // Cardless hit shading performs its own conservative containment test.
         return 1.0;
     }
     let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
@@ -686,6 +690,7 @@ fn hw_bake_card_uv(
 
 fn hw_bake_shade_hit(
     inst: HwBakeInstanceGiData,
+    hit_world: vec3<f32>,
     hit_os: vec3<f32>,
     dir: vec3<f32>,
 ) -> vec3<f32> {
@@ -699,7 +704,29 @@ fn hw_bake_shade_hit(
     }
     let hit_n = inst.normal_ws;
     let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
-    let direct = u.sun_color.xyz * ndotl;
+    var shadow = 1.0;
+    if (u.flags.y > 0.5) {
+        shadow = 0.0;
+        for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1) {
+            var clip: vec4<f32>;
+            if (cascade == 0) {
+                clip = u.shadow_vps[0] * vec4<f32>(hit_world, 1.0);
+            } else if (cascade == 1) {
+                clip = u.shadow_vps[1] * vec4<f32>(hit_world, 1.0);
+            } else {
+                clip = u.shadow_vps[2] * vec4<f32>(hit_world, 1.0);
+            }
+            if (clip.w <= 0.0) { continue; }
+            let ndc = clip.xyz / clip.w;
+            if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
+                ndc.z < 0.0 || ndc.z > 1.0) {
+                continue;
+            }
+            shadow = hw_bake_sample_cascade(cascade, hit_world, u.flags.x);
+            break;
+        }
+    }
+    let direct = u.sun_color.xyz * ndotl * shadow;
     let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
     let sky = u.sky_color.xyz * ndotup;
     return inst.albedo * (direct + sky)
@@ -777,7 +804,7 @@ fn cs_main(
         let inst = instance_data[hit.instance_custom_data];
         let hit_world = probe_pos + dir * hit.t;
         let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
-        let front = hw_bake_shade_hit(inst, hit_os, dir);
+        let front = hw_bake_shade_hit(inst, hit_world, hit_os, dir);
         radiance = front;
 
         if (BLOOM_TRANSPARENT_GI && inst.mat_params.z > 0.0) {
@@ -803,7 +830,7 @@ fn cs_main(
                 let opaque_os = (
                     opaque_hit.world_to_object * vec4<f32>(opaque_world, 1.0)
                 ).xyz;
-                behind = hw_bake_shade_hit(opaque_inst, opaque_os, dir);
+                behind = hw_bake_shade_hit(opaque_inst, opaque_world, opaque_os, dir);
             }
             let surface_weight = clamp(inst.world_aabb_max.w, 0.0, 1.0)
                 * (1.0 - clamp(inst.mat_params.z, 0.0, 1.0));

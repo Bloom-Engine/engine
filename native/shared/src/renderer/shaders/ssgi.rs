@@ -287,6 +287,9 @@ struct TraceParams {
     sky_color: vec4<f32>,
     clipmap: vec4<f32>,
     wsrc_cascades: array<vec4<f32>, 3>,
+    shadow_vps: array<mat4x4<f32>, 3>,
+    shadow_splits: vec4<f32>,
+    shadow_params: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TraceParams;
@@ -447,9 +450,8 @@ fn cs_main(
 /// Hit shading is "hit-lighting-lite":
 ///   - flat per-instance albedo + world-space normal from
 ///     `instance_data[hit.instance_custom_data]`;
-///   - sun direct: NdotL × sun_color (no cascade shadow lookup in V1 —
-///     the bias is one bounce away and hidden by temporal averaging;
-///     re-add when shadow-aware hit shading becomes worth the cost);
+///   - sun direct: NdotL × sun_color × cascaded-shadow visibility;
+///     uncovered Mesh-Card hits must not invent camera-moving sunlight;
 ///   - sky: max(dot(N, up), 0) × sky_color for the upward hemisphere;
 ///   - emissive: per-instance scalar × albedo;
 ///   - distance falloff and firefly clamp match the SW path so the
@@ -471,6 +473,9 @@ struct TraceParams {
     // is padding here (HW ray-query has its own world-space trace).
     clipmap: vec4<f32>,
     wsrc_cascades: array<vec4<f32>, 3>,
+    shadow_vps: array<mat4x4<f32>, 3>,
+    shadow_splits: vec4<f32>,
+    shadow_params: vec4<f32>,
 };
 
 struct InstanceGiData {
@@ -507,6 +512,10 @@ const BLOOM_TRANSPARENT_GI: bool = false;
 @group(0) @binding(7) var wsrc_atlas: texture_3d<f32>;
 @group(0) @binding(8) var wsrc_samp: sampler;
 @group(0) @binding(9) var prev_history: texture_3d<f32>;
+@group(0) @binding(10) var shadow_atlas_0: texture_depth_2d;
+@group(0) @binding(11) var shadow_atlas_1: texture_depth_2d;
+@group(0) @binding(12) var shadow_atlas_2: texture_depth_2d;
+@group(0) @binding(13) var shadow_samp: sampler_comparison;
 
 // Ticket 014 V7/V8 — WSRC lookup shared with the SDF path. V8
 // trilinear across the 8 neighbouring probes, nearest octel for
@@ -581,6 +590,45 @@ fn hw_gi_cap(raw_in: vec3<f32>) -> vec3<f32> {
 
 fn hw_gi_miss(origin_ws: vec3<f32>, dir_ws: vec3<f32>, max_t: f32) -> vec3<f32> {
     return hw_gi_cap(hw_wsrc_sample(origin_ws + dir_ws * max_t, dir_ws));
+}
+
+fn hw_gi_sun_visibility(pos_ws: vec3<f32>) -> f32 {
+    if (u.shadow_params.y <= 0.5) {
+        return 1.0;
+    }
+    let view_z = -(u.view * vec4<f32>(pos_ws, 1.0)).z;
+    var cascade: i32 = 2;
+    if (view_z <= u.shadow_splits.x) {
+        cascade = 0;
+    } else if (view_z <= u.shadow_splits.y) {
+        cascade = 1;
+    }
+    var clip: vec4<f32>;
+    if (cascade == 0) {
+        clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
+    } else if (cascade == 1) {
+        clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0);
+    } else {
+        clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0);
+    }
+    if (clip.w <= 0.0) {
+        return 0.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        // The fallback has no visibility evidence outside the camera's CSM.
+        // Conservatively retain sky/emissive instead of inventing sunlight.
+        return 0.0;
+    }
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let ref_depth = ndc.z - u.shadow_params.x;
+    if (cascade == 0) {
+        return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, uv, ref_depth);
+    } else if (cascade == 1) {
+        return textureSampleCompareLevel(shadow_atlas_1, shadow_samp, uv, ref_depth);
+    }
+    return textureSampleCompareLevel(shadow_atlas_2, shadow_samp, uv, ref_depth);
 }
 
 fn hw_gi_card_uv(
@@ -658,7 +706,7 @@ fn hw_gi_shade_hit(
 
     let hit_n = inst.normal_ws;
     let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
-    let direct = u.sun_color.xyz * ndotl;
+    let direct = u.sun_color.xyz * ndotl * hw_gi_sun_visibility(hit_world);
     let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
     let sky = u.sky_color.xyz * ndotup;
     return hw_gi_cap(
@@ -850,6 +898,9 @@ struct TraceParams {
     // ray-terminal position. extent <= 0 marks an unbaked cascade
     // (per-cascade); the shader falls back to black if none match.
     wsrc_cascades: array<vec4<f32>, 3>,
+    shadow_vps: array<mat4x4<f32>, 3>,
+    shadow_splits: vec4<f32>,
+    shadow_params: vec4<f32>,
 };
 
 struct SdfInstanceGiData {

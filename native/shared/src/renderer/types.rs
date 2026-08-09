@@ -766,6 +766,15 @@ pub(super) struct ProbeTraceParams {
     /// carry these for uniform-buffer size parity; Hi-Z ignores
     /// them.
     pub(super) wsrc_cascades: [[f32; 4]; 3],
+    /// Directional-shadow transforms used by cardless HW hits. The detailed
+    /// Bistro has more primitives than the fixed Mesh-Card atlas can cover,
+    /// so the fallback must query the same visibility as the primary pass
+    /// instead of inventing unoccluded sunlight.
+    pub(super) shadow_vps: [[[f32; 4]; 4]; 3],
+    /// xyz = camera-space cascade split distances, w unused.
+    pub(super) shadow_splits: [f32; 4],
+    /// x = comparison bias, y = shadows enabled, zw unused.
+    pub(super) shadow_params: [f32; 4],
 }
 
 /// PT-2 — fixed size of the kernel's texture binding array. Real texture
@@ -1199,6 +1208,7 @@ mod physical_uv_tests {
     #[test]
     fn probe_header_matches_shader_storage_abi() {
         assert_eq!(std::mem::size_of::<ProbeHeaderCpu>(), 80);
+        assert_eq!(std::mem::size_of::<ProbeTraceParams>(), 576);
     }
 
     #[test]
