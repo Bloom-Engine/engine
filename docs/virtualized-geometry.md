@@ -4,9 +4,10 @@ Bloom's virtualized-geometry work is opt-in and staged. The #131 milestones now
 cover the deterministic meshlet/page contract, strict runtime loading,
 fixed-budget GPU residency, projected-error GPU hierarchy selection, raw-page
 vertex decoding, bounded indirect draw emission, and the temporal/material ABI
-needed by a future visibility consumer. They still do not enable a production
-renderer, change ordinary glTF loading, or claim complete Nanite-equivalent
-streaming, occlusion, material, or visibility integration.
+and namespaced raw visibility raster needed by a future PBR consumer. They
+still do not enable a production renderer, change ordinary glTF loading, or
+claim complete Nanite-equivalent streaming, occlusion, material, or visibility
+integration.
 
 ## Cook and inspect
 
@@ -276,6 +277,25 @@ state, use indirect-count support or provide a separately qualified bounded
 fallback, and reproduce every visibility MRT. Unsupported adapters remain on
 the compatibility renderer.
 
+`GpuVirtualVisibilityRaster` is the first raw visibility consumer. It pulls
+the emitted triangles from the physical page, mesh, cluster, selection, and
+instance buffers and writes Bloom's shared `Rg32Uint` target plus depth. Draw
+word bit 31 selects the virtual namespace; the lower 31 bits address the
+selected record. Compatibility IDs keep bit 31 clear, while `0xffffffff`
+remains the unambiguous background sentinel. Primitive word bit 31 continues
+to carry front-face orientation independently.
+
+Construction requires `PRIMITIVE_INDEX`, `INDIRECT_FIRST_INSTANCE`, five
+vertex-stage storage buffers, and a draw capacity that fits the namespace.
+The shipping draw method additionally requires
+`MULTI_DRAW_INDIRECT_COUNT`. Its exact fixed-count form exists only in tests,
+so an adapter without count support cannot accidentally execute stale command
+slots. Alpha-masked clusters are discarded and remain compatibility-owned;
+single-sided clusters reject back faces while double-sided clusters preserve
+the face bit for later shading. The 128-byte frame record already carries
+current and previous view-projection transforms, although this raster consumes
+only the current transform.
+
 The renderer integration remains deliberately explicit:
 
 - zero production render passes, draws, buffers, bindings, allocations, or
@@ -283,10 +303,10 @@ The renderer integration remains deliberately explicit:
 - zero changes to existing immediate-mode or glTF selection and pixels;
 - no silent `.bgeo` replacement of an ordinary model;
 - no asynchronous file/store IO, request-feedback scheduling, production
-  visibility raster, or virtual-geometry material composition yet.
+  renderer registration, or virtual-geometry material composition yet.
 
-The next #131 runtime milestones are temporal instance/material records,
-integration with #27's visibility/material path, a non-indirect-count fallback,
+The next #131 runtime milestones are exact PBR/MRT reconstruction through
+#27's visibility/material path, a bounded non-indirect-count fallback,
 conservative previous-frame Hi-Z, and asynchronous #136 index resolution plus
 request feedback. The compatibility renderer remains responsible for
 unsupported and not-yet-qualified content throughout that work.
@@ -350,4 +370,6 @@ Metal readback proof are recorded in
 GPU hierarchy selection and independent CPU parity are recorded in
 `docs/evidence/issue-131-gpu-hierarchy-traversal-v1.{md,json}`. Raw-page decode,
 bounded indirect emission, and executable Metal raster proof are recorded in
-`docs/evidence/issue-131-virtual-draw-emission-v1.{md,json}`.
+`docs/evidence/issue-131-virtual-draw-emission-v1.{md,json}`. Collision-free
+visibility namespacing and raw virtual ID/depth rasterization are recorded in
+`docs/evidence/issue-131-virtual-visibility-raster-v1.{md,json}`.

@@ -12,8 +12,9 @@ win from the old estimate.
 
 The implementation contract is now:
 
-- `Rg32Uint` (8 bytes/pixel): full 32-bit draw ID plus a 31-bit primitive ID
-  and one front-face bit;
+- `Rg32Uint` (8 bytes/pixel): draw bit 31 selects the compatibility or virtual
+  namespace, the remaining 31 bits address a draw within that namespace, and
+  the second word carries a 31-bit primitive ID plus one front-face bit;
 - reconstruct perspective-correct barycentrics from the referenced
   triangle's clip positions rather than storing them or expanding shared
   vertices;
@@ -75,6 +76,16 @@ or commands, and the production MRTs do not gain `COPY_SRC` usage. The parity
 scene contains moving eligible geometry and a moving layered compatibility
 draw, so the velocity comparison cannot pass through an all-zero attachment.
 
+The staged virtual-geometry raster uses that same `Rg32Uint` contract. It
+pulls vertices directly from validated resident pages and writes namespaced
+virtual draw IDs, but it is not registered with `Renderer` or the visibility
+runtime yet. Its counted production entry point requires
+`MULTI_DRAW_INDIRECT_COUNT`; adapters without it fail closed to compatibility
+rendering until a bounded fallback is separately qualified. Alpha-masked
+virtual clusters also remain compatibility-only until their exact material
+coverage inputs are available. This checkpoint proves raw ID/depth
+rasterization, not PBR/MRT composition or runtime activation.
+
 ## Original problem statement (historical)
 
 The `main_hdr_pass` writes four MRTs at the full physical resolution:
@@ -101,8 +112,9 @@ depth prepass, every visible pixel shades exactly once.
 This is a significant refactor — do ticket 005 (depth prepass) first. Then:
 
 1. **Rasterize eligible geometry** into one `Rg32Uint` visibility target,
-   storing `(draw_id, primitive_id + front-face bit)`. Material and normal are
-   not written; barycentrics are reconstructed in the shading pass.
+   storing `(namespace + draw_index, primitive_id + front-face bit)`. Material
+   and normal are not written; barycentrics are reconstructed in the shading
+   pass.
 2. **New shading pass** reads the visibility buffer, fetches the vertex data
    for the referenced triangle, interpolates attributes from barycentrics,
    and evaluates the full PBR shader once per pixel.
