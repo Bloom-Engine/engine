@@ -76,6 +76,9 @@ SSGI now owns `probe_history_valid` independently of TAA:
 - force refresh assigns current radiance directly, avoiding the undefined
   `invalid_history * 0` side of a nominal `mix(..., alpha = 1)`;
 - valid history keeps the existing variance-adaptive four-frame EMA;
+- placement dither is bounded to one half-resolution pixel rather than half a
+  probe tile, and each probe retains its prior world position/normal so a
+  depth-layer or surface change refreshes history instead of smearing it;
 - non-finite half-float history, trace input, and trace output are replaced
   component-wise with zero; ordinary finite radiance is unchanged;
 - degenerate depth-derived normals use finite fallback directions during probe
@@ -92,10 +95,11 @@ SSGI now owns `probe_history_valid` independently of TAA:
   filter remain unchanged.
 
 Telemetry exposes `temporal_history.ssgi_probe_valid` and `ssgi_probe_index`.
-The cached diffuse result grows each probe header from 32 to 48 bytes
-(16 bytes per probe, 32,640 bytes at a 1920x1080 render size). It adds no
-texture, bind group, dispatch, draw, or graph pass, and removes the probe
-history texture lookup from each resolve sample.
+The cached diffuse result plus prior geometric placement make each probe
+header 80 bytes. Relative to the previous 48-byte header, continuity adds 32
+bytes per probe (65,280 bytes at a 1920x1080 render size). It adds no texture,
+bind group, dispatch, draw, or graph pass; diffuse caching continues to avoid
+the probe-history texture lookup from each resolve sample.
 
 ## TAA/TSR implementation
 
@@ -307,12 +311,12 @@ When SSGI is active, a capture also emits `ssgi-rejection-reason.png` and
 `ssgi-temporal-confidence.png`. SSGI history lives in a 3D
 probe-X/probe-Y/octahedral-texel domain, so the capture-only compute pass
 flattens each probe's 8x8 octahedral slab into a 2D atlas. Gray marks invalid
-or freshly seeded probes, magenta marks invalid or adaptively refreshed
-radiance, and green marks retained history. Confidence RGB contains local
-radiance variation, current-radiance strength, and retained-history
-contribution. Screen-space categories such as off-screen reprojection and
-motion weighting are intentionally absent because they do not exist in this
-representation.
+or freshly seeded probes, cyan marks a changed world-space surface placement,
+magenta marks invalid or adaptively refreshed radiance, and green marks
+retained history. Confidence RGB contains local radiance variation,
+current-radiance strength, and retained-history contribution. Screen-space
+categories such as off-screen reprojection and motion weighting are
+intentionally absent because they do not exist in this representation.
 
 The two RGBA8 atlases and their readback buffers exist only for the native
 capture and are released after encoding. Normal frames add no diagnostic pass,

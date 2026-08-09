@@ -813,14 +813,17 @@ pub(super) struct ProbeResolveParams {
 }
 
 /// On-GPU `ProbeHeader` layout (must match PROBE_HELPERS_WGSL's struct).
-/// 48 bytes per probe; diffuse stores the cosine-convolved result so resolve
-/// needs no separate probe-history texture lookup.
+/// 80 bytes per probe. Diffuse stores the cosine-convolved result so resolve
+/// needs no separate probe-history texture lookup; the prior placement gives
+/// temporal accumulation an explicit geometric continuity test.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeHeaderCpu {
     pub(super) world_pos: [f32; 4],
     pub(super) normal: [f32; 4],
     pub(super) diffuse: [f32; 4],
+    pub(super) previous_world_pos: [f32; 4],
+    pub(super) previous_normal: [f32; 4],
 }
 
 pub(super) const PROBE_HEADER_RW_LAYOUT_ENTRY: wgpu::BindGroupLayoutEntry =
@@ -1165,7 +1168,7 @@ mod physical_uv_tests {
 
     #[test]
     fn probe_header_matches_shader_storage_abi() {
-        assert_eq!(std::mem::size_of::<ProbeHeaderCpu>(), 48);
+        assert_eq!(std::mem::size_of::<ProbeHeaderCpu>(), 80);
     }
 
     #[test]

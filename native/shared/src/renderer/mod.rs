@@ -878,7 +878,7 @@ pub struct Renderer {
     /// Current probe grid dimensions. Recomputed on resize.
     pub probe_grid_w: u32,
     pub probe_grid_h: u32,
-    /// Per-probe headers (48 B, storage/copy-dst), placed then read by trace/resolve.
+    /// Per-probe headers (80 B, storage/copy-dst), placed then read by trace/resolve.
     pub probe_header_buffer: wgpu::Buffer,
     /// Per-frame compute trace output; temporal reads it as current input.
     pub probe_trace_tex: wgpu::Texture,

@@ -97,9 +97,10 @@ impl SsgiTemporalDiagnosticResources {
                 storage(5),
             ],
         });
+        let source = format!("{}{}", PROBE_HELPERS_WGSL, SHADER);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ssgi_temporal_diagnostic_shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ssgi_temporal_diagnostic_pipeline_layout"),
@@ -203,11 +204,12 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::SHADER;
+    use super::{PROBE_HELPERS_WGSL, SHADER};
 
     #[test]
     fn probe_diagnostic_shader_parses_without_touching_production_history() {
-        wgpu::naga::front::wgsl::parse_str(SHADER)
+        let source = format!("{}{}", PROBE_HELPERS_WGSL, SHADER);
+        wgpu::naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|error| panic!("SSGI temporal diagnostics WGSL failed: {error}"));
     }
 }

@@ -16,6 +16,7 @@ and pass profiler do not modify the renderer.
 | SSR validity and firefly bound | 0 B | 0 / 0 | Reuses the two existing HDR histories and temporal pass |
 | SSGI validity and finite seeding | 0 B of history | 0 / 0 | Reuses the two existing 3D histories |
 | SSGI cached diffuse probe value | 32,640 B at native 1080p | 0 / 0 | Adds 16 B/probe to the existing header and removes a resolve texture lookup |
+| SSGI geometric continuity | 65,280 B at native 1080p | 0 / 0 | Adds prior world position/normal to the probe header; no texture, bind group, dispatch, or draw |
 | TAA validity and ownership | 0 B | 0 / 0 | Reuses the two existing TAA histories |
 | Auto-exposure validity | 0 B | 0 / 0 | Reuses the existing two 1x1 histories |
 | PT reset/reseed contract | 0 B | 0 / 0 | Reuses compatible SVGF histories; no retained bytes can seed a zero-sample epoch |

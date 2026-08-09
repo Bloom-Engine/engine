@@ -405,3 +405,65 @@ fn ssgi_capture_exposes_probe_history_without_normal_frame_resources() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn ssgi_rotation_rejects_changed_probe_surfaces() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(false);
+    r.set_ssao_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_ssgi_enabled(true);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_shadows_enabled(false);
+
+    let capture = |eng: &mut EngineState, camera_x: f32, target_x: f32| {
+        eng.begin_frame();
+        let r = &mut eng.renderer;
+        r.set_clear_color(6.0, 8.0, 15.0, 255.0);
+        r.begin_mode_3d(
+            camera_x, 3.0, 6.0, target_x, 0.6, 0.0, 0.0, 1.0, 0.0, 48.0, 0.0,
+        );
+        r.set_ambient_light(15.0, 18.0, 28.0, 0.2);
+        r.add_directional_light(-0.5, -1.0, -0.3, 1.0, 0.85, 0.7, 1.8);
+        r.draw_cube(0.0, -0.1, 0.0, 12.0, 0.2, 12.0, 90.0, 96.0, 107.0, 255.0);
+        r.draw_cube(0.0, 2.0, -3.0, 8.0, 4.0, 0.2, 230.0, 166.0, 31.0, 255.0);
+        r.draw_cube(-1.1, 1.0, 0.0, 1.8, 2.0, 1.8, 230.0, 45.0, 25.0, 255.0);
+        r.draw_sphere(1.1, 0.9, -0.8, 0.9, 30.0, 110.0, 240.0, 255.0);
+        eng.end_frame();
+    };
+
+    eng.renderer.reset_temporal_history();
+    for _ in 0..24 {
+        capture(&mut eng, 4.0, 0.0);
+    }
+
+    let directory = std::env::temp_dir().join(format!("bloom-ssgi-motion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+    capture(&mut eng, 4.0, 4.0);
+
+    let reasons = image::open(directory.join("ssgi-rejection-reason.png"))
+        .expect("moving SSGI capture did not emit probe-domain temporal reasons")
+        .to_rgb8();
+    let changed_surface = reasons
+        .pixels()
+        .filter(|pixel| pixel[0] < 30 && pixel[1] > 170 && pixel[2] > 220)
+        .count();
+    let total = u64::from(reasons.width()) * u64::from(reasons.height());
+    eprintln!("temporal-corpus ssgi-motion changed_surface={changed_surface} total={total}");
+    assert!(
+        u64::try_from(changed_surface).unwrap() >= total / 2,
+        "camera motion did not reject probe history from changed surfaces"
+    );
+
+    if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+        eprintln!("kept moving SSGI diagnostics at {directory:?}");
+    } else {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

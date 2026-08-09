@@ -23,6 +23,14 @@
       "added_passes": 0,
       "removed_resolve_texture_lookups_per_sample": 1
     },
+    "ssgi_geometric_continuity": {
+      "bytes_per_probe": 32,
+      "bytes_at_native_1920x1080": 65280,
+      "total_probe_header_bytes_per_probe": 80,
+      "added_passes": 0,
+      "added_textures": 0,
+      "added_bind_groups": 0
+    },
     "motion_cpu_histories": {
       "cached_model_one_instance_capacity_bytes": 576,
       "immediate_three_primitive_capacity_bytes": 1728,

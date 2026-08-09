@@ -28,7 +28,26 @@ struct ProbeHeader {
     normal: vec4<f32>,
     // xyz = cosine-convolved diffuse radiance, w = reserved.
     diffuse: vec4<f32>,
+    // Prior placement at this screen-probe slot. Temporal history is only
+    // retained when both placements describe the same surface.
+    previous_world_pos: vec4<f32>,
+    previous_normal: vec4<f32>,
 };
+
+fn probe_history_geometry_valid(probe: ProbeHeader) -> bool {
+    if (probe.world_pos.w < 0.5 || probe.previous_world_pos.w < 0.5) {
+        return false;
+    }
+    let normal_similarity = dot(probe.normal.xyz, probe.previous_normal.xyz);
+    let linear_depth = max(min(probe.normal.w, probe.previous_normal.w), 0.1);
+    // A pixel subtends a larger world-space footprint at distance. This bound
+    // retains ordinary camera motion and subpixel dither while rejecting a
+    // different depth layer that entered the same screen-probe slot.
+    let maximum_world_shift = 0.05 + linear_depth * 0.02;
+    return normal_similarity >= 0.85
+        && distance(probe.world_pos.xyz, probe.previous_world_pos.xyz)
+            <= maximum_world_shift;
+}
 
 fn oct_wrap(v: vec2<f32>) -> vec2<f32> {
     let s = vec2<f32>(
@@ -154,10 +173,9 @@ fn safe_probe_direction(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
 
 /// Probe placement. One workgroup invocation per probe tile writes a
 /// ProbeHeader (world position + world normal + linear view-z). Sky
-/// probes are flagged invalid (world_pos.w = 0). Per-frame Halton-style
-/// jitter moves the probe within its 16×16 tile so adjacent frames
-/// cover slightly different surface points, widening effective
-/// coverage when combined with temporal accumulation.
+/// probes are flagged invalid (world_pos.w = 0). A bounded subpixel dither
+/// avoids a permanently quantized location without moving the probe across
+/// visibly different parts of its 16×16 tile.
 pub(in crate::renderer) const SSGI_PROBE_PLACE_WGSL: &str = "
 struct PlaceParams {
     // Full inverse view matrix — used to lift view-space positions/normals
@@ -183,18 +201,22 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= grid_w || gid.y >= grid_h) { return; }
 
     let probe_idx = gid.y * grid_w + gid.x;
+    // Preserve the prior placement before publishing this frame's surface.
+    // Temporal accumulation compares both records after placement.
+    probes[probe_idx].previous_world_pos = probes[probe_idx].world_pos;
+    probes[probe_idx].previous_normal = probes[probe_idx].normal;
     let half_w = f32(u.size.x);
     let half_h = f32(u.size.y);
     let tile = u.params.y;
     let frame = u.params.x;
 
-    // Jitter UV inside the tile — 50% of tile radius so probe stays
-    // comfortably away from tile borders. Golden-ratio offsets across
-    // frames decorrelate the jitter from TAA/SSAO patterns.
+    // Dither by at most half a half-resolution pixel. The former +/-4-pixel
+    // placement retained radiance from visibly different surface points and
+    // produced large gray smoke-like patches during inspection and motion.
     let jx = ign(vec2<f32>(f32(gid.x) + frame * 1.618, f32(gid.y)));
     let jy = ign(vec2<f32>(f32(gid.x), f32(gid.y) + frame * 2.236));
-    let px_x = f32(gid.x) * tile + tile * 0.5 + (jx - 0.5) * tile * 0.5;
-    let px_y = f32(gid.y) * tile + tile * 0.5 + (jy - 0.5) * tile * 0.5;
+    let px_x = f32(gid.x) * tile + tile * 0.5 + (jx - 0.5);
+    let px_y = f32(gid.y) * tile + tile * 0.5 + (jy - 0.5);
     let uv = vec2<f32>(px_x / half_w, px_y / half_h);
 
     let linear_z = textureSampleLevel(hiz0, hiz_samp, uv, 0.0).r;
@@ -1271,14 +1293,10 @@ fn cs_main(
 }
 ";
 
-/// Probe temporal accumulator. EMA in probe-octel space. No reprojection
-/// in V1 — since every frame traces all 64 octels, history only smooths
-/// firefly noise; per-probe world positions jitter by tile-fraction so
-/// camera motion eventually converges to a stable signal without explicit
-/// velocity. Disocclusion is handled implicitly: moving the camera
-/// changes which tile a surface falls into, replacing that probe's
-/// header, and the new probe's history blends from zero since the old
-/// probe at that grid coord pointed elsewhere.
+/// Probe temporal accumulator. EMA remains in probe-octel space, but history
+/// is retained only while current and previous placements represent the same
+/// world-space surface. This bounds camera-motion/disocclusion ghosts without
+/// another texture or a screen-space velocity dependency.
 pub(in crate::renderer) const SSGI_PROBE_TEMPORAL_WGSL: &str = "
 struct TemporalParams {
     // x = alpha (0.25 = 4-frame EMA at steady state),
@@ -1308,6 +1326,8 @@ fn cs_main(
     let grid_h = u32(u.params.w);
     if (wg.x >= grid_w || wg.y >= grid_h) { return; }
 
+    let probe_index = wg.y * grid_w + wg.x;
+    let geometry_valid = probe_history_geometry_valid(probes[probe_index]);
     let coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
     let curr = bounded_probe_history(textureLoad(radiance_in, coord, 0).rgb);
     var hist = bounded_probe_history(textureLoad(history_in, coord, 0).rgb);
@@ -1320,7 +1340,7 @@ fn cs_main(
 
     var alpha = u.params.x;
     let force_refresh = u.params.y > 0.5;
-    if (force_refresh) {
+    if (force_refresh || !geometry_valid) {
         alpha = 1.0;
     } else {
         // Ticket 016 V4 — variance-adaptive alpha. Scale the base
@@ -1341,7 +1361,7 @@ fn cs_main(
         alpha = min(1.0, alpha + delta * 0.6);
     }
     var blended = mix(hist, curr, alpha);
-    if (force_refresh) {
+    if (force_refresh || !geometry_valid) {
         // `mix(undefined, current, 1)` may still evaluate undefined * zero.
         // Direct assignment guarantees invalid history is never observed.
         blended = curr;
@@ -1374,7 +1394,7 @@ fn cs_main(
         // Uniform sphere samples need 4x their mean cosine-weighted
         // radiance to reproduce constant diffuse incident radiance.
         blended = bounded_probe_history(diffuse_radiance[0] * (4.0 / 64.0));
-        probes[wg.y * grid_w + wg.x].diffuse = vec4<f32>(blended, 1.0);
+        probes[probe_index].diffuse = vec4<f32>(blended, 1.0);
     }
 
     textureStore(history_out, coord, vec4<f32>(blended, 1.0));
