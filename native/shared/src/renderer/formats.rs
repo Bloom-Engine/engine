@@ -12,7 +12,7 @@ use wgpu;
 // Depth texture helper
 // ============================================================
 
-pub(super) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Linear HDR format for the offscreen render target. The scene + sky
 /// + immediate-mode 3D passes write here in linear space; a final
 /// composite pass tonemaps to the sRGB surface format.

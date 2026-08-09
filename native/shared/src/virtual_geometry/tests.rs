@@ -17,7 +17,9 @@ const VIRTUAL_GEOMETRY_DECODE_PROBE_WGSL: &str =
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "temporal_material_tests.rs"]
 mod temporal_material_tests;
-
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "virtual_visibility_tests.rs"]
+mod virtual_visibility_tests;
 fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
@@ -462,8 +464,9 @@ fn try_traversal_device() -> Option<(wgpu::Device, wgpu::Queue)> {
             .ok()?;
     let mut limits = wgpu::Limits::downlevel_defaults();
     limits.max_storage_buffers_per_shader_stage = 7;
-    let optional_indirect =
-        wgpu::Features::INDIRECT_FIRST_INSTANCE | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
+    let optional_indirect = wgpu::Features::INDIRECT_FIRST_INSTANCE
+        | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
+        | wgpu::Features::PRIMITIVE_INDEX;
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("virtual_geometry_traversal_test_device"),
         required_limits: limits,

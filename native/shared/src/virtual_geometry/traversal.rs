@@ -435,6 +435,10 @@ impl GpuVirtualHierarchySelector {
     pub(super) const fn id(&self) -> u64 {
         self.id
     }
+
+    pub(super) const fn pool_id(&self) -> u64 {
+        self.pool_id
+    }
 }
 
 fn binding(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

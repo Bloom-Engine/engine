@@ -222,6 +222,10 @@ impl GpuVirtualDrawEmitter {
         self.draw_capacity
     }
 
+    pub(super) const fn selector_id(&self) -> u64 {
+        self.selector_id
+    }
+
     pub fn command_buffer(&self) -> &wgpu::Buffer {
         &self.command_buffer
     }
