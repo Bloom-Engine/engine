@@ -21,7 +21,8 @@ pub use draw_emission::{
 pub use gpu_pool::{
     GpuPageTransition, GpuVirtualClusterEntry, GpuVirtualGeometryConfig, GpuVirtualGeometryPool,
     GpuVirtualGeometryTelemetry, GpuVirtualMeshEntry, GpuVirtualPageEntry, VirtualGeometryGpuError,
-    VirtualMeshId, VirtualPageId, GPU_VIRTUAL_PAGE_PINNED, GPU_VIRTUAL_PAGE_RESIDENT,
+    VirtualMaterialBinding, VirtualMeshId, VirtualPageId, GPU_VIRTUAL_MESH_MATERIALS_BOUND,
+    GPU_VIRTUAL_MESH_VALID, GPU_VIRTUAL_PAGE_PINNED, GPU_VIRTUAL_PAGE_RESIDENT,
 };
 pub use residency::{
     ClusterGroup, PageTransition, ResidencyError, ResidencyTelemetry, ResolvedClusterGroup,

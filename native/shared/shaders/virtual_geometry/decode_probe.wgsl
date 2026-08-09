@@ -30,15 +30,24 @@ struct ClusterTable { records: array<GpuVirtualClusterEntry>, };
 
 struct GpuSelectedVirtualCluster {
     mesh_id: u32,
-    instance_id: u32,
+    instance_index: u32,
     cluster_index: u32,
     physical_slot: u32,
     lod_level: u32,
     triangle_count: u32,
-    material_index: u32,
+    material_id: u32,
     flags: u32,
 };
 struct SelectedTable { records: array<GpuSelectedVirtualCluster>, };
+
+struct GpuVirtualInstance {
+    model: mat4x4<f32>,
+    normal_rows: array<vec4<f32>, 3>,
+    instance_info: vec4<u32>,
+    previous_model: mat4x4<f32>,
+    model_tint: vec4<f32>,
+};
+struct InstanceTable { records: array<GpuVirtualInstance>, };
 
 struct GpuDecodedVirtualVertex {
     position: vec4<f32>,
@@ -46,6 +55,10 @@ struct GpuDecodedVirtualVertex {
     tangent: vec4<f32>,
     uv0_uv1: vec4<f32>,
     color: vec4<f32>,
+    current_world: vec4<f32>,
+    previous_world: vec4<f32>,
+    tinted_color: vec4<f32>,
+    world_normal: vec4<f32>,
     info: vec4<u32>,
 };
 struct DecodedTable { records: array<GpuDecodedVirtualVertex>, };
@@ -62,6 +75,7 @@ struct DecodeParams {
 @group(0) @binding(3) var<storage, read> selected: SelectedTable;
 @group(0) @binding(4) var<storage, read_write> decoded: DecodedTable;
 @group(0) @binding(5) var<uniform> params: DecodeParams;
+@group(0) @binding(6) var<storage, read> instances: InstanceTable;
 
 @compute @workgroup_size(32, 1, 1)
 fn decode_selected_corners(@builtin(global_invocation_id) invocation: vec3<u32>) {
@@ -76,6 +90,10 @@ fn decode_selected_corners(@builtin(global_invocation_id) invocation: vec3<u32>)
         return;
     }
     let selection = selected.records[selected_index];
+    if (selection.instance_index >= arrayLength(&instances.records)) {
+        return;
+    }
+    let instance = instances.records[selection.instance_index];
     let mesh_slot_plus_one = selection.mesh_id & 0xfffffu;
     if (mesh_slot_plus_one == 0u) {
         return;
@@ -109,12 +127,22 @@ fn decode_selected_corners(@builtin(global_invocation_id) invocation: vec3<u32>)
         cluster.aabb_min_error.xyz,
         cluster.aabb_max_radius.xyz,
     );
+    let local_position = vec4<f32>(vertex.position, 1.0);
+    let world_normal = normalize(vec3<f32>(
+        dot(instance.normal_rows[0].xyz, vertex.normal),
+        dot(instance.normal_rows[1].xyz, vertex.normal),
+        dot(instance.normal_rows[2].xyz, vertex.normal),
+    ));
     decoded.records[output_index] = GpuDecodedVirtualVertex(
-        vec4<f32>(vertex.position, 1.0),
+        local_position,
         vec4<f32>(vertex.normal, 0.0),
         vertex.tangent,
         vec4<f32>(vertex.uv0, vertex.uv1),
         vertex.color,
+        instance.model * local_position,
+        instance.previous_model * local_position,
+        vertex.color * instance.model_tint,
+        vec4<f32>(world_normal, 0.0),
         vec4<u32>(selected_index, selection.cluster_index, corner, local_vertex),
     );
 }

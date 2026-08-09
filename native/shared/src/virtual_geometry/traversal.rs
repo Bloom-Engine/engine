@@ -1,4 +1,7 @@
-use super::{GpuVirtualGeometryPool, VirtualGeometryGpuError, VirtualMeshId};
+use super::{
+    GpuVirtualGeometryPool, VirtualGeometryGpuError, VirtualMeshId,
+    GPU_VIRTUAL_MESH_MATERIALS_BOUND,
+};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,11 +13,12 @@ const INSTANCE_CONE_CULL_SAFE: u32 = 1 << 0;
 const ID_SLOT_MASK: u32 = (1 << 20) - 1;
 static NEXT_SELECTOR_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Fixed GPU input record for one virtual-geometry instance (128 bytes).
+/// Fixed GPU input record for one virtual-geometry instance (208 bytes).
 ///
-/// `model` is column-major. The normal rows and cone-safety bit are derived
-/// by [`GpuVirtualInstance::new`], so non-uniform or sheared transforms retain
-/// correct geometry and merely skip the optional normal-cone rejection.
+/// The first 128 bytes are the traversal-hot current transform, normal rows,
+/// and identity. Previous transform and tint are an appended render prefix so
+/// later visibility/PBR work can reproduce the established velocity and color
+/// contract without making hierarchy selection fetch a separate record.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuVirtualInstance {
@@ -22,6 +26,8 @@ pub struct GpuVirtualInstance {
     normal_rows: [[f32; 4]; 3],
     /// mesh ID, caller-stable instance ID, flags, reserved.
     instance_info: [u32; 4],
+    previous_model: [[f32; 4]; 4],
+    model_tint: [f32; 4],
 }
 
 impl GpuVirtualInstance {
@@ -30,11 +36,26 @@ impl GpuVirtualInstance {
         instance_id: u32,
         model: [[f32; 4]; 4],
     ) -> Result<Self, VirtualGeometryTraversalError> {
+        Self::with_render_state(mesh, instance_id, model, model, [1.0; 4])
+    }
+
+    pub fn with_render_state(
+        mesh: VirtualMeshId,
+        instance_id: u32,
+        model: [[f32; 4]; 4],
+        previous_model: [[f32; 4]; 4],
+        model_tint: [f32; 4],
+    ) -> Result<Self, VirtualGeometryTraversalError> {
         let (normal_rows, cone_safe) = normal_rows_and_cone_safety(model).ok_or(
             VirtualGeometryTraversalError::InvalidInstanceTransform {
                 instance: instance_id,
             },
         )?;
+        if !finite_affine(previous_model) || !model_tint.iter().all(|value| value.is_finite()) {
+            return Err(VirtualGeometryTraversalError::InvalidInstanceTransform {
+                instance: instance_id,
+            });
+        }
         Ok(Self {
             model,
             normal_rows,
@@ -44,6 +65,8 @@ impl GpuVirtualInstance {
                 u32::from(cone_safe) * INSTANCE_CONE_CULL_SAFE,
                 0,
             ],
+            previous_model,
+            model_tint,
         })
     }
 
@@ -80,9 +103,17 @@ impl GpuVirtualInstance {
     pub const fn normal_rows(self) -> [[f32; 4]; 3] {
         self.normal_rows
     }
+
+    pub const fn previous_model(self) -> [[f32; 4]; 4] {
+        self.previous_model
+    }
+
+    pub const fn model_tint(self) -> [f32; 4] {
+        self.model_tint
+    }
 }
 
-const _: () = assert!(std::mem::size_of::<GpuVirtualInstance>() == 128);
+const _: () = assert!(std::mem::size_of::<GpuVirtualInstance>() == 208);
 
 /// Camera data for projected-error hierarchy selection.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -105,12 +136,14 @@ pub struct VirtualGeometryView {
 )]
 pub struct GpuSelectedVirtualCluster {
     pub mesh_id: u32,
-    pub instance_id: u32,
+    /// Dense index into the exact instance buffer used for this dispatch.
+    pub instance_index: u32,
     pub cluster_index: u32,
     pub physical_slot: u32,
     pub lod_level: u32,
     pub triangle_count: u32,
-    pub material_index: u32,
+    /// Generation-safe renderer material ID; admitted selections never use zero.
+    pub material_id: u32,
     pub flags: u32,
 }
 
@@ -313,6 +346,11 @@ impl GpuVirtualHierarchySelector {
         for instance in instances {
             validate_instance(*instance)?;
             let mesh = pool.mesh_entry(instance.mesh_id())?;
+            if mesh.flags & GPU_VIRTUAL_MESH_MATERIALS_BOUND == 0 {
+                return Err(VirtualGeometryTraversalError::UnboundMaterials {
+                    mesh: instance.mesh_id(),
+                });
+            }
             maximum_root_clusters = maximum_root_clusters.max(mesh.root_cluster_count);
         }
         let workgroups_x = maximum_root_clusters.div_ceil(WORKGROUP_SIZE);
@@ -380,6 +418,10 @@ impl GpuVirtualHierarchySelector {
 
     pub fn selected_buffer(&self) -> &wgpu::Buffer {
         &self.selected_buffer
+    }
+
+    pub fn instance_buffer(&self) -> &wgpu::Buffer {
+        &self.instance_buffer
     }
 
     pub fn page_request_buffer(&self) -> &wgpu::Buffer {
@@ -517,6 +559,8 @@ fn validate_instance(instance: GpuVirtualInstance) -> Result<(), VirtualGeometry
         .iter()
         .flatten()
         .chain(instance.normal_rows.iter().flatten())
+        .chain(instance.previous_model.iter().flatten())
+        .chain(instance.model_tint.iter())
         .all(|value| value.is_finite());
     let Some((expected_normal_rows, expected_cone_safe)) =
         normal_rows_and_cone_safety(instance.model)
@@ -531,6 +575,7 @@ fn validate_instance(instance: GpuVirtualInstance) -> Result<(), VirtualGeometry
         || instance.normal_rows != expected_normal_rows
         || instance.instance_info[2] != expected_flags
         || instance.instance_info[3] != 0
+        || !finite_affine(instance.previous_model)
     {
         return Err(VirtualGeometryTraversalError::InvalidInstanceTransform {
             instance: instance.instance_id(),
@@ -539,13 +584,16 @@ fn validate_instance(instance: GpuVirtualInstance) -> Result<(), VirtualGeometry
     Ok(())
 }
 
+fn finite_affine(model: [[f32; 4]; 4]) -> bool {
+    model.iter().flatten().all(|value| value.is_finite())
+        && model[0][3].abs() <= 1.0e-6
+        && model[1][3].abs() <= 1.0e-6
+        && model[2][3].abs() <= 1.0e-6
+        && (model[3][3] - 1.0).abs() <= 1.0e-6
+}
+
 fn normal_rows_and_cone_safety(model: [[f32; 4]; 4]) -> Option<([[f32; 4]; 3], bool)> {
-    if !model.iter().flatten().all(|value| value.is_finite())
-        || model[0][3].abs() > 1.0e-6
-        || model[1][3].abs() > 1.0e-6
-        || model[2][3].abs() > 1.0e-6
-        || (model[3][3] - 1.0).abs() > 1.0e-6
-    {
+    if !finite_affine(model) {
         return None;
     }
     let a00 = model[0][0];
@@ -623,6 +671,9 @@ pub enum VirtualGeometryTraversalError {
     InvalidInstanceTransform {
         instance: u32,
     },
+    UnboundMaterials {
+        mesh: VirtualMeshId,
+    },
     DispatchLimitExceeded {
         requested: u32,
         maximum: u32,
@@ -668,6 +719,11 @@ impl fmt::Display for VirtualGeometryTraversalError {
                 formatter,
                 "virtual-geometry instance {instance} has a non-finite or singular transform"
             ),
+            Self::UnboundMaterials { mesh } => write!(
+                formatter,
+                "virtual mesh {} has no complete GPU material binding",
+                mesh.raw()
+            ),
             Self::DispatchLimitExceeded { requested, maximum } => write!(
                 formatter,
                 "virtual-geometry traversal needs {requested} workgroups in one dimension but the device limit is {maximum}"
@@ -700,10 +756,13 @@ pub(super) fn select_cpu_reference(
         });
     }
     let mut result = CpuTraversalResult::default();
-    for instance in instances {
+    for (instance_index, instance) in instances.iter().enumerate() {
         validate_instance(*instance)?;
         let mesh_id = instance.mesh_id();
         let mesh_entry = pool.mesh_entry(mesh_id)?;
+        if mesh_entry.flags & GPU_VIRTUAL_MESH_MATERIALS_BOUND == 0 {
+            return Err(VirtualGeometryTraversalError::UnboundMaterials { mesh: mesh_id });
+        }
         let archive = pool.asset(mesh_id)?.archive();
         for root_index in 0..mesh_entry.root_cluster_count {
             let root = &archive.clusters[root_index as usize];
@@ -750,6 +809,7 @@ pub(super) fn select_cpu_reference(
                         pool,
                         config,
                         mesh_id,
+                        instance_index as u32,
                         *instance,
                         group_first,
                         group_count,
@@ -775,6 +835,7 @@ pub(super) fn select_cpu_reference(
                         pool,
                         config,
                         mesh_id,
+                        instance_index as u32,
                         *instance,
                         group_first,
                         group_count,
@@ -795,6 +856,7 @@ pub(super) fn select_cpu_reference(
                     pool,
                     config,
                     mesh_id,
+                    instance_index as u32,
                     *instance,
                     group_first,
                     group_count,
@@ -880,6 +942,7 @@ fn cpu_select_group(
     pool: &GpuVirtualGeometryPool,
     config: GpuVirtualTraversalConfig,
     mesh_id: VirtualMeshId,
+    instance_index: u32,
     instance: GpuVirtualInstance,
     first: u32,
     count: u32,
@@ -923,14 +986,15 @@ fn cpu_select_group(
         let output_index = result.counters.selected_count;
         result.counters.selected_count += 1;
         if output_index < config.max_selected_clusters {
+            let material_id = pool.bound_material_id(mesh_id, cluster.material_index)?;
             result.selected.push(GpuSelectedVirtualCluster {
                 mesh_id: mesh_id.raw(),
-                instance_id: instance.instance_id(),
+                instance_index,
                 cluster_index: first + offset as u32,
                 physical_slot: page.slot_plus_one - 1,
                 lod_level: cluster.lod_level,
                 triangle_count: cluster.triangle_count,
-                material_index: cluster.material_index.unwrap_or(u32::MAX),
+                material_id,
                 flags: cluster.flags,
             });
         } else {
@@ -1120,15 +1184,17 @@ struct GpuVirtualInstance {
     model: mat4x4<f32>,
     normal_rows: array<vec4<f32>, 3>,
     instance_info: vec4<u32>,
+    previous_model: mat4x4<f32>,
+    model_tint: vec4<f32>,
 };
 struct GpuSelectedVirtualCluster {
     mesh_id: u32,
-    instance_id: u32,
+    instance_index: u32,
     cluster_index: u32,
     physical_slot: u32,
     lod_level: u32,
     triangle_count: u32,
-    material_index: u32,
+    material_id: u32,
     flags: u32,
 };
 struct GpuVirtualPageRequest {
@@ -1343,6 +1409,7 @@ fn emit_missing_requests(
 
 fn select_group(
     mesh: GpuVirtualMeshEntry,
+    instance_index: u32,
     instance: GpuVirtualInstance,
     first: u32,
     count: u32,
@@ -1378,7 +1445,7 @@ fn select_group(
         if (output_index < params.dispatch.z) {
             selected.records[output_index] = GpuSelectedVirtualCluster(
                 mesh.mesh_id,
-                instance.instance_info.y,
+                instance_index,
                 local_cluster,
                 page.slot_plus_one - 1u,
                 cluster.page_lod_counts.y,
@@ -1469,18 +1536,18 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
         let child_count = first_cluster.relations.w;
         let wants_refinement = maximum_error > params.thresholds.x && child_count != 0u;
         if (!wants_refinement) {
-            select_group(mesh, instance, group_first, group_count, scale);
+            select_group(mesh, instance_index, instance, group_first, group_count, scale);
             return;
         }
         if (child_count > params.limits.y || child_first + child_count > mesh.cluster_count) {
             atomicAdd(&counters.invalid_records, 1u);
-            select_group(mesh, instance, group_first, group_count, scale);
+            select_group(mesh, instance_index, instance, group_first, group_count, scale);
             return;
         }
         if (!group_is_resident(mesh, child_first, child_count)) {
             atomicAdd(&counters.fallback_groups, 1u);
             emit_missing_requests(mesh, instance, child_first, child_count);
-            select_group(mesh, instance, group_first, group_count, scale);
+            select_group(mesh, instance_index, instance, group_first, group_count, scale);
             return;
         }
         atomicAdd(&counters.refined_groups, 1u);
@@ -1489,7 +1556,7 @@ fn select_virtual_clusters(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     atomicAdd(&counters.depth_limit_fallbacks, 1u);
-    select_group(mesh, instance, group_first, group_count, scale);
+    select_group(mesh, instance_index, instance, group_first, group_count, scale);
 }
 "#;
 

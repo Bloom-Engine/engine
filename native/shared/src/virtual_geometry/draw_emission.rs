@@ -326,12 +326,12 @@ impl std::error::Error for VirtualGeometryDrawEmissionError {}
 const DRAW_PREPARE_SHADER: &str = r#"
 struct GpuSelectedVirtualCluster {
     mesh_id: u32,
-    instance_id: u32,
+    instance_index: u32,
     cluster_index: u32,
     physical_slot: u32,
     lod_level: u32,
     triangle_count: u32,
-    material_index: u32,
+    material_id: u32,
     flags: u32,
 };
 struct SelectedTable { records: array<GpuSelectedVirtualCluster>, };
@@ -411,12 +411,12 @@ fn prepare_virtual_draws() {
 const DRAW_EMIT_SHADER: &str = r#"
 struct GpuSelectedVirtualCluster {
     mesh_id: u32,
-    instance_id: u32,
+    instance_index: u32,
     cluster_index: u32,
     physical_slot: u32,
     lod_level: u32,
     triangle_count: u32,
-    material_index: u32,
+    material_id: u32,
     flags: u32,
 };
 struct SelectedTable { records: array<GpuSelectedVirtualCluster>, };

@@ -9,6 +9,7 @@ use super::residency::{group_containing, group_lod, group_pages, parent_group};
 use super::{ClusterGroup, ResidencyError, ResolvedClusterGroup, VirtualGeometryAsset};
 use crate::renderer::material_indirection::{GpuCompletionTracker, StableResourceId};
 use bloom_geometry_format::{MAX_PAGE_BYTES, MIN_PAGE_BYTES};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -25,6 +26,16 @@ static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 
 pub const GPU_VIRTUAL_PAGE_RESIDENT: u32 = 1 << 0;
 pub const GPU_VIRTUAL_PAGE_PINNED: u32 = 1 << 1;
+pub const GPU_VIRTUAL_MESH_VALID: u32 = 1 << 0;
+pub const GPU_VIRTUAL_MESH_MATERIALS_BOUND: u32 = 1 << 1;
+
+/// Explicit translation from one archive material slot to the renderer's
+/// generation-safe global material ID. `None` is glTF's default material.
+#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct VirtualMaterialBinding {
+    pub source_material_index: Option<u32>,
+    pub material_id: u32,
+}
 
 /// A generation-safe runtime mesh address. Zero is the shader fallback.
 #[repr(transparent)]
@@ -113,7 +124,7 @@ pub struct GpuVirtualClusterEntry {
     pub sphere: [f32; 4],
     /// xyz = object-space normal-cone axis, w = minimum axis/normal dot.
     pub normal_cone: [f32; 4],
-    /// mesh index, primitive index, material index/u32::MAX, flags.
+    /// mesh index, primitive index, bound GPU material ID/zero fallback, flags.
     pub identity: [u32; 4],
     /// logical page, LOD level, vertex count, triangle count.
     pub page_lod_counts: [u32; 4],
@@ -207,6 +218,7 @@ struct LiveMesh {
     page_table_base: u32,
     cluster_table_base: u32,
     pages: Vec<LogicalPageState>,
+    material_bindings: Option<BTreeMap<Option<u32>, u32>>,
 }
 
 struct RetiringMesh {
@@ -434,6 +446,7 @@ impl GpuVirtualGeometryPool {
             page_table_base: table_base,
             cluster_table_base,
             pages,
+            material_bindings: None,
         });
         let archive = self.live_mesh(mesh_id)?.asset.archive();
         let mesh_entry = GpuVirtualMeshEntry {
@@ -449,7 +462,7 @@ impl GpuVirtualGeometryPool {
                 bloom_geometry_format::VertexEncoding::Quantized => 2,
             },
             format_version: archive.format_version,
-            flags: 1,
+            flags: GPU_VIRTUAL_MESH_VALID,
             reserved: [0; 2],
         };
         self.write_cluster_entries(queue, cluster_table_base, &cluster_entries);
@@ -474,6 +487,78 @@ impl GpuVirtualGeometryPool {
         self.counters.uploads += u64::from(root_page_count);
         self.counters.evictions += u64::from(root_evictions);
         Ok(mesh_id)
+    }
+
+    /// Atomically replace every archive material slot with the renderer's
+    /// stable global material ID. Validation completes before either CPU or
+    /// GPU metadata changes; queue ordering keeps a rebind behind older draws.
+    pub fn bind_mesh_materials(
+        &mut self,
+        queue: &wgpu::Queue,
+        mesh_id: VirtualMeshId,
+        bindings: &[VirtualMaterialBinding],
+    ) -> Result<(), VirtualGeometryGpuError> {
+        let mesh_slot_index = self.live_mesh_slot_index(mesh_id)?;
+        let (cluster_table_base, required, updated_entries, material_bindings) = {
+            let mesh = self.live_mesh(mesh_id)?;
+            let required = mesh
+                .asset
+                .archive()
+                .clusters
+                .iter()
+                .map(|cluster| cluster.material_index)
+                .collect::<BTreeSet<_>>();
+            let mut supplied = BTreeMap::new();
+            for binding in bindings {
+                if binding.material_id == 0 {
+                    return Err(VirtualGeometryGpuError::InvalidMaterialBinding(
+                        binding.source_material_index,
+                    ));
+                }
+                if supplied
+                    .insert(binding.source_material_index, binding.material_id)
+                    .is_some()
+                {
+                    return Err(VirtualGeometryGpuError::DuplicateMaterialBinding(
+                        binding.source_material_index,
+                    ));
+                }
+            }
+            for source in &required {
+                if !supplied.contains_key(source) {
+                    return Err(VirtualGeometryGpuError::MissingMaterialBinding(*source));
+                }
+            }
+            for source in supplied.keys() {
+                if !required.contains(source) {
+                    return Err(VirtualGeometryGpuError::UnusedMaterialBinding(*source));
+                }
+            }
+            let updated_entries = mesh
+                .asset
+                .archive()
+                .clusters
+                .iter()
+                .enumerate()
+                .map(|(local_index, cluster)| {
+                    let mut entry =
+                        self.cluster_entries[mesh.cluster_table_base as usize + local_index];
+                    entry.identity[2] = supplied[&cluster.material_index];
+                    entry
+                })
+                .collect::<Vec<_>>();
+            (mesh.cluster_table_base, required, updated_entries, supplied)
+        };
+        debug_assert_eq!(required.len(), material_bindings.len());
+        self.write_cluster_entries(queue, cluster_table_base, &updated_entries);
+        let MeshLifecycle::Live(mesh) = &mut self.mesh_slots[mesh_slot_index].lifecycle else {
+            unreachable!();
+        };
+        mesh.material_bindings = Some(material_bindings);
+        let mut mesh_entry = self.mesh_entries[mesh_slot_index];
+        mesh_entry.flags |= GPU_VIRTUAL_MESH_MATERIALS_BOUND;
+        self.write_mesh_entry(queue, mesh_slot_index, mesh_entry);
+        Ok(())
     }
 
     pub fn make_group_resident(
@@ -802,6 +887,21 @@ impl GpuVirtualGeometryPool {
         mesh_id: VirtualMeshId,
     ) -> Result<&Arc<VirtualGeometryAsset>, VirtualGeometryGpuError> {
         Ok(&self.live_mesh(mesh_id)?.asset)
+    }
+
+    #[cfg(test)]
+    pub(super) fn bound_material_id(
+        &self,
+        mesh_id: VirtualMeshId,
+        source_material_index: Option<u32>,
+    ) -> Result<u32, VirtualGeometryGpuError> {
+        Ok(self
+            .live_mesh(mesh_id)?
+            .material_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.get(&source_material_index))
+            .copied()
+            .unwrap_or(0))
     }
 
     pub const fn config(&self) -> GpuVirtualGeometryConfig {
@@ -1240,7 +1340,7 @@ fn encode_cluster_entries(
                 identity: [
                     cluster.mesh_index,
                     cluster.primitive_index,
-                    cluster.material_index.unwrap_or(u32::MAX),
+                    0,
                     cluster.flags,
                 ],
                 page_lod_counts: [
@@ -1326,6 +1426,10 @@ pub enum VirtualGeometryGpuError {
     MeshTableExhausted,
     PageTableExhausted,
     ClusterTableExhausted,
+    DuplicateMaterialBinding(Option<u32>),
+    InvalidMaterialBinding(Option<u32>),
+    MissingMaterialBinding(Option<u32>),
+    UnusedMaterialBinding(Option<u32>),
     InvalidClusterAddress(u32),
     TraversalLimitExceeded {
         cluster: u32,
@@ -1386,6 +1490,22 @@ impl fmt::Display for VirtualGeometryGpuError {
             Self::MeshTableExhausted => write!(formatter, "virtual mesh table is full"),
             Self::PageTableExhausted => write!(formatter, "virtual page table is full"),
             Self::ClusterTableExhausted => write!(formatter, "virtual cluster table is full"),
+            Self::DuplicateMaterialBinding(source) => write!(
+                formatter,
+                "virtual mesh material source {source:?} was bound more than once"
+            ),
+            Self::InvalidMaterialBinding(source) => write!(
+                formatter,
+                "virtual mesh material source {source:?} was bound to fallback ID zero"
+            ),
+            Self::MissingMaterialBinding(source) => write!(
+                formatter,
+                "virtual mesh material source {source:?} has no GPU material binding"
+            ),
+            Self::UnusedMaterialBinding(source) => write!(
+                formatter,
+                "GPU material binding for virtual source {source:?} is unused"
+            ),
             Self::InvalidClusterAddress(cluster) => write!(
                 formatter,
                 "virtual cluster {cluster} has no page-local GPU payload address"

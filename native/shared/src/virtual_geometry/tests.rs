@@ -14,6 +14,10 @@ use std::sync::Arc;
 const VIRTUAL_GEOMETRY_DECODE_PROBE_WGSL: &str =
     include_str!("../../shaders/virtual_geometry/decode_probe.wgsl");
 
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "temporal_material_tests.rs"]
+mod temporal_material_tests;
+
 fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
@@ -566,12 +570,16 @@ struct GpuDecodedVirtualVertex {
     tangent: [f32; 4],
     uv0_uv1: [f32; 4],
     color: [f32; 4],
+    current_world: [f32; 4],
+    previous_world: [f32; 4],
+    tinted_color: [f32; 4],
+    world_normal: [f32; 4],
     /// Selected record, cluster, corner, and page-local vertex index.
     info: [u32; 4],
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const _: () = assert!(std::mem::size_of::<GpuDecodedVirtualVertex>() == 96);
+const _: () = assert!(std::mem::size_of::<GpuDecodedVirtualVertex>() == 160);
 
 #[cfg(not(target_arch = "wasm32"))]
 #[repr(C)]
@@ -657,6 +665,7 @@ fn run_virtual_decode_probe(
             gpu_buffer_binding(3, selector.selected_buffer()),
             gpu_buffer_binding(4, &output),
             gpu_buffer_binding(5, &params),
+            gpu_buffer_binding(6, selector.instance_buffer()),
         ],
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -714,6 +723,16 @@ fn assert_decoded_test_vertices(
                 ],
             );
             assert_f32x4_close(vertex.color, expected_color);
+            assert_f32x4_close(
+                vertex.current_world,
+                [position[0], position[1], position[2], 1.0],
+            );
+            assert_f32x4_close(
+                vertex.previous_world,
+                [position[0], position[1], position[2], 1.0],
+            );
+            assert_f32x4_close(vertex.tinted_color, expected_color);
+            assert_f32x4_close(vertex.world_normal, [0.0, 0.0, 1.0, 0.0]);
             assert_eq!(
                 vertex.info,
                 [
@@ -809,11 +828,42 @@ fn assert_traversal_matches_cpu(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn bind_test_materials(
+    pool: &mut GpuVirtualGeometryPool,
+    queue: &wgpu::Queue,
+    mesh: VirtualMeshId,
+) {
+    if pool.mesh_entry(mesh).unwrap().flags & GPU_VIRTUAL_MESH_MATERIALS_BOUND != 0 {
+        return;
+    }
+    let mut sources = pool
+        .asset(mesh)
+        .unwrap()
+        .archive()
+        .clusters
+        .iter()
+        .map(|cluster| cluster.material_index)
+        .collect::<Vec<_>>();
+    sources.sort_unstable();
+    sources.dedup();
+    let bindings = sources
+        .into_iter()
+        .enumerate()
+        .map(|(index, source_material_index)| VirtualMaterialBinding {
+            source_material_index,
+            material_id: index as u32 + 1,
+        })
+        .collect::<Vec<_>>();
+    pool.bind_mesh_materials(queue, mesh, &bindings).unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn make_hierarchy_fully_resident(
     pool: &mut GpuVirtualGeometryPool,
     queue: &wgpu::Queue,
     mesh: VirtualMeshId,
 ) {
+    bind_test_materials(pool, queue, mesh);
     pool.begin_frame(2);
     for cluster in [2, 3, 4, 6] {
         pool.make_group_resident(queue, mesh, cluster).unwrap();
@@ -1234,6 +1284,7 @@ fn gpu_virtual_draw_emission_suppresses_the_whole_batch_on_selection_overflow() 
     let partial_mesh = partial_pool
         .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
         .unwrap();
+    bind_test_materials(&mut partial_pool, &queue, partial_mesh);
     partial_pool.begin_frame(2);
     partial_pool
         .make_group_resident(&queue, partial_mesh, 2)
@@ -1353,6 +1404,7 @@ fn gpu_hierarchy_selector_keeps_resident_ancestors_and_requests_missing_pages() 
     let mesh = pool
         .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
         .unwrap();
+    bind_test_materials(&mut pool, &queue, mesh);
     pool.begin_frame(2);
     pool.make_group_resident(&queue, mesh, 2).unwrap();
     pool.make_group_resident(&queue, mesh, 3).unwrap();
@@ -1431,6 +1483,7 @@ fn gpu_hierarchy_selector_reports_bounded_output_overflow_without_overwriting() 
     let partial_mesh = partial_pool
         .register_mesh(&queue, hierarchy_asset(hierarchy_archive()))
         .unwrap();
+    bind_test_materials(&mut partial_pool, &queue, partial_mesh);
     partial_pool.begin_frame(2);
     partial_pool
         .make_group_resident(&queue, partial_mesh, 2)
@@ -1479,6 +1532,7 @@ fn gpu_hierarchy_selector_cone_culling_is_conservative_for_transform_class() {
     let mesh = pool
         .register_mesh(&queue, hierarchy_asset(archive))
         .unwrap();
+    bind_test_materials(&mut pool, &queue, mesh);
     let selector = GpuVirtualHierarchySelector::new(&device, &pool, traversal_config()).unwrap();
 
     let front = [GpuVirtualInstance::identity(mesh, 41)];
