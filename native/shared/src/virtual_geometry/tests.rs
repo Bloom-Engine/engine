@@ -150,6 +150,12 @@ fn split_leaf_group_archive() -> GeometryArchive {
     archive
 }
 
+fn large_intermediate_page_archive() -> GeometryArchive {
+    let mut archive = hierarchy_archive();
+    archive.clusters[2].vertex_count = 48;
+    archive
+}
+
 fn encode_archive(mut archive: GeometryArchive) -> Vec<u8> {
     let mut payload = Vec::new();
     for (page_index, page) in archive.pages.iter_mut().enumerate() {
@@ -364,4 +370,363 @@ fn insufficient_budgets_fail_without_mutating_residency() {
     assert!(residency.is_page_resident(0));
     assert!(!residency.is_page_resident(3));
     assert!(!residency.is_page_resident(4));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .ok()?;
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("virtual_geometry_pool_test_device"),
+        required_limits: wgpu::Limits::downlevel_defaults(),
+        ..Default::default()
+    }))
+    .ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn gpu_config(slot_count: u64) -> GpuVirtualGeometryConfig {
+    GpuVirtualGeometryConfig {
+        capacity_bytes: slot_count * u64::from(MIN_PAGE_BYTES),
+        page_stride_bytes: MIN_PAGE_BYTES,
+        max_meshes: 2,
+        max_page_records: 16,
+        max_upload_bytes_per_frame: 8 * u64::from(MIN_PAGE_BYTES),
+        max_upload_pages_per_frame: 8,
+        max_evictions_per_frame: 8,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_gpu_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source: &wgpu::Buffer,
+    bytes: u64,
+) -> Vec<u8> {
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("virtual_geometry_test_readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("virtual_geometry_test_readback_encoder"),
+    });
+    encoder.copy_buffer_to_buffer(source, 0, &readback, 0, bytes);
+    queue.submit(std::iter::once(encoder.finish()));
+    let slice = readback.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    receiver
+        .recv()
+        .expect("virtual-geometry readback callback dropped")
+        .expect("virtual-geometry readback mapping failed");
+    let mapped = slice.get_mapped_range();
+    let result = mapped.to_vec();
+    drop(mapped);
+    readback.unmap();
+    result
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_pool_uploads_validated_pages_and_matches_its_gpu_tables() {
+    let Some((device, queue)) = try_device() else {
+        eprintln!("no GPU adapter — skipping virtual-geometry pool oracle");
+        return;
+    };
+    let asset = hierarchy_asset(hierarchy_archive());
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(3)).unwrap();
+    assert_eq!(pool.physical_buffer().size(), 3 * u64::from(MIN_PAGE_BYTES));
+    assert_eq!(
+        pool.page_table_buffer().size(),
+        u64::from(pool.config().max_page_records)
+            * std::mem::size_of::<GpuVirtualPageEntry>() as u64
+    );
+    assert_eq!(
+        pool.mesh_table_buffer().size(),
+        u64::from(pool.config().max_meshes) * std::mem::size_of::<GpuVirtualMeshEntry>() as u64
+    );
+    let mesh = pool.register_mesh(&queue, Arc::clone(&asset)).unwrap();
+    assert_eq!(
+        pool.telemetry().resident_slot_bytes,
+        u64::from(MIN_PAGE_BYTES)
+    );
+    assert_eq!(pool.telemetry().pinned_pages, 1);
+
+    pool.begin_frame(2);
+    pool.make_group_resident(&queue, mesh, 2).unwrap();
+    pool.make_group_resident(&queue, mesh, 3).unwrap();
+    let transition = pool.make_group_resident(&queue, mesh, 4).unwrap();
+    assert_eq!(transition.uploaded.len(), 1);
+    assert_eq!(transition.evicted.len(), 1);
+    assert_eq!(
+        transition.resident_slot_bytes,
+        3 * u64::from(MIN_PAGE_BYTES)
+    );
+    assert_eq!(
+        pool.resolve_cluster(mesh, 4)
+            .unwrap()
+            .unwrap()
+            .fallback_levels,
+        0
+    );
+
+    let page = VirtualPageId {
+        mesh,
+        page_index: 3,
+    };
+    let page_entry = pool.page_entry(page).unwrap();
+    assert_ne!(page_entry.slot_plus_one, 0);
+    assert_eq!(page_entry.mesh_id, mesh.raw());
+    let physical = read_gpu_buffer(
+        &device,
+        &queue,
+        pool.physical_buffer(),
+        pool.config().capacity_bytes,
+    );
+    let physical_offset =
+        (page_entry.slot_plus_one as usize - 1) * pool.config().page_stride_bytes as usize;
+    let expected = asset.page_bytes(3).unwrap();
+    assert_eq!(
+        &physical[physical_offset..physical_offset + expected.len()],
+        expected
+    );
+
+    let page_table = read_gpu_buffer(
+        &device,
+        &queue,
+        pool.page_table_buffer(),
+        u64::from(pool.config().max_page_records)
+            * std::mem::size_of::<GpuVirtualPageEntry>() as u64,
+    );
+    let gpu_pages = bytemuck::cast_slice::<u8, GpuVirtualPageEntry>(&page_table);
+    let mesh_entry = pool.mesh_entry(mesh).unwrap();
+    assert_eq!(
+        gpu_pages[(mesh_entry.page_table_base + page.page_index) as usize],
+        page_entry
+    );
+    let mesh_table = read_gpu_buffer(
+        &device,
+        &queue,
+        pool.mesh_table_buffer(),
+        u64::from(pool.config().max_meshes) * std::mem::size_of::<GpuVirtualMeshEntry>() as u64,
+    );
+    let gpu_meshes = bytemuck::cast_slice::<u8, GpuVirtualMeshEntry>(&mesh_table);
+    assert_eq!(gpu_meshes[mesh.descriptor_index() as usize - 1], mesh_entry);
+
+    let telemetry = pool.telemetry();
+    assert_eq!(telemetry.capacity_bytes, 3 * u64::from(MIN_PAGE_BYTES));
+    assert_eq!(telemetry.resident_slot_bytes, telemetry.capacity_bytes);
+    assert_eq!(telemetry.resident_payload_bytes, 1_120);
+    assert_eq!(telemetry.page_table_bytes, 256);
+    assert_eq!(telemetry.mesh_table_bytes, 64);
+    assert_eq!(telemetry.total_gpu_bytes, 12_608);
+    assert_eq!(telemetry.frame_upload_pages, 3);
+    assert_eq!(telemetry.frame_upload_bytes, 896);
+    assert_eq!(telemetry.frame_evictions, 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_pool_rejects_an_atomic_group_when_only_one_slot_is_replaceable() {
+    let Some((device, queue)) = try_device() else {
+        eprintln!("no GPU adapter — skipping virtual-geometry atomicity oracle");
+        return;
+    };
+    let mut pool = GpuVirtualGeometryPool::new(&device, gpu_config(2)).unwrap();
+    let mesh = pool
+        .register_mesh(&queue, hierarchy_asset(split_leaf_group_archive()))
+        .unwrap();
+    pool.begin_frame(2);
+    let before = pool.telemetry();
+    let before_a = pool
+        .page_entry(VirtualPageId {
+            mesh,
+            page_index: 3,
+        })
+        .unwrap();
+    let before_b = pool
+        .page_entry(VirtualPageId {
+            mesh,
+            page_index: 4,
+        })
+        .unwrap();
+    assert_eq!(
+        pool.make_group_resident(&queue, mesh, 4).unwrap_err(),
+        VirtualGeometryGpuError::PhysicalPoolExhausted {
+            requested_pages: 2,
+            available_pages: 1,
+        }
+    );
+    assert_eq!(pool.telemetry(), before);
+    assert_eq!(
+        pool.page_entry(VirtualPageId {
+            mesh,
+            page_index: 3,
+        })
+        .unwrap(),
+        before_a
+    );
+    assert_eq!(
+        pool.page_entry(VirtualPageId {
+            mesh,
+            page_index: 4,
+        })
+        .unwrap(),
+        before_b
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn retired_mesh_ids_and_slots_are_reused_only_after_gpu_completion() {
+    let Some((device, queue)) = try_device() else {
+        eprintln!("no GPU adapter — skipping virtual-geometry retirement oracle");
+        return;
+    };
+    let asset = hierarchy_asset(hierarchy_archive());
+    let mut config = gpu_config(2);
+    config.max_meshes = 1;
+    let mut pool = GpuVirtualGeometryPool::new(&device, config).unwrap();
+    let old = pool.register_mesh(&queue, Arc::clone(&asset)).unwrap();
+    pool.retire_mesh(&queue, old).unwrap();
+    assert!(matches!(
+        pool.mesh_entry(old),
+        Err(VirtualGeometryGpuError::RetiringMesh(id)) if id == old
+    ));
+    assert_eq!(pool.telemetry().retiring_slots, 1);
+    assert_eq!(
+        pool.register_mesh(&queue, Arc::clone(&asset)).unwrap_err(),
+        VirtualGeometryGpuError::MeshTableExhausted
+    );
+
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    assert_eq!(pool.collect_completed(), 1);
+    pool.begin_frame(2);
+    let new = pool.register_mesh(&queue, asset).unwrap();
+    assert_ne!(old.raw(), new.raw());
+    assert!(matches!(
+        pool.mesh_entry(old),
+        Err(VirtualGeometryGpuError::StaleMesh(id)) if id == old
+    ));
+    assert_eq!(new.descriptor_index(), old.descriptor_index());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn gpu_pool_enforces_frame_upload_and_eviction_limits_without_partial_pages() {
+    let Some((device, queue)) = try_device() else {
+        eprintln!("no GPU adapter — skipping virtual-geometry budget oracle");
+        return;
+    };
+    let asset = hierarchy_asset(hierarchy_archive());
+    let mut upload_config = gpu_config(3);
+    upload_config.max_upload_pages_per_frame = 1;
+    let mut upload_limited = GpuVirtualGeometryPool::new(&device, upload_config).unwrap();
+    let mesh = upload_limited
+        .register_mesh(&queue, Arc::clone(&asset))
+        .unwrap();
+    upload_limited.begin_frame(2);
+    upload_limited.make_group_resident(&queue, mesh, 2).unwrap();
+    let before_denial = upload_limited.telemetry();
+    assert!(matches!(
+        upload_limited.make_group_resident(&queue, mesh, 3),
+        Err(VirtualGeometryGpuError::UploadBudgetExceeded { .. })
+    ));
+    let after_denial = upload_limited.telemetry();
+    assert_eq!(
+        after_denial.frame_upload_pages,
+        before_denial.frame_upload_pages
+    );
+    assert_eq!(
+        after_denial.frame_upload_bytes,
+        before_denial.frame_upload_bytes
+    );
+    assert_eq!(after_denial.resident_pages, before_denial.resident_pages);
+    assert_eq!(
+        after_denial.denied_uploads,
+        before_denial.denied_uploads + 1
+    );
+    assert!(!upload_limited
+        .is_page_resident(VirtualPageId {
+            mesh,
+            page_index: 2,
+        })
+        .unwrap());
+
+    let mut byte_config = gpu_config(3);
+    byte_config.max_upload_bytes_per_frame = u64::from(MIN_PAGE_BYTES);
+    let mut byte_limited = GpuVirtualGeometryPool::new(&device, byte_config).unwrap();
+    let mesh = byte_limited
+        .register_mesh(&queue, hierarchy_asset(large_intermediate_page_archive()))
+        .unwrap();
+    byte_limited.make_group_resident(&queue, mesh, 2).unwrap();
+    let before_denial = byte_limited.telemetry();
+    assert_eq!(before_denial.frame_upload_bytes, 3_920);
+    assert!(matches!(
+        byte_limited.make_group_resident(&queue, mesh, 3),
+        Err(VirtualGeometryGpuError::UploadBudgetExceeded {
+            requested_bytes: 224,
+            remaining_bytes: 176,
+            ..
+        })
+    ));
+    let after_denial = byte_limited.telemetry();
+    assert_eq!(
+        after_denial.frame_upload_bytes,
+        before_denial.frame_upload_bytes
+    );
+    assert_eq!(after_denial.resident_pages, before_denial.resident_pages);
+    assert_eq!(
+        after_denial.denied_uploads,
+        before_denial.denied_uploads + 1
+    );
+
+    let mut eviction_config = gpu_config(3);
+    eviction_config.max_evictions_per_frame = 0;
+    let mut eviction_limited = GpuVirtualGeometryPool::new(&device, eviction_config).unwrap();
+    let mesh = eviction_limited.register_mesh(&queue, asset).unwrap();
+    eviction_limited.begin_frame(2);
+    eviction_limited
+        .make_group_resident(&queue, mesh, 2)
+        .unwrap();
+    eviction_limited
+        .make_group_resident(&queue, mesh, 3)
+        .unwrap();
+    let before_denial = eviction_limited.telemetry();
+    assert_eq!(
+        eviction_limited
+            .make_group_resident(&queue, mesh, 4)
+            .unwrap_err(),
+        VirtualGeometryGpuError::EvictionBudgetExceeded
+    );
+    let after_denial = eviction_limited.telemetry();
+    assert_eq!(after_denial.resident_pages, before_denial.resident_pages);
+    assert_eq!(after_denial.frame_evictions, 0);
+    assert_eq!(
+        after_denial.denied_uploads,
+        before_denial.denied_uploads + 1
+    );
+    assert!(!eviction_limited
+        .is_page_resident(VirtualPageId {
+            mesh,
+            page_index: 3,
+        })
+        .unwrap());
 }

@@ -250,7 +250,7 @@ impl VirtualGeometryResidency {
     }
 }
 
-fn group_containing(
+pub(super) fn group_containing(
     archive: &GeometryArchive,
     cluster_index: u32,
 ) -> Result<ClusterGroup, ResidencyError> {
@@ -278,7 +278,7 @@ fn group_containing(
     })
 }
 
-fn parent_group(archive: &GeometryArchive, group: ClusterGroup) -> Option<ClusterGroup> {
+pub(super) fn parent_group(archive: &GeometryArchive, group: ClusterGroup) -> Option<ClusterGroup> {
     let first = &archive.clusters[group.first_cluster as usize];
     (first.parent != NO_RELATION).then_some(ClusterGroup {
         first_cluster: first.parent,
@@ -286,11 +286,11 @@ fn parent_group(archive: &GeometryArchive, group: ClusterGroup) -> Option<Cluste
     })
 }
 
-fn group_lod(archive: &GeometryArchive, group: ClusterGroup) -> u32 {
+pub(super) fn group_lod(archive: &GeometryArchive, group: ClusterGroup) -> u32 {
     archive.clusters[group.first_cluster as usize].lod_level
 }
 
-fn group_pages(archive: &GeometryArchive, group: ClusterGroup) -> Vec<u32> {
+pub(super) fn group_pages(archive: &GeometryArchive, group: ClusterGroup) -> Vec<u32> {
     let mut pages = archive.clusters[group.range()]
         .iter()
         .map(|cluster| cluster.page_index)

@@ -209,18 +209,43 @@ validated parent-group links until it finds a completely resident ancestor;
 partially resident groups are never rendered. Telemetry reports pinned,
 resident, upload, eviction, exact-resolution, fallback, and unresolved counts.
 
-This remains a CPU-side ownership/planning milestone:
+`GpuVirtualGeometryPool` is the corresponding explicit GPU owner. It uses one
+fixed-size raw-page storage buffer rather than the compatibility renderer's
+growable, expanded `Vertex3D`/`u32` arena. Its configuration fixes the physical
+bytes, slot stride, mesh-table records, page-table records, geometry upload
+bytes/pages per frame, and evictions per frame before any allocation occurs.
+Construction fails against device buffer/binding limits instead of silently
+shrinking a requested budget.
+
+Registration allocates a generational `VirtualMeshId`, a contiguous logical
+page-table range, and physical slots for every validated coarse-root page.
+`VirtualPageId` combines that mesh generation with a local page index, so a
+retired page cannot alias a later mesh that reuses the same descriptor slot.
+The GPU mesh and page entries carry the complete mesh ID; a zero physical slot
+means missing. Retired IDs, page-table ranges, and physical slots are not
+reused until a queue-completion callback proves older commands have finished.
+
+Detail requests plan every upload and deterministic global-LRU eviction before
+writing anything. A complete atomic cluster group fits both the hard physical
+pool and the remaining per-frame upload/eviction limits, or no page mapping is
+changed. The physical buffer stores only bytes returned by the fully validated
+archive reader. GPU-visible entries expose slot, payload length, ownership,
+resident state, and pinned state. Telemetry distinguishes allocated GPU bytes,
+resident slot bytes, useful payload bytes, pinned/retiring slots, frame and
+lifetime upload/eviction counts, denials, and exact/ancestor fallback results.
+
+The renderer integration remains deliberately explicit:
 
 - zero production render passes, draws, buffers, bindings, allocations, or
-  shader branches unless an application explicitly constructs these objects;
+  shader branches unless a caller explicitly constructs the GPU pool;
 - zero changes to existing immediate-mode or glTF selection and pixels;
 - no silent `.bgeo` replacement of an ordinary model;
-- no asynchronous file/store IO and no GPU page upload yet.
+- no asynchronous file/store IO, feedback readback, or traversal dispatch yet.
 
-The next #131 runtime milestones are asynchronous #136 index resolution,
-fixed-size GPU page allocation/upload, projected-error hierarchy traversal,
-and integration with #27's visibility/material path and #28's shared geometry
-arena. The compatibility renderer remains responsible for unsupported and
+The next #131 runtime milestones are asynchronous #136 index resolution and
+request feedback, projected-error hierarchy traversal, and integration with
+#27's visibility/material path and #28's GPU-driven submission. The
+compatibility renderer remains responsible for unsupported and
 not-yet-virtualized content throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
