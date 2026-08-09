@@ -175,25 +175,53 @@ impl Renderer {
     /// Acquire the frame target. `None` means the swapchain was lost and
     /// has been reconfigured — skip this frame.
     pub(super) fn acquire_frame(&self) -> Option<FrameTarget> {
+        static ACQUIRE_FAILURES: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+
         match &self.surface {
             Some(surface) => match surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(t)
-                | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(FrameTarget::Surface(t)),
-                _ => {
-                    // Diagnostic (title-freeze investigation): this path used
-                    // to fail silently; an eternal acquire failure looks like
-                    // a frozen game (headless spin, last frame stays on
-                    // screen). One-shot + periodic so a wedged swapchain is
-                    // visible in stderr.
-                    static ACQ_FAILS: std::sync::atomic::AtomicU32 =
-                        std::sync::atomic::AtomicU32::new(0);
-                    let n = ACQ_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                    ACQUIRE_FAILURES.store(0, std::sync::atomic::Ordering::Relaxed);
+                    Some(FrameTarget::Surface(t))
+                }
+                status => {
+                    // Timeout and Occluded explicitly mean "try again later".
+                    // Reconfiguring those states leaked backend swapchains on
+                    // Metal, and because no present occurred the ordinary
+                    // vsync pacing vanished too: a hidden window could spin
+                    // tens of thousands of frames and consume gigabytes.
+                    let needs_reconfigure = matches!(
+                        &status,
+                        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost
+                    );
+                    let status_name = match status {
+                        wgpu::CurrentSurfaceTexture::Timeout => "timeout",
+                        wgpu::CurrentSurfaceTexture::Occluded => "occluded",
+                        wgpu::CurrentSurfaceTexture::Outdated => "outdated",
+                        wgpu::CurrentSurfaceTexture::Lost => "lost",
+                        wgpu::CurrentSurfaceTexture::Validation => "validation",
+                        wgpu::CurrentSurfaceTexture::Success(_)
+                        | wgpu::CurrentSurfaceTexture::Suboptimal(_) => unreachable!(),
+                    };
+                    let n = ACQUIRE_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     if n == 1 || n % 300 == 0 {
                         crate::ffi::log_error(&format!(
-                            "bloom: surface acquire failed (count={n}) — reconfiguring and skipping frame"
+                            "bloom: surface acquire {status_name} (count={n}) — skipping frame"
                         ));
                     }
-                    surface.configure(&self.device, &self.surface_config);
+                    // A real lost/outdated surface normally recovers after one
+                    // configure. Retry only once per second thereafter so a
+                    // backend that remains lost cannot allocate without bound.
+                    if needs_reconfigure && (n == 1 || n % 60 == 0) {
+                        surface.configure(&self.device, &self.surface_config);
+                    }
+                    // Fifo pacing happens at present, which this path skips.
+                    // Supply a small fallback wait so minimized/occluded native
+                    // windows do not become a busy loop. Browsers supply their
+                    // own requestAnimationFrame pacing.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    std::thread::sleep(std::time::Duration::from_millis(16));
                     None
                 }
             },
