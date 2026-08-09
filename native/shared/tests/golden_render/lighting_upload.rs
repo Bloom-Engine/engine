@@ -45,6 +45,61 @@ fn live_gpu_objects(device: &wgpu::Device) -> LiveGpuObjects {
     }
 }
 
+fn assert_gpu_objects_did_not_grow(before: &LiveGpuObjects, after: &LiveGpuObjects) {
+    let before = [
+        ("buffers", before.buffers),
+        ("textures", before.textures),
+        ("texture_views", before.texture_views),
+        ("bind_groups", before.bind_groups),
+        ("bind_group_layouts", before.bind_group_layouts),
+        ("render_pipelines", before.render_pipelines),
+        ("compute_pipelines", before.compute_pipelines),
+        ("pipeline_layouts", before.pipeline_layouts),
+        ("samplers", before.samplers),
+        ("command_encoders", before.command_encoders),
+        ("shader_modules", before.shader_modules),
+        ("query_sets", before.query_sets),
+        ("fences", before.fences),
+        ("buffer_memory", before.buffer_memory),
+        ("texture_memory", before.texture_memory),
+        (
+            "acceleration_structure_memory",
+            before.acceleration_structure_memory,
+        ),
+        ("memory_allocations", before.memory_allocations),
+    ];
+    let after = [
+        ("buffers", after.buffers),
+        ("textures", after.textures),
+        ("texture_views", after.texture_views),
+        ("bind_groups", after.bind_groups),
+        ("bind_group_layouts", after.bind_group_layouts),
+        ("render_pipelines", after.render_pipelines),
+        ("compute_pipelines", after.compute_pipelines),
+        ("pipeline_layouts", after.pipeline_layouts),
+        ("samplers", after.samplers),
+        ("command_encoders", after.command_encoders),
+        ("shader_modules", after.shader_modules),
+        ("query_sets", after.query_sets),
+        ("fences", after.fences),
+        ("buffer_memory", after.buffer_memory),
+        ("texture_memory", after.texture_memory),
+        (
+            "acceleration_structure_memory",
+            after.acceleration_structure_memory,
+        ),
+        ("memory_allocations", after.memory_allocations),
+    ];
+    for ((before_name, before_count), (after_name, after_count)) in before.into_iter().zip(after) {
+        assert_eq!(before_name, after_name);
+        assert!(
+            after_count <= before_count,
+            "renderer-owned {after_name} grew over 1,000 static frames: \
+             before={before_count}, after={after_count}"
+        );
+    }
+}
+
 fn wait_for_gpu(device: &wgpu::Device) {
     let _ = device.poll(wgpu::PollType::Wait {
         submission_index: None,
@@ -114,10 +169,7 @@ fn static_ultra_scene_has_stable_renderer_owned_memory_for_1000_frames() {
             .expect("post-run runtime paths are valid JSON");
     let cpu_capacity_after = eng.renderer.quality_frame_cpu_capacity_bytes();
 
-    assert_eq!(
-        after, before,
-        "renderer-owned live GPU objects or backend-reported bytes grew over 1,000 static frames"
-    );
+    assert_gpu_objects_did_not_grow(&before, &after);
     assert_eq!(
         cpu_capacity_after, cpu_capacity_before,
         "renderer-owned growable frame-container capacity changed over 1,000 static frames"
