@@ -140,6 +140,7 @@ STEADY_STATE_BIND_GROUP_SITES = {
     "auto_exposure",
     "final_composite",
     "custom_post_pass",
+    "visibility_buffer",
 }
 
 
