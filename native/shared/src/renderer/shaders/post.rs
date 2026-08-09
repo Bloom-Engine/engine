@@ -807,27 +807,12 @@ fn fs_main(in: VsOut) -> TaaOut {
     // composite pass reads to apply AO only to indirect-dominated
     // pixels; pass it through blended with the colour so history
     // stays consistent.
-    // UNJITTER the current-frame taps (2026-07-16 sparkle slice 2). The
-    // composed image was RENDERED with this frame's sub-pixel jitter, so a
-    // feature that belongs at pixel p sits at p + jitter — sampling at in.uv
-    // fed alpha x (jitter-phase difference) of shimmer into every output
-    // frame by construction, which the variance rig measured as TAA adding
-    // 2x flicker on static detail versus TAA off. Resampling the current
-    // frame at its true (unjittered) position is how the jitter becomes
-    // sub-pixel INFORMATION (via the Catmull-Rom fractional reconstruction)
-    // instead of output noise. History reprojection stays in jittered space
-    // on purpose: the velocity-ref VP already bakes the current jitter
-    // (EN-022), so prev_uv lands correctly without this offset.
-    let src_uv = in.uv + u.params.yz;
     // Both current reconstruction and neighborhood statistics operate in the
     // same input texture domain. Compute its size/reciprocal once per output
     // pixel and share it; the previous shader repeated the dimension queries
     // and reciprocal divisions in both stages.
     let input_size = vec2<f32>(textureDimensions(composed_tex));
     let input_texel = 1.0 / input_size;
-    let current_sample = sample_catmull_rom(src_uv, input_size, input_texel);
-    let current = current_sample.rgb;
-    let current_w = current_sample.a;
 
     // Closest-depth velocity dilation. Sampling the low-resolution velocity
     // buffer linearly mixed foreground motion with zero/background motion at
@@ -883,6 +868,8 @@ fn fs_main(in: VsOut) -> TaaOut {
         velocity_divergence = length(vel - center_vel);
     }
     let vel_len = length(vel);
+    let motion_alpha = smoothstep(0.0005, 0.008, vel_len);
+
     var prev_uv: vec2<f32>;
     if (depth >= 0.9999) {
         // Sky / far plane: the positional reconstruction divides by a
@@ -909,6 +896,37 @@ fn fs_main(in: VsOut) -> TaaOut {
         // progressively averaged fine texture detail into a broad blur.
         prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
     }
+
+    // Keep a static native-resolution sample on its OUTPUT pixel. The velocity
+    // reference projection already reapplies the current jitter (EN-022), so
+    // static history maps to that same pixel; fully undoing jitter here
+    // low-pass filtered native labels and texture grain before accumulation.
+    // Fractional-resolution reconstruction keeps the established alignment,
+    // since one input pixel covers more than one output pixel. Blend only over
+    // the final five percent of render scale so custom near-native scales do
+    // not cross a hard sampling discontinuity. During actual motion restore
+    // full current-frame alignment immediately; it bounds slow-pan phase crawl
+    // while reprojection supplies the temporal sample location. Sky has no
+    // geometry velocity, so include its actual directional reprojection
+    // distance in the same motion classification.
+    let reconstruction_scale = clamp(abs(u.params.w), 0.5, 1.0);
+    var jitter_alignment = 1.0;
+    // Uniform branch: fractional tiers keep the former shader path (and its
+    // cost) exactly. Only near-native tiers pay for the motion classifier.
+    if (reconstruction_scale > 0.95) {
+        let static_jitter_alignment =
+            1.0 - smoothstep(0.95, 1.0, reconstruction_scale);
+        let reprojection_motion = max(vel_len, length(prev_uv - in.uv));
+        // The static path is deliberately narrow: even a very slow camera pan
+        // must use the established aligned sample rather than intermittently
+        // mixing between sharp and aligned phases across the image.
+        let alignment_motion = smoothstep(0.0000001, 0.000001, reprojection_motion);
+        jitter_alignment = mix(static_jitter_alignment, 1.0, alignment_motion);
+    }
+    let src_uv = in.uv + u.params.yz * jitter_alignment;
+    let current_sample = sample_catmull_rom(src_uv, input_size, input_texel);
+    let current = current_sample.rgb;
+    let current_w = current_sample.a;
 
     var history = current;
     var history_w = current_w;
@@ -968,7 +986,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     // input-texel statistical floor. Packing scale into the existing projection
     // flag keeps the source-footprint policy to one scalar max/multiply and
     // adds no uniform bytes or bindings.
-    let statistics_texel = input_texel * max(abs(u.params.w), 0.80);
+    let statistics_texel = input_texel * max(reconstruction_scale, 0.80);
     // Keep the center statistical sample bilinear. The reconstructed current
     // contains the cubic filter's negative-lobe response; feeding that into
     // the variance estimate makes the clamp breathe with the reconstruction
@@ -1000,7 +1018,6 @@ fn fs_main(in: VsOut) -> TaaOut {
     // history, bright wall in current' case that the wider band
     // let slip. alpha ramps to 0.85 at the same time so remaining
     // history contributes only 15 %.
-    let motion_alpha = smoothstep(0.0005, 0.008, vel_len);
     let gamma = mix(1.25, 0.25, motion_alpha);
     let y_min = mean.x - gamma * stddev.x;
     let y_max = mean.x + gamma * stddev.x;

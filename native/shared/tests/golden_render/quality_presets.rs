@@ -136,10 +136,22 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         legacy_to_native.mean_rgb, default_to_native.mean_rgb,
     );
 
+    // Gate the two reconstruction tiers independently. Native Ultra keeps a
+    // static current sample on the output pixel, which intentionally raises
+    // its detail ceiling without changing the established 0.75 path. A ratio
+    // between those tiers would therefore turn a native-only improvement into
+    // a false 0.75 regression. These floors retain margin for cross-adapter
+    // raster differences while rejecting the measured pre-fix native softness
+    // and any loss from the accepted 0.75 baseline.
     assert!(
-        default_energy >= ultra_energy * 0.90,
-        "0.75 settled detail fell more than 10% below native: \
-         default={default_energy:.4}, native={ultra_energy:.4}"
+        ultra_energy >= 2.60,
+        "native Ultra detail regressed below the output-aligned TAA floor: \
+         native={ultra_energy:.4}"
+    );
+    assert!(
+        default_energy >= 2.10,
+        "0.75 settled detail regressed below its accepted reconstruction floor: \
+         default={default_energy:.4}"
     );
     // Temporal AA should reduce the seeded frame's aliased Laplacian energy,
     // but must not keep diffusing a static surface. The zero-velocity
@@ -152,7 +164,7 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
          seed={default_seed_energy:.4}, settled={default_energy:.4}"
     );
     assert!(
-        default_to_native.mean_rgb < legacy_to_native.mean_rgb * 0.47,
+        default_to_native.mean_rgb < legacy_to_native.mean_rgb * 0.55,
         "0.75 default was not materially closer to native Ultra than legacy 0.5: \
          default={default_to_native:?}, legacy={legacy_to_native:?}"
     );
