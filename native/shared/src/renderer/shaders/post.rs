@@ -1003,29 +1003,44 @@ fn fs_main(in: VsOut) -> TaaOut {
         mean.z - c_gamma * stddev.z, mean.z + c_gamma * stddev.z);
     let clamped_history = ycocg_to_rgb(vec3<f32>(history_y_clamped, co_clamped, cg_clamped));
 
-    // Per-pixel disocclusion reject. If the history (already
-    // variance-clamped) still sits far from the current
-    // neighborhood's center, the reprojection sampled a very
-    // different world point and should be dropped. Absolute
-    // threshold keyed to stddev so tight-gradient regions
-    // reject aggressively; flat regions stay accumulating.
-    // NOTE: do not gate this by motion — the luma-only variance clamp
-    // deliberately leaves chroma unbounded, and this reject is what
-    // flushes chroma-poisoned history on static pixels (weakening it
-    // green-tints the whole frame within seconds).
+    // Color-change rejection has two deliberately different operating
+    // ranges. During motion, a tight clamped-luma test helps flush a sample
+    // that reprojected onto the wrong side of a textured silhouette. At rest,
+    // however, jitter phases are SUPPOSED to differ inside the source
+    // footprint: treating a perfectly ordinary 0.6-sigma texture excursion as
+    // a disocclusion forced the low-resolution current sample into most Bistro
+    // pixels every frame and prevented temporal super-resolution from ever
+    // accumulating its sub-pixel samples.
     let history_dist = abs(history_y_clamped - mean.x);
-    // The reject's lower edge is MOTION-AWARE (2026-07-16 sparkle hunt).
-    // At rest, sub-pixel jitter walks high-frequency detail (pebble bank,
-    // grass tips) across the 0.25-sigma edge every few frames, so alpha
-    // oscillated between converged history and raw current - measured as
-    // 2x MORE temporal flicker with TAA on than off on static surfaces
-    // (bank 3.99 vs 1.94 high-pass stddev). Rest pixels now need 0.6 sigma
-    // before rejecting; under motion the tight 0.25 returns (the
-    // dark-column-in-history case lives there). The chroma-poison flush
-    // this reject exists for still fires at rest: poisoned history sits
-    // at ~1 sigma+, well past either edge.
-    let dis_lo = stddev.x * mix(0.6, 0.25, motion_alpha);
-    let disocclusion = smoothstep(dis_lo, stddev.x * 1.0, history_dist);
+    let motion_color_change = smoothstep(
+        stddev.x * 0.25,
+        max(stddev.x, 0.0001),
+        history_dist,
+    ) * motion_alpha;
+
+    // A stationary scene can still change illumination/emissive state or
+    // inherit poisoned chroma, so it is not safe to disable color rejection
+    // outright. Test the UNCLAMPED history against a deliberately broad,
+    // absolute-floored statistical band instead. Coherent lighting/material
+    // changes on a flat surface cross this band immediately; valid jittered
+    // texture samples stay inside it and are variance-clipped before blending.
+    let raw_luma_dist = abs(history_ycocg.x - mean.x);
+    let gross_luma_change = smoothstep(
+        max(stddev.x * 3.0, 0.02),
+        max(stddev.x * 6.0, 0.06),
+        raw_luma_dist,
+    );
+    let raw_chroma_dist = length(history_ycocg.yz - mean.yz);
+    let chroma_stddev = length(stddev.yz);
+    let gross_chroma_change = smoothstep(
+        max(chroma_stddev * 3.0, 0.04),
+        max(chroma_stddev * 6.0, 0.12),
+        raw_chroma_dist,
+    );
+    let disocclusion = max(
+        motion_color_change,
+        max(gross_luma_change, gross_chroma_change),
+    );
 
     // Divergent neighbor motion marks a silhouette/disocclusion footprint.
     // Prefer the current frame there even when both individual vectors are

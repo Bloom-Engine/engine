@@ -140,14 +140,16 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     );
     // Temporal AA should reduce the seeded frame's aliased Laplacian energy,
     // but must not keep diffusing a static surface. The zero-velocity
-    // prev-jitter regression measured 72.9%; the corrected resolve is 81.2%.
+    // prev-jitter regression measured 72.9%; trusting zero velocity reached
+    // 81.2%, and the source-footprint color-change policy reaches at least
+    // 83% without accepting stale geometry history.
     assert!(
-        default_energy >= default_seed_energy * 0.78,
+        default_energy >= default_seed_energy * 0.83,
         "static TAA accumulation lost more detail than the bounded AA window permits: \
          seed={default_seed_energy:.4}, settled={default_energy:.4}"
     );
     assert!(
-        default_to_native.mean_rgb < legacy_to_native.mean_rgb * 0.90,
+        default_to_native.mean_rgb < legacy_to_native.mean_rgb * 0.47,
         "0.75 default was not materially closer to native Ultra than legacy 0.5: \
          default={default_to_native:?}, legacy={legacy_to_native:?}"
     );
