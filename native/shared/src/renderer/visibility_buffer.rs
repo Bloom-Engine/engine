@@ -5,9 +5,11 @@
 //! use. The existing forward MRT remains authoritative until total frame cost
 //! and image parity pass on every required capability tier.
 
+#[cfg(test)]
+pub(crate) use super::visibility_ids::FRONT_FACE_BIT;
 pub(crate) use super::visibility_ids::{
-    VisibilityDraw, VisibilityRecord, DRAW_INDEX_MASK, FRONT_FACE_BIT, INVALID_DRAW_ID,
-    PRIMITIVE_ID_MASK, VIRTUAL_DRAW_BIT, VISIBILITY_BYTES_PER_PIXEL, VISIBILITY_FORMAT,
+    VisibilityDraw, VisibilityRecord, DRAW_INDEX_MASK, INVALID_DRAW_ID, PRIMITIVE_ID_MASK,
+    VIRTUAL_DRAW_BIT, VISIBILITY_BYTES_PER_PIXEL, VISIBILITY_FORMAT,
 };
 
 /// Exact allocation size of the packed visibility target, excluding backend
@@ -29,14 +31,20 @@ pub(crate) fn contract_json() -> String {
     let background = VisibilityRecord::BACKGROUND;
     let max_record = VisibilityRecord::encode(0, PRIMITIVE_ID_MASK, true)
         .expect("the visibility ABI maximum must remain encodable");
+    let virtual_record = VisibilityRecord::encode_virtual(0, 0, true)
+        .expect("virtual draw zero must remain encodable");
+    let virtual_namespace_valid =
+        virtual_record.decode_draw() == Some((VisibilityDraw::Virtual(0), 0, true));
     debug_assert_eq!(background.decode(), None);
     debug_assert_eq!(max_record.decode(), Some((0, PRIMITIVE_ID_MASK, true)));
+    debug_assert!(virtual_namespace_valid);
     format!(
         concat!(
             "{{\"format\":\"{}\",\"bytes_per_pixel\":{},",
             "\"invalid_draw_id\":{},\"primitive_bits\":31,",
             "\"front_face_bits\":1,\"draw_namespace_bits\":1,",
             "\"virtual_draw_bit\":{},\"draw_index_mask\":{},",
+            "\"virtual_namespace_valid\":{},",
             "\"shipping_enabled\":false,",
             "\"required_feature\":\"primitive-index\",",
             "\"vertex_stride_bytes\":{},\"native_1080p_bytes\":{},",
@@ -48,6 +56,7 @@ pub(crate) fn contract_json() -> String {
         INVALID_DRAW_ID,
         VIRTUAL_DRAW_BIT,
         DRAW_INDEX_MASK,
+        virtual_namespace_valid,
         std::mem::size_of::<super::Vertex3D>(),
         target_bytes(1_920, 1_080).expect("1080p visibility allocation is bounded"),
         RECONSTRUCTION_WGSL.len(),
