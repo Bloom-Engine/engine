@@ -177,7 +177,7 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     assert_eq!(reconstruction["render_scale"].as_f64(), Some(0.75));
     assert_eq!(
         reconstruction["statistics_footprint_input_pixels"].as_f64(),
-        Some(0.8)
+        Some(0.75)
     );
     assert!(
         reconstruction["input_extent"][0].as_u64() < reconstruction["output_extent"][0].as_u64(),

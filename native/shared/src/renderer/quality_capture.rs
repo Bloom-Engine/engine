@@ -1146,7 +1146,11 @@ impl Renderer {
         let (taa_input_width, taa_input_height) = self.render_extent();
         let taa_output_width = self.surface_config.width.max(1);
         let taa_output_height = self.surface_config.height.max(1);
-        let taa_footprint_input_pixels = self.render_scale.max(0.80);
+        let taa_footprint_input_pixels = if self.render_scale >= 0.75 {
+            self.render_scale
+        } else {
+            0.80
+        };
         let taa_footprint_output_x =
             taa_footprint_input_pixels * taa_output_width as f32 / taa_input_width.max(1) as f32;
         let taa_footprint_output_y =

@@ -981,12 +981,18 @@ fn fs_main(in: VsOut) -> TaaOut {
     // Define the clipping neighborhood from the OUTPUT-pixel footprint mapped
     // into input texels. At 0.75 scale the old one-input-texel offsets mixed a
     // 33% wider spatial neighborhood into every history decision and softened
-    // detail after confidence converged. Below 0.8 scale adjacent output
-    // positions become strongly correlated bilinear samples, so retain a 0.8
-    // input-texel statistical floor. Packing scale into the existing projection
-    // flag keeps the source-footprint policy to one scalar max/multiply and
-    // adds no uniform bytes or bindings.
-    let statistics_texel = input_texel * max(reconstruction_scale, 0.80);
+    // detail after confidence converged. Using the exact output footprint at
+    // 0.75 and above remains stable in the slow-pan corpus. Lower tiers keep
+    // the proven 0.8-input-pixel floor, where adjacent output positions are
+    // too strongly correlated for a tighter statistical window. Packing scale
+    // into the existing projection flag adds no uniform bytes, bindings,
+    // samples, or passes.
+    let statistics_footprint = select(
+        0.80,
+        reconstruction_scale,
+        reconstruction_scale >= 0.75,
+    );
+    let statistics_texel = input_texel * statistics_footprint;
     // Keep the center statistical sample bilinear. The reconstructed current
     // contains the cubic filter's negative-lobe response; feeding that into
     // the variance estimate makes the clamp breathe with the reconstruction
