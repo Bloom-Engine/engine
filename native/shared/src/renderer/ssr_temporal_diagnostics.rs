@@ -33,7 +33,7 @@ fn fs_diagnostics(in: VsOut) -> SsrTemporalDiagnosticOut {"#;
         "SSR temporal entry point changed; diagnostics must follow it"
     );
     source = source.replacen(
-        "    if (off_screen) { return current; }",
+        "    if (off_screen) { return vec4<f32>(current, signed_current_depth); }",
         "    // Diagnostics continue with a clamped lookup so they can classify\n\
          // the off-screen rejection without sampling outside the history.",
         1,
@@ -48,9 +48,11 @@ fn fs_diagnostics(in: VsOut) -> SsrTemporalDiagnosticOut {"#;
          )",
         1,
     );
-    let final_return = "    return select(current, blended, blended == blended);";
-    let diagnostic_return = r#"    let history_finite = all(history_raw == history_raw);
-    let clamp_delta = length(history_raw.rgb - clamped_history.rgb);
+    let final_return = r#"    let finite_blended = select(current, blended, blended == blended);
+    return vec4<f32>(finite_blended, signed_current_depth);"#;
+    let diagnostic_return = r#"    let history_finite =
+        all(history_raw.rgb == history_raw.rgb) && history_raw.a == history_raw.a;
+    let clamp_delta = length(history_raw.rgb - clamped_history);
     let local_luma_range = abs(dot(
         nmax.rgb - nmin.rgb,
         vec3<f32>(0.2126, 0.7152, 0.0722),
@@ -64,18 +66,21 @@ fn fs_diagnostics(in: VsOut) -> SsrTemporalDiagnosticOut {"#;
     let history_in_bounds = !off_screen;
     let history_confidence = select(
         0.0,
-        clamp(1.0 - u.params.x, 0.0, 1.0),
-        history_in_bounds && history_finite,
+        clamp(1.0 - alpha, 0.0, 1.0),
+        history_in_bounds && history_finite && depth_disocclusion < 0.01,
     );
 
-    // Shared temporal palette: gray seed, red off-screen, magenta invalid
-    // history, yellow neighborhood clamp, and green accepted history.
+    // Shared temporal palette: gray seed, red off-screen, cyan invalid
+    // history, magenta geometric disocclusion, yellow neighborhood clamp,
+    // and green accepted history.
     var reason = vec3<f32>(0.05, 0.65, 0.10);
     if (u.params.x >= 0.999) {
         reason = vec3<f32>(0.25);
     } else if (!history_in_bounds) {
         reason = vec3<f32>(1.0, 0.05, 0.02);
     } else if (!history_finite) {
+        reason = vec3<f32>(0.0, 0.9, 1.0);
+    } else if (depth_disocclusion > 0.01) {
         reason = vec3<f32>(1.0, 0.0, 0.8);
     } else if (clamp_delta > 0.0001) {
         reason = vec3<f32>(1.0, 0.75, 0.0);

@@ -1072,8 +1072,12 @@ pub(super) struct InstanceGiDataCpu {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct SsrTemporalParams {
-    /// x = blend_alpha (0.1), yzw unused
+    /// x = blend_alpha (0.1), y = 1 for perspective depth, 0 for orthographic.
     pub(super) params: [f32; 4],
+    /// Current inverse view-projection and previous view-projection provide the
+    /// exact previous-frame geometric depth expected at a reprojected pixel.
+    pub(super) inv_vp: [[f32; 4]; 4],
+    pub(super) prev_vp: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -1173,6 +1177,7 @@ mod physical_uv_tests {
     fn secondary_uv_keeps_established_vertex_and_uniform_abis() {
         assert_eq!(std::mem::size_of::<Vertex3D>(), 96);
         assert_eq!(std::mem::size_of::<SceneTransmissionUniforms>(), 96);
+        assert_eq!(std::mem::size_of::<SsrTemporalParams>(), 144);
         let layout = secondary_uv_desc();
         assert_eq!(layout.array_stride, 8);
         assert_eq!(layout.attributes.len(), 1);

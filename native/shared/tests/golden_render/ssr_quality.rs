@@ -152,23 +152,50 @@ fn dark_interior_ssr_rejects_fireflies_and_preserves_smooth_reflections() {
         [0.0; 3],
     );
 
-    let draw = |eng: &mut EngineState| {
+    let draw = |eng: &mut EngineState, camera_x: f32| {
         let r = &mut eng.renderer;
         r.set_clear_color(1.0, 1.0, 2.0, 255.0);
-        r.begin_mode_3d(0.0, 2.2, 4.5, 0.0, 0.6, -0.8, 0.0, 1.0, 0.0, 55.0, 0.0);
+        r.begin_mode_3d(
+            camera_x, 2.2, 4.5, camera_x, 0.6, -0.8, 0.0, 1.0, 0.0, 55.0, 0.0,
+        );
         r.set_ambient_light(10.0, 12.0, 18.0, 0.08);
         r.add_directional_light(-0.3, -1.0, -0.2, 0.3, 0.36, 0.5, 0.18);
     };
-    let capture = |eng: &mut EngineState| render(eng, 1, draw).2;
+    let capture =
+        |eng: &mut EngineState, camera_x: f32| render(eng, 1, |eng| draw(eng, camera_x)).2;
 
     eng.renderer.reset_temporal_history();
     for _ in 0..24 {
-        capture(&mut eng);
+        capture(&mut eng, 0.0);
     }
     let directory = std::env::temp_dir().join(format!("bloom-ssr-interior-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
+    let static_directory = directory.join("static");
+    eng.renderer.pending_quality_capture_dir =
+        Some(static_directory.to_string_lossy().into_owned());
+    capture(&mut eng, 0.0);
+    let static_rejection = image::open(static_directory.join("ssr-rejection-reason.png"))
+        .expect("static SSR qualification did not emit temporal rejection reasons")
+        .to_rgb8();
+    let accepted_history = static_rejection
+        .pixels()
+        .filter(|pixel| pixel[0] < 40 && pixel[1] > 140 && pixel[2] < 60)
+        .count();
+    let static_confidence = image::open(static_directory.join("ssr-temporal-confidence.png"))
+        .expect("static SSR qualification did not emit temporal confidence")
+        .to_rgb8();
+    let retained_history = static_confidence
+        .pixels()
+        .filter(|pixel| pixel[2] > 200)
+        .count();
+
     eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
-    let ssr_enabled = capture(&mut eng);
+    // Translate the settled view immediately before the diagnostic capture.
+    // This makes the old frame's bright reflection overlap newly revealed
+    // wall/floor pixels, reproducing the camera-locked bright patch that only
+    // appeared while navigating the Bistro.
+    let moved_camera_x = 0.24;
+    let ssr_enabled = capture(&mut eng, moved_camera_x);
     let ssr = image::open(directory.join("ssr.png"))
         .expect("SSR qualification capture did not emit its logical graph resource")
         .to_rgb8();
@@ -195,25 +222,30 @@ fn dark_interior_ssr_rejects_fireflies_and_preserves_smooth_reflections() {
     let rejection = image::open(directory.join("ssr-rejection-reason.png"))
         .expect("SSR qualification capture did not emit temporal rejection reasons")
         .to_rgb8();
-    let accepted_history = rejection
-        .pixels()
-        .filter(|pixel| pixel[0] < 40 && pixel[1] > 140 && pixel[2] < 60)
-        .count();
     let neighborhood_clamps = rejection
         .pixels()
         .filter(|pixel| pixel[0] > 220 && pixel[1] > 150 && pixel[2] < 40)
         .count();
-    let confidence = image::open(directory.join("ssr-temporal-confidence.png"))
+    let geometric_rejections = rejection
+        .pixels()
+        .filter(|pixel| pixel[0] > 220 && pixel[1] < 40 && pixel[2] > 160)
+        .count();
+    let moved_confidence = image::open(directory.join("ssr-temporal-confidence.png"))
         .expect("SSR qualification capture did not emit temporal confidence")
         .to_rgb8();
-    let retained_history = confidence.pixels().filter(|pixel| pixel[2] > 200).count();
+    let motion_refreshed = moved_confidence
+        .pixels()
+        .filter(|pixel| pixel[2] < 80)
+        .count();
     eprintln!(
         "temporal-corpus dark-interior-ssr active={active} hot={hot} isolated={isolated} \
          raw_max={max_luminance:.4} raw_p999={p999_luminance:.4} \
          raw_isolated={raw_isolated} hit_alpha={hit_alpha_pixels} \
          march_max={raw_march_max:.4} march_hits={raw_hit_alpha_pixels} \
          non_finite={non_finite} accepted={accepted_history} \
-         clamps={neighborhood_clamps} retained={retained_history}"
+         geometric_rejections={geometric_rejections} \
+         clamps={neighborhood_clamps} retained={retained_history} \
+         motion_refreshed={motion_refreshed}"
     );
     assert!(
         active >= 100,
@@ -236,13 +268,21 @@ fn dark_interior_ssr_rejects_fireflies_and_preserves_smooth_reflections() {
         neighborhood_clamps > 0,
         "bright-interior scene did not exercise SSR neighborhood clamping"
     );
+    assert!(
+        geometric_rejections > 0,
+        "moving-camera scene did not reject geometrically stale SSR history"
+    );
+    assert!(
+        motion_refreshed >= 100,
+        "moving-camera SSR history was not refreshed aggressively"
+    );
 
     eng.renderer.set_ssr_enabled(false);
     eng.renderer.reset_temporal_history();
     for _ in 0..16 {
-        capture(&mut eng);
+        capture(&mut eng, moved_camera_x);
     }
-    let ssr_disabled = capture(&mut eng);
+    let ssr_disabled = capture(&mut eng, moved_camera_x);
     let reflection_delta = calculate_diff_metrics(&ssr_disabled, &ssr_enabled, W, H).mean_rgb;
     eprintln!("temporal-corpus dark-interior-ssr reflection_delta={reflection_delta:.4}");
     assert!(

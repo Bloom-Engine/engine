@@ -256,7 +256,18 @@ impl Renderer {
             // suspended by PT long after TAA frame zero.
             let alpha = ssr_temporal_alpha(self.ssr_history_valid);
             let tp = SsrTemporalParams {
-                params: [alpha, 0.0, 0.0, 0.0],
+                params: [
+                    alpha,
+                    if self.current_proj_matrix[3][3].abs() < 0.5 {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                    0.0,
+                ],
+                inv_vp: super::mat4_transpose(self.current_inv_vp_matrix),
+                prev_vp: self.prev_vp_matrix,
             };
             self.queue.write_buffer(
                 &self.ssr_temporal_uniform_buffer,
@@ -304,6 +315,10 @@ impl Renderer {
                             wgpu::BindGroupEntry {
                                 binding: 6,
                                 resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: wgpu::BindingResource::TextureView(&self.depth_view),
                             },
                         ],
                     }));

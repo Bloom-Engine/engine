@@ -1630,8 +1630,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 /// glossy-ray sparkles in one frame instead of 10.
 pub(in crate::renderer) const SSR_TEMPORAL_SHADER_WGSL: &str = "
 struct SsrTemporalParams {
-    /// x = blend_alpha (0.1), yzw unused
+    /// x = blend_alpha (0.1), y = 1 for perspective depth.
     params: vec4<f32>,
+    inv_vp: mat4x4<f32>,
+    prev_vp: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: SsrTemporalParams;
@@ -1641,6 +1643,7 @@ struct SsrTemporalParams {
 @group(0) @binding(4) var history_samp: sampler;
 @group(0) @binding(5) var velocity_tex: texture_2d<f32>;
 @group(0) @binding(6) var velocity_samp: sampler;
+@group(0) @binding(7) var depth_tex: texture_depth_2d;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1661,20 +1664,57 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let current_raw = textureSampleLevel(current_tex, current_samp, in.uv, 0.0);
 
+    // Reconstruct the current surface once and project the same world point
+    // through the previous camera. SSR history alpha stores signed geometric
+    // depth (positive = traced hit, negative = env miss), so this adds exact
+    // disocclusion provenance without another history texture or attachment.
+    let depth_dims = vec2<i32>(textureDimensions(depth_tex));
+    let depth_coord = clamp(
+        vec2<i32>(floor(in.uv * vec2<f32>(depth_dims))),
+        vec2<i32>(0),
+        depth_dims - vec2<i32>(1),
+    );
+    let depth = textureLoad(depth_tex, depth_coord, 0);
+    let ndc = vec4<f32>(
+        in.uv.x * 2.0 - 1.0,
+        (1.0 - in.uv.y) * 2.0 - 1.0,
+        depth,
+        1.0,
+    );
+    let world_h = u.inv_vp * ndc;
+    let world = world_h.xyz / world_h.w;
+    let perspective = u.params.y > 0.5;
+    let current_depth_key = select(
+        depth,
+        select(1.0 / max(abs(world_h.w), 0.000001), 10000.0, depth >= 0.9999),
+        perspective,
+    );
+    let prev_world_clip = u.prev_vp * vec4<f32>(world, 1.0);
+    let expected_prev_depth = select(
+        prev_world_clip.z / max(abs(prev_world_clip.w), 0.000001),
+        select(prev_world_clip.w, 10000.0, depth >= 0.9999),
+        perspective,
+    );
+    let signed_current_depth = select(
+        -current_depth_key,
+        current_depth_key,
+        current_raw.a > 0.001,
+    );
+
     // 3×3 box pre-filter + neighborhood min/max. One texel spread
     // across 9 samples hides single-pixel glossy-ray sparkles in a
     // single frame; the min/max bounds the history so disocclusion
     // and material transitions clamp rather than ghost.
     let texel = vec2<f32>(1.0) / vec2<f32>(textureDimensions(current_tex));
-    var nmin = current_raw;
-    var nmax = current_raw;
-    var prefilt = vec4<f32>(0.0);
+    var nmin = current_raw.rgb;
+    var nmax = current_raw.rgb;
+    var prefilt = vec3<f32>(0.0);
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let s = textureSampleLevel(current_tex, current_samp, in.uv + vec2<f32>(f32(x), f32(y)) * texel, 0.0);
-            nmin = min(nmin, s);
-            nmax = max(nmax, s);
-            prefilt = prefilt + s;
+            nmin = min(nmin, s.rgb);
+            nmax = max(nmax, s.rgb);
+            prefilt = prefilt + s.rgb;
         }
     }
     let current = prefilt * (1.0 / 9.0);
@@ -1683,9 +1723,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // NDC-space velocity + UV Y-flip → `uv + vel.y` for the Y axis,
     // matching TAA + SSAO + the sibling SSGI temporal pass.
     let vel = textureSampleLevel(velocity_tex, velocity_samp, in.uv, 0.0).xy;
+    let vel_len = length(vel);
     let prev_uv = vec2<f32>(in.uv.x - vel.x, in.uv.y + vel.y);
     let off_screen = prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0;
-    if (off_screen) { return current; }
+    if (off_screen) { return vec4<f32>(current, signed_current_depth); }
 
     let history_raw = textureSampleLevel(history_tex, history_samp, prev_uv, 0.0);
     // Scrub NaN/Inf from the history read. Until a clean SSR frame
@@ -1694,11 +1735,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // implementation-defined on Metal — frequently NaN) and keep
     // tonemapping to pink. Replace poisoned channels with the
     // current-frame mean, which is the best available estimate.
-    let history = select(current, history_raw, history_raw == history_raw);
+    let history = select(current, history_raw.rgb, history_raw.rgb == history_raw.rgb);
     let clamped_history = clamp(history, nmin, nmax);
-    let alpha = u.params.x;
+    let history_depth = abs(history_raw.a);
+    let depth_base_tolerance = 0.02 + abs(expected_prev_depth) * 0.005;
+    let depth_gradient = abs(dpdx(expected_prev_depth)) + abs(dpdy(expected_prev_depth));
+    let depth_tolerance = max(
+        depth_base_tolerance,
+        min(depth_gradient * 2.0, depth_base_tolerance * 4.0),
+    );
+    let depth_error = abs(history_depth - expected_prev_depth);
+    let depth_disocclusion = smoothstep(
+        depth_tolerance,
+        depth_tolerance * 2.0,
+        depth_error,
+    );
+    // A reflection is view-dependent even when its receiving surface remains
+    // geometrically valid. Keeping 90% of the old reflection during a camera
+    // move makes highlights visibly lag behind the wall/floor that owns them.
+    // Match TAA's qualified motion envelope: static pixels retain the full
+    // denoising window, while moving pixels refresh quickly from the already
+    // 3x3-prefiltered current result. Downstream TAA still removes residual
+    // stochastic noise, so motion does not trade the ghost for shimmer.
+    let motion_refresh = smoothstep(0.0005, 0.008, vel_len);
+    let motion_alpha = mix(u.params.x, 0.85, motion_refresh);
+    let alpha = max(motion_alpha, depth_disocclusion);
     let blended = mix(clamped_history, current, alpha);
-    return select(current, blended, blended == blended);
+    let finite_blended = select(current, blended, blended == blended);
+    return vec4<f32>(finite_blended, signed_current_depth);
 }
 ";
 
