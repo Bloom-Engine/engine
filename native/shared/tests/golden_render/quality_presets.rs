@@ -118,6 +118,9 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     let legacy_half = capture_preset(&mut eng, 2, Some(0.5));
     let default_seed = capture_preset_frames(&mut eng, 2, None, 1);
     let default_medium = capture_preset(&mut eng, 2, None);
+    let default_paths: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+            .expect("default reconstruction telemetry is valid JSON");
     let ultra = capture_preset(&mut eng, 4, None);
     let legacy_energy = detail_energy(&legacy_half);
     let default_energy = detail_energy(&default_medium);
@@ -153,6 +156,26 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         "0.75 default was not materially closer to native Ultra than legacy 0.5: \
          default={default_to_native:?}, legacy={legacy_to_native:?}"
     );
+    let reconstruction = &default_paths["temporal_reconstruction"];
+    assert_eq!(reconstruction["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        reconstruction["mode"].as_str(),
+        Some("source-footprint-temporal")
+    );
+    assert_eq!(reconstruction["render_scale"].as_f64(), Some(0.75));
+    assert_eq!(
+        reconstruction["statistics_footprint_input_pixels"].as_f64(),
+        Some(0.8)
+    );
+    assert!(
+        reconstruction["input_extent"][0].as_u64() < reconstruction["output_extent"][0].as_u64(),
+        "fractional reconstruction telemetry did not expose distinct extents: {reconstruction}"
+    );
+    assert_eq!(
+        reconstruction["additional_persistent_bytes"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(reconstruction["additional_graph_passes"].as_u64(), Some(0));
 }
 
 #[test]

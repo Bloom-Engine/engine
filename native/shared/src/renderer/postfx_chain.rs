@@ -781,9 +781,9 @@ impl Renderer {
                     -0.5 * self.current_jitter_ndc[0],
                     0.5 * self.current_jitter_ndc[1],
                     if self.current_proj_matrix[3][3].abs() < 0.5 {
-                        1.0
+                        self.render_scale
                     } else {
-                        0.0
+                        -self.render_scale
                     },
                 ],
                 // Match the already-qualified path-tracing inverse upload.

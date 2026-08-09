@@ -1117,7 +1117,8 @@ pub(super) struct SceneComposeParams {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct TaaParams {
-    /// x = blend factor (current-frame weight), yzw padding.
+    /// x = blend factor (current-frame weight), yz = current jitter UV,
+    /// abs(w) = render scale; sign(w) = perspective (+) / orthographic (-).
     pub(super) params: [f32; 4],
     pub(super) inv_vp: [[f32; 4]; 4],
     pub(super) prev_vp: [[f32; 4]; 4],

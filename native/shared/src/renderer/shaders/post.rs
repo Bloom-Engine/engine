@@ -692,7 +692,8 @@ pub(in crate::renderer) const TAA_SHADER_WGSL: &str = "
 struct TaaParams {
     /// x = blend factor (current-frame weight); yz = the CURRENT frame's
     /// jitter as a composed-texture UV offset (see the unjitter note at the
-    /// current-frame sample); w = 1 for perspective depth, 0 for orthographic.
+    /// current-frame sample); abs(w) = render scale, with positive sign for
+    /// perspective depth and negative sign for orthographic depth.
     params: vec4<f32>,
     /// Inverse of the current-frame view-projection matrix —
     /// reconstructs world-space position for history reprojection.
@@ -760,10 +761,11 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
 // turning high-frequency textures into ink-like edges. Clipping to the hull
 // of the five already-fetched reconstruction taps retains cubic phase detail
 // without inventing radiance that was never shaded or adding texture reads.
-fn sample_catmull_rom(uv: vec2<f32>) -> vec4<f32> {
-    let tex_dims = vec2<i32>(textureDimensions(composed_tex));
-    let tex_size = vec2<f32>(tex_dims);
-    let inv_size = 1.0 / tex_size;
+fn sample_catmull_rom(
+    uv: vec2<f32>,
+    tex_size: vec2<f32>,
+    inv_size: vec2<f32>,
+) -> vec4<f32> {
     let sample_pos = uv * tex_size;
     let tex_pos1 = floor(sample_pos - 0.5) + 0.5;
     let f = sample_pos - tex_pos1;
@@ -817,7 +819,13 @@ fn fs_main(in: VsOut) -> TaaOut {
     // on purpose: the velocity-ref VP already bakes the current jitter
     // (EN-022), so prev_uv lands correctly without this offset.
     let src_uv = in.uv + u.params.yz;
-    let current_sample = sample_catmull_rom(src_uv);
+    // Both current reconstruction and neighborhood statistics operate in the
+    // same input texture domain. Compute its size/reciprocal once per output
+    // pixel and share it; the previous shader repeated the dimension queries
+    // and reciprocal divisions in both stages.
+    let input_size = vec2<f32>(textureDimensions(composed_tex));
+    let input_texel = 1.0 / input_size;
+    let current_sample = sample_catmull_rom(src_uv, input_size, input_texel);
     let current = current_sample.rgb;
     let current_w = current_sample.a;
 
@@ -855,7 +863,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     // Persist a geometric depth key beside color history. Perspective clip-W
     // is positive linear view distance; orthographic clip-W is constant, so
     // that projection stores NDC depth instead. Sky gets an explicit far key.
-    let perspective = u.params.w > 0.5;
+    let perspective = u.params.w > 0.0;
     let current_depth_key = select(
         depth,
         select(1.0 / max(abs(world_h.w), 0.000001), 10000.0, depth >= 0.9999),
@@ -952,10 +960,20 @@ fn fs_main(in: VsOut) -> TaaOut {
     // across frames; the 1σ variance range is a statistical clamp
     // that absorbs single-pixel outliers without collapsing to a
     // hard min/max bound.
-    let texel = vec2<f32>(1.0 / f32(textureDimensions(composed_tex).x),
-                          1.0 / f32(textureDimensions(composed_tex).y));
-    // Neighborhood statistics track the same unjittered position, or the
-    // clamp window would wobble against the sample it bounds.
+    // Define the clipping neighborhood from the OUTPUT-pixel footprint mapped
+    // into input texels. At 0.75 scale the old one-input-texel offsets mixed a
+    // 33% wider spatial neighborhood into every history decision and softened
+    // detail after confidence converged. Below 0.8 scale adjacent output
+    // positions become strongly correlated bilinear samples, so retain a 0.8
+    // input-texel statistical floor. Packing scale into the existing projection
+    // flag keeps the source-footprint policy to one scalar max/multiply and
+    // adds no uniform bytes or bindings.
+    let statistics_texel = input_texel * max(abs(u.params.w), 0.80);
+    // Keep the center statistical sample bilinear. The reconstructed current
+    // contains the cubic filter's negative-lobe response; feeding that into
+    // the variance estimate makes the clamp breathe with the reconstruction
+    // phase even at native scale. This lookup existed in the baseline path,
+    // so retaining it does not add a performance cost versus shipped TAA.
     let center_rgb = textureSampleLevel(composed_tex, composed_samp, src_uv, 0.0).rgb;
     var m1 = rgb_to_ycocg(center_rgb);
     var m2 = m1 * m1;
@@ -963,7 +981,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             if (x == 0 && y == 0) { continue; }
-            let s_uv = src_uv + vec2<f32>(f32(x), f32(y)) * texel;
+            let s_uv = src_uv + vec2<f32>(f32(x), f32(y)) * statistics_texel;
             let s_rgb = textureSampleLevel(composed_tex, composed_samp, s_uv, 0.0).rgb;
             let s = rgb_to_ycocg(s_rgb);
             m1 = m1 + s;

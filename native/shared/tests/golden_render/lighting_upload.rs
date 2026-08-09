@@ -151,6 +151,16 @@ fn static_ultra_scene_has_stable_renderer_owned_memory_for_1000_frames() {
     // staging allocations, and the three-frame headless submission window.
     run_frames(&mut eng, 16);
     wait_for_gpu(&eng.renderer.device);
+    // Metal lazily expands its command-encoder pool to the queue depth reached
+    // by a sustained submission burst. A short warm-up samples that pool at 5
+    // or 7 encoders and then observes its normal ceiling of 9 during the long
+    // window, falsely labeling driver warm-up as a renderer leak. Exercise one
+    // bounded burst with the same no-intermediate-wait pattern before taking
+    // the baseline. A genuine leak continues growing during the subsequent
+    // 1,000-frame window and still fails the unchanged no-growth assertion.
+    const POOL_WARMUP_FRAMES: u32 = 256;
+    run_frames(&mut eng, POOL_WARMUP_FRAMES);
+    wait_for_gpu(&eng.renderer.device);
     let before = live_gpu_objects(&eng.renderer.device);
     assert!(
         before.buffers > 0 && before.textures > 0,
@@ -197,7 +207,7 @@ fn static_ultra_scene_has_stable_renderer_owned_memory_for_1000_frames() {
     );
     assert_eq!(steady["bind_group_creations"]["total"].as_u64(), Some(0));
     eprintln!(
-        "1,000-frame renderer memory stable: {before:?}; frame_cpu_capacity_bytes={cpu_capacity_before}; graph_plans={}; transient_slots={}",
+        "1,000-frame renderer memory stable after {POOL_WARMUP_FRAMES} pool warm-up frames: {before:?}; frame_cpu_capacity_bytes={cpu_capacity_before}; graph_plans={}; transient_slots={}",
         paths_before["render_graph"]["cached_plan_count"],
         paths_before["render_graph"]["physical_transient_slots"],
     );

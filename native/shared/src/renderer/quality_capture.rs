@@ -1143,6 +1143,48 @@ impl Renderer {
         });
         self.append_pt_temporal_diagnostic_telemetry(&mut out);
         out.push('}');
+        let (taa_input_width, taa_input_height) = self.render_extent();
+        let taa_output_width = self.surface_config.width.max(1);
+        let taa_output_height = self.surface_config.height.max(1);
+        let taa_footprint_input_pixels = self.render_scale.max(0.80);
+        let taa_footprint_output_x =
+            taa_footprint_input_pixels * taa_output_width as f32 / taa_input_width.max(1) as f32;
+        let taa_footprint_output_y =
+            taa_footprint_input_pixels * taa_output_height as f32 / taa_input_height.max(1) as f32;
+        let taa_jitter_phase = if self.taa_frame_index == 0 {
+            0
+        } else {
+            ((self.taa_frame_index - 1) % 16) + 1
+        };
+        out.push_str(",\"temporal_reconstruction\":{");
+        out.push_str("\"enabled\":");
+        out.push_str(if self.taa_enabled { "true" } else { "false" });
+        out.push_str(",\"mode\":\"source-footprint-temporal\"");
+        out.push_str(",\"input_extent\":[");
+        out.push_str(&taa_input_width.to_string());
+        out.push(',');
+        out.push_str(&taa_input_height.to_string());
+        out.push_str("],\"output_extent\":[");
+        out.push_str(&taa_output_width.to_string());
+        out.push(',');
+        out.push_str(&taa_output_height.to_string());
+        out.push_str("],\"render_scale\":");
+        out.push_str(&self.render_scale.to_string());
+        out.push_str(",\"jitter_sequence\":\"halton-2-3-16\"");
+        out.push_str(",\"jitter_phase\":");
+        out.push_str(&taa_jitter_phase.to_string());
+        out.push_str(",\"jitter_uv\":[");
+        out.push_str(&(-0.5 * self.current_jitter_ndc[0]).to_string());
+        out.push(',');
+        out.push_str(&(0.5 * self.current_jitter_ndc[1]).to_string());
+        out.push_str("],\"statistics_footprint_input_pixels\":");
+        out.push_str(&taa_footprint_input_pixels.to_string());
+        out.push_str(",\"statistics_footprint_output_pixels\":[");
+        out.push_str(&taa_footprint_output_x.to_string());
+        out.push(',');
+        out.push_str(&taa_footprint_output_y.to_string());
+        out.push_str("],\"additional_persistent_bytes\":0");
+        out.push_str(",\"additional_graph_passes\":0}");
         out.push_str(",\"transparent_gi\":{");
         out.push_str("\"enabled\":");
         out.push_str(if super::transparent_gi::transparent_gi_enabled() {
