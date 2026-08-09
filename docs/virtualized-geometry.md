@@ -1,11 +1,11 @@
 # Virtualized geometry
 
-Bloom's virtualized-geometry work is opt-in and staged. The offline #131
-milestones establish a deterministic meshlet/page contract; the first runtime
-milestone adds one shared strict reader, immutable archive ownership, and a
-fixed-budget residency plan with deterministic ancestor fallback. It does not
-yet enable a new renderer, change ordinary glTF loading, or claim
-Nanite-equivalent GPU traversal/streaming.
+Bloom's virtualized-geometry work is opt-in and staged. The #131 milestones now
+cover the deterministic meshlet/page contract, strict runtime loading,
+fixed-budget GPU residency, projected-error GPU hierarchy selection, raw-page
+vertex decoding, and bounded indirect draw emission. They still do not enable
+a production renderer, change ordinary glTF loading, or claim complete
+Nanite-equivalent streaming, occlusion, material, or visibility integration.
 
 ## Cook and inspect
 
@@ -234,27 +234,54 @@ resident state, and pinned state. Telemetry distinguishes allocated GPU bytes,
 resident slot bytes, useful payload bytes, pinned/retiring slots, frame and
 lifetime upload/eviction counts, denials, and exact/ancestor fallback results.
 
+`GpuVirtualHierarchySelector` consumes fixed 128-byte instance records and
+walks each atomic hierarchy group on the GPU. Projected pixel error controls
+LOD. Frustum and transform-safe normal-cone tests reject invisible work;
+non-uniform or sheared transforms conservatively disable only cone rejection.
+Refinement requires the complete child group to be resident. Otherwise the
+selector keeps the resident ancestor and writes bounded page requests. Camera
+cuts and instance motion consume no prior selection state.
+
+`GpuVirtualDrawEmitter` converts the bounded selected table into compact
+16-byte non-indexed indirect commands. `first_instance` addresses the matching
+selected-cluster record for vertex pulling. Selection overflow, an invalid
+record, or a missing current page publishes a zero draw count for the whole
+virtual batch; request overflow remains safe because the complete resident
+ancestor batch is still selected. Construction validates command-buffer and
+compute-dispatch limits up front.
+
+The shared WGSL page decoder reads local `u8` triangle indices directly from
+the fixed physical pool and reconstructs every version 1 Float32 or version 2
+quantized vertex lane. A Metal compute oracle reads the real mesh, cluster,
+selection, and physical-page buffers. A separate Metal render oracle consumes
+the emitted indirect commands and proves the exact `first_instance` values.
+An eventual production consumer must use indirect-count support or provide a
+separately qualified bounded fallback; unsupported adapters remain on the
+compatibility renderer.
+
 The renderer integration remains deliberately explicit:
 
 - zero production render passes, draws, buffers, bindings, allocations, or
   shader branches unless a caller explicitly constructs the GPU pool;
 - zero changes to existing immediate-mode or glTF selection and pixels;
 - no silent `.bgeo` replacement of an ordinary model;
-- no asynchronous file/store IO, feedback readback, or traversal dispatch yet.
+- no asynchronous file/store IO, request-feedback scheduling, production
+  visibility raster, or virtual-geometry material composition yet.
 
-The next #131 runtime milestones are asynchronous #136 index resolution and
-request feedback, projected-error hierarchy traversal, and integration with
-#27's visibility/material path and #28's GPU-driven submission. The
-compatibility renderer remains responsible for unsupported and
-not-yet-virtualized content throughout that work.
+The next #131 runtime milestones are temporal instance/material records,
+integration with #27's visibility/material path, a non-indirect-count fallback,
+conservative previous-frame Hi-Z, and asynchronous #136 index resolution plus
+request feedback. The compatibility renderer remains responsible for
+unsupported and not-yet-qualified content throughout that work.
 
 The default version 1 artifact remains byte-identical to the qualified
 leaf-only milestone (`parent` and `first_child` absent, both relation counts
 zero, level/error zero). Opt-in hierarchy artifacts populate those formerly
 reserved fields without changing the 128-byte cluster record. Opt-in packed
 vertices use format version 2 so a version 1 reader can never reinterpret the
-32-byte stride as float32. Runtime streaming remains disabled until residency,
-traversal, occlusion, and fallback milestones are independently qualified.
+32-byte stride as float32. Runtime activation remains disabled until temporal
+data, visibility/material composition, streaming feedback, occlusion, and
+platform fallback milestones are independently qualified.
 
 ## Qualification
 
@@ -303,3 +330,7 @@ loose-store qualification are recorded in
 The fixed physical GPU pool, stable ID/page-table ABI, bounded frame work, and
 Metal readback proof are recorded in
 `docs/evidence/issue-131-gpu-page-pool-v1.{md,json}`.
+GPU hierarchy selection and independent CPU parity are recorded in
+`docs/evidence/issue-131-gpu-hierarchy-traversal-v1.{md,json}`. Raw-page decode,
+bounded indirect emission, and executable Metal raster proof are recorded in
+`docs/evidence/issue-131-virtual-draw-emission-v1.{md,json}`.
