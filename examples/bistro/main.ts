@@ -28,7 +28,7 @@ import {
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
-  setSsgiEnabled, setSsrEnabled, setShadowsAlwaysFresh,
+  setSsgiEnabled, setSsrEnabled, setShadowsAlwaysFresh, setMotionBlurEnabled,
   setQualityPreset, setRenderScale, getRenderScale, getPhysicalWidth, getPhysicalHeight,
   getCommandLineArgs, resize,
 } from "bloom/core";
@@ -71,6 +71,7 @@ let fogOverride = -1;
 let sunShaftOverride = -1;
 let ssgiOverride = -1;
 let ssrOverride = -1;
+let motionBlurOverride = 0;
 let vsmMotionPath = false;
 let motionYaw = 0.0;
 let motionFrames = 0;
@@ -111,6 +112,9 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--ssr" && i + 1 < argv.length) {
     ssrOverride = parseInt(argv[i + 1]);
+  }
+  if (argv[i] === "--motion-blur" && i + 1 < argv.length) {
+    motionBlurOverride = parseInt(argv[i + 1]);
   }
   if (argv[i] === "--scene" && i + 1 < argv.length) {
     scenePath = argv[i + 1];
@@ -171,6 +175,14 @@ if (ssgiOverride === 0) { setSsgiEnabled(false); }
 if (ssgiOverride === 1) { setSsgiEnabled(true); }
 if (ssrOverride === 0) { setSsrEnabled(false); }
 if (ssrOverride === 1) { setSsrEnabled(true); }
+
+// Bistro is an image-quality inspection scene. Ultra intentionally offers
+// cinematic motion blur, but applying its 8-tap directional filter while the
+// user free-looks makes texture detail appear softer than the stationary
+// renderer actually is and obscures temporal-reconstruction defects. Keep the
+// inspection default optically clean; --motion-blur 1 remains available to
+// qualify the effect itself.
+setMotionBlurEnabled(motionBlurOverride === 1);
 
 // Keep the reference presentation optically clear by default. The Bistro
 // already gets natural distance depth from its atmosphere sky and HDR IBL;
