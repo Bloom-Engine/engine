@@ -1172,6 +1172,11 @@ impl Renderer {
         out.push_str("\"enabled\":");
         out.push_str(if self.taa_enabled { "true" } else { "false" });
         out.push_str(",\"mode\":\"source-footprint-temporal\"");
+        out.push_str(",\"source_filter\":\"exact-separable-catmull-rom\"");
+        out.push_str(",\"source_filter_samples\":9");
+        out.push_str(",\"statistics_filter\":\"variance-corrected-cross\"");
+        out.push_str(",\"statistics_filter_samples\":5");
+        out.push_str(",\"composed_source_samples\":14");
         out.push_str(",\"history_filter\":\"camera-motion-phase-compressed-linear\"");
         out.push_str(",\"history_filter_samples\":1");
         out.push_str(",\"stationary_reconstruction_detail_strength\":0.2");

@@ -449,17 +449,17 @@ fn glossy_textured_temporal_reconstruction_tracks_supersampled_reference() {
          reference={reference_detail:.4}, temporal={native_detail:.4}"
     );
     assert!(
-        fractional_metrics.ssim >= 0.958,
+        fractional_metrics.ssim >= 0.962,
         "fractional reconstruction diverged on glossy authored detail: \
          {fractional_metrics:?}"
     );
     assert!(
-        fractional_detail >= reference_detail * 0.67,
+        fractional_detail >= reference_detail * 0.70,
         "fractional reconstruction erased glossy authored detail: \
          reference={reference_detail:.4}, temporal={fractional_detail:.4}"
     );
     assert!(
-        fractional_metrics.mean_rgb <= 2.30,
+        fractional_metrics.mean_rgb <= 2.20,
         "fractional glossy material error exceeded the qualified baseline: \
          {fractional_metrics:?}"
     );
@@ -520,12 +520,12 @@ fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
     );
 
     assert!(
-        mean_ssim >= 0.95 && minimum_ssim >= 0.94,
+        mean_ssim >= 0.955 && minimum_ssim >= 0.945,
         "fractional glossy slow pan diverged from supersampled motion: \
          mean_ssim={mean_ssim:.6}, minimum_ssim={minimum_ssim:.6}"
     );
     assert!(
-        derivative_error <= 1.0,
+        derivative_error <= 0.40,
         "fractional glossy slow pan added excessive temporal variation: \
          derivative_error={derivative_error:.6}"
     );
@@ -625,6 +625,20 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         reconstruction["mode"].as_str(),
         Some("source-footprint-temporal")
     );
+    assert_eq!(
+        reconstruction["source_filter"].as_str(),
+        Some("exact-separable-catmull-rom")
+    );
+    assert_eq!(reconstruction["source_filter_samples"].as_u64(), Some(9));
+    assert_eq!(
+        reconstruction["statistics_filter"].as_str(),
+        Some("variance-corrected-cross")
+    );
+    assert_eq!(
+        reconstruction["statistics_filter_samples"].as_u64(),
+        Some(5)
+    );
+    assert_eq!(reconstruction["composed_source_samples"].as_u64(), Some(14));
     assert_eq!(
         reconstruction["history_filter"].as_str(),
         Some("camera-motion-phase-compressed-linear")

@@ -756,12 +756,15 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
-// 5-tap Catmull-Rom upsample (Karis formulation), footprint-clipped.
-// The cubic has negative lobes and can otherwise overshoot the actual 2x2
-// source footprint, drawing dark/bright contours around hard silhouettes and
-// turning high-frequency textures into ink-like edges. Clipping to the hull
-// of the five already-fetched reconstruction taps retains cubic phase detail
-// without inventing radiance that was never shaded or adding texture reads.
+// Exact separable Catmull-Rom upsample, footprint-clipped. The common five-tap
+// approximation drops the four diagonal products of the cubic's outer lobes;
+// at fractional phase its weights therefore no longer sum to one and diagonal
+// material detail is attenuated before temporal accumulation even begins.
+// Restore those four products so the reconstruction is energy preserving.
+// The history statistics below use five rather than nine source taps, keeping
+// the resolve at the same fourteen composed-texture reads per output pixel.
+// The cubic has negative lobes and can otherwise overshoot the sampled source
+// footprint, so bound it to the radiance hull of the nine fetched groups.
 fn sample_catmull_rom(
     uv: vec2<f32>,
     tex_size: vec2<f32>,
@@ -787,16 +790,28 @@ fn sample_catmull_rom(
     let tap2 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp12.y), 0.0);
     let tap3 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp12.y), 0.0);
     let tap4 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp3.y), 0.0);
+    let corner0 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp0.y), 0.0);
+    let corner1 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp0.y), 0.0);
+    let corner2 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp3.y), 0.0);
+    let corner3 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp3.y), 0.0);
     let result =
         tap0 * w12.x * w0.y +
         tap1 * w0.x * w12.y +
         tap2 * w12.x * w12.y +
         tap3 * w3.x * w12.y +
-        tap4 * w12.x * w3.y;
-    // Reuse the five already-fetched bilinear taps for the radiance hull; no
-    // additional texture work is required for overshoot suppression.
-    let footprint_min = min(min(tap0, tap1), min(min(tap2, tap3), tap4));
-    let footprint_max = max(max(tap0, tap1), max(max(tap2, tap3), tap4));
+        tap4 * w12.x * w3.y +
+        corner0 * w0.x * w0.y +
+        corner1 * w3.x * w0.y +
+        corner2 * w0.x * w3.y +
+        corner3 * w3.x * w3.y;
+    let footprint_min = min(
+        min(min(tap0, tap1), min(tap2, tap3)),
+        min(min(tap4, corner0), min(min(corner1, corner2), corner3)),
+    );
+    let footprint_max = max(
+        max(max(tap0, tap1), max(tap2, tap3)),
+        max(max(tap4, corner0), max(max(corner1, corner2), corner3)),
+    );
     return clamp(result, max(footprint_min, vec4<f32>(0.0)), footprint_max);
 }
 
@@ -1030,19 +1045,25 @@ fn fs_main(in: VsOut) -> TaaOut {
     let center_rgb = textureSampleLevel(composed_tex, composed_samp, src_uv, 0.0).rgb;
     var m1 = rgb_to_ycocg(center_rgb);
     var m2 = m1 * m1;
-    let n_samples = 9.0;
-    for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
-            if (x == 0 && y == 0) { continue; }
-            let s_uv = src_uv + vec2<f32>(f32(x), f32(y)) * statistics_texel;
-            let s_rgb = textureSampleLevel(composed_tex, composed_samp, s_uv, 0.0).rgb;
-            let s = rgb_to_ycocg(s_rgb);
-            m1 = m1 + s;
-            m2 = m2 + s * s;
-        }
+    let statistics_offsets = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, 0.0), vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, -1.0), vec2<f32>(0.0, 1.0),
+    );
+    for (var i = 0; i < 4; i = i + 1) {
+        let s_uv = src_uv + statistics_offsets[i] * statistics_texel;
+        let s_rgb = textureSampleLevel(composed_tex, composed_samp, s_uv, 0.0).rgb;
+        let s = rgb_to_ycocg(s_rgb);
+        m1 = m1 + s;
+        m2 = m2 + s * s;
     }
+    let n_samples = 5.0;
     let mean = m1 / n_samples;
-    let variance = max(m2 / n_samples - mean * mean, vec3<f32>(0.0));
+    // A five-sample cross measures 3/5 of the first-order variance measured by
+    // the former 3x3 grid over the same radius (2/5 versus 2/3 per axis).
+    // Correct that known sampling bias so the history clip preserves the same
+    // linear-ramp bandwidth while spending the four saved reads on the exact
+    // cubic's diagonal lobes.
+    let variance = max(m2 / n_samples - mean * mean, vec3<f32>(0.0)) * (5.0 / 3.0);
     let stddev = sqrt(variance);
 
     // Motion-aware γ + alpha. At rest γ=1.25 lets sub-pixel jitter
