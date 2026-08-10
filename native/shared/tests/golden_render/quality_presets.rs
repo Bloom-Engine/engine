@@ -393,6 +393,22 @@ fn glossy_textured_temporal_reconstruction_tracks_supersampled_reference() {
     let fractional_seed = capture_glossy_detail(&mut eng, true, 0.75, 1, 0.0);
     let fractional_taa = capture_glossy_detail(&mut eng, true, 0.75, 24, 0.0);
 
+    if let Some(directory) = std::env::var_os("BLOOM_KEEP_GLOSSY_TEMPORAL") {
+        let directory = PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create glossy temporal artifact directory");
+        for (name, pixels) in [
+            ("reference.png", &reference),
+            ("native-no-taa.png", &no_taa),
+            ("native-taa.png", &native_taa),
+            ("fractional-no-taa.png", &fractional_no_taa),
+            ("fractional-seed.png", &fractional_seed),
+            ("fractional-settled.png", &fractional_taa),
+        ] {
+            image::save_buffer(directory.join(name), pixels, W, H, image::ColorType::Rgba8)
+                .expect("write glossy temporal artifact");
+        }
+    }
+
     let no_taa_metrics = calculate_diff_metrics(&reference, &no_taa, W, H);
     let native_metrics = calculate_diff_metrics(&reference, &native_taa, W, H);
     let fractional_no_taa_metrics = calculate_diff_metrics(&reference, &fractional_no_taa, W, H);
