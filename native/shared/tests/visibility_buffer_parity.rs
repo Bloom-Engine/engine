@@ -559,11 +559,52 @@ fn visibility_shading_matches_forward_reference() {
                     .expect("read visibility capability report"),
             )
             .expect("visibility capability report is JSON");
-            let visibility_runtime =
-                &capabilities["runtime_support"]["gpu_driven"]["visibility_buffer_runtime"];
-            assert!(visibility_runtime["compatibility_draws"]
-                .as_u64()
-                .is_some_and(|draws| draws >= 6));
+            let gpu_driven = &capabilities["runtime_support"]["gpu_driven"];
+            let visibility_runtime = &gpu_driven["visibility_buffer_runtime"];
+            assert_eq!(visibility_runtime["requested_mode"], "shade");
+            if visibility_runtime["enabled"] == true {
+                assert_eq!(visibility_runtime["pbr_shading"], true);
+                assert_eq!(visibility_runtime["forward_authoritative"], false);
+                assert_eq!(
+                    visibility_runtime["composition"],
+                    "visibility-eligible+forward-compatibility"
+                );
+                assert!(visibility_runtime["eligible_draws"]
+                    .as_u64()
+                    .is_some_and(|draws| draws >= 32));
+                assert!(visibility_runtime["compatibility_draws"]
+                    .as_u64()
+                    .is_some_and(|draws| draws >= 6));
+                assert_eq!(visibility_runtime["frame_recorded"], true);
+            } else {
+                // Visibility shading is optional on adapters lacking primitive
+                // indices or Tier-A material indirection. In that state there
+                // is no routed draw list, so both counters must remain zero;
+                // the byte/MRT comparisons below qualify the explicit,
+                // forward-authoritative fallback instead.
+                let reason = visibility_runtime["disabled_reason"]
+                    .as_str()
+                    .expect("disabled visibility runtime reports a reason");
+                assert!(
+                    matches!(
+                        reason,
+                        "primitive-index-unavailable"
+                            | "gpu-driven-unavailable"
+                            | "tier-a-materials-unavailable"
+                    ),
+                    "unexpected visibility fallback reason: {reason}"
+                );
+                assert_eq!(visibility_runtime["pbr_shading"], false);
+                assert_eq!(visibility_runtime["forward_authoritative"], true);
+                assert_eq!(visibility_runtime["composition"], "forward-authoritative");
+                assert_eq!(visibility_runtime["eligible_draws"], 0);
+                assert_eq!(visibility_runtime["compatibility_draws"], 0);
+                assert_eq!(visibility_runtime["allocated_bytes"], 0);
+                assert_eq!(visibility_runtime["frame_recorded"], false);
+                if reason == "gpu-driven-unavailable" {
+                    assert_eq!(gpu_driven["enabled"], false);
+                }
+            }
         }
     }
 
