@@ -121,17 +121,22 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     let default_paths: serde_json::Value =
         serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
             .expect("default reconstruction telemetry is valid JSON");
+    let ultra_seed = capture_preset_frames(&mut eng, 4, None, 1);
     let ultra = capture_preset(&mut eng, 4, None);
+    let ultra_no_taa = capture_sharpen_scene(&mut eng, 0.85);
     let legacy_energy = detail_energy(&legacy_half);
     let default_energy = detail_energy(&default_medium);
     let default_seed_energy = detail_energy(&default_seed);
+    let ultra_seed_energy = detail_energy(&ultra_seed);
     let ultra_energy = detail_energy(&ultra);
+    let ultra_no_taa_energy = detail_energy(&ultra_no_taa);
     let legacy_to_native = calculate_diff_metrics(&ultra, &legacy_half, W, H);
     let default_to_native = calculate_diff_metrics(&ultra, &default_medium, W, H);
     eprintln!(
         "quality-preset detail_energy legacy_half={legacy_energy:.4} \
          default_seed={default_seed_energy:.4} default_075={default_energy:.4} \
-         ultra_native={ultra_energy:.4} \
+         ultra_seed={ultra_seed_energy:.4} ultra_native={ultra_energy:.4} \
+         ultra_no_taa={ultra_no_taa_energy:.4} \
          legacy_native_mean={:.4} default_native_mean={:.4}",
         legacy_to_native.mean_rgb, default_to_native.mean_rgb,
     );
@@ -147,6 +152,21 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         ultra_energy >= 2.60,
         "native Ultra detail regressed below the output-aligned TAA floor: \
          native={ultra_energy:.4}"
+    );
+    // Native TAA is an anti-aliasing resolve, not an upscale. It may trade a
+    // bounded amount of single-frame aliased Laplacian energy for stability,
+    // but must not turn the native reference into a soft target that makes a
+    // fractional reconstruction look deceptively close. Keep both the seeded
+    // and TAA-off references visible in this gate.
+    assert!(
+        ultra_energy >= ultra_seed_energy * 0.70,
+        "native temporal accumulation fell below the accepted seeded-detail baseline: \
+         seed={ultra_seed_energy:.4}, settled={ultra_energy:.4}"
+    );
+    assert!(
+        ultra_energy >= ultra_no_taa_energy * 0.70,
+        "native TAA fell below the accepted same-frame no-TAA detail baseline: \
+         no_taa={ultra_no_taa_energy:.4}, settled={ultra_energy:.4}"
     );
     assert!(
         default_energy >= 2.20,
