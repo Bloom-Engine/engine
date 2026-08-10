@@ -612,31 +612,17 @@ fn shade_pbr(
 
     let specular_raw = d * vis * f;
 
-    // Dielectric direct-specular attenuation. A polished marble column
-    // lit by the sun produces a narrow GGX highlight peak that pathtracers
-    // average over hemisphere-sized light sources; our point sun spikes
-    // D_GGX to 1000+ at the peak and survives tonemap as a bright stripe
-    // even after Fresnel (Intel Sponza column vs Cycles was the test).
-    // Same smoothstep-by-roughness treatment as the IBL path, applied
-    // only to the specular lobe — diffuse stays physically correct.
-    let dielectric_direct_amp = smoothstep(0.0, 1.0, roughness);
-    let dielectric_factor = 1.0 - metallic;
-    let direct_spec_scale = mix(1.0, dielectric_direct_amp, dielectric_factor);
-    // Universal roughness damping on direct specular too — same
-    // reasoning as the IBL path; a smooth marble column lit by a
-    // point sun spikes D_GGX past any tonemap cap. Metals stay at
-    // full direct spec for roughness > ~0.75.
-    // Universal soft luma cap on direct specular. A smooth marble
-    // cylinder hit by the sun spikes D_GGX past any reasonable
-    // tonemap; Reinhard-compress the luma toward a 0.3 ceiling
-    // smoothly so adjacent pixels with slightly different GGX peaks
-    // scale by neighbouring cap values instead of ping-ponging
-    // across a hard min() discontinuity (the cause of the sparkle on
-    // Sponza's sunlit floor tiles).
+    // Preserve the authored direct Fresnel response. The former dielectric
+    // and universal roughness ramps both reached zero for smooth paint and
+    // glass, deleting the highlight that distinguishes Bistro's scooter and
+    // bottles from flat-colour props. Bound the punctual/directional-light
+    // approximation continuously in radiance instead: this keeps the lobe
+    // present while preventing an infinitesimal GGX peak from becoming a
+    // camera-tracking firefly. Normal-variance filtering above supplies the
+    // spatial integration for minified normal maps.
     let direct_luma = dot(specular_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
     let direct_cap = 1.0 / (1.0 + direct_luma / 0.3);
-    let universal_damp = smoothstep(0.05, 0.75, roughness);
-    let specular = specular_raw * direct_spec_scale * universal_damp * direct_cap;
+    let specular = specular_raw * direct_cap;
 
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     let diffuse = kd * base_color / PI;

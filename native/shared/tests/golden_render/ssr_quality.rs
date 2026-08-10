@@ -65,6 +65,80 @@ fn isolated_hot_pixels(image: &image::RgbImage) -> usize {
 }
 
 #[test]
+fn smooth_dark_dielectric_retains_bounded_direct_specular() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(false);
+    r.set_render_scale(1.0);
+    r.set_ssao_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+    r.set_sharpen_strength(0.0);
+    r.set_env_intensity(0.0);
+
+    // Bistro's painted scooter is a roughness ~= 0.05 dielectric. Its direct
+    // highlight used to be multiplied by two roughness ramps, both of which
+    // reached zero at this end of the authored range. Keep the base colour
+    // nearly black so this fixture measures the Fresnel lobe rather than a
+    // diffuse-lighting change.
+    transformed_box(
+        &mut eng,
+        [0.0, 0.0, 0.0],
+        [2.4, 2.4, 0.3],
+        [0.01, 0.01, 0.01, 1.0],
+        0.05,
+        0.0,
+        [0.0; 3],
+    );
+
+    let capture = |eng: &mut EngineState, intensity: f64| {
+        render(eng, 1, |eng| {
+            let r = &mut eng.renderer;
+            r.set_clear_color(0.0, 0.0, 0.0, 1.0);
+            r.begin_mode_3d(0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+            r.set_ambient_light(0.0, 0.0, 0.0, 0.0);
+            r.set_directional_light(0.0, 0.0, 1.0, 255.0, 255.0, 255.0, intensity);
+        })
+        .2
+    };
+    let unlit = capture(&mut eng, 0.0);
+    let lit = capture(&mut eng, 3.0);
+    let region_mean = |image: &[u8]| {
+        let mut sum = 0.0;
+        let mut samples = 0usize;
+        for y in 96..160 {
+            for x in 96..160 {
+                let pixel = ((y * W + x) * 4) as usize;
+                sum += 0.2126 * f64::from(image[pixel])
+                    + 0.7152 * f64::from(image[pixel + 1])
+                    + 0.0722 * f64::from(image[pixel + 2]);
+                samples += 1;
+            }
+        }
+        sum / samples as f64
+    };
+    let unlit_luma = region_mean(&unlit);
+    let lit_luma = region_mean(&lit);
+    eprintln!("smooth-direct-dielectric unlit={unlit_luma:.4} lit={lit_luma:.4}");
+    assert!(
+        lit_luma >= unlit_luma + 24.0,
+        "smooth dielectric direct Fresnel lobe was suppressed: \
+         unlit={unlit_luma:.4}, lit={lit_luma:.4}"
+    );
+    assert!(
+        lit_luma <= 245.0,
+        "bounded smooth dielectric highlight clipped to display white: {lit_luma:.4}"
+    );
+}
+
+#[test]
 fn smooth_dark_dielectric_retains_environment_specular_without_ssr() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
