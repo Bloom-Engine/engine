@@ -525,8 +525,28 @@ fn visibility_shading_matches_forward_reference() {
         )
         .expect("layered runtime paths are JSON");
         let layered = &paths["layered_pbr"];
-        assert_eq!(layered["scene_specialization_available"], true);
-        assert_eq!(layered["scene_specialization_initialized"], true);
+        let granted = layered["granted_sampled_textures_per_stage"]
+            .as_u64()
+            .expect("layered path reports the granted sampled-texture limit");
+        let required = layered["scene_specialization_required_sampled_textures"]
+            .as_u64()
+            .expect("layered path reports its specialization requirement");
+        let specialization_available = layered["scene_specialization_available"]
+            .as_bool()
+            .expect("layered path reports specialization availability");
+        assert_eq!(
+            specialization_available,
+            granted >= required,
+            "layered specialization selection must match the negotiated texture limit"
+        );
+        assert_eq!(
+            layered["scene_specialization_initialized"], specialization_available,
+            "the optional layered scene path must initialize exactly when supported"
+        );
+        // Sheen remains required by the six forward compatibility draws even
+        // when the visibility scene specialization cannot fit on a constrained
+        // adapter. This proves the fallback preserves layered shading instead
+        // of silently dropping the lobe.
         assert_eq!(layered["sheen_lut_initialized"], true);
 
         if directory == &visibility_mrt {
