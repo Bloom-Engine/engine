@@ -1202,6 +1202,8 @@ impl Renderer {
         out.push_str("],\"render_scale\":");
         out.push_str(&self.render_scale.to_string());
         out.push_str(",\"jitter_sequence\":\"halton-2-3-16\"");
+        out.push_str(",\"jitter_spread\":");
+        out.push_str(&super::temporal_history::taa_jitter_spread(self.render_scale).to_string());
         out.push_str(",\"jitter_phase\":");
         out.push_str(&taa_jitter_phase.to_string());
         out.push_str(",\"jitter_uv\":[");

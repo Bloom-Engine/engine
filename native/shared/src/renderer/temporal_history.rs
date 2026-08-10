@@ -2,6 +2,18 @@
 
 use super::*;
 
+/// Native rendering already shades every display pixel, so a full-pixel
+/// Halton aperture behaves like an unnecessarily broad box filter after
+/// convergence. Fractional reconstruction still needs the full footprint to
+/// cover display samples that were not shaded in the current frame.
+pub(super) fn taa_jitter_spread(render_scale: f32) -> f32 {
+    if render_scale >= 0.999 {
+        0.75
+    } else {
+        1.0
+    }
+}
+
 /// Reapply the current frame's projection jitter to the previous unjittered
 /// projection. Both current and previous clip positions then contain the same
 /// sampling offset, so the velocity target represents scene/camera motion
@@ -41,7 +53,7 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::velocity_reference_projection;
+    use super::{taa_jitter_spread, velocity_reference_projection};
     use crate::renderer::{mat4_mul_vec4, mat4_perspective};
 
     fn assert_vec2_close(actual: [f32; 2], expected: [f32; 2]) {
@@ -68,6 +80,15 @@ mod tests {
 
     fn previous_uv_from_velocity(current_uv: [f32; 2], velocity: [f32; 2]) -> [f32; 2] {
         [current_uv[0] - velocity[0], current_uv[1] + velocity[1]]
+    }
+
+    #[test]
+    fn native_jitter_uses_a_narrower_aperture_without_reducing_upscale_coverage() {
+        assert_eq!(taa_jitter_spread(1.0), 0.75);
+        assert_eq!(taa_jitter_spread(0.999), 0.75);
+        assert_eq!(taa_jitter_spread(0.998), 1.0);
+        assert_eq!(taa_jitter_spread(0.75), 1.0);
+        assert_eq!(taa_jitter_spread(0.15), 1.0);
     }
 
     #[test]

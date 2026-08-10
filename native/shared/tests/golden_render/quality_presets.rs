@@ -108,6 +108,91 @@ fn capture_sharpen_scene(eng: &mut EngineState, strength: f32) -> Vec<u8> {
     .2
 }
 
+fn downsample_box_2x(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    assert_eq!(width % 2, 0);
+    assert_eq!(height % 2, 0);
+    assert_eq!(rgba.len(), (width * height * 4) as usize);
+    let output_width = width / 2;
+    let output_height = height / 2;
+    let mut output = vec![0u8; (output_width * output_height * 4) as usize];
+    for y in 0..output_height {
+        for x in 0..output_width {
+            for channel in 0..4 {
+                let mut sum = 0u16;
+                for oy in 0..2 {
+                    for ox in 0..2 {
+                        let index = ((((y * 2 + oy) * width + x * 2 + ox) * 4) + channel) as usize;
+                        sum += u16::from(rgba[index]);
+                    }
+                }
+                output[((y * output_width + x) * 4 + channel) as usize] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    output
+}
+
+fn capture_native_unsharpened(eng: &mut EngineState, taa: bool, frames: u32) -> Vec<u8> {
+    eng.renderer.apply_quality_preset(4);
+    eng.renderer.set_render_scale(1.0);
+    configure_reconstruction_scene(&mut eng.renderer);
+    eng.renderer.set_taa_enabled(taa);
+    eng.renderer.set_sharpen_strength(0.0);
+    eng.renderer.reset_temporal_history();
+    render(eng, frames, |eng| {
+        let r = &mut eng.renderer;
+        r.set_clear_color(5.0, 7.0, 12.0, 255.0);
+        r.begin_mode_3d(4.4, 3.5, 6.0, 0.0, 0.45, 0.0, 0.0, 1.0, 0.0, 51.0, 0.0);
+        r.set_ambient_light(255.0, 255.0, 255.0, 0.82);
+        r.draw_grid(48, 0.16);
+        for column in -8..=8 {
+            let bright = column & 1 == 0;
+            r.draw_cube(
+                f64::from(column) * 0.19,
+                0.55,
+                -0.35 + f64::from(column & 3) * 0.08,
+                0.075,
+                1.10,
+                0.075,
+                if bright { 238.0 } else { 35.0 },
+                if bright { 226.0 } else { 55.0 },
+                if bright { 205.0 } else { 85.0 },
+                255.0,
+            );
+        }
+    })
+    .2
+}
+
+#[test]
+fn native_temporal_reconstruction_tracks_supersampled_reference() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+
+    eng.renderer.resize(W * 2, H * 2, W * 2, H * 2);
+    let supersampled = capture_native_unsharpened(&mut eng, false, 2);
+    let reference = downsample_box_2x(&supersampled, W * 2, H * 2);
+    eng.renderer.resize(W, H, W, H);
+    let no_taa = capture_native_unsharpened(&mut eng, false, 2);
+    let display_history = capture_native_unsharpened(&mut eng, true, 24);
+    let no_taa_metrics = calculate_diff_metrics(&reference, &no_taa, W, H);
+    let display_metrics = calculate_diff_metrics(&reference, &display_history, W, H);
+    eprintln!("native-reference no_taa={no_taa_metrics:?} display_history={display_metrics:?}");
+
+    assert!(
+        display_metrics.ssim >= no_taa_metrics.ssim,
+        "settled native temporal reconstruction diverged from the supersampled reference: \
+         no_taa={no_taa_metrics:?}, temporal={display_metrics:?}"
+    );
+    assert!(
+        display_metrics.mean_rgb <= no_taa_metrics.mean_rgb * 0.80,
+        "native temporal reconstruction did not materially improve on the aliased single frame: \
+         no_taa={no_taa_metrics:?}, temporal={display_metrics:?}"
+    );
+}
+
 #[test]
 fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     let Some(mut eng) = try_engine() else {
@@ -123,6 +208,9 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
             .expect("default reconstruction telemetry is valid JSON");
     let ultra_seed = capture_preset_frames(&mut eng, 4, None, 1);
     let ultra = capture_preset(&mut eng, 4, None);
+    let ultra_paths: serde_json::Value =
+        serde_json::from_str(&eng.renderer.quality_runtime_paths_json())
+            .expect("Ultra reconstruction telemetry is valid JSON");
     let ultra_no_taa = capture_sharpen_scene(&mut eng, 0.85);
     let legacy_energy = detail_energy(&legacy_half);
     let default_energy = detail_energy(&default_medium);
@@ -149,7 +237,7 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     // raster differences while rejecting the measured pre-fix native softness
     // and any loss from the accepted 0.75 baseline.
     assert!(
-        ultra_energy >= 2.60,
+        ultra_energy >= 2.85,
         "native Ultra detail regressed below the output-aligned TAA floor: \
          native={ultra_energy:.4}"
     );
@@ -159,12 +247,12 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     // fractional reconstruction look deceptively close. Keep both the seeded
     // and TAA-off references visible in this gate.
     assert!(
-        ultra_energy >= ultra_seed_energy * 0.70,
+        ultra_energy >= ultra_seed_energy * 0.74,
         "native temporal accumulation fell below the accepted seeded-detail baseline: \
          seed={ultra_seed_energy:.4}, settled={ultra_energy:.4}"
     );
     assert!(
-        ultra_energy >= ultra_no_taa_energy * 0.70,
+        ultra_energy >= ultra_no_taa_energy * 0.74,
         "native TAA fell below the accepted same-frame no-TAA detail baseline: \
          no_taa={ultra_no_taa_energy:.4}, settled={ultra_energy:.4}"
     );
@@ -235,6 +323,11 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     );
     assert_eq!(reconstruction["camera_moving"].as_bool(), Some(false));
     assert_eq!(reconstruction["render_scale"].as_f64(), Some(0.75));
+    assert_eq!(reconstruction["jitter_spread"].as_f64(), Some(1.0));
+    assert_eq!(
+        ultra_paths["temporal_reconstruction"]["jitter_spread"].as_f64(),
+        Some(0.75)
+    );
     assert_eq!(
         reconstruction["statistics_footprint_input_pixels"].as_f64(),
         Some(0.75)

@@ -8393,6 +8393,15 @@ impl Renderer {
             // resize can shift the VPs even with the camera stationary.
             // Force a re-render next frame.
             self.shadow_map.invalidate();
+            // A size/aspect transition also invalidates the coordinate domain
+            // of every motion producer. TAA images were already recreated
+            // below, but retaining immediate previous positions made the seed
+            // frame report false velocity and select a different native
+            // reconstruction phase. Treat resize as a temporal camera cut:
+            // immediate vertices seed now; retained/skinned owners are pinned
+            // when begin_mode_3d consumes this pending cut.
+            self.immediate_motion.reset();
+            self.temporal_camera_cut_pending = true;
             self.surface_config.width = width;
             self.surface_config.height = height;
             self.logical_width = logical_width.max(1);
@@ -13164,8 +13173,9 @@ impl Renderer {
         // Skipped when TAA is disabled to keep image stable.
         if self.taa_enabled {
             let i = (self.taa_frame_index % 16) + 1;
-            let jx = halton(i, 2) - 0.5;
-            let jy = halton(i, 3) - 0.5;
+            let jitter_spread = temporal_history::taa_jitter_spread(self.render_scale);
+            let jx = (halton(i, 2) - 0.5) * jitter_spread;
+            let jy = (halton(i, 3) - 0.5) * jitter_spread;
             // Jitter is sub-pixel in *render* space — at fractional
             // render_scale the G-buffer is smaller than the surface,
             // so each render pixel covers 1/scale surface pixels and
