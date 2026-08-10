@@ -4,11 +4,14 @@ use super::*;
 
 /// Native rendering already shades every display pixel, so a full-pixel
 /// Halton aperture behaves like an unnecessarily broad box filter after
-/// convergence. Fractional reconstruction still needs the full footprint to
-/// cover display samples that were not shaded in the current frame.
+/// convergence. A half-pixel aperture retains sub-pixel edge coverage while
+/// tracking the 2x supersampled reference more closely than either the former
+/// 0.75-pixel aperture or a narrower 0.25-pixel candidate. Fractional
+/// reconstruction still needs the full footprint to cover display samples
+/// that were not shaded in the current frame.
 pub(super) fn taa_jitter_spread(render_scale: f32) -> f32 {
     if render_scale >= 0.999 {
-        0.75
+        0.5
     } else {
         1.0
     }
@@ -84,8 +87,8 @@ mod tests {
 
     #[test]
     fn native_jitter_uses_a_narrower_aperture_without_reducing_upscale_coverage() {
-        assert_eq!(taa_jitter_spread(1.0), 0.75);
-        assert_eq!(taa_jitter_spread(0.999), 0.75);
+        assert_eq!(taa_jitter_spread(1.0), 0.5);
+        assert_eq!(taa_jitter_spread(0.999), 0.5);
         assert_eq!(taa_jitter_spread(0.998), 1.0);
         assert_eq!(taa_jitter_spread(0.75), 1.0);
         assert_eq!(taa_jitter_spread(0.15), 1.0);

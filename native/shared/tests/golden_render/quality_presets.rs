@@ -237,7 +237,7 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     // raster differences while rejecting the measured pre-fix native softness
     // and any loss from the accepted 0.75 baseline.
     assert!(
-        ultra_energy >= 2.85,
+        ultra_energy >= 3.10,
         "native Ultra detail regressed below the output-aligned TAA floor: \
          native={ultra_energy:.4}"
     );
@@ -247,12 +247,12 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     // fractional reconstruction look deceptively close. Keep both the seeded
     // and TAA-off references visible in this gate.
     assert!(
-        ultra_energy >= ultra_seed_energy * 0.74,
+        ultra_energy >= ultra_seed_energy * 0.80,
         "native temporal accumulation fell below the accepted seeded-detail baseline: \
          seed={ultra_seed_energy:.4}, settled={ultra_energy:.4}"
     );
     assert!(
-        ultra_energy >= ultra_no_taa_energy * 0.74,
+        ultra_energy >= ultra_no_taa_energy * 0.80,
         "native TAA fell below the accepted same-frame no-TAA detail baseline: \
          no_taa={ultra_no_taa_energy:.4}, settled={ultra_energy:.4}"
     );
@@ -273,7 +273,11 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
          seed={default_seed_energy:.4}, settled={default_energy:.4}"
     );
     assert!(
-        default_to_native.mean_rgb < legacy_to_native.mean_rgb * 0.55,
+        // Native is intentionally a sharper target now, so this comparison
+        // is a tier-ordering guard rather than a demand that the unchanged
+        // 0.75 path converge toward the former soft native image. Its own
+        // absolute and seeded-detail floors above remain authoritative.
+        default_to_native.mean_rgb < legacy_to_native.mean_rgb * 0.65,
         "0.75 default was not materially closer to native Ultra than legacy 0.5: \
          default={default_to_native:?}, legacy={legacy_to_native:?}"
     );
@@ -326,7 +330,7 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
     assert_eq!(reconstruction["jitter_spread"].as_f64(), Some(1.0));
     assert_eq!(
         ultra_paths["temporal_reconstruction"]["jitter_spread"].as_f64(),
-        Some(0.75)
+        Some(0.5)
     );
     assert_eq!(
         reconstruction["statistics_footprint_input_pixels"].as_f64(),
