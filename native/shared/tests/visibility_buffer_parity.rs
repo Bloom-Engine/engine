@@ -15,6 +15,42 @@ const ROW_SPACING: f32 = 0.8;
 const CHILD_OUTPUT: &str = "BLOOM_VISIBILITY_PARITY_CHILD_OUTPUT";
 const CHILD_MRT_DIR: &str = "BLOOM_VISIBILITY_PARITY_CHILD_MRT_DIR";
 
+fn layered_compatibility_materials() -> [MaterialLayeredPbr; 6] {
+    let material = |lobe_mask| {
+        MaterialLayeredPbr::from_authoring_factors(
+            lobe_mask,
+            0.82,
+            0.24,
+            1.0,
+            0.42,
+            [0.65, 0.9, 1.15],
+            1.82,
+            [0.62, 0.16, 0.04],
+            0.38,
+            0.86,
+            0.61,
+            0.92,
+            1.34,
+            120.0,
+            430.0,
+        )
+    };
+    [
+        material(MaterialLayeredPbr::SPECULAR_IOR_LOBE),
+        material(MaterialLayeredPbr::CLEARCOAT_LOBE),
+        material(MaterialLayeredPbr::SHEEN_LOBE),
+        material(MaterialLayeredPbr::ANISOTROPY_LOBE),
+        material(MaterialLayeredPbr::IRIDESCENCE_LOBE),
+        material(
+            MaterialLayeredPbr::CLEARCOAT_LOBE
+                | MaterialLayeredPbr::SPECULAR_IOR_LOBE
+                | MaterialLayeredPbr::SHEEN_LOBE
+                | MaterialLayeredPbr::ANISOTROPY_LOBE
+                | MaterialLayeredPbr::IRIDESCENCE_LOBE,
+        ),
+    ]
+}
+
 fn render_scene(path: &Path) {
     unsafe { std::env::set_var("BLOOM_SKIP_SKY", "1") };
     let mut engine = match bloom_shared::attach::attach_headless_engine(
@@ -166,34 +202,50 @@ fn render_scene(path: &Path) {
         }
         eligible_nodes.push((node, column, row));
     }
-    let compatibility = engine.scene.create_node();
-    engine
-        .scene
-        .update_geometry(compatibility, vertices.clone(), vec![0, 1, 2]);
-    // Place a forward-only layered surface just in front of the final
-    // eligible triangle. Shade mode records the triangle's visibility ID in
-    // the prepass, then compatibility rendering replaces its depth. The
-    // fullscreen visibility pass must honor that final owner.
-    engine.scene.set_trs(
-        compatibility,
-        3.5 * COLUMN_SPACING,
-        1.5 * ROW_SPACING,
-        0.05,
-        0.0,
-        1.0,
+    // Place one forward-only surface for every scalar layered lobe plus the
+    // combined material just in front of six final-row visibility triangles.
+    // Shade mode records the underlying visibility IDs in the prepass, then
+    // compatibility rendering replaces their depth. The fullscreen
+    // visibility pass must preserve the final owner and every layered result.
+    let layered_materials = layered_compatibility_materials();
+    assert!(layered_materials[0].specular_authored && layered_materials[0].ior_authored);
+    assert!(layered_materials[1].clearcoat_authored);
+    assert!(layered_materials[2].sheen_authored);
+    assert!(layered_materials[3].anisotropy_authored);
+    assert!(layered_materials[4].iridescence_authored);
+    assert!(
+        layered_materials[5].clearcoat_authored
+            && layered_materials[5].specular_authored
+            && layered_materials[5].sheen_authored
+            && layered_materials[5].anisotropy_authored
+            && layered_materials[5].iridescence_authored
     );
-    engine
-        .scene
-        .set_material_color(compatibility, 0.8, 0.15, 0.7, 1.0);
-    engine.scene.set_material_layered_pbr(
-        compatibility,
-        MaterialLayeredPbr {
-            clearcoat_authored: true,
-            clearcoat_factor: 0.8,
-            clearcoat_roughness_factor: 0.25,
-            ..Default::default()
-        },
-    );
+    let mut compatibility_nodes = Vec::with_capacity(layered_materials.len());
+    for (index, material) in layered_materials.into_iter().enumerate() {
+        let node = engine.scene.create_node();
+        engine
+            .scene
+            .update_geometry(node, vertices.clone(), vec![0, 1, 2]);
+        let column = index as f32 + 1.0;
+        engine.scene.set_trs(
+            node,
+            (column - 3.5) * COLUMN_SPACING,
+            1.5 * ROW_SPACING,
+            0.05,
+            0.0,
+            1.0,
+        );
+        engine.scene.set_material_color(
+            node,
+            0.35 + index as f32 * 0.075,
+            0.18 + index as f32 * 0.045,
+            0.75 - index as f32 * 0.07,
+            1.0,
+        );
+        engine.scene.set_material_pbr(node, 0.38, 0.2);
+        engine.scene.set_material_layered_pbr(node, material);
+        compatibility_nodes.push((node, column));
+    }
     let mask_texture = engine.renderer.register_texture_kind(
         2,
         2,
@@ -229,7 +281,10 @@ fn render_scene(path: &Path) {
     engine
         .renderer
         .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
-    engine.renderer.set_ambient_light(210.0, 225.0, 255.0, 0.55);
+    engine.renderer.set_ambient_light(210.0, 225.0, 255.0, 0.25);
+    engine
+        .renderer
+        .set_directional_light(0.35, 0.42, 1.0, 255.0, 235.0, 215.0, 1.35);
     engine.end_frame();
 
     for (node, column, row) in eligible_nodes {
@@ -243,14 +298,16 @@ fn render_scene(path: &Path) {
         );
     }
     let final_row_x_motion = 0.035 + 3.0 * 0.004;
-    engine.scene.set_trs(
-        compatibility,
-        3.5 * COLUMN_SPACING + final_row_x_motion,
-        1.5 * ROW_SPACING - 0.018,
-        0.05,
-        0.0,
-        1.0,
-    );
+    for (node, column) in compatibility_nodes {
+        engine.scene.set_trs(
+            node,
+            (column - 3.5) * COLUMN_SPACING + final_row_x_motion,
+            1.5 * ROW_SPACING - 0.018,
+            0.05,
+            0.0,
+            1.0,
+        );
+    }
     engine.scene.set_trs(
         cutout,
         -3.5 * COLUMN_SPACING + final_row_x_motion,
@@ -265,9 +322,13 @@ fn render_scene(path: &Path) {
     engine
         .renderer
         .begin_mode_3d(0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
-    engine.renderer.set_ambient_light(210.0, 225.0, 255.0, 0.55);
-    engine.renderer.pending_mrt_capture_dir =
-        Some(std::env::var(CHILD_MRT_DIR).expect("MRT parity child capture directory is set"));
+    engine.renderer.set_ambient_light(210.0, 225.0, 255.0, 0.25);
+    engine
+        .renderer
+        .set_directional_light(0.35, 0.42, 1.0, 255.0, 235.0, 215.0, 1.35);
+    let mrt_capture_dir =
+        std::env::var(CHILD_MRT_DIR).expect("MRT parity child capture directory is set");
+    engine.renderer.pending_mrt_capture_dir = Some(mrt_capture_dir.clone());
     engine.renderer.screenshot_requested = true;
     engine.end_frame();
     assert!(
@@ -289,6 +350,16 @@ fn render_scene(path: &Path) {
         }
     }
     std::fs::write(path, rgba).expect("write parity screenshot bytes");
+    std::fs::write(
+        Path::new(&mrt_capture_dir).join("runtime-paths.json"),
+        engine.renderer.quality_runtime_paths_json(),
+    )
+    .expect("write parity runtime paths");
+    std::fs::write(
+        Path::new(&mrt_capture_dir).join("capability-report.json"),
+        engine.renderer.renderer_capability_report_json(),
+    )
+    .expect("write parity capability report");
 }
 
 #[test]
@@ -447,6 +518,29 @@ fn visibility_shading_matches_forward_reference() {
         assert_eq!(manifest["width"], WIDTH);
         assert_eq!(manifest["height"], HEIGHT);
         assert_eq!(manifest["attachments"].as_array().map(Vec::len), Some(4));
+
+        let paths: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.join("runtime-paths.json"))
+                .expect("read layered runtime paths"),
+        )
+        .expect("layered runtime paths are JSON");
+        let layered = &paths["layered_pbr"];
+        assert_eq!(layered["scene_specialization_available"], true);
+        assert_eq!(layered["scene_specialization_initialized"], true);
+        assert_eq!(layered["sheen_lut_initialized"], true);
+
+        if directory == &visibility_mrt {
+            let capabilities: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(directory.join("capability-report.json"))
+                    .expect("read visibility capability report"),
+            )
+            .expect("visibility capability report is JSON");
+            let visibility_runtime =
+                &capabilities["runtime_support"]["gpu_driven"]["visibility_buffer_runtime"];
+            assert!(visibility_runtime["compatibility_draws"]
+                .as_u64()
+                .is_some_and(|draws| draws >= 6));
+        }
     }
 
     let forward_hdr = read_attachment(&forward_mrt, "hdr-scene", 8);
