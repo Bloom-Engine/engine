@@ -249,8 +249,8 @@ fn specialize_visibility_derivatives(source: &str) -> String {
     );
     replace_once(
         &mut body,
-        "let nm_dx = dpdx(n);\n    let nm_dy = dpdy(n);",
-        "let visibility_normal_x = bloom_visibility_surface_normal(\n        visibility_gradients.normal_x, visibility_gradients.tangent_x,\n        visibility_gradients.uv_x, material, visibility_gradients, 1.0 + lod_bias,\n    );\n    let visibility_normal_y = bloom_visibility_surface_normal(\n        visibility_gradients.normal_y, visibility_gradients.tangent_y,\n        visibility_gradients.uv_y, material, visibility_gradients, 1.0 + lod_bias,\n    );\n    let nm_dx = (visibility_normal_x - n) * visibility_gradients.x_sign;\n    let nm_dy = (visibility_normal_y - n) * visibility_gradients.y_sign;",
+        "let nm_dx = dpdx(geometric_n);\n    let nm_dy = dpdy(geometric_n);",
+        "let nm_dx = (normalize(visibility_gradients.normal_x) - geometric_n)\n        * visibility_gradients.x_sign;\n    let nm_dy = (normalize(visibility_gradients.normal_y) - geometric_n)\n        * visibility_gradients.y_sign;",
     );
     replace_once(
         &mut body,
@@ -353,51 +353,6 @@ fn bloom_visibility_sample_normal_raw_grad_bias(
     );
 }
 
-// Evaluate the adjacent helper lane from the same triangle. This reproduces
-// raster normal derivatives even when the visible adjacent pixel belongs to a
-// different primitive, and includes normal-map variation in the specular-AA
-// kernel rather than silently reducing it to geometric-normal variation.
-fn bloom_visibility_surface_normal(
-    geometric_normal: vec3<f32>,
-    tangent: vec4<f32>,
-    uv: vec2<f32>,
-    material_record: GlobalMaterialRecord,
-    gradients: BloomVisibilityGradients,
-    normal_lod_bias: f32,
-) -> vec3<f32> {
-    var normal = normalize(geometric_normal);
-    let normal_sample4 = bloom_visibility_sample_normal_raw_grad_bias(
-        material_record,
-        uv,
-        gradients.uv_dx,
-        gradients.uv_dy,
-        normal_lod_bias,
-    );
-    let normal_raw = normal_sample4.xyz * 2.0 - 1.0;
-    let normal_sample = normal_raw * inverseSqrt(clamp(dot(normal_raw, normal_raw), 0.01, 1.0));
-    if (dot(tangent.xyz, tangent.xyz) > 0.0001) {
-        let tangent_normalized = normalize(tangent.xyz);
-        let tangent_ortho = normalize(
-            tangent_normalized - normal * dot(normal, tangent_normalized),
-        );
-        let bitangent = cross(normal, tangent_ortho) * tangent.w;
-        normal = normalize(
-            tangent_ortho * normal_sample.x
-                + bitangent * normal_sample.y
-                + normal * normal_sample.z,
-        );
-    } else {
-        let tbn = compute_tbn(
-            gradients.world_dx,
-            gradients.world_dy,
-            gradients.uv_dx,
-            gradients.uv_dy,
-            normal,
-        );
-        normal = normalize(tbn * normal_sample);
-    }
-    return normal;
-}
 "#;
 
 const VISIBILITY_SHADE_WGSL: &str = r#"
@@ -630,6 +585,8 @@ mod tests {
         ));
         assert!(shade.contains("if (visibility.virtual_geometry) { discard; }"));
         assert!(shade.contains("textureSampleGrad("));
+        assert!(shade.contains("normalize(visibility_gradients.normal_x) - geometric_n"));
+        assert!(!shade.contains("bloom_visibility_surface_normal"));
         assert!(!shade[shade
             .find("fn shade_main_scene(")
             .expect("specialized shade function")

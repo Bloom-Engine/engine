@@ -78,6 +78,7 @@ let motionFrames = 0;
 let shadowsAlwaysFresh = false;
 let interactiveQualityPreset = -1;
 let interactiveRenderScale = -1.0;
+let interactiveSharpenStrength = -1.0;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -137,6 +138,9 @@ for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--render-scale" && i + 1 < argv.length) {
     interactiveRenderScale = Math.max(0.15, Math.min(1.0, parseFloat(argv[i + 1])));
   }
+  if (argv[i] === "--sharpen" && i + 1 < argv.length) {
+    interactiveSharpenStrength = Math.max(0.0, Math.min(1.0, parseFloat(argv[i + 1])));
+  }
 }
 
 // ---- Init ----
@@ -151,6 +155,7 @@ let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qual
 if (qualityRun === null) {
   if (interactiveQualityPreset >= 0) { setQualityPreset(interactiveQualityPreset as any); }
   if (interactiveRenderScale > 0.0) { setRenderScale(interactiveRenderScale); }
+  if (interactiveSharpenStrength >= 0.0) { setSharpenStrength(interactiveSharpenStrength); }
   console.error(
     "BLOOM_BISTRO_RENDER output=" + getPhysicalWidth() + "x" + getPhysicalHeight()
       + " render_scale=" + getRenderScale().toFixed(2)
@@ -187,9 +192,11 @@ let diagnosticSsgiEnabled = ssgiOverride === 1
 let diagnosticSsrEnabled = ssrOverride === 1
   || (ssrOverride < 0 && (interactiveQualityPreset < 0 || interactiveQualityPreset >= 3));
 const diagnosticSharpenStrengths = [0.0, 0.25, 0.40, 0.45, 0.85];
-const diagnosticSharpenStrength = interactiveQualityPreset >= 0
-  ? diagnosticSharpenStrengths[interactiveQualityPreset]
-  : 0.5;
+const diagnosticSharpenStrength = interactiveSharpenStrength >= 0.0
+  ? interactiveSharpenStrength
+  : interactiveQualityPreset >= 0
+    ? diagnosticSharpenStrengths[interactiveQualityPreset]
+    : 0.5;
 let diagnosticSharpenEnabled = diagnosticSharpenStrength > 0.0;
 
 // Bistro is an image-quality inspection scene. Ultra intentionally offers

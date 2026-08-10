@@ -630,6 +630,52 @@ fn shade_pbr(
     return (diffuse + specular) * light_color * intensity * n_dot_l;
 }
 
+// Evaluate the legacy KHR_materials_pbrSpecularGlossiness workflow without
+// squeezing its independent diffuse and specular colours through the
+// metallic-roughness parameterization.  That conversion is necessarily
+// lossy: a painted dielectric with an authored F0 above 0.04 is interpreted
+// as partly metallic, tinting its reflection with the diffuse colour and
+// suppressing the diffuse lobe.  Bistro's blue scooter is the canonical
+// failure case.  Keeping the authored F0 here preserves both lobes while
+// sharing the established GGX distribution, visibility, energy bound, and
+// roughness policy with the ordinary material path.
+fn shade_specular_glossiness_pbr(
+    n: vec3<f32>,
+    v: vec3<f32>,
+    l_dir: vec3<f32>,
+    light_color: vec3<f32>,
+    intensity: f32,
+    diffuse_color: vec3<f32>,
+    authored_f0: vec3<f32>,
+    roughness: f32,
+) -> vec3<f32> {
+    let n_dot_l = max(dot(n, l_dir), 0.0);
+    if (n_dot_l <= 0.0 || intensity <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let n_dot_v = max(dot(n, v), 1e-4);
+    let h_raw = l_dir + v;
+    let h_len2 = dot(h_raw, h_raw);
+    if (h_len2 <= 1e-12) {
+        let kd0 = vec3<f32>(1.0) - authored_f0;
+        return kd0 * diffuse_color / PI * light_color * intensity * n_dot_l;
+    }
+    let h = h_raw * inverseSqrt(h_len2);
+    let n_dot_h = clamp(dot(n, h), 0.0, 1.0);
+    let v_dot_h = clamp(dot(v, h), 0.0, 1.0);
+    let alpha = max(roughness * roughness, 0.001);
+    let alpha2 = alpha * alpha;
+    let f = f_schlick(v_dot_h, authored_f0);
+    let d = d_ggx(n_dot_h, alpha2);
+    let vis = v_smith_ggx_correlated(n_dot_l, n_dot_v, alpha2);
+    let specular_raw = d * vis * f;
+    let direct_luma = dot(specular_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let direct_cap = 1.0 / (1.0 + direct_luma / 0.3);
+    let specular = specular_raw * direct_cap;
+    let diffuse = (vec3<f32>(1.0) - f) * diffuse_color / PI;
+    return (diffuse + specular) * light_color * intensity * n_dot_l;
+}
+
 struct SceneOut {
     @location(0) color: vec4<f32>,
     @location(1) material: vec2<f32>,
@@ -698,6 +744,16 @@ fn fs_depth_prepass(in: VertexOutputScene) {
 
 fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     var n = normalize(in.normal);
+    // Keep the interpolated geometric normal separate from the normal-mapped
+    // shading normal.  The texture path already contributes both Toksvig
+    // shortening and LEADR-style baked mip variance below; differentiating
+    // the mapped normal as well counted that same texture variation a second
+    // time.  On compact glossy props (Bistro's painted scooter is the
+    // clearest case) the duplicate variance widened a 0.05 paint lobe toward
+    // matte and removed the environment response that gives the surface its
+    // shape.  Screen-space specular AA still integrates actual geometric
+    // curvature through this retained normal.
+    let geometric_n = n;
 
     // --- Normal mapping (tangent-space) ---
     // LEADR-lite normal map sample. The texture uploader bakes
@@ -844,11 +900,17 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         clamp(mr_tex_sample.b * material.metal_rough.x, 0.0, 1.0),
         has_mr,
     );
+    var authored_specular = vec3<f32>(0.04);
+    var ssr_base_color = base_color;
     if (has_spec_gloss) {
-        let authored_specular = srgb_to_linear_v(mr_tex_sample.rgb) *
+        authored_specular = srgb_to_linear_v(mr_tex_sample.rgb) *
             material.spec_gloss.rgb;
+        // Retain the old conversion only for the compact metallic/roughness
+        // and albedo buffers consumed by screen-space effects. Main-scene
+        // direct and environment lighting below use the authored diffuse and
+        // F0 independently, avoiding the false-metal appearance.
         let converted = specgloss_to_metalrough_pixel(base_color, authored_specular);
-        base_color = converted.rgb;
+        ssr_base_color = converted.rgb;
         metallic_raw = converted.a;
         roughness_raw = clamp(
             1.0 - mr_tex_sample.a * material.spec_gloss.a,
@@ -888,17 +950,13 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     let sigma2_baked = baked_variance / max(1.0 - baked_variance, 0.001);
     let sigma2 = sigma2_toksvig + sigma2_baked;
     var alpha2 = roughness * roughness + sigma2;
-    let nm_dx = dpdx(n);
-    let nm_dy = dpdy(n);
+    let nm_dx = dpdx(geometric_n);
+    let nm_dy = dpdy(geometric_n);
     let curvature_sq = dot(nm_dx, nm_dx) + dot(nm_dy, nm_dy);
-    // Kaplanyan 2016 screen-space kernel. Bumped aggressively: 2.0
-    // coefficient / cap 0.9 to kill sparkle on Intel Sponza's sunlit
-    // floor tiles where each tile edge has a high-frequency normal-
-    // map bump that D_GGX spikes on at a grazing view. Integrates
-    // normal variance across a larger screen-space footprint before
-    // the BRDF sees it. Tradeoff: subtly softer micro-specular on
-    // all surfaces, which matches the path-tracer's multi-ray
-    // average.
+    // Kaplanyan 2016 screen-space kernel. The aggressive coefficient/cap
+    // integrates unresolved geometric curvature. Texture-space variation is
+    // already represented by the two terms above and must not enter here a
+    // second time.
     let kernel_alpha = min(2.0 * curvature_sq, 0.9);
     alpha2 = min(alpha2 + kernel_alpha, 1.0);
     roughness = sqrt(alpha2);
@@ -954,9 +1012,16 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         lit += base_color / PI * lighting.light_color.rgb * lighting.light_dir.w
              * ndl_wrap * direct_shadow;
     } else {
-        lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
-                         lighting.light_dir.w, base_color, metallic, roughness)
-             * direct_shadow;
+        if (has_spec_gloss) {
+            lit += shade_specular_glossiness_pbr(
+                n, v, legacy_dir, lighting.light_color.rgb,
+                lighting.light_dir.w, base_color, authored_specular, roughness,
+            ) * direct_shadow;
+        } else {
+            lit += shade_pbr(n, v, legacy_dir, lighting.light_color.rgb,
+                             lighting.light_dir.w, base_color, metallic, roughness)
+                 * direct_shadow;
+        }
     }
 
     // Foliage backlit transmission — sun bleeding THROUGH alpha-cut leaf cards
@@ -976,8 +1041,15 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     for (var i = 0u; i < dir_count; i++) {
         let dl = lighting.dir_lights[i];
         let l = normalize(dl.direction.xyz);
-        lit += shade_pbr(n, v, l, dl.color.rgb, dl.direction.w,
-                         base_color, metallic, roughness);
+        if (has_spec_gloss) {
+            lit += shade_specular_glossiness_pbr(
+                n, v, l, dl.color.rgb, dl.direction.w,
+                base_color, authored_specular, roughness,
+            );
+        } else {
+            lit += shade_pbr(n, v, l, dl.color.rgb, dl.direction.w,
+                             base_color, metallic, roughness);
+        }
     }
 
     // BEGIN-POINT-LIGHT-LOOP (replaced by the froxel-clustered variant
@@ -994,8 +1066,15 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
             let l = to_light / dist;
             let atten = 1.0 - (dist / range);
             let atten2 = atten * atten;
-            lit += shade_pbr(n, v, l, pl.color.rgb, pl.color.w * atten2,
-                             base_color, metallic, roughness);
+            if (has_spec_gloss) {
+                lit += shade_specular_glossiness_pbr(
+                    n, v, l, pl.color.rgb, pl.color.w * atten2,
+                    base_color, authored_specular, roughness,
+                );
+            } else {
+                lit += shade_pbr(n, v, l, pl.color.rgb, pl.color.w * atten2,
+                                 base_color, metallic, roughness);
+            }
         }
     }
     // END-POINT-LIGHT-LOOP
@@ -1019,7 +1098,8 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // chain's per-fragment cost on mobile GPUs. Only ibl_diffuse/ibl_spec
     // escape this block.
     let n_dot_v_ibl = max(dot(n, v), 0.0);
-    let f0 = mix(vec3<f32>(0.04), base_color, metallic);
+    let mr_f0 = mix(vec3<f32>(0.04), base_color, metallic);
+    let f0 = select(mr_f0, authored_specular, has_spec_gloss);
 
     // Diffuse irradiance: dedicated cosine-convolved texture populated
     // at env load. Sampling it directly (mip 0) at the fragment normal
@@ -1034,7 +1114,8 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // (Lazarov 2013) handles the average kS factor at grazing angles.
     let fc_n = pow(1.0 - n_dot_v_ibl, 5.0);
     let f_ibl = f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * fc_n;
-    let kd = (vec3<f32>(1.0) - f_ibl) * (1.0 - metallic);
+    let diffuse_weight = select(1.0 - metallic, 1.0, has_spec_gloss);
+    let kd = (vec3<f32>(1.0) - f_ibl) * diffuse_weight;
     let ibl_diffuse = irradiance * base_color * kd * occlusion;
 
     // Pre-filtered specular sample at mip = roughness * (mips - 1).
@@ -1189,7 +1270,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
         //             correct behaviour for AO (occludes indirect
         //             only). 1.0 where fully shadowed, 0.0 where
         //             sunlit. Sky shader overrides with 0.0.
-        vec4<f32>(base_color, 1.0 - shadow_factor),
+        vec4<f32>(ssr_base_color, 1.0 - shadow_factor),
     );
 }
 

@@ -166,8 +166,15 @@ const CLUSTERED_LOOP: &str = "
             let l = to_light / dist;
             let atten = 1.0 - (dist / range);
             let atten2 = atten * atten;
-            lit += shade_pbr(n, v, l, pl.color.rgb, pl.color.w * atten2,
-                             base_color, metallic, roughness);
+            if (has_spec_gloss) {
+                lit += shade_specular_glossiness_pbr(
+                    n, v, l, pl.color.rgb, pl.color.w * atten2,
+                    base_color, authored_specular, roughness,
+                );
+            } else {
+                lit += shade_pbr(n, v, l, pl.color.rgb, pl.color.w * atten2,
+                                 base_color, metallic, roughness);
+            }
         }
     }
 ";

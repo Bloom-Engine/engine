@@ -17,6 +17,19 @@ fn scene_vertex_shader_preserves_the_missing_tangent_sentinel() {
 }
 
 #[test]
+fn textured_specular_glossiness_keeps_authored_diffuse_and_f0_independent() {
+    wgpu::naga::front::wgsl::parse_str(SCENE_SHADER)
+        .unwrap_or_else(|error| panic!("ordinary scene WGSL failed: {error:?}"));
+    assert!(SCENE_SHADER.contains("fn shade_specular_glossiness_pbr("));
+    assert!(SCENE_SHADER.contains("let f0 = select(mr_f0, authored_specular, has_spec_gloss);"));
+    assert!(
+        SCENE_SHADER.contains("let diffuse_weight = select(1.0 - metallic, 1.0, has_spec_gloss);")
+    );
+    assert!(SCENE_SHADER.contains("ssr_base_color = converted.rgb;"));
+    assert!(!SCENE_SHADER.contains("\n        base_color = converted.rgb;"));
+}
+
+#[test]
 fn shadow_cascade_selection_matches_the_fitted_view_frustum_depth() {
     assert!(SCENE_SHADER
         .contains("let view_pos = lighting.shadow_view_matrix * vec4<f32>(world_pos, 1.0);"));

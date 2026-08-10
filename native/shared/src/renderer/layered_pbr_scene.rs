@@ -414,7 +414,8 @@ fn layered_secondary_uv(in: VertexOutputScene) -> vec2<f32> {
 
     source = replace_once(
         source,
-        "    let f0 = mix(vec3<f32>(0.04), base_color, metallic);",
+        r#"    let mr_f0 = mix(vec3<f32>(0.04), base_color, metallic);
+    let f0 = select(mr_f0, authored_specular, has_spec_gloss);"#,
         r#"    let f0 = layered_ibl_f0(
         layered_surface,
         max(dot(n, v), 0.0),
@@ -432,7 +433,8 @@ fn layered_secondary_uv(in: VertexOutputScene) -> vec2<f32> {
         source,
         r#"    let fc_n = pow(1.0 - n_dot_v_ibl, 5.0);
     let f_ibl = f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * fc_n;
-    let kd = (vec3<f32>(1.0) - f_ibl) * (1.0 - metallic);"#,
+    let diffuse_weight = select(1.0 - metallic, 1.0, has_spec_gloss);
+    let kd = (vec3<f32>(1.0) - f_ibl) * diffuse_weight;"#,
         r#"    let dielectric_f_ibl = layered_base_fresnel_roughness(
         layered_surface,
         n_dot_v_ibl,
