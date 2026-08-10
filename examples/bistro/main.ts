@@ -28,7 +28,7 @@ import {
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
-  setSsgiEnabled, setSsrEnabled, setShadowsAlwaysFresh, setMotionBlurEnabled,
+  setSsgiEnabled, setSsrEnabled, setSharpenStrength, setShadowsAlwaysFresh, setMotionBlurEnabled,
   setQualityPreset, setRenderScale, getRenderScale, getPhysicalWidth, getPhysicalHeight,
   getCommandLineArgs, resize,
 } from "bloom/core";
@@ -176,6 +176,22 @@ if (ssgiOverride === 1) { setSsgiEnabled(true); }
 if (ssrOverride === 0) { setSsrEnabled(false); }
 if (ssrOverride === 1) { setSsrEnabled(true); }
 
+// Same-camera image-quality isolation. These toggles deliberately live in
+// the validation scene rather than changing renderer policy: they let an
+// artist freeze one problematic view and identify whether softness comes
+// from temporal reconstruction, indirect light, or reflections.
+let diagnosticTaaEnabled = taaOverride !== 0
+  && !(taaOverride < 0 && interactiveQualityPreset >= 0 && interactiveQualityPreset < 2);
+let diagnosticSsgiEnabled = ssgiOverride === 1
+  || (ssgiOverride < 0 && (interactiveQualityPreset < 0 || interactiveQualityPreset >= 3));
+let diagnosticSsrEnabled = ssrOverride === 1
+  || (ssrOverride < 0 && (interactiveQualityPreset < 0 || interactiveQualityPreset >= 3));
+const diagnosticSharpenStrengths = [0.0, 0.25, 0.40, 0.45, 0.85];
+const diagnosticSharpenStrength = interactiveQualityPreset >= 0
+  ? diagnosticSharpenStrengths[interactiveQualityPreset]
+  : 0.5;
+let diagnosticSharpenEnabled = diagnosticSharpenStrength > 0.0;
+
 // Bistro is an image-quality inspection scene. Ultra intentionally offers
 // cinematic motion blur, but applying its 8-tap directional filter while the
 // user free-looks makes texture detail appear softer than the stationary
@@ -250,6 +266,22 @@ while (!windowShouldClose()) {
     cursorLocked = !cursorLocked;
     if (cursorLocked) { disableCursor(); } else { enableCursor(); }
   }
+  if (qualityRun === null && isKeyPressed(Key.T)) {
+    diagnosticTaaEnabled = !diagnosticTaaEnabled;
+    setTaaEnabled(diagnosticTaaEnabled);
+  }
+  if (qualityRun === null && isKeyPressed(Key.G)) {
+    diagnosticSsgiEnabled = !diagnosticSsgiEnabled;
+    setSsgiEnabled(diagnosticSsgiEnabled);
+  }
+  if (qualityRun === null && isKeyPressed(Key.R)) {
+    diagnosticSsrEnabled = !diagnosticSsrEnabled;
+    setSsrEnabled(diagnosticSsrEnabled);
+  }
+  if (qualityRun === null && isKeyPressed(Key.S)) {
+    diagnosticSharpenEnabled = !diagnosticSharpenEnabled;
+    setSharpenStrength(diagnosticSharpenEnabled ? diagnosticSharpenStrength : 0.0);
+  }
 
   // Opt-in VSM transition oracle. Move six metres along the exact sun
   // light-plane right vector every 30 frames, returning to the established
@@ -314,7 +346,9 @@ while (!windowShouldClose()) {
         : { r: 230, g: 120, b: 120, a: 255 };
     const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
     drawText(fpsText, 10, 35, 16, fpsColor);
-    drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 30, 14, { r: 180, g: 180, b: 180, a: 255 });
+    drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 48, 14, { r: 180, g: 180, b: 180, a: 255 });
+    const diagnosticText = `T TAA ${diagnosticTaaEnabled ? "on" : "off"} / G SSGI ${diagnosticSsgiEnabled ? "on" : "off"} / R SSR ${diagnosticSsrEnabled ? "on" : "off"} / S sharpen ${diagnosticSharpenEnabled ? "on" : "off"}`;
+    drawText(diagnosticText, 10, SCREEN_H - 26, 13, { r: 180, g: 210, b: 240, a: 255 });
   }
 
   if (qualityCapture && qualityRun !== null) {

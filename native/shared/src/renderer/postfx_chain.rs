@@ -9,7 +9,7 @@ use wgpu::util::DeviceExt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub(super) enum CompositeSource {
-    Hdr,
+    Composed,
     Upscale,
     Taa0,
     Taa1,
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn composite_cache_key_covers_every_source_and_exposure_slot() {
         let sources = [
-            CompositeSource::Hdr,
+            CompositeSource::Composed,
             CompositeSource::Upscale,
             CompositeSource::Taa0,
             CompositeSource::Taa1,
@@ -1475,13 +1475,13 @@ impl Renderer {
         } else if self.render_scale < 0.999 {
             CompositeSource::Upscale
         } else {
-            CompositeSource::Hdr
+            CompositeSource::Composed
         }
     }
 
     pub(super) fn composite_source_view_for(&self, source: CompositeSource) -> &wgpu::TextureView {
         match source {
-            CompositeSource::Hdr => &self.hdr_rt_view,
+            CompositeSource::Composed => &self.composed_rt_view,
             CompositeSource::Upscale => &self.upscale_rt_view,
             CompositeSource::Taa0 => &self.taa_views[0],
             CompositeSource::Taa1 => &self.taa_views[1],
