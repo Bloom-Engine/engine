@@ -36,6 +36,29 @@ fn configure_reconstruction_scene(renderer: &mut Renderer) {
     renderer.set_shadows_enabled(false);
 }
 
+fn draw_reconstruction_scene(eng: &mut EngineState) {
+    let r = &mut eng.renderer;
+    r.set_clear_color(5.0, 7.0, 12.0, 255.0);
+    r.begin_mode_3d(4.4, 3.5, 6.0, 0.0, 0.45, 0.0, 0.0, 1.0, 0.0, 51.0, 0.0);
+    r.set_ambient_light(255.0, 255.0, 255.0, 0.82);
+    r.draw_grid(48, 0.16);
+    for column in -8..=8 {
+        let bright = column & 1 == 0;
+        r.draw_cube(
+            f64::from(column) * 0.19,
+            0.55,
+            -0.35 + f64::from(column & 3) * 0.08,
+            0.075,
+            1.10,
+            0.075,
+            if bright { 238.0 } else { 35.0 },
+            if bright { 226.0 } else { 55.0 },
+            if bright { 205.0 } else { 85.0 },
+            255.0,
+        );
+    }
+}
+
 fn capture_preset_frames(
     eng: &mut EngineState,
     preset: u32,
@@ -48,29 +71,7 @@ fn capture_preset_frames(
     }
     configure_reconstruction_scene(&mut eng.renderer);
     eng.renderer.reset_temporal_history();
-    render(eng, frames, |eng| {
-        let r = &mut eng.renderer;
-        r.set_clear_color(5.0, 7.0, 12.0, 255.0);
-        r.begin_mode_3d(4.4, 3.5, 6.0, 0.0, 0.45, 0.0, 0.0, 1.0, 0.0, 51.0, 0.0);
-        r.set_ambient_light(255.0, 255.0, 255.0, 0.82);
-        r.draw_grid(48, 0.16);
-        for column in -8..=8 {
-            let bright = column & 1 == 0;
-            r.draw_cube(
-                f64::from(column) * 0.19,
-                0.55,
-                -0.35 + f64::from(column & 3) * 0.08,
-                0.075,
-                1.10,
-                0.075,
-                if bright { 238.0 } else { 35.0 },
-                if bright { 226.0 } else { 55.0 },
-                if bright { 205.0 } else { 85.0 },
-                255.0,
-            );
-        }
-    })
-    .2
+    render(eng, frames, draw_reconstruction_scene).2
 }
 
 fn capture_preset(eng: &mut EngineState, preset: u32, legacy_scale: Option<f32>) -> Vec<u8> {
@@ -83,29 +84,7 @@ fn capture_sharpen_scene(eng: &mut EngineState, strength: f32) -> Vec<u8> {
     eng.renderer.set_taa_enabled(false);
     eng.renderer.set_sharpen_strength(strength);
     eng.renderer.reset_temporal_history();
-    render(eng, 2, |eng| {
-        let r = &mut eng.renderer;
-        r.set_clear_color(5.0, 7.0, 12.0, 255.0);
-        r.begin_mode_3d(4.4, 3.5, 6.0, 0.0, 0.45, 0.0, 0.0, 1.0, 0.0, 51.0, 0.0);
-        r.set_ambient_light(255.0, 255.0, 255.0, 0.82);
-        r.draw_grid(48, 0.16);
-        for column in -8..=8 {
-            let bright = column & 1 == 0;
-            r.draw_cube(
-                f64::from(column) * 0.19,
-                0.55,
-                -0.35 + f64::from(column & 3) * 0.08,
-                0.075,
-                1.10,
-                0.075,
-                if bright { 238.0 } else { 35.0 },
-                if bright { 226.0 } else { 55.0 },
-                if bright { 205.0 } else { 85.0 },
-                255.0,
-            );
-        }
-    })
-    .2
+    render(eng, 2, draw_reconstruction_scene).2
 }
 
 fn downsample_box_2x(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
@@ -139,29 +118,17 @@ fn capture_native_unsharpened(eng: &mut EngineState, taa: bool, frames: u32) -> 
     eng.renderer.set_taa_enabled(taa);
     eng.renderer.set_sharpen_strength(0.0);
     eng.renderer.reset_temporal_history();
-    render(eng, frames, |eng| {
-        let r = &mut eng.renderer;
-        r.set_clear_color(5.0, 7.0, 12.0, 255.0);
-        r.begin_mode_3d(4.4, 3.5, 6.0, 0.0, 0.45, 0.0, 0.0, 1.0, 0.0, 51.0, 0.0);
-        r.set_ambient_light(255.0, 255.0, 255.0, 0.82);
-        r.draw_grid(48, 0.16);
-        for column in -8..=8 {
-            let bright = column & 1 == 0;
-            r.draw_cube(
-                f64::from(column) * 0.19,
-                0.55,
-                -0.35 + f64::from(column & 3) * 0.08,
-                0.075,
-                1.10,
-                0.075,
-                if bright { 238.0 } else { 35.0 },
-                if bright { 226.0 } else { 55.0 },
-                if bright { 205.0 } else { 85.0 },
-                255.0,
-            );
-        }
-    })
-    .2
+    render(eng, frames, draw_reconstruction_scene).2
+}
+
+fn capture_fractional_unsharpened(eng: &mut EngineState, frames: u32) -> Vec<u8> {
+    eng.renderer.apply_quality_preset(2);
+    eng.renderer.set_render_scale(0.75);
+    configure_reconstruction_scene(&mut eng.renderer);
+    eng.renderer.set_taa_enabled(true);
+    eng.renderer.set_sharpen_strength(0.0);
+    eng.renderer.reset_temporal_history();
+    render(eng, frames, draw_reconstruction_scene).2
 }
 
 #[test]
@@ -190,6 +157,31 @@ fn native_temporal_reconstruction_tracks_supersampled_reference() {
         display_metrics.mean_rgb <= no_taa_metrics.mean_rgb * 0.80,
         "native temporal reconstruction did not materially improve on the aliased single frame: \
          no_taa={no_taa_metrics:?}, temporal={display_metrics:?}"
+    );
+}
+
+#[test]
+fn fractional_temporal_reconstruction_tracks_supersampled_reference() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+
+    eng.renderer.resize(W * 2, H * 2, W * 2, H * 2);
+    let supersampled = capture_native_unsharpened(&mut eng, false, 2);
+    let reference = downsample_box_2x(&supersampled, W * 2, H * 2);
+    eng.renderer.resize(W, H, W, H);
+    let fractional = capture_fractional_unsharpened(&mut eng, 24);
+    let metrics = calculate_diff_metrics(&reference, &fractional, W, H);
+    eprintln!("fractional-reference temporal={metrics:?}");
+
+    assert!(
+        metrics.ssim >= 0.9902,
+        "fractional temporal reconstruction diverged from the supersampled reference: {metrics:?}"
+    );
+    assert!(
+        metrics.mean_rgb <= 0.65,
+        "fractional temporal reconstruction exceeded the supersampled-reference RGB gate: {metrics:?}"
     );
 }
 
