@@ -59,6 +59,195 @@ fn draw_reconstruction_scene(eng: &mut EngineState) {
     }
 }
 
+const GLOSSY_DETAIL_HANDLE: u64 = 0x7AA5_1490;
+
+/// A compact stand-in for Bistro's painted scooter/bottle materials. The
+/// curved surface exercises the imported specular-glossiness workflow while
+/// the one/two-texel markings expose temporal loss that the untextured cube
+/// fixture cannot see.
+fn install_glossy_detail_fixture(eng: &mut EngineState) {
+    const TEXTURE_SIZE: u32 = 256;
+    const COLUMNS: u32 = 32;
+    const ROWS: u32 = 16;
+
+    let mut base_color = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
+    let mut normal = Vec::with_capacity(base_color.capacity());
+    let mut specular_gloss = Vec::with_capacity(base_color.capacity());
+    for y in 0..TEXTURE_SIZE {
+        for x in 0..TEXTURE_SIZE {
+            let label = (54..=202).contains(&x) && (84..=171).contains(&y);
+            let label_border = label && (!(58..=198).contains(&x) || !(88..=167).contains(&y));
+            let fine_print =
+                label && (96..=160).contains(&y) && ((y - 96) % 9 <= 1) && (72..=188).contains(&x);
+            let vertical_trim = x % 31 <= 1;
+            let paint = if label_border {
+                [18, 22, 31]
+            } else if fine_print {
+                [28, 38, 58]
+            } else if label {
+                [222, 208, 166]
+            } else if vertical_trim {
+                [215, 225, 242]
+            } else {
+                // Slight authored paint variation prevents a uniform-color
+                // panel from hiding phase-dependent texture loss.
+                let grain = ((x.wrapping_mul(13) ^ y.wrapping_mul(29)) & 7) as u8;
+                [12 + grain, 52 + grain, 154 + grain * 2]
+            };
+            base_color.extend_from_slice(&[paint[0], paint[1], paint[2], 255]);
+
+            let nx = (((x as f32 * 0.31).sin() * 5.0) + 128.0).round() as u8;
+            let ny = (((y as f32 * 0.27).cos() * 4.0) + 128.0).round() as u8;
+            normal.extend_from_slice(&[nx, ny, 255, 255]);
+
+            let gloss_variation = if vertical_trim { 238 } else { 247 };
+            specular_gloss.extend_from_slice(&[190, 190, 190, gloss_variation]);
+        }
+    }
+
+    let base_color =
+        eng.renderer
+            .register_texture_kind(TEXTURE_SIZE, TEXTURE_SIZE, &base_color, false);
+    let normal = eng
+        .renderer
+        .register_texture_kind(TEXTURE_SIZE, TEXTURE_SIZE, &normal, true);
+    let specular_gloss =
+        eng.renderer
+            .register_texture_kind(TEXTURE_SIZE, TEXTURE_SIZE, &specular_gloss, false);
+
+    let mut vertices = Vec::with_capacity(((COLUMNS + 1) * (ROWS + 1)) as usize);
+    for row in 0..=ROWS {
+        let v = row as f32 / ROWS as f32;
+        let y = 1.55 - v * 3.10;
+        for column in 0..=COLUMNS {
+            let u = column as f32 / COLUMNS as f32;
+            let x = (u * 2.0 - 1.0) * 2.75;
+            let curve_x = x / 2.75;
+            let z = -0.34 * curve_x * curve_x;
+            let dz_dx = -0.68 * x / (2.75 * 2.75);
+            let inv_len = (1.0 + dz_dx * dz_dx).sqrt().recip();
+            vertices.push(Vertex3D {
+                position: [x, y, z],
+                normal: [-dz_dx * inv_len, 0.0, inv_len],
+                color: [1.0; 4],
+                uv: [u, v],
+                joints: [0.0; 4],
+                weights: [0.0; 4],
+                tangent: [inv_len, 0.0, dz_dx * inv_len, 1.0],
+            });
+        }
+    }
+    let mut indices = Vec::with_capacity((COLUMNS * ROWS * 6) as usize);
+    let stride = COLUMNS + 1;
+    for row in 0..ROWS {
+        for column in 0..COLUMNS {
+            let a = row * stride + column;
+            let b = a + 1;
+            let c = a + stride;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+
+    assert!(eng.renderer.cache_model_if_static(
+        GLOSSY_DETAIL_HANDLE,
+        &[MeshData {
+            vertices,
+            secondary_tex_coords: None,
+            indices,
+            texture_idx: Some(base_color),
+            normal_texture_idx: Some(normal),
+            metallic_roughness_texture_idx: Some(specular_gloss),
+            specular_glossiness_factor: Some([0.73, 0.73, 0.73, 0.95]),
+            emissive_texture_idx: None,
+            occlusion_texture_idx: None,
+            metallic_factor: 0.0,
+            roughness_factor: 1.0,
+            emissive_factor: [0.0; 3],
+            alpha_mode: MaterialAlphaMode::Opaque,
+            alpha_cutoff: 0.0,
+            alpha_coverage_mips: false,
+            double_sided: false,
+            transmission: Default::default(),
+            layered_pbr: Default::default(),
+        }]
+    ));
+}
+
+fn draw_glossy_detail_fixture(eng: &mut EngineState, camera_x: f32) {
+    let r = &mut eng.renderer;
+    r.set_clear_color(4.0, 5.0, 8.0, 255.0);
+    r.begin_mode_3d(
+        camera_x,
+        0.05,
+        6.3,
+        camera_x * 0.12,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        43.0,
+        0.0,
+    );
+    r.set_ambient_light(185.0, 198.0, 225.0, 0.20);
+    r.add_directional_light(-0.45, -0.35, -1.0, 1.0, 0.92, 0.78, 3.2);
+    r.add_point_light(-1.8, 1.6, 2.8, 9.0, 0.55, 0.72, 1.0, 9.0);
+    r.draw_model_cached(GLOSSY_DETAIL_HANDLE, [0.0; 3], 1.0, [1.0; 4]);
+}
+
+fn configure_glossy_detail_capture(renderer: &mut Renderer, taa: bool, render_scale: f32) {
+    renderer.apply_quality_preset(4);
+    renderer.set_render_scale(render_scale);
+    configure_reconstruction_scene(renderer);
+    // The production Bistro path keeps directional shadows enabled. Material
+    // mip policy currently shares the per-view cascade split upload, so this
+    // fixture must exercise the same path while we qualify that ownership.
+    renderer.set_shadows_enabled(true);
+    renderer.set_taa_enabled(taa);
+    renderer.set_sharpen_strength(0.0);
+    renderer.set_auto_exposure(false);
+    renderer.set_manual_exposure(1.0);
+    renderer.reset_temporal_history();
+}
+
+fn capture_glossy_detail(
+    eng: &mut EngineState,
+    taa: bool,
+    render_scale: f32,
+    frames: u32,
+    camera_x: f32,
+) -> Vec<u8> {
+    configure_glossy_detail_capture(&mut eng.renderer, taa, render_scale);
+    render(eng, frames, |eng| draw_glossy_detail_fixture(eng, camera_x)).2
+}
+
+fn temporal_derivative_error(
+    previous_reference: &[u8],
+    reference: &[u8],
+    previous_candidate: &[u8],
+    candidate: &[u8],
+) -> f64 {
+    let mut total = 0u64;
+    let mut samples = 0u64;
+    for (((previous_reference, reference), previous_candidate), candidate) in previous_reference
+        .chunks_exact(4)
+        .zip(reference.chunks_exact(4))
+        .zip(previous_candidate.chunks_exact(4))
+        .zip(candidate.chunks_exact(4))
+    {
+        for channel in 0..3 {
+            let reference_delta =
+                i16::from(reference[channel]) - i16::from(previous_reference[channel]);
+            let candidate_delta =
+                i16::from(candidate[channel]) - i16::from(previous_candidate[channel]);
+            total += u64::from(reference_delta.abs_diff(candidate_delta));
+            samples += 1;
+        }
+    }
+    total as f64 / samples as f64
+}
+
 fn capture_preset_frames(
     eng: &mut EngineState,
     preset: u32,
@@ -182,6 +371,147 @@ fn fractional_temporal_reconstruction_tracks_supersampled_reference() {
     assert!(
         metrics.mean_rgb <= 0.65,
         "fractional temporal reconstruction exceeded the supersampled-reference RGB gate: {metrics:?}"
+    );
+}
+
+#[test]
+fn glossy_textured_temporal_reconstruction_tracks_supersampled_reference() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    install_glossy_detail_fixture(&mut eng);
+
+    eng.renderer.resize(W * 2, H * 2, W * 2, H * 2);
+    let supersampled = capture_glossy_detail(&mut eng, false, 1.0, 2, 0.0);
+    let reference = downsample_box_2x(&supersampled, W * 2, H * 2);
+
+    eng.renderer.resize(W, H, W, H);
+    let no_taa = capture_glossy_detail(&mut eng, false, 1.0, 2, 0.0);
+    let native_taa = capture_glossy_detail(&mut eng, true, 1.0, 24, 0.0);
+    let fractional_no_taa = capture_glossy_detail(&mut eng, false, 0.75, 2, 0.0);
+    let fractional_seed = capture_glossy_detail(&mut eng, true, 0.75, 1, 0.0);
+    let fractional_taa = capture_glossy_detail(&mut eng, true, 0.75, 24, 0.0);
+
+    let no_taa_metrics = calculate_diff_metrics(&reference, &no_taa, W, H);
+    let native_metrics = calculate_diff_metrics(&reference, &native_taa, W, H);
+    let fractional_no_taa_metrics = calculate_diff_metrics(&reference, &fractional_no_taa, W, H);
+    let fractional_seed_metrics = calculate_diff_metrics(&reference, &fractional_seed, W, H);
+    let fractional_metrics = calculate_diff_metrics(&reference, &fractional_taa, W, H);
+    let reference_detail = detail_energy(&reference);
+    let no_taa_detail = detail_energy(&no_taa);
+    let native_detail = detail_energy(&native_taa);
+    let fractional_no_taa_detail = detail_energy(&fractional_no_taa);
+    let fractional_seed_detail = detail_energy(&fractional_seed);
+    let fractional_detail = detail_energy(&fractional_taa);
+    eprintln!(
+        "glossy-detail reference={reference_detail:.4} no_taa={no_taa_detail:.4} \
+         native={native_detail:.4} fractional_no_taa={fractional_no_taa_detail:.4} \
+         fractional_seed={fractional_seed_detail:.4} fractional={fractional_detail:.4} \
+         no_taa_metrics={no_taa_metrics:?} native_metrics={native_metrics:?} \
+         fractional_no_taa_metrics={fractional_no_taa_metrics:?} \
+         fractional_seed_metrics={fractional_seed_metrics:?} \
+         fractional_metrics={fractional_metrics:?}"
+    );
+
+    // A real anti-aliasing resolve must improve the authored glossy material
+    // against a supersampled reference, not merely produce more raw edge
+    // energy. This is the failure mode hidden by the untextured primitive rig.
+    assert!(
+        native_metrics.ssim >= no_taa_metrics.ssim,
+        "native TAA made the glossy textured material less reference-like: \
+         no_taa={no_taa_metrics:?}, temporal={native_metrics:?}"
+    );
+    assert!(
+        native_metrics.mean_rgb <= no_taa_metrics.mean_rgb,
+        "native TAA increased glossy textured material error: \
+         no_taa={no_taa_metrics:?}, temporal={native_metrics:?}"
+    );
+    assert!(
+        native_detail >= reference_detail * 0.72,
+        "native TAA erased too much reference material detail: \
+         reference={reference_detail:.4}, temporal={native_detail:.4}"
+    );
+    assert!(
+        fractional_metrics.ssim >= 0.958,
+        "fractional reconstruction diverged on glossy authored detail: \
+         {fractional_metrics:?}"
+    );
+    assert!(
+        fractional_detail >= reference_detail * 0.67,
+        "fractional reconstruction erased glossy authored detail: \
+         reference={reference_detail:.4}, temporal={fractional_detail:.4}"
+    );
+    assert!(
+        fractional_metrics.mean_rgb <= 2.30,
+        "fractional glossy material error exceeded the qualified baseline: \
+         {fractional_metrics:?}"
+    );
+}
+
+#[test]
+fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
+    const FRAMES: usize = 12;
+    const CAMERA_STEP: f32 = 0.004;
+
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    install_glossy_detail_fixture(&mut eng);
+
+    eng.renderer.resize(W * 2, H * 2, W * 2, H * 2);
+    configure_glossy_detail_capture(&mut eng.renderer, false, 1.0);
+    let mut references = Vec::with_capacity(FRAMES);
+    for frame in 0..FRAMES {
+        let camera_x = frame as f32 * CAMERA_STEP;
+        let supersampled = render(&mut eng, 1, |eng| draw_glossy_detail_fixture(eng, camera_x)).2;
+        references.push(downsample_box_2x(&supersampled, W * 2, H * 2));
+    }
+
+    eng.renderer.resize(W, H, W, H);
+    configure_glossy_detail_capture(&mut eng.renderer, true, 0.75);
+    let _ = render(&mut eng, 24, |eng| draw_glossy_detail_fixture(eng, 0.0));
+    let mut candidates = Vec::with_capacity(FRAMES);
+    for frame in 0..FRAMES {
+        let camera_x = frame as f32 * CAMERA_STEP;
+        candidates.push(render(&mut eng, 1, |eng| draw_glossy_detail_fixture(eng, camera_x)).2);
+    }
+
+    let mut mean_rgb = 0.0;
+    let mut mean_ssim = 0.0;
+    let mut minimum_ssim = 1.0f64;
+    for (reference, candidate) in references.iter().zip(&candidates) {
+        let metrics = calculate_diff_metrics(reference, candidate, W, H);
+        mean_rgb += metrics.mean_rgb;
+        mean_ssim += metrics.ssim;
+        minimum_ssim = minimum_ssim.min(metrics.ssim);
+    }
+    mean_rgb /= FRAMES as f64;
+    mean_ssim /= FRAMES as f64;
+    let derivative_errors = references
+        .windows(2)
+        .zip(candidates.windows(2))
+        .map(|(reference, candidate)| {
+            temporal_derivative_error(&reference[0], &reference[1], &candidate[0], &candidate[1])
+        })
+        .collect::<Vec<_>>();
+    let derivative_error = derivative_errors.iter().sum::<f64>() / (FRAMES - 1) as f64;
+    eprintln!(
+        "glossy-slow-pan mean_rgb={mean_rgb:.6} mean_ssim={mean_ssim:.6} \
+         minimum_ssim={minimum_ssim:.6} derivative_error={derivative_error:.6} \
+         derivative_frames={derivative_errors:?}"
+    );
+
+    assert!(
+        mean_ssim >= 0.95 && minimum_ssim >= 0.94,
+        "fractional glossy slow pan diverged from supersampled motion: \
+         mean_ssim={mean_ssim:.6}, minimum_ssim={minimum_ssim:.6}"
+    );
+    assert!(
+        derivative_error <= 1.0,
+        "fractional glossy slow pan added excessive temporal variation: \
+         derivative_error={derivative_error:.6}"
     );
 }
 
