@@ -106,7 +106,7 @@ fn quality_presets_own_resolution_reconstruction_and_sharpening() {
         (1, (172, 172), false, 1, 0.25),
         (2, (192, 192), true, 1, 0.40),
         (3, (218, 218), true, 1, 0.45),
-        (4, (256, 256), true, 1, 0.50),
+        (4, (256, 256), true, 1, 0.85),
     ];
     for (preset, extent, taa, upscale, sharpen) in expected {
         r.apply_quality_preset(preset);

@@ -16,6 +16,23 @@ impl Renderer {
         profiler.begin("post_fx");
         let composite_source = self.composite_source();
         let composite_cache_index = composite_source.bind_group_cache_index(exposure_dst_idx);
+        // The first four TAA frames are deliberately current-frame seeds
+        // (alpha = 1). A resize/cut changes the projection matrices, but it
+        // must not select the motion filter until compatible temporal history
+        // exists; doing so made the first returned-size frame differ from an
+        // otherwise-identical fresh render.
+        let camera_moving = self.taa_frame_index >= 4
+            && super::postfx_chain::taa_camera_moving(
+                &self.current_view_matrix,
+                &self.prev_view_matrix,
+                &self.current_proj_matrix_unjittered,
+                &self.prev_proj_matrix_unjittered,
+            );
+        // Keep one depth-free presentation throughout a path-tracing session.
+        // Progressive PT initially leaves raster on screen, so keying this to
+        // ownership would visibly switch filters when the traced image takes
+        // over; raster depth is also not authoritative after that handoff.
+        let path_tracing_active = self.pt_active();
         let params = CompositeParams {
             params: [
                 self.tonemap_kind as f32,
@@ -33,7 +50,12 @@ impl Renderer {
                 self.vignette_softness,
                 self.grain_strength,
             ],
-            misc: [self.taa_frame_index as f32, self.sharpen_strength, 0.0, 0.0],
+            misc: [
+                self.taa_frame_index as f32,
+                self.sharpen_strength,
+                if camera_moving { 1.0 } else { 0.0 },
+                if path_tracing_active { 1.0 } else { 0.0 },
+            ],
         };
         self.queue.write_buffer(
             &self.composite_uniform_buffer,
@@ -79,6 +101,10 @@ impl Renderer {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&self.depth_view),
                     },
                 ],
             });

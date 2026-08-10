@@ -1160,6 +1160,14 @@ impl Renderer {
         } else {
             ((self.taa_frame_index - 1) % 16) + 1
         };
+        let taa_camera_moving = self.taa_frame_index >= 4
+            && super::postfx_chain::taa_camera_moving(
+                &self.current_view_matrix,
+                &self.prev_view_matrix,
+                &self.current_proj_matrix_unjittered,
+                &self.prev_proj_matrix_unjittered,
+            );
+        let output_detail_uses_depth = !taa_camera_moving && !self.pt_active();
         out.push_str(",\"temporal_reconstruction\":{");
         out.push_str("\"enabled\":");
         out.push_str(if self.taa_enabled { "true" } else { "false" });
@@ -1170,19 +1178,19 @@ impl Renderer {
         out.push_str(",\"stationary_reconstruction_detail_clamp\":0.08");
         out.push_str(",\"stationary_reconstruction_additional_samples\":0");
         out.push_str(",\"stationary_reconstruction_motion_gated\":true");
+        out.push_str(",\"output_detail_filter\":\"depth-aware-local-luma-hull\"");
+        out.push_str(",\"output_detail_strength\":");
+        out.push_str(&self.sharpen_strength.to_string());
+        out.push_str(",\"output_detail_depth_samples\":");
+        out.push_str(if self.sharpen_strength > 0.0 && output_detail_uses_depth {
+            "1"
+        } else {
+            "0"
+        });
+        out.push_str(",\"output_detail_additional_persistent_bytes\":0");
+        out.push_str(",\"output_detail_additional_graph_passes\":0");
         out.push_str(",\"camera_moving\":");
-        out.push_str(
-            if super::postfx_chain::taa_camera_moving(
-                &self.current_view_matrix,
-                &self.prev_view_matrix,
-                &self.current_proj_matrix_unjittered,
-                &self.prev_proj_matrix_unjittered,
-            ) {
-                "true"
-            } else {
-                "false"
-            },
-        );
+        out.push_str(if taa_camera_moving { "true" } else { "false" });
         out.push_str(",\"input_extent\":[");
         out.push_str(&taa_input_width.to_string());
         out.push(',');

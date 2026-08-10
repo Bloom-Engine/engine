@@ -196,6 +196,23 @@ fn default_and_ultra_presets_resolve_more_detail_than_legacy_half_scale() {
         reconstruction["stationary_reconstruction_motion_gated"].as_bool(),
         Some(true)
     );
+    assert_eq!(
+        reconstruction["output_detail_filter"].as_str(),
+        Some("depth-aware-local-luma-hull")
+    );
+    assert_eq!(reconstruction["output_detail_strength"].as_f64(), Some(0.4));
+    assert_eq!(
+        reconstruction["output_detail_depth_samples"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        reconstruction["output_detail_additional_persistent_bytes"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        reconstruction["output_detail_additional_graph_passes"].as_u64(),
+        Some(0)
+    );
     assert_eq!(reconstruction["camera_moving"].as_bool(), Some(false));
     assert_eq!(reconstruction["render_scale"].as_f64(), Some(0.75));
     assert_eq!(

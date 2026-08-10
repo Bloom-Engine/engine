@@ -1328,7 +1328,7 @@ struct CompositeParams {
     filmic: vec4<f32>,
     /// x = grain seed (frame index, randomizes the noise per frame);
     /// y = sharpen strength (0 = off, ~0.25 subtle, ~0.5 punchy);
-    /// zw padding.
+    /// z = authored camera-motion flag; w = path-tracing session.
     misc: vec4<f32>,
 };
 
@@ -1339,6 +1339,7 @@ struct CompositeParams {
 @group(0) @binding(4) var exposure_samp: sampler;
 @group(0) @binding(5) var ssao_tex: texture_2d<f32>;
 @group(0) @binding(6) var ssao_samp: sampler;
+@group(0) @binding(7) var scene_depth_tex: texture_depth_2d;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -1615,21 +1616,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let sharpen_hdr_scale = ao_weighted * exposure;
         let h_avg = (h_r + h_l + h_d + h_u) * 0.25 * sharpen_hdr_scale;
         let avg = tonemap_select(h_avg);
-        // Treat material detail and object silhouettes differently. A hard
-        // luminance boundary is already resolved by TAA; sharpening it creates
-        // a paired dark/bright contour that reads as an inked, cartoon edge
-        // and crawls when the reconstructed silhouette moves subpixel. Keep
-        // the existing detail clamp, then smoothly suppress it as local luma
-        // contrast enters silhouette territory. Low-contrast stone, wood,
-        // fabric, and normal-map detail retains the authored preset strength.
+        // Recover contrast lost by the temporal resolve without drawing the
+        // dark/bright overshoot pair that makes ordinary unsharp masks look
+        // inked. The candidate may move a transition toward either endpoint,
+        // but its luma may never exceed the extrema already present in the
+        // five-pixel source neighborhood.
         let raw_detail = clamp(ldr - avg, vec3<f32>(-0.12), vec3<f32>(0.12));
         let luma_axis = vec3<f32>(0.2126, 0.7152, 0.0722);
-        let edge_contrast = abs(dot(ldr, luma_axis) - dot(avg, luma_axis));
-        // Center-vs-average contrast alone misses a one-sided silhouette:
-        // averaging one bright neighbor with three same-surface neighbors
-        // dilutes the boundary by 4x. Reuse the already-fetched HDR taps to
-        // estimate their relative span before tonemapping. This costs ALU but
-        // no sample or extra tonemap and remains exposure-independent.
         let h_center_luma = max(dot(hdr, luma_axis), 0.0);
         let h_r_luma = max(dot(h_r * sharpen_hdr_scale, luma_axis), 0.0);
         let h_l_luma = max(dot(h_l * sharpen_hdr_scale, luma_axis), 0.0);
@@ -1639,12 +1632,78 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             min(min(h_r_luma, h_l_luma), min(h_d_luma, h_u_luma)));
         let h_max_luma = max(h_center_luma,
             max(max(h_r_luma, h_l_luma), max(h_d_luma, h_u_luma)));
-        let relative_hdr_span = (h_max_luma - h_min_luma) / max(h_max_luma, 0.05);
-        let ldr_detail_weight = 1.0 - smoothstep(0.08, 0.24, edge_contrast);
-        let silhouette_weight = 1.0 - smoothstep(0.30, 0.65, relative_hdr_span);
-        let detail_weight = min(ldr_detail_weight, silhouette_weight);
-        let detail = raw_detail * detail_weight;
-        ldr = clamp(ldr + detail * sharpen_strength, vec3<f32>(0.0), vec3<f32>(1.0));
+        if (u.misc.w > 0.5) {
+            // Path tracing keeps the established filter byte-for-byte for the
+            // whole session. Raster depth is not authoritative after PT takes
+            // ownership, and progressive mode must not visibly switch output
+            // filters at the ownership handoff.
+            let edge_contrast = abs(dot(ldr, luma_axis) - dot(avg, luma_axis));
+            let relative_hdr_span =
+                (h_max_luma - h_min_luma) / max(h_max_luma, 0.05);
+            let ldr_detail_weight = 1.0 - smoothstep(0.08, 0.24, edge_contrast);
+            let silhouette_weight = 1.0 - smoothstep(0.30, 0.65, relative_hdr_span);
+            let detail_weight = min(ldr_detail_weight, silhouette_weight);
+            let detail = raw_detail * detail_weight;
+            ldr = clamp(
+                ldr + detail * sharpen_strength,
+                vec3<f32>(0.0),
+                vec3<f32>(1.0),
+            );
+        } else {
+            var detail_weight = 1.0;
+            var effective_sharpen_strength = sharpen_strength;
+            if (u.misc.z > 0.5) {
+                // Preserve the qualified moving-camera classifier and strength
+                // ceiling so settled detail cannot turn into crawling edges.
+                let edge_contrast = abs(dot(ldr, luma_axis) - dot(avg, luma_axis));
+                let relative_hdr_span =
+                    (h_max_luma - h_min_luma) / max(h_max_luma, 0.05);
+                let ldr_detail_weight = 1.0 - smoothstep(0.08, 0.24, edge_contrast);
+                let silhouette_weight = 1.0 - smoothstep(0.30, 0.65, relative_hdr_span);
+                detail_weight = min(ldr_detail_weight, silhouette_weight);
+                effective_sharpen_strength = min(sharpen_strength, 0.50);
+            } else {
+                // A one-sample depth derivative distinguishes a same-surface
+                // texture edge from an object silhouette. Convert standard
+                // depth to a logarithmic distance proxy so the classifier has
+                // comparable sensitivity in the Bistro interior and far
+                // street. This costs one depth read, no pass/history image,
+                // and keeps sloped continuous surfaces in the detail path.
+                let depth_dims = vec2<i32>(textureDimensions(scene_depth_tex));
+                let depth_coord = clamp(
+                    vec2<i32>(floor(sample_uv * vec2<f32>(depth_dims))),
+                    vec2<i32>(0),
+                    depth_dims - vec2<i32>(1),
+                );
+                let scene_depth = textureLoad(scene_depth_tex, depth_coord, 0);
+                let log_distance = -log2(max(1.0 - scene_depth, 0.00001));
+                let depth_gradient = max(abs(dpdx(log_distance)), abs(dpdy(log_distance)));
+                detail_weight = 1.0 - smoothstep(0.025, 0.12, depth_gradient);
+            }
+            let candidate = clamp(
+                ldr + raw_detail * (effective_sharpen_strength * 0.90 * detail_weight),
+                vec3<f32>(0.0),
+                vec3<f32>(1.0),
+            );
+            // Reuse the centre pixel's tone response to map the local HDR luma
+            // hull into display space. Exact neighbour tonemaps would require
+            // four more expensive tone-curve evaluations per output pixel;
+            // this local slope is conservative at highlights and costs no
+            // additional texture reads or graph passes.
+            let ldr_luma = dot(ldr, luma_axis);
+            let local_tone_slope = ldr_luma / max(h_center_luma, 0.0001);
+            let ldr_min_luma = clamp(h_min_luma * local_tone_slope, 0.0, 1.0);
+            let ldr_max_luma = clamp(h_max_luma * local_tone_slope, 0.0, 1.0);
+            let candidate_luma = dot(candidate, luma_axis);
+            let bounded_luma = clamp(candidate_luma, ldr_min_luma, ldr_max_luma);
+            // Equal-channel luma correction preserves the candidate's chroma
+            // and is exact because the Rec.709 coefficients sum to one.
+            ldr = clamp(
+                candidate + vec3<f32>(bounded_luma - candidate_luma),
+                vec3<f32>(0.0),
+                vec3<f32>(1.0),
+            );
+        }
     }
 
     // --- Vignette (post-tonemap) ---

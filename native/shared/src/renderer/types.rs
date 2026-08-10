@@ -1164,7 +1164,7 @@ pub(super) struct CompositeParams {
     /// z = vignette softness, w = grain strength.
     pub(super) filmic: [f32; 4],
     /// x = grain seed (frame index, animates the noise),
-    /// y = sharpen strength, zw padding.
+    /// y = sharpen strength, z = camera motion, w = path-tracing session.
     pub(super) misc: [f32; 4],
 }
 #[cfg(test)]

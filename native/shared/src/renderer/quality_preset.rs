@@ -89,7 +89,7 @@ fn quality_preset_config(preset: u32) -> QualityPresetConfig {
             render_scale: 1.0,
             taa: true,
             upscale_mode: 1,
-            composite_sharpen: 0.50,
+            composite_sharpen: 0.85,
             cas_sharpen: 0.0,
             shadows: true,
             ssao: true,
