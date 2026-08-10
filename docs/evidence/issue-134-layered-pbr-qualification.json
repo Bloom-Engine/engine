@@ -1,11 +1,12 @@
 {
   "schema": "bloom-layered-pbr-qualification-v1",
   "issue": 134,
-  "qualified_revision": "21356b8541b52155d2136044b39a927ab3373949",
+  "qualified_revision": "2b996932fcdaedf0f0604fd6de2f7f314e1ac433",
   "commits": {
     "clearcoat_normal_motion": "eca754ee28ff9cdef04277398b33e867f55e603e",
     "angular_reference": "ad97e77fc3558c86d5774d63d16e28b76a0a15ac",
-    "renderer_parity": "21356b8541b52155d2136044b39a927ab3373949"
+    "renderer_parity": "21356b8541b52155d2136044b39a927ab3373949",
+    "visibility_parity": "2b996932fcdaedf0f0604fd6de2f7f314e1ac433"
   },
   "adapter": {
     "name": "Apple M1 Max",
@@ -110,6 +111,52 @@
     },
     "status": "pass"
   },
+  "visibility_parity": {
+    "architecture": "visibility-eligible geometry plus authoritative forward compatibility for layered materials",
+    "layered_materials": [
+      "specular_ior",
+      "clearcoat",
+      "sheen",
+      "anisotropy",
+      "iridescence",
+      "combined"
+    ],
+    "moving_layered_draws": 6,
+    "specialization_available": true,
+    "specialization_initialized": true,
+    "sheen_lut_initialized": true,
+    "final_output": {
+      "components": 81920,
+      "changed_components": 150,
+      "maximum_code_delta": 1,
+      "mean_code_delta": 0.00183105
+    },
+    "hdr_scene_rgba16float": {
+      "components": 81920,
+      "changed_components": 1838,
+      "maximum_absolute_delta": 0.000854492,
+      "mean_absolute_delta": 0.000003760681
+    },
+    "material_properties_rg8unorm": {
+      "components": 40960,
+      "changed_components": 19,
+      "maximum_code_delta": 1,
+      "mean_code_delta": 0.000463867
+    },
+    "motion_vectors_rg16float": {
+      "components": 40960,
+      "changed_components": 55,
+      "maximum_absolute_delta": 0.000003815,
+      "mean_absolute_delta": 0.000000005122
+    },
+    "albedo_rgba8unorm": {
+      "components": 81920,
+      "changed_components": 80,
+      "maximum_code_delta": 1,
+      "mean_code_delta": 0.000976562
+    },
+    "status": "pass"
+  },
   "regression_qualification": {
     "lane": "quick",
     "status": "pass",
@@ -135,10 +182,11 @@
     "bindings": 0,
     "per_frame_work": 0
   },
-  "remaining_dependency": {
+  "resolved_dependency": {
     "issue": 27,
     "component": "visibility-buffer renderer",
-    "implemented": false,
-    "issue_134_cross_path_acceptance_complete": false
+    "implemented": true,
+    "layered_material_route": "forward compatibility",
+    "issue_134_cross_path_acceptance_complete": true
   }
 }

@@ -1,9 +1,10 @@
 # Issue #134 layered-PBR qualification
 
 This checkpoint qualifies Bloom's shared layered material model against a
-generated angular oracle, the realtime forward renderer, the hardware
-ray-query path tracer, and a motion sequence. It is qualified at revision
-`21356b8` on an Apple M1 Max / Metal adapter.
+generated angular oracle, the realtime forward renderer, the visibility-buffer
+composition path, the hardware ray-query path tracer, and a motion sequence.
+The cross-path qualification is complete at revision `2b99693` on an Apple M1
+Max / Metal adapter.
 
 ## Angular reference corpus
 
@@ -62,6 +63,34 @@ coherent outlier fraction of `2%`. This test covers minification and temporal
 stability independently from the static clearcoat-normal qualification in
 `issue-134-clearcoat-normal-pt.md`.
 
+## Visibility composition parity
+
+Bloom's visibility renderer keeps unsupported/layered materials on the
+authoritative forward compatibility path while visibility shading owns the
+ordinary material population. The process-isolated parity fixture now places
+moving specular/IOR, clearcoat, sheen, anisotropy, iridescence, and combined
+layered draws over visibility-owned geometry. It verifies that the layered
+specialization and sheen LUT initialize, that visibility mode records at least
+the six layered compatibility draws, and that final depth ownership preserves
+their results.
+
+The forward and visibility runs compare the final display output and every raw
+scene MRT attachment:
+
+| Target | Changed components | Maximum delta | Mean delta |
+|---|---:|---:|---:|
+| Final RGBA8 | 150 / 81,920 | 1 code value | 0.00183105 |
+| HDR scene RGBA16F | 1,838 / 81,920 | 0.000854492 | 0.000003760681 |
+| Material RG8 | 19 / 40,960 | 1 code value | 0.000463867 |
+| Motion RG16F | 55 / 40,960 | 0.000003815 | 0.000000005122 |
+| Albedo RGBA8 | 80 / 81,920 | 1 code value | 0.000976562 |
+
+The sub-LSB/f16 movement is the established manual perspective-reconstruction
+rounding allowance; no target exceeds its existing parity gate. Together with
+the lobe-response forward/PT/oracle test above, this closes the remaining
+forward/visibility/path-traced agreement criterion without adding a shipping
+pass, allocation, shader branch, or binding.
+
 ## Regression and cost qualification
 
 `./scripts/ci-check.sh --quick --summary
@@ -79,20 +108,18 @@ The angular generator and both renderer gates add no shipping render pass,
 image, shader branch, GPU allocation, binding, or per-frame work. Their
 production runtime and binary shader cost is zero.
 
-## Remaining cross-path dependency
-
-Bloom currently uses the forward MRT renderer; the visibility-buffer renderer
-tracked by issue #27 is not implemented. Consequently, issue #134's
-forward/visibility/path-traced parity item must remain open. When #27 lands,
-its material evaluator must consume this same checked corpus and satisfy the
-same documented parity contract. The generated-matrix and normal-minification
-acceptance items are independently complete.
+The 2026-08-10 targeted Metal gates passed: both process-isolated visibility
+tests, the visibility runtime test, and the 64-frame hardware ray-query
+layered parity test. The repository quick wrapper stopped before its test phase
+because the current branch's pre-existing `renderer/mod.rs` is 20 lines above
+its stored file-size baseline; this qualification does not modify that file.
 
 ## Commits
 
 - `eca754e` — clearcoat-normal motion stability gate;
 - `ad97e77` — versioned layered-PBR angular reference corpus;
-- `21356b8` — forward, path-traced, and oracle parity gate.
+- `21356b8` — forward, path-traced, and oracle parity gate;
+- `2b99693` — complete layered forward/visibility MRT parity gate.
 
 Machine-readable measurements accompany this note in
 `docs/evidence/issue-134-layered-pbr-qualification.json`.
