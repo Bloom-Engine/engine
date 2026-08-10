@@ -23,6 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
+#[path = "golden_render/metrics.rs"]
+mod metrics;
+use metrics::{calculate_diff_metrics, select_outlier_gate};
 #[path = "golden_render/layered_pbr_motion.rs"]
 mod layered_pbr_motion;
 #[path = "golden_render/layered_pbr_parity.rs"]
@@ -99,125 +102,6 @@ fn git_commit() -> String {
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .map(|s| s.trim().to_owned())
         .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn luminance(px: &[u8]) -> f64 {
-    (0.2126 * px[0] as f64 + 0.7152 * px[1] as f64 + 0.0722 * px[2] as f64) / 255.0
-}
-
-/// Single-scale luminance SSIM over non-overlapping 8x8 windows. This is
-/// intentionally identical in shape to tools/bloom-diff's regression metric.
-fn ssim_luminance(reference: &[u8], candidate: &[u8], width: u32, height: u32) -> f64 {
-    const WINDOW: usize = 8;
-    const C1: f64 = 0.0001;
-    const C2: f64 = 0.0009;
-    let width = width as usize;
-    let height = height as usize;
-    if width < WINDOW || height < WINDOW {
-        return 1.0;
-    }
-    let mut total = 0.0;
-    let mut windows = 0usize;
-    for y0 in (0..=height - WINDOW).step_by(WINDOW) {
-        for x0 in (0..=width - WINDOW).step_by(WINDOW) {
-            let mut mean_r = 0.0;
-            let mut mean_c = 0.0;
-            for y in y0..y0 + WINDOW {
-                for x in x0..x0 + WINDOW {
-                    let i = (y * width + x) * 4;
-                    mean_r += luminance(&reference[i..i + 4]);
-                    mean_c += luminance(&candidate[i..i + 4]);
-                }
-            }
-            let n = (WINDOW * WINDOW) as f64;
-            mean_r /= n;
-            mean_c /= n;
-            let mut var_r = 0.0;
-            let mut var_c = 0.0;
-            let mut covariance = 0.0;
-            for y in y0..y0 + WINDOW {
-                for x in x0..x0 + WINDOW {
-                    let i = (y * width + x) * 4;
-                    let dr = luminance(&reference[i..i + 4]) - mean_r;
-                    let dc = luminance(&candidate[i..i + 4]) - mean_c;
-                    var_r += dr * dr;
-                    var_c += dc * dc;
-                    covariance += dr * dc;
-                }
-            }
-            var_r /= n;
-            var_c /= n;
-            covariance /= n;
-            total += ((2.0 * mean_r * mean_c + C1) * (2.0 * covariance + C2))
-                / ((mean_r * mean_r + mean_c * mean_c + C1) * (var_r + var_c + C2));
-            windows += 1;
-        }
-    }
-    total / windows as f64
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DiffMetrics {
-    mean_rgba: f64,
-    mean_rgb: f64,
-    max_diff: u8,
-    outlier_pixel_fraction: f64,
-    outlier_channel_fraction: f64,
-    ssim: f64,
-}
-
-fn calculate_diff_metrics(expected: &[u8], actual: &[u8], width: u32, height: u32) -> DiffMetrics {
-    assert_eq!(expected.len(), actual.len());
-    assert_eq!(actual.len(), width as usize * height as usize * 4);
-    let mut sum_abs = 0.0;
-    let mut sum_abs_rgb = 0.0;
-    let mut outlier_pixels = 0usize;
-    let mut outlier_channels = 0usize;
-    let mut max_diff = 0u8;
-    for (actual, expected) in actual.chunks_exact(4).zip(expected.chunks_exact(4)) {
-        let mut pixel_max = 0u8;
-        for channel in 0..4 {
-            let diff = actual[channel].abs_diff(expected[channel]);
-            sum_abs += diff as f64;
-            if channel < 3 {
-                sum_abs_rgb += diff as f64;
-                pixel_max = pixel_max.max(diff);
-            }
-            if diff > 32 {
-                outlier_channels += 1;
-            }
-            max_diff = max_diff.max(diff);
-        }
-        if pixel_max > 32 {
-            outlier_pixels += 1;
-        }
-    }
-    DiffMetrics {
-        mean_rgba: sum_abs / actual.len() as f64,
-        mean_rgb: sum_abs_rgb / (width as f64 * height as f64 * 3.0),
-        max_diff,
-        outlier_pixel_fraction: outlier_pixels as f64 / (width as f64 * height as f64),
-        outlier_channel_fraction: outlier_channels as f64 / actual.len() as f64,
-        ssim: ssim_luminance(expected, actual, width, height),
-    }
-}
-
-fn select_outlier_gate(metrics: DiffMetrics, is_pt_oracle: bool) -> (&'static str, f64) {
-    if is_pt_oracle {
-        ("pixel", metrics.outlier_pixel_fraction)
-    } else {
-        ("channel", metrics.outlier_channel_fraction)
-    }
-}
-
-#[test]
-fn diff_metrics_keep_raster_gate_and_detect_coherent_pt_regions() {
-    let expected = [0u8, 0, 0, 255, 0, 0, 0, 255];
-    let actual = [64u8, 0, 0, 255, 0, 0, 0, 255];
-    let metrics = calculate_diff_metrics(&expected, &actual, 2, 1);
-    assert_eq!(select_outlier_gate(metrics, false), ("channel", 0.125));
-    assert_eq!(select_outlier_gate(metrics, true), ("pixel", 0.5));
-    assert_eq!(metrics.max_diff, 64);
 }
 
 fn golden_artifact_dir(name: &str) -> PathBuf {

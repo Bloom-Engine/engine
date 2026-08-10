@@ -1502,8 +1502,8 @@ struct GpuDrawTable { records: array<GpuDrawRecord>, };
             "bloom_sample_raw(material.texture_ids_0.x, material.sampler_ids_0.x, in.uv).a",
         )
         .replace(
-            "textureSampleBias(normal_tex, normal_samp, in.uv, 1.0 + lod_bias)",
-            "bloom_sample_normal_raw_bias(material, in.uv, 1.0 + lod_bias)",
+            "textureSampleBias(normal_tex, normal_samp, in.uv, 0.25 + lod_bias)",
+            "bloom_sample_normal_raw_bias(material, in.uv, 0.25 + lod_bias)",
         )
         .replace(
             "textureSampleBias(base_color_tex, base_color_samp, in.uv, lod_bias)",

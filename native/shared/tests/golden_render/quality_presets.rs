@@ -347,6 +347,13 @@ fn native_temporal_reconstruction_tracks_supersampled_reference() {
         "native temporal reconstruction did not materially improve on the aliased single frame: \
          no_taa={no_taa_metrics:?}, temporal={display_metrics:?}"
     );
+    assert!(
+        display_metrics.rmse_luminance <= no_taa_metrics.rmse_luminance
+            && display_metrics.mean_oklab_delta <= no_taa_metrics.mean_oklab_delta
+            && display_metrics.mean_edge_delta <= no_taa_metrics.mean_edge_delta,
+        "native temporal reconstruction regressed a perceptual reference metric: \
+         no_taa={no_taa_metrics:?}, temporal={display_metrics:?}"
+    );
 }
 
 #[test]
@@ -441,6 +448,13 @@ fn glossy_textured_temporal_reconstruction_tracks_supersampled_reference() {
     assert!(
         native_metrics.mean_rgb <= no_taa_metrics.mean_rgb,
         "native TAA increased glossy textured material error: \
+         no_taa={no_taa_metrics:?}, temporal={native_metrics:?}"
+    );
+    assert!(
+        native_metrics.rmse_luminance <= no_taa_metrics.rmse_luminance
+            && native_metrics.mean_oklab_delta <= no_taa_metrics.mean_oklab_delta
+            && native_metrics.mean_edge_delta <= no_taa_metrics.mean_edge_delta,
+        "native TAA regressed glossy luminance, colour, or edge fidelity: \
          no_taa={no_taa_metrics:?}, temporal={native_metrics:?}"
     );
     assert!(

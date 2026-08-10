@@ -766,15 +766,17 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // widening the lobe by exactly enough to integrate over sub-
     // pixel normal variance before it hits the BRDF as sparkle.
     //
-    // We still sample at +1 LOD bias so the hardware picks a mip
-    // with more accumulated variance than strictly minimal; the
-    // tradeoff is a hair of softness at near-perpendicular views
-    // in exchange for path-tracer-like integration at grazing.
+    // Sample one quarter level toward the next coarser mip. The baked LEADR variance
+    // already integrates the normal disagreement at the hardware-selected
+    // footprint, so a full +1 mip erased stable authored microdetail at native
+    // resolution (most visibly on Bistro's painted bottles and scooter). The
+    // quarter-mip guard retains extra grazing-angle stability without collapsing
+    // an entire level of normal response.
     // shadow_cascade_splits.w carries the global LOD bias (-1 when
     // TSR is on, 0 otherwise) — added so half-res rendering still
     // reads texture detail one mip finer than hardware would pick.
     let lod_bias = lighting.shadow_cascade_splits.w;
-    let nm_sample4 = textureSampleBias(normal_tex, normal_samp, in.uv, 1.0 + lod_bias);
+    let nm_sample4 = textureSampleBias(normal_tex, normal_samp, in.uv, 0.25 + lod_bias);
     let nm_raw = nm_sample4.xyz * 2.0 - 1.0;
     let baked_variance = nm_sample4.w;
     let toksvig_len2 = clamp(dot(nm_raw, nm_raw), 0.01, 1.0);

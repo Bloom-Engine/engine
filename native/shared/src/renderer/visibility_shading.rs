@@ -214,8 +214,8 @@ fn specialize_visibility_derivatives(source: &str) -> String {
     );
     replace_once(
         &mut body,
-        "bloom_sample_normal_raw_bias(material, in.uv, 1.0 + lod_bias)",
-        "bloom_visibility_sample_normal_raw_grad_bias(\n        material, in.uv, visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n        1.0 + lod_bias,\n    )",
+        "bloom_sample_normal_raw_bias(material, in.uv, 0.25 + lod_bias)",
+        "bloom_visibility_sample_normal_raw_grad_bias(\n        material, in.uv, visibility_gradients.uv_dx, visibility_gradients.uv_dy,\n        0.25 + lod_bias,\n    )",
     );
     replace_once(
         &mut body,

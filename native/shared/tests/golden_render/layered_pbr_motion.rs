@@ -301,8 +301,8 @@ fn base_normal_minification_preserves_response_without_motion_sparkle() {
         max_residual_outliers * 100.0,
     );
     assert!(
-        response >= 0.1,
-        "minified base normal map did not retain a visible material response"
+        response >= 1.5,
+        "base-normal sampling collapsed stable authored response into an over-filtered mip"
     );
     assert!(
         max_residual_mean <= 1.5,
