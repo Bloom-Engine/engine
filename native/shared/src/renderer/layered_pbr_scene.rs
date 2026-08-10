@@ -472,28 +472,6 @@ fn layered_secondary_uv(in: VertexOutputScene) -> vec2<f32> {
     );
     source = replace_once(
         source,
-        "    let roughness_amp = smoothstep(0.05, 0.75, roughness);",
-        r#"    let roughness_amp = smoothstep(0.05, 0.75, roughness);
-    // Smooth ordinary materials retain the established visibility clamp.
-    // Thin-film materials need an IBL owner when SSR is disabled; otherwise
-    // their physically evaluated Fresnel is multiplied by zero. The existing
-    // SSR complement below still prevents double ownership when SSR runs.
-    let layered_roughness_amp = mix(
-        roughness_amp,
-        1.0,
-        layered_surface.iridescence_factor,
-    );"#,
-        "iridescence IBL visibility",
-    );
-    source = replace_once(
-        source,
-        "        * dielectric_scale * spec_occ * roughness_amp * cap2 * (1.0 - ssr_own);",
-        "        * dielectric_scale * spec_occ * layered_roughness_amp * cap2\n\
-         * (1.0 - ssr_own);",
-        "iridescence IBL ownership",
-    );
-    source = replace_once(
-        source,
         "    //IBL_STRIP_END",
         r#"    let ibl_sheen = layered_sheen_ibl(
         layered_surface,

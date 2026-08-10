@@ -1101,58 +1101,19 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     let ibl_spec_raw = prefiltered_env
         * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
-    // Dielectric specular luma cap. Without a proper visibility-aware
-    // specular integral, smooth non-metals like marble / varnished wood
-    // end up reflecting the HDR's bright-sky region at full intensity
-    // even when occluded by intervening geometry (the Intel Sponza
-    // column stripe vs Cycles was the smoking gun — proven by a
-    // roughness=1 test render where the stripe disappeared).
-    // Path-tracers handle this via shadow rays; we approximate by
-    // (1) hard luma cap at 0.8 mid-grey — barely visible — and
-    // (2) scaling the dielectric spec amplitude by roughness so the
-    // polished end of the scale (roughness 0.15-0.35) loses almost all
-    // of its IBL specular response. Metals are left alone so chrome
-    // and gold keep their full dynamic range.
-    let spec_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let dielectric_factor = 1.0 - metallic;
-    let luma_cap = 0.5;
-    let cap_scale = select(1.0, luma_cap / max(spec_luma, 0.0001),
-                           spec_luma > luma_cap);
-    // Roughness attenuation curve for dielectrics: fully off on
-    // polished surfaces, on-ramp all the way to roughness 1.0 where
-    // the prefiltered blur covers a full hemisphere so a wrong sample
-    // is guaranteed to average with its occluded neighbours. This
-    // nearly wipes the column stripe without killing specular on
-    // rough natural stone — matter with roughness 0.7 still gets
-    // ~50% of the IBL spec contribution.
-    let dielectric_spec_amp = smoothstep(0.0, 1.0, roughness);
-    let dielectric_scale = mix(1.0, cap_scale * dielectric_spec_amp,
-                               dielectric_factor);
-    // Universal roughness-based spec attenuation. A smooth curved
-    // surface with ANY material (even metal) needs visibility-aware
-    // specular to avoid bright stripes where the reflection vector
-    // happens to sweep across a hot HDR sample. We don't have
-    // visibility, so we dial down specular for smooth surfaces
-    // regardless of metalness. Roughness 0.15 floor (applied upstream
-    // to dielectrics) plus this smoothstep leaves roughness 1.0
-    // surfaces untouched and mid-rough surfaces (0.3-0.5) at
-    // significant but reduced strength. Metals still get the
-    // dielectric_scale (via the metallic-weighted mix), so the
-    // combined effect is conservative for both.
-    // Universal luma cap: whatever the metallicity or the roughness,
-    // the IBL specular contribution for a single fragment can't exceed
-    // a hard luma ceiling. Marble / stone columns get their mirror-
-    // of-a-bright-sky-strip reflection clipped to something that
-    // couldn't survive a path-tracer's visibility integral,
-    // and brightly-polished metals lose a little punch (they compensate
-    // via direct specular which still uses Fresnel at full strength).
-    // Reinhard-style soft luma cap: same 0.3 ceiling as direct spec
-    // but smooth rolloff so adjacent pixels don't ping-pong across a
-    // hard discontinuity (speckle on sunlit floor tiles with
-    // per-pixel roughness / normal-map variation).
+    // Preserve the Fresnel response at every authored roughness. The former
+    // anti-stripe workaround multiplied smooth dielectrics by roughness twice,
+    // driving glossy dark materials (Bistro wine bottles are the canonical
+    // case) to exactly zero environment reflection. Specular occlusion above,
+    // the bounded soft radiance compression below, normal-variance filtering,
+    // and exclusive SSR ownership are the appropriate stability controls;
+    // material roughness selects the prefiltered lobe and must not also erase
+    // that lobe's energy.
+    // Reinhard-style soft luma compression keeps isolated HDR environment
+    // samples finite and continuous without imposing a roughness-dependent
+    // energy hole.
     let cap2_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
     let cap2 = 1.0 / (1.0 + cap2_luma / 0.3);
-    let roughness_amp = smoothstep(0.05, 0.75, roughness);
     // EN-021 exclusive ownership: where SSR is active it owns specular —
     // hit (traced colour) or miss (env fallback inside the SSR shader).
     // Scale IBL specular by the complement of SSR's own roughness fade
@@ -1163,8 +1124,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     let ssr_own = clamp(
         lighting.dir_light_count.z * (1.0 - smoothstep(0.5, 0.85, roughness)),
         0.0, 1.0);
-    let ibl_spec = ibl_spec_raw
-        * dielectric_scale * spec_occ * roughness_amp * cap2 * (1.0 - ssr_own);
+    let ibl_spec = ibl_spec_raw * spec_occ * cap2 * (1.0 - ssr_own);
     //IBL_STRIP_END
 
     // Indirect-shadow attenuation. 0.15 — deep enough that windows

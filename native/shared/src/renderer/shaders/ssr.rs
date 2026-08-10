@@ -229,6 +229,15 @@ fn env_fallback(r_view: vec3<f32>, roughness: f32) -> vec3<f32> {
          * u.params2.y;
 }
 
+/// Match the scene material path's continuous HDR specular compression.
+/// Without this, enabling SSR replaces bounded split-sum IBL with an
+/// unbounded environment miss, so a stationary smooth dielectric changes
+/// brightness merely because reflection ownership moved between passes.
+fn compress_environment_specular(radiance: vec3<f32>) -> vec3<f32> {
+    let luma = dot(radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return radiance * (1.0 / (1.0 + luma / 0.3));
+}
+
 /// Interleaved gradient noise — per-pixel pseudo-random in [0, 1).
 /// Varies with frame so the temporal accumulator averages over
 /// different march offsets each frame.
@@ -328,7 +337,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Camera-facing rays can't be marched — env fallback (EN-021).
     if (r.z > 0.0) {
-        let fb = env_fallback(r, roughness) * fresnel * roughness_fade * u.params.x;
+        let fb = compress_environment_specular(
+            env_fallback(r, roughness) * fresnel,
+        ) * roughness_fade * u.params.x;
         let fb_safe = select(vec3<f32>(0.0), fb, fb == fb);
         return vec4<f32>(fb_safe, 0.0);
     }
@@ -377,7 +388,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     if (!hit_found) {
         // March left the screen or found nothing — env fallback (EN-021).
-        let fb = env_fallback(r, roughness) * fresnel * roughness_fade * u.params.x;
+        let fb = compress_environment_specular(
+            env_fallback(r, roughness) * fresnel,
+        ) * roughness_fade * u.params.x;
         let fb_safe = select(vec3<f32>(0.0), fb, fb == fb);
         return vec4<f32>(fb_safe, 0.0);
     }

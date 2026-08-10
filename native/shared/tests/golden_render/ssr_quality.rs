@@ -65,6 +65,105 @@ fn isolated_hot_pixels(image: &image::RgbImage) -> usize {
 }
 
 #[test]
+fn smooth_dark_dielectric_retains_environment_specular_without_ssr() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    let r = &mut eng.renderer;
+    r.set_taa_enabled(false);
+    r.set_render_scale(1.0);
+    r.set_ssao_enabled(false);
+    r.set_ssgi_enabled(false);
+    r.set_ssr_enabled(false);
+    r.set_bloom_enabled(false);
+    r.set_auto_exposure(false);
+    r.set_motion_blur_enabled(false);
+    r.set_shadows_enabled(false);
+    r.set_sharpen_strength(0.0);
+
+    // Near-black glossy dielectrics are the failure mode exposed by Bistro's
+    // wine bottles. With no diffuse energy or direct lights, their only valid
+    // response is the Fresnel reflection of the environment. A roughness
+    // heuristic that suppresses that lobe turns them into flat silhouettes.
+    transformed_box(
+        &mut eng,
+        [0.0, 0.0, 0.0],
+        [2.4, 2.4, 0.3],
+        [0.0, 0.0, 0.0, 1.0],
+        0.02,
+        0.0,
+        [0.0; 3],
+    );
+
+    let capture = |eng: &mut EngineState, env_intensity: f32| {
+        let r = &mut eng.renderer;
+        r.set_env_intensity(env_intensity);
+        render(eng, 1, |eng| {
+            let r = &mut eng.renderer;
+            r.set_clear_color(0.0, 0.0, 0.0, 1.0);
+            r.begin_mode_3d(0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0, 0.0);
+            r.set_ambient_light(0.0, 0.0, 0.0, 0.0);
+        })
+        .2
+    };
+
+    let dark = capture(&mut eng, 0.0);
+    let reflected = capture(&mut eng, 4.0);
+    eng.renderer.set_ssr_enabled(true);
+    eng.renderer.set_ssr_strength(1.0);
+    eng.renderer.reset_temporal_history();
+    for _ in 0..16 {
+        capture(&mut eng, 4.0);
+    }
+    let diagnostic_dir = std::env::temp_dir().join(format!(
+        "bloom-smooth-dielectric-ssr-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&diagnostic_dir);
+    eng.renderer.pending_quality_capture_dir = Some(diagnostic_dir.to_string_lossy().into_owned());
+    let reflected_with_ssr = capture(&mut eng, 4.0);
+    let ssr_diagnostic = image::open(diagnostic_dir.join("ssr.png"))
+        .expect("smooth-dielectric qualification did not emit SSR")
+        .to_rgb8();
+    let _ = std::fs::remove_dir_all(&diagnostic_dir);
+    let region_mean = |image: &[u8]| {
+        let mut sum = 0.0;
+        let mut samples = 0usize;
+        for y in 96..160 {
+            for x in 96..160 {
+                let pixel = ((y * W + x) * 4) as usize;
+                sum += 0.2126 * f64::from(image[pixel])
+                    + 0.7152 * f64::from(image[pixel + 1])
+                    + 0.0722 * f64::from(image[pixel + 2]);
+                samples += 1;
+            }
+        }
+        sum / samples as f64
+    };
+    let dark_luma = region_mean(&dark);
+    let reflected_luma = region_mean(&reflected);
+    let reflected_with_ssr_luma = region_mean(&reflected_with_ssr);
+    let ssr_diagnostic_luma = ssr_diagnostic.pixels().map(luma).sum::<f64>()
+        / f64::from(ssr_diagnostic.width() * ssr_diagnostic.height());
+    eprintln!(
+        "smooth-dark-dielectric dark_luma={dark_luma:.4} reflected_luma={reflected_luma:.4} \
+         reflected_with_ssr_luma={reflected_with_ssr_luma:.4} \
+         ssr_diagnostic_luma={ssr_diagnostic_luma:.4}"
+    );
+    assert!(
+        reflected_luma >= dark_luma + 1.0,
+        "smooth dark dielectric lost its environment Fresnel response"
+    );
+    let ownership_ratio = reflected_with_ssr_luma / reflected_luma.max(0.0001);
+    assert!(
+        (0.85..=1.15).contains(&ownership_ratio),
+        "SSR hit-or-environment ownership changed smooth-dielectric energy: \
+         off={reflected_luma:.4}, on={reflected_with_ssr_luma:.4}, ratio={ownership_ratio:.4}"
+    );
+}
+
+#[test]
 fn dark_interior_ssr_rejects_fireflies_and_preserves_smooth_reflections() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
