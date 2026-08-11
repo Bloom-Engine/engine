@@ -567,6 +567,10 @@ pub struct ModelData {
     /// separate from geometry is what allows repeated glTF nodes to share the
     /// same vertices and indices without baking/copying them.
     pub mesh_transforms: Vec<[[f32; 4]; 4]>,
+    /// Per-placement shadow intent imported from authoring metadata. This is
+    /// parallel to `meshes`/`mesh_transforms`; procedural and legacy models
+    /// default to `true` so existing attachment behaviour is unchanged.
+    pub mesh_cast_shadows: Vec<bool>,
     pub bbox_min: [f32; 3],
     pub bbox_max: [f32; 3],
 }
@@ -577,6 +581,10 @@ impl ModelData {
             .get(index)
             .copied()
             .unwrap_or(crate::renderer::IDENTITY_MAT4)
+    }
+
+    pub fn mesh_cast_shadow(&self, index: usize) -> bool {
+        self.mesh_cast_shadows.get(index).copied().unwrap_or(true)
     }
 }
 
@@ -894,6 +902,7 @@ impl ModelManager {
                 layered_pbr: MaterialLayeredPbr::default(),
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
+            mesh_cast_shadows: vec![true],
             bbox_min: [-hw, -hh, -hd],
             bbox_max: [hw, hh, hd],
         };
@@ -1014,6 +1023,7 @@ impl ModelManager {
                 layered_pbr: MaterialLayeredPbr::default(),
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
+            mesh_cast_shadows: vec![true],
             bbox_min: [-size_x * 0.5, 0.0, -size_z * 0.5],
             bbox_max: [size_x * 0.5, size_y, size_z * 0.5],
         };
@@ -1083,6 +1093,7 @@ impl ModelManager {
                 layered_pbr: MaterialLayeredPbr::default(),
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
+            mesh_cast_shadows: vec![true],
             bbox_min,
             bbox_max,
         };
@@ -1214,6 +1225,7 @@ impl ModelManager {
                 layered_pbr: MaterialLayeredPbr::default(),
             })],
             mesh_transforms: vec![crate::renderer::IDENTITY_MAT4],
+            mesh_cast_shadows: vec![true],
             bbox_min,
             bbox_max,
         };

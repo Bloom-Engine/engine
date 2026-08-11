@@ -29,17 +29,38 @@ use texture_semantics::srgb_material_image_indices;
 /// instance — so glTF scenes with heavy mesh reuse (Bistro: 5910 nodes
 /// referencing 551 unique meshes) render every chair / bollard / chain
 /// / bush instead of collapsing to a single copy each.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MeshInstance {
+    transform: [[f32; 4]; 4],
+    cast_shadow: bool,
+}
+
+fn node_casts_shadow(node: &gltf::Node<'_>) -> bool {
+    node.extras()
+        .as_ref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+        .and_then(|extras| {
+            extras
+                .get("BLOOM_cast_shadow")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(true)
+}
+
 fn walk_scene_collect_instances(
     node: &gltf::Node,
     parent: &[[f32; 4]; 4],
-    out: &mut [Vec<[[f32; 4]; 4]>],
+    out: &mut [Vec<MeshInstance>],
 ) {
     let local = node.transform().matrix();
     let world = mat4_mul(parent, &local);
     if let Some(mesh) = node.mesh() {
         let idx = mesh.index();
         if idx < out.len() {
-            out[idx].push(world);
+            out[idx].push(MeshInstance {
+                transform: world,
+                cast_shadow: node_casts_shadow(node),
+            });
         }
     }
     for child in node.children() {
@@ -653,6 +674,7 @@ pub(super) fn load_gltf_with_textures(
 
     let mut meshes: Vec<Arc<MeshData>> = Vec::new();
     let mut mesh_transforms = Vec::new();
+    let mut mesh_cast_shadows = Vec::new();
 
     // Walk the scene node tree to collect world-space transforms for
     // each mesh-referencing node. glTF supports instancing by having
@@ -664,7 +686,7 @@ pub(super) fn load_gltf_with_textures(
     // payload; only their compact transforms scale with node count. Animated
     // / skinned meshes retain their owned compatibility path.
     let mesh_count = gltf.meshes().count();
-    let mut mesh_instances: Vec<Vec<[[f32; 4]; 4]>> = vec![Vec::new(); mesh_count];
+    let mut mesh_instances: Vec<Vec<MeshInstance>> = vec![Vec::new(); mesh_count];
     let identity = [
         [1.0f32, 0.0, 0.0, 0.0],
         [0.0, 1.0, 0.0, 0.0],
@@ -682,23 +704,26 @@ pub(super) fn load_gltf_with_textures(
         // Meshes reachable from no scene node would have no instances;
         // fall back to a single identity transform so orphan meshes
         // still render (matches prior behaviour for simple models).
-        let instance_transforms: Vec<Option<[[f32; 4]; 4]>> = if instances.is_empty() {
-            vec![None]
+        let placements: Vec<MeshInstance> = if instances.is_empty() {
+            vec![MeshInstance {
+                transform: identity,
+                cast_shadow: true,
+            }]
         } else {
-            instances.into_iter().map(Some).collect()
+            instances
         };
 
         let mut primitive_cache: Vec<Option<Arc<MeshData>>> =
             (0..mesh.primitives().count()).map(|_| None).collect();
-        for mesh_world in &instance_transforms {
-            let mesh_world = *mesh_world;
-            let instance_transform = mesh_world.unwrap_or(identity);
+        for placement in &placements {
+            let instance_transform = placement.transform;
             for (primitive_index, primitive) in mesh.primitives().enumerate() {
                 if let Some(source) = primitive_cache[primitive_index].as_ref() {
                     let (instance, transform) =
                         shared_or_owned_instance(source, instance_transform);
                     meshes.push(instance);
                     mesh_transforms.push(transform);
+                    mesh_cast_shadows.push(placement.cast_shadow);
                     continue;
                 }
                 let reader =
@@ -931,6 +956,7 @@ pub(super) fn load_gltf_with_textures(
                 let (instance, transform) = shared_or_owned_instance(&source, instance_transform);
                 meshes.push(instance);
                 mesh_transforms.push(transform);
+                mesh_cast_shadows.push(placement.cast_shadow);
             }
         } // end instance loop
     }
@@ -942,6 +968,7 @@ pub(super) fn load_gltf_with_textures(
     Some(ModelData {
         meshes,
         mesh_transforms,
+        mesh_cast_shadows,
         bbox_min,
         bbox_max,
     })
@@ -1339,7 +1366,8 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         }
     }
 
-    let (meshes, mesh_transforms) = share_scene_mesh_instances(&gltf, source_meshes);
+    let (meshes, mesh_transforms, mesh_cast_shadows) =
+        share_scene_mesh_instances(&gltf, source_meshes);
     if meshes.is_empty() {
         return None;
     }
@@ -1348,6 +1376,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         model: ModelData {
             meshes,
             mesh_transforms,
+            mesh_cast_shadows,
             bbox_min,
             bbox_max,
         },
@@ -1496,7 +1525,8 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
         }
     }
 
-    let (meshes, mesh_transforms) = share_scene_mesh_instances(&gltf, source_meshes);
+    let (meshes, mesh_transforms, mesh_cast_shadows) =
+        share_scene_mesh_instances(&gltf, source_meshes);
     if meshes.is_empty() {
         return None;
     }
@@ -1504,6 +1534,7 @@ pub(super) fn load_gltf(data: &[u8]) -> Option<ModelData> {
     Some(ModelData {
         meshes,
         mesh_transforms,
+        mesh_cast_shadows,
         bbox_min,
         bbox_max,
     })

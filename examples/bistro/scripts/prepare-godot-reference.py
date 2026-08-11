@@ -201,17 +201,38 @@ def fillout_instances(root: Path) -> list[tuple[str, list[float]]]:
     return result
 
 
-def scene_overrides(root: Path, scene_path: str) -> tuple[set[str], dict[str, list[float]]]:
+def scene_overrides(
+    root: Path, scene_path: str
+) -> tuple[set[str], dict[str, list[float]], set[str]]:
     text = (root / scene_path).read_text()
     hidden: set[str] = set()
     transforms: dict[str, list[float]] = {}
+    no_shadow: set[str] = set()
     for _, name, properties in node_blocks(text):
         normalized = name.replace(".", "_")
         if properties.get("visible") == "false":
             hidden.add(normalized)
         if "transform" in properties:
             transforms[normalized] = parse_transform(properties["transform"])
-    return hidden, transforms
+        if properties.get("cast_shadow") == "0":
+            no_shadow.add(normalized)
+    return hidden, transforms, no_shadow
+
+
+def annotate_shadow_overrides(
+    output: dict[str, Any], source_index: int, no_shadow: set[str]
+) -> int:
+    """Preserve Godot GeometryInstance3D shadow intent in glTF extras."""
+    node = output["nodes"][source_index]
+    count = 0
+    normalized = node.get("name", "").replace(".", "_")
+    if normalized in no_shadow:
+        extras = node.setdefault("extras", {})
+        extras["BLOOM_cast_shadow"] = False
+        count += 1
+    for child in node.get("children", []):
+        count += annotate_shadow_overrides(output, child, no_shadow)
+    return count
 
 
 class MaterialLibrary:
@@ -408,6 +429,7 @@ def clone_node_tree(
     source_index: int,
     hidden: set[str],
     transforms: dict[str, list[float]],
+    no_shadow: set[str],
 ) -> int | None:
     source = output["nodes"][source_index]
     normalized = source.get("name", "").replace(".", "_")
@@ -416,7 +438,7 @@ def clone_node_tree(
     copied = json.loads(json.dumps(source))
     children = []
     for child in source.get("children", []):
-        cloned = clone_node_tree(output, child, hidden, transforms)
+        cloned = clone_node_tree(output, child, hidden, transforms, no_shadow)
         if cloned is not None:
             children.append(cloned)
     if children:
@@ -429,6 +451,9 @@ def clone_node_tree(
         copied.pop("translation", None)
         copied.pop("rotation", None)
         copied.pop("scale", None)
+    if normalized in no_shadow:
+        extras = copied.setdefault("extras", {})
+        extras["BLOOM_cast_shadow"] = False
     index = len(output["nodes"])
     output["nodes"].append(copied)
     return index
@@ -597,6 +622,9 @@ def main() -> int:
     for scene_path in scene_paths:
         glb_path = scene_glb_path(root, scene_path)
         meshes, mappings, roots = merge_scene(output, binary, glb_path, library)
+        _, _, no_shadow = scene_overrides(root, scene_path)
+        for source_root in roots:
+            annotate_shadow_overrides(output, source_root, no_shadow)
         source_roots[glb_path.resolve()] = roots
         mesh_count += meshes
         mapping_count += mappings
@@ -617,9 +645,9 @@ def main() -> int:
                 f"merged fill-out source {glb_path.relative_to(root)}: "
                 f"{meshes} meshes, {mappings} material mappings"
             )
-        hidden, transforms = scene_overrides(root, scene_path)
+        hidden, transforms, no_shadow = scene_overrides(root, scene_path)
         cloned_roots = [
-            clone_node_tree(output, source_root, hidden, transforms)
+            clone_node_tree(output, source_root, hidden, transforms, no_shadow)
             for source_root in roots
         ]
         children = [node for node in cloned_roots if node is not None]
@@ -637,6 +665,11 @@ def main() -> int:
         fillout_count += 1
 
     window_count = append_window_panes(root, output, binary, library)
+    no_shadow_count = sum(
+        1
+        for node in output["nodes"]
+        if node.get("extras", {}).get("BLOOM_cast_shadow") is False
+    )
 
     while len(binary) % 4:
         binary.append(0)
@@ -650,6 +683,7 @@ def main() -> int:
         f"wrote {output_path} and {binary_path}: {len(scene_paths)} scenes, "
         f"{mesh_count} source meshes, {mapping_count} mappings, "
         f"{fillout_count} fill-out instances, {window_count} window panes, "
+        f"{no_shadow_count} no-shadow placements, "
         f"{len(library.materials)} materials, {len(library.images)} textures"
     )
     return 0

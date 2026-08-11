@@ -57,19 +57,19 @@ fn bake_owned_mesh_instance(mut instance: MeshData, world: &[[f32; 4]; 4]) -> Me
     instance
 }
 
-fn selected_scene_transforms(gltf: &gltf::Gltf) -> Vec<Vec<[[f32; 4]; 4]>> {
+fn selected_scene_instances(gltf: &gltf::Gltf) -> Vec<Vec<super::MeshInstance>> {
     let mesh_count = gltf.meshes().count();
-    let mut transforms = vec![Vec::new(); mesh_count];
+    let mut instances = vec![Vec::new(); mesh_count];
     let identity = crate::renderer::IDENTITY_MAT4;
     // glTF defines one active/default scene. Walking every scene duplicates
     // placements from authoring variants and makes scene selection depend on
     // exporter ordering. Fall back deterministically to the first scene.
     if let Some(scene) = gltf.default_scene().or_else(|| gltf.scenes().next()) {
         for node in scene.nodes() {
-            walk_scene_collect_instances(&node, &identity, &mut transforms);
+            walk_scene_collect_instances(&node, &identity, &mut instances);
         }
     }
-    transforms
+    instances
 }
 
 /// Expand scene placements while sharing every immutable static primitive.
@@ -80,29 +80,36 @@ fn selected_scene_transforms(gltf: &gltf::Gltf) -> Vec<Vec<[[f32; 4]; 4]>> {
 pub(super) fn share_scene_mesh_instances(
     gltf: &gltf::Gltf,
     source_meshes: Vec<Vec<MeshData>>,
-) -> (Vec<Arc<MeshData>>, Vec<[[f32; 4]; 4]>) {
-    let transforms = selected_scene_transforms(gltf);
+) -> (Vec<Arc<MeshData>>, Vec<[[f32; 4]; 4]>, Vec<bool>) {
+    let instances = selected_scene_instances(gltf);
     let identity = crate::renderer::IDENTITY_MAT4;
     let mut output = Vec::new();
     let mut output_transforms = Vec::new();
+    let mut output_cast_shadows = Vec::new();
 
     for (mesh_index, primitives) in source_meshes.into_iter().enumerate() {
-        let worlds: &[[[f32; 4]; 4]] = if transforms[mesh_index].is_empty() {
-            std::slice::from_ref(&identity)
+        let fallback = super::MeshInstance {
+            transform: identity,
+            cast_shadow: true,
+        };
+        let placements: &[super::MeshInstance] = if instances[mesh_index].is_empty() {
+            std::slice::from_ref(&fallback)
         } else {
-            &transforms[mesh_index]
+            &instances[mesh_index]
         };
         let primitives: Vec<Arc<MeshData>> = primitives.into_iter().map(Arc::new).collect();
 
-        for world in worlds {
+        for placement in placements {
             for primitive in &primitives {
-                let (instance, transform) = shared_or_owned_instance(primitive, *world);
+                let (instance, transform) =
+                    shared_or_owned_instance(primitive, placement.transform);
                 output.push(instance);
                 output_transforms.push(transform);
+                output_cast_shadows.push(placement.cast_shadow);
             }
         }
     }
-    (output, output_transforms)
+    (output, output_transforms, output_cast_shadows)
 }
 
 pub(super) fn model_bounds(
@@ -135,9 +142,8 @@ pub(super) fn model_bounds(
 mod tests {
     use super::*;
 
-    #[test]
-    fn transformed_bounds_do_not_require_baked_vertices() {
-        let mesh = Arc::new(MeshData {
+    fn one_vertex_mesh() -> MeshData {
+        MeshData {
             vertices: vec![Vertex3D {
                 position: [1.0, 2.0, 3.0],
                 normal: [0.0, 1.0, 0.0],
@@ -164,11 +170,44 @@ mod tests {
             double_sided: false,
             transmission: crate::models::MaterialTransmission::default(),
             layered_pbr: crate::models::MaterialLayeredPbr::default(),
-        });
+        }
+    }
+
+    #[test]
+    fn transformed_bounds_do_not_require_baked_vertices() {
+        let mesh = Arc::new(one_vertex_mesh());
         let mut transform = crate::renderer::IDENTITY_MAT4;
         transform[3] = [10.0, -2.0, 4.0, 1.0];
         let (minimum, maximum) = model_bounds(&[mesh], &[transform]);
         assert_eq!(minimum, [11.0, 0.0, 7.0]);
         assert_eq!(maximum, minimum);
+    }
+
+    #[test]
+    fn scene_instances_preserve_authored_shadow_intent() {
+        let document = br#"{
+            "asset":{"version":"2.0"},
+            "scene":0,
+            "scenes":[{"nodes":[0,1]}],
+            "nodes":[
+                {"mesh":0,"extras":{"BLOOM_cast_shadow":false}},
+                {"mesh":0,"translation":[4.0,0.0,0.0]}
+            ],
+            "buffers":[{"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA","byteLength":12}],
+            "bufferViews":[{"buffer":0,"byteLength":12}],
+            "accessors":[{
+                "bufferView":0,"componentType":5126,"count":1,"type":"VEC3",
+                "min":[0.0,0.0,0.0],"max":[0.0,0.0,0.0]
+            }],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]
+        }"#;
+        let gltf = gltf::Gltf::from_slice(document).expect("minimal glTF parses");
+        let (meshes, transforms, cast_shadows) =
+            share_scene_mesh_instances(&gltf, vec![vec![one_vertex_mesh()]]);
+
+        assert_eq!(meshes.len(), 2);
+        assert_eq!(transforms.len(), 2);
+        assert_eq!(cast_shadows, vec![false, true]);
+        assert_eq!(transforms[1][3][0], 4.0);
     }
 }

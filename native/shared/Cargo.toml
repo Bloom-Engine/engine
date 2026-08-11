@@ -47,6 +47,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image"], optional = true }
 gltf = { version = "1", features = [
     "extensions",
+    "extras",
     "KHR_materials_ior",
     "KHR_materials_pbrSpecularGlossiness",
     "KHR_materials_specular",

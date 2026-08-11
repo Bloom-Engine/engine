@@ -694,6 +694,7 @@ macro_rules! __bloom_ffi_scene {
                 }
                 let mesh = std::sync::Arc::clone(&model_data.meshes[mi]);
                 let source_transform = model_data.mesh_transform(mi);
+                let source_cast_shadow = model_data.mesh_cast_shadow(mi);
                 let base_color_tex = mesh.texture_idx;
                 let normal_tex = mesh.normal_texture_idx;
                 let mr_tex = mesh.metallic_roughness_texture_idx;
@@ -722,6 +723,7 @@ macro_rules! __bloom_ffi_scene {
                     (axis_length(0) + axis_length(1) + axis_length(2)) / 3.0;
                 eng.scene
                     .update_shared_model_geometry(node_handle, mesh, source_transform);
+                eng.scene.set_cast_shadow(node_handle, source_cast_shadow);
 
                 if let Some(tex_idx) = base_color_tex {
                     eng.scene.set_material_texture(node_handle, tex_idx);
