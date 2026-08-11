@@ -864,11 +864,12 @@ macro_rules! __bloom_ffi_models {
                 let mut tex_map: Vec<u32> = Vec::with_capacity(staged.textures.len());
                 for tex in &staged.textures {
                     tex_map.push(
-                        eng.renderer.register_texture_kind_with_alpha_coverage(
+                        eng.renderer.register_texture_kind_with_color_space(
                             tex.width,
                             tex.height,
                             &tex.data,
                             tex.is_normal,
+                            tex.is_srgb,
                             tex.alpha_coverage_reference,
                         ),
                     );

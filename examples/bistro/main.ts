@@ -27,7 +27,8 @@ import {
   disableCursor, enableCursor,
   beginMode3D, endMode3D,
   setFog, setSunShafts, setVignette, setChromaticAberration,
-  setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
+  setAutoExposure, setAutoExposureKey, setAutoExposureRate,
+  setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
   setSsgiEnabled, setSsrEnabled, setSharpenStrength, setShadowsAlwaysFresh, setMotionBlurEnabled,
   setBloomIntensity, setSsaoIntensity, setSsaoRadius,
   setSsgiIntensity, setSsgiRadius, setTonemap, Tonemap,
@@ -88,6 +89,8 @@ let referenceSunIntensity = 2.60;
 let referenceSkySunIntensity = 3.00;
 let referenceEnvIntensity = 0.70;
 let referenceAmbientIntensity = 0.06;
+let referenceAutoExposure = true;
+let referenceAutoExposureKey = 0.12;
 let fullscreen = false;
 let cameraXOverride = false;
 let cameraYOverride = false;
@@ -168,6 +171,12 @@ for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--manual-exposure" && i + 1 < argv.length) {
     referenceManualExposure = Math.max(0.01, Math.min(10.0, parseFloat(argv[i + 1])));
   }
+  if (argv[i] === "--auto-exposure" && i + 1 < argv.length) {
+    referenceAutoExposure = parseInt(argv[i + 1]) !== 0;
+  }
+  if (argv[i] === "--auto-exposure-key" && i + 1 < argv.length) {
+    referenceAutoExposureKey = Math.max(0.01, Math.min(1.0, parseFloat(argv[i + 1])));
+  }
   if (argv[i] === "--reference-sun" && i + 1 < argv.length) {
     referenceSunIntensity = Math.max(0.0, Math.min(20.0, parseFloat(argv[i + 1])));
   }
@@ -233,12 +242,16 @@ if (godotReference) {
   setSunDirection(godotSun, referenceSkySunIntensity);
   setEnvIntensity(referenceEnvIntensity);
   setTonemap(Tonemap.ACESFull);
-  // Godot's physical-camera sensitivity and Bloom's histogram target are not
-  // numerically interchangeable. A fixed reference exposure preserves the
-  // authored sun/shade ratio while the camera moves and avoids the histogram
-  // lifting the shaded street into the same tonal range as direct sunlight.
-  // --manual-exposure remains available for deterministic calibration shots.
-  setAutoExposure(false);
+  // The reference camera launches with auto exposure enabled. Godot's 0.22
+  // `auto_exposure_scale` is applied on top of a physical camera sensitivity;
+  // Bloom's key is an absolute HDR median target, so copying 0.22 directly
+  // overexposes this scene by several stops. 0.12 maps the authored outdoor
+  // luminance to the same mid-tone range while retaining adaptation between
+  // the street and cafe. A fixed exposure remains available through
+  // --auto-exposure 0, and --auto-exposure-key supports calibration captures.
+  setAutoExposureKey(referenceAutoExposureKey);
+  setAutoExposureRate(0.02);
+  setAutoExposure(referenceAutoExposure);
   setManualExposure(referenceManualExposure);
   setColorSaturation(1.17);
   // Godot's numeric SSAO scale is not interchangeable with Bloom's. A raw

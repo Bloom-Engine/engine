@@ -144,8 +144,14 @@ mod tests {
     #[test]
     fn allocation_growth_never_overshoots_device_limit() {
         let mib = 1024 * 1024;
-        assert_eq!(buffer_allocation_size(129 * mib, 256 * mib), Some(256 * mib));
-        assert_eq!(buffer_allocation_size(200 * mib, 224 * mib), Some(224 * mib));
+        assert_eq!(
+            buffer_allocation_size(129 * mib, 256 * mib),
+            Some(256 * mib)
+        );
+        assert_eq!(
+            buffer_allocation_size(200 * mib, 224 * mib),
+            Some(224 * mib)
+        );
         assert_eq!(buffer_allocation_size(225 * mib, 224 * mib), None);
     }
 

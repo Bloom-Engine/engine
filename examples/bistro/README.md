@@ -43,9 +43,12 @@ Then run, from the Bloom engine repository root:
 Set `BLOOM_GODOT_BISTRO_SOURCE=/absolute/path/to/Bistro-Demo-Tweaked` to use a
 different checkout. Extra arguments are forwarded to the demo. The reference
 profile launches fullscreen at native 1.0 render scale with Ultra quality,
-the source camera pose and sun direction, full ACES, stable manual exposure,
-and the source project's 1.17 output saturation. Calibration overrides are
-available as `--manual-exposure`, `--reference-sun`, `--reference-env`, and
+the source camera pose and sun direction, full ACES, native-scale sharpening,
+camera adaptation, and the source project's 1.17 output saturation. Godot's
+physical-camera exposure scale is converted to Bloom's HDR histogram units;
+use `--auto-exposure 0 --manual-exposure VALUE` for fixed calibration shots or
+`--auto-exposure-key VALUE` to tune the adaptive target. Additional overrides
+are available as `--reference-sun`, `--reference-env`, and
 `--reference-ambient`; `--reference-sky-sun` calibrates the procedural sky's
 solar radiance independently from surface direct lighting.
 

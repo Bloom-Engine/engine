@@ -16,9 +16,12 @@ use layered_pbr_import::{
 };
 #[path = "models_gltf_bake.rs"]
 mod bake;
+#[path = "models_gltf_texture_semantics.rs"]
+mod texture_semantics;
 #[path = "models_gltf_transform.rs"]
 mod transform;
 use bake::{model_bounds, share_scene_mesh_instances, shared_or_owned_instance};
+use texture_semantics::srgb_material_image_indices;
 
 /// Walk the scene graph and collect EVERY world-space transform that
 /// references each mesh. Unlike `walk_scene_for_mesh_transforms` which
@@ -470,6 +473,7 @@ pub(super) fn load_gltf_with_textures(
         }
     }
     retain_layered_normal_image_indices(&gltf, &mut normal_image_set);
+    let srgb_image_set = srgb_material_image_indices(&gltf);
     let mask_coverage_references = target_mask_texture_coverage_references(&gltf);
     let mask_only_images =
         mask_only_texture_images(&gltf, mask_coverage_references.keys().copied());
@@ -480,6 +484,7 @@ pub(super) fn load_gltf_with_textures(
     let mut texture_indices: Vec<u32> = Vec::new(); // maps glTF image index -> renderer texture index
     for (image_idx, image) in gltf.images().enumerate() {
         let is_normal = normal_image_set.contains(&image_idx);
+        let is_srgb = !is_normal && srgb_image_set.contains(&image_idx);
         match image.source() {
             gltf::image::Source::View { view, .. } => {
                 let buf_idx = view.buffer().index();
@@ -499,6 +504,7 @@ pub(super) fn load_gltf_with_textures(
                                 h,
                                 &rgba,
                                 is_normal,
+                                is_srgb,
                                 mask_coverage_references.get(&image_idx).map(Vec::as_slice),
                                 mask_only_images.contains(&image_idx),
                                 &mut mask_texture_indices,
@@ -553,6 +559,7 @@ pub(super) fn load_gltf_with_textures(
                             h,
                             &rgba,
                             is_normal,
+                            is_srgb,
                             mask_coverage_references.get(&image_idx).map(Vec::as_slice),
                             mask_only_images.contains(&image_idx),
                             &mut mask_texture_indices,
@@ -978,6 +985,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
         }
     }
     retain_layered_normal_image_indices(&gltf, &mut normal_image_set);
+    let srgb_image_set = srgb_material_image_indices(&gltf);
     let mask_coverage_references = target_mask_texture_coverage_references(&gltf);
     let mask_only_images =
         mask_only_texture_images(&gltf, mask_coverage_references.keys().copied());
@@ -1010,6 +1018,8 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                                     width: w,
                                     height: h,
                                     is_normal: normal_image_set.contains(&image_idx),
+                                    is_srgb: !normal_image_set.contains(&image_idx)
+                                        && srgb_image_set.contains(&image_idx),
                                     alpha_coverage_reference: None,
                                 });
                                 primary_texture_idx = Some(staged_textures.len() as u32);
@@ -1021,6 +1031,7 @@ pub fn load_gltf_staged(data: &[u8]) -> Option<crate::staging::StagedModel> {
                                         width: w,
                                         height: h,
                                         is_normal: false,
+                                        is_srgb: true,
                                         alpha_coverage_reference: Some(*reference),
                                     });
                                     mask_texture_indices.insert(
@@ -1547,15 +1558,19 @@ fn register_gltf_image_with_mask_variants(
     height: u32,
     rgba: &[u8],
     is_normal: bool,
+    is_srgb: bool,
     coverage_references: Option<&[f32]>,
     mask_only: bool,
     variants: &mut std::collections::HashMap<MaskTextureVariantKey, u32>,
 ) -> u32 {
-    let mut primary = if mask_only {
-        None
-    } else {
-        Some(renderer.register_texture_kind(width, height, rgba, is_normal))
-    };
+    let mut primary =
+        if mask_only {
+            None
+        } else {
+            Some(renderer.register_texture_kind_with_color_space(
+                width, height, rgba, is_normal, is_srgb, None,
+            ))
+        };
     if let Some(references) = coverage_references {
         for reference in references {
             let variant = renderer.register_texture_kind_with_alpha_coverage(

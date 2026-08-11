@@ -12,6 +12,10 @@ pub struct StagedTexture {
     /// flattens the shading. Set by `load_gltf_staged` from the material's
     /// `normal_texture` references, mirroring `load_gltf_with_textures`.
     pub is_normal: bool,
+    /// Whether RGB is display-encoded colour (albedo/emissive/specular
+    /// colour) rather than linear material data. This controls mip filtering;
+    /// level zero remains unchanged.
+    pub is_srgb: bool,
     /// MASK-only texture-space cutoff used to build lower mips whose alpha
     /// stores surviving texel coverage. None preserves ordinary color mips.
     pub alpha_coverage_reference: Option<f32>,
@@ -84,6 +88,7 @@ pub fn decode_and_stage_texture(file_data: &[u8]) -> f64 {
         width,
         height,
         is_normal: false,
+        is_srgb: true,
         alpha_coverage_reference: None,
     })
 }

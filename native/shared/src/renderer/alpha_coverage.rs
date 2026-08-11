@@ -22,6 +22,7 @@ pub(super) fn build_color_mip_chain(
     data: &[u8],
     mip_count: u32,
     coverage_reference: Option<f32>,
+    srgb_rgb: bool,
 ) -> (Vec<u8>, Vec<usize>) {
     let base_len = width as usize * height as usize * 4;
     assert!(
@@ -34,9 +35,9 @@ pub(super) fn build_color_mip_chain(
     let mut previous_width = width.max(1);
     let mut previous_height = height.max(1);
     let reference = coverage_reference.map(|value| value.max(0.0));
-    let srgb_decode =
-        reference.map(|_| std::array::from_fn::<_, 256, _>(|value| srgb_u8_to_linear(value as u8)));
-    let srgb_encode = reference.map(|_| {
+    let srgb_decode = (reference.is_some() || srgb_rgb)
+        .then(|| std::array::from_fn::<_, 256, _>(|value| srgb_u8_to_linear(value as u8)));
+    let srgb_encode = (reference.is_some() || srgb_rgb).then(|| {
         (0..=u16::MAX)
             .map(|value| linear_to_srgb_u8(value as f32 / u16::MAX as f32))
             .collect::<Vec<_>>()
@@ -60,6 +61,17 @@ pub(super) fn build_color_mip_chain(
                 srgb_decode.as_ref().expect("coverage decode table exists"),
                 srgb_encode.as_ref().expect("coverage encode table exists"),
             );
+        } else if srgb_rgb {
+            append_ordinary_srgb_mip_level(
+                &mut mip_data,
+                previous_offset,
+                previous_width,
+                previous_height,
+                width,
+                height,
+                srgb_decode.as_ref().expect("sRGB decode table exists"),
+                srgb_encode.as_ref().expect("sRGB encode table exists"),
+            );
         } else {
             append_ordinary_color_mip_level(
                 &mut mip_data,
@@ -75,6 +87,51 @@ pub(super) fn build_color_mip_chain(
     }
 
     (mip_data, mip_offsets)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_ordinary_srgb_mip_level(
+    mip_data: &mut Vec<u8>,
+    previous_offset: usize,
+    previous_width: u32,
+    previous_height: u32,
+    width: u32,
+    height: u32,
+    srgb_decode: &[f32; 256],
+    srgb_encode: &[u8],
+) {
+    let pw = previous_width as usize;
+    let ph = previous_height as usize;
+    let index = |x: usize, y: usize| previous_offset + (y * pw + x) * 4;
+
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let sx = x * 2;
+            let sy = y * 2;
+            let sx1 = (sx + 1).min(pw - 1);
+            let sy1 = (sy + 1).min(ph - 1);
+            let children = [
+                index(sx, sy),
+                index(sx1, sy),
+                index(sx, sy1),
+                index(sx1, sy1),
+            ];
+            for channel in 0..3 {
+                let linear = children
+                    .iter()
+                    .map(|child| srgb_decode[mip_data[*child + channel] as usize])
+                    .sum::<f32>()
+                    * 0.25;
+                let table_index = (linear.clamp(0.0, 1.0) * u16::MAX as f32).round() as usize;
+                mip_data.push(srgb_encode[table_index]);
+            }
+            let alpha_sum: u32 = children
+                .iter()
+                .map(|child| mip_data[*child + 3] as u32)
+                .sum();
+            mip_data.push(((alpha_sum + 2) / 4) as u8);
+        }
+    }
 }
 
 fn append_ordinary_color_mip_level(
@@ -273,9 +330,21 @@ mod tests {
     #[test]
     fn ordinary_color_mips_keep_the_established_byte_average() {
         let pixels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let (chain, offsets) = build_color_mip_chain(2, 2, &pixels, 2, None);
+        let (chain, offsets) = build_color_mip_chain(2, 2, &pixels, 2, None, false);
         assert_eq!(offsets, [0, 16]);
         assert_eq!(&chain[16..], &[7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn srgb_color_mips_average_rgb_in_linear_light_and_alpha_as_data() {
+        let pixels = [
+            0, 0, 0, 0, 255, 255, 255, 64, 0, 0, 0, 128, 255, 255, 255, 255,
+        ];
+        let (chain, offsets) = build_color_mip_chain(2, 2, &pixels, 2, None, true);
+        assert_eq!(offsets, [0, 16]);
+        // 50% linear light encodes to sRGB 188, not the byte-space mean 128.
+        assert_eq!(&chain[16..19], &[188, 188, 188]);
+        assert_eq!(chain[19], 112);
     }
 
     #[test]
@@ -289,7 +358,7 @@ mod tests {
                 &[255, 0, 255, 0]
             });
         }
-        let (chain, offsets) = build_color_mip_chain(8, 8, &pixels, 4, Some(0.5));
+        let (chain, offsets) = build_color_mip_chain(8, 8, &pixels, 4, Some(0.5), true);
         let expected_coverage = 0.75;
         for (level, extent) in [(1usize, 4usize), (2, 2), (3, 1)] {
             let start = offsets[level];
@@ -310,7 +379,7 @@ mod tests {
         let mut pixels = vec![0u8; 5 * 3 * 4];
         let visible = (2 * 5 + 4) * 4;
         pixels[visible..visible + 4].copy_from_slice(&[30, 220, 20, 255]);
-        let (chain, offsets) = build_color_mip_chain(5, 3, &pixels, 3, Some(0.5));
+        let (chain, offsets) = build_color_mip_chain(5, 3, &pixels, 3, Some(0.5), true);
         let level_one = &chain[offsets[1]..offsets[1] + 2 * 4];
         let level_two = &chain[offsets[2]..offsets[2] + 4];
         let authored = 1.0 / 15.0;
@@ -330,7 +399,7 @@ mod tests {
                 });
             }
         }
-        let (chain, offsets) = build_color_mip_chain(8, 8, &pixels, 2, Some(0.5));
+        let (chain, offsets) = build_color_mip_chain(8, 8, &pixels, 2, Some(0.5), true);
         for pixel in chain[offsets[1]..].chunks_exact(4) {
             assert!(
                 pixel[1] > pixel[0] && pixel[1] > pixel[2],
@@ -344,7 +413,7 @@ mod tests {
         let pixels = [
             0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255,
         ];
-        let (chain, offsets) = build_color_mip_chain(2, 2, &pixels, 2, Some(0.5));
+        let (chain, offsets) = build_color_mip_chain(2, 2, &pixels, 2, Some(0.5), true);
         let output = &chain[offsets[1]..];
         assert!(
             (output[0] as i16 - 188).abs() <= 1,

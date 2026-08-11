@@ -186,7 +186,14 @@ impl Renderer {
         data: &[u8],
         is_normal_map: bool,
     ) -> u32 {
-        self.register_texture_kind_with_alpha_coverage(width, height, data, is_normal_map, None)
+        self.register_texture_kind_with_color_space(
+            width,
+            height,
+            data,
+            is_normal_map,
+            !is_normal_map,
+            None,
+        )
     }
 
     /// Kind-aware registration with MASK-only coverage mips. Ordinary color
@@ -197,6 +204,31 @@ impl Renderer {
         height: u32,
         data: &[u8],
         is_normal_map: bool,
+        alpha_coverage_reference: Option<f32>,
+    ) -> u32 {
+        self.register_texture_kind_with_color_space(
+            width,
+            height,
+            data,
+            is_normal_map,
+            !is_normal_map,
+            alpha_coverage_reference,
+        )
+    }
+
+    /// Register a decoded material texture while preserving whether its RGB
+    /// channels are display-encoded colour or linear material data. glTF
+    /// albedo/emissive images need linear-light mip filtering followed by an
+    /// sRGB re-encode; roughness/metallic/occlusion images must retain an
+    /// ordinary numeric average. Level zero remains byte-identical either way.
+    #[doc(hidden)]
+    pub fn register_texture_kind_with_color_space(
+        &mut self,
+        width: u32,
+        height: u32,
+        data: &[u8],
+        is_normal_map: bool,
+        srgb_rgb: bool,
         alpha_coverage_reference: Option<f32>,
     ) -> u32 {
         // On Android/Vulkan, multi-level mipmap upload was observed to
@@ -236,6 +268,7 @@ impl Renderer {
                 data,
                 mip_count,
                 alpha_coverage_reference,
+                srgb_rgb,
             )
         };
 
@@ -403,15 +436,17 @@ impl Renderer {
             width,
             height,
             mip_count,
-            if is_normal_map {
+            if is_normal_map || !srgb_rgb {
                 TextureColorSpace::Linear
             } else {
                 TextureColorSpace::Srgb
             },
             if is_normal_map {
                 TextureSemantic::Normal
-            } else {
+            } else if srgb_rgb {
                 TextureSemantic::BaseColor
+            } else {
+                TextureSemantic::MetallicRoughness
             },
             false,
         );
