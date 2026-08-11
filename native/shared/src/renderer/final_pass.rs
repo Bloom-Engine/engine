@@ -56,6 +56,7 @@ impl Renderer {
                 if camera_moving { 1.0 } else { 0.0 },
                 if path_tracing_active { 1.0 } else { 0.0 },
             ],
+            color: [self.color_saturation, 0.0, 0.0, 0.0],
         };
         self.queue.write_buffer(
             &self.composite_uniform_buffer,

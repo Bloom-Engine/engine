@@ -163,6 +163,12 @@ pub fn bloom_set_tonemap(kind: f64) -> f64 {
 }
 
 #[wasm_bindgen]
+pub fn bloom_set_color_saturation(value: f64) -> f64 {
+    engine().renderer.set_color_saturation(value as f32);
+    1.0
+}
+
+#[wasm_bindgen]
 pub fn bloom_set_auto_exposure_key(key: f64) -> f64 {
     engine().renderer.set_auto_exposure_key(key as f32);
     1.0

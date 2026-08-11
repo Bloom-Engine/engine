@@ -1902,6 +1902,13 @@
           "returns": "f64"
         },
         {
+          "name": "bloom_set_color_saturation",
+          "params": [
+            "f64"
+          ],
+          "returns": "f64"
+        },
+        {
           "name": "bloom_set_auto_exposure_key",
           "params": [
             "f64"

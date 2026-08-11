@@ -76,6 +76,7 @@ declare function bloom_set_shadows_always_fresh(on: number): number;
 declare function bloom_set_bloom_enabled(on: number): number;
 declare function bloom_set_bloom_intensity(value: number): number;
 declare function bloom_set_tonemap(kind: number): number;
+declare function bloom_set_color_saturation(value: number): number;
 declare function bloom_set_auto_exposure_key(key: number): number;
 declare function bloom_set_auto_exposure_rate(rate: number): number;
 declare function bloom_set_ssao_enabled(on: number): number;
@@ -785,15 +786,22 @@ export function setBloomIntensity(intensity: number): boolean {
 
 /** Tonemap operator selection. */
 export enum Tonemap {
-  /** Filmic ACES (default). */
+  /** Compact filmic ACES fit. */
   ACES = 0,
   /** AgX — more filmic highlight roll-off + a punchier, better-saturated look. */
   AgX = 1,
+  /** Full ACES RRT+ODT fit with a 6.0 white point (Godot 4 compatible). */
+  ACESFull = 2,
 }
 
 /** Choose the tonemap operator applied in the composite pass. */
 export function setTonemap(kind: Tonemap): boolean {
   return bloom_set_tonemap(kind) !== 0;
+}
+
+/** Post-tonemap output saturation. 1 is neutral; 0 is grayscale. */
+export function setColorSaturation(saturation: number): boolean {
+  return bloom_set_color_saturation(saturation) !== 0;
 }
 
 /**

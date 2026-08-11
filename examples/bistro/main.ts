@@ -29,6 +29,9 @@ import {
   setFog, setSunShafts, setVignette, setChromaticAberration,
   setAutoExposure, setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
   setSsgiEnabled, setSsrEnabled, setSharpenStrength, setShadowsAlwaysFresh, setMotionBlurEnabled,
+  setBloomIntensity, setSsaoIntensity, setSsaoRadius,
+  setSsgiIntensity, setSsgiRadius, setTonemap, Tonemap,
+  setColorSaturation,
   setQualityPreset, setRenderScale, getRenderScale, getPhysicalWidth, getPhysicalHeight,
   getCommandLineArgs, resize,
 } from "bloom/core";
@@ -36,7 +39,7 @@ import { parseQualityRun, QualityRun } from "bloom/quality";
 import { Key } from "bloom/core";
 import { drawText } from "bloom/text";
 import {
-  setAmbientLight, setDirectionalLight, loadModel,
+  setAmbientLight, setDirectionalLight, loadModel, setProceduralSky, setSunDirection,
 } from "bloom/models";
 import {
   enableShadows, addDirectionalLight,
@@ -79,6 +82,17 @@ let shadowsAlwaysFresh = false;
 let interactiveQualityPreset = -1;
 let interactiveRenderScale = -1.0;
 let interactiveSharpenStrength = -1.0;
+let godotReference = false;
+let referenceManualExposure = 1.20;
+let referenceSunIntensity = 2.60;
+let referenceSkySunIntensity = 3.00;
+let referenceEnvIntensity = 0.70;
+let referenceAmbientIntensity = 0.06;
+let fullscreen = false;
+let cameraXOverride = false;
+let cameraYOverride = false;
+let cameraZOverride = false;
+let yawOverride = false;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -86,15 +100,19 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--yaw" && i + 1 < argv.length) {
     initYaw = parseFloat(argv[i + 1]);
+    yawOverride = true;
   }
   if (argv[i] === "--camera-x" && i + 1 < argv.length) {
     initCamX = parseFloat(argv[i + 1]);
+    cameraXOverride = true;
   }
   if (argv[i] === "--camera-y" && i + 1 < argv.length) {
     initCamY = parseFloat(argv[i + 1]);
+    cameraYOverride = true;
   }
   if (argv[i] === "--camera-z" && i + 1 < argv.length) {
     initCamZ = parseFloat(argv[i + 1]);
+    cameraZOverride = true;
   }
   if (argv[i] === "--taa" && i + 1 < argv.length) {
     taaOverride = parseInt(argv[i + 1]);
@@ -141,10 +159,44 @@ for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--sharpen" && i + 1 < argv.length) {
     interactiveSharpenStrength = Math.max(0.0, Math.min(1.0, parseFloat(argv[i + 1])));
   }
+  if (argv[i] === "--godot-reference") {
+    godotReference = true;
+  }
+  if (argv[i] === "--fullscreen") {
+    fullscreen = true;
+  }
+  if (argv[i] === "--manual-exposure" && i + 1 < argv.length) {
+    referenceManualExposure = Math.max(0.01, Math.min(10.0, parseFloat(argv[i + 1])));
+  }
+  if (argv[i] === "--reference-sun" && i + 1 < argv.length) {
+    referenceSunIntensity = Math.max(0.0, Math.min(20.0, parseFloat(argv[i + 1])));
+  }
+  if (argv[i] === "--reference-sky-sun" && i + 1 < argv.length) {
+    referenceSkySunIntensity = Math.max(0.0, Math.min(20.0, parseFloat(argv[i + 1])));
+  }
+  if (argv[i] === "--reference-env" && i + 1 < argv.length) {
+    referenceEnvIntensity = Math.max(0.0, Math.min(10.0, parseFloat(argv[i + 1])));
+  }
+  if (argv[i] === "--reference-ambient" && i + 1 < argv.length) {
+    referenceAmbientIntensity = Math.max(0.0, Math.min(10.0, parseFloat(argv[i + 1])));
+  }
+}
+
+// Match the launch pose of Bistro-Demo-Tweaked's Human-For-Scale camera.
+// The camera is a 2.1 m spring arm attached to the player transform authored
+// in MainScene.tscn. Explicit camera arguments always win.
+if (godotReference) {
+  if (!cameraXOverride) { initCamX = -3.2720; }
+  if (!cameraYOverride) { initCamY = 1.5440; }
+  if (!cameraZOverride) { initCamZ = 7.2358; }
+  if (!yawOverride) { initYaw = -0.3440; }
+  if (interactiveQualityPreset < 0) { interactiveQualityPreset = 4; }
+  if (interactiveRenderScale < 0.0) { interactiveRenderScale = 1.0; }
+  if (interactiveSharpenStrength < 0.0) { interactiveSharpenStrength = 0.20; }
 }
 
 // ---- Init ----
-initWindow(SCREEN_W, SCREEN_H, "Bloom Bistro", 0);
+initWindow(SCREEN_W, SCREEN_H, "Bloom Bistro", fullscreen);
 if (qualityConfig !== null) resize(SCREEN_W, SCREEN_H, SCREEN_W, SCREEN_H);
 setTargetFPS(60);
 let qualityRun: QualityRun | null = qualityConfig !== null ? new QualityRun(qualityConfig) : null;
@@ -169,9 +221,40 @@ setShadowsAlwaysFresh(shadowsAlwaysFresh);
 // Open-air street scene: the sky is the dominant IBL source. 1.2×
 // env intensity gives colourful ambient reflection without washing
 // out direct sunlight (now at 3.0 below).
-setEnvIntensity(1.2);
-setAutoExposure(false);
-setManualExposure(1.0);
+if (godotReference) {
+  // Bistro-Demo-Tweaked uses Godot's ProceduralSkyMaterial, an ACES output
+  // transform, physical auto-exposure, and a 4250 K / 75 klux afternoon sun.
+  // Bloom's public light intensity is a relative radiometric multiplier, so
+  // preserve the authored sun/sky relationship rather than copying lux as a
+  // dimensionless value. The direction is the Godot light's +Z basis: from a
+  // shaded surface toward the sun.
+  const godotSun = { x: 0.59732, y: 0.79653, z: -0.0935387 };
+  setProceduralSky(true, { rayleighDensity: 1.0, mieDensity: 2.0, groundAlbedo: 0.1 });
+  setSunDirection(godotSun, referenceSkySunIntensity);
+  setEnvIntensity(referenceEnvIntensity);
+  setTonemap(Tonemap.ACESFull);
+  // Godot's physical-camera sensitivity and Bloom's histogram target are not
+  // numerically interchangeable. A fixed reference exposure preserves the
+  // authored sun/shade ratio while the camera moves and avoids the histogram
+  // lifting the shaded street into the same tonal range as direct sunlight.
+  // --manual-exposure remains available for deterministic calibration shots.
+  setAutoExposure(false);
+  setManualExposure(referenceManualExposure);
+  setColorSaturation(1.17);
+  // Godot's numeric SSAO scale is not interchangeable with Bloom's. A raw
+  // 2.3 copy creates dark silhouette halos (the familiar "cartoon outline"
+  // failure) in Bloom. These values match the authored contact-darkening
+  // intent without changing large-scale albedo or direct-light contrast.
+  setSsaoRadius(0.65);
+  setSsaoIntensity(0.85);
+  setSsgiRadius(2.3);
+  setSsgiIntensity(1.1);
+  setBloomIntensity(0.035);
+} else {
+  setEnvIntensity(1.2);
+  setAutoExposure(false);
+  setManualExposure(1.0);
+}
 if (taaOverride === 0) { setTaaEnabled(false); }
 if (taaOverride === 1) { setTaaEnabled(true); }
 if (bloomOverride === 0) { setBloomEnabled(false); }
@@ -180,6 +263,7 @@ if (ssgiOverride === 0) { setSsgiEnabled(false); }
 if (ssgiOverride === 1) { setSsgiEnabled(true); }
 if (ssrOverride === 0) { setSsrEnabled(false); }
 if (ssrOverride === 1) { setSsrEnabled(true); }
+if (godotReference && ssrOverride < 0) { setSsrEnabled(false); }
 
 // Same-camera image-quality isolation. These toggles deliberately live in
 // the validation scene rather than changing renderer policy: they let an
@@ -190,7 +274,7 @@ let diagnosticTaaEnabled = taaOverride !== 0
 let diagnosticSsgiEnabled = ssgiOverride === 1
   || (ssgiOverride < 0 && (interactiveQualityPreset < 0 || interactiveQualityPreset >= 3));
 let diagnosticSsrEnabled = ssrOverride === 1
-  || (ssrOverride < 0 && (interactiveQualityPreset < 0 || interactiveQualityPreset >= 3));
+  || (ssrOverride < 0 && !godotReference && (interactiveQualityPreset < 0 || interactiveQualityPreset >= 3));
 const diagnosticSharpenStrengths = [0.0, 0.25, 0.40, 0.45, 0.85];
 const diagnosticSharpenStrength = interactiveSharpenStrength >= 0.0
   ? interactiveSharpenStrength
@@ -215,8 +299,8 @@ setMotionBlurEnabled(motionBlurOverride === 1);
 // `--sun-shafts 1`.
 setFog(0.92, 0.90, 0.84, fogOverride === 1 ? 0.006 : 0.0, 0.0, 0.05);
 setSunShafts(sunShaftOverride === 1 ? 0.25 : 0.0, 0.96, 1.0, 0.94, 0.82);
-setVignette(0.10, 0.30);
-setChromaticAberration(0.0005);
+setVignette(godotReference ? 0.0 : 0.10, 0.30);
+setChromaticAberration(godotReference ? 0.0 : 0.0005);
 
 // ---- Load Bistro into scene graph ----
 // The rich launcher supplies the complete source exterior here. Each mesh
@@ -240,7 +324,7 @@ console.error("BLOOM_QUALITY_SCENE bistro_placements_attached=" + bistro.meshCou
 let camX = initCamX;
 let camY = initCamY;
 let camZ = initCamZ;
-let camYaw = initYaw !== 0.0 ? initYaw : -1.17; // ≈ 67° left of -Z
+let camYaw = (yawOverride || godotReference) ? initYaw : -1.17; // ≈ 67° left of -Z
 let camPitch = 0.0;
 let cursorLocked = false;
 let fixtureFrame = 0;
@@ -317,20 +401,25 @@ while (!windowShouldClose()) {
 
   beginDrawing();
 
-  setAmbientLight({ r: 150, g: 160, b: 180, a: 255 }, 0.3);
+  setAmbientLight(
+    godotReference ? { r: 255, g: 245, b: 232, a: 255 } : { r: 150, g: 160, b: 180, a: 255 },
+    godotReference ? referenceAmbientIntensity : 0.3,
+  );
   // Parisian afternoon sun — warm, angled slightly from the side.
   // 3.0 intensity gives a stronger sun-to-ambient ratio, matching
   // the Cycles reference's dominant directional light (Cycles uses
   // ~5 W/m² sun vs 1.2× HDR env — our ratio was previously too
   // flat, leaving sunlit and shaded surfaces in a narrow tonal band).
   setDirectionalLight(
-    { x: -0.5, y: 0.75, z: 0.4 },
-    { r: 255, g: 240, b: 220, a: 255 },
-    3.0,
+    godotReference ? { x: 0.59732, y: 0.79653, z: -0.0935387 } : { x: -0.5, y: 0.75, z: 0.4 },
+    godotReference ? { r: 255, g: 212, b: 177, a: 255 } : { r: 255, g: 240, b: 220, a: 255 },
+    godotReference ? referenceSunIntensity : 3.0,
   );
   // Tiny fill from below — same trick as Sponza, keeps overhangs
   // and awnings from bottoming out when SSGI misses them.
-  addDirectionalLight(0.0, -1.0, 0.0, 0.5, 0.55, 0.7, 0.4);
+  if (!godotReference) {
+    addDirectionalLight(0.0, -1.0, 0.0, 0.5, 0.55, 0.7, 0.4);
+  }
 
   beginMode3D({
     position: { x: renderCamX, y: camY, z: renderCamZ },

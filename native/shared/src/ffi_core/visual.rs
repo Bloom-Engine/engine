@@ -592,12 +592,21 @@ macro_rules! __bloom_ffi_visual {
         }
 
         // bloom_set_tonemap  [source: art-direction]
-        // Selects the tonemap operator: 0 = ACES (default), 1 = AgX (more
-        // filmic, better highlight desaturation + a punchier look).
+        // Selects the tonemap operator: 0 = compact ACES, 1 = AgX, 2 = full
+        // ACES RRT+ODT fit with a 6.0 white point.
         #[no_mangle]
         pub extern "C" fn bloom_set_tonemap(kind: f64) -> f64 {
             $crate::ffi::guard_applied("bloom_set_tonemap", move || {
                 engine().renderer.set_tonemap_kind(kind as u32);
+            })
+        }
+
+        // bloom_set_color_saturation  [source: art-direction]
+        // Post-tonemap output saturation (1 = neutral, 0 = grayscale).
+        #[no_mangle]
+        pub extern "C" fn bloom_set_color_saturation(value: f64) -> f64 {
+            $crate::ffi::guard_applied("bloom_set_color_saturation", move || {
+                engine().renderer.set_color_saturation(value as f32);
             })
         }
 

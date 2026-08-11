@@ -92,6 +92,7 @@ const RENDERER_STATUS_FUNCTIONS = new Set([
   'bloom_set_bloom_enabled',
   'bloom_set_bloom_intensity',
   'bloom_set_tonemap',
+  'bloom_set_color_saturation',
   'bloom_set_auto_exposure_key',
   'bloom_set_auto_exposure_rate',
   'bloom_set_ssao_enabled',

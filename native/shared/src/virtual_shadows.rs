@@ -1448,10 +1448,12 @@ pub(crate) fn directional_scene_shader(source: &str) -> String {
     } else {
         "i"
     };
-    let point_intensity = "pl.color.w * atten2,\n                             base_color";
-    let shadowed_point_intensity = format!(
-        "pl.color.w * atten2 * sample_local_shadow({light_index}, in.world_pos),\n                             base_color"
-    );
+    // Match the semantic point-light intensity expression, not the caller's
+    // indentation. Both metallic/roughness and specular/glossiness paths use
+    // this term, and shader specialization is free to reformat either call.
+    let point_intensity = "pl.color.w * atten2";
+    let shadowed_point_intensity =
+        format!("pl.color.w * atten2 * sample_local_shadow({light_index}, in.world_pos)");
     let output = output.replace(point_intensity, &shadowed_point_intensity);
     debug_assert!(
         !source.contains("point_light_count") || output.contains(&shadowed_point_intensity),

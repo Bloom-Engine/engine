@@ -1166,6 +1166,8 @@ pub(super) struct CompositeParams {
     /// x = grain seed (frame index, animates the noise),
     /// y = sharpen strength, z = camera motion, w = path-tracing session.
     pub(super) misc: [f32; 4],
+    /// x = output saturation (1 = neutral), yzw reserved.
+    pub(super) color: [f32; 4],
 }
 #[cfg(test)]
 mod physical_uv_tests {

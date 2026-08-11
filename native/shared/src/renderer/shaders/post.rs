@@ -1351,6 +1351,8 @@ struct CompositeParams {
     /// y = sharpen strength (0 = off, ~0.25 subtle, ~0.5 punchy);
     /// z = authored camera-motion flag; w = path-tracing session.
     misc: vec4<f32>,
+    /// x = output saturation (1 = neutral); yzw reserved.
+    color: vec4<f32>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -1384,6 +1386,40 @@ fn aces_tone(c: vec3<f32>) -> vec3<f32> {
     let d = 0.59;
     let e = 0.14;
     return clamp((c * (c * a + b)) / (c * (c * cc + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// ACES RRT+ODT fit with an explicit 6.0 white point. This is the MJP
+// BakingLab fit used by Godot 4's ACES mode, including its 1.8 exposure bias
+// and gamut transforms. Keep the compact Narkowicz fit above as mode 0 for
+// output compatibility; mode 2 is the reference-quality/highlight-preserving
+// path used by scenes that request the full transform.
+fn aces_full_tone(c_in: vec3<f32>) -> vec3<f32> {
+    let exposure_bias = 1.8;
+    let a = 0.0245786;
+    let b = 0.000090537;
+    let cc = 0.983729;
+    let d = 0.432951;
+    let e = 0.238081;
+    let rgb_to_rrt = mat3x3<f32>(
+        vec3<f32>(0.59719, 0.35458, 0.04823) * exposure_bias,
+        vec3<f32>(0.07600, 0.90834, 0.01566) * exposure_bias,
+        vec3<f32>(0.02840, 0.13383, 0.83777) * exposure_bias,
+    );
+    let odt_to_rgb = mat3x3<f32>(
+        vec3<f32>( 1.60475, -0.53108, -0.07367),
+        vec3<f32>(-0.10208,  1.10813, -0.00605),
+        vec3<f32>(-0.00327, -0.07276,  1.07602),
+    );
+    // Godot's source uses row-vector multiplication (`color *= matrix`).
+    // Preserve that convention explicitly; swapping this order transposes the
+    // gamut transform and gives neutral surfaces a strong green cast.
+    let c = max(c_in, vec3<f32>(0.0)) * rgb_to_rrt;
+    let mapped = (c * (c + a) - b) / (c * (cc * c + d) + e);
+    let white = 6.0 * exposure_bias;
+    let white_mapped = (white * (white + a) - b)
+        / (white * (cc * white + d) + e);
+    return clamp(mapped * odt_to_rgb / white_mapped,
+        vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 // --- AgX tonemap (Blender/Filament reference) ---
@@ -1439,12 +1475,16 @@ fn agx_eotf(val_in: vec3<f32>) -> vec3<f32> {
     return agx_mat_inv * val_in;
 }
 
-// Tonemap — branches on u.params.x (0 = ACES, 1 = AgX). Extracted
+// Tonemap — branches on u.params.x (0 = compact ACES, 1 = AgX,
+// 2 = full ACES RRT+ODT fit). Extracted
 // so the sharpen pass can tonemap neighbour HDR samples through the
 // same path as the center pixel.
 fn tonemap_select(hdr: vec3<f32>) -> vec3<f32> {
     if (u.params.x < 0.5) {
         return aces_tone(hdr);
+    }
+    if (u.params.x > 1.5) {
+        return aces_full_tone(hdr);
     }
     // Full Filament AgX pipeline:
     //   agx_tone  (inset + log2 + sigmoid)
@@ -1725,6 +1765,31 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 vec3<f32>(1.0),
             );
         }
+    }
+
+    // Output color adjustment. Keep this after sharpening so saturation does
+    // not change the luma-domain edge classifier or amplify temporal detail.
+    // Grade in display/sRGB space, matching artist tools and Godot's BCS
+    // stage, then return to linear because the swapchain performs the final
+    // sRGB encoding. A value of 1.0 skips the conversion and is exactly
+    // neutral for existing scenes.
+    let saturation = u.color.x;
+    if (abs(saturation - 1.0) > 0.0001) {
+        let display = select(
+            12.92 * ldr,
+            1.055 * pow(max(ldr, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055,
+            ldr > vec3<f32>(0.0031308),
+        );
+        let gray = dot(display, vec3<f32>(1.0 / 3.0));
+        let graded = clamp(
+            vec3<f32>(gray) + saturation * (display - vec3<f32>(gray)),
+            vec3<f32>(0.0), vec3<f32>(1.0),
+        );
+        ldr = select(
+            graded / 12.92,
+            pow((graded + 0.055) / 1.055, vec3<f32>(2.4)),
+            graded > vec3<f32>(0.04045),
+        );
     }
 
     // --- Vignette (post-tonemap) ---

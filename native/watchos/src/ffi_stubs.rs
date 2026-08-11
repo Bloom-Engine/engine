@@ -402,6 +402,9 @@
 #[no_mangle] pub extern "C" fn bloom_set_tonemap(_p0: f64) -> f64 {
     0.0
 }
+#[no_mangle] pub extern "C" fn bloom_set_color_saturation(_p0: f64) -> f64 {
+    0.0
+}
 #[no_mangle] pub extern "C" fn bloom_set_auto_exposure_key(_p0: f64) -> f64 {
     0.0
 }

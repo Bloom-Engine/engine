@@ -556,6 +556,9 @@ pub struct Renderer {
     composite_bind_group_cache: [Option<wgpu::BindGroup>; postfx_chain::CompositeSource::COUNT * 2],
     /// 0 = ACES (default, matches bloom-reference), 1 = AgX.
     pub tonemap_kind: u32,
+    /// Post-tonemap output saturation. 1.0 is neutral and preserves the
+    /// established renderer output byte-for-byte.
+    pub color_saturation: f32,
     /// Auto-exposure on/off. Default off so validation against
     /// the path-traced reference (fixed exposure) stays meaningful.
     pub auto_exposure: bool,
@@ -7705,6 +7708,7 @@ impl Renderer {
             // which tends to read as "digital/plasticky" on saturated
             // primary-colour materials (red awnings, green storefronts).
             tonemap_kind: 1,
+            color_saturation: 1.0,
             auto_exposure: false,
             manual_exposure: 1.0,
             auto_exposure_key: 0.18,
@@ -10146,13 +10150,15 @@ impl Renderer {
         self.sss_width = width.max(0.0);
     }
 
-    /// Select the display tonemap curve. 0 = ACES (default, used
-    /// by the bloom-reference path tracer so validation diffs stay
-    /// meaningful). 1 = AgX (Troy Sobotka 2022) — better hue
-    /// preservation in saturated colors, matches Blender 4.0+ /
-    /// UE5 "PBR Neutral" look.
+    /// Select the display tonemap curve. 0 = compact ACES, 1 = AgX,
+    /// 2 = full ACES RRT+ODT fit with a 6.0 white point.
     pub fn set_tonemap_kind(&mut self, kind: u32) {
         self.tonemap_kind = kind;
+    }
+
+    /// Post-tonemap output saturation. 1.0 is neutral, 0.0 is grayscale.
+    pub fn set_color_saturation(&mut self, saturation: f32) {
+        self.color_saturation = saturation.clamp(0.0, 4.0);
     }
 
     /// Fog color that distant geometry fades to (rgb, 0-1).
