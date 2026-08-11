@@ -30,6 +30,17 @@ fn textured_specular_glossiness_keeps_authored_diffuse_and_f0_independent() {
 }
 
 #[test]
+fn ordinary_specular_energy_reaches_the_display_tonemapper() {
+    // Direct MR, direct spec-gloss, and environment reflection retain only a
+    // high outlier knee. A display-range knee here acts as a second tonemapper
+    // per material and produces flat highlight bands on smooth Bistro props.
+    assert_eq!(SCENE_SHADER.matches("direct_luma / 4.0").count(), 2);
+    assert_eq!(SCENE_SHADER.matches("cap2_luma / 4.0").count(), 1);
+    assert!(!SCENE_SHADER.contains("direct_luma / 0.3"));
+    assert!(!SCENE_SHADER.contains("cap2_luma / 0.3"));
+}
+
+#[test]
 fn shadow_cascade_selection_matches_the_fitted_view_frustum_depth() {
     assert!(SCENE_SHADER
         .contains("let view_pos = lighting.shadow_view_matrix * vec4<f32>(world_pos, 1.0);"));

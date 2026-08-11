@@ -612,16 +612,15 @@ fn shade_pbr(
 
     let specular_raw = d * vis * f;
 
-    // Preserve the authored direct Fresnel response. The former dielectric
-    // and universal roughness ramps both reached zero for smooth paint and
-    // glass, deleting the highlight that distinguishes Bistro's scooter and
-    // bottles from flat-colour props. Bound the punctual/directional-light
-    // approximation continuously in radiance instead: this keeps the lobe
-    // present while preventing an infinitesimal GGX peak from becoming a
-    // camera-tracking firefly. Normal-variance filtering above supplies the
-    // spatial integration for minified normal maps.
+    // Preserve the authored direct Fresnel response. Keep only a high soft
+    // safety knee for pathological sub-pixel peaks: the previous 0.3 knee
+    // compressed ordinary highlights as well as outliers, flattening smooth
+    // paint and metal into broad, cartoon-like bands before the display
+    // tonemapper ever saw them. Normal-variance filtering supplies the real
+    // spatial integration; this bound is deliberately far above normal scene
+    // radiance and is not an artistic response curve.
     let direct_luma = dot(specular_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let direct_cap = 1.0 / (1.0 + direct_luma / 0.3);
+    let direct_cap = 1.0 / (1.0 + direct_luma / 4.0);
     let specular = specular_raw * direct_cap;
 
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
@@ -670,7 +669,7 @@ fn shade_specular_glossiness_pbr(
     let vis = v_smith_ggx_correlated(n_dot_l, n_dot_v, alpha2);
     let specular_raw = d * vis * f;
     let direct_luma = dot(specular_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let direct_cap = 1.0 / (1.0 + direct_luma / 0.3);
+    let direct_cap = 1.0 / (1.0 + direct_luma / 4.0);
     let specular = specular_raw * direct_cap;
     let diffuse = (vec3<f32>(1.0) - f) * diffuse_color / PI;
     return (diffuse + specular) * light_color * intensity * n_dot_l;
@@ -1170,19 +1169,14 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     let ibl_spec_raw = prefiltered_env
         * (f0 * brdf.x + vec3<f32>(brdf.y) + ms_contribution);
 
-    // Preserve the Fresnel response at every authored roughness. The former
-    // anti-stripe workaround multiplied smooth dielectrics by roughness twice,
-    // driving glossy dark materials (Bistro wine bottles are the canonical
-    // case) to exactly zero environment reflection. Specular occlusion above,
-    // the bounded soft radiance compression below, normal-variance filtering,
-    // and exclusive SSR ownership are the appropriate stability controls;
-    // material roughness selects the prefiltered lobe and must not also erase
-    // that lobe's energy.
-    // Reinhard-style soft luma compression keeps isolated HDR environment
-    // samples finite and continuous without imposing a roughness-dependent
-    // energy hole.
+    // Preserve the Fresnel response at every authored roughness. A high soft
+    // knee keeps pathological HDR environment samples finite and continuous,
+    // but leaves ordinary reflections to the display tonemapper. The former
+    // 0.3 knee changed almost every reflection in Bistro and was effectively
+    // a second, material-local tonemapper, erasing the contrast that makes
+    // paint, glass, and metal look photographic.
     let cap2_luma = dot(ibl_spec_raw, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let cap2 = 1.0 / (1.0 + cap2_luma / 0.3);
+    let cap2 = 1.0 / (1.0 + cap2_luma / 4.0);
     // EN-021 exclusive ownership: where SSR is active it owns specular —
     // hit (traced colour) or miss (env fallback inside the SSR shader).
     // Scale IBL specular by the complement of SSR's own roughness fade
