@@ -14,7 +14,8 @@ uses `MSFT_texture_dds` indirection and remains available for importer
 diagnostics. Extra arguments are forwarded to the example.
 
 Controls: WASD moves, Shift sprints, the mouse looks around, and Tab releases
-or captures the cursor.
+or captures the cursor. T toggles TAA, G toggles SSGI, R toggles SSR, and P
+toggles sharpening without colliding with movement.
 
 The default presentation keeps local contrast clear for material and temporal
 quality inspection. Use `--fog 1`, `--sun-shafts 1`, and/or `--motion-blur 1`

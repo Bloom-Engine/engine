@@ -48,7 +48,10 @@ allocation.
 At magnification and near level zero, scene color, depth prepass, velocity,
 and shadow passes retain the exact authored alpha test. At minification they
 interpret lower-mip alpha as coverage probability and compare it against the
-same deterministic 4×4 Bayer threshold. A short transition between level zero
+same deterministic 4×4 Bayer threshold. The threshold is anchored to authored
+base-texture texels rather than screen or shadow-map pixels, so its binary
+silhouette follows object motion, survives camera reprojection, and does not
+re-roll when a shadow cascade refits. A short transition between level zero
 and the first coverage mip avoids a discrete LOD pop.
 
 The main and depth-prepass paths use the same texture LOD bias. Shadow cutouts

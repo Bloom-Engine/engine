@@ -63,6 +63,17 @@ fn selected_shadow_cascade_miss_hands_off_instead_of_punching_a_lit_hole() {
 }
 
 #[test]
+fn masked_coverage_phase_follows_authored_texture_coordinates() {
+    wgpu::naga::front::wgsl::parse_str(SCENE_SHADER)
+        .unwrap_or_else(|error| panic!("ordinary scene WGSL failed: {error:?}"));
+    assert!(
+        SCENE_SHADER.contains("fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>)")
+    );
+    assert!(SCENE_SHADER.contains("wrapped_uv * vec2<f32>(dimensions)"));
+    assert!(!SCENE_SHADER.contains("mask_coverage_threshold(in.clip_position.xy"));
+}
+
+#[test]
 fn native_and_folded_refractive_variants_parse_without_touching_ordinary_shader() {
     assert!(!SCENE_SHADER.contains("fs_refractive_scene"));
     for (folded, screen_space_reflections) in [(false, false), (false, true), (true, false)] {

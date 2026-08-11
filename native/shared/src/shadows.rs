@@ -109,15 +109,20 @@ struct VsOut {
     @location(1) alpha: f32,
 };
 
-fn mask_coverage_threshold(pixel: vec2<f32>) -> f32 {
+// Match the scene pass's authored-space coverage phase. A shadow-map pixel
+// phase changes whenever a cascade refits, which made stationary foliage cast
+// a visibly different dappled shadow as the camera moved.
+fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>) -> f32 {
     let bayer = array<f32, 16>(
          0.5 / 16.0,  8.5 / 16.0,  2.5 / 16.0, 10.5 / 16.0,
         12.5 / 16.0,  4.5 / 16.0, 14.5 / 16.0,  6.5 / 16.0,
          3.5 / 16.0, 11.5 / 16.0,  1.5 / 16.0,  9.5 / 16.0,
         15.5 / 16.0,  7.5 / 16.0, 13.5 / 16.0,  5.5 / 16.0,
     );
-    let x = u32(floor(pixel.x)) & 3u;
-    let y = u32(floor(pixel.y)) & 3u;
+    let wrapped_uv = uv - floor(uv);
+    let texel = vec2<u32>(floor(wrapped_uv * vec2<f32>(dimensions)));
+    let x = texel.x & 3u;
+    let y = texel.y & 3u;
     return bayer[y * 4u + x];
 }
 
@@ -152,7 +157,10 @@ fn fs_shadow_cutout(in: VsOut) {
             survives = authored_alpha >= cut.cutoff.x;
         } else if (lod >= 1.0) {
             let coverage = textureSampleLevel(base_tex, base_samp, in.uv, lod).a;
-            survives = coverage >= mask_coverage_threshold(in.pos.xy);
+            survives = coverage >= mask_coverage_threshold(
+                in.uv,
+                textureDimensions(base_tex),
+            );
         } else {
             let authored_alpha =
                 textureSampleLevel(base_tex, base_samp, in.uv, 0.0).a * in.alpha;
@@ -162,7 +170,10 @@ fn fs_shadow_cutout(in: VsOut) {
                 coverage,
                 smoothstep(0.5, 1.0, lod),
             );
-            survives = probability >= mask_coverage_threshold(in.pos.xy);
+            survives = probability >= mask_coverage_threshold(
+                in.uv,
+                textureDimensions(base_tex),
+            );
         }
     } else {
         let raw_alpha = textureSample(base_tex, base_samp, in.uv).a * in.alpha;
@@ -1122,6 +1133,14 @@ mod shader_tests {
     fn coverage_preserving_cutout_shadow_shader_parses() {
         wgpu::naga::front::wgsl::parse_str(SHADOW_SHADER_CUTOUT)
             .unwrap_or_else(|error| panic!("cutout shadow WGSL failed to parse: {error:?}"));
+    }
+
+    #[test]
+    fn cutout_shadow_coverage_phase_follows_authored_texture_coordinates() {
+        assert!(SHADOW_SHADER_CUTOUT
+            .contains("fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>)"));
+        assert!(SHADOW_SHADER_CUTOUT.contains("wrapped_uv * vec2<f32>(dimensions)"));
+        assert!(!SHADOW_SHADER_CUTOUT.contains("mask_coverage_threshold(in.pos.xy"));
     }
 }
 

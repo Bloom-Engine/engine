@@ -382,7 +382,10 @@ while (!windowShouldClose()) {
     diagnosticSsrEnabled = !diagnosticSsrEnabled;
     setSsrEnabled(diagnosticSsrEnabled);
   }
-  if (qualityRun === null && isKeyPressed(Key.S)) {
+  // P is deliberately outside the WASD movement cluster. Binding this to S
+  // made every fresh backward key press toggle post-process sharpening, so
+  // ordinary navigation changed the apparent texture and shadow sharpness.
+  if (qualityRun === null && isKeyPressed(Key.P)) {
     diagnosticSharpenEnabled = !diagnosticSharpenEnabled;
     setSharpenStrength(diagnosticSharpenEnabled ? diagnosticSharpenStrength : 0.0);
   }
@@ -456,7 +459,7 @@ while (!windowShouldClose()) {
     const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
     drawText(fpsText, 10, 35, 16, fpsColor);
     drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 48, 14, { r: 180, g: 180, b: 180, a: 255 });
-    const diagnosticText = `T TAA ${diagnosticTaaEnabled ? "on" : "off"} / G SSGI ${diagnosticSsgiEnabled ? "on" : "off"} / R SSR ${diagnosticSsrEnabled ? "on" : "off"} / S sharpen ${diagnosticSharpenEnabled ? "on" : "off"}`;
+    const diagnosticText = `T TAA ${diagnosticTaaEnabled ? "on" : "off"} / G SSGI ${diagnosticSsgiEnabled ? "on" : "off"} / R SSR ${diagnosticSsrEnabled ? "on" : "off"} / P sharpen ${diagnosticSharpenEnabled ? "on" : "off"}`;
     drawText(diagnosticText, 10, SCREEN_H - 26, 13, { r: 180, g: 210, b: 240, a: 255 });
   }
 

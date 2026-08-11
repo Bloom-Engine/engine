@@ -277,19 +277,27 @@ fn compute_tbn(dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>,
     return mat3x3<f32>(t * invmax, b * invmax, n);
 }
 
-// Stable 4x4 Bayer threshold. Bloom's scene targets are single-sample, so
-// hardware alpha-to-coverage is unavailable; this is its deterministic
-// spatial equivalent for subpixel MASK coverage. It is used only after the
-// sampler footprint reaches the coverage-encoded lower mip chain.
-fn mask_coverage_threshold(pixel: vec2<f32>) -> f32 {
+// Stable 4x4 Bayer threshold anchored to the source texture. Bloom's scene
+// targets are single-sample, so hardware alpha-to-coverage is unavailable;
+// this is its deterministic spatial equivalent for subpixel MASK coverage.
+//
+// This must follow the material, not the render target. The former
+// screen-pixel phase stayed fixed while a leaf moved underneath it, so TAA
+// reprojected a different binary silhouette on every camera step. The shadow
+// pass had the same defect in light-map pixels, re-rolling foliage shadows
+// whenever a cascade refit. Base-texel anchoring gives scene color, depth,
+// velocity and shadows one persistent authored-space decision.
+fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>) -> f32 {
     let bayer = array<f32, 16>(
          0.5 / 16.0,  8.5 / 16.0,  2.5 / 16.0, 10.5 / 16.0,
         12.5 / 16.0,  4.5 / 16.0, 14.5 / 16.0,  6.5 / 16.0,
          3.5 / 16.0, 11.5 / 16.0,  1.5 / 16.0,  9.5 / 16.0,
         15.5 / 16.0,  7.5 / 16.0, 13.5 / 16.0,  5.5 / 16.0,
     );
-    let x = u32(floor(pixel.x)) & 3u;
-    let y = u32(floor(pixel.y)) & 3u;
+    let wrapped_uv = uv - floor(uv);
+    let texel = vec2<u32>(floor(wrapped_uv * vec2<f32>(dimensions)));
+    let x = texel.x & 3u;
+    let y = texel.y & 3u;
     return bayer[y * 4u + x];
 }
 
@@ -310,14 +318,15 @@ fn mask_coverage_survives(
     lower_mip_coverage: f32,
     cutoff: f32,
     lod: f32,
-    pixel: vec2<f32>,
+    uv: vec2<f32>,
+    dimensions: vec2<u32>,
 ) -> bool {
     let hard_coverage = select(0.0, 1.0, authored_alpha >= cutoff);
     // Transition before LOD 1 avoids a pop while trilinear sampling moves
     // from authored level-zero alpha to lower levels whose alpha is coverage.
     let blend = smoothstep(0.5, 1.0, lod);
     let probability = mix(hard_coverage, lower_mip_coverage, blend);
-    return probability >= mask_coverage_threshold(pixel);
+    return probability >= mask_coverage_threshold(uv, dimensions);
 }
 
 // Exact piecewise sRGB → linear, matching bloom-reference's
@@ -716,7 +725,10 @@ fn fs_depth_prepass(in: VertexOutputScene) {
             } else if (mask_lod >= 1.0) {
                 let coverage =
                     textureSampleLevel(base_color_tex, base_color_samp, in.uv, mask_lod).a;
-                survives = coverage >= mask_coverage_threshold(in.clip_position.xy);
+                survives = coverage >= mask_coverage_threshold(
+                    in.uv,
+                    textureDimensions(base_color_tex),
+                );
             } else {
                 let authored_alpha =
                     textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
@@ -728,7 +740,8 @@ fn fs_depth_prepass(in: VertexOutputScene) {
                     coverage,
                     alpha_cutoff,
                     mask_lod,
-                    in.clip_position.xy,
+                    in.uv,
+                    textureDimensions(base_color_tex),
                 );
             }
         } else {
@@ -841,7 +854,10 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
             } else if (mask_lod >= 1.0) {
                 let coverage =
                     textureSampleLevel(base_color_tex, base_color_samp, in.uv, mask_lod).a;
-                survives = coverage >= mask_coverage_threshold(in.clip_position.xy);
+                survives = coverage >= mask_coverage_threshold(
+                    in.uv,
+                    textureDimensions(base_color_tex),
+                );
             } else {
                 let authored_alpha =
                     textureSampleLevel(base_color_tex, base_color_samp, in.uv, 0.0).a *
@@ -853,7 +869,8 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
                     coverage,
                     alpha_cutoff,
                     mask_lod,
-                    in.clip_position.xy,
+                    in.uv,
+                    textureDimensions(base_color_tex),
                 );
             }
         }
