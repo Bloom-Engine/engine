@@ -323,7 +323,7 @@ pub(super) fn create_ssr_rt(
 }
 
 /// Create the SSR temporal history textures (ping-pong pair, same
-/// format/size as ssr_rt — half-res HDR). The temporal denoiser
+/// format/size as ssr_rt — quarter-res HDR). The temporal denoiser
 /// blends the noisy current-frame stochastic SSR into the
 /// reprojected previous-frame history so 4–8 frames of accumulation
 /// converge to a smooth reflection.

@@ -41,17 +41,25 @@ impl Renderer {
         layout: &wgpu::BindGroupLayout,
         iridescence_metadata: Option<&wgpu::TextureView>,
     ) -> wgpu::BindGroup {
-        // EN-021 — env panorama (or the 1×1 default) for the miss fallback.
-        // Both caches are invalidated wherever the lighting source or render
-        // targets change.
-        let env_view = self
-            .sky_texture
-            .as_ref()
-            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()))
-            .unwrap_or_else(|| {
-                self._scene_env_default_texture
-                    .create_view(&wgpu::TextureViewDescriptor::default())
-            });
+        // EN-021 — SSR misses must sample the same environment that owns the
+        // scene's split-sum IBL. Procedural-sky mode previously kept binding
+        // `sky_texture` (the last panorama loaded), so hit/miss ownership
+        // changes during camera motion also changed the reflected world and
+        // appeared as a moving bright patch on rough floors.
+        let panorama_or_default_view;
+        let env_view = if self.lighting_bg_is_procedural {
+            &self.procedural_sky_equirect_full_view
+        } else {
+            panorama_or_default_view = self
+                .sky_texture
+                .as_ref()
+                .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()))
+                .unwrap_or_else(|| {
+                    self._scene_env_default_texture
+                        .create_view(&wgpu::TextureViewDescriptor::default())
+                });
+            &panorama_or_default_view
+        };
         let mut entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -91,7 +99,7 @@ impl Renderer {
             },
             wgpu::BindGroupEntry {
                 binding: 9,
-                resource: wgpu::BindingResource::TextureView(&env_view),
+                resource: wgpu::BindingResource::TextureView(env_view),
             },
             wgpu::BindGroupEntry {
                 binding: 10,

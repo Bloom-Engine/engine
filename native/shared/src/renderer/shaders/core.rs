@@ -1185,7 +1185,9 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
     // double-count on hits (round-2 audit F10) without darkening
     // off-screen reflections.
     let ssr_own = clamp(
-        lighting.dir_light_count.z * (1.0 - smoothstep(0.5, 0.85, roughness)),
+        // Match the SSR pass exactly: a quarter-resolution single-ray trace
+        // is reserved for lobes narrow enough to converge without shimmer.
+        lighting.dir_light_count.z * (1.0 - smoothstep(0.45, 0.70, roughness)),
         0.0, 1.0);
     let ibl_spec = ibl_spec_raw * spec_occ * cap2 * (1.0 - ssr_own);
     //IBL_STRIP_END

@@ -122,6 +122,21 @@ mod ray_query_variant_tests {
         assert!(!SSR_SHADER_WGSL.contains("let n = normalize(cross(dx, dy));"));
         assert!(SSR_SHADER_WGSL.contains("dot(n_raw, v) >= 0.0"));
     }
+
+    #[test]
+    fn ssr_uses_stable_roughness_ownership_and_hit_provenance() {
+        wgpu::naga::front::wgsl::parse_str(SSR_SHADER_WGSL)
+            .unwrap_or_else(|error| panic!("SSR WGSL failed: {error:?}"));
+        wgpu::naga::front::wgsl::parse_str(SSR_TEMPORAL_SHADER_WGSL)
+            .unwrap_or_else(|error| panic!("SSR temporal WGSL failed: {error:?}"));
+
+        let ownership = "1.0 - smoothstep(0.45, 0.70, roughness)";
+        assert!(SSR_SHADER_WGSL.contains(ownership));
+        assert!(SCENE_SHADER.contains(ownership));
+        assert!(SSR_SHADER_WGSL.contains("luma / 4.0"));
+        assert!(SSR_TEMPORAL_SHADER_WGSL.contains("provenance_disocclusion"));
+        assert!(SSR_TEMPORAL_SHADER_WGSL.contains("current_hit == history_hit"));
+    }
 }
 mod post;
 pub(super) use post::{

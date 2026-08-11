@@ -115,6 +115,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let history = select(current, history_raw.rgb, history_raw.rgb == history_raw.rgb);
     let clamped_history = clamp(history, nmin, nmax);
     let history_depth = abs(history_raw.a);
+    // Alpha's sign is free hit provenance: positive means that the ray found
+    // screen geometry, negative means that it fell back to the environment.
+    // These two estimators can differ substantially even when the receiving
+    // surface depth remains valid. Never drag one estimator through a camera
+    // move after ownership flips; doing so produced a bright reflection patch
+    // that visibly lagged across Bistro's cobbles and walls.
+    let current_hit = current_raw.a > 0.001;
+    let history_hit = history_raw.a > 0.0;
+    let provenance_disocclusion = select(1.0, 0.0, current_hit == history_hit);
     let depth_base_tolerance = 0.02 + abs(expected_prev_depth) * 0.005;
     let depth_gradient = abs(dpdx(expected_prev_depth)) + abs(dpdy(expected_prev_depth));
     let depth_tolerance = max(
@@ -136,7 +145,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // stochastic noise, so motion does not trade the ghost for shimmer.
     let motion_refresh = smoothstep(0.0005, 0.008, vel_len);
     let motion_alpha = mix(u.params.x, 0.85, motion_refresh);
-    let alpha = max(motion_alpha, depth_disocclusion);
+    let alpha = max(max(motion_alpha, depth_disocclusion), provenance_disocclusion);
     let blended = mix(clamped_history, current, alpha);
     let finite_blended = select(current, blended, blended == blended);
     return vec4<f32>(finite_blended, signed_current_depth);
@@ -235,7 +244,10 @@ fn env_fallback(r_view: vec3<f32>, roughness: f32) -> vec3<f32> {
 /// brightness merely because reflection ownership moved between passes.
 fn compress_environment_specular(radiance: vec3<f32>) -> vec3<f32> {
     let luma = dot(radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
-    return radiance * (1.0 / (1.0 + luma / 0.3));
+    // Keep this knee identical to core.rs's split-sum IBL. A different knee
+    // makes a reflection change brightness when SSR switches between an
+    // on-screen hit and its environment fallback.
+    return radiance * (1.0 / (1.0 + luma / 4.0));
 }
 
 /// Interleaved gradient noise — per-pixel pseudo-random in [0, 1).
@@ -300,7 +312,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let metallic = mat.r;
     let roughness = mat.g;
     let albedo = textureSampleLevel(albedo_tex, albedo_samp, in.uv, 0.0).rgb;
-    let roughness_fade = 1.0 - smoothstep(0.5, 0.85, roughness);
+    // Quarter-resolution, one-ray SSR cannot converge a wide GGX lobe without
+    // visible low-frequency blobs. Hand rough surfaces back to the stable,
+    // prefiltered environment before that point. Smooth glass, paint and metal
+    // retain SSR; Bistro's 0.73-rough cobbles and foliage remain pure IBL.
+    let roughness_fade = 1.0 - smoothstep(0.45, 0.70, roughness);
     if (roughness_fade <= 0.001) { return vec4<f32>(0.0); }
 
     let v = normalize(-view_pos);
