@@ -24,7 +24,14 @@ pub const SHADOW_FAR: f32 = 100.0;
 /// be >= sizeof(ShadowUniforms) (144B) and a multiple of the device's
 /// min_uniform_buffer_offset_alignment. 256 is safe on every platform.
 pub const SHADOW_UNIFORM_STRIDE: u32 = 256;
-pub const SHADOW_MAX_NODES: u32 = 1024;
+/// Per-cascade shadow-uniform slots. The complete Bistro reference contains
+/// 1,175 static casters in its far cascade. The former 1,024-slot arena also
+/// reserved 256 slots for dynamics, silently truncating static casters at 768;
+/// which buildings cast shadows then changed as camera-driven cascade culling
+/// changed. 2,048 retains the full reference scene plus the dynamic reserve.
+/// At a 256-byte aligned stride this costs 1.5 MiB across all three cascades
+/// (0.75 MiB more than the old arena) and does not add work on cache-hit frames.
+pub const SHADOW_MAX_NODES: u32 = 2048;
 /// Slots at the TAIL of each cascade's uniform region reserved for
 /// dynamic casters, which re-render every frame while static casters keep their
 /// cached depth. Disjoint slot ranges keep the every-frame dynamic writes from
@@ -1127,7 +1134,19 @@ impl ShadowMap {
 
 #[cfg(test)]
 mod shader_tests {
-    use super::SHADOW_SHADER_CUTOUT;
+    use super::{SHADOW_MAX_DYNAMIC, SHADOW_MAX_NODES, SHADOW_SHADER_CUTOUT};
+
+    #[test]
+    fn shadow_uniform_arena_retains_bistro_class_static_caster_counts() {
+        // Measured from the complete Bistro reference's far cascade. Keep this
+        // as a hard regression guard: dropping a caster here does not fail a
+        // draw; it silently makes shadows appear or disappear with culling.
+        const BISTRO_REFERENCE_STATIC_CASTERS: u32 = 1_175;
+        assert!(
+            SHADOW_MAX_NODES - SHADOW_MAX_DYNAMIC >= BISTRO_REFERENCE_STATIC_CASTERS,
+            "static shadow arena would truncate the complete Bistro reference",
+        );
+    }
 
     #[test]
     fn coverage_preserving_cutout_shadow_shader_parses() {
