@@ -9351,13 +9351,13 @@ impl Renderer {
         // bake's ground-bounce term.
         let mut albedo_sum = [0.0f32; 3];
         let mut opaque_albedo_count = 0_u32;
-        // PT-2 — geometry megabuffers: every instance's Vertex3D + index
-        // data concatenated so the path-trace kernel can interpolate
-        // real normals/UVs at ray hits. Raw Vertex3D stride (24 f32);
-        // instances without retained CPU geometry get index_count = 0
-        // and the kernel falls back to flat-normal/card shading.
-        // Shared meshes are duplicated per node (nodes own their
-        // vertices); arena-scale worlds measure a few tens of MB.
+        // PT-2 — geometry megabuffers let the path-trace kernel interpolate
+        // real normals/UVs at ray hits. Static raster/ray-query rendering does
+        // not consume these windows (SSGI only mirrors the instance layout),
+        // so keep them lazy. This matters for production scenes whose retained
+        // Vertex3D data can exceed a device's single-buffer limit even though
+        // their ordinary per-mesh raster and BLAS buffers are fully valid.
+        let build_static_pt_geometry = self.pt_active();
         let mut geo_vertices: Vec<f32> = Vec::new();
         let mut geo_indices: Vec<u32> = Vec::new();
         let mut geo_secondary_uvs = None;
@@ -9371,7 +9371,7 @@ impl Renderer {
         // Array-incapable adapters cannot bind any PT material texture.
         // Passing an empty runtime table preserves their exact fallback and
         // avoids building otherwise unreachable CPU texture sidecars.
-        let runtime_texture_count = if self.pt_texture_arrays_enabled {
+        let runtime_texture_count = if build_static_pt_geometry && self.pt_texture_arrays_enabled {
             self.textures.len()
         } else {
             0
@@ -9390,7 +9390,10 @@ impl Renderer {
                 shared_identity.and_then(|identity| shared_pt_geometry.get(&identity).copied())
             {
                 window
-            } else if !n.vertices().is_empty() && !n.indices().is_empty() {
+            } else if build_static_pt_geometry
+                && !n.vertices().is_empty()
+                && !n.indices().is_empty()
+            {
                 let vb = (geo_vertices.len() / 24) as u32;
                 let ib = geo_indices.len() as u32;
                 geo_vertices.extend_from_slice(bytemuck::cast_slice(n.vertices()));
@@ -9423,36 +9426,38 @@ impl Renderer {
                 albedo_sum[2] += n.flat_albedo[2];
                 opaque_albedo_count = opaque_albedo_count.saturating_add(1);
             }
-            let uses_uv1 = layered_pbr_pt::append_record(
-                &mut pt_layered_records,
-                &mut pt_layered_texture_records,
-                &mut pt_clearcoat_texture_records,
-                &mut pt_clearcoat_normal_records,
-                &mut pt_sheen_texture_records,
-                &mut pt_iridescence_texture_records,
-                &mut pt_anisotropy_texture_records,
-                instance_data.len(),
-                n.material.layered_pbr,
-                runtime_texture_count,
-                self.pt_texture_arrays_enabled
-                    && index_count != 0
-                    && n.secondary_tex_coords().is_some(),
-            );
-            pt_geometry::append_pt_secondary_uvs(
-                &mut geo_secondary_uvs,
-                vertex_base as usize,
-                if index_count != 0 {
-                    n.vertices().len()
-                } else {
-                    0
-                },
-                if index_count != 0 {
-                    n.secondary_tex_coords()
-                } else {
-                    None
-                },
-                uses_uv1,
-            );
+            if build_static_pt_geometry {
+                let uses_uv1 = layered_pbr_pt::append_record(
+                    &mut pt_layered_records,
+                    &mut pt_layered_texture_records,
+                    &mut pt_clearcoat_texture_records,
+                    &mut pt_clearcoat_normal_records,
+                    &mut pt_sheen_texture_records,
+                    &mut pt_iridescence_texture_records,
+                    &mut pt_anisotropy_texture_records,
+                    instance_data.len(),
+                    n.material.layered_pbr,
+                    runtime_texture_count,
+                    self.pt_texture_arrays_enabled
+                        && index_count != 0
+                        && n.secondary_tex_coords().is_some(),
+                );
+                pt_geometry::append_pt_secondary_uvs(
+                    &mut geo_secondary_uvs,
+                    vertex_base as usize,
+                    if index_count != 0 {
+                        n.vertices().len()
+                    } else {
+                        0
+                    },
+                    if index_count != 0 {
+                        n.secondary_tex_coords()
+                    } else {
+                        None
+                    },
+                    uses_uv1,
+                );
+            }
             instance_data.push(InstanceGiDataCpu {
                 albedo: n.flat_albedo,
                 emissive_luma: (e[0] + e[1] + e[2]) * (1.0 / 3.0),
@@ -9570,6 +9575,23 @@ impl Renderer {
                 mesh_idx: d.mesh_idx,
             });
         }
+        let geometry_uploaded = if build_static_pt_geometry || !dyn_draws.is_empty() {
+            self.upload_pt_geometry(&geo_vertices, &geo_indices, geo_secondary_uvs.as_deref())
+        } else {
+            true
+        };
+        if !geometry_uploaded {
+            // A monolithic path-tracing window is optional. Keep raster and
+            // ray-query rendering complete and stable when a scene exceeds a
+            // device's single-buffer limit; path tracing can be re-requested
+            // after loading a smaller scene.
+            eprintln!(
+                "[bloom] path tracing disabled: scene geometry exceeds the device buffer limit"
+            );
+            self.pt_mode = 0;
+            instance_data.truncate(instance_handles.len());
+            self.pt_dyn_windows.clear();
+        }
         self.set_pt_layered_records(
             pt_layered_records,
             pt_layered_texture_records,
@@ -9580,7 +9602,6 @@ impl Renderer {
             pt_anisotropy_texture_records,
             instance_data.len(),
         );
-        self.upload_pt_geometry(&geo_vertices, &geo_indices, geo_secondary_uvs.as_deref());
         if opaque_albedo_count > 0 {
             let inv = 1.0 / opaque_albedo_count as f32;
             self.gi_scene_avg_albedo = [

@@ -5,6 +5,18 @@
 
 use super::*;
 
+fn buffer_allocation_size(required: u64, maximum: u64) -> Option<u64> {
+    if required > maximum {
+        return None;
+    }
+    Some(
+        required
+            .checked_next_power_of_two()
+            .unwrap_or(required)
+            .min(maximum),
+    )
+}
+
 pub(super) fn append_pt_secondary_uvs(
     output: &mut Option<Vec<[f32; 2]>>,
     vertex_base: usize,
@@ -32,9 +44,16 @@ impl Renderer {
         vertices: &[f32],
         indices: &[u32],
         secondary_uvs: Option<&[[f32; 2]]>,
-    ) {
+    ) -> bool {
         let vertex_bytes = (std::mem::size_of_val(vertices)).max(16) as u64;
         let index_bytes = (std::mem::size_of_val(indices)).max(16) as u64;
+        let maximum = self.device.limits().max_buffer_size;
+        let Some(vertex_allocation) = buffer_allocation_size(vertex_bytes, maximum) else {
+            return false;
+        };
+        let Some(index_allocation) = buffer_allocation_size(index_bytes, maximum) else {
+            return false;
+        };
         let vertex_recreate = self
             .pt_geo_vertex_buffer
             .as_ref()
@@ -54,7 +73,7 @@ impl Renderer {
         if vertex_recreate {
             self.pt_geo_vertex_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pt_geo_vertices"),
-                size: vertex_bytes.next_power_of_two(),
+                size: vertex_allocation,
                 usage: geometry_usage,
                 mapped_at_creation: false,
             }));
@@ -62,7 +81,7 @@ impl Renderer {
         if index_recreate {
             self.pt_geo_index_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pt_geo_indices"),
-                size: index_bytes.next_power_of_two(),
+                size: index_allocation,
                 usage: geometry_usage,
                 mapped_at_creation: false,
             }));
@@ -86,9 +105,12 @@ impl Renderer {
         }
 
         let Some(secondary_uvs) = secondary_uvs else {
-            return;
+            return true;
         };
         let secondary_bytes = std::mem::size_of_val(secondary_uvs).max(8) as u64;
+        let Some(secondary_allocation) = buffer_allocation_size(secondary_bytes, maximum) else {
+            return false;
+        };
         let secondary_recreate = self
             .pt_layered
             .uv1_buffer
@@ -97,7 +119,7 @@ impl Renderer {
         if secondary_recreate {
             self.pt_layered.uv1_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pt_layered_uv1_vertices"),
-                size: secondary_bytes.next_power_of_two(),
+                size: secondary_allocation,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
@@ -111,12 +133,21 @@ impl Renderer {
             0,
             bytemuck::cast_slice(secondary_uvs),
         );
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::append_pt_secondary_uvs;
+    use super::{append_pt_secondary_uvs, buffer_allocation_size};
+
+    #[test]
+    fn allocation_growth_never_overshoots_device_limit() {
+        let mib = 1024 * 1024;
+        assert_eq!(buffer_allocation_size(129 * mib, 256 * mib), Some(256 * mib));
+        assert_eq!(buffer_allocation_size(200 * mib, 224 * mib), Some(224 * mib));
+        assert_eq!(buffer_allocation_size(225 * mib, 224 * mib), None);
+    }
 
     #[test]
     fn secondary_uv_stream_backfills_and_stays_vertex_aligned() {

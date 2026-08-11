@@ -12,7 +12,14 @@ impl Renderer {
     pub fn set_path_tracing(&mut self, mode: u32) {
         let mode = mode.min(2);
         if self.pt_mode != mode {
+            let entering = self.pt_mode == 0 && mode != 0;
             self.pt_mode = mode;
+            if entering {
+                // Static PT geometry is intentionally lazy. Force the shared
+                // ray-scene preparation path to populate it when an app turns
+                // path tracing on after its scene was already built.
+                self.tlas_built_version = self.tlas_built_version.wrapping_sub(1);
+            }
             self.reset_path_tracing_history(0);
             self.ssr_history_idx = 0;
             self.ssr_history_valid = false;
