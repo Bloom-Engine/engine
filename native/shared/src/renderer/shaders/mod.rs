@@ -115,6 +115,45 @@ mod ray_query_variant_tests {
     }
 
     #[test]
+    fn ssgi_sampling_is_temporally_stable_and_world_point_owned() {
+        let traces = [
+            SSGI_PROBE_TRACE_SW_WGSL,
+            SSGI_PROBE_TRACE_HW_WGSL,
+            SSGI_PROBE_TRACE_SDF_WGSL,
+        ];
+        for source in traces {
+            assert!(source.contains("let dir_ws = octel_direction(lid.xy);"));
+            assert!(!source.contains("textureLoad(prev_history"));
+            assert!(!source.contains("octel_jitter("));
+        }
+        assert!(!SSGI_PROBE_PLACE_WGSL.contains("let frame = u.params.x"));
+        assert!(!SSGI_PROBE_PLACE_WGSL.contains("let jx ="));
+        assert!(SSGI_PROBE_TRACE_HW_WGSL
+            .contains("for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1)"));
+        assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("let view_z = -(u.view"));
+        assert!(CARD_LIGHT_WGSL
+            .contains("for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1)"));
+        assert!(!CARD_LIGHT_WGSL.contains("let view_z = -(u.view_matrix"));
+
+        for source in [
+            format!("{PROBE_HELPERS_WGSL}{SSGI_PROBE_PLACE_WGSL}"),
+            format!("{PROBE_HELPERS_WGSL}{SSGI_PROBE_TRACE_SW_WGSL}"),
+            format!("{PROBE_HELPERS_WGSL}{SSGI_PROBE_TRACE_SDF_WGSL}"),
+            format!("{PROBE_HELPERS_WGSL}{CARD_LIGHT_WGSL}"),
+        ] {
+            wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|error| panic!("stable SSGI WGSL failed: {error:?}"));
+        }
+        let hardware = format!(
+            "enable wgpu_ray_query;\n\
+             const BLOOM_RAY_QUERY_NEEDS_PROCEED: bool = false;\n\
+             {PROBE_HELPERS_WGSL}{SSGI_PROBE_TRACE_HW_WGSL}"
+        );
+        wgpu::naga::front::wgsl::parse_str(&hardware)
+            .unwrap_or_else(|error| panic!("stable hardware SSGI WGSL failed: {error:?}"));
+    }
+
+    #[test]
     fn ssr_derivative_normal_faces_the_camera() {
         wgpu::naga::front::wgsl::parse_str(SSR_SHADER_WGSL)
             .unwrap_or_else(|error| panic!("SSR WGSL failed: {error:?}"));

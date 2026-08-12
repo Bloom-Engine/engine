@@ -399,17 +399,31 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let pos_ws = (slot_m.transform * vec4<f32>(pos_os, 1.0)).xyz;
 
-    // Shadow. Cascade selection uses view-space Z against splits.
+    // GI card points can be outside the camera depth slice that would select
+    // their raster cascade. Pick the finest cascade that actually contains
+    // the world point so camera motion cannot toggle indirect sunlight merely
+    // by changing the selected (uncovered) cascade.
     var shadow: f32 = 1.0;
     if (u.flags.y > 0.5) {
-        let view_z = -(u.view_matrix * vec4<f32>(pos_ws, 1.0)).z;
-        var cascade: i32 = 2;
-        if (view_z <= u.shadow_splits.x) {
-            cascade = 0;
-        } else if (view_z <= u.shadow_splits.y) {
-            cascade = 1;
+        shadow = 0.0;
+        for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1) {
+            var clip: vec4<f32>;
+            if (cascade == 0) {
+                clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
+            } else if (cascade == 1) {
+                clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0);
+            } else {
+                clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0);
+            }
+            if (clip.w <= 0.0) { continue; }
+            let ndc = clip.xyz / clip.w;
+            if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
+                ndc.z < 0.0 || ndc.z > 1.0) {
+                continue;
+            }
+            shadow = sample_cascade(cascade, pos_ws, u.flags.x);
+            break;
         }
-        shadow = sample_cascade(cascade, pos_ws, u.flags.x);
     }
 
     let ndotl = max(dot(n_ws, u.sun_dir.xyz), 0.0);

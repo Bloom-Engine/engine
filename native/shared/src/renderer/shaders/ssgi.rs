@@ -104,38 +104,6 @@ fn wsrc_real_octel(padded: vec2<i32>) -> vec2<u32> {
     return vec2<u32>(real);
 }
 
-// Ticket 016 V1/V2 — temporal octahedral direction jitter with
-// per-probe decorrelation (V2). V1 indexed a 2D R2 low-discrepancy
-// sequence by frame, giving every probe the same per-frame sample
-// offset. That means the 3×3 neighbourhood the resolve pass reads
-// sees 9 probes sampling identical sub-texel positions — the
-// spatial filter averages correlated noise, which is slower to
-// converge than independent samples would be.
-//
-// V2 folds `probe_idx` into the sequence via a third low-
-// discrepancy axis (1/g³ ≈ 0.4301597). Adjacent probes now land
-// at different sub-texel positions each frame, so the 3×3 read
-// effectively samples 9 × 4 = 36 distinct directions per octel
-// over the EMA horizon rather than 4. Same zero-cost structure
-// as V1 — two `fract` calls with an extra multiply.
-const OCT_JITTER_A1: f32 = 0.7548776662;
-const OCT_JITTER_A2: f32 = 0.5698402910;
-const OCT_JITTER_A3: f32 = 0.4301597090;
-fn octel_jitter(frame: f32, probe_idx: u32) -> vec2<f32> {
-    // R2 sequence in `frame` + orthogonal axis in `probe_idx`.
-    // The two components use different probe-axis scales (a3 vs
-    // a3 × R2's irrational) to stay 2D-decorrelated across probes.
-    let pf = f32(probe_idx);
-    return vec2<f32>(
-        fract(0.5 + OCT_JITTER_A1 * frame + OCT_JITTER_A3 * pf) - 0.5,
-        fract(0.5 + OCT_JITTER_A2 * frame + OCT_JITTER_A3 * pf * 1.324718) - 0.5,
-    );
-}
-fn octel_direction_jittered(octel: vec2<u32>, jitter: vec2<f32>) -> vec3<f32> {
-    let uv = (vec2<f32>(octel) + vec2<f32>(0.5) + jitter) / f32(PROBE_OCT_SIZE);
-    return oct_decode(uv);
-}
-
 fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32,
                         p00: f32, p11: f32, p20: f32, p21: f32) -> vec3<f32> {
     let ndc_x = uv.x * 2.0 - 1.0;
@@ -144,10 +112,6 @@ fn view_pos_from_linear(uv: vec2<f32>, linear_z: f32,
     let view_x = -(ndc_x + p20) * view_z / p00;
     let view_y = -(ndc_y + p21) * view_z / p11;
     return vec3<f32>(view_x, view_y, view_z);
-}
-
-fn ign(p: vec2<f32>) -> f32 {
-    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 
 fn bounded_probe_history(value: vec3<f32>) -> vec3<f32> {
@@ -172,9 +136,9 @@ fn safe_probe_direction(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
 
 /// Probe placement. One workgroup invocation per probe tile writes a
 /// ProbeHeader (world position + world normal + linear view-z). Sky
-/// probes are flagged invalid (world_pos.w = 0). A bounded subpixel dither
-/// avoids a permanently quantized location without moving the probe across
-/// visibly different parts of its 16×16 tile.
+/// probes are flagged invalid (world_pos.w = 0). Placement stays at the tile
+/// centre: camera motion already supplies subpixel coverage, while changing
+/// the sampled surface point every frame made static indirect light sparkle.
 pub(in crate::renderer) const SSGI_PROBE_PLACE_WGSL: &str = "
 struct PlaceParams {
     // Full inverse view matrix — used to lift view-space positions/normals
@@ -184,7 +148,7 @@ struct PlaceParams {
     proj_row01: vec4<f32>,
     // x = half_w, y = half_h, z = grid_w, w = grid_h
     size: vec4<u32>,
-    // x = frame_index (temporal jitter), y = tile_size_f (16.0), zw unused
+    // x = reserved, y = tile_size_f (16.0), zw unused
     params: vec4<f32>,
 };
 
@@ -207,15 +171,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let half_w = f32(u.size.x);
     let half_h = f32(u.size.y);
     let tile = u.params.y;
-    let frame = u.params.x;
-
-    // Dither by at most half a half-resolution pixel. The former +/-4-pixel
-    // placement retained radiance from visibly different surface points and
-    // produced large gray smoke-like patches during inspection and motion.
-    let jx = ign(vec2<f32>(f32(gid.x) + frame * 1.618, f32(gid.y)));
-    let jy = ign(vec2<f32>(f32(gid.x), f32(gid.y) + frame * 2.236));
-    let px_x = f32(gid.x) * tile + tile * 0.5 + (jx - 0.5);
-    let px_y = f32(gid.y) * tile + tile * 0.5 + (jy - 0.5);
+    let px_x = f32(gid.x) * tile + tile * 0.5;
+    let px_y = f32(gid.y) * tile + tile * 0.5;
     let uv = vec2<f32>(px_x / half_w, px_y / half_h);
 
     let linear_z = textureSampleLevel(hiz0, hiz_samp, uv, 0.0).r;
@@ -336,23 +293,12 @@ fn cs_main(
         return;
     }
 
-    // V1 — temporal jitter within each octel; 4-frame EMA turns
-    // this into free super-sampling.
-    // V2 — probe_idx folded into the jitter so neighbouring probes
-    // sample decorrelated sub-texel positions.
-    // V3 — scale jitter inversely with prev-frame luma at this octel:
-    // already-bright octels narrow their jitter (exploit / lock in
-    // the peak); dark octels keep full jitter (explore for new
-    // light). Luma is read from the prev-frame temporal-filtered
-    // history texture; `dst_coord` indexes the probe × octel slab
-    // identically between trace output and history.
-    let prev_slice = bounded_probe_history(
-        textureLoad(prev_history, dst_coord, 0).rgb,
-    );
-    let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
-    let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
-    let dir_ws = octel_direction_jittered(lid.xy, jitter);
+    // The 8x8 octahedral centres are a deterministic spherical quadrature.
+    // Temporal direction jitter made a static scene produce new radiance
+    // every frame and coupled each ray to the previous *screen-grid* slot.
+    // Fixed world-space directions retain all 64 samples, eliminate that
+    // camera-relative noise, and remove one history texture read per ray.
+    let dir_ws = octel_direction(lid.xy);
     let n_ws = header.normal.xyz;
 
     // Hemisphere cull — rays pointing below the surface carry no diffuse contribution.
@@ -596,39 +542,36 @@ fn hw_gi_sun_visibility(pos_ws: vec3<f32>) -> f32 {
     if (u.shadow_params.y <= 0.5) {
         return 1.0;
     }
-    let view_z = -(u.view * vec4<f32>(pos_ws, 1.0)).z;
-    var cascade: i32 = 2;
-    if (view_z <= u.shadow_splits.x) {
-        cascade = 0;
-    } else if (view_z <= u.shadow_splits.y) {
-        cascade = 1;
+    // GI hit points are not necessarily in the camera's current depth slice.
+    // Choose the finest cascade that actually contains the world point. The
+    // former view-depth choice could select an uncovered cascade and turn
+    // indirect sunlight on/off as the camera moved.
+    for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1) {
+        var clip: vec4<f32>;
+        if (cascade == 0) {
+            clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
+        } else if (cascade == 1) {
+            clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0);
+        } else {
+            clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0);
+        }
+        if (clip.w <= 0.0) { continue; }
+        let ndc = clip.xyz / clip.w;
+        if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
+            ndc.z < 0.0 || ndc.z > 1.0) {
+            continue;
+        }
+        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        let ref_depth = ndc.z - u.shadow_params.x;
+        if (cascade == 0) {
+            return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, uv, ref_depth);
+        } else if (cascade == 1) {
+            return textureSampleCompareLevel(shadow_atlas_1, shadow_samp, uv, ref_depth);
+        }
+        return textureSampleCompareLevel(shadow_atlas_2, shadow_samp, uv, ref_depth);
     }
-    var clip: vec4<f32>;
-    if (cascade == 0) {
-        clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
-    } else if (cascade == 1) {
-        clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0);
-    } else {
-        clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0);
-    }
-    if (clip.w <= 0.0) {
-        return 0.0;
-    }
-    let ndc = clip.xyz / clip.w;
-    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
-        ndc.z < 0.0 || ndc.z > 1.0) {
-        // The fallback has no visibility evidence outside the camera's CSM.
-        // Conservatively retain sky/emissive instead of inventing sunlight.
-        return 0.0;
-    }
-    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    let ref_depth = ndc.z - u.shadow_params.x;
-    if (cascade == 0) {
-        return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, uv, ref_depth);
-    } else if (cascade == 1) {
-        return textureSampleCompareLevel(shadow_atlas_1, shadow_samp, uv, ref_depth);
-    }
-    return textureSampleCompareLevel(shadow_atlas_2, shadow_samp, uv, ref_depth);
+    // No cascade owns this point, so there is no proven direct visibility.
+    return 0.0;
 }
 
 fn hw_gi_card_uv(
@@ -749,23 +692,8 @@ fn cs_main(
         return;
     }
 
-    // V1 — temporal jitter within each octel; 4-frame EMA turns
-    // this into free super-sampling.
-    // V2 — probe_idx folded into the jitter so neighbouring probes
-    // sample decorrelated sub-texel positions.
-    // V3 — scale jitter inversely with prev-frame luma at this octel:
-    // already-bright octels narrow their jitter (exploit / lock in
-    // the peak); dark octels keep full jitter (explore for new
-    // light). Luma is read from the prev-frame temporal-filtered
-    // history texture; `dst_coord` indexes the probe × octel slab
-    // identically between trace output and history.
-    let prev_slice = bounded_probe_history(
-        textureLoad(prev_history, dst_coord, 0).rgb,
-    );
-    let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
-    let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
-    let dir_ws = octel_direction_jittered(lid.xy, jitter);
+    // Stable 64-direction diffuse quadrature. See the Hi-Z path above.
+    let dir_ws = octel_direction(lid.xy);
     let n_ws = header.normal.xyz;
     let ndotd = dot(dir_ws, n_ws);
     if (ndotd <= 0.0) {
@@ -1090,23 +1018,8 @@ fn cs_main(
         return;
     }
 
-    // V1 — temporal jitter within each octel; 4-frame EMA turns
-    // this into free super-sampling.
-    // V2 — probe_idx folded into the jitter so neighbouring probes
-    // sample decorrelated sub-texel positions.
-    // V3 — scale jitter inversely with prev-frame luma at this octel:
-    // already-bright octels narrow their jitter (exploit / lock in
-    // the peak); dark octels keep full jitter (explore for new
-    // light). Luma is read from the prev-frame temporal-filtered
-    // history texture; `dst_coord` indexes the probe × octel slab
-    // identically between trace output and history.
-    let prev_slice = bounded_probe_history(
-        textureLoad(prev_history, dst_coord, 0).rgb,
-    );
-    let prev_luma = dot(prev_slice, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let jitter_scale = mix(1.0, 0.3, clamp(prev_luma, 0.0, 1.0));
-    let jitter = octel_jitter(u.params.x, probe_idx) * jitter_scale;
-    let dir_ws = octel_direction_jittered(lid.xy, jitter);
+    // Stable 64-direction diffuse quadrature. See the Hi-Z path above.
+    let dir_ws = octel_direction(lid.xy);
     let n_ws = header.normal.xyz;
     let ndotd = dot(dir_ws, n_ws);
     if (ndotd <= 0.0) {
