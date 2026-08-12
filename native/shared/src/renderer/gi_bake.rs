@@ -5,6 +5,20 @@
 
 use super::*;
 
+fn snapped_wsrc_origin(camera: [f32; 3], extent: f32) -> [f32; 3] {
+    // Adjacent origins are eight 16³-cache cells apart; their midpoint is
+    // the established quarter-extent maximum drift. Anchor those regions to
+    // the world, not to whichever camera pose happened to build the cache
+    // first, so one camera endpoint has one cache origin without increasing
+    // rebake frequency.
+    let region = extent * WSRC_REBAKE_THRESHOLD * 2.0;
+    [
+        (camera[0] / region).round() * region,
+        (camera[1] / region).round() * region,
+        (camera[2] / region).round() * region,
+    ]
+}
+
 // EN-054 — cached world-triangle soup for the clipmap rebake. The soup is a
 // pure function of the scene graph (node set, geometry, transforms,
 // visibility), and every one of those bumps `tlas_version` — so a travel-
@@ -358,15 +372,11 @@ impl Renderer {
         }
     }
 
-    /// Ticket 014 V6/V7/V12/V13 — invalidate WSRC cascades on
-    /// camera travel OR meaningful lighting change. V13 runs the
-    /// V12 hysteresis checks per cascade, so a sun rotation or
-    /// camera shift only rebakes the affected cascade(s). Typical
-    /// pattern: camera moves 10 m → near cascade (1.875 m cell,
-    /// ~0.47 m threshold) rebakes every few frames, mid cascade
-    /// (7.5 m cell, ~1.9 m threshold) rebakes occasionally, far
-    /// cascade (31 m cell, ~7.8 m threshold) stays cached for
-    /// much longer.
+    /// Ticket 014 V6/V7/V12/V13 — invalidate WSRC cascades on camera
+    /// travel or meaningful lighting change. Each camera position maps to a
+    /// deterministic world-anchored region, while lighting hysteresis remains
+    /// per cascade. Near/mid/far regions are respectively 15/60/250 m wide,
+    /// so wider cascades still rebake much less often.
     pub(super) fn maybe_invalidate_wsrc(&mut self) {
         let cam = self.current_camera_world_pos();
         let ld = self.lighting_uniforms.light_dir;
@@ -386,17 +396,12 @@ impl Renderer {
             if !self.wsrc_built[c] {
                 continue;
             }
-            // Camera travel — per-cascade threshold scales with the
-            // cascade's extent, so each cascade has its own
-            // "moved enough" metric.
+            // Camera travel uses a world-anchored region snap. The previous
+            // radial threshold was centered on historical build positions,
+            // so identical endpoints could retain different WSRC volumes and
+            // expose large camera-relative SSGI patches.
             let extent = WSRC_CASCADE_EXTENTS[c];
-            let origin = self.wsrc_origin[c];
-            let dx = cam[0] - origin[0];
-            let dy = cam[1] - origin[1];
-            let dz = cam[2] - origin[2];
-            let dist_sq = dx * dx + dy * dy + dz * dz;
-            let threshold = extent * WSRC_REBAKE_THRESHOLD;
-            if dist_sq > threshold * threshold {
+            if self.wsrc_origin[c] != snapped_wsrc_origin(cam, extent) {
                 self.wsrc_built[c] = false;
                 continue;
             }
@@ -422,13 +427,23 @@ impl Renderer {
     /// dispatch covers all `WSRC_GRID_RES³` probes × 64 octel texels.
     /// Cheap: per-texel work is one shadow-cascade lookup + analytic
     /// sun/sky math, roughly matching a single card-lighting pixel.
-    /// Runs at most once per `WSRC_REBAKE_THRESHOLD × extent` of
-    /// camera travel — same amortisation pattern as the clipmap.
+    /// Camera-driven rebakes occur only when crossing world regions spanning
+    /// `2 × WSRC_REBAKE_THRESHOLD × extent`; maximum drift from a live origin
+    /// remains the established `threshold × extent`.
     pub(super) fn bake_wsrc(
         &mut self,
+        scene: &crate::scene::SceneGraph,
         encoder: &mut wgpu::CommandEncoder,
         profiler: &mut crate::profiler::Profiler,
     ) {
+        // The HW bake traces the current TLAS. Large scenes admit bounded BLAS
+        // batches over many frames, so publishing a cache before admission
+        // completes permanently records missing blockers. Cards are likewise
+        // an input to hit radiance. Wait for both queues and then bake each
+        // cascade once from one coherent final ray scene.
+        if !scene.pending_blas_builds.is_empty() || !scene.pending_card_captures.is_empty() {
+            return;
+        }
         // V13 — bake only cascades that are marked not-built. Each
         // cascade snaps to its own cell grid (cell = extent / 16)
         // and writes into its own 16-slice block of the shared
@@ -454,7 +469,7 @@ impl Renderer {
             / (ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2])
                 .sqrt()
                 .max(1e-4);
-        let sun_dir_ws = [-ld[0] * inv_len, -ld[1] * inv_len, -ld[2] * inv_len, ld[3]];
+        let sun_dir_ws = [ld[0] * inv_len, ld[1] * inv_len, ld[2] * inv_len, ld[3]];
         let lc = self.lighting_uniforms.light_color;
         let sun_intensity = ld[3].max(0.0);
         let sun_color = [
@@ -538,13 +553,19 @@ impl Renderer {
                             wgpu::BindGroupEntry {
                                 binding: 8,
                                 resource: wgpu::BindingResource::TextureView(
-                                    &self.mesh_card_radiance_view,
+                                    &self.mesh_card_atlas_view,
                                 ),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 9,
                                 resource: wgpu::BindingResource::Sampler(
                                     &self.mesh_card_atlas_sampler,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 10,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.mesh_card_emissive_view,
                                 ),
                             },
                         ],
@@ -604,12 +625,7 @@ impl Renderer {
                 continue;
             }
             let extent = WSRC_CASCADE_EXTENTS[c];
-            let cell = extent / WSRC_GRID_RES as f32;
-            let origin = [
-                (cam[0] / cell).round() * cell,
-                (cam[1] / cell).round() * cell,
-                (cam[2] / cell).round() * cell,
-            ];
+            let origin = snapped_wsrc_origin(cam, extent);
             self.wsrc_origin[c] = origin;
 
             let params = WsrcBakeParams {
@@ -804,5 +820,27 @@ impl Renderer {
                 self.sdf_cache_writes.push((hash, staging));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wsrc_origin_tests {
+    use super::snapped_wsrc_origin;
+
+    #[test]
+    fn origin_is_a_pure_world_anchored_camera_function() {
+        let extent = 30.0;
+        assert_eq!(
+            snapped_wsrc_origin([-3.2720, 1.544, 7.2358], extent),
+            [0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            snapped_wsrc_origin([0.4761703, 1.544, 11.921013], extent),
+            [0.0, 0.0, 15.0]
+        );
+        assert_eq!(
+            snapped_wsrc_origin([0.4761703, 1.544, 11.921013], extent),
+            snapped_wsrc_origin([0.4761703, 1.544, 11.921013], extent)
+        );
     }
 }

@@ -31,6 +31,7 @@ struct VertexIn {
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) normal_os: vec3<f32>,
 };
 
 struct FsOut {
@@ -48,7 +49,28 @@ fn vs_main(v: VertexIn) -> VsOut {
     var out: VsOut;
     out.clip_pos = u.ortho_vp * vec4<f32>(v.position, 1.0);
     out.uv = v.uv;
+    out.normal_os = v.normal;
     return out;
+}
+
+fn card_oct_encode(normal_raw: vec3<f32>) -> vec2<f32> {
+    var n = normal_raw;
+    let len2 = dot(n, n);
+    if (len2 <= 0.000001) {
+        n = vec3<f32>(0.0, 1.0, 0.0);
+    } else {
+        n = n * inverseSqrt(len2);
+    }
+    n = n / max(abs(n.x) + abs(n.y) + abs(n.z), 0.000001);
+    var p = n.xy;
+    if (n.z < 0.0) {
+        let signs = vec2<f32>(
+            select(-1.0, 1.0, p.x >= 0.0),
+            select(-1.0, 1.0, p.y >= 0.0),
+        );
+        p = (1.0 - abs(p.yx)) * signs;
+    }
+    return p * 0.5 + vec2<f32>(0.5);
 }
 
 @fragment
@@ -63,12 +85,21 @@ fn fs_main(in: VsOut) -> FsOut {
         emissive = emissive * textureSample(emissive_tex, albedo_samp, in.uv).rgb;
     }
 
+    // Both card textures are already sampled by every textured GI hit and
+    // their alpha channels were unused. Store one octahedral-normal component
+    // in each alpha so ray hits recover the captured triangle normal without
+    // another atlas, binding, allocation, or texture fetch.
+    let normal_oct = card_oct_encode(in.normal_os);
+
     var out: FsOut;
-    out.albedo = vec4<f32>(albedo, 1.0);
+    out.albedo = vec4<f32>(albedo, normal_oct.x);
     // Rgba8UnormSrgb clamps emissive at 1.0 per channel; that's fine
     // for Sponza-scale lanterns. Pre-divide by EMISSIVE_SCALE at write
     // and multiply back at sample if HDR emissive becomes necessary.
-    out.emissive = vec4<f32>(clamp(emissive, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    out.emissive = vec4<f32>(
+        clamp(emissive, vec3<f32>(0.0), vec3<f32>(1.0)),
+        normal_oct.y,
+    );
     return out;
 }
 ";
@@ -294,6 +325,7 @@ struct SlotMeta {
     aabb_min: vec4<f32>,
     aabb_max: vec4<f32>,
     transform: mat4x4<f32>,
+    normal_transform: array<vec4<f32>, 3>,
 };
 
 struct CardLightParams {
@@ -427,12 +459,222 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let ndotl = max(dot(n_ws, u.sun_dir.xyz), 0.0);
-    let direct = u.sun_color.xyz * ndotl * shadow;
+    // Convert direct irradiance to Lambertian outgoing radiance before this
+    // atlas is sampled by another diffuse bounce.
+    let direct = u.sun_color.xyz * ndotl * shadow / 3.14159265;
     let ndotup = max(dot(n_ws, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
     let sky = u.sky_color.xyz * ndotup;
 
     let lit = albedo * (direct + sky) + emissive;
     textureStore(radiance_out, vec2<i32>(px), vec4<f32>(lit, 1.0));
+}
+";
+
+/// Hardware Mesh-Card relight. One workgroup owns one 64x64 card slot:
+/// its 4x4 lanes trace a coarse 4x4 world-space visibility field, then each
+/// lane shades a 16x16 texel block. This bounds the one-time coherent bake to
+/// 16 ray queries per slot rather than one query per atlas texel, while card
+/// albedo, emissive, and captured normals retain full resolution.
+pub(in crate::renderer) const CARD_LIGHT_HW_WGSL: &str = "
+struct SlotMeta {
+    normal_ws: vec4<f32>,
+    aabb_min: vec4<f32>,
+    aabb_max: vec4<f32>,
+    transform: mat4x4<f32>,
+    normal_transform: array<vec4<f32>, 3>,
+};
+
+struct CardLightParams {
+    sun_dir: vec4<f32>,
+    sun_color: vec4<f32>,
+    sky_color: vec4<f32>,
+    atlas_info: vec4<u32>,
+    shadow_vps: array<mat4x4<f32>, 3>,
+    shadow_splits: vec4<f32>,
+    view_matrix: mat4x4<f32>,
+    flags: vec4<f32>,
+};
+
+struct InstanceGiData {
+    albedo: vec3<f32>,
+    emissive_luma: f32,
+    normal_ws: vec3<f32>,
+    stable_sun_visibility: f32,
+    card_slot: vec4<f32>,
+    card_aabb_min: vec4<f32>,
+    card_aabb_max: vec4<f32>,
+    world_aabb_min: vec4<f32>,
+    world_aabb_max: vec4<f32>,
+    geo: vec4<u32>,
+    mat_params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: CardLightParams;
+@group(0) @binding(1) var albedo_atlas: texture_2d<f32>;
+@group(0) @binding(2) var atlas_samp: sampler;
+@group(0) @binding(3) var<storage, read> slot_meta: array<SlotMeta>;
+@group(0) @binding(4) var radiance_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var emissive_atlas: texture_2d<f32>;
+@group(0) @binding(6) var accel: acceleration_structure;
+@group(0) @binding(7) var<storage, read_write> instance_data: array<InstanceGiData>;
+
+var<workgroup> coarse_visibility: array<f32, 16>;
+
+fn safe_direction(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let len2 = dot(value, value);
+    if (len2 <= 0.000001) { return fallback; }
+    return value * inverseSqrt(len2);
+}
+
+fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
+    let f = uv * 2.0 - 1.0;
+    var n = vec3<f32>(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    let t = max(-n.z, 0.0);
+    n.x = n.x + select(t, -t, n.x >= 0.0);
+    n.y = n.y + select(t, -t, n.y >= 0.0);
+    return safe_direction(n, vec3<f32>(0.0, 1.0, 0.0));
+}
+
+fn card_position_os(slot_m: SlotMeta, axis: u32, uv_in: vec2<f32>) -> vec3<f32> {
+    var uv = uv_in;
+    var pos = vec3<f32>(0.0);
+    if (axis == 0u || axis == 1u) {
+        if (axis == 1u) { uv.x = 1.0 - uv.x; }
+        pos.y = mix(slot_m.aabb_min.y, slot_m.aabb_max.y, uv.x);
+        pos.z = mix(slot_m.aabb_min.z, slot_m.aabb_max.z, uv.y);
+        pos.x = select(slot_m.aabb_min.x, slot_m.aabb_max.x, axis == 0u);
+    } else if (axis == 2u || axis == 3u) {
+        if (axis == 3u) { uv.x = 1.0 - uv.x; }
+        pos.x = mix(slot_m.aabb_min.x, slot_m.aabb_max.x, uv.x);
+        pos.z = mix(slot_m.aabb_min.z, slot_m.aabb_max.z, uv.y);
+        pos.y = select(slot_m.aabb_min.y, slot_m.aabb_max.y, axis == 2u);
+    } else {
+        if (axis == 5u) { uv.x = 1.0 - uv.x; }
+        pos.x = mix(slot_m.aabb_min.x, slot_m.aabb_max.x, uv.x);
+        pos.y = mix(slot_m.aabb_min.y, slot_m.aabb_max.y, uv.y);
+        pos.z = select(slot_m.aabb_min.z, slot_m.aabb_max.z, axis == 4u);
+    }
+    return pos;
+}
+
+fn captured_normal_ws(slot_m: SlotMeta, normal_oct: vec2<f32>) -> vec3<f32> {
+    let n = oct_decode(normal_oct);
+    return safe_direction(
+        slot_m.normal_transform[0].xyz * n.x
+            + slot_m.normal_transform[1].xyz * n.y
+            + slot_m.normal_transform[2].xyz * n.z,
+        slot_m.normal_ws.xyz,
+    );
+}
+
+fn coarse_surface_position(slot_m: SlotMeta, axis: u32, uv: vec2<f32>) -> vec3<f32> {
+    let face_os = card_position_os(slot_m, axis, uv);
+    let face_ws = (slot_m.transform * vec4<f32>(face_os, 1.0)).xyz;
+    let outward = safe_direction(slot_m.normal_ws.xyz, vec3<f32>(0.0, 1.0, 0.0));
+    let inward = -outward;
+    let diagonal_os = length(slot_m.aabb_max.xyz - slot_m.aabb_min.xyz);
+    let diagonal_ws = max(
+        length((slot_m.transform * vec4<f32>(
+            safe_direction(slot_m.aabb_max.xyz - slot_m.aabb_min.xyz, vec3<f32>(1.0, 0.0, 0.0))
+                * diagonal_os,
+            0.0,
+        )).xyz),
+        0.1,
+    );
+    var surface_query: ray_query;
+    rayQueryInitialize(&surface_query, accel, RayDesc(
+        0u,
+        0xFFu,
+        0.001,
+        diagonal_ws + 0.04,
+        face_ws + outward * 0.02,
+        inward,
+    ));
+    if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+        loop {
+            if (!rayQueryProceed(&surface_query)) { break; }
+        }
+    }
+    let surface_hit = rayQueryGetCommittedIntersection(&surface_query);
+    if (surface_hit.kind == RAY_QUERY_INTERSECTION_NONE) { return face_ws; }
+    return face_ws + outward * 0.02 + inward * surface_hit.t;
+}
+
+fn sun_visibility(pos_ws: vec3<f32>) -> f32 {
+    if (u.flags.y <= 0.5) { return 1.0; }
+    let sun_dir = safe_direction(u.sun_dir.xyz, vec3<f32>(0.0, 1.0, 0.0));
+    var shadow_query: ray_query;
+    rayQueryInitialize(&shadow_query, accel, RayDesc(
+        0u,
+        0x01u,
+        0.001,
+        10000.0,
+        pos_ws + sun_dir * 0.02,
+        sun_dir,
+    ));
+    if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+        loop {
+            if (!rayQueryProceed(&shadow_query)) { break; }
+        }
+    }
+    let blocker = rayQueryGetCommittedIntersection(&shadow_query);
+    return select(0.0, 1.0, blocker.kind == RAY_QUERY_INTERSECTION_NONE);
+}
+
+fn filtered_visibility(local_px: vec2<u32>) -> f32 {
+    let grid = (vec2<f32>(local_px) + vec2<f32>(0.5)) / 16.0 - vec2<f32>(0.5);
+    let base_f = floor(grid);
+    let frac = clamp(grid - base_f, vec2<f32>(0.0), vec2<f32>(1.0));
+    let base = vec2<i32>(base_f);
+    let x0 = u32(clamp(base.x, 0, 3));
+    let y0 = u32(clamp(base.y, 0, 3));
+    let x1 = u32(clamp(base.x + 1, 0, 3));
+    let y1 = u32(clamp(base.y + 1, 0, 3));
+    let v00 = coarse_visibility[y0 * 4u + x0];
+    let v10 = coarse_visibility[y0 * 4u + x1];
+    let v01 = coarse_visibility[y1 * 4u + x0];
+    let v11 = coarse_visibility[y1 * 4u + x1];
+    return mix(mix(v00, v10, frac.x), mix(v01, v11, frac.x), frac.y);
+}
+
+@compute @workgroup_size(4, 4, 1)
+fn cs_main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let slot_idx = wg.y * u.atlas_info.z + wg.x;
+    if (slot_idx >= u.atlas_info.w || wg.x >= u.atlas_info.z) { return; }
+    let slot_m = slot_meta[slot_idx];
+    let axis = u32(slot_m.normal_ws.w);
+    let coarse_uv = (vec2<f32>(lid.xy) * 16.0 + vec2<f32>(8.0)) / 64.0;
+    let surface_ws = coarse_surface_position(slot_m, axis, coarse_uv);
+    let lane = lid.y * 4u + lid.x;
+    coarse_visibility[lane] = sun_visibility(surface_ws);
+    workgroupBarrier();
+
+    let slot_origin = wg.xy * u.atlas_info.y;
+    let block_origin = slot_origin + lid.xy * 16u;
+    for (var dy: u32 = 0u; dy < 16u; dy = dy + 1u) {
+        for (var dx: u32 = 0u; dx < 16u; dx = dx + 1u) {
+            let px = block_origin + vec2<u32>(dx, dy);
+            if (px.x >= u.atlas_info.x || px.y >= u.atlas_info.x) { continue; }
+            let uv = (vec2<f32>(px) + vec2<f32>(0.5)) / f32(u.atlas_info.x);
+            let albedo_sample = textureSampleLevel(albedo_atlas, atlas_samp, uv, 0.0);
+            let emissive_sample = textureSampleLevel(emissive_atlas, atlas_samp, uv, 0.0);
+            let n_ws = captured_normal_ws(
+                slot_m,
+                vec2<f32>(albedo_sample.a, emissive_sample.a),
+            );
+            let ndotl = max(dot(n_ws, u.sun_dir.xyz), 0.0);
+            let local_px = lid.xy * 16u + vec2<u32>(dx, dy);
+            let visibility = filtered_visibility(local_px);
+            let direct = u.sun_color.xyz * ndotl * visibility / 3.14159265;
+            let ndotup = max(dot(n_ws, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+            let sky = u.sky_color.xyz * ndotup;
+            let lit = albedo_sample.rgb * (direct + sky) + emissive_sample.rgb;
+            textureStore(radiance_out, vec2<i32>(px), vec4<f32>(lit, 1.0));
+        }
+    }
 }
 ";
 
@@ -557,7 +799,7 @@ fn cs_main(
         i32(wg.y * WSRC_OCT_PADDED_SIZE + lid.y),
         i32(cascade_idx * grid_res + wg.z),
     );
-    textureStore(wsrc_out, tex_coord, vec4<f32>(radiance, 1.0));
+    textureStore(wsrc_out, tex_coord, vec4<f32>(radiance, shadow));
 }
 ";
 
@@ -627,32 +869,16 @@ const BLOOM_TRANSPARENT_GI: bool = false;
 @group(0) @binding(7) var<storage, read> instance_data: array<HwBakeInstanceGiData>;
 @group(0) @binding(8) var card_atlas: texture_2d<f32>;
 @group(0) @binding(9) var card_samp: sampler;
+@group(0) @binding(10) var card_emissive_atlas: texture_2d<f32>;
 
-fn hw_bake_sample_cascade(cascade: i32, pos_ws: vec3<f32>, bias: f32) -> f32 {
-    var clip: vec4<f32>;
-    if (cascade == 0) { clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0); }
-    else if (cascade == 1) { clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0); }
-    else { clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0); }
-    let ndc = clip.xyz / clip.w;
-    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
-        // A hardware-cache miss already traced unobstructed to the cache
-        // boundary, so preserve open-sky sun outside camera CSM coverage.
-        // Cardless hit shading performs its own conservative containment test.
-        return 1.0;
-    }
-    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    let ref_depth = ndc.z - bias;
-    if (cascade == 0) { return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, shadow_uv, ref_depth); }
-    else if (cascade == 1) { return textureSampleCompareLevel(shadow_atlas_1, shadow_samp, shadow_uv, ref_depth); }
-    else { return textureSampleCompareLevel(shadow_atlas_2, shadow_samp, shadow_uv, ref_depth); }
-}
+var<workgroup> cache_probe_sun_visibility: f32;
 
 fn hw_bake_card_uv(
     inst: HwBakeInstanceGiData,
     hit_os: vec3<f32>,
-    dir: vec3<f32>,
+    dir_os: vec3<f32>,
 ) -> vec2<f32> {
-    let abs_d = abs(dir);
+    let abs_d = abs(dir_os);
     var axis_idx: u32 = 0u;
     if (abs_d.y >= abs_d.x && abs_d.y >= abs_d.z) {
         axis_idx = 2u;
@@ -660,9 +886,9 @@ fn hw_bake_card_uv(
         axis_idx = 4u;
     }
     var signed_axis: u32 = axis_idx;
-    if (axis_idx == 0u && dir.x > 0.0) { signed_axis = 1u; }
-    else if (axis_idx == 2u && dir.y > 0.0) { signed_axis = 3u; }
-    else if (axis_idx == 4u && dir.z > 0.0) { signed_axis = 5u; }
+    if (axis_idx == 0u && dir_os.x > 0.0) { signed_axis = 1u; }
+    else if (axis_idx == 2u && dir_os.y > 0.0) { signed_axis = 3u; }
+    else if (axis_idx == 4u && dir_os.z > 0.0) { signed_axis = 5u; }
 
     let slot = u32(inst.card_slot.x) + signed_axis;
     let slot_x = slot % 64u;
@@ -702,45 +928,64 @@ fn hw_bake_card_uv(
     );
 }
 
+fn hw_bake_trace_sun_visibility(pos_ws: vec3<f32>) -> f32 {
+    if (u.flags.y <= 0.5) {
+        return 1.0;
+    }
+    let sun_dir = safe_probe_direction(u.sun_dir.xyz, vec3<f32>(0.0, 1.0, 0.0));
+    var shadow_query: ray_query;
+    rayQueryInitialize(&shadow_query, accel, RayDesc(
+        0u,
+        0x01u,
+        0.001,
+        10000.0,
+        pos_ws + sun_dir * 0.02,
+        sun_dir,
+    ));
+    if (BLOOM_RAY_QUERY_NEEDS_PROCEED) {
+        loop {
+            if (!rayQueryProceed(&shadow_query)) { break; }
+        }
+    }
+    let blocker = rayQueryGetCommittedIntersection(&shadow_query);
+    return select(0.0, 1.0, blocker.kind == RAY_QUERY_INTERSECTION_NONE);
+}
+
+fn hw_bake_sun_visibility() -> f32 {
+    return cache_probe_sun_visibility;
+}
+
 fn hw_bake_shade_hit(
     inst: HwBakeInstanceGiData,
     hit_world: vec3<f32>,
     hit_os: vec3<f32>,
     dir: vec3<f32>,
+    dir_os: vec3<f32>,
 ) -> vec3<f32> {
     if (inst.card_slot.w > 0.5) {
-        return textureSampleLevel(
+        let atlas_uv = hw_bake_card_uv(inst, hit_os, dir_os);
+        let albedo = textureSampleLevel(
             card_atlas,
             card_samp,
-            hw_bake_card_uv(inst, hit_os, dir),
+            atlas_uv,
             0.0,
         ).rgb;
+        let emissive = textureSampleLevel(
+            card_emissive_atlas,
+            card_samp,
+            atlas_uv,
+            0.0,
+        ).rgb;
+        let hit_n = inst.normal_ws;
+        let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
+        let direct = u.sun_color.xyz * ndotl * hw_bake_sun_visibility() / 3.14159265;
+        let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+        let sky = u.sky_color.xyz * ndotup;
+        return albedo * (direct + sky) + emissive;
     }
     let hit_n = inst.normal_ws;
     let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
-    var shadow = 1.0;
-    if (u.flags.y > 0.5) {
-        shadow = 0.0;
-        for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1) {
-            var clip: vec4<f32>;
-            if (cascade == 0) {
-                clip = u.shadow_vps[0] * vec4<f32>(hit_world, 1.0);
-            } else if (cascade == 1) {
-                clip = u.shadow_vps[1] * vec4<f32>(hit_world, 1.0);
-            } else {
-                clip = u.shadow_vps[2] * vec4<f32>(hit_world, 1.0);
-            }
-            if (clip.w <= 0.0) { continue; }
-            let ndc = clip.xyz / clip.w;
-            if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
-                ndc.z < 0.0 || ndc.z > 1.0) {
-                continue;
-            }
-            shadow = hw_bake_sample_cascade(cascade, hit_world, u.flags.x);
-            break;
-        }
-    }
-    let direct = u.sun_color.xyz * ndotl * shadow;
+    let direct = u.sun_color.xyz * ndotl * hw_bake_sun_visibility() / 3.14159265;
     let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
     let sky = u.sky_color.xyz * ndotup;
     return inst.albedo * (direct + sky)
@@ -748,10 +993,7 @@ fn hw_bake_shade_hit(
 }
 
 fn hw_bake_miss(probe_pos: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
-    var shadow: f32 = 1.0;
-    if (u.flags.y > 0.5) {
-        shadow = hw_bake_sample_cascade(2, probe_pos, u.flags.x);
-    }
+    let shadow = hw_bake_sun_visibility();
     let ndotl = max(dot(dir, u.sun_dir.xyz), 0.0);
     let sun = u.sun_color.xyz * ndotl * shadow;
     let up = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
@@ -788,6 +1030,11 @@ fn cs_main(
         - vec3<f32>(extent * 0.5)
         + (vec3<f32>(f32(wg.x), f32(wg.y), f32(wg.z)) + vec3<f32>(0.5)) * cell;
 
+    if (lid.x == 0u && lid.y == 0u) {
+        cache_probe_sun_visibility = hw_bake_trace_sun_visibility(probe_pos);
+    }
+    workgroupBarrier();
+
     // V11/#23 — shared edge and double-fold corner wrap.
     let real_octel = wsrc_real_octel(vec2<i32>(lid.xy));
     let dir = octel_direction(real_octel);
@@ -818,7 +1065,17 @@ fn cs_main(
         let inst = instance_data[hit.instance_custom_data];
         let hit_world = probe_pos + dir * hit.t;
         let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
-        let front = hw_bake_shade_hit(inst, hit_world, hit_os, dir);
+        let dir_os = safe_probe_direction(
+            (hit.world_to_object * vec4<f32>(dir, 0.0)).xyz,
+            dir,
+        );
+        let front = hw_bake_shade_hit(
+            inst,
+            hit_world,
+            hit_os,
+            dir,
+            dir_os,
+        );
         radiance = front;
 
         if (BLOOM_TRANSPARENT_GI && inst.mat_params.z > 0.0) {
@@ -844,7 +1101,17 @@ fn cs_main(
                 let opaque_os = (
                     opaque_hit.world_to_object * vec4<f32>(opaque_world, 1.0)
                 ).xyz;
-                behind = hw_bake_shade_hit(opaque_inst, opaque_world, opaque_os, dir);
+                let opaque_dir_os = safe_probe_direction(
+                    (opaque_hit.world_to_object * vec4<f32>(dir, 0.0)).xyz,
+                    dir,
+                );
+                behind = hw_bake_shade_hit(
+                    opaque_inst,
+                    opaque_world,
+                    opaque_os,
+                    dir,
+                    opaque_dir_os,
+                );
             }
             let surface_weight = clamp(inst.world_aabb_max.w, 0.0, 1.0)
                 * (1.0 - clamp(inst.mat_params.z, 0.0, 1.0));
@@ -865,6 +1132,10 @@ fn cs_main(
         i32(wg.y * HW_BAKE_OCT_PADDED + lid.y),
         i32(cascade_idx * grid_res + wg.z),
     );
-    textureStore(wsrc_out, tex_coord, vec4<f32>(radiance, 1.0));
+    textureStore(
+        wsrc_out,
+        tex_coord,
+        vec4<f32>(radiance, cache_probe_sun_visibility),
+    );
 }
 ";

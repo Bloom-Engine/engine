@@ -886,47 +886,47 @@ pub(super) fn build_card_ortho_v2(face_axis: u32, bmin: [f32; 3], bmax: [f32; 3]
     let cy = bmin[1] + bmax[1];
     let cz = bmin[2] + bmax[2];
     match face_axis {
-        // +X → project onto YZ; clip.x = y, clip.y = z.
+        // +X → project onto YZ; depth 0 at bmax.x, 1 at bmin.x.
         0 => [
-            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0 / wx, 0.0],
             [2.0 / wy, 0.0, 0.0, 0.0],
             [0.0, 2.0 / wz, 0.0, 0.0],
-            [-cy / wy, -cz / wz, 0.0, 1.0],
+            [-cy / wy, -cz / wz, bmax[0] / wx, 1.0],
         ],
-        // -X → flip u so the -X view is the mirror of +X. clip.x = -y, clip.y = z.
+        // -X → flip u; depth 0 at bmin.x, 1 at bmax.x.
         1 => [
-            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0 / wx, 0.0],
             [-2.0 / wy, 0.0, 0.0, 0.0],
             [0.0, 2.0 / wz, 0.0, 0.0],
-            [cy / wy, -cz / wz, 0.0, 1.0],
+            [cy / wy, -cz / wz, -bmin[0] / wx, 1.0],
         ],
-        // +Y → project onto XZ; clip.x = x, clip.y = z.
+        // +Y → project onto XZ; depth 0 at bmax.y, 1 at bmin.y.
         2 => [
             [2.0 / wx, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0 / wy, 0.0],
             [0.0, 2.0 / wz, 0.0, 0.0],
-            [-cx / wx, -cz / wz, 0.0, 1.0],
+            [-cx / wx, -cz / wz, bmax[1] / wy, 1.0],
         ],
-        // -Y → flip u; clip.x = -x, clip.y = z.
+        // -Y → flip u; depth 0 at bmin.y, 1 at bmax.y.
         3 => [
             [-2.0 / wx, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0 / wy, 0.0],
             [0.0, 2.0 / wz, 0.0, 0.0],
-            [cx / wx, -cz / wz, 0.0, 1.0],
+            [cx / wx, -cz / wz, -bmin[1] / wy, 1.0],
         ],
-        // +Z → project onto XY; clip.x = x, clip.y = y.
+        // +Z → project onto XY; depth 0 at bmax.z, 1 at bmin.z.
         4 => [
             [2.0 / wx, 0.0, 0.0, 0.0],
             [0.0, 2.0 / wy, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [-cx / wx, -cy / wy, 0.0, 1.0],
+            [0.0, 0.0, -1.0 / wz, 0.0],
+            [-cx / wx, -cy / wy, bmax[2] / wz, 1.0],
         ],
-        // -Z → flip u; clip.x = -x, clip.y = y.
+        // -Z → flip u; depth 0 at bmin.z, 1 at bmax.z.
         _ => [
             [-2.0 / wx, 0.0, 0.0, 0.0],
             [0.0, 2.0 / wy, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [cx / wx, -cy / wy, 0.0, 1.0],
+            [0.0, 0.0, 1.0 / wz, 0.0],
+            [cx / wx, -cy / wy, -bmin[2] / wz, 1.0],
         ],
     }
 }
@@ -1024,6 +1024,47 @@ pub(super) struct CardSlotMetaCpu {
     /// Mesh's world transform. Multiplied into the object-space
     /// card-plane position to land in world space for shadow lookup.
     pub(super) transform: [[f32; 4]; 4],
+    /// Inverse-transpose of the transform's linear block, stored as three
+    /// vec4 columns so the GPU storage layout remains 16-byte aligned.
+    pub(super) normal_transform: [[f32; 4]; 3],
+}
+
+pub(super) fn card_normal_transform(m: &[[f32; 4]; 4]) -> [[f32; 4]; 3] {
+    // Inverse-transpose of the world transform's linear block. Store columns
+    // as padded vec4s so WGSL can evaluate M * n without layout ambiguity.
+    let a = m[0][0];
+    let b = m[1][0];
+    let c = m[2][0];
+    let d = m[0][1];
+    let e = m[1][1];
+    let f = m[2][1];
+    let g = m[0][2];
+    let h = m[1][2];
+    let i = m[2][2];
+
+    let inv00 = e * i - f * h;
+    let inv10 = f * g - d * i;
+    let inv20 = d * h - e * g;
+    let inv01 = c * h - b * i;
+    let inv11 = a * i - c * g;
+    let inv21 = b * g - a * h;
+    let inv02 = b * f - c * e;
+    let inv12 = c * d - a * f;
+    let inv22 = a * e - b * d;
+    let det = a * inv00 + b * inv10 + c * inv20;
+    if det.abs() < 1e-10 {
+        return [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+    }
+    let s = 1.0 / det;
+    [
+        [inv00 * s, inv01 * s, inv02 * s, 0.0],
+        [inv10 * s, inv11 * s, inv12 * s, 0.0],
+        [inv20 * s, inv21 * s, inv22 * s, 0.0],
+    ]
 }
 
 /// Ticket 007b — per-TLAS-instance GI shading input. Indexed by the

@@ -1770,8 +1770,9 @@ fn create_rt_device_context() -> Result<Option<RtDeviceContext>, String> {
         !enabled_texture_array_features.is_empty(),
     );
     let supported_features = format!("{:?}", adapter.features());
+    let timing_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: rt_mask | enabled_texture_array_features,
+        required_features: rt_mask | enabled_texture_array_features | timing_features,
         required_limits: adapter.limits(),
         experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
         ..Default::default()

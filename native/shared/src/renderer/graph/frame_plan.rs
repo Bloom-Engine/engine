@@ -408,27 +408,25 @@ pub fn build_renderer_frame_plan(
 
     let ssgi_preparation = key.feature_mask & super::FRAME_FEATURE_SSGI != 0;
     let pt_preparation = key.path_tracing != super::PathTracingMode::Off;
-    let mut previous_gi = None;
+    let mut previous_gi_preparation = None;
     for (name, enabled) in [
         ("accel_rebuild", ssgi_preparation || pt_preparation),
         ("card_capture", ssgi_preparation || pt_preparation),
         ("sdf_bake", ssgi_preparation),
         ("scene_sdf_clipmap", ssgi_preparation),
-        ("wsrc_bake", ssgi_preparation),
-        ("card_light", ssgi_preparation),
     ] {
         if enabled {
             let pass = graph.add_pass(name);
-            if let Some(previous) = previous_gi {
+            if let Some(previous) = previous_gi_preparation {
                 graph.after(pass, previous);
             }
             graph.set_side_effects(pass, super::SideEffects::EXTERNAL_STATE);
-            previous_gi = Some(pass);
+            previous_gi_preparation = Some(pass);
         }
     }
 
     let froxel_assign = graph.add_pass("froxel_assign");
-    if let Some(previous) = previous_gi {
+    if let Some(previous) = previous_gi_preparation {
         graph.after(froxel_assign, previous);
     }
     let froxel = graph.write_buffer(froxel_assign, froxel, BufferUsage::STORAGE_WRITE);
@@ -447,8 +445,31 @@ pub fn build_renderer_frame_plan(
         }
     }
 
+    // Mesh-card radiance and the world-space radiance cache both sample
+    // directional shadow maps. Keep those consumers after this frame's
+    // shadow producer so their cascade matrices and depth texels describe the
+    // same camera fit. WSRC additionally samples the card-radiance atlas on
+    // hardware, so card relighting must precede the cache bake.
+    let mut previous_scene = shadow;
+    if ssgi_preparation {
+        let card_light = graph.add_pass("card_light");
+        graph.after(card_light, previous_scene);
+        graph.set_side_effects(card_light, super::SideEffects::EXTERNAL_STATE);
+        for cascade in &shadows {
+            graph.read_texture(card_light, *cascade, TextureUsage::SAMPLED);
+        }
+
+        let wsrc_bake = graph.add_pass("wsrc_bake");
+        graph.after(wsrc_bake, card_light);
+        graph.set_side_effects(wsrc_bake, super::SideEffects::EXTERNAL_STATE);
+        for cascade in &shadows {
+            graph.read_texture(wsrc_bake, *cascade, TextureUsage::SAMPLED);
+        }
+        previous_scene = wsrc_bake;
+    }
+
     let hdr_scene = graph.add_pass("hdr_scene");
-    graph.after(hdr_scene, shadow);
+    graph.after(hdr_scene, previous_scene);
     for cascade in shadows {
         graph.read_texture(hdr_scene, cascade, TextureUsage::SAMPLED);
     }
@@ -523,21 +544,28 @@ pub fn build_renderer_frame_plan(
     }
 
     let mut previous = translucent;
-    if key.feature_mask & super::FRAME_FEATURE_SSAO != 0 {
+    // SSGI probe placement and resolve sample mip zero of the same Hi-Z
+    // pyramid as GTAO. Build it whenever either consumer is enabled; tying
+    // the producer to SSAO left SSGI reading stale depth when applications
+    // enabled GI independently.
+    if key.feature_mask & (super::FRAME_FEATURE_SSAO | super::FRAME_FEATURE_SSGI) != 0 {
         let hiz_build = graph.add_pass("hiz_build");
         graph.after(hiz_build, previous);
         graph.read_texture(hiz_build, depth, TextureUsage::SAMPLED);
         hiz = graph.write_texture(hiz_build, hiz, TextureUsage::STORAGE_WRITE);
+        previous = hiz_build;
 
-        let occlusion_capture = graph.add_pass("occlusion_capture");
-        graph.after(occlusion_capture, hiz_build);
-        graph.read_texture(occlusion_capture, hiz, TextureUsage::SAMPLED);
+        if key.feature_mask & super::FRAME_FEATURE_SSAO != 0 {
+            let occlusion_capture = graph.add_pass("occlusion_capture");
+            graph.after(occlusion_capture, hiz_build);
+            graph.read_texture(occlusion_capture, hiz, TextureUsage::SAMPLED);
 
-        let gtao = graph.add_pass("gtao");
-        graph.after(gtao, occlusion_capture);
-        graph.read_texture(gtao, hiz, TextureUsage::SAMPLED);
-        ssao_raw = graph.write_texture(gtao, ssao_raw, TextureUsage::STORAGE_WRITE);
-        previous = gtao;
+            let gtao = graph.add_pass("gtao");
+            graph.after(gtao, occlusion_capture);
+            graph.read_texture(gtao, hiz, TextureUsage::SAMPLED);
+            ssao_raw = graph.write_texture(gtao, ssao_raw, TextureUsage::STORAGE_WRITE);
+            previous = gtao;
+        }
     }
     let ssao_blur_pass = graph.add_pass("ssao_blur");
     graph.after(ssao_blur_pass, previous);
@@ -569,6 +597,7 @@ pub fn build_renderer_frame_plan(
         graph.after(ssgi_pass, previous);
         graph.read_texture(ssgi_pass, hdr, TextureUsage::SAMPLED);
         graph.read_texture(ssgi_pass, depth, TextureUsage::SAMPLED);
+        graph.read_texture(ssgi_pass, hiz, TextureUsage::SAMPLED);
         graph.read_texture(ssgi_pass, albedo, TextureUsage::SAMPLED);
         ssgi = graph.write_texture(ssgi_pass, ssgi, TextureUsage::STORAGE_WRITE);
         previous = ssgi_pass;
@@ -672,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_plan_preserves_the_legacy_serial_order() {
+    fn renderer_plan_orders_gi_lighting_after_current_shadows() {
         let all_optional =
             FRAME_FEATURE_SSAO | FRAME_FEATURE_SSR | FRAME_FEATURE_SSGI | FRAME_FEATURE_BLOOM;
         let plan =
@@ -691,10 +720,10 @@ mod tests {
                 "card_capture",
                 "sdf_bake",
                 "scene_sdf_clipmap",
-                "wsrc_bake",
-                "card_light",
                 "froxel_assign",
                 "shadow",
+                "card_light",
+                "wsrc_bake",
                 "hdr_scene",
                 "pt",
                 "translucent",
@@ -717,6 +746,24 @@ mod tests {
             .passes
             .iter()
             .all(|pass| pass.queue == QueueClass::Graphics));
+        let shadow_cascades = (0..3)
+            .map(|cascade| {
+                plan.resource(&format!("shadow-cascade-{cascade}"))
+                    .unwrap()
+                    .id
+            })
+            .collect::<Vec<_>>();
+        for consumer in ["card_light", "wsrc_bake"] {
+            let pass = plan.pass(consumer).unwrap();
+            for cascade in &shadow_cascades {
+                assert!(
+                    pass.accesses
+                        .iter()
+                        .any(|access| access.resource == *cascade),
+                    "{consumer} must declare its shadow-cascade read"
+                );
+            }
+        }
         assert!(
             plan.allocations.is_empty(),
             "parity plan imports current persistent RTs"
@@ -754,6 +801,32 @@ mod tests {
         );
         assert!(plan.pass("compose").is_some());
         assert!(plan.pass("capture_readback").is_none());
+    }
+
+    #[test]
+    fn ssgi_builds_and_declares_hiz_without_ssao() {
+        let plan =
+            build_renderer_frame_plan(key(FRAME_FEATURE_SSGI), wgpu::TextureFormat::Bgra8UnormSrgb)
+                .compile(CompileOptions::CONSERVATIVE_ALIASING)
+                .unwrap();
+        plan.pass("hiz_build").expect("SSGI needs current Hi-Z");
+        assert!(plan.pass("occlusion_capture").is_none());
+        assert!(plan.pass("gtao").is_none());
+        let ssgi = plan.pass("ssgi").unwrap();
+        let hiz = plan.resource("hiz-pyramid").unwrap();
+        assert!(
+            ssgi.accesses.iter().any(|access| access.resource == hiz.id),
+            "SSGI must declare its sampled Hi-Z input"
+        );
+        let names = plan
+            .passes
+            .iter()
+            .map(|pass| pass.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            names.iter().position(|name| *name == "hiz_build").unwrap()
+                < names.iter().position(|name| *name == "ssgi").unwrap()
+        );
     }
 
     #[test]

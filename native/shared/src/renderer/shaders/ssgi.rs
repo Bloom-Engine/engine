@@ -462,6 +462,8 @@ const BLOOM_TRANSPARENT_GI: bool = false;
 @group(0) @binding(11) var shadow_atlas_1: texture_depth_2d;
 @group(0) @binding(12) var shadow_atlas_2: texture_depth_2d;
 @group(0) @binding(13) var shadow_samp: sampler_comparison;
+@group(0) @binding(14) var card_emissive_atlas: texture_2d<f32>;
+@group(0) @binding(15) var card_radiance_atlas: texture_2d<f32>;
 
 // Ticket 014 V7/V8 — WSRC lookup shared with the SDF path. V8
 // trilinear across the 8 neighbouring probes, nearest octel for
@@ -534,52 +536,18 @@ fn hw_gi_cap(raw_in: vec3<f32>) -> vec3<f32> {
     return raw;
 }
 
-fn hw_gi_miss(origin_ws: vec3<f32>, dir_ws: vec3<f32>, max_t: f32) -> vec3<f32> {
-    return hw_gi_cap(hw_wsrc_sample(origin_ws + dir_ws * max_t, dir_ws));
+fn hw_gi_miss(_origin_ws: vec3<f32>, dir_ws: vec3<f32>, _max_t: f32) -> vec3<f32> {
+    // The ray query has already proved this direction contains no geometry
+    // inside the SSGI radius. Sampling an unrelated camera-following cache at
+    // its terminal point injected rebasing light/dark blocks into open rays.
+    // A hardware miss represents the distant environment, which is spatially
+    // invariant; local bounced radiance remains owned by actual geometry hits.
+    let up = clamp(dir_ws.y * 0.5 + 0.5, 0.0, 1.0);
+    return hw_gi_cap(u.sky_color.xyz * up * up);
 }
 
-fn hw_gi_sun_visibility(pos_ws: vec3<f32>) -> f32 {
-    if (u.shadow_params.y <= 0.5) {
-        return 1.0;
-    }
-    // GI hit points are not necessarily in the camera's current depth slice.
-    // Choose the finest cascade that actually contains the world point. The
-    // former view-depth choice could select an uncovered cascade and turn
-    // indirect sunlight on/off as the camera moved.
-    for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1) {
-        var clip: vec4<f32>;
-        if (cascade == 0) {
-            clip = u.shadow_vps[0] * vec4<f32>(pos_ws, 1.0);
-        } else if (cascade == 1) {
-            clip = u.shadow_vps[1] * vec4<f32>(pos_ws, 1.0);
-        } else {
-            clip = u.shadow_vps[2] * vec4<f32>(pos_ws, 1.0);
-        }
-        if (clip.w <= 0.0) { continue; }
-        let ndc = clip.xyz / clip.w;
-        if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 ||
-            ndc.z < 0.0 || ndc.z > 1.0) {
-            continue;
-        }
-        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-        let ref_depth = ndc.z - u.shadow_params.x;
-        if (cascade == 0) {
-            return textureSampleCompareLevel(shadow_atlas_0, shadow_samp, uv, ref_depth);
-        } else if (cascade == 1) {
-            return textureSampleCompareLevel(shadow_atlas_1, shadow_samp, uv, ref_depth);
-        }
-        return textureSampleCompareLevel(shadow_atlas_2, shadow_samp, uv, ref_depth);
-    }
-    // No cascade owns this point, so there is no proven direct visibility.
-    return 0.0;
-}
-
-fn hw_gi_card_uv(
-    inst: InstanceGiData,
-    hit_os: vec3<f32>,
-    dir_ws: vec3<f32>,
-) -> vec2<f32> {
-    let abs_d = abs(dir_ws);
+fn hw_gi_card_axis(dir_os: vec3<f32>) -> u32 {
+    let abs_d = abs(dir_os);
     var axis_idx: u32 = 0u;
     if (abs_d.y >= abs_d.x && abs_d.y >= abs_d.z) {
         axis_idx = 2u;
@@ -587,9 +555,42 @@ fn hw_gi_card_uv(
         axis_idx = 4u;
     }
     var signed_axis: u32 = axis_idx;
-    if (axis_idx == 0u && dir_ws.x > 0.0) { signed_axis = 1u; }
-    else if (axis_idx == 2u && dir_ws.y > 0.0) { signed_axis = 3u; }
-    else if (axis_idx == 4u && dir_ws.z > 0.0) { signed_axis = 5u; }
+    if (axis_idx == 0u && dir_os.x > 0.0) { signed_axis = 1u; }
+    else if (axis_idx == 2u && dir_os.y > 0.0) { signed_axis = 3u; }
+    else if (axis_idx == 4u && dir_os.z > 0.0) { signed_axis = 5u; }
+    return signed_axis;
+}
+
+fn hw_gi_card_normal_ws(
+    normal_oct: vec2<f32>,
+    world_to_object: mat4x3<f32>,
+    incoming_dir_ws: vec3<f32>,
+) -> vec3<f32> {
+    let normal_os = oct_decode(normal_oct);
+
+    // Normals transform by inverse-transpose. The ray query supplies the
+    // inverse (`world_to_object`), and row-vector multiplication applies its
+    // transpose in WGSL. This remains correct under non-uniform scale.
+    let inverse_linear = mat3x3<f32>(
+        world_to_object[0],
+        world_to_object[1],
+        world_to_object[2],
+    );
+    var normal_ws = safe_probe_direction(normal_os * inverse_linear, -incoming_dir_ws);
+    // The raster scene is two-sided. Orient an authored back-face normal
+    // toward the incident hemisphere so its diffuse bounce matches that
+    // convention instead of disappearing or lighting through the surface.
+    if (dot(normal_ws, incoming_dir_ws) > 0.0) {
+        normal_ws = -normal_ws;
+    }
+    return normal_ws;
+}
+
+fn hw_gi_card_uv(
+    inst: InstanceGiData,
+    hit_os: vec3<f32>,
+    signed_axis: u32,
+) -> vec2<f32> {
 
     let slot = u32(inst.card_slot.x) + signed_axis;
     let slot_x = slot % 64u;
@@ -636,24 +637,63 @@ fn hw_gi_shade_hit(
     hit_world: vec3<f32>,
     hit_os: vec3<f32>,
     dir_ws: vec3<f32>,
+    dir_os: vec3<f32>,
+    world_to_object: mat4x3<f32>,
     hit_t: f32,
     max_t: f32,
 ) -> vec3<f32> {
     let tn = hit_t / max_t;
     let falloff = max(1.0 - tn * tn, 0.0);
     if (inst.card_slot.w > 0.5) {
-        let atlas_uv = hw_gi_card_uv(inst, hit_os, dir_ws);
-        let pre_lit = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0).rgb;
-        return hw_gi_cap(pre_lit * falloff);
+        let signed_axis = hw_gi_card_axis(dir_os);
+        let atlas_uv = hw_gi_card_uv(inst, hit_os, signed_axis);
+        // Once the coherent scene finishes streaming, the card-light pass has
+        // baked exact world-space sun visibility into this atlas. It is stable
+        // under camera motion and turns the normal hit path into one fetch.
+        if (u.shadow_params.z > 0.5) {
+            let pre_lit = textureSampleLevel(
+                card_radiance_atlas,
+                card_samp,
+                atlas_uv,
+                0.0,
+            ).rgb;
+            return hw_gi_cap(pre_lit * falloff);
+        }
+        let albedo_sample = textureSampleLevel(card_atlas, card_samp, atlas_uv, 0.0);
+        let emissive_sample = textureSampleLevel(
+            card_emissive_atlas,
+            card_samp,
+            atlas_uv,
+            0.0,
+        );
+        let albedo = albedo_sample.rgb;
+        let emissive = emissive_sample.rgb;
+        // Card capture stores the rasterized triangle normal beside the two
+        // already-fetched material samples. This avoids the former card-face
+        // proxy, which could turn wall detail into an up-facing sun receiver.
+        let hit_n = hw_gi_card_normal_ws(
+            vec2<f32>(albedo_sample.a, emissive_sample.a),
+            world_to_object,
+            dir_ws,
+        );
+        // While BLAS/card admission is still in flight, use only signals that
+        // cannot change with camera-fitted shadow cascades. The exact direct
+        // term becomes available atomically with the baked radiance atlas.
+        let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+        let sky = u.sky_color.xyz * ndotup;
+        return hw_gi_cap((albedo * sky + emissive) * falloff);
     }
 
     let hit_n = inst.normal_ws;
-    let ndotl = max(dot(hit_n, u.sun_dir.xyz), 0.0);
-    let direct = u.sun_color.xyz * ndotl * hw_gi_sun_visibility(hit_world);
+    // The bounded Mesh-Card atlas cannot represent every placement in very
+    // large scenes. A single visibility sample for an entire cardless mesh
+    // creates facade-sized light fragments when that sample changes. Keep the
+    // fallback conservative and invariant: sky + emissive only. Card-backed
+    // hits retain the coherent world-space direct-light bake above.
     let ndotup = max(dot(hit_n, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
     let sky = u.sky_color.xyz * ndotup;
     return hw_gi_cap(
-        inst.albedo * (direct + sky) * falloff
+        inst.albedo * sky * falloff
         + inst.albedo * inst.emissive_luma
     );
 }
@@ -695,6 +735,7 @@ fn cs_main(
     // Stable 64-direction diffuse quadrature. See the Hi-Z path above.
     let dir_ws = octel_direction(lid.xy);
     let n_ws = header.normal.xyz;
+    let origin_ws = header.world_pos.xyz + n_ws * 0.02;
     let ndotd = dot(dir_ws, n_ws);
     if (ndotd <= 0.0) {
         textureStore(radiance_out, dst_coord, vec4<f32>(0.0));
@@ -703,7 +744,6 @@ fn cs_main(
 
     // 2 cm normal offset — matches the SW start_t and keeps primary
     // hits from self-intersecting the surface the probe sits on.
-    let origin_ws = header.world_pos.xyz + n_ws * 0.02;
     let max_t = u.params.z;
 
     var rq: ray_query;
@@ -727,7 +767,20 @@ fn cs_main(
         let inst = instance_data[hit.instance_custom_data];
         let hit_world = origin_ws + dir_ws * hit.t;
         let hit_os = (hit.world_to_object * vec4<f32>(hit_world, 1.0)).xyz;
-        let front = hw_gi_shade_hit(inst, hit_world, hit_os, dir_ws, hit.t, max_t);
+        let dir_os = safe_probe_direction(
+            (hit.world_to_object * vec4<f32>(dir_ws, 0.0)).xyz,
+            dir_ws,
+        );
+        let front = hw_gi_shade_hit(
+            inst,
+            hit_world,
+            hit_os,
+            dir_ws,
+            dir_os,
+            hit.world_to_object,
+            hit.t,
+            max_t,
+        );
         radiance = front;
 
         if (BLOOM_TRANSPARENT_GI && inst.mat_params.z > 0.0) {
@@ -757,11 +810,17 @@ fn cs_main(
                 let opaque_os = (
                     opaque_hit.world_to_object * vec4<f32>(opaque_world, 1.0)
                 ).xyz;
+                let opaque_dir_os = safe_probe_direction(
+                    (opaque_hit.world_to_object * vec4<f32>(dir_ws, 0.0)).xyz,
+                    dir_ws,
+                );
                 behind = hw_gi_shade_hit(
                     opaque_inst,
                     opaque_world,
                     opaque_os,
                     dir_ws,
+                    opaque_dir_os,
+                    opaque_hit.world_to_object,
                     opaque_hit.t,
                     max_t,
                 );
@@ -1284,6 +1343,7 @@ struct TemporalParams {
 var<workgroup> diffuse_radiance: array<vec3<f32>, 64>;
 var<workgroup> reprojected_history_probe: u32;
 var<workgroup> reprojected_history_valid: u32;
+var<workgroup> reprojected_history_alpha: f32;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(
@@ -1302,6 +1362,7 @@ fn cs_main(
     if (lane == 0u) {
         reprojected_history_probe = probe_index;
         reprojected_history_valid = 0u;
+        reprojected_history_alpha = u.params.x;
         let current_probe = probes[probe_index];
         if (current_probe.world_pos.w >= 0.5) {
             let current_uv = (
@@ -1314,6 +1375,8 @@ fn cs_main(
                 velocity_size - vec2<i32>(1),
             );
             let velocity = textureLoad(velocity_tex, velocity_coord, 0).xy;
+            let motion_refresh = smoothstep(0.00025, 0.003, length(velocity));
+            reprojected_history_alpha = mix(u.params.x, 0.65, motion_refresh);
             // Velocity stores current-minus-previous NDC. UV's Y axis is
             // flipped, matching the established TAA and SSR reprojection.
             let previous_uv = vec2<f32>(
@@ -1390,7 +1453,11 @@ fn cs_main(
         hist = curr;
     }
 
-    var alpha = u.params.x;
+    // Fixed trace directions need less temporal smoothing during camera
+    // motion. Refresh over roughly 0.1..1.5 output pixels so high-contrast
+    // world-cache radiance does not trail behind its receiver, while a
+    // stationary camera retains the established four-frame EMA.
+    var alpha = reprojected_history_alpha;
     let force_refresh = u.params.y > 0.5;
     if (force_refresh || !geometry_valid) {
         alpha = 1.0;
@@ -1568,7 +1635,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let w_depth = exp(-dz * dz * 8.0);
             let ndotn = clamp(dot(probe.normal.xyz, N_ws), 0.0, 1.0);
             let w_normal = pow(ndotn, 4.0);
-
             let w = w_corner * w_depth * w_normal;
             if (w <= 0.0001) { continue; }
 

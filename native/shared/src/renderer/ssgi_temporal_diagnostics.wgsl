@@ -26,6 +26,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // 0 invalid current, 1 valid current, 2 previous UV outside,
     // 3 searched but found no matching prior surface, 4 matched.
     var reprojection_stage = 0u;
+    var motion_length = 0.0;
     if (valid_probe) {
         reprojection_stage = 1u;
         let current_uv = (
@@ -38,6 +39,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             velocity_size - vec2<i32>(1),
         );
         let velocity = textureLoad(velocity_tex, velocity_coord, 0).xy;
+        motion_length = length(velocity);
         let previous_uv = vec2<f32>(
             current_uv.x - velocity.x,
             current_uv.y + velocity.y,
@@ -118,14 +120,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let curr_luma = dot(curr, vec3<f32>(0.2126, 0.7152, 0.0722));
     let hist_luma = dot(hist, vec3<f32>(0.2126, 0.7152, 0.0722));
     let delta = abs(curr_luma - hist_luma);
-    var alpha = min(1.0, u.params.x + delta * 0.6);
+    let motion_refresh = smoothstep(0.00025, 0.003, motion_length);
+    var alpha = min(1.0, mix(u.params.x, 0.65, motion_refresh) + delta * 0.6);
     if (u.params.y > 0.5 || !geometry_valid) {
         alpha = 1.0;
     }
 
     // Shared palette in probe space: gray seed, magenta adaptive radiance
-    // refresh/invalid data, green retained history. Screen-space categories
-    // such as off-screen UV and motion do not exist for this representation.
+    // refresh/invalid data, blue motion refresh, green retained history.
     var reason = vec3<f32>(0.05, 0.65, 0.10);
     if (!valid_probe || u.params.y > 0.5) {
         reason = vec3<f32>(0.25);
@@ -139,6 +141,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
     } else if (!finite || delta * 0.6 >= u.params.x) {
         reason = vec3<f32>(1.0, 0.0, 0.8);
+    } else if (motion_refresh > 0.01) {
+        reason = vec3<f32>(0.05, 0.25, 1.0);
     }
     var variation_heat = 1.0;
     var current_heat = 0.0;

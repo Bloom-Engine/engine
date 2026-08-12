@@ -127,19 +127,19 @@ impl Renderer {
             }
 
             // ---- trace ----
-            // Sun direction in world space — inverted because our
-            // `light_dir` points from light toward the scene, while the
-            // shader's NdotL expects the vector from the shading point
-            // toward the light. Normalised because the shader doesn't.
+            // Sun direction in world space. Bloom's public directional-light
+            // convention is surface-to-light (the same vector consumed by
+            // the raster PBR and shadow passes), so preserve its sign here.
+            // Normalise because the probe shaders do not.
             let ld = self.lighting_uniforms.light_dir;
             let sun_inv_len = 1.0
                 / (ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2])
                     .sqrt()
                     .max(1e-4);
             let sun_dir_ws = [
-                -ld[0] * sun_inv_len,
-                -ld[1] * sun_inv_len,
-                -ld[2] * sun_inv_len,
+                ld[0] * sun_inv_len,
+                ld[1] * sun_inv_len,
+                ld[2] * sun_inv_len,
                 ld[3],
             ];
             // Sun colour = light_color × light intensity (ld.w). Sky
@@ -238,7 +238,12 @@ impl Renderer {
                 ],
                 shadow_vps,
                 shadow_splits,
-                shadow_params: [0.002, if shadows_enabled { 1.0 } else { 0.0 }, 0.0, 0.0],
+                shadow_params: [
+                    0.002,
+                    if shadows_enabled { 1.0 } else { 0.0 },
+                    if self.card_light_coherent { 1.0 } else { 0.0 },
+                    0.0,
+                ],
             };
             self.queue.write_buffer(
                 &self.probe_trace_uniform,
@@ -377,13 +382,14 @@ impl Renderer {
                                         &self.probe_trace_view,
                                     ),
                                 },
-                                // Ticket 013 V2: the HW trace samples the
-                                // *radiance* atlas (pre-lit by card_light_pass)
-                                // at hit, not the raw albedo atlas.
+                                // Hardware GI shades from camera-independent
+                                // card material data and traces its own sun
+                                // visibility. The CSM-lit atlas is reserved
+                                // for the software fallback.
                                 wgpu::BindGroupEntry {
                                     binding: 5,
                                     resource: wgpu::BindingResource::TextureView(
-                                        &self.mesh_card_radiance_view,
+                                        &self.mesh_card_atlas_view,
                                     ),
                                 },
                                 wgpu::BindGroupEntry {
@@ -434,6 +440,18 @@ impl Renderer {
                                     binding: 13,
                                     resource: wgpu::BindingResource::Sampler(
                                         &self.shadow_map.sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 14,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.mesh_card_emissive_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 15,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.mesh_card_radiance_view,
                                     ),
                                 },
                             ],

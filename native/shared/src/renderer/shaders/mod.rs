@@ -22,8 +22,8 @@ pub(super) use ao::{
 };
 mod gi;
 pub(super) use gi::{
-    CARD_CAPTURE_WGSL, CARD_LIGHT_WGSL, SDF_BAKE_WGSL, SDF_CLIPMAP_BAKE_WGSL, WSRC_BAKE_HW_WGSL,
-    WSRC_BAKE_WGSL,
+    CARD_CAPTURE_WGSL, CARD_LIGHT_HW_WGSL, CARD_LIGHT_WGSL, SDF_BAKE_WGSL, SDF_CLIPMAP_BAKE_WGSL,
+    WSRC_BAKE_HW_WGSL, WSRC_BAKE_WGSL,
 };
 mod ssgi;
 pub(super) use ssgi::{
@@ -70,6 +70,7 @@ mod ray_query_variant_tests {
             production_pt.as_ref(),
             SSGI_PROBE_TRACE_HW_WGSL,
             WSRC_BAKE_HW_WGSL,
+            CARD_LIGHT_HW_WGSL,
         ] {
             assert_eq!(
                 source.matches("rayQueryProceed").count(),
@@ -100,18 +101,47 @@ mod ray_query_variant_tests {
         );
         wgpu::naga::front::wgsl::parse_str(&hardware)
             .unwrap_or_else(|error| panic!("hardware WSRC WGSL failed: {error:?}"));
+        let card_light_hardware = format!(
+            "enable wgpu_ray_query;\n\
+             const BLOOM_RAY_QUERY_NEEDS_PROCEED: bool = false;\n\
+             {CARD_LIGHT_HW_WGSL}"
+        );
+        wgpu::naga::front::wgsl::parse_str(&card_light_hardware)
+            .unwrap_or_else(|error| panic!("hardware card-light WGSL failed: {error:?}"));
     }
 
     #[test]
-    fn indirect_sun_fallbacks_require_proven_visibility() {
-        assert!(SSGI_PROBE_TRACE_HW_WGSL
-            .contains("let direct = u.sun_color.xyz * ndotl * hw_gi_sun_visibility(hit_world);"));
-        assert!(SSGI_PROBE_TRACE_HW_WGSL
-            .contains("@group(0) @binding(13) var shadow_samp: sampler_comparison;"));
+    fn hardware_indirect_sun_visibility_is_baked_in_world_space() {
+        assert!(SSGI_PROBE_TRACE_HW_WGSL.contains("card_radiance_atlas"));
+        assert!(SSGI_PROBE_TRACE_HW_WGSL.contains(
+            "facade-sized light fragments when that sample changes"
+        ));
+        assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("stable_visibility"));
+        assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("textureSampleCompareLevel"));
+        assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("probe_sun_visibility"));
+        assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("shadow_query"));
+        assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("hw_wsrc_sun_visibility"));
+        assert!(SSGI_PROBE_TRACE_HW_WGSL.contains("return hw_gi_cap(u.sky_color.xyz * up * up);"));
+        assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("hw_wsrc_sample(origin_ws + dir_ws * max_t"));
+        assert!(CARD_LIGHT_HW_WGSL.contains("pos_ws + sun_dir * 0.02"));
+        assert!(CARD_LIGHT_HW_WGSL.contains("coarse_visibility"));
+        assert!(!CARD_LIGHT_HW_WGSL.contains("textureSampleCompareLevel"));
         assert!(CARD_LIGHT_WGSL.contains("never manufacture direct sunlight in the GI feed"));
-        assert!(WSRC_BAKE_HW_WGSL.contains("shadow = 0.0;"));
         assert!(WSRC_BAKE_HW_WGSL
-            .contains("shadow = hw_bake_sample_cascade(cascade, hit_world, u.flags.x);"));
+            .contains("cache_probe_sun_visibility = hw_bake_trace_sun_visibility(probe_pos);"));
+        assert!(WSRC_BAKE_HW_WGSL.contains("vec4<f32>(radiance, cache_probe_sun_visibility)"));
+        assert!(WSRC_BAKE_WGSL.contains("vec4<f32>(radiance, shadow)"));
+        assert!(WSRC_BAKE_HW_WGSL.contains("pos_ws + sun_dir * 0.02"));
+        assert!(!WSRC_BAKE_HW_WGSL.contains("textureSampleCompareLevel"));
+    }
+
+    #[test]
+    fn mesh_cards_reuse_material_alpha_for_captured_hit_normals() {
+        assert!(CARD_CAPTURE_WGSL.contains("let normal_oct = card_oct_encode(in.normal_os);"));
+        assert!(CARD_CAPTURE_WGSL.contains("vec4<f32>(albedo, normal_oct.x)"));
+        assert!(CARD_CAPTURE_WGSL.contains("normal_oct.y"));
+        assert!(SSGI_PROBE_TRACE_HW_WGSL.contains("vec2<f32>(albedo_sample.a, emissive_sample.a)"));
+        assert!(SSGI_PROBE_TRACE_HW_WGSL.contains("if (dot(normal_ws, incoming_dir_ws) > 0.0)"));
     }
 
     #[test]
@@ -128,12 +158,21 @@ mod ray_query_variant_tests {
         }
         assert!(!SSGI_PROBE_PLACE_WGSL.contains("let frame = u.params.x"));
         assert!(!SSGI_PROBE_PLACE_WGSL.contains("let jx ="));
-        assert!(SSGI_PROBE_TRACE_HW_WGSL
-            .contains("for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1)"));
+        assert!(SSGI_PROBE_TRACE_HW_WGSL.contains("card_radiance_atlas"));
+        assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("textureSampleCompareLevel"));
         assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("let view_z = -(u.view"));
         assert!(CARD_LIGHT_WGSL
             .contains("for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1)"));
         assert!(!CARD_LIGHT_WGSL.contains("let view_z = -(u.view_matrix"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("mix(u.params.x, 0.65, motion_refresh)"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("w_corner * w_depth * w_normal"));
+        assert_eq!(
+            SSGI_PROBE_TEMPORAL_WGSL
+                .matches("textureLoad(history_in")
+                .count(),
+            1,
+            "motion refresh must not add temporal-history texture reads"
+        );
 
         for source in [
             format!("{PROBE_HELPERS_WGSL}{SSGI_PROBE_PLACE_WGSL}"),

@@ -171,6 +171,20 @@ pub(crate) enum FrameTarget {
     Headless,
 }
 
+fn should_reconfigure_surface(status: &wgpu::CurrentSurfaceTexture, failure_count: u32) -> bool {
+    match status {
+        // A visible Metal window can report Occluded on its first drawable
+        // after a long synchronous scene import. One configure recovers that
+        // stale initial swapchain without recreating it forever while a real
+        // hidden/minimized window remains occluded.
+        wgpu::CurrentSurfaceTexture::Occluded => failure_count == 1,
+        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+            failure_count == 1 || failure_count % 60 == 0
+        }
+        _ => false,
+    }
+}
+
 impl Renderer {
     /// Acquire the frame target. `None` means the swapchain was lost and
     /// has been reconfigured — skip this frame.
@@ -191,10 +205,6 @@ impl Renderer {
                     // Metal, and because no present occurred the ordinary
                     // vsync pacing vanished too: a hidden window could spin
                     // tens of thousands of frames and consume gigabytes.
-                    let needs_reconfigure = matches!(
-                        &status,
-                        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost
-                    );
                     let status_name = match status {
                         wgpu::CurrentSurfaceTexture::Timeout => "timeout",
                         wgpu::CurrentSurfaceTexture::Occluded => "occluded",
@@ -210,10 +220,10 @@ impl Renderer {
                             "bloom: surface acquire {status_name} (count={n}) — skipping frame"
                         ));
                     }
-                    // A real lost/outdated surface normally recovers after one
-                    // configure. Retry only once per second thereafter so a
-                    // backend that remains lost cannot allocate without bound.
-                    if needs_reconfigure && (n == 1 || n % 60 == 0) {
+                    // Recover one stale first drawable, or a genuinely lost
+                    // surface at a bounded cadence. Repeated Occluded/Timeout
+                    // statuses never allocate another Metal swapchain.
+                    if should_reconfigure_surface(&status, n) {
                         surface.configure(&self.device, &self.surface_config);
                     }
                     // Fifo pacing happens at present, which this path skips.
@@ -243,5 +253,30 @@ impl Renderer {
         if let FrameTarget::Surface(t) = target {
             t.present();
         }
+    }
+}
+
+#[cfg(test)]
+mod surface_recovery_tests {
+    use super::should_reconfigure_surface;
+
+    #[test]
+    fn initial_occlusion_gets_one_bounded_recovery() {
+        let occluded = wgpu::CurrentSurfaceTexture::Occluded;
+        assert!(should_reconfigure_surface(&occluded, 1));
+        assert!(!should_reconfigure_surface(&occluded, 2));
+        assert!(!should_reconfigure_surface(&occluded, 300));
+    }
+
+    #[test]
+    fn lost_surface_retries_slowly_and_timeout_never_reconfigures() {
+        let lost = wgpu::CurrentSurfaceTexture::Lost;
+        assert!(should_reconfigure_surface(&lost, 1));
+        assert!(!should_reconfigure_surface(&lost, 2));
+        assert!(should_reconfigure_surface(&lost, 60));
+        assert!(!should_reconfigure_surface(
+            &wgpu::CurrentSurfaceTexture::Timeout,
+            1,
+        ));
     }
 }

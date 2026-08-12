@@ -273,7 +273,7 @@ fn ssgi_hiz_immediate_scene_produces_finite_indirect_radiance() {
     eprintln!(
         "hiz-corpus ssgi current={current} retained={retained} non_finite={non_finite} \
          max_luma={max_luminance:.6} probe_total_gpu_us={probe_total_gpu_us:.3} \
-         probe_gpu_us={probe_gpu_us:?} paths={paths}"
+         probe_gpu_us={probe_gpu_us:?}"
     );
     assert!(
         paths.contains("\"ssgi_trace_backend\":\"hiz-screen\""),
@@ -407,7 +407,7 @@ fn ssgi_capture_exposes_probe_history_without_normal_frame_resources() {
 }
 
 #[test]
-fn ssgi_rotation_rejects_changed_probe_surfaces() {
+fn ssgi_rotation_refreshes_changed_and_reprojected_probe_surfaces() {
     let Some(mut eng) = try_engine() else {
         eprintln!("skip: no GPU adapter");
         return;
@@ -454,11 +454,32 @@ fn ssgi_rotation_rejects_changed_probe_surfaces() {
         .pixels()
         .filter(|pixel| pixel[0] < 30 && pixel[1] > 170 && pixel[2] > 220)
         .count();
+    let motion_refreshed = reasons
+        .pixels()
+        .filter(|pixel| pixel[0] < 30 && pixel[1] > 40 && pixel[1] < 100 && pixel[2] > 220)
+        .count();
+    let radiance_refreshed = reasons
+        .pixels()
+        .filter(|pixel| pixel[0] > 220 && pixel[1] < 40 && pixel[2] > 160)
+        .count();
+    let offscreen_refreshed = reasons
+        .pixels()
+        .filter(|pixel| pixel[0] > 220 && pixel[1] < 60 && pixel[2] < 30)
+        .count();
     let total = u64::from(reasons.width()) * u64::from(reasons.height());
-    eprintln!("temporal-corpus ssgi-motion changed_surface={changed_surface} total={total}");
+    eprintln!(
+        "temporal-corpus ssgi-motion changed_surface={changed_surface} \
+         motion_refreshed={motion_refreshed} radiance_refreshed={radiance_refreshed} \
+         offscreen_refreshed={offscreen_refreshed} total={total}"
+    );
     assert!(
-        u64::try_from(changed_surface).unwrap() >= total / 2,
-        "camera motion did not reject probe history from changed surfaces"
+        u64::try_from(
+            changed_surface + motion_refreshed + radiance_refreshed + offscreen_refreshed,
+        )
+        .unwrap()
+            >= total / 2,
+        "camera motion neither rejected changed probe surfaces nor refreshed \
+         reprojected history"
     );
 
     if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
@@ -466,4 +487,270 @@ fn ssgi_rotation_rejects_changed_probe_surfaces() {
     } else {
         let _ = std::fs::remove_dir_all(directory);
     }
+}
+
+#[test]
+fn detailed_bistro_ssgi_is_camera_path_stable_at_same_endpoint() {
+    let Some(scene_path) = std::env::var_os("BLOOM_BISTRO_SSGI_SCENE").map(PathBuf::from) else {
+        eprintln!("skip: BLOOM_BISTRO_SSGI_SCENE is not set");
+        return;
+    };
+    let _guard = lock_rt_goldens();
+    let endpoint_settle_frames = std::env::var("BLOOM_BISTRO_SSGI_SETTLE_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let shadows_enabled =
+        std::env::var_os("BLOOM_BISTRO_SSGI_SHADOWS").is_none_or(|value| value != "0");
+    let shadow_always_fresh = std::env::var_os("BLOOM_BISTRO_SSGI_SHADOW_ALWAYS_FRESH").is_some();
+
+    fn attach_model_placements(eng: &mut EngineState, source_path: &Path) {
+        let data = std::fs::read(source_path).expect("read detailed Bistro glTF");
+        let model_handle = eng.models.load_model_with_textures_from_source_path(
+            &data,
+            source_path,
+            &mut eng.renderer,
+        );
+        assert!(model_handle > 0.0, "load detailed Bistro glTF");
+        let placements = {
+            let model = eng.models.get(model_handle).expect("loaded Bistro model");
+            model
+                .meshes
+                .iter()
+                .enumerate()
+                .map(|(index, mesh)| {
+                    (
+                        std::sync::Arc::clone(mesh),
+                        model.mesh_transform(index),
+                        model.mesh_cast_shadow(index),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        eprintln!("detailed-bistro placements={}", placements.len());
+        assert_eq!(
+            placements.len(),
+            1_176,
+            "unexpected Bistro placement corpus"
+        );
+
+        for (mesh, source_transform, cast_shadow) in placements {
+            let node = eng.scene.create_node();
+            let mut transmission = mesh.transmission;
+            let axis_length = |column: usize| {
+                let x = source_transform[column][0];
+                let y = source_transform[column][1];
+                let z = source_transform[column][2];
+                (x * x + y * y + z * z).sqrt()
+            };
+            transmission.baked_thickness_scale *=
+                (axis_length(0) + axis_length(1) + axis_length(2)) / 3.0;
+
+            eng.scene.update_shared_model_geometry(
+                node,
+                std::sync::Arc::clone(&mesh),
+                source_transform,
+            );
+            eng.scene.set_cast_shadow(node, cast_shadow);
+            if let Some(texture) = mesh.texture_idx {
+                eng.scene.set_material_texture(node, texture);
+            }
+            if let Some(texture) = mesh.normal_texture_idx {
+                eng.scene.set_material_normal_texture(node, texture);
+            }
+            if let Some(texture) = mesh.metallic_roughness_texture_idx {
+                eng.scene
+                    .set_material_metallic_roughness_texture(node, texture);
+            }
+            eng.scene
+                .set_material_specular_glossiness_factor(node, mesh.specular_glossiness_factor);
+            if let Some(texture) = mesh.emissive_texture_idx {
+                eng.scene.set_material_emissive_texture(node, texture);
+            }
+            eng.scene.set_material_emissive_factor(
+                node,
+                mesh.emissive_factor[0],
+                mesh.emissive_factor[1],
+                mesh.emissive_factor[2],
+            );
+            eng.scene
+                .set_material_pbr(node, mesh.roughness_factor, mesh.metallic_factor);
+            eng.scene.set_material_gltf_alpha(
+                node,
+                mesh.alpha_mode,
+                mesh.alpha_cutoff,
+                mesh.double_sided,
+            );
+            eng.scene
+                .set_material_alpha_coverage_mips(node, mesh.alpha_coverage_mips);
+            eng.scene.set_material_transmission(node, transmission);
+            eng.scene.set_material_layered_pbr(node, mesh.layered_pbr);
+        }
+    }
+
+    fn configure(eng: &mut EngineState, shadows_enabled: bool, shadow_always_fresh: bool) {
+        let renderer = &mut eng.renderer;
+        renderer.apply_quality_preset(4);
+        renderer.set_render_scale(1.0);
+        renderer.set_taa_enabled(false);
+        renderer.set_ssao_enabled(false);
+        renderer.set_ssr_enabled(false);
+        renderer.set_ssgi_enabled(true);
+        renderer.set_ssgi_radius(2.3);
+        renderer.set_ssgi_intensity(1.1);
+        renderer.set_bloom_enabled(false);
+        renderer.set_motion_blur_enabled(false);
+        renderer.set_sss_enabled(false);
+        renderer.set_sharpen_strength(0.0);
+        renderer.set_auto_exposure(false);
+        renderer.set_manual_exposure(1.2);
+        renderer.set_shadows_enabled(shadows_enabled);
+        renderer.shadow_map.always_fresh = shadow_always_fresh;
+    }
+
+    fn draw(eng: &mut EngineState, camera_x: f32, camera_z: f32) {
+        const YAW: f32 = -0.344;
+        let forward_x = -YAW.sin();
+        let forward_z = -YAW.cos();
+        let renderer = &mut eng.renderer;
+        renderer.set_clear_color(5.0, 7.0, 12.0, 255.0);
+        renderer.begin_mode_3d(
+            camera_x,
+            1.544,
+            camera_z,
+            camera_x + forward_x * 100.0,
+            1.544,
+            camera_z + forward_z * 100.0,
+            0.0,
+            1.0,
+            0.0,
+            60.0,
+            0.0,
+        );
+        renderer.set_ambient_light(255.0, 245.0, 232.0, 0.06);
+        renderer.set_directional_light(0.59732, 0.79653, -0.0935387, 255.0, 212.0, 177.0, 2.60);
+    }
+
+    fn frame(eng: &mut EngineState, camera_x: f32, camera_z: f32) {
+        eng.begin_frame();
+        draw(eng, camera_x, camera_z);
+        eng.end_frame();
+    }
+
+    fn capture(
+        scene_path: &Path,
+        moved: bool,
+        endpoint_settle_frames: usize,
+        shadows_enabled: bool,
+        shadow_always_fresh: bool,
+        label: &str,
+    ) -> (Vec<u8>, image::RgbaImage, String) {
+        let Some((mut eng, _)) = try_engine_rt().expect("create ray-query Bistro engine") else {
+            panic!("detailed Bistro SSGI qualification requires hardware ray query");
+        };
+        configure(&mut eng, shadows_enabled, shadow_always_fresh);
+        attach_model_placements(&mut eng, scene_path);
+
+        const START_X: f32 = -3.2720;
+        const START_Z: f32 = 7.2358;
+        const END_X: f32 = START_X + 3.748170285;
+        const END_Z: f32 = START_Z + 4.685212856;
+        if moved {
+            for _ in 0..96 {
+                frame(&mut eng, START_X, START_Z);
+            }
+            for step in 1..=60 {
+                let t = step as f32 / 60.0;
+                frame(
+                    &mut eng,
+                    START_X + (END_X - START_X) * t,
+                    START_Z + (END_Z - START_Z) * t,
+                );
+            }
+            for _ in 0..endpoint_settle_frames {
+                frame(&mut eng, END_X, END_Z);
+            }
+        } else {
+            for _ in 0..(156 + endpoint_settle_frames) {
+                frame(&mut eng, END_X, END_Z);
+            }
+        }
+
+        let profile_frames = std::env::var("BLOOM_BISTRO_SSGI_PROFILE_FRAMES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        if profile_frames > 0 {
+            eng.profiler.set_enabled(true);
+            for _ in 0..profile_frames {
+                frame(&mut eng, END_X, END_Z);
+            }
+            let timings = eng
+                .profiler
+                .snapshot()
+                .into_iter()
+                .filter_map(|(label, _, gpu)| {
+                    (label.starts_with("probe_") || label == "wsrc_bake_pass")
+                        .then_some((label, gpu?))
+                })
+                .collect::<Vec<_>>();
+            eprintln!("detailed-bistro-ssgi profile={timings:?}");
+            eng.profiler.set_enabled(false);
+        }
+
+        let directory =
+            std::env::temp_dir().join(format!("bloom-bistro-ssgi-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        eng.renderer.pending_quality_capture_dir = Some(directory.to_string_lossy().into_owned());
+        let (_, _, output) = render(&mut eng, 1, |eng| draw(eng, END_X, END_Z));
+        let ssgi = image::open(directory.join("ssgi.png"))
+            .expect("Bistro capture did not emit raw SSGI")
+            .to_rgba8();
+        let paths = eng.renderer.quality_runtime_paths_json();
+        if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
+            eprintln!("kept detailed Bistro SSGI diagnostics at {directory:?}");
+        } else {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+        (output, ssgi, paths)
+    }
+
+    let (moved_output, moved_ssgi, moved_paths) = capture(
+        &scene_path,
+        true,
+        endpoint_settle_frames,
+        shadows_enabled,
+        shadow_always_fresh,
+        "moved",
+    );
+    let (direct_output, direct_ssgi, direct_paths) = capture(
+        &scene_path,
+        false,
+        endpoint_settle_frames,
+        shadows_enabled,
+        shadow_always_fresh,
+        "direct",
+    );
+    assert!(
+        moved_paths.contains("\"ssgi_trace_backend\":\"hw-ray-query\"")
+            && direct_paths.contains("\"ssgi_trace_backend\":\"hw-ray-query\""),
+        "Bistro endpoint oracle did not run hardware SSGI"
+    );
+    assert_eq!(moved_ssgi.dimensions(), direct_ssgi.dimensions());
+    let (ssgi_w, ssgi_h) = moved_ssgi.dimensions();
+    let ssgi_metrics =
+        calculate_diff_metrics(moved_ssgi.as_raw(), direct_ssgi.as_raw(), ssgi_w, ssgi_h);
+    let output_metrics = calculate_diff_metrics(&moved_output, &direct_output, W, H);
+    eprintln!(
+        "detailed-bistro-ssgi endpoint shadows={shadows_enabled} \
+         shadow_always_fresh={shadow_always_fresh} \
+         settle_frames={endpoint_settle_frames} \
+         raw={ssgi_metrics:?} output={output_metrics:?}"
+    );
+
+    assert!(
+        ssgi_metrics.ssim >= 0.9995 && output_metrics.ssim >= 0.9998,
+        "detailed Bistro SSGI retained camera-path-dependent lighting: \
+         raw={ssgi_metrics:?}, output={output_metrics:?}"
+    );
 }
