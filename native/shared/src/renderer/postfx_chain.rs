@@ -109,6 +109,15 @@ fn exposure_update_rate(history_valid: bool, authored_rate: f32) -> f32 {
 }
 
 #[inline]
+fn ssgi_composite_weight(ssgi_enabled: bool, path_tracer_owns_frame: bool) -> f32 {
+    if ssgi_enabled && !path_tracer_owns_frame {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+#[inline]
 fn bloom_mip_extent(width: u32, height: u32, mip_index: usize) -> (u32, u32) {
     (
         ((width / 2) >> mip_index).max(1),
@@ -346,7 +355,8 @@ impl Renderer {
 mod tests {
     use super::{
         bloom_mip_extent, bloom_threshold, exposure_update_rate, reactive_taa_cache_key,
-        taa_camera_moving, taa_current_weight, CompositeSource, PostFxSource, SsrCompositeSource,
+        ssgi_composite_weight, taa_camera_moving, taa_current_weight, CompositeSource,
+        PostFxSource, SsrCompositeSource,
     };
 
     #[test]
@@ -484,6 +494,16 @@ mod tests {
         assert_eq!(exposure_update_rate(false, 0.05), -1.0);
         assert_eq!(exposure_update_rate(true, 0.05), 0.05);
     }
+
+    #[test]
+    fn scene_compose_never_samples_stale_ssgi_output() {
+        assert_eq!(ssgi_composite_weight(true, false), 1.0);
+        assert_eq!(ssgi_composite_weight(false, false), 0.0);
+        assert_eq!(ssgi_composite_weight(true, true), 0.0);
+        assert_eq!(ssgi_composite_weight(false, true), 0.0);
+        assert!(super::SCENE_COMPOSE_SHADER_WGSL
+            .contains("textureSampleLevel(ssgi_tex, ssgi_samp, in.uv, 0.0).rgb * u.misc.w"));
+    }
 }
 
 impl Renderer {
@@ -551,6 +571,11 @@ impl Renderer {
             // misc.y = procedural-sky aerial-perspective on/off flag.
             // The scene_compose shader reads this to decide between
             // the legacy 16-step fog march and the V2 3D LUT sample.
+            // misc.w gates SSGI composition. The render graph omits the SSGI
+            // node when disabled, so its old resolve texture is deliberately
+            // left untouched; a composition gate prevents that stale history
+            // from leaking through on the first disabled frame without adding
+            // a clear pass or any steady-state cost.
             misc: [
                 effective_bloom_intensity,
                 if self.procedural_sky_enabled {
@@ -559,7 +584,7 @@ impl Renderer {
                     0.0
                 },
                 AERIAL_MAX_DIST_KM,
-                0.0,
+                ssgi_composite_weight(self.ssgi_enabled, self.pt_owns_frame()),
             ],
             inv_vp: inv_vp_current,
             fog_color_density: [

@@ -557,7 +557,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // is scaled by the user-tuned intensity.
     let hdr = textureSampleLevel(hdr_tex, hdr_samp, in.uv, 0.0).rgb;
     let ssr = textureSampleLevel(ssr_tex, ssr_samp, in.uv, 0.0).rgb;
-    let ssgi = textureSampleLevel(ssgi_tex, ssgi_samp, in.uv, 0.0).rgb;
+    let ssgi = textureSampleLevel(ssgi_tex, ssgi_samp, in.uv, 0.0).rgb * u.misc.w;
     let albedo_sample = textureSampleLevel(albedo_tex, albedo_samp, in.uv, 0.0);
     let albedo = albedo_sample.rgb;
     // albedo.a carries `1 - shadow_factor` from the scene pass — how
