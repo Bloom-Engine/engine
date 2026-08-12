@@ -479,15 +479,11 @@ fn glossy_textured_temporal_reconstruction_tracks_supersampled_reference() {
     );
 }
 
-#[test]
-fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
+fn glossy_slow_pan_metrics(render_scale: f32) -> Option<(f64, f64, f64, f64, Vec<f64>)> {
     const FRAMES: usize = 12;
     const CAMERA_STEP: f32 = 0.004;
 
-    let Some(mut eng) = try_engine() else {
-        eprintln!("skip: no GPU adapter");
-        return;
-    };
+    let mut eng = try_engine()?;
     install_glossy_detail_fixture(&mut eng);
 
     eng.renderer.resize(W * 2, H * 2, W * 2, H * 2);
@@ -500,7 +496,7 @@ fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
     }
 
     eng.renderer.resize(W, H, W, H);
-    configure_glossy_detail_capture(&mut eng.renderer, true, 0.75);
+    configure_glossy_detail_capture(&mut eng.renderer, true, render_scale);
     let _ = render(&mut eng, 24, |eng| draw_glossy_detail_fixture(eng, 0.0));
     let mut candidates = Vec::with_capacity(FRAMES);
     for frame in 0..FRAMES {
@@ -528,10 +524,28 @@ fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
         .collect::<Vec<_>>();
     let derivative_error = derivative_errors.iter().sum::<f64>() / (FRAMES - 1) as f64;
     eprintln!(
-        "glossy-slow-pan mean_rgb={mean_rgb:.6} mean_ssim={mean_ssim:.6} \
+        "glossy-slow-pan scale={render_scale:.2} mean_rgb={mean_rgb:.6} \
+         mean_ssim={mean_ssim:.6} \
          minimum_ssim={minimum_ssim:.6} derivative_error={derivative_error:.6} \
          derivative_frames={derivative_errors:?}"
     );
+
+    Some((
+        mean_rgb,
+        mean_ssim,
+        minimum_ssim,
+        derivative_error,
+        derivative_errors,
+    ))
+}
+
+#[test]
+fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
+    let Some((_, mean_ssim, minimum_ssim, derivative_error, _)) = glossy_slow_pan_metrics(0.75)
+    else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
 
     assert!(
         mean_ssim >= 0.955 && minimum_ssim >= 0.945,
@@ -541,6 +555,32 @@ fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
     assert!(
         derivative_error <= 0.40,
         "fractional glossy slow pan added excessive temporal variation: \
+         derivative_error={derivative_error:.6}"
+    );
+}
+
+#[test]
+fn native_glossy_slow_pan_tracks_supersampled_motion() {
+    let Some((mean_rgb, mean_ssim, minimum_ssim, derivative_error, _)) =
+        glossy_slow_pan_metrics(1.0)
+    else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+
+    assert!(
+        mean_ssim >= 0.985 && minimum_ssim >= 0.980,
+        "native glossy slow pan diverged from supersampled motion: \
+         mean_ssim={mean_ssim:.6}, minimum_ssim={minimum_ssim:.6}"
+    );
+    assert!(
+        mean_rgb <= 0.85,
+        "native glossy slow pan exceeded the supersampled-reference RGB gate: \
+         mean_rgb={mean_rgb:.6}"
+    );
+    assert!(
+        derivative_error <= 0.30,
+        "native glossy slow pan added excessive temporal variation: \
          derivative_error={derivative_error:.6}"
     );
 }
