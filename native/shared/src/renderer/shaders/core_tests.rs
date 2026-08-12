@@ -56,6 +56,14 @@ fn shadow_cascade_blend_never_samples_outside_the_next_fit() {
 }
 
 #[test]
+fn shadow_cascade_blend_uses_one_continuous_receiver_position() {
+    assert!(SCENE_SHADER.contains("fit_r = mix(fit_r, next_fit_r, toward_next);"));
+    assert!(SCENE_SHADER
+        .contains("lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(recv_pos, 1.0)"));
+    assert!(!SCENE_SHADER.contains("let next_pos = world_pos + geo_n"));
+}
+
+#[test]
 fn selected_shadow_cascade_miss_hands_off_instead_of_punching_a_lit_hole() {
     assert!(SCENE_SHADER.contains("for (var handoff = 0; handoff < 2; handoff = handoff + 1)"));
     assert!(SCENE_SHADER.contains("cascade = cascade + 1;"));
@@ -66,10 +74,8 @@ fn selected_shadow_cascade_miss_hands_off_instead_of_punching_a_lit_hole() {
 fn masked_coverage_phase_follows_authored_texture_coordinates() {
     wgpu::naga::front::wgsl::parse_str(SCENE_SHADER)
         .unwrap_or_else(|error| panic!("ordinary scene WGSL failed: {error:?}"));
-    assert!(
-        SCENE_SHADER.contains("fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>)")
-    );
-    assert!(SCENE_SHADER.contains("wrapped_uv * vec2<f32>(dimensions)"));
+    assert!(SCENE_SHADER.contains("let phase_lod = max(floor(lod), 1.0);"));
+    assert!(SCENE_SHADER.contains("wrapped_uv * mip_dimensions"));
     assert!(!SCENE_SHADER.contains("mask_coverage_threshold(in.clip_position.xy"));
 }
 

@@ -154,30 +154,28 @@ fn sample_sun_shadow_n(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
   // is ~2×split distance, mapped across the cascade map's width.
   // textureDimensions keeps this honest if CASCADE_MAP_SIZE changes.
   //
-  // Near a split boundary sample_sun_shadow blends in the NEXT cascade,
-  // whose texels are larger — an offset sized for this cascade
-  // under-biases that sample and paints acne bands exactly in the blend
-  // zones (the deferred core path hit the same thing). Size the offset
-  // by the next cascade's texel when inside its blend zone.
+  // Near a split boundary sample_sun_shadow blends in the NEXT cascade.
+  // Both maps must compare the same receiver position: abruptly switching to
+  // the next cascade's larger normal offset creates two displaced edges and a
+  // camera-following dark/light stroke. Interpolate the world-space offset
+  // continuously across the same blend interval instead.
   var split_far = view.shadow_splits.z;
   if (cascade == 0u) { split_far = view.shadow_splits.x; }
   else if (cascade == 1u) { split_far = view.shadow_splits.y; }
   var split_near = 0.0;
   if (cascade == 1u) { split_near = view.shadow_splits.x; }
   else if (cascade == 2u) { split_near = view.shadow_splits.y; }
-  var eff_cascade = cascade;
-  if (cascade < 2u && (split_far - view_depth) < (split_far - split_near) * 0.1) {
-    eff_cascade = cascade + 1u;
-    if (eff_cascade == 1u) { split_far = view.shadow_splits.y; }
-    else { split_far = view.shadow_splits.z; }
+  let blend_zone = (split_far - split_near) * 0.1;
+  let dist_to_edge = split_far - view_depth;
+  var receiver_fit = split_far;
+  if (cascade < 2u && dist_to_edge < blend_zone) {
+    var next_fit = view.shadow_splits.z;
+    if (cascade == 0u) { next_fit = view.shadow_splits.y; }
+    let toward_next = clamp(1.0 - dist_to_edge / blend_zone, 0.0, 1.0);
+    receiver_fit = mix(receiver_fit, next_fit, toward_next);
   }
-  var dims: vec2<u32>;
-  switch (eff_cascade) {
-    case 0u: { dims = textureDimensions(shadow_tex_0); }
-    case 1u: { dims = textureDimensions(shadow_tex_1); }
-    default: { dims = textureDimensions(shadow_tex_2); }
-  }
-  let texel_ws = (2.0 * split_far) / f32(dims.x);
+  let map_dim = f32(textureDimensions(shadow_tex_0).x);
+  let texel_ws = (2.0 * receiver_fit) / map_dim;
   // Slope-adaptive: at grazing sun incidence one shadow texel spans many
   // times its footprint in receiver depth, so the fixed 1.5-texel offset
   // still stripes walls that run nearly parallel to the light and distant

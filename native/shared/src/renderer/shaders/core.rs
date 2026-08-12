@@ -285,9 +285,14 @@ fn compute_tbn(dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>,
 // screen-pixel phase stayed fixed while a leaf moved underneath it, so TAA
 // reprojected a different binary silhouette on every camera step. The shadow
 // pass had the same defect in light-map pixels, re-rolling foliage shadows
-// whenever a cascade refit. Base-texel anchoring gives scene color, depth,
-// velocity and shadows one persistent authored-space decision.
-fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>) -> f32 {
+// whenever a cascade refit. Authored-coordinate anchoring gives scene color,
+// depth, velocity and shadows one persistent material-space decision; its
+// frequency follows the sampled coverage mip so minification stays band-limited.
+fn mask_coverage_threshold(
+    uv: vec2<f32>,
+    dimensions: vec2<u32>,
+    lod: f32,
+) -> f32 {
     let bayer = array<f32, 16>(
          0.5 / 16.0,  8.5 / 16.0,  2.5 / 16.0, 10.5 / 16.0,
         12.5 / 16.0,  4.5 / 16.0, 14.5 / 16.0,  6.5 / 16.0,
@@ -295,7 +300,21 @@ fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>) -> f32 {
         15.5 / 16.0,  7.5 / 16.0, 13.5 / 16.0,  5.5 / 16.0,
     );
     let wrapped_uv = uv - floor(uv);
-    let texel = vec2<u32>(floor(wrapped_uv * vec2<f32>(dimensions)));
+    // Lower alpha mips already describe the complete source footprint as one
+    // coverage probability. Repeating the threshold at level-zero texel
+    // frequency reintroduced all of the invisible source detail as a binary
+    // pattern: one screen pixel crossed many decisions while the camera moved,
+    // producing foliage sparkle. Anchor the pattern to the nearest owning mip
+    // instead. Quantising the phase LOD keeps it fixed between mip boundaries;
+    // TAA only has to absorb the occasional boundary transition, not a new
+    // decision on every subpixel camera step.
+    let phase_lod = max(floor(lod), 1.0);
+    let mip_scale = exp2(-phase_lod);
+    let mip_dimensions = max(
+        floor(vec2<f32>(dimensions) * mip_scale),
+        vec2<f32>(1.0),
+    );
+    let texel = vec2<u32>(floor(wrapped_uv * mip_dimensions));
     let x = texel.x & 3u;
     let y = texel.y & 3u;
     return bayer[y * 4u + x];
@@ -326,7 +345,7 @@ fn mask_coverage_survives(
     // from authored level-zero alpha to lower levels whose alpha is coverage.
     let blend = smoothstep(0.5, 1.0, lod);
     let probability = mix(hard_coverage, lower_mip_coverage, blend);
-    return probability >= mask_coverage_threshold(uv, dimensions);
+    return probability >= mask_coverage_threshold(uv, dimensions, max(lod, 1.0));
 }
 
 // Exact piecewise sRGB → linear, matching bloom-reference's
@@ -496,6 +515,34 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
     } else if (cascade == 1) {
         fit_r = lighting.shadow_cascade_splits.y;
     }
+
+    // A cascade transition must compare both maps at ONE receiver position.
+    // The former path offset the current sample by this cascade's texel size
+    // and the next sample by the next cascade's much coarser texel size. That
+    // produced two displaced shadow edges; their 10% blend band was a broad
+    // dark/light stroke that followed the camera across otherwise static
+    // streets and walls. Smooth the receiver offset across the blend region,
+    // then reuse that position for both depth comparisons. At either end it
+    // exactly matches the owning cascade, so crossing a split is continuous.
+    var offset_split_near = 0.0;
+    var offset_split_far = lighting.shadow_cascade_splits.x;
+    if (cascade == 1) {
+        offset_split_near = lighting.shadow_cascade_splits.x;
+        offset_split_far = lighting.shadow_cascade_splits.y;
+    } else if (cascade == 2) {
+        offset_split_near = lighting.shadow_cascade_splits.y;
+        offset_split_far = lighting.shadow_cascade_splits.z;
+    }
+    let offset_blend_zone = (offset_split_far - offset_split_near) * 0.1;
+    let offset_dist_to_edge = offset_split_far - view_depth;
+    if (cascade < 2 && offset_dist_to_edge < offset_blend_zone) {
+        var next_fit_r = lighting.shadow_cascade_splits.z;
+        if (cascade == 0) {
+            next_fit_r = lighting.shadow_cascade_splits.y;
+        }
+        let toward_next = clamp(1.0 - offset_dist_to_edge / offset_blend_zone, 0.0, 1.0);
+        fit_r = mix(fit_r, next_fit_r, toward_next);
+    }
     var recv_pos = world_pos + geo_n * (2.0 * fit_r / map_dim) * 1.5;
 
     // Project through the selected cascade's VP. A retained translation-slack
@@ -552,15 +599,10 @@ fn sample_shadow(world_pos: vec3<f32>, geo_n: vec3<f32>) -> f32 {
 
     if (dist_to_edge < blend_zone && cascade < 2) {
         // In the blend zone: sample the next cascade too and lerp.
-        // Same normal-offset receiver bias, scaled to the NEXT cascade's
-        // texel size (it is coarser, so the offset grows accordingly).
+        // `recv_pos` was smoothly sized for this transition above. Sampling
+        // both maps at that same world-space point prevents a double edge.
         let next_cascade = cascade + 1;
-        var next_fit = lighting.shadow_cascade_splits.z;
-        if (next_cascade == 1) {
-            next_fit = lighting.shadow_cascade_splits.y;
-        }
-        let next_pos = world_pos + geo_n * (2.0 * next_fit / map_dim) * 1.5;
-        let next_clip = lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(next_pos, 1.0);
+        let next_clip = lighting.shadow_cascade_vps[next_cascade] * vec4<f32>(recv_pos, 1.0);
         let next_ndc = next_clip.xyz / next_clip.w;
         // The next fitted slice may not cover the inner blend zone. Never
         // turn its clamped edge texel into a moving, falsely-lit shadow gap.
@@ -728,6 +770,7 @@ fn fs_depth_prepass(in: VertexOutputScene) {
                 survives = coverage >= mask_coverage_threshold(
                     in.uv,
                     textureDimensions(base_color_tex),
+                    mask_lod,
                 );
             } else {
                 let authored_alpha =
@@ -857,6 +900,7 @@ fn shade_main_scene(in: VertexOutputScene, front_facing: bool) -> SceneOut {
                 survives = coverage >= mask_coverage_threshold(
                     in.uv,
                     textureDimensions(base_color_tex),
+                    mask_lod,
                 );
             } else {
                 let authored_alpha =

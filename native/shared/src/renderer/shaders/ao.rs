@@ -409,17 +409,21 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // --- Temporal accumulation ---
     // Reproject previous-frame history via the velocity buffer. Use
-    // `textureLoad` (nearest, no sampler — velocity's bind-group
-    // entry is filterable:false). With TSR on (the default since
-    // ticket 001), the velocity RT is created at `render_extent()`
-    // = half-res, matching the SSAO pass dimensions 1:1 — so the
-    // integer coord is just `px`, NOT `px*2`. The earlier `px*2`
-    // read velocity at 2× offset, which sent 75% of SSAO pixels
-    // out of bounds (returns zero → history reprojected from the
-    // same screen pixel even during camera motion → stale geometry
-    // blended in over 4 frames → scene-wide darkening while
-    // turning + per-pixel floor sparkle from stale-history noise).
-    let vel = textureLoad(velocity_tex, vec2<i32>(px), 0).rg;
+    // `textureLoad` (nearest, no sampler — velocity's bind-group entry is
+    // filterable:false). GTAO is always half surface resolution, while the
+    // velocity target follows `render_extent()`: the two only happen to be
+    // 1:1 at render scale 0.5. Reading velocity at `px` therefore sampled the
+    // upper-left quarter of a native-scale target, reprojecting most AO from
+    // unrelated geometry while the camera moved. Map the GTAO pixel centre
+    // through normalized UV so every render scale addresses the same screen
+    // position. This remains exactly `px` when both targets are equal-sized.
+    let velocity_size = vec2<i32>(textureDimensions(velocity_tex));
+    let velocity_coord = clamp(
+        vec2<i32>(uv * vec2<f32>(velocity_size)),
+        vec2<i32>(0),
+        velocity_size - vec2<i32>(1),
+    );
+    let vel = textureLoad(velocity_tex, velocity_coord, 0).rg;
     let prev_uv = vec2<f32>(uv.x - vel.x, uv.y + vel.y);
     let reproj_oob = prev_uv.x < 0.0 || prev_uv.x > 1.0
                   || prev_uv.y < 0.0 || prev_uv.y > 1.0;
@@ -446,7 +450,17 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // reprojection breaks (off-screen history / first frames).
     let force_refresh = reproj_oob || u.size.w != 0u;
     let ao_in = clamp(ao_raw, history_ao - 0.15, history_ao + 0.15);
-    let alpha = select(u.temporal.x, 1.0, force_refresh);
+    // A static 0.25 alpha is correct for reconstructing the four GTAO
+    // direction phases while the receiver stays put, but it retains a
+    // visibly dark wake on newly revealed surfaces during camera motion.
+    // Qualify the blend from the velocity already fetched above: static
+    // pixels keep the full four-frame reconstruction, while meaningful
+    // motion converges in roughly one frame. The bounded `ao_in` still caps
+    // any single-frame stochastic excursion, so faster convergence does not
+    // turn the two-direction estimate into sparkle.
+    let motion_refresh = smoothstep(0.0005, 0.008, length(vel));
+    let temporal_alpha = mix(u.temporal.x, 0.85, motion_refresh);
+    let alpha = select(temporal_alpha, 1.0, force_refresh);
     let ao = mix(history_ao, select(ao_in, ao_raw, force_refresh), alpha);
 
     // Contrast + floor (exact curve preserved).
@@ -567,3 +581,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(ao_blurred, center.g, 0.0, 1.0);
 }
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::SSAO_SHADER_WGSL;
+
+    #[test]
+    fn gtao_reprojection_maps_normalized_uv_into_velocity_extent() {
+        wgpu::naga::front::wgsl::parse_str(SSAO_SHADER_WGSL)
+            .unwrap_or_else(|error| panic!("GTAO WGSL failed: {error:?}"));
+        assert!(SSAO_SHADER_WGSL
+            .contains("let velocity_size = vec2<i32>(textureDimensions(velocity_tex));"));
+        assert!(SSAO_SHADER_WGSL.contains("vec2<i32>(uv * vec2<f32>(velocity_size))"));
+        assert!(SSAO_SHADER_WGSL.contains("textureLoad(velocity_tex, velocity_coord, 0).rg"));
+        assert!(!SSAO_SHADER_WGSL.contains("textureLoad(velocity_tex, vec2<i32>(px), 0).rg"));
+    }
+
+    #[test]
+    fn gtao_history_refreshes_during_motion_without_another_velocity_sample() {
+        let module = wgpu::naga::front::wgsl::parse_str(SSAO_SHADER_WGSL)
+            .expect("GTAO shader must remain valid WGSL");
+        assert!(!module.entry_points.is_empty());
+        assert!(SSAO_SHADER_WGSL
+            .contains("let motion_refresh = smoothstep(0.0005, 0.008, length(vel));"));
+        assert!(SSAO_SHADER_WGSL
+            .contains("let temporal_alpha = mix(u.temporal.x, 0.85, motion_refresh);"));
+        assert_eq!(
+            SSAO_SHADER_WGSL.matches("textureLoad(velocity_tex").count(),
+            1
+        );
+    }
+}

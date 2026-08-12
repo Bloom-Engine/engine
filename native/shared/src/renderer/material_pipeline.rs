@@ -1153,6 +1153,8 @@ mod tests {
         assert!(source.contains("sample_shadow_cascade(cascade, world_pos, -1.0)"));
         assert!(source.contains("shadow_val < 0.0"));
         assert!(source.contains("sample_shadow_cascade(cascade + 1u, world_pos, shadow_val)"));
+        assert!(source.contains("receiver_fit = mix(receiver_fit, next_fit, toward_next);"));
+        assert!(!source.contains("eff_cascade = cascade + 1u"));
     }
 
     /// End-to-end validation: resolve the minimal test material's

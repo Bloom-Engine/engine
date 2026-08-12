@@ -356,7 +356,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<VsmGpuCaster>(), 80);
         assert_eq!(std::mem::size_of::<DrawIndexedIndirect>(), 20);
         assert_eq!(INDIRECT_COMMAND_BYTES, 20);
-        assert_eq!(MAX_CASTER_RECORDS, 65_536);
+        assert_eq!(
+            MAX_CASTER_RECORDS,
+            crate::virtual_shadows::VSM_MAX_PAGE_RENDER_BUDGET as usize
+                * crate::shadows::SHADOW_MAX_NODES as usize
+        );
     }
 
     #[test]

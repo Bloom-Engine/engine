@@ -1441,7 +1441,7 @@ pub(crate) fn directional_scene_shader(source: &str) -> String {
     );
     output = output.replace(
         "let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);",
-        "let next_val = sample_virtual_shadow(next_cascade, next_pos, next_uv, next_depth_ref);",
+        "let next_val = sample_virtual_shadow(next_cascade, recv_pos, next_uv, next_depth_ref);",
     );
     let light_index = if source.contains("let light_index = cluster_indices[") {
         "light_index"

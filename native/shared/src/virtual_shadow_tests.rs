@@ -453,7 +453,7 @@ let next_val = sample_cascade(next_cascade, next_uv, next_depth_ref);
     assert!(variant.contains("@binding(15) var<uniform> vsm_params"));
     assert_eq!(variant.matches("sample_virtual_shadow(").count(), 3);
     assert!(variant.contains("sample_virtual_shadow(cascade, recv_pos,"));
-    assert!(variant.contains("sample_virtual_shadow(next_cascade, next_pos,"));
+    assert!(variant.contains("sample_virtual_shadow(next_cascade, recv_pos,"));
     assert!(variant.contains("(vsm_params.words.x & 2u) == 0u"));
     assert!(variant.contains("level_vps: array<mat4x4<f32>, 3>"));
     assert!(!source.contains("vsm_page_table"));

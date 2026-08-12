@@ -119,7 +119,11 @@ struct VsOut {
 // Match the scene pass's authored-space coverage phase. A shadow-map pixel
 // phase changes whenever a cascade refits, which made stationary foliage cast
 // a visibly different dappled shadow as the camera moved.
-fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>) -> f32 {
+fn mask_coverage_threshold(
+    uv: vec2<f32>,
+    dimensions: vec2<u32>,
+    lod: f32,
+) -> f32 {
     let bayer = array<f32, 16>(
          0.5 / 16.0,  8.5 / 16.0,  2.5 / 16.0, 10.5 / 16.0,
         12.5 / 16.0,  4.5 / 16.0, 14.5 / 16.0,  6.5 / 16.0,
@@ -127,7 +131,16 @@ fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>) -> f32 {
         15.5 / 16.0,  7.5 / 16.0, 13.5 / 16.0,  5.5 / 16.0,
     );
     let wrapped_uv = uv - floor(uv);
-    let texel = vec2<u32>(floor(wrapped_uv * vec2<f32>(dimensions)));
+    // Match the scene pass's sampled-mip footprint. A level-zero phase at
+    // distance makes one shadow texel cross many binary leaf decisions during
+    // even a sub-texel cascade translation, which appears as bright sparkle.
+    let phase_lod = max(floor(lod), 1.0);
+    let mip_scale = exp2(-phase_lod);
+    let mip_dimensions = max(
+        floor(vec2<f32>(dimensions) * mip_scale),
+        vec2<f32>(1.0),
+    );
+    let texel = vec2<u32>(floor(wrapped_uv * mip_dimensions));
     let x = texel.x & 3u;
     let y = texel.y & 3u;
     return bayer[y * 4u + x];
@@ -167,6 +180,7 @@ fn fs_shadow_cutout(in: VsOut) {
             survives = coverage >= mask_coverage_threshold(
                 in.uv,
                 textureDimensions(base_tex),
+                lod,
             );
         } else {
             let authored_alpha =
@@ -180,6 +194,7 @@ fn fs_shadow_cutout(in: VsOut) {
             survives = probability >= mask_coverage_threshold(
                 in.uv,
                 textureDimensions(base_tex),
+                max(lod, 1.0),
             );
         }
     } else {
@@ -816,6 +831,7 @@ impl ShadowMap {
         // from cached shadow contents without changing the default path.
         if self.always_fresh {
             self.accepted_fit = [None; NUM_CASCADES];
+            self.pancake_hysteresis = [[0.0; 2]; NUM_CASCADES];
         }
 
         let len = (light_dir[0] * light_dir[0]
@@ -1156,9 +1172,8 @@ mod shader_tests {
 
     #[test]
     fn cutout_shadow_coverage_phase_follows_authored_texture_coordinates() {
-        assert!(SHADOW_SHADER_CUTOUT
-            .contains("fn mask_coverage_threshold(uv: vec2<f32>, dimensions: vec2<u32>)"));
-        assert!(SHADOW_SHADER_CUTOUT.contains("wrapped_uv * vec2<f32>(dimensions)"));
+        assert!(SHADOW_SHADER_CUTOUT.contains("let phase_lod = max(floor(lod), 1.0);"));
+        assert!(SHADOW_SHADER_CUTOUT.contains("wrapped_uv * mip_dimensions"));
         assert!(!SHADOW_SHADER_CUTOUT.contains("mask_coverage_threshold(in.pos.xy"));
     }
 }
