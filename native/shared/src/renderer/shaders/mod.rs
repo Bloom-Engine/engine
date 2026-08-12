@@ -165,6 +165,8 @@ mod ray_query_variant_tests {
             .contains("for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1)"));
         assert!(!CARD_LIGHT_WGSL.contains("let view_z = -(u.view_matrix"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("mix(u.params.x, 0.65, motion_refresh)"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("mean_luminance * 5.0"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("too concentrated for this sampling density"));
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("w_corner * w_depth * w_normal"));
         assert_eq!(
             SSGI_PROBE_TEMPORAL_WGSL

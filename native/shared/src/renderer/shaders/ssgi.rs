@@ -1341,6 +1341,7 @@ struct TemporalParams {
 // convolution that resolve actually needs. Keeping the reduction in this
 // existing workgroup avoids another texture, pass, or per-pixel 64-tap loop.
 var<workgroup> diffuse_radiance: array<vec3<f32>, 64>;
+var<workgroup> diffuse_luminance: array<f32, 64>;
 var<workgroup> reprojected_history_probe: u32;
 var<workgroup> reprojected_history_valid: u32;
 var<workgroup> reprojected_history_alpha: f32;
@@ -1487,6 +1488,45 @@ fn cs_main(
     }
 
     diffuse_radiance[lane] = blended;
+    diffuse_luminance[lane] = dot(
+        blended,
+        vec3<f32>(0.2126, 0.7152, 0.0722),
+    );
+    workgroupBarrier();
+    if (lane < 8u) {
+        var row_sum = 0.0;
+        let row_start = lane * 8u;
+        for (var column = 0u; column < 8u; column = column + 1u) {
+            row_sum = row_sum + diffuse_luminance[row_start + column];
+        }
+        diffuse_luminance[lane] = row_sum;
+    }
+    workgroupBarrier();
+    if (lane == 0u) {
+        var probe_sum = 0.0;
+        for (var row = 0u; row < 8u; row = row + 1u) {
+            probe_sum = probe_sum + diffuse_luminance[row];
+        }
+        diffuse_luminance[0] = probe_sum;
+    }
+    workgroupBarrier();
+
+    // One fixed ray that happens to intersect a tiny bright texture or lamp
+    // represents 1/64 of the sphere even when the source covers far less
+    // solid angle. Prevent that quadrature outlier from becoming a whole
+    // 16-pixel probe streak. The 8x8 octahedral grid's worst smooth cosine
+    // field is 4.21x its mean, so 5x preserves every smooth sky/sun field and
+    // only winsorizes energy too concentrated for this sampling density.
+    let ray_luminance = dot(
+        diffuse_radiance[lane],
+        vec3<f32>(0.2126, 0.7152, 0.0722),
+    );
+    let mean_luminance = diffuse_luminance[0] / 64.0;
+    let solid_angle_cap = mean_luminance * 5.0;
+    if (ray_luminance > solid_angle_cap && ray_luminance > 0.0) {
+        diffuse_radiance[lane] =
+            diffuse_radiance[lane] * (solid_angle_cap / ray_luminance);
+    }
     workgroupBarrier();
     if (lane < 32u) {
         diffuse_radiance[lane] = diffuse_radiance[lane] + diffuse_radiance[lane + 32u];
