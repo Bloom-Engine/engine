@@ -48,6 +48,22 @@ fn probe_history_geometry_valid(
             <= maximum_world_shift;
 }
 
+fn probe_history_geometry_values_valid(
+    current_world_pos: vec4<f32>,
+    current_normal: vec4<f32>,
+    previous_world_pos: vec4<f32>,
+    previous_normal: vec4<f32>,
+    maximum_world_shift: f32,
+) -> bool {
+    if (current_world_pos.w < 0.5 || previous_world_pos.w < 0.5) {
+        return false;
+    }
+    let normal_similarity = dot(current_normal.xyz, previous_normal.xyz);
+    return normal_similarity >= 0.85
+        && distance(current_world_pos.xyz, previous_world_pos.xyz)
+            <= maximum_world_shift;
+}
+
 fn oct_wrap(v: vec2<f32>) -> vec2<f32> {
     let s = vec2<f32>(
         select(-1.0, 1.0, v.x >= 0.0),
@@ -1337,14 +1353,94 @@ struct TemporalParams {
 @group(0) @binding(5) var velocity_tex: texture_2d<f32>;
 
 // The trace stores cosine-weighted incident radiance in 64 directional
-// octels. Reserve octel zero in the filtered history for the diffuse
-// convolution that resolve actually needs. Keeping the reduction in this
+// octels. Keep the filtered directional result in history and publish the
+// diffuse convolution through ProbeHeader. Keeping both operations in this
 // existing workgroup avoids another texture, pass, or per-pixel 64-tap loop.
 var<workgroup> diffuse_radiance: array<vec3<f32>, 64>;
 var<workgroup> diffuse_luminance: array<f32, 64>;
 var<workgroup> reprojected_history_probe: u32;
 var<workgroup> reprojected_history_valid: u32;
 var<workgroup> reprojected_history_alpha: f32;
+
+// Filter the current directional sample in probe space before temporal
+// accumulation. Fixed octels have the same world-space direction at every
+// probe, so matching an octel across neighboring probes is meaningful. The
+// symmetric plane test prevents foreground/background and perpendicular
+// surfaces from bleeding into each other. This is the screen-probe analogue
+// of a much wider same-plane screen-space filter, but costs no extra pass or
+// allocation and cannot recursively blur its own history.
+fn spatially_filter_current_radiance(
+    probe_xy: vec2<u32>,
+    octel: u32,
+    current: vec3<f32>,
+) -> vec3<f32> {
+    let grid_w = u32(u.params.z);
+    let grid_h = u32(u.params.w);
+    let probe_index = probe_xy.y * grid_w + probe_xy.x;
+    // Read only placement fields. Other temporal workgroups write `diffuse`
+    // in the same header buffer after their reduction; member-only accesses
+    // make these storage locations explicitly non-overlapping.
+    let center_world_pos = probes[probe_index].world_pos;
+    let center_normal = probes[probe_index].normal;
+    if (center_world_pos.w < 0.5) {
+        return current;
+    }
+
+    let probe_world_spacing =
+        2.0 * max(center_normal.w, 0.1) * u.size.z /
+        max(abs(u.size.w) * u.size.x, 0.0001);
+    let maximum_world_distance = 0.10 + probe_world_spacing * 2.25;
+    let plane_sigma = 0.025 + probe_world_spacing * 0.20;
+    var radiance_sum = current * 2.0;
+    var weight_sum = 2.0;
+
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            if (dx == 0 && dy == 0) { continue; }
+            let neighbor_xy = vec2<i32>(probe_xy) + vec2<i32>(dx, dy);
+            if (neighbor_xy.x < 0 || neighbor_xy.y < 0 ||
+                neighbor_xy.x >= i32(grid_w) || neighbor_xy.y >= i32(grid_h)) {
+                continue;
+            }
+
+            let neighbor_index =
+                u32(neighbor_xy.y) * grid_w + u32(neighbor_xy.x);
+            let neighbor_world_pos = probes[neighbor_index].world_pos;
+            let neighbor_normal = probes[neighbor_index].normal;
+            if (neighbor_world_pos.w < 0.5) { continue; }
+            let normal_similarity = clamp(
+                dot(center_normal.xyz, neighbor_normal.xyz),
+                0.0,
+                1.0,
+            );
+            if (normal_similarity < 0.85) { continue; }
+
+            let world_delta = neighbor_world_pos.xyz - center_world_pos.xyz;
+            if (length(world_delta) > maximum_world_distance) { continue; }
+            let plane_error = max(
+                abs(dot(world_delta, center_normal.xyz)),
+                abs(dot(world_delta, neighbor_normal.xyz)),
+            );
+            if (plane_error > plane_sigma * 2.5) { continue; }
+
+            let plane_weight = exp(
+                -0.5 * plane_error * plane_error /
+                max(plane_sigma * plane_sigma, 0.000001),
+            );
+            let grid_weight = select(0.5, 0.75, dx == 0 || dy == 0);
+            let weight = grid_weight * pow(normal_similarity, 8.0) * plane_weight;
+            if (weight <= 0.0001) { continue; }
+
+            let neighbor_coord = vec3<i32>(neighbor_xy, i32(octel));
+            let neighbor_radiance = bounded_probe_history(
+                textureLoad(radiance_in, neighbor_coord, 0).rgb,
+            );
+            radiance_sum = radiance_sum + neighbor_radiance * weight;
+            weight_sum = weight_sum + weight;
+        }
+    }
+    return bounded_probe_history(radiance_sum / weight_sum);
+}
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(
@@ -1358,14 +1454,16 @@ fn cs_main(
     let probe_index = wg.y * grid_w + wg.x;
     let coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
     let lane = lid.y * PROBE_OCT_SIZE + lid.x;
-    let curr = bounded_probe_history(textureLoad(radiance_in, coord, 0).rgb);
+    let unfiltered_curr = bounded_probe_history(textureLoad(radiance_in, coord, 0).rgb);
+    let curr = spatially_filter_current_radiance(wg.xy, lane, unfiltered_curr);
 
     if (lane == 0u) {
         reprojected_history_probe = probe_index;
         reprojected_history_valid = 0u;
         reprojected_history_alpha = u.params.x;
-        let current_probe = probes[probe_index];
-        if (current_probe.world_pos.w >= 0.5) {
+        let current_world_pos = probes[probe_index].world_pos;
+        let current_normal = probes[probe_index].normal;
+        if (current_world_pos.w >= 0.5) {
             let current_uv = (
                 vec2<f32>(wg.xy) * u.size.z + vec2<f32>(u.size.z * 0.5)
             ) / u.size.xy;
@@ -1397,7 +1495,7 @@ fn cs_main(
                 // radius from that footprint instead of using a fixed
                 // tolerance that collapses as resolution/depth changes.
                 let probe_world_spacing =
-                    2.0 * max(current_probe.normal.w, 0.1) * u.size.z /
+                    2.0 * max(current_normal.w, 0.1) * u.size.z /
                     max(abs(u.size.w) * u.size.x, 0.0001);
                 let maximum_world_shift = 0.05 + probe_world_spacing * 0.9;
                 var best_score = 1e30;
@@ -1410,21 +1508,24 @@ fn cs_main(
                         }
                         let candidate_index =
                             u32(candidate_xy.y) * grid_w + u32(candidate_xy.x);
-                        let candidate = probes[candidate_index];
-                        if (!probe_history_geometry_valid(
-                            current_probe,
-                            candidate,
+                        let previous_world_pos = probes[candidate_index].previous_world_pos;
+                        let previous_normal = probes[candidate_index].previous_normal;
+                        if (!probe_history_geometry_values_valid(
+                            current_world_pos,
+                            current_normal,
+                            previous_world_pos,
+                            previous_normal,
                             maximum_world_shift,
                         )) {
                             continue;
                         }
                         let world_shift = distance(
-                            current_probe.world_pos.xyz,
-                            candidate.previous_world_pos.xyz,
+                            current_world_pos.xyz,
+                            previous_world_pos.xyz,
                         );
                         let normal_penalty = 1.0 - clamp(dot(
-                            current_probe.normal.xyz,
-                            candidate.previous_normal.xyz,
+                            current_normal.xyz,
+                            previous_normal.xyz,
                         ), 0.0, 1.0);
                         let score = world_shift + normal_penalty * maximum_world_shift;
                         if (score < best_score) {
@@ -1448,12 +1549,6 @@ fn cs_main(
     );
     let geometry_valid = reprojected_history_valid != 0u;
     var hist = bounded_probe_history(textureLoad(history_in, history_coord, 0).rgb);
-    // Octel zero held the previous frame's integrated irradiance rather than
-    // directional history. Seed that one directional sample from current.
-    if (lane == 0u) {
-        hist = curr;
-    }
-
     // Fixed trace directions need less temporal smoothing during camera
     // motion. Refresh over roughly 0.1..1.5 output pixels so high-contrast
     // world-cache radiance does not trail behind its receiver, while a
@@ -1552,10 +1647,12 @@ fn cs_main(
         diffuse_radiance[0] = diffuse_radiance[0] + diffuse_radiance[1];
         // Uniform sphere samples need 4x their mean cosine-weighted
         // radiance to reproduce constant diffuse incident radiance.
-        blended = bounded_probe_history(diffuse_radiance[0] * (4.0 / 64.0));
-        probes[probe_index].diffuse = vec4<f32>(blended, 1.0);
+        let integrated = bounded_probe_history(diffuse_radiance[0] * (4.0 / 64.0));
+        probes[probe_index].diffuse = vec4<f32>(integrated, 1.0);
     }
 
+    // Every octel remains directional history. ProbeHeader carries the
+    // separately integrated result used by resolve.
     textureStore(history_out, coord, vec4<f32>(blended, 1.0));
 }
 ";
@@ -1563,13 +1660,10 @@ fn cs_main(
 /// Per-pixel probe-cache reconstruction. Writes the half-res ssgi_rt
 /// that the downstream compose / TAA passes already read.
 ///
-/// Samples the 2×2 probes whose tiles enclose the pixel's tile. For
-/// each probe, evaluates the octahedral atlas along the pixel's
-/// world-space normal, then bilateral-weights the contribution by
-/// depth-match + normal-match with the pixel itself. Invalid probes
-/// (sky) are skipped. When all 4 probes reject (pixel depth/normal
-/// wildly off), fall back to a zero contribution — better than leaking
-/// a stale distant probe's radiance into a foreground surface.
+/// Samples the 2×2 probes whose tiles enclose the pixel's tile and
+/// bilateral-weights the contribution by a symmetric world-space same-plane
+/// test plus normal match. Invalid probes (sky) are skipped. When all four
+/// probes reject, fall back to zero rather than leak a different surface.
 pub(in crate::renderer) const SSGI_PROBE_RESOLVE_WGSL: &str = "
 struct ResolveParams {
     inv_view: mat4x4<f32>,
@@ -1627,6 +1721,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let p20 = u.proj_row01.z;
     let p21 = u.proj_row01.w;
     let P_vs = view_pos_from_linear(in.uv, linear_z, p00, p11, p20, p21);
+    let P_ws = (u.inv_view * vec4<f32>(P_vs, 1.0)).xyz;
 
     // Reconstruct pixel normal (same 3-tap trick as the placement pass).
     let texel = vec2<f32>(1.0 / half_w, 1.0 / half_h);
@@ -1668,14 +1763,27 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             w_corner = w_corner * select(1.0 - tx, tx, dx == 1);
             w_corner = w_corner * select(1.0 - ty, ty, dy == 1);
 
-            // Depth + normal bilateral weights — reject probes on very
-            // different surfaces from the pixel (foreground pixel vs
-            // probe on a far wall, or on an orthogonal facet).
-            let dz = abs(probe.normal.w - linear_z);
-            let w_depth = exp(-dz * dz * 8.0);
+            // A view-depth difference rejects valid samples on an oblique
+            // wall and changes as the camera moves. Compare the receiver and
+            // probe in world space instead, accepting only the same plane.
             let ndotn = clamp(dot(probe.normal.xyz, N_ws), 0.0, 1.0);
-            let w_normal = pow(ndotn, 4.0);
-            let w = w_corner * w_depth * w_normal;
+            if (ndotn < 0.80) { continue; }
+            let world_delta = probe.world_pos.xyz - P_ws;
+            let plane_error = max(
+                abs(dot(world_delta, N_ws)),
+                abs(dot(world_delta, probe.normal.xyz)),
+            );
+            let probe_world_spacing =
+                2.0 * max(linear_z, 0.1) * tile /
+                max(abs(p00) * half_w, 0.0001);
+            let plane_sigma = 0.015 + probe_world_spacing * 0.12;
+            if (plane_error > plane_sigma * 2.5) { continue; }
+            let w_plane = exp(
+                -0.5 * plane_error * plane_error /
+                max(plane_sigma * plane_sigma, 0.000001),
+            );
+            let w_normal = pow(ndotn, 8.0);
+            let w = w_corner * w_plane * w_normal;
             if (w <= 0.0001) { continue; }
 
             let radiance = sample_probe(probe);

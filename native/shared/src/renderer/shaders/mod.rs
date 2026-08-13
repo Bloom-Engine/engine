@@ -113,9 +113,8 @@ mod ray_query_variant_tests {
     #[test]
     fn hardware_indirect_sun_visibility_is_baked_in_world_space() {
         assert!(SSGI_PROBE_TRACE_HW_WGSL.contains("card_radiance_atlas"));
-        assert!(SSGI_PROBE_TRACE_HW_WGSL.contains(
-            "facade-sized light fragments when that sample changes"
-        ));
+        assert!(SSGI_PROBE_TRACE_HW_WGSL
+            .contains("facade-sized light fragments when that sample changes"));
         assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("stable_visibility"));
         assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("textureSampleCompareLevel"));
         assert!(!SSGI_PROBE_TRACE_HW_WGSL.contains("probe_sun_visibility"));
@@ -167,7 +166,11 @@ mod ray_query_variant_tests {
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("mix(u.params.x, 0.65, motion_refresh)"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("mean_luminance * 5.0"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("too concentrated for this sampling density"));
-        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("w_corner * w_depth * w_normal"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("spatially_filter_current_radiance"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("textureStore(history_out, coord"));
+        assert!(!SSGI_PROBE_TEMPORAL_WGSL.contains("hist = curr"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("w_corner * w_plane * w_normal"));
+        assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("w_depth"));
         assert_eq!(
             SSGI_PROBE_TEMPORAL_WGSL
                 .matches("textureLoad(history_in")
@@ -180,6 +183,8 @@ mod ray_query_variant_tests {
             format!("{PROBE_HELPERS_WGSL}{SSGI_PROBE_PLACE_WGSL}"),
             format!("{PROBE_HELPERS_WGSL}{SSGI_PROBE_TRACE_SW_WGSL}"),
             format!("{PROBE_HELPERS_WGSL}{SSGI_PROBE_TRACE_SDF_WGSL}"),
+            format!("{PROBE_HELPERS_WGSL}{SSGI_PROBE_TEMPORAL_WGSL}"),
+            format!("{PROBE_HELPERS_WGSL}{SSGI_PROBE_RESOLVE_WGSL}"),
             format!("{PROBE_HELPERS_WGSL}{CARD_LIGHT_WGSL}"),
         ] {
             wgpu::naga::front::wgsl::parse_str(&source)
