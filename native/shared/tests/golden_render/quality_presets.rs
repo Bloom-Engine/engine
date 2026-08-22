@@ -222,6 +222,31 @@ fn capture_glossy_detail(
     render(eng, frames, |eng| draw_glossy_detail_fixture(eng, camera_x)).2
 }
 
+fn profile_fractional_taa(eng: &mut EngineState, frames: u32) -> f64 {
+    eng.renderer.resize(1600, 900, 1600, 900);
+    configure_glossy_detail_capture(&mut eng.renderer, true, 0.75);
+    for _ in 0..24 {
+        eng.begin_frame();
+        draw_glossy_detail_fixture(eng, 0.0);
+        eng.end_frame();
+    }
+
+    eng.profiler.set_enabled(true);
+    for _ in 0..frames.max(1) {
+        eng.begin_frame();
+        draw_glossy_detail_fixture(eng, 0.0);
+        eng.end_frame();
+    }
+    let taa_gpu_us = eng
+        .profiler
+        .snapshot()
+        .into_iter()
+        .find_map(|(label, _, gpu)| (label == "taa_pass").then_some(gpu?))
+        .unwrap_or(0.0);
+    eng.profiler.set_enabled(false);
+    taa_gpu_us
+}
+
 fn temporal_derivative_error(
     previous_reference: &[u8],
     reference: &[u8],
@@ -463,12 +488,12 @@ fn glossy_textured_temporal_reconstruction_tracks_supersampled_reference() {
          reference={reference_detail:.4}, temporal={native_detail:.4}"
     );
     assert!(
-        fractional_metrics.ssim >= 0.962,
+        fractional_metrics.ssim >= 0.972,
         "fractional reconstruction diverged on glossy authored detail: \
          {fractional_metrics:?}"
     );
     assert!(
-        fractional_detail >= reference_detail * 0.70,
+        fractional_detail >= reference_detail * 0.76,
         "fractional reconstruction erased glossy authored detail: \
          reference={reference_detail:.4}, temporal={fractional_detail:.4}"
     );
@@ -477,6 +502,11 @@ fn glossy_textured_temporal_reconstruction_tracks_supersampled_reference() {
         "fractional glossy material error exceeded the qualified baseline: \
          {fractional_metrics:?}"
     );
+    if let Ok(frames) = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_FRAMES") {
+        let frames = frames.parse::<u32>().expect("profile frame count");
+        let taa_gpu_us = profile_fractional_taa(&mut eng, frames);
+        eprintln!("fractional-reconstruction taa_gpu_us={taa_gpu_us:.3} frames={frames}");
+    }
 }
 
 fn glossy_slow_pan_metrics(render_scale: f32) -> Option<(f64, f64, f64, f64, Vec<f64>)> {
@@ -548,12 +578,12 @@ fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
     };
 
     assert!(
-        mean_ssim >= 0.955 && minimum_ssim >= 0.945,
+        mean_ssim >= 0.973 && minimum_ssim >= 0.965,
         "fractional glossy slow pan diverged from supersampled motion: \
          mean_ssim={mean_ssim:.6}, minimum_ssim={minimum_ssim:.6}"
     );
     assert!(
-        derivative_error <= 0.40,
+        derivative_error <= 0.145,
         "fractional glossy slow pan added excessive temporal variation: \
          derivative_error={derivative_error:.6}"
     );

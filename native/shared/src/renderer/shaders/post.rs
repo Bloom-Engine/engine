@@ -688,7 +688,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 /// reprojection with neighborhood clamp, blending against the
 /// history RT. For static scenes the blend converges in ~10 frames
 /// to a fully sub-pixel-resolved image.
-pub(in crate::renderer) const TAA_SHADER_WGSL: &str = "
+pub(in crate::renderer) const TAA_SHADER_WGSL: &str = concat!(
+    include_str!("taa_reconstruction.wgsl"),
+    "
 struct TaaParams {
     /// abs(x) = blend factor (current-frame weight); sign(x) = whether the
     /// unjittered camera transform moved; yz = the CURRENT frame's
@@ -756,65 +758,6 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
-// Exact separable Catmull-Rom upsample, footprint-clipped. The common five-tap
-// approximation drops the four diagonal products of the cubic's outer lobes;
-// at fractional phase its weights therefore no longer sum to one and diagonal
-// material detail is attenuated before temporal accumulation even begins.
-// Restore those four products so the reconstruction is energy preserving.
-// The history statistics below use five rather than nine source taps, keeping
-// the resolve at the same fourteen composed-texture reads per output pixel.
-// The cubic has negative lobes and can otherwise overshoot the sampled source
-// footprint, so bound it to the radiance hull of the nine fetched groups.
-fn sample_catmull_rom(
-    uv: vec2<f32>,
-    tex_size: vec2<f32>,
-    inv_size: vec2<f32>,
-) -> vec4<f32> {
-    let sample_pos = uv * tex_size;
-    let tex_pos1 = floor(sample_pos - 0.5) + 0.5;
-    let f = sample_pos - tex_pos1;
-
-    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
-    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
-    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
-    let w3 = f * f * (-0.5 + 0.5 * f);
-    let w12 = w1 + w2;
-    let offset12 = w2 / w12;
-
-    let tp0 = (tex_pos1 - 1.0) * inv_size;
-    let tp3 = (tex_pos1 + 2.0) * inv_size;
-    let tp12 = (tex_pos1 + offset12) * inv_size;
-
-    let tap0 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp0.y), 0.0);
-    let tap1 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp12.y), 0.0);
-    let tap2 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp12.y), 0.0);
-    let tap3 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp12.y), 0.0);
-    let tap4 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp3.y), 0.0);
-    let corner0 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp0.y), 0.0);
-    let corner1 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp0.y), 0.0);
-    let corner2 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp3.y), 0.0);
-    let corner3 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp3.y), 0.0);
-    let result =
-        tap0 * w12.x * w0.y +
-        tap1 * w0.x * w12.y +
-        tap2 * w12.x * w12.y +
-        tap3 * w3.x * w12.y +
-        tap4 * w12.x * w3.y +
-        corner0 * w0.x * w0.y +
-        corner1 * w3.x * w0.y +
-        corner2 * w0.x * w3.y +
-        corner3 * w3.x * w3.y;
-    let footprint_min = min(
-        min(min(tap0, tap1), min(tap2, tap3)),
-        min(min(tap4, corner0), min(min(corner1, corner2), corner3)),
-    );
-    let footprint_max = max(
-        max(max(tap0, tap1), max(tap2, tap3)),
-        max(max(tap4, corner0), max(max(corner1, corner2), corner3)),
-    );
-    return clamp(result, max(footprint_min, vec4<f32>(0.0)), footprint_max);
-}
-
 // History lives at output resolution. A bilinear lookup is exact while a
 // reprojected coordinate remains on an output texel centre, but under camera
 // or object motion it averages four already-filtered history pixels. Repeating
@@ -855,7 +798,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     // and reciprocal divisions in both stages.
     let input_size = vec2<f32>(textureDimensions(composed_tex));
     let input_texel = 1.0 / input_size;
-    let current_weight = abs(u.params.x);
+    var current_weight = abs(u.params.x);
     let camera_moving = u.params.x < 0.0;
 
     // Closest-depth velocity dilation. Sampling the low-resolution velocity
@@ -968,7 +911,46 @@ fn fs_main(in: VsOut) -> TaaOut {
         jitter_alignment = mix(static_jitter_alignment, 1.0, alignment_motion);
     }
     let src_uv = in.uv + u.params.yz * jitter_alignment;
-    let current_sample = sample_catmull_rom(src_uv, input_size, input_texel);
+    var current_sample: vec4<f32>;
+    var center_rgb: vec3<f32>;
+    var fractional_coverage = 1.0;
+    var fractional_mean = vec3<f32>(0.0);
+    var fractional_stddev = vec3<f32>(0.0);
+    var use_fractional_statistics = false;
+    // This is uniform across the draw. Keep native reconstruction and its
+    // already-qualified material response byte-for-byte unchanged.
+    if (
+        reconstruction_scale >= 0.75 &&
+        reconstruction_scale < 0.95 &&
+        current_weight < 0.999
+    ) {
+        let reconstructed = sample_fractional_lanczos2(
+            src_uv,
+            input_size,
+            input_texel,
+            reconstruction_scale,
+        );
+        current_sample = reconstructed.value;
+        center_rgb = reconstructed.center.rgb;
+        fractional_mean = reconstructed.mean;
+        fractional_stddev = reconstructed.stddev;
+        use_fractional_statistics = true;
+        // Preserve the separable kernel's phase coverage through accumulation.
+        // Its average raw weight is approximately 0.74 over a jitter cycle;
+        // normalizing around that mean keeps Bloom's authored temporal window
+        // while low-coverage phases contribute proportionally less.
+        fractional_coverage = clamp(reconstructed.weight / 0.74, 0.25, 2.0);
+        current_weight = 1.0 - pow(1.0 - current_weight, fractional_coverage);
+    } else {
+        // History resets, the four-frame bootstrap, and sub-0.75 legacy tiers
+        // retain the qualified cubic. A single Lanczos phase is
+        // intentionally sharp; it is only representative once temporal
+        // accumulation can combine phases. At half scale the compact 3x3
+        // radial support needs a wider reconstruction architecture rather than
+        // substituting a near-point kernel into the proven legacy resolve.
+        current_sample = sample_catmull_rom(src_uv, input_size, input_texel);
+        center_rgb = textureSampleLevel(composed_tex, composed_samp, src_uv, 0.0).rgb;
+    }
     let current = current_sample.rgb;
     let current_w = current_sample.a;
 
@@ -1042,29 +1024,36 @@ fn fs_main(in: VsOut) -> TaaOut {
     // the variance estimate makes the clamp breathe with the reconstruction
     // phase even at native scale. This lookup existed in the baseline path,
     // so retaining it does not add a performance cost versus shipped TAA.
-    let center_rgb = textureSampleLevel(composed_tex, composed_samp, src_uv, 0.0).rgb;
-    var m1 = rgb_to_ycocg(center_rgb);
-    var m2 = m1 * m1;
-    let statistics_offsets = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, 0.0), vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, -1.0), vec2<f32>(0.0, 1.0),
-    );
-    for (var i = 0; i < 4; i = i + 1) {
-        let s_uv = src_uv + statistics_offsets[i] * statistics_texel;
-        let s_rgb = textureSampleLevel(composed_tex, composed_samp, s_uv, 0.0).rgb;
-        let s = rgb_to_ycocg(s_rgb);
-        m1 = m1 + s;
-        m2 = m2 + s * s;
+    var mean: vec3<f32>;
+    var stddev: vec3<f32>;
+    if (use_fractional_statistics) {
+        mean = fractional_mean;
+        stddev = fractional_stddev;
+    } else {
+        var m1 = rgb_to_ycocg(center_rgb);
+        var m2 = m1 * m1;
+        let statistics_offsets = array<vec2<f32>, 4>(
+            vec2<f32>(-1.0, 0.0), vec2<f32>(1.0, 0.0),
+            vec2<f32>(0.0, -1.0), vec2<f32>(0.0, 1.0),
+        );
+        for (var i = 0; i < 4; i = i + 1) {
+            let s_uv = src_uv + statistics_offsets[i] * statistics_texel;
+            let s_rgb = textureSampleLevel(composed_tex, composed_samp, s_uv, 0.0).rgb;
+            let s = rgb_to_ycocg(s_rgb);
+            m1 = m1 + s;
+            m2 = m2 + s * s;
+        }
+        let n_samples = 5.0;
+        mean = m1 / n_samples;
+        // A five-sample cross measures 3/5 of the first-order variance measured by
+        // the former 3x3 grid over the same radius (2/5 versus 2/3 per axis).
+        // Correct that known sampling bias so the history clip preserves the same
+        // linear-ramp bandwidth while spending the four saved reads on the exact
+        // cubic's diagonal lobes.
+        let variance =
+            max(m2 / n_samples - mean * mean, vec3<f32>(0.0)) * (5.0 / 3.0);
+        stddev = sqrt(variance);
     }
-    let n_samples = 5.0;
-    let mean = m1 / n_samples;
-    // A five-sample cross measures 3/5 of the first-order variance measured by
-    // the former 3x3 grid over the same radius (2/5 versus 2/3 per axis).
-    // Correct that known sampling bias so the history clip preserves the same
-    // linear-ramp bandwidth while spending the four saved reads on the exact
-    // cubic's diagonal lobes.
-    let variance = max(m2 / n_samples - mean * mean, vec3<f32>(0.0)) * (5.0 / 3.0);
-    let stddev = sqrt(variance);
 
     // Motion-aware γ + alpha. At rest γ=1.25 lets sub-pixel jitter
     // history through for smooth accumulation. Under any camera
@@ -1160,8 +1149,11 @@ fn fs_main(in: VsOut) -> TaaOut {
     // safe resolve into visibly noisier current samples during a slow pan.
     let history_usable = history_in_bounds && current_weight < 0.999;
     let history_sample_count = history_confidence * 16.0;
-    let bootstrap_running_alpha =
-        select(1.0, 1.0 / (history_sample_count + 1.0), history_usable);
+    let bootstrap_running_alpha = select(
+        1.0,
+        fractional_coverage / (history_sample_count + fractional_coverage),
+        history_usable,
+    );
     let bootstrap_static = 1.0 - smoothstep(0.00001, 0.0001, vel_len);
     let bootstrap_alpha = mix(current_weight, bootstrap_running_alpha, bootstrap_static);
     let alpha = max(
@@ -1178,7 +1170,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     // current-vs-linear residual only on settled, stationary fractional
     // reconstruction. This is part of reconstruction rather than a second
     // output sharpen: it adds no samples, is disabled for camera/object
-    // motion, and vanishes at native scale.
+        // motion, and vanishes at native scale.
     let settled_static = history_confidence
         * (1.0 - motion_alpha)
         * select(1.0, 0.0, camera_moving);
@@ -1198,7 +1190,8 @@ fn fs_main(in: VsOut) -> TaaOut {
         vec2<f32>(current_depth_key, next_history_confidence),
     );
 }
-";
+",
+);
 
 /// Auto-exposure update shader. Runs at 1×1 viewport → single
 /// fragment. Samples hdr_rt at a 4×4 grid (16 taps), averages
