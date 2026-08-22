@@ -509,6 +509,50 @@ fn glossy_textured_temporal_reconstruction_tracks_supersampled_reference() {
     }
 }
 
+#[test]
+fn half_scale_glossy_temporal_reconstruction_tracks_supersampled_reference() {
+    let Some(mut eng) = try_engine() else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+    install_glossy_detail_fixture(&mut eng);
+
+    eng.renderer.resize(W * 2, H * 2, W * 2, H * 2);
+    let supersampled = capture_glossy_detail(&mut eng, false, 1.0, 2, 0.0);
+    let reference = downsample_box_2x(&supersampled, W * 2, H * 2);
+
+    eng.renderer.resize(W, H, W, H);
+    let no_taa = capture_glossy_detail(&mut eng, false, 0.5, 2, 0.0);
+    let temporal = capture_glossy_detail(&mut eng, true, 0.5, 24, 0.0);
+    let no_taa_metrics = calculate_diff_metrics(&reference, &no_taa, W, H);
+    let temporal_metrics = calculate_diff_metrics(&reference, &temporal, W, H);
+    let reference_detail = detail_energy(&reference);
+    let no_taa_detail = detail_energy(&no_taa);
+    let temporal_detail = detail_energy(&temporal);
+    eprintln!(
+        "half-glossy reference={reference_detail:.4} no_taa={no_taa_detail:.4} \
+         temporal={temporal_detail:.4} no_taa_metrics={no_taa_metrics:?} \
+         temporal_metrics={temporal_metrics:?}"
+    );
+
+    assert!(
+        temporal_metrics.ssim >= no_taa_metrics.ssim
+            && temporal_metrics.mean_rgb <= no_taa_metrics.mean_rgb,
+        "half-scale temporal reconstruction did not improve the aliased single frame: \
+         no_taa={no_taa_metrics:?}, temporal={temporal_metrics:?}"
+    );
+    assert!(
+        temporal_metrics.ssim >= 0.915 && temporal_metrics.mean_rgb <= 2.30,
+        "half-scale glossy reconstruction exceeded its qualified reference envelope: \
+         {temporal_metrics:?}"
+    );
+    assert!(
+        temporal_detail >= reference_detail * 0.50,
+        "half-scale reconstruction erased too much authored glossy detail: \
+         reference={reference_detail:.4}, temporal={temporal_detail:.4}"
+    );
+}
+
 fn glossy_slow_pan_metrics(render_scale: f32) -> Option<(f64, f64, f64, f64, Vec<f64>)> {
     const FRAMES: usize = 12;
     const CAMERA_STEP: f32 = 0.004;
@@ -585,6 +629,28 @@ fn fractional_glossy_slow_pan_tracks_supersampled_motion() {
     assert!(
         derivative_error <= 0.145,
         "fractional glossy slow pan added excessive temporal variation: \
+         derivative_error={derivative_error:.6}"
+    );
+}
+
+#[test]
+fn half_scale_glossy_slow_pan_tracks_supersampled_motion() {
+    let Some((mean_rgb, mean_ssim, minimum_ssim, derivative_error, _)) =
+        glossy_slow_pan_metrics(0.5)
+    else {
+        eprintln!("skip: no GPU adapter");
+        return;
+    };
+
+    assert!(
+        mean_rgb <= 2.30 && mean_ssim >= 0.915 && minimum_ssim >= 0.90,
+        "half-scale glossy slow pan diverged from supersampled motion: \
+         mean_rgb={mean_rgb:.6}, mean_ssim={mean_ssim:.6}, \
+         minimum_ssim={minimum_ssim:.6}"
+    );
+    assert!(
+        derivative_error <= 0.25,
+        "half-scale glossy slow pan added excessive temporal variation: \
          derivative_error={derivative_error:.6}"
     );
 }

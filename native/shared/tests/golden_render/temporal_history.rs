@@ -834,6 +834,7 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
         "taa-reprojected-uv",
         "taa-temporal-confidence",
         "taa-reactive-history",
+        "taa-history-policy",
     ] {
         let path = directory.join(format!("{name}.png"));
         let bytes = std::fs::read(&path)
@@ -933,6 +934,25 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
             assert!(
                 current > 0 && history > 0 && union >= current.max(history),
                 "reactive diagnostics must expose current, history, and union coverage"
+            );
+        } else if name == "taa-history-policy" {
+            let pixels = image::open(&path).unwrap().to_rgb8();
+            let clamped = pixels.pixels().filter(|pixel| pixel[0] > 2).count();
+            let current_weighted = pixels.pixels().filter(|pixel| pixel[1] > 2).count();
+            let rejected = pixels.pixels().filter(|pixel| pixel[2] > 2).count();
+            let minimum_current_weight = pixels.pixels().map(|pixel| pixel[1]).min().unwrap();
+            let maximum_current_weight = pixels.pixels().map(|pixel| pixel[1]).max().unwrap();
+            eprintln!(
+                "temporal-corpus history_clamped={clamped} \
+                 history_current_weighted={current_weighted} history_rejected={rejected} \
+                 current_weight_range={minimum_current_weight}..={maximum_current_weight}"
+            );
+            assert!(
+                clamped > 0
+                    && current_weighted > 0
+                    && rejected > 0
+                    && minimum_current_weight < maximum_current_weight,
+                "history-policy diagnostics must expose clamp, blend, and rejection decisions"
             );
         }
     }

@@ -6,12 +6,13 @@
 
 use super::*;
 
-pub(super) const TAA_DIAGNOSTIC_NAMES: [&str; 5] = [
+pub(super) const TAA_DIAGNOSTIC_NAMES: [&str; 6] = [
     "taa-rejection-reason",
     "taa-motion",
     "taa-reprojected-uv",
     "taa-temporal-confidence",
     "taa-reactive-history",
+    "taa-history-policy",
 ];
 pub(super) const TAA_DIAGNOSTIC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -37,6 +38,7 @@ fn diagnostic_shader_source(reactive: bool) -> String {
     @location(2) reprojected_uv: vec4<f32>,
     @location(3) temporal_confidence: vec4<f32>,
     @location(4) reactive_history: vec4<f32>,
+    @location(5) history_policy: vec4<f32>,
 };
 
 @fragment
@@ -95,6 +97,15 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#;
             clamp(current_reactive, 0.0, 1.0),
             clamp(history_reactive, 0.0, 1.0),
             clamp(reactive, 0.0, 1.0),
+            1.0,
+        ),
+        // R = variance-clamp displacement, G = current-frame blend weight,
+        // B = persistent confidence rejection. The displacement scale keeps
+        // ordinary sub-percent HDR corrections visible in an 8-bit capture.
+        vec4<f32>(
+            clamp(clamp_delta * 8.0, 0.0, 1.0),
+            clamp(alpha, 0.0, 1.0),
+            clamp(temporal_rejection, 0.0, 1.0),
             1.0,
         ),
     );"#
