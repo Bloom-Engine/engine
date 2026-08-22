@@ -1003,7 +1003,7 @@ fn fs_main(in: VsOut) -> TaaOut {
         min(depth_gradient * 2.0, depth_base_tolerance * 4.0),
     );
     let depth_error = abs(history_depth - expected_prev_depth);
-    let depth_disocclusion = select(
+    let raw_depth_disocclusion = select(
         0.0,
         smoothstep(depth_tolerance, depth_tolerance * 2.0, depth_error),
         history_in_bounds,
@@ -1136,6 +1136,28 @@ fn fs_main(in: VsOut) -> TaaOut {
         motion_alpha,
     );
     let disocclusion = smoothstep(reject_lo, reject_hi, color_dist);
+
+    // A stationary projection still jitters the low-resolution depth raster.
+    // Thin geometry and grazing, finely tessellated surfaces can therefore
+    // alternate which depth owns an output pixel even though their temporal
+    // color footprint remains compatible. Treating that coverage change as a
+    // geometric disocclusion repeatedly discarded settled history and made
+    // native and fractional Bistro detail flicker with a zero motion buffer.
+    //
+    // Suppress depth-only rejection only for the exact static case. Camera
+    // motion keeps the renderer-owned camera flag; object motion keeps its
+    // velocity or the closest-depth divergence signal; topology/material
+    // changes still use reactive and broad color rejection. This adds no
+    // samples or resources and does not weaken moving silhouettes.
+    let static_zero_velocity = !camera_moving
+        && vel_len < 0.0000001
+        && velocity_divergence < 0.0000001;
+    let jitter_coverage_compatible = gross_color_dist <= reject_hi;
+    let depth_disocclusion = select(
+        raw_depth_disocclusion,
+        0.0,
+        static_zero_velocity && jitter_coverage_compatible,
+    );
 
     // Divergent neighbor motion marks a silhouette/disocclusion footprint.
     // Prefer the current frame there even when both individual vectors are
