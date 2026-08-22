@@ -61,6 +61,9 @@ const argv: string[] = getCommandLineArgs();
 const qualityConfig = parseQualityRun(argv);
 let captureFrames = 0;
 let capturePath = "";
+let captureSequenceStart = 0;
+let captureSequenceFrames = 0;
+let captureSequenceDirectory = "";
 let diagnosticCaptureFrames = 0;
 let diagnosticCaptureIndex = 0;
 let frameCount = 0;
@@ -107,6 +110,11 @@ for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
     capturePath = argv[i + 2];
+  }
+  if (argv[i] === "--capture-sequence" && i + 3 < argv.length) {
+    captureSequenceStart = Math.max(1, Math.floor(parseFloat(argv[i + 1])));
+    captureSequenceFrames = Math.max(1, Math.floor(parseFloat(argv[i + 2])));
+    captureSequenceDirectory = argv[i + 3];
   }
   if (argv[i] === "--debug-capture" && i + 1 < argv.length) {
     diagnosticCaptureFrames = Math.floor(parseFloat(argv[i + 1]));
@@ -487,7 +495,11 @@ while (!windowShouldClose()) {
     drawText(diagnosticText, 10, SCREEN_H - 26, 13, { r: 180, g: 210, b: 240, a: 255 });
   }
 
-  if (qualityRun === null && (captureFrames > 0 || diagnosticCaptureFrames > 0)) {
+  if (qualityRun === null && (
+    captureFrames > 0 ||
+    diagnosticCaptureFrames > 0 ||
+    captureSequenceFrames > 0
+  )) {
     frameCount = frameCount + 1;
     if (diagnosticCaptureFrames > 0 && frameCount === diagnosticCaptureFrames) {
       diagnosticCaptureRequested = true;
@@ -516,6 +528,22 @@ while (!windowShouldClose()) {
   } else if (qualityRun === null && captureFrames > 0) {
     if (frameCount === captureFrames) { takeScreenshot(capturePath); }
     if (frameCount > captureFrames) { endDrawing(); break; }
+  }
+
+  if (
+    qualityRun === null &&
+    captureSequenceFrames > 0 &&
+    frameCount >= captureSequenceStart &&
+    frameCount < captureSequenceStart + captureSequenceFrames
+  ) {
+    const sequenceIndex = frameCount - captureSequenceStart;
+    captureFrameToPng(
+      captureSequenceDirectory + "/frame-" + sequenceIndex + ".png",
+    );
+    if (sequenceIndex + 1 >= captureSequenceFrames) {
+      endDrawing();
+      break;
+    }
   }
 
   endDrawing();
