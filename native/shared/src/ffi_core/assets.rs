@@ -31,6 +31,17 @@ macro_rules! __bloom_ffi_assets {
                     Some(path) if !path.is_empty() => path.to_string(),
                     _ => return 0.0,
                 };
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        if let Err(error) = std::fs::create_dir_all(parent) {
+                            eprintln!(
+                                "bloom: cannot create deterministic capture directory \
+                                 '{parent:?}': {error}"
+                            );
+                            return 0.0;
+                        }
+                    }
+                }
                 eprintln!("bloom: deterministic capture requested -> '{}'", path);
                 let eng = engine();
                 eng.renderer.screenshot_requested = true;
