@@ -126,7 +126,7 @@ pub fn build_leaf_meshlets(
     let mut source_vertices = Vec::<u32>::with_capacity(limits.max_vertices as usize);
     let mut local_indices = Vec::<u8>::with_capacity(limits.max_triangles as usize * 3);
 
-    for triangle in primitive.indices.chunks_exact(3) {
+    for triangle in primitive.indices.as_chunks::<3>().0 {
         let additional_vertices = triangle
             .iter()
             .filter(|index| !source_vertices.contains(index))
@@ -263,7 +263,7 @@ fn calculate_bounds(
 
     let mut face_normals = Vec::with_capacity(local_indices.len() / 3);
     let mut normal_sum = [0.0; 3];
-    for triangle in local_indices.chunks_exact(3) {
+    for triangle in local_indices.as_chunks::<3>().0 {
         let a = vertices[triangle[0] as usize].position;
         let b = vertices[triangle[1] as usize].position;
         let c = vertices[triangle[2] as usize].position;
