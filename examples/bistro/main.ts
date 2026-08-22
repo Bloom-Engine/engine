@@ -62,6 +62,7 @@ const qualityConfig = parseQualityRun(argv);
 let captureFrames = 0;
 let capturePath = "";
 let diagnosticCaptureFrames = 0;
+let diagnosticCaptureIndex = 0;
 let frameCount = 0;
 let initYaw = 0.0;
 let initCamX = -26.43;
@@ -481,7 +482,7 @@ while (!windowShouldClose()) {
         : { r: 230, g: 120, b: 120, a: 255 };
     const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
     drawText(fpsText, 10, 35, 16, fpsColor);
-    drawText("WASD move / Mouse look / Tab cursor / N capture", 10, SCREEN_H - 48, 14, { r: 180, g: 180, b: 180, a: 255 });
+    drawText("WASD move / Mouse look / Tab cursor / N numbered capture", 10, SCREEN_H - 48, 14, { r: 180, g: 180, b: 180, a: 255 });
     const diagnosticText = `T TAA ${diagnosticTaaEnabled ? "on" : "off"} / G SSGI ${diagnosticSsgiEnabled ? "on" : "off"} / R SSR ${diagnosticSsrEnabled ? "on" : "off"} / P sharpen ${diagnosticSharpenEnabled ? "on" : "off"}`;
     drawText(diagnosticText, 10, SCREEN_H - 26, 13, { r: 180, g: 210, b: 240, a: 255 });
   }
@@ -496,16 +497,21 @@ while (!windowShouldClose()) {
   if (qualityCapture && qualityRun !== null) {
     qualityRun.requestCapture();
   } else if (diagnosticCaptureRequested) {
+    const diagnosticDirectory =
+      "/tmp/bloom-bistro-ssgi-diagnostic/capture-" + diagnosticCaptureIndex;
     console.error(
       "BLOOM_BISTRO_CAPTURE_CAMERA"
+        + " index=" + diagnosticCaptureIndex
+        + " directory=" + diagnosticDirectory
         + " x=" + renderCamX.toFixed(6)
         + " y=" + camY.toFixed(6)
         + " z=" + renderCamZ.toFixed(6)
         + " yaw=" + renderYaw.toFixed(6)
         + " pitch=" + camPitch.toFixed(6),
     );
-    captureDebugIntermediates("/tmp/bloom-bistro-ssgi-diagnostic");
-    captureFrameToPng("/tmp/bloom-bistro-ssgi-diagnostic/frame.png");
+    captureDebugIntermediates(diagnosticDirectory);
+    captureFrameToPng(diagnosticDirectory + "/frame.png");
+    diagnosticCaptureIndex = diagnosticCaptureIndex + 1;
     diagnosticCaptureRequested = false;
   } else if (qualityRun === null && captureFrames > 0) {
     if (frameCount === captureFrames) { takeScreenshot(capturePath); }

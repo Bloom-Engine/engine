@@ -59,6 +59,17 @@ macro_rules! __bloom_ffi_assets {
                     Some(path) if !path.is_empty() => path.to_string(),
                     _ => return 0.0,
                 };
+                // The frame PNG and graph diagnostics are commonly queued
+                // together. Create the shared directory synchronously so the
+                // screenshot writer cannot race the later diagnostic
+                // readback's directory creation on a fresh numbered capture.
+                if let Err(error) = std::fs::create_dir_all(&path) {
+                    eprintln!(
+                        "bloom: cannot create debug capture directory '{}': {error}",
+                        path
+                    );
+                    return 0.0;
+                }
                 engine().renderer.pending_quality_capture_dir = Some(path);
                 1.0
             })
