@@ -174,6 +174,12 @@ fn moving_physical_refraction_writes_velocity_reactive_coverage_and_no_trail() {
         reactive_pixels >= 250,
         "moving physical refraction wrote no reactive TAA coverage"
     );
+    assert!(
+        reactive_pixels >= moving_pixels * 18 / 10,
+        "reactive rejection did not protect both the current and newly \
+         revealed refractive footprints: moving_pixels={moving_pixels}, \
+         reactive_pixels={reactive_pixels}"
+    );
     evaluate_reactive_motion_recovery("physical-refraction", &old_pose, &frames);
     assert!(
         eng.renderer

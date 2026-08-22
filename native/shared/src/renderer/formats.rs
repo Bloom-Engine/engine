@@ -18,11 +18,13 @@ pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth3
 /// composite pass tonemaps to the sRGB surface format.
 pub(super) const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Previous-frame TAA provenance: R = geometric depth, G = normalized history
-/// confidence/length. RG16Float has the same 4 B/px footprint as the former
-/// R32Float depth-only target and is a core renderable + sampleable WebGPU
-/// format. Half-float relative precision remains well inside the geometric
-/// rejection tolerance, including the 10 km sky sentinel.
+/// Previous-frame TAA provenance: R = geometric depth. G keeps ordinary
+/// normalized history confidence in 0..1 and encodes reactive history as
+/// -(confidence + 1), preserving all 17 confidence states exactly. RG16Float
+/// has the same 4 B/px footprint as the former R32Float depth-only target and
+/// is a core renderable + sampleable WebGPU format. Half-float relative
+/// precision remains inside the geometric rejection tolerance, including the
+/// 10 km sky sentinel.
 pub(super) const TAA_DEPTH_HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 
 #[cfg(test)]
@@ -30,12 +32,28 @@ mod taa_history_format_tests {
     use super::*;
 
     #[test]
-    fn depth_and_confidence_fit_the_original_webgpu_memory_contract() {
+    fn depth_reactive_and_confidence_fit_the_original_webgpu_memory_contract() {
         assert_eq!(TAA_DEPTH_HISTORY_FORMAT.block_copy_size(None), Some(4));
         let features = TAA_DEPTH_HISTORY_FORMAT.guaranteed_format_features(wgpu::Features::empty());
         let required =
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         assert!(features.allowed_usages.contains(required));
+    }
+
+    #[test]
+    fn packed_reactive_confidence_is_exact_in_half_float() {
+        for reactive in [false, true] {
+            for confidence in 0..=16_u16 {
+                let normalized = f32::from(confidence) / 16.0;
+                let packed = if reactive {
+                    -normalized - 1.0
+                } else {
+                    normalized
+                };
+                let stored = half::f16::from_f32(packed).to_f32();
+                assert_eq!(stored, packed);
+            }
+        }
     }
 
     #[test]

@@ -191,12 +191,19 @@ pub(super) fn taa_reactive_shader_source() -> String {
         "TAA binding declarations changed; reactive injection must be updated"
     );
     let source = source.replacen(
-        "    let reactive = 0.0;",
+        "        history_confidence = max(history_provenance.g, 0.0);",
+        "        let temporal_history = unpack_temporal_history(history_provenance.g);\n\
+         history_confidence = temporal_history.confidence;\n\
+         history_reactive = temporal_history.reactive;",
+        1,
+    );
+    let source = source.replacen(
+        "    let current_reactive = 0.0;",
         "    // The mask follows the same unjittered current-frame coordinate as\n\
          // the color sample. Coverage is the minimum current-frame weight: a\n\
          // 20% glass layer rejects at least 20% stale history, while fully\n\
          // refractive pixels consume the current result immediately.\n\
-         let reactive = textureSampleLevel(\n\
+         let current_reactive = textureSampleLevel(\n\
              reactive_tex,\n\
              composed_samp,\n\
              clamp(src_uv, vec2<f32>(0.0), vec2<f32>(1.0)),\n\
@@ -204,9 +211,26 @@ pub(super) fn taa_reactive_shader_source() -> String {
          ).r;",
         1,
     );
+    let source = source.replacen(
+        "    let reactive = 0.0;",
+        "    // Union current coverage with the prior footprint. The encoded\n\
+         // bit clears after this frame, so it cannot extend a trail.\n\
+         let reactive = max(current_reactive, history_reactive);",
+        1,
+    );
+    let source = source.replacen(
+        "        vec2<f32>(current_depth_key, next_history_confidence),",
+        "        vec2<f32>(\n\
+             current_depth_key,\n\
+             pack_temporal_history(next_history_confidence, current_reactive),\n\
+         ),",
+        1,
+    );
     assert!(
-        source.contains("var reactive_tex"),
-        "reactive TAA shader must declare its coverage input"
+        source.contains("var reactive_tex")
+            && source.contains("history_reactive = temporal_history.reactive")
+            && source.contains("pack_temporal_history(next_history_confidence"),
+        "reactive TAA shader must declare and persist current/prior coverage"
     );
     source
 }

@@ -833,6 +833,7 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
         "taa-motion",
         "taa-reprojected-uv",
         "taa-temporal-confidence",
+        "taa-reactive-history",
     ] {
         let path = directory.join(format!("{name}.png"));
         let bytes = std::fs::read(&path)
@@ -919,6 +920,19 @@ fn taa_capture_emits_per_pixel_diagnostics_without_retaining_resources() {
             assert!(
                 retaining > 0,
                 "accepted pixels must retain temporal history"
+            );
+        } else if name == "taa-reactive-history" {
+            let pixels = image::open(&path).unwrap().to_rgb8();
+            let current = pixels.pixels().filter(|pixel| pixel[0] > 8).count();
+            let history = pixels.pixels().filter(|pixel| pixel[1] > 8).count();
+            let union = pixels.pixels().filter(|pixel| pixel[2] > 8).count();
+            eprintln!(
+                "temporal-corpus reactive_current={current} reactive_history={history} \
+                 reactive_union={union}"
+            );
+            assert!(
+                current > 0 && history > 0 && union >= current.max(history),
+                "reactive diagnostics must expose current, history, and union coverage"
             );
         }
     }

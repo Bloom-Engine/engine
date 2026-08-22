@@ -6,11 +6,12 @@
 
 use super::*;
 
-pub(super) const TAA_DIAGNOSTIC_NAMES: [&str; 4] = [
+pub(super) const TAA_DIAGNOSTIC_NAMES: [&str; 5] = [
     "taa-rejection-reason",
     "taa-motion",
     "taa-reprojected-uv",
     "taa-temporal-confidence",
+    "taa-reactive-history",
 ];
 pub(super) const TAA_DIAGNOSTIC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -35,6 +36,7 @@ fn diagnostic_shader_source(reactive: bool) -> String {
     @location(1) motion: vec4<f32>,
     @location(2) reprojected_uv: vec4<f32>,
     @location(3) temporal_confidence: vec4<f32>,
+    @location(4) reactive_history: vec4<f32>,
 };
 
 @fragment
@@ -45,17 +47,14 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#;
         "TAA entry point changed; diagnostics must follow it"
     );
 
-    let final_return = r#"    return TaaOut(
-        vec4<f32>(blended, blended_w),
-        vec2<f32>(current_depth_key, next_history_confidence),
-    );"#;
     let diagnostic_return = format!(
         r#"    let clamped_ycocg = vec3<f32>(history_y_clamped, co_clamped, cg_clamped);
     let clamp_delta = length(history_ycocg - clamped_ycocg);
     let reactive_weight = reactive;
 
     // Categorical dominant reason: gray seed, red off-screen, cyan reactive,
-    // magenta disocclusion, yellow neighborhood clamp, blue motion, green keep.
+    // magenta depth/color disocclusion, yellow neighborhood clamp, blue motion,
+    // green keep.
     var reason = vec3<f32>(0.05, 0.65, 0.10);
     if (abs(u.params.x) >= 0.999) {{
         reason = vec3<f32>(0.25);
@@ -92,13 +91,27 @@ fn fs_diagnostics(in: VsOut) -> TaaDiagnosticOut {"#;
             clamp(1.0 - alpha, 0.0, 1.0),
             1.0,
         ),
+        vec4<f32>(
+            clamp(current_reactive, 0.0, 1.0),
+            clamp(history_reactive, 0.0, 1.0),
+            clamp(reactive, 0.0, 1.0),
+            1.0,
+        ),
     );"#
     );
-    let source = source.replacen(final_return, &diagnostic_return, 1);
-    assert!(
-        source.contains("return TaaDiagnosticOut"),
-        "TAA final output changed; diagnostics must follow it"
-    );
+    let final_start_signature = "    return TaaOut(\n        vec4<f32>(blended, blended_w),";
+    let final_start = source.find(final_start_signature).unwrap_or_else(|| {
+        panic!("TAA final output changed; diagnostics must follow it (reactive={reactive})")
+    });
+    let final_end_signature = "\n    );";
+    let final_end = source[final_start..]
+        .find(final_end_signature)
+        .map(|offset| final_start + offset + final_end_signature.len())
+        .unwrap_or_else(|| {
+            panic!("TAA final output changed; diagnostics must follow it (reactive={reactive})")
+        });
+    let mut source = source;
+    source.replace_range(final_start..final_end, &diagnostic_return);
     source
 }
 

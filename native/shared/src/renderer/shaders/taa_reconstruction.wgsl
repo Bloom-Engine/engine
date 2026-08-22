@@ -62,6 +62,25 @@ struct FractionalSample {
     stddev: vec3<f32>,
 };
 
+// Rg16Float provenance has one half-float beside depth. Non-reactive history
+// keeps the established normalized 0..1 confidence value byte-for-byte.
+// Reactive history stores -(confidence + 1), preserving the same 17 exact
+// confidence states while retaining coverage even when confidence is zero.
+struct TemporalHistory {
+    confidence: f32,
+    reactive: f32,
+};
+
+fn unpack_temporal_history(payload: f32) -> TemporalHistory {
+    let reactive = select(0.0, 1.0, payload < 0.0);
+    let confidence = select(payload, -payload - 1.0, payload < 0.0);
+    return TemporalHistory(clamp(confidence, 0.0, 1.0), reactive);
+}
+
+fn pack_temporal_history(confidence: f32, reactive: f32) -> f32 {
+    return select(confidence, -confidence - 1.0, reactive > 0.01);
+}
+
 fn sample_fractional_lanczos2(
     uv: vec2<f32>,
     tex_size: vec2<f32>,

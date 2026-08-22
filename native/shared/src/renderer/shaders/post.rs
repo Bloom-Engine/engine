@@ -724,7 +724,8 @@ struct VsOut {
 
 struct TaaOut {
     @location(0) color: vec4<f32>,
-    /// R = geometric depth, G = normalized persistent history confidence.
+    /// R = geometric depth; abs-domain G stores persistent history confidence,
+    /// with a negative encoded range retaining prior reactive coverage.
     @location(1) provenance_history: vec2<f32>,
 };
 
@@ -958,6 +959,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     var history_w = current_w;
     var history_depth = current_depth_key;
     var history_confidence = 0.0;
+    var history_reactive = 0.0;
     let history_in_bounds =
         prev_uv.x >= 0.0 && prev_uv.x <= 1.0 &&
         prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
@@ -973,7 +975,10 @@ fn fs_main(in: VsOut) -> TaaOut {
         );
         let history_provenance = textureLoad(history_depth_tex, history_depth_coord, 0).rg;
         history_depth = history_provenance.r;
-        history_confidence = history_provenance.g;
+        // Negative provenance came from a reactive frame. The ordinary path
+        // resets its confidence, consuming current color immediately if the
+        // last reactive contributor disappeared with its lazy topology.
+        history_confidence = max(history_provenance.g, 0.0);
     }
 
     // Reject history whose geometric provenance no longer matches the world
@@ -993,7 +998,6 @@ fn fs_main(in: VsOut) -> TaaOut {
         smoothstep(depth_tolerance, depth_tolerance * 2.0, depth_error),
         history_in_bounds,
     );
-
     // Variance clamp in YCoCg (Karis 2014). Per-channel RGB min/max
     // clamping was producing chromatic sparkle on the stone floor
     // at grazing angles: high-frequency normal-map specular makes
@@ -1131,6 +1135,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     // Reactive coverage is injected by the material-aware TAA variant. Keep a
     // concrete zero in the base shader so confidence policy is identical for
     // both variants and diagnostics can report the real persistent lock.
+    let current_reactive = 0.0;
     let reactive = 0.0;
     // Confidence represents geometric/material continuity. Do not erase that
     // persistent fact for a luma-only neighborhood excursion: sub-pixel normal
@@ -1138,8 +1143,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     // and repeatedly unlocking those valid pixels turns detail into shimmer.
     // Color disocclusion still raises alpha below; it simply does not destroy
     // the longer-lived geometric lock.
-    let temporal_rejection =
-        max(depth_disocclusion, max(divergence_alpha, reactive));
+    let temporal_rejection = max(depth_disocclusion, max(divergence_alpha, reactive));
 
     // A confidence value of 1 represents sixteen compatible samples. At rest,
     // enforce the unbiased running-average weight 1/(N+1) until lock; after
