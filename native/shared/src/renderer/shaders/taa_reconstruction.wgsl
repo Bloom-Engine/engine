@@ -42,11 +42,12 @@ fn sample_catmull_rom(
     return clamp(result, max(footprint_min, vec4<f32>(0.0)), footprint_max);
 }
 
-// Fractional-resolution reconstruction uses an exact separable Lanczos-2
-// footprint. Its four one-dimensional weights map onto the same nine grouped
-// bilinear reads as Bloom's exact Catmull-Rom path, preserving the established
-// pass bandwidth while improving authored-detail reconstruction. The compact
-// polynomial is FidelityFX's sin/sqrt-free Lanczos approximation.
+// Fractional-resolution reconstruction uses a Lanczos-2 footprint. At 0.75
+// and above its four one-dimensional weights form the exact nine-read
+// separable filter. Half scale uses the same weights as a five-read radial
+// footprint, reserving the remaining reads for phase-stable history
+// statistics. The compact polynomial is FidelityFX's sin/sqrt-free Lanczos
+// approximation.
 fn lanczos2_approx_sq4(distance_sq: vec4<f32>) -> vec4<f32> {
     let x2 = min(distance_sq, vec4<f32>(4.0));
     let a = vec4<f32>(0.4) * x2 - vec4<f32>(1.0);
@@ -90,7 +91,7 @@ fn sample_fractional_lanczos2(
     let sample_pos = uv * tex_size;
     let tex_pos1 = floor(sample_pos - 0.5) + 0.5;
     let phase = sample_pos - tex_pos1;
-    let kernel_bias = min(1.99, 1.0 / max(reconstruction_scale, 0.5));
+    let kernel_bias = min(4.0 / 3.0, 1.0 / max(reconstruction_scale, 0.5));
 
     let offset_x =
         (vec4<f32>(-1.0, 0.0, 1.0, 2.0) - vec4<f32>(phase.x)) * kernel_bias;
@@ -110,41 +111,60 @@ fn sample_fractional_lanczos2(
     let tap2 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp12.y), 0.0);
     let tap3 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp12.y), 0.0);
     let tap4 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp12.x, tp3.y), 0.0);
-    let corner0 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp0.y), 0.0);
-    let corner1 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp0.y), 0.0);
-    let corner2 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp3.y), 0.0);
-    let corner3 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp3.y), 0.0);
-    let accumulated =
+    var accumulated =
         tap0 * weight12.x * weights_y.x +
         tap1 * weights_x.x * weight12.y +
         tap2 * weight12.x * weight12.y +
         tap3 * weights_x.w * weight12.y +
-        tap4 * weight12.x * weights_y.w +
-        corner0 * weights_x.x * weights_y.x +
-        corner1 * weights_x.w * weights_y.x +
-        corner2 * weights_x.x * weights_y.w +
-        corner3 * weights_x.w * weights_y.w;
-    let weight = dot(weights_x, vec4<f32>(1.0)) * dot(weights_y, vec4<f32>(1.0));
+        tap4 * weight12.x * weights_y.w;
+    var weight =
+        weight12.x * weights_y.x +
+        weights_x.x * weight12.y +
+        weight12.x * weight12.y +
+        weights_x.w * weight12.y +
+        weight12.x * weights_y.w;
+    var footprint_min = min(min(tap0, tap1), min(tap2, min(tap3, tap4)));
+    var footprint_max = max(max(tap0, tap1), max(tap2, max(tap3, tap4)));
+    var mean = vec3<f32>(0.0);
+    var stddev = vec3<f32>(0.0);
+    if (reconstruction_scale >= 0.75) {
+        // The 0.75 path retains the exact separable footprint.
+        // At half scale the four diagonal outer-lobe products add little
+        // useful coverage but cost four full-resolution texture reads; its
+        // stable five-tap radial footprint pays for the wider reconstruction
+        // without increasing the established pass bandwidth.
+        let corner0 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp0.y), 0.0);
+        let corner1 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp0.y), 0.0);
+        let corner2 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp0.x, tp3.y), 0.0);
+        let corner3 = textureSampleLevel(composed_tex, composed_samp, vec2<f32>(tp3.x, tp3.y), 0.0);
+        accumulated = accumulated +
+            corner0 * weights_x.x * weights_y.x +
+            corner1 * weights_x.w * weights_y.x +
+            corner2 * weights_x.x * weights_y.w +
+            corner3 * weights_x.w * weights_y.w;
+        weight = dot(weights_x, vec4<f32>(1.0)) * dot(weights_y, vec4<f32>(1.0));
+        footprint_min = min(
+            footprint_min,
+            min(min(corner0, corner1), min(corner2, corner3)),
+        );
+        footprint_max = max(
+            footprint_max,
+            max(max(corner0, corner1), max(corner2, corner3)),
+        );
+        let stat0 = rgb_to_ycocg(tap2.rgb);
+        let stat1 = rgb_to_ycocg(tap0.rgb);
+        let stat2 = rgb_to_ycocg(tap1.rgb);
+        let stat3 = rgb_to_ycocg(tap3.rgb);
+        let stat4 = rgb_to_ycocg(tap4.rgb);
+        let moment1 = stat0 + stat1 + stat2 + stat3 + stat4;
+        let moment2 =
+            stat0 * stat0 + stat1 * stat1 + stat2 * stat2 +
+            stat3 * stat3 + stat4 * stat4;
+        mean = moment1 * 0.2;
+        let variance = max(moment2 * 0.2 - mean * mean, vec3<f32>(0.0)) * 2.0;
+        stddev = sqrt(variance);
+    }
     let result = accumulated / max(weight, 0.00001);
-    let footprint_min = min(
-        min(min(tap0, tap1), min(tap2, tap3)),
-        min(min(tap4, corner0), min(min(corner1, corner2), corner3)),
-    );
-    let footprint_max = max(
-        max(max(tap0, tap1), max(tap2, tap3)),
-        max(max(tap4, corner0), max(max(corner1, corner2), corner3)),
-    );
-    let stat0 = rgb_to_ycocg(tap2.rgb);
-    let stat1 = rgb_to_ycocg(tap0.rgb);
-    let stat2 = rgb_to_ycocg(tap1.rgb);
-    let stat3 = rgb_to_ycocg(tap3.rgb);
-    let stat4 = rgb_to_ycocg(tap4.rgb);
-    let moment1 = stat0 + stat1 + stat2 + stat3 + stat4;
-    let moment2 =
-        stat0 * stat0 + stat1 * stat1 + stat2 * stat2 +
-        stat3 * stat3 + stat4 * stat4;
-    let mean = moment1 * 0.2;
-    let variance = max(moment2 * 0.2 - mean * mean, vec3<f32>(0.0)) * 2.0;
     let bounded = clamp(result, max(footprint_min, vec4<f32>(0.0)), footprint_max);
-    return FractionalSample(bounded, tap2, max(weight, 0.00001), mean, sqrt(variance));
+    return FractionalSample(bounded, tap2, max(weight, 0.00001), mean, stddev);
 }

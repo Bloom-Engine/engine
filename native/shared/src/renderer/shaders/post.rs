@@ -921,7 +921,7 @@ fn fs_main(in: VsOut) -> TaaOut {
     // This is uniform across the draw. Keep native reconstruction and its
     // already-qualified material response byte-for-byte unchanged.
     if (
-        reconstruction_scale >= 0.75 &&
+        reconstruction_scale >= 0.5 &&
         reconstruction_scale < 0.95 &&
         current_weight < 0.999
     ) {
@@ -935,20 +935,30 @@ fn fs_main(in: VsOut) -> TaaOut {
         center_rgb = reconstructed.center.rgb;
         fractional_mean = reconstructed.mean;
         fractional_stddev = reconstructed.stddev;
-        use_fractional_statistics = true;
+        // At half scale, the Lanczos taps move substantially with source
+        // phase. Reusing their moments as a history-clamp neighborhood makes
+        // the clamp breathe as the Halton phase advances. Keep history
+        // validation on the stable output-footprint cross below 0.75 while
+        // retaining the sharper sample itself.
+        use_fractional_statistics = reconstruction_scale >= 0.75;
         // Preserve the separable kernel's phase coverage through accumulation.
-        // Its average raw weight is approximately 0.74 over a jitter cycle;
-        // normalizing around that mean keeps Bloom's authored temporal window
-        // while low-coverage phases contribute proportionally less.
-        fractional_coverage = clamp(reconstructed.weight / 0.74, 0.25, 2.0);
+        // At 0.75 its average raw weight is approximately 0.74 over a jitter
+        // cycle; normalizing around that mean keeps Bloom's authored temporal
+        // window while low-coverage phases contribute proportionally less.
+        // The 0.5 path freezes coverage at the measured mean over all sixteen
+        // Halton phases and both output-pixel parities. Per-phase coverage
+        // changes are useful at 0.75, but at half scale they modulate alpha
+        // enough to make a slow pan alternate between sharp and soft frames.
+        fractional_coverage = select(
+            0.784,
+            clamp(reconstructed.weight / 0.74, 0.25, 2.0),
+            reconstruction_scale >= 0.75,
+        );
         current_weight = 1.0 - pow(1.0 - current_weight, fractional_coverage);
     } else {
-        // History resets, the four-frame bootstrap, and sub-0.75 legacy tiers
-        // retain the qualified cubic. A single Lanczos phase is
-        // intentionally sharp; it is only representative once temporal
-        // accumulation can combine phases. At half scale the compact 3x3
-        // radial support needs a wider reconstruction architecture rather than
-        // substituting a near-point kernel into the proven legacy resolve.
+        // History resets and the four-frame bootstrap retain the qualified
+        // cubic. A single Lanczos phase is intentionally sharp; it is only
+        // representative once temporal accumulation can combine phases.
         current_sample = sample_catmull_rom(src_uv, input_size, input_texel);
         center_rgb = textureSampleLevel(composed_tex, composed_samp, src_uv, 0.0).rgb;
     }

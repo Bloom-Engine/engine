@@ -222,9 +222,9 @@ fn capture_glossy_detail(
     render(eng, frames, |eng| draw_glossy_detail_fixture(eng, camera_x)).2
 }
 
-fn profile_fractional_taa(eng: &mut EngineState, frames: u32) -> f64 {
+fn profile_taa_reconstruction(eng: &mut EngineState, frames: u32, render_scale: f32) -> f64 {
     eng.renderer.resize(1600, 900, 1600, 900);
-    configure_glossy_detail_capture(&mut eng.renderer, true, 0.75);
+    configure_glossy_detail_capture(&mut eng.renderer, true, render_scale);
     for _ in 0..24 {
         eng.begin_frame();
         draw_glossy_detail_fixture(eng, 0.0);
@@ -504,7 +504,7 @@ fn glossy_textured_temporal_reconstruction_tracks_supersampled_reference() {
     );
     if let Ok(frames) = std::env::var("BLOOM_PROFILE_FRACTIONAL_TAA_FRAMES") {
         let frames = frames.parse::<u32>().expect("profile frame count");
-        let taa_gpu_us = profile_fractional_taa(&mut eng, frames);
+        let taa_gpu_us = profile_taa_reconstruction(&mut eng, frames, 0.75);
         eprintln!("fractional-reconstruction taa_gpu_us={taa_gpu_us:.3} frames={frames}");
     }
 }
@@ -542,15 +542,24 @@ fn half_scale_glossy_temporal_reconstruction_tracks_supersampled_reference() {
          no_taa={no_taa_metrics:?}, temporal={temporal_metrics:?}"
     );
     assert!(
-        temporal_metrics.ssim >= 0.915 && temporal_metrics.mean_rgb <= 2.30,
+        temporal_metrics.ssim >= 0.922
+            && temporal_metrics.mean_rgb <= 2.13
+            && temporal_metrics.rmse_luminance <= 0.0249
+            && temporal_metrics.mean_oklab_delta <= 0.0083
+            && temporal_metrics.mean_edge_delta <= 0.0149,
         "half-scale glossy reconstruction exceeded its qualified reference envelope: \
          {temporal_metrics:?}"
     );
     assert!(
-        temporal_detail >= reference_detail * 0.50,
+        temporal_detail >= reference_detail * 0.54,
         "half-scale reconstruction erased too much authored glossy detail: \
          reference={reference_detail:.4}, temporal={temporal_detail:.4}"
     );
+    if let Ok(frames) = std::env::var("BLOOM_PROFILE_HALF_TAA_FRAMES") {
+        let frames = frames.parse::<u32>().expect("profile frame count");
+        let taa_gpu_us = profile_taa_reconstruction(&mut eng, frames, 0.5);
+        eprintln!("half-reconstruction taa_gpu_us={taa_gpu_us:.3} frames={frames}");
+    }
 }
 
 fn glossy_slow_pan_metrics(render_scale: f32) -> Option<(f64, f64, f64, f64, Vec<f64>)> {
@@ -643,13 +652,13 @@ fn half_scale_glossy_slow_pan_tracks_supersampled_motion() {
     };
 
     assert!(
-        mean_rgb <= 2.30 && mean_ssim >= 0.915 && minimum_ssim >= 0.90,
+        mean_rgb <= 2.10 && mean_ssim >= 0.925 && minimum_ssim >= 0.913,
         "half-scale glossy slow pan diverged from supersampled motion: \
          mean_rgb={mean_rgb:.6}, mean_ssim={mean_ssim:.6}, \
          minimum_ssim={minimum_ssim:.6}"
     );
     assert!(
-        derivative_error <= 0.25,
+        derivative_error <= 0.20,
         "half-scale glossy slow pan added excessive temporal variation: \
          derivative_error={derivative_error:.6}"
     );
