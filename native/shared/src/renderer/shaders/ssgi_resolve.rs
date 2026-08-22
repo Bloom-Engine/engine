@@ -4,8 +4,9 @@
 ///
 /// Samples the 2×2 probes whose tiles enclose the pixel's tile and
 /// bilateral-weights the contribution by a symmetric world-space same-plane
-/// test plus normal match. Invalid probes (sky) are skipped. When all four
-/// probes reject, fall back to zero rather than leak a different surface.
+/// test plus normal match. Invalid probes (sky) are skipped. An empty strict
+/// footprint is reconstructed only when all four surrounding probes remain
+/// safely compatible with the receiver; unsupported edges stay black.
 pub(in crate::renderer) const SSGI_PROBE_RESOLVE_WGSL: &str = "
 struct ResolveParams {
     inv_view: mat4x4<f32>,
@@ -92,6 +93,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     var accum = vec3<f32>(0.0);
     var wsum = 0.0;
+    // xyz = bilinear temporal radiance, w = compatible probe count.
+    var fallback = vec4<f32>(0.0);
 
     for (var dy = 0; dy <= 1; dy = dy + 1) {
         for (var dx = 0; dx <= 1; dx = dx + 1) {
@@ -109,7 +112,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             // wall and changes as the camera moves. Compare the receiver and
             // probe in world space instead, accepting only the same plane.
             let ndotn = clamp(dot(probe.normal.xyz, N_ws), 0.0, 1.0);
-            if (ndotn < 0.80) { continue; }
             let world_delta = probe.world_pos.xyz - P_ws;
             let plane_error = max(
                 abs(dot(world_delta, N_ws)),
@@ -119,23 +121,43 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 2.0 * max(linear_z, 0.1) * tile /
                 max(abs(p00) * half_w, 0.0001);
             let plane_sigma = 0.015 + probe_world_spacing * 0.12;
-            if (plane_error > plane_sigma * 2.5) { continue; }
-            let w_plane = exp(
-                -0.5 * plane_error * plane_error /
-                max(plane_sigma * plane_sigma, 0.000001),
-            );
-            let w_normal = pow(ndotn, 8.0);
-            let w = w_corner * w_plane * w_normal;
-            if (w <= 0.0001) { continue; }
+            if (ndotn >= 0.80 && plane_error <= plane_sigma * 2.5) {
+                let w_plane = exp(
+                    -0.5 * plane_error * plane_error /
+                    max(plane_sigma * plane_sigma, 0.000001),
+                );
+                let w_normal = pow(ndotn, 8.0);
+                let w = w_corner * w_plane * w_normal;
+                if (w > 0.0001) {
+                    let radiance = sample_probe(vec2<i32>(gx, gy));
+                    accum = accum + radiance * w;
+                    wsum = wsum + w;
+                    continue;
+                }
+            }
 
-            let radiance = sample_probe(vec2<i32>(gx, gy));
-            accum = accum + radiance * w;
-            wsum = wsum + w;
+            // A strict reject may contribute to the broader fallback. Four
+            // probes must sit safely inside both geometry boundaries, so a
+            // curved silhouette cannot blink into this reconstruction.
+            let fallback_plane_limit =
+                (0.08 + probe_world_spacing * 0.85) * 0.85;
+            if (ndotn >= 0.65 && plane_error <= fallback_plane_limit) {
+                fallback = fallback + vec4<f32>(
+                    probe.previous_diffuse.rgb * w_corner,
+                    1.0,
+                );
+            }
         }
     }
 
     if (wsum > 0.0001) {
         accum = (accum / wsum) * u.params.y;
+    } else if (fallback.w == 4.0) {
+        // Strict rejection on shallow, finely tessellated receivers used to
+        // expose alternating illuminated and zero-energy probe rows. The
+        // broader footprint is deliberately tapered as a lower-confidence
+        // estimate, retaining stability without recreating those stripes.
+        accum = fallback.rgb * (u.params.y * 0.90);
     }
     return vec4<f32>(accum, 1.0);
 }

@@ -261,6 +261,18 @@ mod ray_query_variant_tests {
         assert!(SSGI_PROBE_RESOLVE_WGSL.contains("w_corner * w_plane * w_normal"));
         assert!(SSGI_PROBE_RESOLVE_WGSL
             .contains("textureLoad(radiance_tex, vec3<i32>(probe_coord, 0), 0)"));
+        assert_eq!(
+            SSGI_PROBE_RESOLVE_WGSL
+                .matches("textureLoad(radiance_tex")
+                .count(),
+            1,
+            "empty-footprint reconstruction added a radiance texture fetch",
+        );
+        assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("textureSampleLevel(radiance_tex"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("fallback.w == 4.0"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL
+            .contains("probe.previous_diffuse.rgb * w_corner"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("accum = fallback.rgb"));
         assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("w_depth"));
         assert_eq!(
             SSGI_PROBE_TEMPORAL_WGSL
