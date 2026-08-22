@@ -21,6 +21,7 @@
 
 import {
   initWindow, closeWindow, windowShouldClose, beginDrawing, endDrawing, takeScreenshot,
+  captureFrameToPng, captureDebugIntermediates,
   setEnvClearFromHdr, setTargetFPS, getDeltaTime, getFPS,
   isKeyDown, isKeyPressed,
   getMouseDeltaX, getMouseDeltaY,
@@ -30,6 +31,7 @@ import {
   setAutoExposure, setAutoExposureKey, setAutoExposureRate,
   setEnvIntensity, setManualExposure, setTaaEnabled, setBloomEnabled,
   setSsgiEnabled, setSsrEnabled, setSharpenStrength, setShadowsAlwaysFresh, setMotionBlurEnabled,
+  setPathTracing,
   setBloomIntensity, setSsaoIntensity, setSsaoRadius,
   setSsgiIntensity, setSsgiRadius, setTonemap, Tonemap,
   setColorSaturation,
@@ -59,6 +61,7 @@ const argv: string[] = getCommandLineArgs();
 const qualityConfig = parseQualityRun(argv);
 let captureFrames = 0;
 let capturePath = "";
+let diagnosticCaptureFrames = 0;
 let frameCount = 0;
 let initYaw = 0.0;
 let initCamX = -26.43;
@@ -91,19 +94,29 @@ let referenceEnvIntensity = 0.70;
 let referenceAmbientIntensity = 0.06;
 let referenceAutoExposure = true;
 let referenceAutoExposureKey = 0.12;
+let pathTracingMode = 0;
 let fullscreen = false;
 let cameraXOverride = false;
 let cameraYOverride = false;
 let cameraZOverride = false;
 let yawOverride = false;
+let pitchOverride = false;
+let initPitch = 0.0;
 for (let i = 1; i < argv.length; i = i + 1) {
   if (argv[i] === "--capture" && i + 2 < argv.length) {
     captureFrames = Math.floor(parseFloat(argv[i + 1]));
     capturePath = argv[i + 2];
   }
+  if (argv[i] === "--debug-capture" && i + 1 < argv.length) {
+    diagnosticCaptureFrames = Math.floor(parseFloat(argv[i + 1]));
+  }
   if (argv[i] === "--yaw" && i + 1 < argv.length) {
     initYaw = parseFloat(argv[i + 1]);
     yawOverride = true;
+  }
+  if (argv[i] === "--pitch" && i + 1 < argv.length) {
+    initPitch = parseFloat(argv[i + 1]);
+    pitchOverride = true;
   }
   if (argv[i] === "--camera-x" && i + 1 < argv.length) {
     initCamX = parseFloat(argv[i + 1]);
@@ -188,6 +201,9 @@ for (let i = 1; i < argv.length; i = i + 1) {
   }
   if (argv[i] === "--reference-ambient" && i + 1 < argv.length) {
     referenceAmbientIntensity = Math.max(0.0, Math.min(10.0, parseFloat(argv[i + 1])));
+  }
+  if (argv[i] === "--path-tracing" && i + 1 < argv.length) {
+    pathTracingMode = Math.max(0, Math.min(2, Math.floor(parseFloat(argv[i + 1]))));
   }
 }
 
@@ -295,6 +311,7 @@ const diagnosticSharpenStrength = interactiveSharpenStrength >= 0.0
     ? diagnosticSharpenStrengths[interactiveQualityPreset]
     : 0.5;
 let diagnosticSharpenEnabled = diagnosticSharpenStrength > 0.0;
+let diagnosticCaptureRequested = false;
 
 // Bistro is an image-quality inspection scene. Ultra intentionally offers
 // cinematic motion blur, but applying its 8-tap directional filter while the
@@ -328,6 +345,9 @@ for (let i = 0; i < bistro.meshCount; i = i + 1) {
   setSceneNodeTransform(node, identity);
 }
 console.error("BLOOM_QUALITY_SCENE bistro_placements_attached=" + bistro.meshCount);
+if (pathTracingMode > 0) {
+  setPathTracing(pathTracingMode);
+}
 
 // ---- Camera ----
 // Matches the preset glTF camera in zeux/niagara_bistro (translation
@@ -338,7 +358,7 @@ let camX = initCamX;
 let camY = initCamY;
 let camZ = initCamZ;
 let camYaw = (yawOverride || godotReference) ? initYaw : -1.17; // ≈ 67° left of -Z
-let camPitch = 0.0;
+let camPitch = pitchOverride ? initPitch : 0.0;
 let cursorLocked = false;
 let fixtureFrame = 0;
 
@@ -388,6 +408,9 @@ while (!windowShouldClose()) {
   if (qualityRun === null && isKeyPressed(Key.P)) {
     diagnosticSharpenEnabled = !diagnosticSharpenEnabled;
     setSharpenStrength(diagnosticSharpenEnabled ? diagnosticSharpenStrength : 0.0);
+  }
+  if (qualityRun === null && isKeyPressed(Key.N)) {
+    diagnosticCaptureRequested = true;
   }
 
   // Opt-in VSM transition oracle. Move six metres along the exact sun
@@ -458,15 +481,33 @@ while (!windowShouldClose()) {
         : { r: 230, g: 120, b: 120, a: 255 };
     const fpsText = `FPS ${Math.round(fps)}  (${ms.toFixed(1)} ms)`;
     drawText(fpsText, 10, 35, 16, fpsColor);
-    drawText("WASD move / Mouse look / Tab cursor", 10, SCREEN_H - 48, 14, { r: 180, g: 180, b: 180, a: 255 });
+    drawText("WASD move / Mouse look / Tab cursor / N capture", 10, SCREEN_H - 48, 14, { r: 180, g: 180, b: 180, a: 255 });
     const diagnosticText = `T TAA ${diagnosticTaaEnabled ? "on" : "off"} / G SSGI ${diagnosticSsgiEnabled ? "on" : "off"} / R SSR ${diagnosticSsrEnabled ? "on" : "off"} / P sharpen ${diagnosticSharpenEnabled ? "on" : "off"}`;
     drawText(diagnosticText, 10, SCREEN_H - 26, 13, { r: 180, g: 210, b: 240, a: 255 });
   }
 
+  if (qualityRun === null && (captureFrames > 0 || diagnosticCaptureFrames > 0)) {
+    frameCount = frameCount + 1;
+    if (diagnosticCaptureFrames > 0 && frameCount === diagnosticCaptureFrames) {
+      diagnosticCaptureRequested = true;
+    }
+  }
+
   if (qualityCapture && qualityRun !== null) {
     qualityRun.requestCapture();
+  } else if (diagnosticCaptureRequested) {
+    console.error(
+      "BLOOM_BISTRO_CAPTURE_CAMERA"
+        + " x=" + renderCamX.toFixed(6)
+        + " y=" + camY.toFixed(6)
+        + " z=" + renderCamZ.toFixed(6)
+        + " yaw=" + renderYaw.toFixed(6)
+        + " pitch=" + camPitch.toFixed(6),
+    );
+    captureDebugIntermediates("/tmp/bloom-bistro-ssgi-diagnostic");
+    captureFrameToPng("/tmp/bloom-bistro-ssgi-diagnostic/frame.png");
+    diagnosticCaptureRequested = false;
   } else if (qualityRun === null && captureFrames > 0) {
-    frameCount = frameCount + 1;
     if (frameCount === captureFrames) { takeScreenshot(capturePath); }
     if (frameCount > captureFrames) { endDrawing(); break; }
   }

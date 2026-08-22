@@ -5,6 +5,17 @@
 
 use super::*;
 
+// Accumulate only the completed diffuse integral while the SSGI-owned angular
+// sequence rotates its 32 directions. Sixteen recent estimates suppress
+// angular aliasing; motion raises this to an eight-frame window in shader,
+// while surface rejection and the current-neighborhood clamp prevent stale
+// light transport.
+const SSGI_TEMPORAL_CURRENT_WEIGHT: f32 = 0.0625;
+
+fn probe_inverse_view_for_wgsl(view: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    mat4_transpose(mat4_invert(view))
+}
+
 impl Renderer {
     /// Toggle SSGI (screen-space global illumination) on/off. Off means no
     /// probe work; either transition invalidates radiance from the old route.
@@ -12,6 +23,7 @@ impl Renderer {
         if self.ssgi_enabled != enabled {
             self.ssgi_enabled = enabled;
             self.probe_history_idx = 0;
+            self.probe_frame_index = 0;
             self.probe_history_valid = false;
         }
     }
@@ -23,6 +35,7 @@ impl Renderer {
         if self.ssgi_intensity != intensity {
             self.ssgi_intensity = intensity;
             self.probe_history_idx = 0;
+            self.probe_frame_index = 0;
             self.probe_history_valid = false;
         }
     }
@@ -35,6 +48,7 @@ impl Renderer {
         if self.ssgi_radius != radius {
             self.ssgi_radius = radius;
             self.probe_history_idx = 0;
+            self.probe_frame_index = 0;
             self.probe_history_valid = false;
         }
     }
@@ -67,11 +81,25 @@ impl Renderer {
         // shows raster frames until accumulation warms up, and those still
         // want SSGI.
         if self.ssgi_enabled && !self.pt_owns_frame() {
+            // Coherent card lighting fades in over ~48 frames once the bake
+            // is complete, and drops out immediately if streaming resumes.
+            self.card_light_coherent_ramp = if self.card_light_coherent {
+                (self.card_light_coherent_ramp + 1.0 / 48.0).min(1.0)
+            } else {
+                0.0
+            };
             let p00 = self.current_proj_matrix[0][0];
             let p11 = self.current_proj_matrix[1][1];
             let p20 = self.current_proj_matrix[2][0];
             let p21 = self.current_proj_matrix[2][1];
-            let inv_view = mat4_invert(self.current_view_matrix);
+            // `mat4_invert` lands transposed relative to WGSL's `M * v`
+            // convention (the path tracer has the same upload boundary).
+            // Uploading it raw mirrored screen-probe world positions across
+            // the camera: right-hand facade probes traced from the distant
+            // red awnings, then resolve projected that radiance back onto the
+            // facade. Convert once here; place, HW/SDF trace and resolve all
+            // share this exact uniform value.
+            let inv_view = probe_inverse_view_for_wgsl(self.current_view_matrix);
 
             // ---- place ----
             let place_params = ProbePlaceParams {
@@ -79,7 +107,7 @@ impl Renderer {
                 proj_row01: [p00, p11, p20, p21],
                 size: [half_w, half_h, gw, gh],
                 params: [
-                    self.taa_frame_index as f32,
+                    (self.probe_frame_index & 4095) as f32,
                     PROBE_TILE_SIZE as f32,
                     0.0,
                     0.0,
@@ -182,7 +210,7 @@ impl Renderer {
                 proj_row01: [p00, p11, p20, p21],
                 size: [half_w, half_h, gw, gh],
                 params: [
-                    self.taa_frame_index as f32,
+                    (self.probe_frame_index & 4095) as f32,
                     self.ssgi_intensity,
                     self.ssgi_radius,
                     10.0, // firefly luma cap
@@ -241,7 +269,12 @@ impl Renderer {
                 shadow_params: [
                     0.002,
                     if shadows_enabled { 1.0 } else { 0.0 },
-                    if self.card_light_coherent { 1.0 } else { 0.0 },
+                    // Fade the coherent card-lighting term in over ~0.8 s
+                    // instead of switching the instant the final BLAS lands.
+                    // The binary flip made the sun-lit bounce (most visibly
+                    // Bistro's red awnings onto the façade above them) appear
+                    // as a sudden delayed light change ~20 s into a session.
+                    self.card_light_coherent_ramp,
                     0.0,
                 ],
             };
@@ -609,8 +642,14 @@ impl Renderer {
                 };
             self.transparent_gi_force_probe_refresh = false;
             let temporal_params = ProbeTemporalParams {
-                params: [0.25, force_refresh, gw as f32, gh as f32],
+                params: [
+                    SSGI_TEMPORAL_CURRENT_WEIGHT,
+                    force_refresh,
+                    gw as f32,
+                    gh as f32,
+                ],
                 size: [half_w as f32, half_h as f32, PROBE_TILE_SIZE as f32, p00],
+                confidence: [if use_hw { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             };
             self.queue.write_buffer(
                 &self.probe_temporal_uniform,
@@ -673,6 +712,20 @@ impl Renderer {
                     &[],
                 );
                 pass.dispatch_workgroups(gw, gh, 1);
+            }
+            {
+                let ts = profiler.compute_pass_timestamp_writes("probe_spatial_pass");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("probe_spatial_pass"),
+                    timestamp_writes: ts,
+                });
+                pass.set_pipeline(&self.probe_spatial_pipeline);
+                pass.set_bind_group(
+                    0,
+                    self.probe_temporal_bg_cache[write_idx].as_ref().unwrap(),
+                    &[],
+                );
+                pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
             }
             #[cfg(not(target_arch = "wasm32"))]
             if self.pending_quality_capture_dir.is_some() {
@@ -774,6 +827,38 @@ impl Renderer {
                 multiview_mask: None,
             });
             drop(pass);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{probe_inverse_view_for_wgsl, SSGI_TEMPORAL_CURRENT_WEIGHT};
+    use crate::renderer::{mat4_look_at, mat4_mul_vec4};
+
+    #[test]
+    fn screen_probe_integral_converges_over_sixteen_angular_phases() {
+        assert_eq!(SSGI_TEMPORAL_CURRENT_WEIGHT, 0.0625);
+    }
+
+    #[test]
+    fn probe_inverse_view_upload_reconstructs_the_original_world_point() {
+        let view = mat4_look_at(
+            [-4.526_873, 1.544, 6.502_634],
+            [62.65, -1.156, -67.57],
+            [0.0, 1.0, 0.0],
+        );
+        let world = [4.486_212, 4.024_019, 2.742_565, 1.0];
+        let view_point = mat4_mul_vec4(&view, &world);
+        let inverse_for_wgsl = probe_inverse_view_for_wgsl(view);
+        let reconstructed = mat4_mul_vec4(&inverse_for_wgsl, &view_point);
+        for axis in 0..4 {
+            assert!(
+                (reconstructed[axis] - world[axis]).abs() < 0.000_1,
+                "axis {axis}: reconstructed={} expected={}",
+                reconstructed[axis],
+                world[axis],
+            );
         }
     }
 }

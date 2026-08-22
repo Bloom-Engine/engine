@@ -1,6 +1,7 @@
 struct TemporalParams {
     params: vec4<f32>,
     size: vec4<f32>,
+    confidence: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: TemporalParams;
@@ -10,6 +11,10 @@ struct TemporalParams {
 @group(0) @binding(4) var reason_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(5) var confidence_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(6) var velocity_tex: texture_2d<f32>;
+@group(0) @binding(7) var current_radiance_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(8) var source_identity_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(9) var current_integrated_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(10) var history_integrated_out: texture_storage_2d<rgba8unorm, write>;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -58,6 +63,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 2.0 * max(current_probe.normal.w, 0.1) * u.size.z /
                 max(abs(u.size.w) * u.size.x, 0.0001);
             let maximum_world_shift = 0.05 + probe_world_spacing * 0.9;
+            let maximum_plane_shift = 0.025 + probe_world_spacing * 0.08;
             var best_score = 1e30;
             for (var dy = -1; dy <= 1; dy = dy + 1) {
                 for (var dx = -1; dx <= 1; dx = dx + 1) {
@@ -73,6 +79,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         current_probe,
                         candidate,
                         maximum_world_shift,
+                        maximum_plane_shift,
                     )) {
                         continue;
                     }
@@ -97,34 +104,19 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             reprojection_stage = 2u;
         }
     }
-    let octel = gid.xy % vec2<u32>(8u);
-    let coord = vec3<i32>(
-        vec2<i32>(probe),
-        i32(octel.y * 8u + octel.x),
-    );
-    let history_coord = vec3<i32>(
-        i32(history_probe_idx % u32(u.params.z)),
-        i32(history_probe_idx / u32(u.params.z)),
-        i32(octel.y * 8u + octel.x),
-    );
-    let curr = textureLoad(radiance_in, coord, 0).rgb;
-    var hist = textureLoad(history_in, history_coord, 0).rgb;
-    // Production reserves octel zero for the probe's cosine-convolved
-    // diffuse result and seeds that lane's directional history from current.
-    if (octel.x == 0u && octel.y == 0u) {
-        hist = curr;
-    }
+    // Production history is the integrated diffuse estimate reprojected onto
+    // a world surface. Per-ray slots change direction every frame and are
+    // intentionally excluded from temporal validity diagnostics.
+    let curr = current_probe.diffuse.rgb;
+    let hist = probes[history_probe_idx].previous_diffuse.rgb;
     let curr_finite = all(abs(curr) <= vec3<f32>(65504.0));
     let hist_finite = all(abs(hist) <= vec3<f32>(65504.0));
     let finite = curr_finite && hist_finite;
     let curr_luma = dot(curr, vec3<f32>(0.2126, 0.7152, 0.0722));
     let hist_luma = dot(hist, vec3<f32>(0.2126, 0.7152, 0.0722));
     let delta = abs(curr_luma - hist_luma);
-    let motion_refresh = smoothstep(0.00025, 0.003, motion_length);
-    var alpha = min(1.0, mix(u.params.x, 0.65, motion_refresh) + delta * 0.6);
-    if (u.params.y > 0.5 || !geometry_valid) {
-        alpha = 1.0;
-    }
+    var alpha = u.params.x;
+    if (u.params.y > 0.5 || !geometry_valid) { alpha = 1.0; }
 
     // Shared palette in probe space: gray seed, magenta adaptive radiance
     // refresh/invalid data, blue motion refresh, green retained history.
@@ -139,10 +131,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             vec3<f32>(0.0, 0.8, 1.0),
             reprojection_stage == 3u,
         );
-    } else if (!finite || delta * 0.6 >= u.params.x) {
+    } else if (!finite) {
         reason = vec3<f32>(1.0, 0.0, 0.8);
-    } else if (motion_refresh > 0.01) {
-        reason = vec3<f32>(0.05, 0.25, 1.0);
     }
     var variation_heat = 1.0;
     var current_heat = 0.0;
@@ -152,10 +142,85 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         current_heat = 1.0 - exp(-max(curr_luma, 0.0) * 4.0);
         retained_history = clamp(1.0 - alpha, 0.0, 1.0);
     }
+    // Temporal records current estimator uncertainty in diffuse.w before this
+    // capture-only pass runs. Red shows the confidence heat without a
+    // production resource or readback.
+    let estimator_uncertainty = max(current_probe.diffuse.w, 0.0);
     textureStore(reason_out, vec2<i32>(gid.xy), vec4<f32>(reason, 1.0));
     textureStore(
         confidence_out,
         vec2<i32>(gid.xy),
-        vec4<f32>(variation_heat, current_heat, retained_history, 1.0),
+        vec4<f32>(
+            clamp(estimator_uncertainty * 4.0, 0.0, 1.0),
+            current_heat,
+            retained_history,
+            1.0,
+        ),
+    );
+
+    // Capture-only ray provenance. HW trace stores one-based
+    // `instance_custom_data` in alpha; other backends retain their ordinary
+    // scalar diagnostic and are deliberately shown as misses here.
+    let probe_octel = gid.xy % vec2<u32>(8u);
+    let trace_coord = vec3<i32>(
+        i32(probe.x),
+        i32(probe.y),
+        i32(probe_octel.y * 8u + probe_octel.x),
+    );
+    let raw_sample = textureLoad(radiance_in, trace_coord, 0);
+    let display_radiance = vec3<f32>(1.0) - exp(-max(raw_sample.rgb, vec3<f32>(0.0)) * 2.0);
+    textureStore(
+        current_radiance_out,
+        vec2<i32>(gid.xy),
+        vec4<f32>(display_radiance, 1.0),
+    );
+    let one_based_source = select(
+        0u,
+        u32(round(max(raw_sample.a, 0.0))),
+        u.confidence.x > 0.5,
+    );
+    let source_r = f32(one_based_source & 255u) / 255.0;
+    let source_g = f32((one_based_source >> 8u) & 255u) / 255.0;
+    textureStore(
+        source_identity_out,
+        vec2<i32>(gid.xy),
+        vec4<f32>(source_r, source_g, select(0.0, 1.0, one_based_source != 0u), 1.0),
+    );
+
+}
+
+// Capture-only separation of the two integrated estimators. This is a second
+// entry point so each diagnostic pipeline remains within WebGPU's portable
+// four-storage-texture limit. It is dispatched only for an explicit capture.
+@compute @workgroup_size(8, 8, 1)
+fn cs_integrated(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dimensions = textureDimensions(current_integrated_out);
+    if (gid.x >= dimensions.x || gid.y >= dimensions.y) {
+        return;
+    }
+    let probe = vec2<u32>(gid.xy / vec2<u32>(8u));
+    let probe_idx = probe.y * (dimensions.x / 8u) + probe.x;
+    let current_probe = probes[probe_idx];
+    let current_integrated = bounded_probe_history(
+        current_probe.current_diffuse.rgb,
+    );
+    let history_integrated = bounded_probe_history(
+        current_probe.previous_diffuse.rgb,
+    );
+    textureStore(
+        current_integrated_out,
+        vec2<i32>(gid.xy),
+        vec4<f32>(
+            vec3<f32>(1.0) - exp(-max(current_integrated, vec3<f32>(0.0)) * 2.0),
+            1.0,
+        ),
+    );
+    textureStore(
+        history_integrated_out,
+        vec2<i32>(gid.xy),
+        vec4<f32>(
+            vec3<f32>(1.0) - exp(-max(history_integrated, vec3<f32>(0.0)) * 2.0),
+            1.0,
+        ),
     );
 }

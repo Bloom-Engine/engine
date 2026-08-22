@@ -149,12 +149,12 @@ use formats::{
     create_scene_sdf_clipmap_staging, create_ssao_blur_rt, create_ssao_history_textures,
     create_ssao_rt, create_ssgi_rt, create_ssr_history_textures, create_ssr_rt, create_sss_rt,
     create_taa_depth_history_textures, create_taa_textures, create_velocity_rt, create_wsrc_atlas,
-    halton, probe_grid_dims, BLOOM_MIP_COUNT, CARD_ATLAS_SIZE, CARD_SLOTS_PER_ROW, CARD_SLOT_SIZE,
-    HDR_FORMAT, HIZ_FORMAT, HIZ_MIP_COUNT, MATERIAL_FORMAT, MESH_SDF_RES, PROBE_TILE_SIZE,
-    SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT, SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME,
-    SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD, SCENE_SDF_CLIPMAP_RES, SSAO_FORMAT,
-    TAA_DEPTH_HISTORY_FORMAT, VELOCITY_FORMAT, WSRC_CASCADE_COUNT, WSRC_CASCADE_EXTENTS,
-    WSRC_GRID_RES, WSRC_REBAKE_THRESHOLD,
+    halton, probe_grid_dims, BLOOM_MIP_COUNT, CARD_RADIANCE_ATLAS_SIZE, CARD_RADIANCE_SLOT_SIZE,
+    CARD_SLOTS_PER_ROW, CARD_SLOT_SIZE, HDR_FORMAT, HIZ_FORMAT, HIZ_MIP_COUNT, MATERIAL_FORMAT,
+    MESH_SDF_RES, PROBE_TILE_SIZE, SCENE_SDF_CLIPMAP_BIN_CELLS, SCENE_SDF_CLIPMAP_EXTENT,
+    SCENE_SDF_CLIPMAP_LAYERS_PER_FRAME, SCENE_SDF_CLIPMAP_REBAKE_THRESHOLD, SCENE_SDF_CLIPMAP_RES,
+    SSAO_FORMAT, TAA_DEPTH_HISTORY_FORMAT, VELOCITY_FORMAT, WSRC_CASCADE_COUNT,
+    WSRC_CASCADE_EXTENTS, WSRC_GRID_RES, WSRC_REBAKE_THRESHOLD,
 };
 pub(crate) use formats::{CARD_AXES_PER_MESH, CARD_MAX_SLOTS};
 
@@ -913,7 +913,7 @@ pub struct Renderer {
     /// Current probe grid dimensions. Recomputed on resize.
     pub probe_grid_w: u32,
     pub probe_grid_h: u32,
-    /// Per-probe headers (80 B, storage/copy-dst), placed then read by trace/resolve.
+    /// Per-probe headers (112 B, storage/copy-dst), placed then read by trace/resolve.
     pub probe_header_buffer: wgpu::Buffer,
     /// Per-frame compute trace output; temporal reads it as current input.
     pub probe_trace_tex: wgpu::Texture,
@@ -923,6 +923,9 @@ pub struct Renderer {
     pub probe_history_textures: [wgpu::Texture; 2],
     pub probe_history_views: [wgpu::TextureView; 2],
     pub probe_history_idx: usize,
+    /// SSGI-owned angular sequence. Independent of TAA so disabling or
+    /// toggling antialiasing cannot freeze/reset GI convergence.
+    pub probe_frame_index: u32,
     /// True after temporal writes; the index becomes next write after present.
     /// Independent from TAA because SSGI may be disabled or replaced by PT.
     pub probe_history_valid: bool,
@@ -1114,6 +1117,9 @@ pub struct Renderer {
     /// True only after the radiance atlas and cardless instance visibility
     /// were baked against the fully admitted TLAS.
     card_light_coherent: bool,
+    /// 0→1 fade applied to the coherent card-lit GI term after the bake
+    /// completes, so the delayed handoff cannot pop indirect lighting in.
+    card_light_coherent_ramp: f32,
     /// Dirty-gate for `light_mesh_cards`: hash of every lighting-relevant
     /// input at the last relight (sun, sky, cascade VPs, slot count,
     /// card content version). The relight repaints the entire card atlas
@@ -1202,6 +1208,7 @@ pub struct Renderer {
     pub wsrc_last_sky_color: [[f32; 3]; 3],
 
     pub probe_temporal_pipeline: wgpu::ComputePipeline,
+    pub probe_spatial_pipeline: wgpu::ComputePipeline,
     pub probe_temporal_layout: wgpu::BindGroupLayout,
     pub probe_temporal_uniform: wgpu::Buffer,
     probe_temporal_bg_cache: [Option<wgpu::BindGroup>; 2],
@@ -2471,7 +2478,10 @@ impl Renderer {
             label: Some("probe_header_buffer"),
             size: (probe_grid_w * probe_grid_h) as u64
                 * std::mem::size_of::<ProbeHeaderCpu>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            // COPY_SRC is capture/diagnostic-only.
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let (dof_rt_texture, dof_rt_view) =
@@ -5579,7 +5589,6 @@ impl Renderer {
         } else {
             (None, None)
         };
-
         // --- Path-tracing megakernel (PT-1, docs/pt/pt-roadmap.md) ---
         // Same gate as the HW probe trace: no ray query, no path tracer —
         // and deliberately no software fallback (a CPU-speed path trace is
@@ -6251,6 +6260,15 @@ impl Renderer {
                 layout: Some(&probe_temporal_pl_layout),
                 module: &probe_temporal_shader,
                 entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let probe_spatial_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("probe_spatial_pipeline"),
+                layout: Some(&probe_temporal_pl_layout),
+                module: &probe_temporal_shader,
+                entry_point: Some("cs_spatial"),
                 compilation_options: Default::default(),
                 cache: None,
             });
@@ -8103,6 +8121,7 @@ impl Renderer {
             probe_history_textures,
             probe_history_views,
             probe_history_idx: 0,
+            probe_frame_index: 0,
             probe_history_valid: false,
             #[cfg(not(target_arch = "wasm32"))]
             ssgi_temporal_diagnostics: None,
@@ -8200,6 +8219,7 @@ impl Renderer {
             card_light_bg_cache: None,
             card_light_hw_bg_cache: None,
             card_light_coherent: false,
+            card_light_coherent_ramp: 0.0,
             card_light_input_hash: 0,
             card_content_version: 0,
             sdf_bake_pipeline,
@@ -8235,6 +8255,7 @@ impl Renderer {
             wsrc_last_sun_color: [[0.0; 3]; 3],
             wsrc_last_sky_color: [[0.0; 3]; 3],
             probe_temporal_pipeline,
+            probe_spatial_pipeline,
             probe_temporal_layout,
             probe_temporal_uniform,
             probe_temporal_bg_cache: [None, None],
@@ -8765,11 +8786,15 @@ impl Renderer {
             self.probe_history_textures = pht;
             self.probe_history_views = phv;
             self.probe_history_idx = 0;
+            self.probe_frame_index = 0;
             self.probe_history_valid = false;
             self.probe_header_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("probe_header_buffer"),
                 size: (pg_w * pg_h) as u64 * std::mem::size_of::<ProbeHeaderCpu>() as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                // COPY_SRC is capture/diagnostic-only.
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             let (dof_t, dof_v) = create_dof_rt(&self.device, width, height);
@@ -9523,8 +9548,8 @@ impl Renderer {
             sun_color,
             sky_color,
             atlas_info: [
-                CARD_ATLAS_SIZE,
-                CARD_SLOT_SIZE,
+                CARD_RADIANCE_ATLAS_SIZE,
+                CARD_RADIANCE_SLOT_SIZE,
                 CARD_SLOTS_PER_ROW,
                 active_slots,
             ],
@@ -9670,9 +9695,10 @@ impl Renderer {
         } else {
             pass.set_pipeline(&self.card_light_pipeline);
             pass.set_bind_group(0, self.card_light_bg_cache.as_ref().unwrap(), &[]);
-            // Dispatch over the populated slot range only. Each workgroup
-            // is 8×8 pixels, each slot is CARD_SLOT_SIZE² pixels.
-            let wg_per_slot = CARD_SLOT_SIZE / 8;
+            // Dispatch over the populated low-frequency radiance slots only.
+            // Material cards remain 64x64; normalized UVs map each radiance
+            // texel to the centre of its corresponding material footprint.
+            let wg_per_slot = CARD_RADIANCE_SLOT_SIZE / 8;
             let total_wg_x = wg_per_slot * CARD_SLOTS_PER_ROW;
             let total_wg_y =
                 wg_per_slot * ((active_slots + CARD_SLOTS_PER_ROW - 1) / CARD_SLOTS_PER_ROW);
@@ -9851,7 +9877,7 @@ impl Renderer {
                 albedo: n.flat_albedo,
                 emissive_luma: (e[0] + e[1] + e[2]) * (1.0 / 3.0),
                 normal_ws: n.flat_normal_ws,
-                _pad0: 0.0,
+                double_sided: if n.material.double_sided { 1.0 } else { 0.0 },
                 card_slot: [first_slot, 0.0, 0.0, has_card],
                 card_aabb_min: [
                     n.bounds_min[0],
@@ -9935,7 +9961,7 @@ impl Renderer {
                 albedo: [1.0, 1.0, 1.0],
                 emissive_luma: 0.0,
                 normal_ws: [0.0, 1.0, 0.0],
-                _pad0: 0.0,
+                double_sided: if mesh.double_sided { 1.0 } else { 0.0 },
                 card_slot: [0.0, 0.0, 0.0, 0.0],
                 card_aabb_min: [mesh.local_min[0], mesh.local_min[1], mesh.local_min[2], 0.0],
                 card_aabb_max: [mesh.local_max[0], mesh.local_max[1], mesh.local_max[2], 0.0],
@@ -10117,6 +10143,65 @@ impl Renderer {
             && transparent_gi::transparent_gi_enabled();
         let (instance_count, _resized) =
             self.rebuild_instance_data(scene, &instance_handles, transparent_transport_enabled);
+        #[cfg(not(target_arch = "wasm32"))]
+        // Capture provenance exactly once, when the final progressively-built
+        // BLAS enters the ray scene. Avoid an environment lookup and path
+        // stat on every subsequent production frame.
+        if pending_blas && scene.pending_blas_builds.is_empty() {
+            if let Some(path) = std::env::var_os("BLOOM_SSGI_PROVENANCE_CSV") {
+                let path = std::path::PathBuf::from(path);
+                if !path.as_os_str().is_empty() && !path.exists() {
+                    use std::fmt::Write as _;
+                    let mut csv = String::from(
+                        "instance_id,one_based_source,node_handle,card_first_slot,texture_idx,double_sided,",
+                    );
+                    csv.push_str("albedo_r,albedo_g,albedo_b,emissive_r,emissive_g,emissive_b,");
+                    csv.push_str(
+                        "world_min_x,world_min_y,world_min_z,world_max_x,world_max_y,world_max_z\n",
+                    );
+                    for (instance_id, &handle) in instance_handles.iter().enumerate() {
+                        let node = scene.nodes.get(handle).unwrap();
+                        let card = node
+                            .card_first_slot
+                            .map_or_else(|| String::from("none"), |slot| slot.to_string());
+                        let world_min = node.world_bounds_min;
+                        let world_max = node.world_bounds_max;
+                        let albedo = node.material.color;
+                        let emissive = node.material.emissive;
+                        let _ = writeln!(
+                            csv,
+                            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                            instance_id,
+                            instance_id + 1,
+                            handle,
+                            card,
+                            node.material.texture_idx,
+                            node.material.double_sided,
+                            albedo[0],
+                            albedo[1],
+                            albedo[2],
+                            emissive[0],
+                            emissive[1],
+                            emissive[2],
+                            world_min[0],
+                            world_min[1],
+                            world_min[2],
+                            world_max[0],
+                            world_max[1],
+                            world_max[2],
+                        );
+                    }
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Err(error) = std::fs::write(&path, csv) {
+                        eprintln!("bloom: SSGI provenance CSV write failed: {error}");
+                    } else {
+                        eprintln!("bloom: SSGI provenance CSV -> '{}'", path.display());
+                    }
+                }
+            }
+        }
         // Dynamic instances occupy the slots after the nodes.
         let dyn_count = (instance_count as usize).saturating_sub(node_count);
 
@@ -13184,6 +13269,7 @@ impl Renderer {
         // other buffer. Ticket 007a.
         if self.ssgi_enabled && !self.pt_owns_frame() && self.probe_history_valid {
             self.probe_history_idx = 1 - self.probe_history_idx;
+            self.probe_frame_index = self.probe_frame_index.wrapping_add(1);
         }
         // Same ping-pong for SSR temporal accumulation.
         if self.ssr_enabled && !self.pt_owns_frame() && self.ssr_history_valid {

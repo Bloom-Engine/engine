@@ -428,7 +428,11 @@ fn create_probe_3d_tex(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        // COPY_SRC exists solely for capture/diagnostic readbacks; it has no
+        // effect on the production passes.
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -610,15 +614,16 @@ pub(super) fn create_mesh_sdf_texture(
 /// at 64×64 each; 4096² atlas ⇒ 64×64 = 4096 slots ⇒ 682 meshes at
 /// full 6-axis capture (Sponza's ~405 fits comfortably).
 ///
-/// Two atlases are kept in lockstep:
-///   - `mesh_card_albedo_atlas`   — baked once per mesh at load.
-///   - `mesh_card_radiance_atlas` — written every frame by the card-
-///     lighting compute pass (albedo × sun × NdotL + sky × NdotUp).
-/// The HW trace samples radiance directly at hit, amortising shading
-/// cost across all rays that land in the same card texel.
+/// The material atlases retain the full 64x64 capture, while the diffuse
+/// radiance atlas stores a deliberately lower-frequency 16x16 representation
+/// per slot. A 32-ray diffuse gather cannot resolve the full material texture;
+/// preserving it made bright fabric detail behave like a sharp projector.
+/// The normalized slot layout remains identical across both resolutions.
 pub(super) const CARD_ATLAS_SIZE: u32 = 4096;
 pub(super) const CARD_SLOT_SIZE: u32 = 64;
 pub(super) const CARD_SLOTS_PER_ROW: u32 = CARD_ATLAS_SIZE / CARD_SLOT_SIZE;
+pub(super) const CARD_RADIANCE_SLOT_SIZE: u32 = 16;
+pub(super) const CARD_RADIANCE_ATLAS_SIZE: u32 = CARD_SLOTS_PER_ROW * CARD_RADIANCE_SLOT_SIZE;
 pub(crate) const CARD_MAX_SLOTS: u32 = CARD_SLOTS_PER_ROW * CARD_SLOTS_PER_ROW;
 /// V2: 6 directed axes per mesh (+X, -X, +Y, -Y, +Z, -Z).
 pub(crate) const CARD_AXES_PER_MESH: u32 = 6;
@@ -673,8 +678,8 @@ pub(super) fn create_mesh_card_emissive_atlas(
     (texture, view)
 }
 
-/// Create the mesh-card radiance atlas. Written every frame by the
-/// card-lighting compute pass; sampled at hit by the HW probe trace.
+/// Create the low-frequency mesh-card radiance atlas. Rebuilt only when its
+/// lighting/geometry inputs change and sampled at hit by the probe trace.
 /// Rgba16Float so we can carry multiplicatively-composed sun + sky
 /// without banding. `STORAGE_BINDING` for the compute write,
 /// `TEXTURE_BINDING` for the trace sample.
@@ -684,8 +689,8 @@ pub(super) fn create_mesh_card_radiance_atlas(
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("mesh_card_radiance_atlas"),
         size: wgpu::Extent3d {
-            width: CARD_ATLAS_SIZE,
-            height: CARD_ATLAS_SIZE,
+            width: CARD_RADIANCE_ATLAS_SIZE,
+            height: CARD_RADIANCE_ATLAS_SIZE,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,

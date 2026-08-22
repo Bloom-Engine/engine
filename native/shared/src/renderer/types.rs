@@ -773,7 +773,8 @@ pub(super) struct ProbeTraceParams {
     pub(super) shadow_vps: [[[f32; 4]; 4]; 3],
     /// xyz = camera-space cascade split distances, w unused.
     pub(super) shadow_splits: [f32; 4],
-    /// x = comparison bias, y = shadows enabled, zw unused.
+    /// x = comparison bias, y = shadows enabled, z = coherent card lighting,
+    /// w unused.
     pub(super) shadow_params: [f32; 4],
 }
 
@@ -817,10 +818,13 @@ pub(super) struct PtParamsCpu {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeTemporalParams {
-    /// x = alpha (EMA), y = force_refresh (1→alpha=1), z = grid_w (f32), w = grid_h (f32)
+    /// x = integrated EMA alpha, y = force_refresh (1→alpha=1),
+    /// z = grid_w (f32), w = grid_h (f32)
     pub(super) params: [f32; 4],
     /// x = half_w, y = half_h, z = tile_size, w = projection p00.
     pub(super) size: [f32; 4],
+    /// x = hardware ray provenance/confidence available, yzw unused.
+    pub(super) confidence: [f32; 4],
 }
 
 #[repr(C)]
@@ -835,17 +839,20 @@ pub(super) struct ProbeResolveParams {
 }
 
 /// On-GPU `ProbeHeader` layout (must match PROBE_HELPERS_WGSL's struct).
-/// 80 bytes per probe. Diffuse stores the cosine-convolved result so resolve
-/// needs no separate probe-history texture lookup; the prior placement gives
-/// temporal accumulation an explicit geometric continuity test.
+/// 112 bytes per probe. Diffuse stores the temporally accumulated convolution;
+/// current_diffuse lets the later probe-space reconstruction clamp history to
+/// the current-frame neighborhood without a new texture allocation. Placement
+/// snapshots geometry and the integrated result before temporal workgroups run.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeHeaderCpu {
     pub(super) world_pos: [f32; 4],
     pub(super) normal: [f32; 4],
     pub(super) diffuse: [f32; 4],
+    pub(super) current_diffuse: [f32; 4],
     pub(super) previous_world_pos: [f32; 4],
     pub(super) previous_normal: [f32; 4],
+    pub(super) previous_diffuse: [f32; 4],
 }
 
 pub(super) const PROBE_HEADER_RW_LAYOUT_ENTRY: wgpu::BindGroupLayoutEntry =
@@ -874,7 +881,9 @@ pub(super) struct CardCaptureParams {
 /// `face_axis` encoding:
 ///   0 → +X, 1 → -X, 2 → +Y, 3 → -Y, 4 → +Z, 5 → -Z.
 /// For each face we pick the two orthogonal AABB axes and map them
-/// to clip-space [-1, +1]. The ±pair for each axis differ only in
+/// to clip-space [-1, +1]. Render-target V grows down, so consumers
+/// invert the projected clip-space Y when converting between object
+/// position and card-atlas UV. The ±pair for each axis differ only in
 /// the sign of the "u" clip axis so that when the HW shader picks
 /// axis N at hit and projects the hit into card UV, the UV lines up
 /// with the mesh geometry as seen FROM that face.
@@ -1083,7 +1092,9 @@ pub(super) struct InstanceGiDataCpu {
     /// unavailable; ticket 013's textured path still drives lighting
     /// from this flat normal but multiplies the sampled albedo in.
     pub(super) normal_ws: [f32; 3],
-    pub(super) _pad0: f32,
+    /// Matches the forward material's culling contract. Zero means a ray hit
+    /// on the triangle back face must be skipped; one keeps both faces.
+    pub(super) double_sided: f32,
     /// Ticket 013 — card slot for textured hit shading.
     /// `card_slot.xy` = atlas slot coord (0..CARD_SLOTS_PER_ROW).
     /// `card_slot.z` = dominant axis (0=X, 1=Y, 2=Z).
@@ -1214,6 +1225,7 @@ pub(super) struct CompositeParams {
 mod physical_uv_tests {
     use super::*;
     use crate::models::{MaterialTextureBinding, MaterialTextureTransform, MaterialTransmission};
+    use crate::renderer::CARD_AXES_PER_MESH;
 
     fn binding(tex_coord: u32) -> MaterialTextureBinding {
         MaterialTextureBinding {
@@ -1252,8 +1264,32 @@ mod physical_uv_tests {
 
     #[test]
     fn probe_header_matches_shader_storage_abi() {
-        assert_eq!(std::mem::size_of::<ProbeHeaderCpu>(), 80);
+        assert_eq!(std::mem::size_of::<ProbeHeaderCpu>(), 112);
         assert_eq!(std::mem::size_of::<ProbeTraceParams>(), 576);
+    }
+
+    #[test]
+    fn card_capture_projection_accounts_for_render_target_y_direction() {
+        let bmin = [-3.0, 2.0, 5.0];
+        let bmax = [7.0, 11.0, 19.0];
+        let point = [1.0, 8.0, 13.0];
+        let expected = [
+            [6.0 / 9.0, 1.0 - 8.0 / 14.0],
+            [1.0 - 6.0 / 9.0, 1.0 - 8.0 / 14.0],
+            [4.0 / 10.0, 1.0 - 8.0 / 14.0],
+            [1.0 - 4.0 / 10.0, 1.0 - 8.0 / 14.0],
+            [4.0 / 10.0, 1.0 - 6.0 / 9.0],
+            [1.0 - 4.0 / 10.0, 1.0 - 6.0 / 9.0],
+        ];
+
+        for axis in 0..CARD_AXES_PER_MESH {
+            let m = build_card_ortho_v2(axis, bmin, bmax);
+            let clip_x = m[0][0] * point[0] + m[1][0] * point[1] + m[2][0] * point[2] + m[3][0];
+            let clip_y = m[0][1] * point[0] + m[1][1] * point[1] + m[2][1] * point[2] + m[3][1];
+            let texture_uv = [clip_x * 0.5 + 0.5, 0.5 - clip_y * 0.5];
+            assert!((texture_uv[0] - expected[axis as usize][0]).abs() < 1e-6);
+            assert!((texture_uv[1] - expected[axis as usize][1]).abs() < 1e-6);
+        }
     }
 
     #[test]

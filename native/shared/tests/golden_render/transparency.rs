@@ -830,7 +830,11 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
         eng.renderer.set_path_tracing(1);
         eng.renderer.set_path_tracing_seed(0);
         eng.renderer.reset_path_tracing_history(0);
-        let (_, _, rgba) = render(&mut eng, 12, draw_pt_static_frame);
+        // Progressive PT keeps raster on screen until eight accumulated
+        // samples exist. Bistro-class BLAS admission consumes several startup
+        // frames, so leave enough margin for this test to capture PT rather
+        // than the layered raster fallback.
+        let (_, _, rgba) = render(&mut eng, 16, draw_pt_static_frame);
         Ok(Some((rgba, eng.renderer.quality_runtime_paths_json())))
     }
 
@@ -1009,6 +1013,12 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     }))
     .expect("neutral layered PT variant initializes")
     .expect("same ray-query adapter remains available");
+    let neutral_control_metrics = calculate_diff_metrics(&base, &neutral, W, H);
+    assert!(
+        base == neutral,
+        "an unqualified layered lobe changed PT output before its transport landed: \
+         {neutral_control_metrics:?}"
+    );
     let (clearcoat, clearcoat_paths) = render_variant(Some(MaterialLayeredPbr {
         clearcoat_authored: true,
         clearcoat_factor: 0.85,
@@ -1469,10 +1479,6 @@ fn layered_path_tracing_scalar_lobes_are_isolated_and_energy_bounded() {
     .expect("combined clearcoat/specular PT variant initializes")
     .expect("same ray-query adapter remains available");
 
-    assert!(
-        base == neutral,
-        "an unqualified layered lobe changed PT output before its transport landed"
-    );
     assert!(base_paths.contains("\"path_tracing_specialization_initialized\":false"));
     assert!(base_paths.contains("\"path_tracing_sheen_specialization_initialized\":false"));
     assert!(base_paths.contains("\"path_tracing_iridescence_specialization_initialized\":false"));

@@ -75,7 +75,7 @@ struct InstanceGiData {
     albedo: vec3<f32>,
     emissive_luma: f32,
     normal_ws: vec3<f32>,
-    _pad0: f32,
+    double_sided: f32,
     card_slot: vec4<f32>,
     card_aabb_min: vec4<f32>,
     card_aabb_max: vec4<f32>,
@@ -607,7 +607,8 @@ fn albedo_at_hit(
         if (signed_axis == 5u) { u_flip = -1.0; }
     }
     var u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
-    let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
+    // Match the card capture raster's top-left texture origin.
+    let v_norm = 1.0 - clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
     if (u_flip < 0.0) { u_norm = 1.0 - u_norm; }
 
     let slot_size_uv = 1.0 / 64.0;

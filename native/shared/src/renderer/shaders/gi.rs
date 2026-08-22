@@ -74,7 +74,10 @@ fn card_oct_encode(normal_raw: vec3<f32>) -> vec2<f32> {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> FsOut {
+fn fs_main(
+    in: VsOut,
+    @builtin(front_facing) front_facing: bool,
+) -> FsOut {
     var albedo = u.base_color.rgb;
     if (u.base_color.w > 0.5) {
         albedo = albedo * textureSample(albedo_tex, albedo_samp, in.uv).rgb;
@@ -85,11 +88,25 @@ fn fs_main(in: VsOut) -> FsOut {
         emissive = emissive * textureSample(emissive_tex, albedo_samp, in.uv).rgb;
     }
 
+    // Card capture is deliberately two-sided. Orient the stored normal toward
+    // the signed-axis capture view, just as a two-sided material orients its
+    // shading normal toward the visible face. Keeping the authored normal on a
+    // back face made the underside card of thin meshes (notably Bistro's red
+    // awnings) inherit the sun-facing top normal. The coherent relight then
+    // turned that hidden underside into a bright colored GI projector once the
+    // card bake completed. Each signed card now carries the radiance of the
+    // surface actually visible from that side.
+    let capture_facing_normal = select(
+        -in.normal_os,
+        in.normal_os,
+        front_facing,
+    );
+
     // Both card textures are already sampled by every textured GI hit and
     // their alpha channels were unused. Store one octahedral-normal component
     // in each alpha so ray hits recover the captured triangle normal without
     // another atlas, binding, allocation, or texture fetch.
-    let normal_oct = card_oct_encode(in.normal_os);
+    let normal_oct = card_oct_encode(capture_facing_normal);
 
     var out: FsOut;
     out.albedo = vec4<f32>(albedo, normal_oct.x);
@@ -410,7 +427,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let sy = f32((px.y) % slot_sz);
     let sd = f32(slot_sz);
     var u_norm = (sx + 0.5) / sd;
-    let v_norm = (sy + 0.5) / sd;
+    // Capture maps object-space +V to clip-space +Y, which lands at the top
+    // of a render target.  Undo that framebuffer-Y inversion when rebuilding
+    // the object-space point represented by an atlas texel.
+    let v_norm = 1.0 - (sy + 0.5) / sd;
     var pos_os = vec3<f32>(0.0);
     if (axis == 0u || axis == 1u) {
         // Card plane at x = bmax.x (+X) or bmin.x (-X); u=y, v=z.
@@ -470,11 +490,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ";
 
-/// Hardware Mesh-Card relight. One workgroup owns one 64x64 card slot:
+/// Hardware Mesh-Card relight. One workgroup owns one diffuse-radiance slot:
 /// its 4x4 lanes trace a coarse 4x4 world-space visibility field, then each
-/// lane shades a 16x16 texel block. This bounds the one-time coherent bake to
-/// 16 ray queries per slot rather than one query per atlas texel, while card
-/// albedo, emissive, and captured normals retain full resolution.
+/// lane shades a 4x4 texel block. The 16x16 output samples the full-resolution
+/// material cards at footprint centres, matching the bandwidth of the probe
+/// gather while retaining 64x64 albedo/emissive/normal capture for other uses.
+/// This bounds the coherent bake to 16 ray queries and 256 writes per slot.
 pub(in crate::renderer) const CARD_LIGHT_HW_WGSL: &str = "
 struct SlotMeta {
     normal_ws: vec4<f32>,
@@ -499,7 +520,7 @@ struct InstanceGiData {
     albedo: vec3<f32>,
     emissive_luma: f32,
     normal_ws: vec3<f32>,
-    stable_sun_visibility: f32,
+    double_sided: f32,
     card_slot: vec4<f32>,
     card_aabb_min: vec4<f32>,
     card_aabb_max: vec4<f32>,
@@ -537,6 +558,9 @@ fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
 
 fn card_position_os(slot_m: SlotMeta, axis: u32, uv_in: vec2<f32>) -> vec3<f32> {
     var uv = uv_in;
+    // Atlas V grows downward while the capture projection's clip-space Y
+    // grows upward.
+    uv.y = 1.0 - uv.y;
     var pos = vec3<f32>(0.0);
     if (axis == 0u || axis == 1u) {
         if (axis == 1u) { uv.x = 1.0 - uv.x; }
@@ -622,7 +646,9 @@ fn sun_visibility(pos_ws: vec3<f32>) -> f32 {
 }
 
 fn filtered_visibility(local_px: vec2<u32>) -> f32 {
-    let grid = (vec2<f32>(local_px) + vec2<f32>(0.5)) / 16.0 - vec2<f32>(0.5);
+    let visibility_cell_width = f32(u.atlas_info.y) / 4.0;
+    let grid = (vec2<f32>(local_px) + vec2<f32>(0.5)) /
+        visibility_cell_width - vec2<f32>(0.5);
     let base_f = floor(grid);
     let frac = clamp(grid - base_f, vec2<f32>(0.0), vec2<f32>(1.0));
     let base = vec2<i32>(base_f);
@@ -646,16 +672,17 @@ fn cs_main(
     if (slot_idx >= u.atlas_info.w || wg.x >= u.atlas_info.z) { return; }
     let slot_m = slot_meta[slot_idx];
     let axis = u32(slot_m.normal_ws.w);
-    let coarse_uv = (vec2<f32>(lid.xy) * 16.0 + vec2<f32>(8.0)) / 64.0;
+    let coarse_uv = (vec2<f32>(lid.xy) + vec2<f32>(0.5)) / 4.0;
     let surface_ws = coarse_surface_position(slot_m, axis, coarse_uv);
     let lane = lid.y * 4u + lid.x;
     coarse_visibility[lane] = sun_visibility(surface_ws);
     workgroupBarrier();
 
     let slot_origin = wg.xy * u.atlas_info.y;
-    let block_origin = slot_origin + lid.xy * 16u;
-    for (var dy: u32 = 0u; dy < 16u; dy = dy + 1u) {
-        for (var dx: u32 = 0u; dx < 16u; dx = dx + 1u) {
+    let output_block_size = u.atlas_info.y / 4u;
+    let block_origin = slot_origin + lid.xy * output_block_size;
+    for (var dy: u32 = 0u; dy < output_block_size; dy = dy + 1u) {
+        for (var dx: u32 = 0u; dx < output_block_size; dx = dx + 1u) {
             let px = block_origin + vec2<u32>(dx, dy);
             if (px.x >= u.atlas_info.x || px.y >= u.atlas_info.x) { continue; }
             let uv = (vec2<f32>(px) + vec2<f32>(0.5)) / f32(u.atlas_info.x);
@@ -666,7 +693,7 @@ fn cs_main(
                 vec2<f32>(albedo_sample.a, emissive_sample.a),
             );
             let ndotl = max(dot(n_ws, u.sun_dir.xyz), 0.0);
-            let local_px = lid.xy * 16u + vec2<u32>(dx, dy);
+            let local_px = lid.xy * output_block_size + vec2<u32>(dx, dy);
             let visibility = filtered_visibility(local_px);
             let direct = u.sun_color.xyz * ndotl * visibility / 3.14159265;
             let ndotup = max(dot(n_ws, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
@@ -843,7 +870,7 @@ struct HwBakeInstanceGiData {
     albedo: vec3<f32>,
     emissive_luma: f32,
     normal_ws: vec3<f32>,
-    _pad0: f32,
+    double_sided: f32,
     card_slot: vec4<f32>,
     card_aabb_min: vec4<f32>,
     card_aabb_max: vec4<f32>,
@@ -914,7 +941,7 @@ fn hw_bake_card_uv(
         if (signed_axis == 5u) { u_flip = -1.0; }
     }
     var u_norm = clamp((u_os - u_lo) / max(u_hi - u_lo, 1e-4), 0.0, 1.0);
-    let v_norm = clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
+    let v_norm = 1.0 - clamp((v_os - v_lo) / max(v_hi - v_lo, 1e-4), 0.0, 1.0);
     if (u_flip < 0.0) { u_norm = 1.0 - u_norm; }
 
     let slot_size_uv = 1.0 / HW_BAKE_CARD_SLOTS_PER_ROW;

@@ -185,6 +185,20 @@ fn ssgi_probe_history_tracks_only_frames_that_write_it() {
     advance(&mut eng, 1);
     let paths = eng.renderer.quality_runtime_paths_json();
     assert!(paths.contains("\"ssgi_probe_valid\":true"));
+    let first_probe_frame = eng.renderer.probe_frame_index;
+    advance(&mut eng, 2);
+    assert_eq!(
+        eng.renderer.probe_frame_index,
+        first_probe_frame + 2,
+        "SSGI angular sampling must advance while TAA is disabled"
+    );
+    eng.renderer.set_taa_enabled(true);
+    eng.renderer.set_taa_enabled(false);
+    assert_eq!(
+        eng.renderer.probe_frame_index,
+        first_probe_frame + 2,
+        "TAA toggles must not reset the independent SSGI sequence"
+    );
 
     eng.renderer.set_ssgi_enabled(false);
     assert!(eng

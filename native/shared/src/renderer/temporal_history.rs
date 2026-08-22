@@ -44,6 +44,7 @@ impl Renderer {
         self.ssr_history_idx = 0;
         self.ssr_history_valid = false;
         self.probe_history_idx = 0;
+        self.probe_frame_index = 0;
         self.probe_history_valid = false;
         self.exposure_current_idx = 0;
         self.exposure_history_valid = false;
