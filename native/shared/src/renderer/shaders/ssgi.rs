@@ -41,10 +41,10 @@ struct ProbeHeader {
     // retained when both placements describe the same surface.
     previous_world_pos: vec4<f32>,
     previous_normal: vec4<f32>,
-    // Prior clamped cosine-convolved result for the reprojected world surface.
-    // The spatial pass publishes this after it has finished reading every
-    // neighbor's diffuse/current_diffuse values. Placement deliberately leaves
-    // it intact, so latent unclamped EMA values cannot cross frame boundaries.
+    // RGB = geometry-clamped, unfiltered temporal history. W = current spatial
+    // reconstruction / history luminance ratio for fallback resolve. Keeping
+    // history RGB unfiltered preserves settled reprojection stability while the
+    // ratio removes energy seams between strict and fallback reconstruction.
     previous_diffuse: vec4<f32>,
 };
 
@@ -152,17 +152,21 @@ fn probe_trace_direction(
     // continuous after the inverse cosine-hemisphere CDF wraps from one back
     // to zero; one probe step could replace a near-normal sample with a grazing
     // one. The azimuthal wrap is physically identical. Advance it with an
-    // SSGI-owned low-discrepancy sequence so the integrated diffuse history
-    // converges beyond 32 directions without ever reinterpreting a directional
-    // history slot as a new ray (only the final scalar integral is retained).
+    // finite 16-phase sequence so the integrated diffuse history converges to
+    // 512 effective directions and then becomes stationary. An irrational
+    // phase that advanced forever left a small amount of Monte-Carlo shimmer
+    // even after the temporal estimate appeared settled. The temporal pass
+    // stores complete phase integrals in dedicated history layers; directional
+    // samples are still never reinterpreted as a different ray.
     let ray_index = octel.y * PROBE_OCT_SIZE + octel.x;
     let sequence_index = ray_index & (PROBE_TRACE_RAYS - 1u);
     let sample_u = (f32(sequence_index) + 0.5) / f32(PROBE_TRACE_RAYS);
+    let temporal_phase = f32(u32(frame_index) & 15u);
     let sample_v = fract(
         f32(sequence_index) * 0.6180339887498948
             + 0.37
             + probe_spatial_azimuth(world_pos)
-            + frame_index * 0.7548776662466927,
+            + temporal_phase / 16.0,
     );
     let radius = sqrt(sample_u);
     let z = sqrt(max(1.0 - sample_u, 0.0));
@@ -1503,18 +1507,21 @@ fn cs_main(
 ";
 
 /// Probe temporal accumulator. Directional samples are integrated only within
-/// the current frame. The resulting diffuse estimate is accumulated after
-/// world-surface reprojection, so changing the angular sampling phase cannot
-/// reinterpret old radiance as a different direction.
+/// the current frame. Sixteen complete phase estimates are retained after
+/// world-surface reprojection and averaged as a finite ring, so changing the
+/// angular sampling phase cannot reinterpret old radiance as a different
+/// direction and a static scene becomes stationary after one complete cycle.
 pub(in crate::renderer) const SSGI_PROBE_TEMPORAL_WGSL: &str = "
 struct TemporalParams {
-    // x = current-frame weight (0.5 = short two-frame EMA),
-    // y = force_refresh (1 → alpha 1.0),
+    // x = phase-ring reciprocal (1/16),
+    // y = force_refresh (1 → seed every phase with current),
     // z = grid_w, w = grid_h
     params: vec4<f32>,
     // x = half_w, y = half_h, z = tile_size, w = projection p00
     size: vec4<f32>,
-    // x = hardware ray provenance/confidence available, yzw unused.
+    // x = hardware ray provenance/confidence available,
+    // y = current angular phase [0, 15],
+    // z = short output-blend current weight, w unused.
     confidence: vec4<f32>,
 };
 
@@ -1533,9 +1540,9 @@ var<workgroup> diffuse_luminance: array<f32, 64>;
 var<workgroup> confidence_error_samples: array<f32, 64>;
 var<workgroup> robust_group_radiance: array<vec3<f32>, 8>;
 var<workgroup> independent_estimator_error: f32;
+var<workgroup> current_integrated_shared: vec3<f32>;
 var<workgroup> reprojected_history_probe: u32;
 var<workgroup> reprojected_history_valid: u32;
-var<workgroup> reprojected_history_alpha: f32;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(
@@ -1549,18 +1556,24 @@ fn cs_main(
     let probe_index = wg.y * grid_w + wg.x;
     let coord = vec3<i32>(i32(wg.x), i32(wg.y), i32(lid.y * PROBE_OCT_SIZE + lid.x));
     let lane = lid.y * PROBE_OCT_SIZE + lid.x;
-    let raw_current_sample = textureLoad(radiance_in, coord, 0);
-    let current_sample = vec4<f32>(
-        bounded_probe_history(raw_current_sample.rgb),
-        max(raw_current_sample.a, 0.0),
-    );
+    // Trace owns only 32 cosine-hemisphere rays. The remaining workgroup
+    // lanes reduce/shared-state and integrated-phase history; loading their
+    // guaranteed-zero trace texels wasted twice as many reads as the phase
+    // ring adds below.
+    var current_sample = vec4<f32>(0.0);
+    if (lane < PROBE_TRACE_RAYS) {
+        let raw_current_sample = textureLoad(radiance_in, coord, 0);
+        current_sample = vec4<f32>(
+            bounded_probe_history(raw_current_sample.rgb),
+            max(raw_current_sample.a, 0.0),
+        );
+    }
     let curr = current_sample.rgb;
     confidence_error_samples[lane] = 0.0;
 
     if (lane == 0u) {
         reprojected_history_probe = probe_index;
         reprojected_history_valid = 0u;
-        reprojected_history_alpha = u.params.x;
         let current_world_pos = probes[probe_index].world_pos;
         let current_normal = probes[probe_index].normal;
         if (current_world_pos.w >= 0.5) {
@@ -1574,18 +1587,6 @@ fn cs_main(
                 velocity_size - vec2<i32>(1),
             );
             let velocity = textureLoad(velocity_tex, velocity_coord, 0).xy;
-            // Screen probes cover different world-space footprints while the
-            // camera moves. Reprojection and the current-neighborhood clamp
-            // below reject stale surfaces; retain enough of a compatible
-            // surface's integrated estimate to denoise the temporally rotated
-            // direction set. Motion shortens the window to eight frames rather
-            // than replacing it outright, which would expose raw 32-ray noise.
-            let motion_refresh = smoothstep(0.00025, 0.003, length(velocity));
-            reprojected_history_alpha = mix(
-                u.params.x,
-                max(u.params.x, 0.125),
-                motion_refresh,
-            );
             // Velocity stores current-minus-previous NDC. UV's Y axis is
             // flipped, matching the established TAA and SSR reprojection.
             let previous_uv = vec2<f32>(
@@ -1763,26 +1764,60 @@ fn cs_main(
         // and already reduces an isolated firefly by more than an order of
         // magnitude, so the stratum mean is integrated unmodified and the
         // temporal estimate converges to the true bounce.
-        let current_integrated = bounded_probe_history(group_mean);
-        probes[probe_index].current_diffuse = vec4<f32>(current_integrated, 1.0);
-        var integrated = current_integrated;
-        let force_refresh = u.params.y > 0.5;
-        if (!force_refresh && reprojected_history_valid != 0u) {
-            let history_integrated = bounded_probe_history(
+        current_integrated_shared = bounded_probe_history(group_mean);
+        probes[probe_index].current_diffuse = vec4<f32>(current_integrated_shared, 1.0);
+    }
+    workgroupBarrier();
+
+    // Layers 32..47 are a ring of complete, equal-weight diffuse estimates,
+    // one for each angular phase.
+    // Layers 0..31 remain current directional samples for capture-only
+    // diagnostics. Reproject the integrated ring as a
+    // unit onto the compatible prior world surface; never read a directional
+    // lane as history. Invalid history seeds the whole ring with the current
+    // estimate, avoiding both stale light and a dark 16-frame warm-up.
+    if (lane >= 32u && lane < 48u) {
+        let phase_slot = lane - 32u;
+        let current_phase = u32(u.confidence.y) & 15u;
+        var phase_integrated = current_integrated_shared;
+        if (u.params.y <= 0.5 && reprojected_history_valid != 0u &&
+            phase_slot != current_phase) {
+            let history_x = i32(reprojected_history_probe % grid_w);
+            let history_y = i32(reprojected_history_probe / grid_w);
+            let history_layer = i32(32u + phase_slot);
+            phase_integrated = bounded_probe_history(textureLoad(
+                history_in,
+                vec3<i32>(history_x, history_y, history_layer),
+                0,
+            ).rgb);
+        }
+        diffuse_radiance[lane] = phase_integrated;
+        textureStore(history_out, coord, vec4<f32>(phase_integrated, 1.0));
+    }
+    workgroupBarrier();
+
+    if (lane == 0u) {
+        var phase_sum = vec3<f32>(0.0);
+        for (var phase = 0u; phase < 16u; phase = phase + 1u) {
+            phase_sum = phase_sum + diffuse_radiance[32u + phase];
+        }
+        let phase_integrated = bounded_probe_history(phase_sum * u.params.x);
+        var integrated = phase_integrated;
+        if (u.params.y <= 0.5 && reprojected_history_valid != 0u) {
+            let previous_integrated = bounded_probe_history(
                 probes[reprojected_history_probe].previous_diffuse.rgb,
             );
-            // Accumulate the final diffuse integral on its reprojected world
-            // surface. The host selects a short EMA that suppresses current-
-            // frame ray noise without allowing an old bright view to persist
-            // across camera-relative screen probes. A disocclusion still
-            // refreshes in one frame through the geometric validity test.
-            // Clamp reprojected history to the compatible current-frame
-            // neighborhood. This is performed later in cs_spatial, after all
-            // workgroups have published current_diffuse, to avoid races here.
+            // Hi-Z silhouettes and jittered screen-probe placement can change
+            // a repeated phase slightly even after the angular ring is full.
+            // Smooth only the completed ring with a short eight-frame blend.
+            // Unlike the former 1/16 EMA over an endlessly rotating ray set,
+            // the ring cannot reintroduce a directional outlier after its
+            // 16-frame slot lifetime; the output is also neighborhood-clamped,
+            // and geometric rejection refreshes a disocclusion immediately.
             integrated = mix(
-                history_integrated,
-                current_integrated,
-                reprojected_history_alpha,
+                previous_integrated,
+                phase_integrated,
+                u.confidence.z,
             );
         }
         // Confidence is populated below on the hardware path. Zero is the
@@ -1829,17 +1864,22 @@ fn cs_main(
 
     // Preserve current samples for capture-only diagnostics. They are never
     // interpreted as matching temporal directions by the production path.
-    textureStore(history_out, coord, current_sample);
+    // Layers 32..47 were written above by the integrated phase ring.
+    if (lane < 32u) {
+        textureStore(history_out, coord, current_sample);
+    } else if (lane >= 48u) {
+        textureStore(history_out, coord, vec4<f32>(0.0));
+    }
 }
 
 // Filter the completed irradiance estimate in probe space, after every probe
 // has published its current result. Doing this in a second tiny dispatch avoids
 // cross-workgroup races and costs only one invocation per 16x16 half-resolution
-// tile. The temporal history remains the unfiltered world-reprojected estimate;
-// this output is reconstruction-only and occupies the otherwise diagnostic
-// layer zero of history_out. The clamped, unfiltered temporal state is also
-// published to ProbeHeader.previous_diffuse. This dispatch does not read that
-// field, so the one-write-per-probe update has no cross-workgroup race.
+// tile. The geometry-clamped reconstruction occupies layer zero of history_out.
+// ProbeHeader.previous_diffuse retains unfiltered temporal RGB plus a scalar
+// reconstruction energy ratio for fallback resolve. This dispatch reads the
+// prior diffuse/current values, not that destination field, so the write has no
+// cross-workgroup race and spatial filtering never feeds back into history.
 @compute @workgroup_size(8, 8, 1)
 fn cs_spatial(@builtin(global_invocation_id) gid: vec3<u32>) {
     let grid_w = u32(u.params.z);
@@ -1959,7 +1999,16 @@ fn cs_spatial(@builtin(global_invocation_id) gid: vec3<u32>) {
     // `reconstructed` was clamped while `ProbeHeader.diffuse` kept the raw EMA;
     // a bright card hit could therefore remain hidden for seconds and become
     // visible again when a later current-frame bound happened to include it.
-    probes[center_index].previous_diffuse = vec4<f32>(history_clamped, 1.0);
+    let luminance_weights = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let history_luminance = dot(history_clamped, luminance_weights);
+    let reconstructed_luminance = dot(reconstructed, luminance_weights);
+    let reconstructed_energy_ratio = select(
+        1.0,
+        clamp(reconstructed_luminance / history_luminance, 0.0, 4.0),
+        history_luminance > 0.000001,
+    );
+    probes[center_index].previous_diffuse =
+        vec4<f32>(history_clamped, reconstructed_energy_ratio);
     textureStore(history_out, output_coord, vec4<f32>(reconstructed, 1.0));
 }
 ";

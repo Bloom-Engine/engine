@@ -1120,21 +1120,33 @@ impl Renderer {
         });
         let ssgi_diagnostic_width = self.probe_grid_w * super::PROBE_OCT_SIZE;
         let ssgi_diagnostic_height = self.probe_grid_h * super::PROBE_OCT_SIZE;
-        let ssgi_diagnostic_count =
-            super::ssgi_temporal_diagnostics::SSGI_TEMPORAL_DIAGNOSTIC_NAMES.len() as u64;
+        let ssgi_resolve_diagnostic_count = 4_u64;
+        let ssgi_probe_diagnostic_count =
+            super::ssgi_temporal_diagnostics::SSGI_TEMPORAL_DIAGNOSTIC_NAMES.len() as u64
+                - ssgi_resolve_diagnostic_count;
+        let ssgi_resolve_size = self.ssgi_rt_texture.size();
         let ssgi_diagnostic_texture_bytes = u64::from(ssgi_diagnostic_width)
             * u64::from(ssgi_diagnostic_height)
-            * ssgi_diagnostic_count
-            * 4;
+            * ssgi_probe_diagnostic_count
+            * 4
+            + u64::from(ssgi_resolve_size.width)
+                * u64::from(ssgi_resolve_size.height)
+                * ssgi_resolve_diagnostic_count
+                * 4;
         let ssgi_diagnostic_row_bytes = u64::from((ssgi_diagnostic_width * 4 + 255) & !255);
-        let ssgi_diagnostic_readback_bytes =
-            ssgi_diagnostic_row_bytes * u64::from(ssgi_diagnostic_height) * ssgi_diagnostic_count;
+        let ssgi_resolve_row_bytes = u64::from((ssgi_resolve_size.width * 4 + 255) & !255);
+        let ssgi_diagnostic_readback_bytes = ssgi_diagnostic_row_bytes
+            * u64::from(ssgi_diagnostic_height)
+            * ssgi_probe_diagnostic_count
+            + ssgi_resolve_row_bytes
+                * u64::from(ssgi_resolve_size.height)
+                * ssgi_resolve_diagnostic_count;
         out.push_str(",\"ssgi_diagnostic_persistent_bytes\":0");
         out.push_str(",\"ssgi_diagnostic_capture_texture_bytes\":");
         out.push_str(&ssgi_diagnostic_texture_bytes.to_string());
         out.push_str(",\"ssgi_diagnostic_capture_readback_bytes\":");
         out.push_str(&ssgi_diagnostic_readback_bytes.to_string());
-        out.push_str(",\"ssgi_diagnostic_capture_passes\":1");
+        out.push_str(",\"ssgi_diagnostic_capture_passes\":3");
         out.push_str(",\"ssgi_diagnostic_resources_live\":");
         out.push_str(if self.ssgi_temporal_diagnostic_textures().is_some() {
             "true"

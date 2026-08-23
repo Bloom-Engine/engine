@@ -761,6 +761,21 @@ fn ssgi_capture_exposes_probe_history_without_normal_frame_resources() {
         .to_rgb8();
     let retained = confidence.pixels().filter(|pixel| pixel[2] > 16).count();
     let current = confidence.pixels().filter(|pixel| pixel[1] > 0).count();
+    let resolved = image::open(directory.join("ssgi.png"))
+        .expect("SSGI capture did not emit resolved indirect radiance")
+        .to_rgb8();
+    let resolve_support = image::open(directory.join("ssgi-resolve-support.png"))
+        .expect("SSGI capture did not emit screen-space resolve support")
+        .to_rgb8();
+    let resolve_geometry = image::open(directory.join("ssgi-resolve-geometry.png"))
+        .expect("SSGI capture did not emit screen-space resolve geometry")
+        .to_rgb8();
+    let resolve_plane_ratios = image::open(directory.join("ssgi-resolve-plane-ratios.png"))
+        .expect("SSGI capture did not emit screen-space resolve plane ratios")
+        .to_rgb8();
+    let resolve_plane_ratio_w = image::open(directory.join("ssgi-resolve-plane-ratio-w.png"))
+        .expect("SSGI capture did not emit the fourth screen-space resolve plane ratio")
+        .to_rgb8();
     let metrics: serde_json::Value = serde_json::from_slice(
         &std::fs::read(directory.join("ssgi.metrics.json"))
             .expect("SSGI capture did not emit resolved HDR metrics"),
@@ -787,11 +802,31 @@ fn ssgi_capture_exposes_probe_history_without_normal_frame_resources() {
         confidence.dimensions(),
         "SSGI reason/confidence atlases describe different probe domains"
     );
+    assert_eq!(
+        resolved.dimensions(),
+        resolve_support.dimensions(),
+        "SSGI resolve/support captures describe different screen domains"
+    );
+    assert_eq!(
+        resolved.dimensions(),
+        resolve_geometry.dimensions(),
+        "SSGI resolve/geometry captures describe different screen domains"
+    );
+    assert_eq!(
+        resolved.dimensions(),
+        resolve_plane_ratios.dimensions(),
+        "SSGI resolve/plane-ratio captures describe different screen domains"
+    );
+    assert_eq!(
+        resolved.dimensions(),
+        resolve_plane_ratio_w.dimensions(),
+        "SSGI resolve/fourth-plane-ratio captures describe different screen domains"
+    );
 
     let paths = eng.renderer.quality_runtime_paths_json();
     assert!(paths.contains("\"ray_scene_preparation\":\"ssgi\""));
     assert!(paths.contains("\"ssgi_diagnostic_persistent_bytes\":0"));
-    assert!(paths.contains("\"ssgi_diagnostic_capture_passes\":1"));
+    assert!(paths.contains("\"ssgi_diagnostic_capture_passes\":3"));
     assert!(paths.contains("\"ssgi_diagnostic_resources_live\":false"));
     if std::env::var_os("BLOOM_KEEP_TEMPORAL_DIAGNOSTICS").is_some() {
         eprintln!("kept SSGI diagnostics at {directory:?}");
@@ -1294,6 +1329,11 @@ fn dump_detailed_bistro_probe_state() {
     );
     let mut eng = EngineState::new(renderer);
     configure(&mut eng, true, false);
+    let dump_ssgi_enabled =
+        std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_SSGI").is_none_or(|value| value != "0");
+    if std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_SSR").is_some() {
+        eng.renderer.set_ssr_enabled(true);
+    }
     if std::env::var_os("BLOOM_BISTRO_PROBE_DUMP_TAA").is_some() {
         eng.renderer.set_taa_enabled(true);
     }
@@ -1356,6 +1396,16 @@ fn dump_detailed_bistro_probe_state() {
         }
     }
 
+    // Hardware admission requires an active ray consumer. For the SSGI-off
+    // control, disable only after the queue drains, then settle TAA long
+    // enough that no prior SSGI-composited display history remains.
+    if !dump_ssgi_enabled {
+        eng.renderer.set_ssgi_enabled(false);
+        for _ in 0..64 {
+            frame(&mut eng, start_x, start_z, cam_yaw);
+        }
+    }
+
     eng.renderer.pending_quality_capture_dir = Some(dump_dir.to_string_lossy().into_owned());
     let (shot_w, shot_h, screenshot) =
         render(&mut eng, 1, |eng| draw(eng, start_x, start_z, cam_yaw));
@@ -1367,6 +1417,37 @@ fn dump_detailed_bistro_probe_state() {
         image::ColorType::Rgba8,
     )
     .expect("write final Bistro output");
+
+    // Optional stationary burst for offline temporal analysis. This is gated
+    // so the ordinary corpus keeps exactly one readback; unlike an interactive
+    // window it cannot miss a transient because macOS withheld a drawable.
+    let sequence_frames = std::env::var("BLOOM_BISTRO_PROBE_DUMP_SEQUENCE_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(64);
+    if sequence_frames > 0 {
+        image::save_buffer(
+            dump_dir.join("sequence-000.png"),
+            &screenshot,
+            shot_w,
+            shot_h,
+            image::ColorType::Rgba8,
+        )
+        .expect("write first Bistro sequence frame");
+        for sequence_index in 1..sequence_frames {
+            let (sequence_w, sequence_h, sequence) =
+                render(&mut eng, 1, |eng| draw(eng, start_x, start_z, cam_yaw));
+            image::save_buffer(
+                dump_dir.join(format!("sequence-{sequence_index:03}.png")),
+                &sequence,
+                sequence_w,
+                sequence_h,
+                image::ColorType::Rgba8,
+            )
+            .expect("write Bistro sequence frame");
+        }
+    }
 
     let gw = eng.renderer.probe_grid_w;
     let gh = eng.renderer.probe_grid_h;

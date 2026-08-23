@@ -5,8 +5,8 @@
 /// Samples the 2×2 probes whose tiles enclose the pixel's tile and
 /// bilateral-weights the contribution by a symmetric world-space same-plane
 /// test plus normal match. Invalid probes (sky) are skipped. An empty strict
-/// footprint is reconstructed only when all four surrounding probes remain
-/// safely compatible with the receiver; unsupported edges stay black.
+/// footprint is reconstructed only from a geometrically compatible pair with
+/// meaningful bilinear coverage; unsupported edges stay black.
 pub(in crate::renderer) const SSGI_PROBE_RESOLVE_WGSL: &str = "
 struct ResolveParams {
     inv_view: mat4x4<f32>,
@@ -44,6 +44,10 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 // capture-only diagnostics.
 fn sample_probe(probe_coord: vec2<i32>) -> vec3<f32> {
     return textureLoad(radiance_tex, vec3<i32>(probe_coord, 0), 0).rgb;
+}
+
+fn fallback_probe(probe: ProbeHeader) -> vec3<f32> {
+    return probe.previous_diffuse.rgb * max(probe.previous_diffuse.w, 0.0);
 }
 
 @fragment
@@ -93,8 +97,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     var accum = vec3<f32>(0.0);
     var wsum = 0.0;
-    // xyz = bilinear temporal radiance, w = compatible probe count.
-    var fallback = vec4<f32>(0.0);
+    var fallback_radiance = vec3<f32>(0.0);
+    var fallback_weight = 0.0;
+    var fallback_count = 0u;
+    let probe_world_spacing =
+        2.0 * max(linear_z, 0.1) * tile /
+        max(abs(p00) * half_w, 0.0001);
+    let plane_sigma = 0.015 + probe_world_spacing * 0.12;
+    // The broad fallback is used only when the strict bilateral kernel has no
+    // support. At grazing angles, one screen tile can span several times its
+    // horizontal world footprint along a gently changing road surface. Cover
+    // that footprint while still requiring two independently placed,
+    // normal-compatible probes; unsupported silhouettes remain black.
+    let fallback_plane_limit = (0.08 + probe_world_spacing * 0.85) * 3.0;
 
     for (var dy = 0; dy <= 1; dy = dy + 1) {
         for (var dx = 0; dx <= 1; dx = dx + 1) {
@@ -117,10 +132,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 abs(dot(world_delta, N_ws)),
                 abs(dot(world_delta, probe.normal.xyz)),
             );
-            let probe_world_spacing =
-                2.0 * max(linear_z, 0.1) * tile /
-                max(abs(p00) * half_w, 0.0001);
-            let plane_sigma = 0.015 + probe_world_spacing * 0.12;
             if (ndotn >= 0.80 && plane_error <= plane_sigma * 2.5) {
                 let w_plane = exp(
                     -0.5 * plane_error * plane_error /
@@ -136,28 +147,33 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 }
             }
 
-            // A strict reject may contribute to the broader fallback. Four
-            // probes must sit safely inside both geometry boundaries, so a
-            // curved silhouette cannot blink into this reconstruction.
-            let fallback_plane_limit =
-                (0.08 + probe_world_spacing * 0.85) * 0.85;
+            // A strict reject may contribute to a broader, still geometric
+            // fallback. Two compatible probes establish coherent receiver
+            // support; the count and aggregate-weight gates prevent a lone
+            // distant corner from being normalized into a silhouette leak.
             if (ndotn >= 0.65 && plane_error <= fallback_plane_limit) {
-                fallback = fallback + vec4<f32>(
-                    probe.previous_diffuse.rgb * w_corner,
-                    1.0,
-                );
+                // Bilinear weight reaches exactly zero at a probe-row centre.
+                // If that row lands on a depth/normal seam, the two coherent
+                // probes in the adjacent row otherwise normalize to black for
+                // several pixels, exposing a horizontal tile stripe. A small
+                // broad-kernel floor keeps the fallback continuous without
+                // changing the strict path or admitting a single probe.
+                let fallback_corner_weight = max(w_corner, 0.125);
+                fallback_radiance =
+                    fallback_radiance + fallback_probe(probe) * fallback_corner_weight;
+                fallback_weight = fallback_weight + fallback_corner_weight;
+                fallback_count = fallback_count + 1u;
             }
         }
     }
 
     if (wsum > 0.0001) {
         accum = (accum / wsum) * u.params.y;
-    } else if (fallback.w == 4.0) {
-        // Strict rejection on shallow, finely tessellated receivers used to
-        // expose alternating illuminated and zero-energy probe rows. The
-        // broader footprint is deliberately tapered as a lower-confidence
-        // estimate, retaining stability without recreating those stripes.
-        accum = fallback.rgb * (u.params.y * 0.90);
+    } else if (fallback_count >= 2u && fallback_weight >= 0.25) {
+        // Normalize partial support so screen-grid phase cannot modulate
+        // energy. Geometry compatibility controls admission; valid indirect
+        // light retains the same energy scale as the strict kernel.
+        accum = (fallback_radiance / fallback_weight) * u.params.y;
     }
     return vec4<f32>(accum, 1.0);
 }

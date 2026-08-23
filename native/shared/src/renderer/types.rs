@@ -818,12 +818,15 @@ pub(super) struct PtParamsCpu {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeTemporalParams {
-    /// x = integrated EMA alpha, y = force_refresh (1→alpha=1),
+    /// x = integrated phase-ring reciprocal (1/16),
+    /// y = force_refresh (1→seed every phase with current),
     /// z = grid_w (f32), w = grid_h (f32)
     pub(super) params: [f32; 4],
     /// x = half_w, y = half_h, z = tile_size, w = projection p00.
     pub(super) size: [f32; 4],
-    /// x = hardware ray provenance/confidence available, yzw unused.
+    /// x = hardware ray provenance/confidence available,
+    /// y = current angular phase [0, 15],
+    /// z = short output-blend current weight, w unused.
     pub(super) confidence: [f32; 4],
 }
 
@@ -843,6 +846,8 @@ pub(super) struct ProbeResolveParams {
 /// current_diffuse lets the later probe-space reconstruction clamp history to
 /// the current-frame neighborhood without a new texture allocation. Placement
 /// snapshots geometry and the integrated result before temporal workgroups run.
+/// The final 16-byte record stores unfiltered temporal RGB and a current-frame
+/// reconstruction energy ratio used only by fallback resolve.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ProbeHeaderCpu {

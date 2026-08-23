@@ -115,7 +115,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let curr_luma = dot(curr, vec3<f32>(0.2126, 0.7152, 0.0722));
     let hist_luma = dot(hist, vec3<f32>(0.2126, 0.7152, 0.0722));
     let delta = abs(curr_luma - hist_luma);
-    var alpha = u.params.x;
+    var alpha = u.confidence.z;
     if (u.params.y > 0.5 || !geometry_valid) { alpha = 1.0; }
 
     // Shared palette in probe space: gray seed, magenta adaptive radiance

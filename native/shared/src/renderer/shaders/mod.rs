@@ -194,16 +194,25 @@ mod ray_query_variant_tests {
         assert!(CARD_LIGHT_WGSL
             .contains("for (var cascade: i32 = 0; cascade < 3; cascade = cascade + 1)"));
         assert!(!CARD_LIGHT_WGSL.contains("let view_z = -(u.view_matrix"));
-        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("previous_diffuse.rgb"));
-        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("reprojected_history_alpha"));
-        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("smoothstep(0.00025, 0.003, length(velocity))"));
-        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("max(u.params.x, 0.125)"));
-        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("history_integrated,"));
-        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("current_integrated,"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL
+            .contains("probes[reprojected_history_probe].previous_diffuse.rgb"));
+        assert!(!SSGI_PROBE_TEMPORAL_WGSL.contains("reprojected_history_alpha"));
+        assert!(!SSGI_PROBE_TEMPORAL_WGSL.contains("motion_refresh"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("phase_slot != current_phase"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("let history_layer = i32(32u + phase_slot)"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("phase_sum * u.params.x"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("if (lane < PROBE_TRACE_RAYS)"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("current_integrated_shared"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("previous_integrated,"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("u.confidence.z,"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("mean_luminance * 5.0"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("too concentrated for this sampling density"));
         assert!(!SSGI_PROBE_TEMPORAL_WGSL.contains("spatially_filter_current_sample"));
-        assert!(!SSGI_PROBE_TEMPORAL_WGSL.contains("textureLoad(history_in"));
+        assert_eq!(
+            SSGI_PROBE_TEMPORAL_WGSL.matches("history_in,").count(),
+            1,
+            "only the dedicated integrated phase ring may load temporal texture history",
+        );
         assert!(PROBE_HELPERS_WGSL.contains("fn probe_trace_direction("));
         assert!(PROBE_HELPERS_WGSL.contains("fn probe_spatial_azimuth("));
         assert!(PROBE_HELPERS_WGSL.contains("probe_spatial_azimuth(world_pos)"));
@@ -211,7 +220,9 @@ mod ray_query_variant_tests {
         assert!(!PROBE_HELPERS_WGSL.contains("floor(world_pos"));
         assert!(!PROBE_HELPERS_WGSL.contains("temporal_shift"));
         assert!(PROBE_HELPERS_WGSL.contains("frame_index: f32"));
-        assert!(PROBE_HELPERS_WGSL.contains("frame_index * 0.7548776662466927"));
+        assert!(PROBE_HELPERS_WGSL.contains("u32(frame_index) & 15u"));
+        assert!(PROBE_HELPERS_WGSL.contains("temporal_phase / 16.0"));
+        assert!(!PROBE_HELPERS_WGSL.contains("frame_index * 0.7548776662466927"));
         assert!(PROBE_HELPERS_WGSL.contains("cosine-weighted hemisphere"));
         assert!(PROBE_HELPERS_WGSL.contains("const PROBE_TRACE_RAYS: u32 = 32u"));
         assert!(PROBE_HELPERS_WGSL.contains("n * z + radius * (tangent * cos(phi)"));
@@ -235,8 +246,11 @@ mod ray_query_variant_tests {
             .contains("clamp(\n            center.diffuse.rgb,\n            current_mean - slack,\n            current_mean + slack,\n        )"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("abs(current_mean) * 0.02"));
         assert!(!SSGI_PROBE_TEMPORAL_WGSL.contains("vec3<f32>(0.005)"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("let reconstructed_energy_ratio = select("));
         assert!(SSGI_PROBE_TEMPORAL_WGSL
-            .contains("probes[center_index].previous_diffuse = vec4<f32>(history_clamped, 1.0)"));
+            .contains("clamp(reconstructed_luminance / history_luminance, 0.0, 4.0)"));
+        assert!(SSGI_PROBE_TEMPORAL_WGSL
+            .contains("vec4<f32>(history_clamped, reconstructed_energy_ratio)"));
         assert!(!SSGI_PROBE_PLACE_WGSL.contains("previous_diffuse = probes[probe_idx].diffuse"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("maximum_plane_shift"));
         assert!(SSGI_PROBE_TEMPORAL_WGSL.contains("robust_group_radiance"));
@@ -269,17 +283,22 @@ mod ray_query_variant_tests {
             "empty-footprint reconstruction added a radiance texture fetch",
         );
         assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("textureSampleLevel(radiance_tex"));
-        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("fallback.w == 4.0"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("fallback_count >= 2u"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("fallback_weight >= 0.25"));
+        assert!(
+            SSGI_PROBE_RESOLVE_WGSL.contains("let fallback_corner_weight = max(w_corner, 0.125)")
+        );
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("fallback_probe(probe) * fallback_corner_weight"));
         assert!(SSGI_PROBE_RESOLVE_WGSL
-            .contains("probe.previous_diffuse.rgb * w_corner"));
-        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("accum = fallback.rgb"));
+            .contains("probe.previous_diffuse.rgb * max(probe.previous_diffuse.w, 0.0)"));
+        assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("probe.previous_diffuse.rgb * w_corner"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("fallback_radiance / fallback_weight"));
+        assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("u.params.y * 0.90"));
+        assert!(SSGI_PROBE_RESOLVE_WGSL.contains("(0.08 + probe_world_spacing * 0.85) * 3.0"));
+        assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("let nearest_probe"));
         assert!(!SSGI_PROBE_RESOLVE_WGSL.contains("w_depth"));
-        assert_eq!(
-            SSGI_PROBE_TEMPORAL_WGSL
-                .matches("textureLoad(history_in")
-                .count(),
-            0,
-            "directional samples must not be reused across temporal phases"
+        assert!(
+            SSGI_PROBE_TEMPORAL_WGSL.contains("Layers 0..31 remain current directional samples")
         );
 
         for source in [

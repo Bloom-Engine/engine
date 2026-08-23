@@ -1,16 +1,16 @@
 //! Lumen-style screen-probe SSGI: probe placement, Hi-Z/HW/SDF trace,
-//! temporal EMA, and octahedral resolve into ssgi_rt. Split from
+//! temporal phase accumulation, and octahedral resolve into ssgi_rt. Split from
 //! end_frame_with_scene (2000-line file policy + render-graph migration
 //! prep). When disabled, clears ssgi_rt to transparent.
 
 use super::*;
 
-// Accumulate only the completed diffuse integral while the SSGI-owned angular
-// sequence rotates its 32 directions. Sixteen recent estimates suppress
-// angular aliasing; motion raises this to an eight-frame window in shader,
-// while surface rejection and the current-neighborhood clamp prevent stale
-// light transport.
-const SSGI_TEMPORAL_CURRENT_WEIGHT: f32 = 0.0625;
+// Average a finite ring of sixteen complete diffuse estimates while the
+// SSGI-owned angular sequence rotates its 32 directions. This preserves 512
+// effective samples without additional ray queries and becomes stationary
+// after one cycle; surface rejection prevents stale transport at disocclusion.
+const SSGI_TEMPORAL_PHASE_WEIGHT: f32 = 0.0625;
+const SSGI_TEMPORAL_OUTPUT_WEIGHT: f32 = 0.125;
 
 fn probe_inverse_view_for_wgsl(view: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     mat4_transpose(mat4_invert(view))
@@ -643,13 +643,18 @@ impl Renderer {
             self.transparent_gi_force_probe_refresh = false;
             let temporal_params = ProbeTemporalParams {
                 params: [
-                    SSGI_TEMPORAL_CURRENT_WEIGHT,
+                    SSGI_TEMPORAL_PHASE_WEIGHT,
                     force_refresh,
                     gw as f32,
                     gh as f32,
                 ],
                 size: [half_w as f32, half_h as f32, PROBE_TILE_SIZE as f32, p00],
-                confidence: [if use_hw { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                confidence: [
+                    if use_hw { 1.0 } else { 0.0 },
+                    (self.probe_frame_index & 15) as f32,
+                    SSGI_TEMPORAL_OUTPUT_WEIGHT,
+                    0.0,
+                ],
             };
             self.queue.write_buffer(
                 &self.probe_temporal_uniform,
@@ -727,10 +732,6 @@ impl Renderer {
                 );
                 pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            if self.pending_quality_capture_dir.is_some() {
-                self.record_ssgi_temporal_diagnostics(encoder, prev_idx, gw, gh);
-            }
             self.probe_history_valid = true;
 
             // ---- resolve ----
@@ -745,6 +746,11 @@ impl Renderer {
                 0,
                 bytemuck::bytes_of(&resolve_params),
             );
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.pending_quality_capture_dir.is_some() {
+                self.record_ssgi_temporal_diagnostics(encoder, prev_idx, gw, gh, half_w, half_h);
+                self.record_ssgi_resolve_support_diagnostic(encoder);
+            }
             if self.probe_resolve_bg_cache[write_idx].is_none() {
                 self.probe_resolve_bg_cache[write_idx] =
                     Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -833,12 +839,15 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{probe_inverse_view_for_wgsl, SSGI_TEMPORAL_CURRENT_WEIGHT};
+    use super::{
+        probe_inverse_view_for_wgsl, SSGI_TEMPORAL_OUTPUT_WEIGHT, SSGI_TEMPORAL_PHASE_WEIGHT,
+    };
     use crate::renderer::{mat4_look_at, mat4_mul_vec4};
 
     #[test]
     fn screen_probe_integral_converges_over_sixteen_angular_phases() {
-        assert_eq!(SSGI_TEMPORAL_CURRENT_WEIGHT, 0.0625);
+        assert_eq!(SSGI_TEMPORAL_PHASE_WEIGHT, 0.0625);
+        assert_eq!(SSGI_TEMPORAL_OUTPUT_WEIGHT, 0.125);
     }
 
     #[test]
